@@ -4,6 +4,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computeAccessibleName } from "dom-accessibility-api";
 import { useAppStore } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { Composer } from "./Composer";
 import { ComposerTextarea } from "./ComposerTextarea";
 import { FooterRow } from "./FooterRow";

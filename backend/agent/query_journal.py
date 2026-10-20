@@ -12,9 +12,17 @@ from backend.agent.message import AgentEvent
 from backend.async_cleanup import to_thread_cancel_safe
 
 if TYPE_CHECKING:
+    from backend.agent.code_execution_store import CodeExecutionStore
     from backend.agent.context import ContextBuilder
     from backend.agent.state import AgentState
     from backend.agent.turn_kernel import TurnKernel
+
+
+def _live_thread_code_calls(code_store: CodeExecutionStore | None, *, status: str, turn_id: str) -> frozenset[str]:
+    if code_store is None:
+        return frozenset()
+    return frozenset(call_id for call_id, cell in code_store.live_tool_calls().items()
+        if status == "completed" or cell.parent.turn_id != turn_id)
 
 
 @dataclass(slots=True)
@@ -127,7 +135,9 @@ class QueryJournalRecorder:
             return
         if event.type == 'runtime.span' and data.get('event') == 'tool.started':
             self.journal.append_tool_execution_started(data)
-        if (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"} and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user", "request_user_input"}:
+        item = data.get("item", {})
+        async_user_message = event.type in {"item.started", "item.completed"} and item.get("type") == "agent_message" and item.get("delivery") == "async"
+        if (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"} and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user", "request_user_input"} and not async_user_message:
             self.lifecycle("nested_tool_event", {"event_type": event.type, **data})
             return
         if event.type == "item.started":
@@ -330,10 +340,18 @@ class QueryJournalRecorder:
                     and claim.get("iteration_id") == record.iteration_id
                     and use["request_digest"] == record.request_digest):
                 self.journal.append_tool_result(record.result_payload, tool_name=record.tool_name)
-        uncertain = self.journal.unresolved_tool_uses()
+        code_store = self.turn_kernel.run_context.code_store if self.turn_kernel is not None else None
+        turn_id = str(self.metadata.get("turn_id") or self.metadata.get("run_id") or "")
+        retained_calls = _live_thread_code_calls(code_store, status=status, turn_id=turn_id)
+        # The thread still owns these admitted calls. A completed turn cannot
+        # invent a failed result that would seal out their real late result.
+        # A later interrupted turn also cannot terminate an older live cell.
+        uncertain = [use for use in self.journal.unresolved_tool_uses()
+            if use["tool_call_id"] not in retained_calls]
         self.journal.close_unresolved_tool_uses(
             reason=reason or status,
             content="[Tool result missing because the turn reached terminal state]",
+            preserve_call_ids=retained_calls,
         )
         unresolved = self.journal.unresolved_tool_uses()
         tool_execution_context = self.metadata.get("_tool_execution_context")
@@ -436,8 +454,9 @@ class QueryJournalRecorder:
         item_id = str(item.get("id") or "agent-message").strip()
         content = str(item.get("text") or "")
         source = str(item.get("source") or "model_final")
-        self.last_completed_answer_source = source
-        self.last_completed_answer_item_id = item_id
+        if item.get("delivery") != "async":
+            self.last_completed_answer_source = source
+            self.last_completed_answer_item_id = item_id
         self.agent_messages[item_id] = {"content": content, "source": source}
         if self.journal is None:
             return
@@ -448,6 +467,7 @@ class QueryJournalRecorder:
                 "item_id": item_id,
                 "content": content,
                 "source": source,
+                **{field: item[field] for field in ("delivery", "questions", "phase") if field in item},
                 "status": str(item.get("status") or "completed"),
                 "transcript_only": True,
             },
@@ -466,6 +486,8 @@ def record_setup_failure(
     conversation_id: str,
     completion_event: AgentEvent | None,
     terminal_event: AgentEvent,
+    code_store: CodeExecutionStore | None,
+    turn_id: str,
 ) -> None:
     """Record setup failure evidence without inventing a committed terminal."""
 
@@ -497,10 +519,12 @@ def record_setup_failure(
                    if completion_event.data.get(key) is not None},
             },
         )
-    uncertain = journal.unresolved_tool_uses()
+    retained_calls = _live_thread_code_calls(code_store, status="failed", turn_id=turn_id)
+    uncertain = [use for use in journal.unresolved_tool_uses() if use["tool_call_id"] not in retained_calls]
     journal.close_unresolved_tool_uses(
         reason=str(terminal_event.data.get("reason") or "startup_failed"),
         content="[Tool result missing because startup failed]",
+        preserve_call_ids=retained_calls,
     )
     journal.append_terminal(
         status="failed",

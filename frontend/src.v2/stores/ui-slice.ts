@@ -27,6 +27,11 @@ import {
   initialTextScale,
   initialCodeTextScale,
   initialReducedMotion,
+  initialReducedMotionPreference,
+  initialCodeFontBase,
+  applyPointerCursors,
+  applyDiffMarkerStyle,
+  reducedMotionFor,
   initialViewMode,
   initialSendShortcut,
   initialFollowUpBehavior,
@@ -42,8 +47,9 @@ import {
   editorStateForWorkspace,
 } from "./shared-helpers";
 import { clampTextScale } from "../lib/text-scale";
-import { effectiveAppearanceColors, type AppearanceVariant } from "../lib/appearance-colors";
+import { defaultAppearanceColors, effectiveAppearanceColors, type AppearanceVariant } from "../lib/appearance-colors";
 import { defaultThemePreferences } from "../lib/appearance-themes";
+import { prepareThemeFonts } from "../lib/theme-fonts";
 import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
 import { APPEARANCE_STORAGE_KEYS, readAppearanceStorage, readAppearanceVariant, writeAppearanceVariant, type SavedAppearanceVariant } from "../lib/appearance-storage";
 import { loadCodeTheme } from "../lib/code-themes";
@@ -87,6 +93,7 @@ function cloneArtifactState(state: ArtifactContentState | null): ArtifactContent
 export function emptyConversationWorkbenchState(): ConversationWorkbenchState {
   return {
     agentMode: "build",
+    goalMode: false,
     diffReview: null,
     gitReviewRequest: null,
     previewArtifact: null,
@@ -102,6 +109,7 @@ export function emptyConversationWorkbenchState(): ConversationWorkbenchState {
     rightPanelExpanded: false,
     rightStackTabLocked: false,
     draft: "",
+    richDraft: undefined,
     attachments: [],
     quotedMessage: null,
     selectedMentions: [],
@@ -114,6 +122,7 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
   return {
     ...state,
     agentMode: state.agentMode ?? "build",
+    goalMode: state.goalMode ?? false,
     diffReview: cloneDiffReviewState(state.diffReview),
     previewArtifact: cloneArtifactState(state.previewArtifact),
     previewServers: (state.previewServers ?? []).map((server) => ({ ...server })),
@@ -137,6 +146,7 @@ function cloneConversationWorkbenchState(state: ConversationWorkbenchState): Con
 export function liveConversationWorkbenchState(s: AppStore): ConversationWorkbenchState {
   return {
     agentMode: s.agentMode,
+    goalMode: s.goalMode,
     diffReview: cloneDiffReviewState(s.diffReview),
     gitReviewRequest: s.gitReviewRequest,
     previewArtifact: cloneArtifactState(s.previewArtifact),
@@ -158,6 +168,7 @@ export function liveConversationWorkbenchState(s: AppStore): ConversationWorkben
     rightPanelExpanded: s.rightPanelExpanded,
     rightStackTabLocked: s.rightStackTabLocked,
     draft: s.draft,
+    richDraft: s.richDraft,
     attachments: s.attachments.map((attachment) => ({ ...attachment })),
     quotedMessage: s.quotedMessage ? { ...s.quotedMessage } : null,
     selectedMentions: s.selectedMentions.map((mention) => ({ ...mention })),
@@ -277,13 +288,15 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     revision: number, previous: SavedAppearanceVariant) => {
     const { prepareCodeHighlighting } = await import("../lib/code-highlighting");
     await prepareCodeHighlighting(snapshot.codeThemeId, variant);
+    const fonts = snapshot.theme.fonts ?? previous.theme?.fonts;
+    await prepareThemeFonts(fonts);
     // A newer local edit or another window owns the latest value while the
     // highlighter is loading; its configuration must not be overwritten.
     if (revision !== themeEditRevision[variant]
       || JSON.stringify(previous) !== JSON.stringify(readAppearanceVariant(variant))) return;
     const { accent, surface, ink, contrast, opaqueWindows, semanticColors } = snapshot.theme;
     applySavedAppearance(writeAppearanceVariant(variant, { colors: { accent, surface, ink }, theme: {
-      codeThemeId: snapshot.codeThemeId, contrast, opaqueWindows, semanticColors,
+      codeThemeId: snapshot.codeThemeId, contrast, opaqueWindows, semanticColors, fonts,
     } }));
   };
   const commitAppearanceTheme: UISlice["importAppearanceTheme"] = async (variant, snapshot) => {
@@ -298,7 +311,11 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   ...appearance,
   textScale: initialTextScale(),
   codeTextScale: initialCodeTextScale(),
+  codeFontBase: initialCodeFontBase(),
   reducedMotion: initialReducedMotion(),
+  reducedMotionPreference: initialReducedMotionPreference(),
+  pointerCursors: readLS(LS.pointerCursors) === "1",
+  diffMarkerStyle: readLS(LS.diffMarkerStyle) === "symbols" ? "symbols" : "color",
   viewMode: initialViewMode(),
   sendShortcut: initialSendShortcut(),
   followUpBehavior: initialFollowUpBehavior(),
@@ -314,10 +331,29 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   commandPaletteOpen: false,
   settingsOpen: false,
   settingsTab: "general" as const,
+  projectsOpen: false,
+  projectEditTarget: null,
+  browserSettingsSection: "general",
+  setBrowserSettingsSection: section => set({ browserSettingsSection: section }),
   shortcutsHelpOpen: false,
   quickOpenVisible: false,
   quickOpenResults: [],
   quickOpenLoading: false,
+  defaultTerminalLocation: readLS("minicode.default-terminal-location") === "right" ? "right" : "bottom",
+  composerPlainTextMode: readLS("minicode.composer-plain-text") === "true",
+  primaryNumberShortcutTarget: "tabs",
+  setDefaultTerminalLocation: async location => {
+    const native = desktop();
+    if (native) await native.preferences.set({ defaultTerminalLocation: location });
+    else localStorage.setItem("minicode.default-terminal-location", location);
+    set({ defaultTerminalLocation: location });
+  },
+  setComposerPlainTextMode: async plain => {
+    const native = desktop();
+    if (native) await native.preferences.set({ composerPlainTextMode: plain });
+    else localStorage.setItem("minicode.composer-plain-text", String(plain));
+    set({ composerPlainTextMode: plain });
+  },
   currentModel: "",
   currentProvider: "",
   currentProviderId: "",
@@ -374,7 +410,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     ++themeEditRevision[variant];
     const current = readAppearanceVariant(variant);
     applySavedAppearance(writeAppearanceVariant(variant, { ...current,
-      colors: { ...(current.colors ?? effectiveAppearanceColors()), [role]: value } }));
+      colors: { ...(current.colors ?? (get().resolvedTheme === variant ? effectiveAppearanceColors() : defaultAppearanceColors[variant])), [role]: value } }));
   },
   setCodeThemeId: async (variant, codeThemeId) => {
     const revision = ++themeEditRevision[variant];
@@ -385,6 +421,16 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     await saveAppearanceTheme(variant, { codeThemeId, theme: { ...preferences, ...chromeSeed, accentSource: "custom" } }, revision, previous);
   },
   importAppearanceTheme: commitAppearanceTheme,
+  patchAppearanceTheme: async (variant, patch) => {
+    const revision = ++themeEditRevision[variant];
+    const previous = readAppearanceVariant(variant);
+    const theme = { codeThemeId: "vscode-plus" as const, ...defaultThemePreferences(variant), ...previous.theme, ...patch };
+    await prepareThemeFonts(theme.fonts);
+    if (revision !== themeEditRevision[variant] || JSON.stringify(previous) !== JSON.stringify(readAppearanceVariant(variant))) return;
+    const colors = previous.colors ?? (patch.contrast !== undefined
+      ? get().resolvedTheme === variant ? effectiveAppearanceColors() : defaultAppearanceColors[variant] : null);
+    applySavedAppearance(writeAppearanceVariant(variant, { colors, theme }));
+  },
   setTextScale: (s) => {
     const v = clampTextScale(s);
     writeLS(LS.textScale, String(v));
@@ -392,15 +438,43 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     set({ textScale: v });
   },
   setCodeTextScale: (s) => {
-    const value = clamp(11 / 14, 24 / 14, s);
+    const base = get().codeFontBase;
+    const value = clamp(8 / base, 24 / base, s);
+    writeLS(LS.codeFontBase, String(base));
     writeLS(LS.codeTextScale, String(value));
-    applyCodeTextScale(value);
+    applyCodeTextScale(value, base);
     set({ codeTextScale: value });
   },
   setReducedMotion: (reduced) => {
-    writeLS(LS.reducedMotion, reduced ? "1" : "0");
-    applyReducedMotion(reduced);
-    set({ reducedMotion: reduced });
+    get().setReducedMotionPreference(reduced ? "on" : "off");
+  },
+  setReducedMotionPreference: (preference) => {
+    writeLS(LS.reducedMotion, preference);
+    const reducedMotion = reducedMotionFor(preference);
+    applyReducedMotion(reducedMotion);
+    set({ reducedMotionPreference: preference, reducedMotion });
+  },
+  setPointerCursors: (enabled) => {
+    writeLS(LS.pointerCursors, enabled ? "1" : "0"); applyPointerCursors(enabled); set({ pointerCursors: enabled });
+  },
+  setDiffMarkerStyle: (style) => {
+    writeLS(LS.diffMarkerStyle, style); applyDiffMarkerStyle(style); set({ diffMarkerStyle: style });
+  },
+  resetAdvancedAppearance: (supportsTranslucency) => {
+    get().setTextScale(1);
+    writeLS(LS.codeFontBase, "12"); writeLS(LS.codeTextScale, "1");
+    applyCodeTextScale(1, 12); set({ codeFontBase: 12, codeTextScale: 1 });
+    get().setReducedMotionPreference("system"); get().setPointerCursors(false); get().setDiffMarkerStyle("color");
+    for (const variant of ["light", "dark"] as const) {
+      ++themeEditRevision[variant];
+      const previous = readAppearanceVariant(variant);
+      if (!previous.theme) continue;
+      const defaults = defaultThemePreferences(variant);
+      applySavedAppearance(writeAppearanceVariant(variant, { ...previous, theme: { ...previous.theme,
+        contrast: defaults.contrast, opaqueWindows: supportsTranslucency ? defaults.opaqueWindows : previous.theme.opaqueWindows,
+        fonts: { ui: previous.theme.fonts?.ui ?? null, content: null, code: null },
+      } }));
+    }
   },
   setViewMode: (m) => {
     writeLS(LS.viewMode, m);
@@ -414,8 +488,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     writeLS(LS.followUpBehavior, behavior);
     set({ followUpBehavior: behavior });
   },
-  setShortcutBinding: (action, binding) => set((state) => {
-    const shortcutBindings = { ...state.shortcutBindings, [action]: binding };
+  setShortcutBinding: (action, binding, index = 0) => set((state) => {
+    const actionBindings = [...state.shortcutBindings[action]];
+    actionBindings.splice(index, 1, ...(binding ? [binding] : []));
+    const shortcutBindings = { ...state.shortcutBindings, [action]: actionBindings };
     writeLS(LS.shortcutBindings, JSON.stringify(shortcutBindings));
     return { shortcutBindings };
   }),
@@ -449,14 +525,6 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     }),
   setRightStackTab: (t, options) =>
     set((s) => {
-      if (t === "terminal") {
-        writeLS(LS.layout.dockTab, "terminal");
-        writeLS(LS.layout.dockCollapsed, "0");
-        return {
-          activeBottomTab: "terminal",
-          dockCollapsed: false,
-        };
-      }
       // Legacy callers and replayed command results may still request a
       // separate plan panel. MiniCode surfaces plan state in the task/activity
       // view, so keep one canonical destination instead of storing a tab that
@@ -468,6 +536,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ...(canonicalTab === "sidechat" ? { sideChatOpen: true } : {}),
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
+        ...(canonicalTab === "terminal" && s.activeBottomTab === "terminal" ? { dockCollapsed: true } : {}),
         rightPanelExpanded: (["browser", "preview", "diff", "artifacts"].includes(canonicalTab) || canonicalTab.startsWith("mcp-app:")) && s.rightPanelExpanded,
       };
     }),
@@ -662,7 +731,9 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightPanelExpanded: next.rightPanelExpanded ?? false,
         rightStackTabLocked: next.rightStackTabLocked,
         draft: next.draft,
+        richDraft: next.richDraft,
         agentMode: next.agentMode ?? "build",
+        goalMode: next.goalMode ?? false,
         attachments: next.attachments,
         quotedMessage: next.quotedMessage,
         selectedMentions: next.selectedMentions,

@@ -1,0 +1,14 @@
+.mc-project-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: var(--backdrop-strong); font-family: var(--font-ui); }
+.mc-project-dialog { width: min(480px, calc(100vw - 48px)); padding: 24px; display: grid; gap: 24px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
+.mc-project-dialog h2 { margin: 0; font-size: var(--text-lg); font-weight: var(--fw-semibold); }
+.mc-project-name-input { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
+.mc-project-name-input input { flex: 1; min-width: 0; padding: 6px 0; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; }
+.mc-project-source-folders { display: grid; gap: 10px; }
+.mc-project-source-folders h3 { margin: 0; font: inherit; font-weight: var(--fw-medium); }
+.mc-project-source-folders > button { justify-self: start; }
+.mc-project-source-folder { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.mc-project-source-folder > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); font-size: var(--mc-font-secondary); }
+.mc-project-dialog footer { display: flex; justify-content: flex-end; gap: 10px; }
+.mc-project-dialog button { cursor: pointer; }
+.mc-project-dialog button:disabled { cursor: default; opacity: .5; }
+.mc-project-dialog footer button[data-primary="true"] { background: var(--text-primary); color: var(--surface-raised); }

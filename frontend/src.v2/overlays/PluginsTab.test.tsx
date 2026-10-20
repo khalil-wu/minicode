@@ -1,9 +1,9 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pushToast } from "./ToastContainer";
-import { PluginsTab } from "./PluginsTab";
+import { PluginsTab, PluginSettingsToolbar } from "./PluginsTab";
 import { useAppStore } from "../stores";
 
 vi.hoisted(() => {
@@ -24,7 +24,8 @@ vi.mock("./ToastContainer", () => ({
 vi.mock("../protocol/api", () => ({
   apiBase: () => "http://test.local",
   authHeaders: (headers?: HeadersInit) => headers ?? {},
-  fetchWithTimeout: (url: string, init?: RequestInit) => fetch(url, init),
+  fetchWithTimeout: (url: string, init?: RequestInit) => new URL(url).pathname === "/api/skills/settings"
+    ? Promise.resolve(new Response(JSON.stringify({ skills: [], plugin_skills: [], available_skills: [], workspace_root: new URL(url).searchParams.get("workspace_root") || "" }))) : fetch(url, init),
   errorMessageFromResponseText: (text: string, fallback: string) => text || fallback,
   LONG_HTTP_TIMEOUT_MS: 60_000,
   pluginAssetResourceUrlWithToken: (_path: string, variant: string) => `https://test.local/icon?variant=${variant}`,
@@ -38,6 +39,7 @@ vi.mock("../desktop/runtime", () => ({
   isDesktop: () => false,
   pickDirectory: vi.fn(),
 }));
+vi.mock("../chat/messages/MarkdownRenderer", () => ({ MarkdownRenderer: ({ content }: { content: string }) => <p>{content}</p> }));
 
 describe("PluginsTab loading", () => {
   beforeEach(() => {
@@ -69,17 +71,18 @@ describe("PluginsTab loading", () => {
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith("插件设置加载失败：boom", "error"));
   });
 
-  it("labels the empty-state action by what it actually does", async () => {
+  it("keeps the empty catalog free of an unsupported developer/import panel", async () => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplaces: [] }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }))));
-    render(<PluginsTab />);
+    render(<PluginsTab catalog />);
     await screen.findByText("还没有本地插件");
 
-    fireEvent.click(screen.getByRole("button", { name: "填写插件路径" }));
-
-    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("textbox", { name: "插件文件夹或安装包路径" })));
+    expect(screen.queryByRole("button", { name: "填写插件路径" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "选择插件文件夹" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "插件文件夹或安装包路径" })).toBeNull();
+    expect(screen.queryByText("插件开发", { exact: true })).toBeNull();
   });
 
   it("installs by canonical marketplace identity and reports runtime refresh failure", async () => {
@@ -95,7 +98,7 @@ describe("PluginsTab loading", () => {
       }
       return Promise.resolve(response({ plugins: installedPlugins }));
     }));
-    render(<PluginsTab />);
+    render(<PluginsTab catalog />);
     const install = await screen.findByRole("button", { name: "安装插件 review@team-b" });
     await waitFor(() => expect((install as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(install);
@@ -105,30 +108,31 @@ describe("PluginsTab loading", () => {
     expect((screen.getByRole("button", { name: "安装插件 review@team-b" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("registers a source then synchronizes its real catalog", async () => {
+  it("adds a marketplace with its ref and sparse paths through the source dialog", async () => {
     let registered = false;
+    const marketplace = { name: "team", status: "ready", source: { source: "github", repo: "org/plugins" }, plugins: [] };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith("/marketplaces") && init?.method === "POST") registered = true;
-      return Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplaces: registered ? [{ name: "team", status: "registered", source: { source: "github", repo: "org/plugins" }, plugins: [] }] : [] }), { status: 200 }));
+      return Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplace, marketplaces: registered ? [marketplace] : [] }), { status: 200 }));
     }));
     render(<PluginsTab />);
     await screen.findByText("还没有本地插件");
-    fireEvent.click(screen.getByRole("button", { name: "添加插件来源", exact: true }));
-    fireEvent.change(screen.getByRole("textbox", { name: "来源名称" }), { target: { value: "team" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "来源地址" }), { target: { value: "org/plugins" } });
-    fireEvent.click(screen.getByRole("button", { name: "添加来源", exact: true }));
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/marketplaces", expect.objectContaining({ method: "POST", body: JSON.stringify({ name: "team", source: { source: "github", repo: "org/plugins" } }) })));
-    const sync = await screen.findByRole("button", { name: "同步来源 team" });
-    await waitFor(() => expect((sync as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(sync);
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/marketplaces/team/refresh", expect.objectContaining({ method: "POST" })));
+    fireEvent.click(screen.getByRole("button", { name: "添加", exact: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "添加插件市场", exact: true }));
+    fireEvent.change(screen.getByRole("textbox", { name: "来源", exact: true }), { target: { value: " org/plugins " } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Git 引用" }), { target: { value: " release " } });
+    fireEvent.change(screen.getByRole("textbox", { name: "稀疏路径" }), { target: { value: " .agents/plugins, plugins/review\nplugins/build " } });
+    fireEvent.click(screen.getByRole("button", { name: "添加市场", exact: true }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/marketplaces", expect.objectContaining({ method: "POST", body: JSON.stringify({ source: "org/plugins", ref_name: "release", sparse_paths: [".agents/plugins", "plugins/review", "plugins/build"] }) })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(pushToast).toHaveBeenCalledWith("已添加插件市场：team", "success");
   });
 
   it("reports the actual activation outcome when dependencies keep a plugin disabled", async () => {
     const plugin = { id: "review@team", name: "review", path: "/plugins/review", enabled: false, load_errors: ["missing dependency: parser@team"] };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin], runtime_refresh: { ok: true } }), { status: 200 }))));
     render(<PluginsTab />);
-    const toggle = await screen.findByRole("checkbox", { name: "启用插件 review@team" });
+    const toggle = await screen.findByRole("switch", { name: "启用插件 review@team" });
     await waitFor(() => expect((toggle as HTMLInputElement).disabled).toBe(false));
     fireEvent.click(toggle);
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("missing dependency"), "warning"));
@@ -140,7 +144,7 @@ describe("PluginsTab loading", () => {
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin] }), { status: 200 }))));
     render(<PluginsTab catalog />);
     const icon = await screen.findByRole("button", { name: "管理插件 review@team" });
-    expect(screen.queryByRole("checkbox", { name: "启用插件 review@team" })).toBeNull();
+    expect(screen.queryByRole("switch", { name: "启用插件 review@team" })).toBeNull();
     await waitFor(() => expect((icon as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(icon);
     expect(screen.getByRole("region", { name: "插件详情" })).toBeTruthy();
@@ -154,7 +158,7 @@ describe("PluginsTab loading", () => {
     const plugin = { id: "github-helper@team", name: "github-helper", path: "/plugins/review", enabled: true, iconVariant: "logo", iconVariants: ["logo", "logo-dark"] };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin] }), { status: 200 }))));
     const { container } = render(<PluginsTab />);
-    await screen.findByRole("checkbox", { name: "停用插件 github-helper@team" });
+    await screen.findByRole("switch", { name: "停用插件 github-helper@team" });
     expect(container.querySelector("img")?.getAttribute("src")).toBe("https://test.local/icon?variant=logo");
     act(() => useAppStore.setState({ resolvedTheme: "dark" }));
     expect(container.querySelector("img")?.getAttribute("src")).toBe("https://test.local/icon?variant=logo-dark");
@@ -165,14 +169,17 @@ describe("PluginsTab loading", () => {
     let reads = 0;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       if (String(input).endsWith("/marketplaces") && !init?.method && reads++ === 0) return new Promise<Response>((resolve) => { resolveOld = resolve; });
-      return Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplaces: [{ name: "team", status: "registered", source: {}, plugins: [] }] }), { status: 200 }));
+      const marketplace = { name: "team", status: "ready", source: {}, plugins: [] };
+      return Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplace, marketplaces: [marketplace] }), { status: 200 }));
     }));
-    render(<PluginsTab />);
+    const toolbar = document.createElement("div");
+    const { container } = render(<PluginsTab catalog toolbarHost={toolbar} />);
+    container.appendChild(toolbar);
     await screen.findByText("还没有本地插件");
-    fireEvent.click(screen.getByRole("button", { name: "管理来源与本地导入", exact: true }));
-    fireEvent.change(screen.getByRole("textbox", { name: "来源名称" }), { target: { value: "team" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "来源地址" }), { target: { value: "org/repo" } });
-    fireEvent.click(screen.getByRole("button", { name: "添加来源", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "添加", exact: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "添加插件市场", exact: true }));
+    fireEvent.change(screen.getByRole("textbox", { name: "来源", exact: true }), { target: { value: "org/repo" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加市场", exact: true }));
     await screen.findByRole("button", { name: "同步来源 team" });
     await act(async () => resolveOld(new Response(JSON.stringify({ marketplaces: [] }), { status: 200 })));
     expect(screen.getByRole("button", { name: "同步来源 team" })).toBeTruthy();
@@ -181,12 +188,11 @@ describe("PluginsTab loading", () => {
   it("opens the complete catalog description before installing to the actual supported scope", async () => {
     const plugin = { id: "build@team", name: "build", description: "完整说明：用于项目构建和分析。", interface: { displayName: "构建助手", developerName: "Team" } };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [{ name: "team", status: "ready", source: { repo: "org/tools" }, plugins: [plugin] }] } : { plugins: [] }), { status: 200 }))));
-    render(<PluginsTab />);
+    render(<PluginsTab catalog />);
     fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 build@team" }));
     const detail = screen.getByRole("region", { name: "插件详情" });
     expect(detail.textContent).toContain("完整说明：用于项目构建和分析。");
-    expect(detail.textContent).toContain("org/tools");
-    expect(detail.textContent).toContain("用户级插件配置");
+    expect(within(detail).getByRole("region", { name: "信息" }).textContent).toContain("Team");
     expect(screen.getByRole("button", { name: "安装到用户级配置" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /安装到项目/ })).toBeNull();
   });
@@ -244,12 +250,55 @@ describe("PluginsTab loading", () => {
       return Promise.resolve(new Response(JSON.stringify({ plugins: [{ ...plugin, enabled: init?.method === "PUT" }], runtime_refresh: { ok: true } })));
     }));
     render(<PluginsTab />);
-    const toggle = await screen.findByRole("checkbox", { name: "启用插件 tools@local" });
+    const toggle = await screen.findByRole("switch", { name: "启用插件 tools@local" });
     await waitFor(() => expect(toggle).toHaveProperty("disabled", false));
     fireEvent.click(toggle);
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("尚未启用"), "warning"));
     expect(toggle).toHaveProperty("checked", false);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
     expect(vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === "http://test.local/api/plugins?workspace_root=C%3A%2Fproject")).toHaveLength(2);
+  });
+
+  it("keeps the shared toolbar limited to source actions and routes each enabled menu item", () => {
+    const marketplace = vi.fn();
+    const mcp = vi.fn();
+    render(<PluginSettingsToolbar onAddMarketplace={marketplace} onAddMcpServer={mcp} />);
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "添加", exact: true }));
+    expect(screen.getAllByRole("menuitem")).toHaveLength(3);
+    expect(screen.getByRole("menuitem", { name: "创建插件" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("menuitem", { name: "添加插件市场" }));
+    expect(marketplace).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "添加", exact: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "添加 MCP 服务器" }));
+    expect(mcp).toHaveBeenCalledOnce();
+  });
+
+  it("retains marketplace fields and shows the actual add error", async () => {
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => Promise.resolve(new Response(
+      init?.method === "POST" ? "marketplace manifest not found" : JSON.stringify({ plugins: [], marketplaces: [] }),
+      { status: init?.method === "POST" ? 400 : 200 },
+    ))));
+    render(<PluginsTab managedToolbar marketplaceRequest={1} />);
+    fireEvent.change(await screen.findByRole("textbox", { name: "来源", exact: true }), { target: { value: "C:/plugins/invalid" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加市场", exact: true }));
+    expect(await screen.findByRole("alert")).toHaveProperty("textContent", "marketplace manifest not found");
+    expect(screen.getByRole("textbox", { name: "来源", exact: true })).toHaveProperty("value", "C:/plugins/invalid");
+    expect(screen.getByRole("dialog")).toBeTruthy();
+    expect(pushToast).not.toHaveBeenCalledWith(expect.anything(), "success");
+  });
+
+  it("uses the shared search without rendering a second toolbar or search box", async () => {
+    const plugin = { id: "review@team", name: "review", path: "/plugins/review", enabled: true };
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(JSON.stringify({ plugins: [plugin], marketplaces: [] })))));
+    const changed = vi.fn();
+    const { rerender } = render(<PluginsTab managedToolbar search="review" onPluginsChange={changed} />);
+    await screen.findByRole("button", { name: "查看插件详情 review@team" });
+    expect(changed).toHaveBeenCalledWith(1);
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("button", { name: "添加", exact: true })).toBeNull();
+    rerender(<PluginsTab managedToolbar search="missing" onPluginsChange={changed} />);
+    expect(screen.queryByRole("button", { name: "查看插件详情 review@team" })).toBeNull();
   });
 
 });

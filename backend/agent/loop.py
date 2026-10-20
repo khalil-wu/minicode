@@ -200,6 +200,8 @@ async def run_agent_loop(
     if not isinstance(llm_turn_context, LLMTurnContext):
         raise TypeError("RunContext llm_turn_context must be an LLMTurnContext")
     turn_usage = llm_turn_context.usage
+    if run_context.goal_accounting is not None:
+        run_context.goal_accounting.register_usage(run_record.run_id if run_record is not None else session_id, turn_usage)
     terminal_projection: TurnTerminalProjection | None = None
     iteration_execution_state = IterationExecutionState(
         turn_usage=turn_usage,
@@ -391,6 +393,14 @@ async def run_agent_loop(
                     )
                 iteration_execution_state = iteration_execution_result.state
                 turn_usage = iteration_execution_state.turn_usage
+                if run_context.goal_accounting is not None:
+                    goal = run_context.goal_accounting.account()
+                    if goal is not None:
+                        yield AgentEvent(type="goal.updated", data={"conversation_id": tool_ctx.conversation_id, "goal": goal,
+                            "source": "accounting", "revision": run_context.goal_accounting.revision})
+                        if goal["status"] == "budget_limited":
+                            _set_terminal_reason(state, "goal_budget_exhausted", status="partial")
+                            break
                 stream_text = iteration_execution_result.stream_text
                 if iteration_execution_result.action == "retry":
                     continue
@@ -480,4 +490,7 @@ async def run_agent_loop(
     finally:
         bootstrap.tool_context.permission_grants.end_turn(bootstrap.tool_context.turn_id)
         if run_context.code_execution is not None:
-            await run_context.code_execution.aclose()
+            if state.terminal_status == "completed":
+                run_context.code_execution.finish_turn()
+            else:
+                await run_context.code_execution.aclose()

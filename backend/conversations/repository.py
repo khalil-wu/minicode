@@ -21,10 +21,15 @@ from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.conversations.context_delta import apply_context_snapshot_delta, compose_context_snapshot_deltas
 from backend.conversations.projection_log import append_projection, read_projection
 from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message
+from backend.conversations.compression import (
+    HistoryCompressionError, compressed_history_path, compress_history_file,
+    history_exists, history_stat, is_history_path, is_history_temporary, physical_history_path, read_history_bytes,
+)
 from backend.config import DATA_ROOT
 from backend.workspace.executor_paths import ExecutorPath
 
 from .models import (
+    CONVERSATION_ID_PATTERN as _CONVERSATION_ID_PATTERN,
     inherited_execution_cwd,
     DEFAULT_CONVERSATION_PERMISSION_MODE,
     DEFAULT_CONVERSATION_TYPE,
@@ -51,9 +56,6 @@ from .public_projection import (
 logger = logging.getLogger(__name__)
 
 CONVERSATION_DATA_DIR = DATA_ROOT / "conversations"
-_CONVERSATION_ID_PATTERN = re.compile(
-    r"^(?:conv|side|local)_[A-Za-z0-9_-]{6,80}$|^(?:conv|side)-[A-Za-z0-9_-]{6,80}$"
-)
 _STORAGE_MANIFEST_SCHEMA = "minicode.conversation.manifest"
 _STORAGE_MANIFEST_VERSION = 8
 
@@ -111,6 +113,54 @@ class ConversationRepository:
     @property
     def storage_root(self) -> Path:
         return self._base_dir.resolve()
+
+    def history_paths(self, conversation_id: str) -> tuple[Path, ...]:
+        """Logical history files referenced by this conversation's commit."""
+        with self._store_lock(conversation_id):
+            manifest = self._read_manifest(conversation_id, log_errors=False)
+            if manifest is None:
+                return (self._transcript_path_for(conversation_id), self._snapshot_path_for(conversation_id)) if self._meta_path_for(conversation_id).exists() else ()
+            if self._manifest_is_deleted(manifest):
+                return ()
+            paths = [path for generation in self._manifest_generations(manifest)
+                for path in self._generation_paths(conversation_id, generation)[1:]]
+            for key in ("projection_log", "previous_projection_log"):
+                if key in manifest:
+                    paths.append(self._partial_projection_path(conversation_id, manifest[key]["generation"]))
+            return tuple(dict.fromkeys(paths))
+
+    def compress_history_file(self, path: Path, *, cutoff_ns: int) -> bool:
+        """Coordinate a representation change with the existing commit writer."""
+        path = Path(path)
+        if path.resolve().parent != self.storage_root:
+            raise ValueError("History compression must stay inside its conversation store")
+        conversation_id = self._safe_id(path.name.partition(".")[0])
+
+        @contextmanager
+        def publication():
+            with self._store_lock(conversation_id):
+                # The encoded file may have been deleted or superseded while
+                # compression ran. Do not publish an unreachable generation.
+                yield path.resolve() in {candidate.resolve() for candidate in self.history_paths(conversation_id)}
+
+        return compress_history_file(path, cutoff_ns=cutoff_ns, publication_lock=publication())
+
+    def cleanup_history_temporaries(self, *, older_than_ns: int) -> int:
+        """Remove only old unpublished files created by history transitions."""
+        removed = 0
+        for path in self.storage_root.iterdir():
+            if not is_history_temporary(path):
+                continue
+            conversation_id = path.name[1:].partition(".")[0]
+            if not _CONVERSATION_ID_PATTERN.fullmatch(conversation_id):
+                continue
+            with self._store_lock(conversation_id):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                if path.stat().st_mtime_ns <= older_than_ns:
+                    path.unlink()
+                    removed += 1
+        return removed
 
     def create_conversation(
         self,
@@ -220,6 +270,9 @@ class ConversationRepository:
                 "workspace_root": workspace_root, "worktree_path": worktree_path,
                 "context_snapshot": context_snapshot or {},
             })
+            from backend.workspace.recent_projects import RecentProjectStore
+            registered_project = (RecentProjectStore().project_for_root(workspace_root)
+                if workspace_root and not workspace_root.startswith("file:") else None)
             record = ConversationRecord(
                 id=candidate_id,
                 title=(title or "New chat").strip() or "New chat",
@@ -237,6 +290,7 @@ class ConversationRepository:
                 transcript=initial_transcript,
                 context_snapshot=copy.deepcopy(dict(context_snapshot or {})),
                 workspace_root=workspace_root,
+                project_id=registered_project.path if registered_project is not None and registered_project.named else None,
                 execution_cwd=(ExecutorPath.parse(execution_cwd).uri
                     if execution_cwd.startswith("file:") else str(Path(execution_cwd).expanduser().resolve()) if execution_cwd else ""),
                 projectless_output_dir=projectless.output_directory if projectless is not None else "",
@@ -663,6 +717,10 @@ class ConversationRepository:
             paths.update(self._base_dir.glob(f"{safe_id}.g*.transcript.jsonl"))
             paths.update(self._base_dir.glob(f"{safe_id}.g*.snapshot.json"))
             paths.update(self._base_dir.glob(f"{safe_id}.g*.projection.jsonl"))
+            paths.update(compressed_history_path(path) for path in tuple(paths))
+            paths.update(self._base_dir.glob(f"{safe_id}.g*.transcript.jsonl.zst"))
+            paths.update(self._base_dir.glob(f"{safe_id}.g*.snapshot.json.zst"))
+            paths.update(self._base_dir.glob(f"{safe_id}.g*.projection.jsonl.zst"))
             if not manifest_path.exists() and not any(path.exists() for path in paths):
                 return False
 
@@ -937,6 +995,38 @@ class ConversationRepository:
                 self._commit_record(record)
             self._cache_record(record, copy_record=return_record)
             return record if return_record else record.to_summary()
+
+    def update_tool_call(self, conversation_id: str, *, message_id: str, tool_call: dict[str, Any]) -> bool:
+        """Update one owned tool fact without replacing its completed answer or context."""
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return False
+            message = next((item for item in record.transcript if item.get("id") == message_id), None)
+            if message is None:
+                return False
+            projected = copy.deepcopy(tool_call)
+            calls = message.setdefault("tool_calls", [])
+            previous = next((tool for tool in calls if tool["id"] == projected["id"]), None)
+            if previous is not None and (previous.get("delegations") or projected.get("delegations")):
+                projected["delegations"] = merge_delegation_facts(previous.get("delegations", []), projected.get("delegations", []))
+            for index, tool in enumerate(calls):
+                if tool["id"] == projected["id"]:
+                    calls[index] = projected
+                    break
+            else:
+                calls.append(projected)
+            blocks = message.setdefault("blocks", [])
+            for block in blocks:
+                if block.get("type") == "tool_call" and block["record"]["id"] == projected["id"]:
+                    block["record"] = copy.deepcopy(projected)
+                    break
+            else:
+                blocks.append({"type": "tool_call", "record": copy.deepcopy(projected)})
+            record.updated_at = utc_now_iso()
+            self._commit_record(record)
+            self._cache_record(record)
+            return True
 
     def update_tool_delegation(
         self, conversation_id: str, *, message_id: str, tool_call_id: str, delegation: dict[str, Any],
@@ -1364,6 +1454,9 @@ class ConversationRepository:
 
         return self._mutate_meta(conversation_id, mutate)
 
+    def mutate_goal(self, conversation_id, mutation):
+        return self._mutate_meta(conversation_id, lambda record: setattr(record, "goal", mutation(dict(record.goal))))
+
     def update_goal(
         self,
         conversation_id: str,
@@ -1733,6 +1826,29 @@ class ConversationRepository:
             self._cache_record(record)
             return record
 
+    def append_user_goal_update(self, conversation_id: str, *, objective: str | None = None,
+        status: str | None = None, clear: bool = False, context_builder=None):
+        from backend.agent.context import ContextBuilder
+
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return None, None
+            base = context_builder.export_snapshot() if context_builder is not None else dict(record.context_snapshot)
+            prepared = ContextBuilder()
+            prepared.load_snapshot(base)
+            message = prepared.append_user_goal_update(objective=objective, status=status, clear=clear)
+            updated = prepared.export_snapshot()
+            record.context_snapshot = {**record.context_snapshot, **base,
+                "history": [*base.get("history", []), *([updated["history"][-1]] if context_builder is None else [])],
+                "guardian_evidence": updated["guardian_evidence"]}
+            record.updated_at = utc_now_iso()
+            self._commit_record(record)
+            self._cache_record(record)
+            if context_builder is not None:
+                context_builder.append_recorded_user_goal_update(message, append_history=False)
+            return record, message
+
     def patch_context_snapshot(
         self,
         conversation_id: str,
@@ -1856,7 +1972,7 @@ class ConversationRepository:
         stamps: list[tuple[int, int]] = []
         for path in paths:
             try:
-                stat = path.stat()
+                stat = history_stat(path)
             except OSError:
                 stamps.append((-1, -1))
             else:
@@ -2213,7 +2329,7 @@ class ConversationRepository:
     ) -> ConversationRecord:
         meta_path, transcript_path, snapshot_path = self._generation_paths(conversation_id, generation)
         try:
-            if not meta_path.exists() or not transcript_path.exists() or not snapshot_path.exists():
+            if not meta_path.exists() or not history_exists(transcript_path) or not history_exists(snapshot_path):
                 raise FileNotFoundError(f"generation {generation} is incomplete")
             meta_payload = self._read_generation_metadata(conversation_id, generation)
             transcript = self._read_transcript_path(transcript_path, strict=True)
@@ -2254,7 +2370,7 @@ class ConversationRepository:
     def _cleanup_generations(self, conversation_id: str, *, keep: set[int]) -> None:
         safe_id = self._safe_id(conversation_id)
         pattern = re.compile(
-            rf"^{re.escape(safe_id)}\.g(\d+)\.(?:meta\.json|transcript\.jsonl|snapshot\.json|projection\.jsonl)$"
+            rf"^{re.escape(safe_id)}\.g(\d+)\.(?:meta\.json|transcript\.jsonl|snapshot\.json|projection\.jsonl)(?:\.zst)?$"
         )
         for path in self._base_dir.glob(f"{safe_id}.g*"):
             match = pattern.fullmatch(path.name)
@@ -2283,7 +2399,12 @@ class ConversationRepository:
     def _safe_write_text(self, path: Path, text: str, encoding: str = "utf-8") -> None:
         for attempt in range(5):
             try:
-                atomic_write_text(path, text, encoding=encoding)
+                if is_history_path(path):
+                    with file_mutation_locks([path]):
+                        atomic_write_text(path, text, encoding=encoding)
+                        compressed_history_path(path).unlink(missing_ok=True)
+                else:
+                    atomic_write_text(path, text, encoding=encoding)
                 return
             except (IOError, PermissionError) as e:
                 if attempt == 4:
@@ -2295,7 +2416,9 @@ class ConversationRepository:
         import time
         for attempt in range(5):
             try:
-                return path.read_text(encoding=encoding)
+                return read_history_bytes(path).decode(encoding) if is_history_path(path) else path.read_text(encoding=encoding)
+            except HistoryCompressionError:
+                raise
             except (IOError, PermissionError) as e:
                 if attempt == 4:
                     logger.error("Failed to read text from %s after 5 attempts: %s", path, e)
@@ -2460,11 +2583,11 @@ class ConversationRepository:
                 snapshot_path = self._snapshot_path_for(conversation_id)
                 transcript = self._read_transcript_path(
                     transcript_path,
-                    strict=transcript_path.exists(),
+                    strict=history_exists(transcript_path),
                 )
                 snapshot = self._read_snapshot_path(
                     snapshot_path,
-                    strict=snapshot_path.exists(),
+                    strict=history_exists(snapshot_path),
                 )
 
                 if not transcript and snapshot.get("history"):
@@ -2566,7 +2689,7 @@ class ConversationRepository:
         *,
         strict: bool,
     ) -> list[dict[str, Any]]:
-        if not path.exists():
+        if not history_exists(path):
             if strict:
                 raise FileNotFoundError(path)
             return []
@@ -2603,7 +2726,7 @@ class ConversationRepository:
         )
 
     def _read_snapshot_path(self, path: Path, *, strict: bool) -> dict[str, Any]:
-        if not path.exists():
+        if not history_exists(path):
             if strict:
                 raise FileNotFoundError(path)
             return {}
@@ -2644,8 +2767,10 @@ class ConversationRepository:
         if manifest is not None:
             generation = int(manifest.get("current_generation") or 0)
             if generation > 0:
-                return self._generation_paths(conversation_id, generation)[1]
-        return self._transcript_path_for(conversation_id)
+                logical = self._generation_paths(conversation_id, generation)[1]
+                return physical_history_path(logical) if history_exists(logical) else logical
+        logical = self._transcript_path_for(conversation_id)
+        return physical_history_path(logical) if history_exists(logical) else logical
 
     def _transcript_path_for(self, conversation_id: str) -> Path:
         return self._base_dir / f"{self._safe_id(conversation_id)}.transcript.jsonl"
@@ -2662,7 +2787,7 @@ class ConversationRepository:
     def _cache_partial_projection(
         self, conversation_id: str, pointer: dict[str, int], projection: dict[str, Any],
     ) -> None:
-        stat = self._partial_projection_path(conversation_id, pointer["generation"]).stat()
+        stat = history_stat(self._partial_projection_path(conversation_id, pointer["generation"]))
         with self._process_lock:
             self._partial_projection_cache[conversation_id] = (
                 pointer["generation"], pointer["bytes"], (stat.st_mtime_ns, stat.st_size), projection,
@@ -2679,7 +2804,7 @@ class ConversationRepository:
             return manifest.get("previous_projection" if previous else "partial_projection") or {}
         path = self._partial_projection_path(conversation_id, pointer["generation"])
         try:
-            stat = path.stat()
+            stat = history_stat(path)
             cached = self._partial_projection_cache.get(conversation_id)
             if cached is not None and cached[:3] == (
                 pointer["generation"], pointer["bytes"], (stat.st_mtime_ns, stat.st_size),

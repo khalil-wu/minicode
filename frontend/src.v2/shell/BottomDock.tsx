@@ -28,6 +28,8 @@ const LazyProblemsWorkspace = lazy(() => import("../panels/ProblemsWorkspace").t
 
 export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
   const { t: tr } = useI18n();
+  const appMode = useAppStore(state => state.appMode);
+  const tabs = appMode === "code" ? TABS : TABS.filter(tab => tab.id === "terminal");
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
   const dockHeight = useAppStore((s) => s.dockHeight);
   const activeBottomTab = useAppStore((s) => s.activeBottomTab);
@@ -38,7 +40,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
   const setDockHeight = useAppStore((s) => s.setDockHeight);
   const mainVisible = useAppStore((s) => !s.settingsOpen && !s.skillsMarketplaceOpen && !s.rightPanelExpanded) && visible;
   const visibleTab = activeBottomTab === "tasks" || activeBottomTab === "timeline" ? "terminal" : activeBottomTab;
-  const isOpen = !dockCollapsed && mainVisible;
+  const isOpen = !dockCollapsed && mainVisible && (appMode === "code" || visibleTab === "terminal");
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const problemsVisible = isOpen && visibleTab === "problems";
   const [problemsVisited, setProblemsVisited] = useState(problemsVisible);
@@ -114,7 +116,7 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
       {isOpen && <div className="mc-bottom-drawer-resize" role="separator" aria-orientation="horizontal" aria-label={tr("调整底部工具高度")} aria-valuemin={180} aria-valuemax={520} aria-valuenow={Math.round(dockHeight)} tabIndex={0} onPointerDown={startResize} onKeyDown={handleResizeKeyDown} />}
       {isOpen && <div className="mc-bottom-drawer-header">
         <div role="tablist" aria-label={tr("底部工具面板")} style={{ display: "contents" }}>
-        {TABS.map((t, index) => {
+        {tabs.map((t, index) => {
           const Icon = t.icon;
           let badge: string | null = null;
           if (t.id === "budget" && totalBudgetPercent > 0.7) badge = `${Math.round(totalBudgetPercent * 100)}%`;
@@ -133,13 +135,13 @@ export const BottomDock = ({ visible = true }: { visible?: boolean } = {}) => {
               onClick={() => openBottomTab(t.id)}
               onKeyDown={(event) => {
                 let next = index;
-                if (event.key === "ArrowRight") next = (index + 1) % TABS.length;
-                else if (event.key === "ArrowLeft") next = (index - 1 + TABS.length) % TABS.length;
+                if (event.key === "ArrowRight") next = (index + 1) % tabs.length;
+                else if (event.key === "ArrowLeft") next = (index - 1 + tabs.length) % tabs.length;
                 else if (event.key === "Home") next = 0;
-                else if (event.key === "End") next = TABS.length - 1;
+                else if (event.key === "End") next = tabs.length - 1;
                 else return;
                 event.preventDefault();
-                const target = TABS[next];
+                const target = tabs[next];
                 openBottomTab(target.id);
                 window.setTimeout(() => document.getElementById(`bottom-dock-tab-${target.id}`)?.focus(), 0);
               }}

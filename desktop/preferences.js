@@ -5,6 +5,7 @@ const path = require("node:path");
 const os = require("node:os");
 const { atomicWriteTextSync } = require("./utils");
 const { FILE_OPEN_TARGET_IDS, fileOpenTargets } = require("./open-targets");
+const { isNotificationSound } = require("./notification-sounds");
 
 const DEFAULT_PREFERENCES = Object.freeze({
   fileOpenTarget: "minicode",
@@ -12,48 +13,109 @@ const DEFAULT_PREFERENCES = Object.freeze({
   defaultTaskDirectory: path.join(os.homedir(), "Documents", "MiniCode"),
   defaultPermissionMode: "confirm",
   showFullAccess: true,
+  showContextWindowUsage: false,
   localeOverride: null,
   terminalShell: process.platform === "win32" ? "powershell" : "system",
   confirmBeforeClose: "keyboardOnly",
   turnCompletionNotifications: "onlyWhenUnfocused",
   permissionNotifications: true,
   questionNotifications: true,
+  notificationSound: "default",
+  autoArchiveAfterDays: 0,
+  localHistoryCompression: false,
+  showBottomPanel: true,
+  defaultTerminalLocation: "bottom",
+  composerPlainTextMode: false,
   urlOpenTarget: "external-browser",
   localUrlOpenTarget: "in-app-browser",
   showFullUrl: false,
   annotationScreenshotsMode: "always",
+  primaryNumberShortcutTarget: "tabs",
+  externalBrowserLinkShortcut: "primary",
+  speechEnabled: false,
+  speechProvider: "",
+  speechModel: "",
+  speechLanguage: "zh",
+  microphoneId: "",
+  dictationDictionary: [],
+  dictationMigratedPartitions: [],
+  dictationConfiguredFields: [],
 });
 const OPTIONS = {
   fileOpenTarget: FILE_OPEN_TARGET_IDS,
   defaultPermissionMode: ["confirm", "plan", "auto", "bypass"],
   showFullAccess: [true, false],
+  showContextWindowUsage: [true, false],
   localeOverride: [null, "en-US", "zh-CN"],
   terminalShell: ["powershell", "pwsh", "cmd", "gitBash", "wsl", "system"],
   confirmBeforeClose: ["never", "keyboardOnly", "always"],
   turnCompletionNotifications: ["never", "onlyWhenUnfocused", "always"],
   permissionNotifications: [true, false],
   questionNotifications: [true, false],
+  notificationSound: ["default", "classic", "none"],
+  autoArchiveAfterDays: [0, 1, 7, 14, 30, 90],
+  localHistoryCompression: [true, false],
+  showBottomPanel: [true, false],
+  defaultTerminalLocation: ["bottom", "right"],
+  composerPlainTextMode: [true, false],
   urlOpenTarget: ["in-app-browser", "external-browser"],
   localUrlOpenTarget: ["in-app-browser", "external-browser"],
   showFullUrl: [true, false],
   annotationScreenshotsMode: ["always", "necessary"],
+  primaryNumberShortcutTarget: ["tabs", "sidebar"],
+  externalBrowserLinkShortcut: ["unassigned", "primary", "alt", "primaryShift"],
+  speechEnabled: [true, false],
+  speechProvider: ["", "openai", "anthropic", "custom"],
 };
+const DICTATION_SERVICE_KEYS = ["speechEnabled", "speechProvider", "speechModel", "speechLanguage", "microphoneId"];
+const DICTATION_KEYS = [...DICTATION_SERVICE_KEYS, "dictationDictionary"];
+const isDictationValue = (key, value) => ["speechModel", "speechLanguage", "microphoneId"].includes(key) ? typeof value === "string"
+  : key === "dictationDictionary" ? Array.isArray(value) && value.every(entry => typeof entry === "string")
+  : OPTIONS[key]?.includes(value);
 let preferencesFile = "";
-let preferences = { ...DEFAULT_PREFERENCES };
+let defaultTaskDirectory = DEFAULT_PREFERENCES.defaultTaskDirectory;
+let preferences = { ...DEFAULT_PREFERENCES, defaultTaskDirectory: null };
 
 function init(file, defaults = {}) {
   preferencesFile = file;
-  preferences = { ...DEFAULT_PREFERENCES, ...defaults, ...(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {}) };
+  defaultTaskDirectory = defaults.defaultTaskDirectory ?? DEFAULT_PREFERENCES.defaultTaskDirectory;
+  preferences = { ...DEFAULT_PREFERENCES, ...defaults, defaultTaskDirectory: null,
+    ...(fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : {}) };
 }
 
-function getPreferences() { return { ...preferences }; }
+function getPreferences() {
+  return { ...preferences, defaultTaskDirectory: preferences.defaultTaskDirectory ?? defaultTaskDirectory,
+    taskDirectoryOverride: preferences.defaultTaskDirectory };
+}
 
 function setPreferences(patch) {
   for (const [key, value] of Object.entries(patch)) {
-    if (key === "defaultTaskDirectory" && typeof value === "string" && path.isAbsolute(value)) continue;
+    if (key === "defaultTaskDirectory" && (value === null || typeof value === "string" && path.isAbsolute(value))) continue;
+    if (key === "notificationSound" && isNotificationSound(value)) continue;
+    if (DICTATION_KEYS.includes(key) && isDictationValue(key, value)) continue;
     if (!OPTIONS[key]?.includes(value)) throw new Error(`Unsupported desktop preference: ${key}`);
   }
-  const next = { ...preferences, ...patch };
+  const next = { ...preferences, ...patch,
+    dictationConfiguredFields: [...new Set([...preferences.dictationConfiguredFields, ...DICTATION_SERVICE_KEYS.filter(key => Object.hasOwn(patch, key))])] };
+  atomicWriteTextSync(preferencesFile, `${JSON.stringify(next, null, 2)}\n`);
+  preferences = next;
+  return getPreferences();
+}
+
+function migrateDictationPreferences(partition, legacy) {
+  if (preferences.dictationMigratedPartitions.includes(partition)) return getPreferences();
+  if (Object.keys(legacy).length !== DICTATION_KEYS.length || DICTATION_KEYS.some(key => !isDictationValue(key, legacy[key]))) {
+    throw new Error("Invalid legacy dictation preferences");
+  }
+  const next = { ...preferences,
+    dictationDictionary: [...new Set([...preferences.dictationDictionary, ...legacy.dictationDictionary])],
+    dictationMigratedPartitions: [...preferences.dictationMigratedPartitions, partition],
+  };
+  if (partition === "local") {
+    for (const key of DICTATION_SERVICE_KEYS) {
+      if (!preferences.dictationConfiguredFields.includes(key)) next[key] = legacy[key];
+    }
+  }
   atomicWriteTextSync(preferencesFile, `${JSON.stringify(next, null, 2)}\n`);
   preferences = next;
   return getPreferences();
@@ -176,4 +238,4 @@ function needsCloseConfirmation(source) {
     || preferences.confirmBeforeClose === "keyboardOnly" && source === "keyboard";
 }
 
-module.exports = { init, getPreferences, setPreferences, preferredFileOpenTarget, setPreferredFileOpenTarget, fileOpenTargets, terminalShellTargets, resolveTerminalShell, shouldNotify, needsCloseConfirmation, DEFAULT_PREFERENCES };
+module.exports = { init, getPreferences, setPreferences, migrateDictationPreferences, preferredFileOpenTarget, setPreferredFileOpenTarget, fileOpenTargets, terminalShellTargets, resolveTerminalShell, shouldNotify, needsCloseConfirmation, DEFAULT_PREFERENCES };

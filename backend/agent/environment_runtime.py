@@ -45,8 +45,14 @@ async def resolve_environment_config(selection, config, environment, info) -> En
             if info.get("temporaryDirectories") is not None else None),
         windows_sandbox_type=config.windows_sandbox_type, windows_sandbox_level=config.windows_sandbox_level,
         use_legacy_landlock=config.use_legacy_landlock)
+    shell_policy = config.shell_environment_policy
+    if selection.environment_id == "local":
+        from backend.services.local_environment_settings import worktree_shell_policy
+        from backend.workspace.executor_paths import ExecutorPath
+
+        shell_policy = worktree_shell_policy(shell_policy, Path(ExecutorPath.parse(selection.cwd, platform_os=info.get("platformOs")).native))
     return EnvironmentConfig(profile, config.workspace_roots,
-        allow_login_shell=config.allow_login_shell, shell_environment_policy=config.shell_environment_policy,
+        allow_login_shell=config.allow_login_shell, shell_environment_policy=shell_policy,
         windows_sandbox_type=config.windows_sandbox_type, windows_sandbox_level=config.windows_sandbox_level,
         use_legacy_landlock=config.use_legacy_landlock, exec_policy=config.exec_policy,
         mcp_policy=config.mcp_policy, network_policy=config.network_policy,
@@ -57,7 +63,7 @@ async def prepare_thread_environments(*, manager, defaults, cwd_uri: str,
         workspace_root_uris: tuple[str, ...], owner: ThreadEnvironments | None = None,
         requests: tuple[TurnEnvironmentRequest, ...] | None = None, inherited=None,
         manager_lease: EnvironmentManagerLease | None = None,
-        selected_capability_roots: tuple[dict, ...] = ()) -> ThreadEnvironments:
+        selected_capability_roots: tuple[dict, ...] = (), project_source_cwd: str | None = None) -> ThreadEnvironments:
     if owner is None:
         owner = ThreadEnvironments(manager, defaults, resolve_config=resolve_environment_config,
             inherited=inherited, manager_lease=manager_lease.clone() if manager_lease is not None else None,
@@ -66,6 +72,14 @@ async def prepare_thread_environments(*, manager, defaults, cwd_uri: str,
             requests = default_thread_environment_requests(manager, cwd_uri, workspace_root_uris)
     else:
         await owner.set_active_thread_defaults(defaults)
+    if requests is None and inherited is None and (project_source_cwd == cwd_uri or owner.project_source_cwd == cwd_uri):
+        selections = owner.selections()
+        refreshed = tuple(replace(selection, workspace_roots=workspace_root_uris)
+            if selection.environment_id == "local" and selection.cwd == cwd_uri and selection.config.kind == "FromThread" else selection
+            for selection in selections)
+        if refreshed != selections: await owner.update_selections(refreshed)
+    if inherited is None and (requests is None or all(request.config.kind == "FromThread" for request in requests)):
+        owner.project_source_cwd = project_source_cwd
     if requests is not None:
         await owner.update_selections(TurnEnvironmentSelection.from_request(request) for request in requests)
     return owner
@@ -75,7 +89,7 @@ async def capture_conversation_environments(*, environment_manager, execution_re
         conversation_repository, conversation_id: str, permission_context, config_stack,
         cwd_uri: str, workspace_root_uris: tuple[str, ...],
         requests: tuple[TurnEnvironmentRequest, ...] | None = None,
-        selected_capability_roots: tuple[dict, ...] = (), require_existing_attachment: bool = False):
+        selected_capability_roots: tuple[dict, ...] = (), require_existing_attachment: bool = False, project_source_cwd: str | None = None):
     """Capture the same store/thread owner used by WS, REST and the editor.
 
     Inputs come from the receiving host. Persisted prompts and context snapshots
@@ -95,7 +109,7 @@ async def capture_conversation_environments(*, environment_manager, execution_re
         runtime.thread_environments = await prepare_thread_environments(
             manager=environment_manager, defaults=defaults, cwd_uri=cwd_uri,
             workspace_root_uris=workspace_root_uris, owner=runtime.thread_environments,
-            requests=requests, selected_capability_roots=selected_capability_roots)
+            requests=requests, selected_capability_roots=selected_capability_roots, project_source_cwd=project_source_cwd)
         return await runtime.thread_environments.snapshot()
 
 
@@ -106,6 +120,12 @@ async def prepare_run_environments(run_context, *, agent_session, permission_con
         return None
     cwd_uri = run_context.execution_cwd_uri or Path(workspace_root if workspace_root is not None else Path.cwd()).as_uri()
     roots = (cwd_uri,) if run_context.execution_cwd_uri or workspace_root is not None else ()
+    project_source_cwd = None
+    if not run_context.execution_cwd_uri and workspace_root is not None:
+        from backend.workspace.project_sources import local_project_source_selection
+        project_id, folders = local_project_source_selection(workspace_root)
+        roots = tuple(root.as_uri() for root in folders)
+        project_source_cwd = cwd_uri if project_id is not None else None
     defaults = thread_environment_defaults(permission_context, config_stack)
     runtime = run_context.environment_thread_runtime
     lock = runtime.environment_lock if runtime is not None else run_context.environment_lock
@@ -120,7 +140,7 @@ async def prepare_run_environments(run_context, *, agent_session, permission_con
             cwd_uri=cwd_uri, workspace_root_uris=roots, owner=existing,
             requests=run_context.environment_requests, inherited=run_context.inherited_turn_environments,
             manager_lease=run_context.environment_manager_lease,
-            selected_capability_roots=run_context.selected_capability_roots)
+            selected_capability_roots=run_context.selected_capability_roots, project_source_cwd=project_source_cwd)
         run_context.environment_requests = None
         run_context.thread_environments = owner
         if runtime is not None:

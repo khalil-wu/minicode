@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
@@ -57,6 +58,38 @@ def test_source_parser_matches_codex_git_and_archive_forms() -> None:
     assert parse_marketplace_source(codex_url.to_dict()).subpath == "plugins/review"
     with pytest.raises(MaterializationError):
         parse_marketplace_source("file:///etc/passwd")
+
+
+def test_sparse_git_source_checks_out_requested_paths_and_ref(tmp_path: Path) -> None:
+    repo = tmp_path / "repository"
+    repo.mkdir()
+    subprocess.run(["git", "init", "--initial-branch=main", str(repo)], capture_output=True, check=True)
+    for path in ["plugins/review/SKILL.md", "other/unused.txt", ".agents/plugins/marketplace.json"]:
+        file = repo / path
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_text("selected revision", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "."], capture_output=True, check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.test", "commit", "-m", "fixture"], capture_output=True, check=True)
+    commands: list[list[str]] = []
+
+    def runner(args, **kwargs):
+        args = list(args)
+        commands.append(args)
+        if "clone" in args:
+            args[-2] = str(repo)
+        return subprocess.run(args, capture_output=True, text=True, check=False, **kwargs)
+
+    source = parse_marketplace_source({
+        "source": "git", "url": "https://example.test/plugins.git", "ref": "main",
+        "sparse_paths": ["plugins/review", ".agents/plugins"],
+    })
+    result = materialize_source(source, tmp_path / "selected", command_runner=runner)
+
+    assert (result.path / "plugins/review/SKILL.md").read_text() == "selected revision"
+    assert (result.path / ".agents/plugins/marketplace.json").is_file()
+    assert not (result.path / "other/unused.txt").exists()
+    assert parse_marketplace_source(result.source.to_dict()).sparse_paths == source.sparse_paths
+    assert any("--no-checkout" in command for command in commands)
 
 
 @pytest.mark.parametrize(

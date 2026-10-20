@@ -1374,7 +1374,7 @@ const mdComponents = (
           if (event.defaultPrevented) return;
           if (isDesktop() && isPreviewableHttpUrl(href)) {
             event.preventDefault();
-            void openPreferredWebLink(href);
+            void openPreferredWebLink(href, resourceScope.conversationId, { ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey });
           } else if (openWebTarget(href)) event.preventDefault();
         }}
       >

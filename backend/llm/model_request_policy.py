@@ -10,6 +10,19 @@ from typing import Any
 _SOURCE_MODELS = json.loads(Path(__file__).with_name("source-model-request-capabilities.json").read_text(encoding="utf-8"))["models"]
 
 
+def resolve_web_search_mode(config: Any, *, permission_mode: str = "") -> str:
+    """Source config resolution; cached access never means a live API search."""
+    effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    preferred = effective.get("web_search")
+    if preferred is None:
+        preferred = ("cached" if config.feature_flags.enabled("web_search_cached", False)
+            else "live" if config.feature_flags.enabled("web_search_request", False) else "cached")
+    allowed = config.config_layer_stack.requirements.value_for("allowed_web_search_modes") if config.config_layer_stack is not None else None
+    candidates = (["live", "cached", "disabled"] if permission_mode == "bypass" and preferred not in {"disabled", "indexed"}
+        else [preferred, "cached", "live", "disabled"])
+    return next((mode for mode in candidates if allowed is None or mode in allowed), "disabled")
+
+
 @dataclass(frozen=True)
 class ModelRequestPolicy:
     model: str = ""
@@ -35,7 +48,7 @@ def source_model_request_capabilities(model: str, definition: Any = None) -> dic
         **_SOURCE_MODELS.get(model, {})}
     if definition is not None:
         capabilities.update({key: value for key, value in definition.extra.items() if key in {
-            "support_verbosity", "default_verbosity", "supports_reasoning_summary_parameter", "service_tiers", "multi_agent_version"}})
+            "support_verbosity", "default_verbosity", "supports_reasoning_summary_parameter", "service_tiers", "multi_agent_version", "experimental_supported_tools"}})
     return capabilities
 
 

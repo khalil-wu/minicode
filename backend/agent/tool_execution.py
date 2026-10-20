@@ -2001,6 +2001,16 @@ def _tool_output_was_streamed(
     return isinstance(raw_ids, (set, list, tuple)) and tool_call_id in raw_ids
 
 
+def tool_call_event_payload(tc: ToolCallEvent, tool_ctx: ToolExecutionContext, data: dict[str, Any]) -> dict[str, Any]:
+    """Bind a producer fact to the actual invocation, preserving its own id."""
+    payload = {**data, "tool_call_id": tc.id, "call_source": asdict(tool_ctx.source_for_call(tc.id))}
+    payload.setdefault("conversation_id", tool_ctx.conversation_id)
+    turn_id = tool_ctx.turn_id
+    if turn_id:
+        payload["turn_id"] = turn_id
+    return payload
+
+
 def tool_context_with_live_output(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
@@ -2035,6 +2045,11 @@ def tool_context_with_live_output(
         exec_policy_decision=(_bound_final_tool_request(tc).exec_policy if _bound_final_tool_request(tc) is not None else None),
         final_tool_request=_bound_final_tool_request(tc),
     )
+    producer_context = call_context
+    if producer_context.emit_event is not None:
+        async def emit_call_event(kind: str, data: dict[str, Any]) -> None:
+            await producer_context.emit_event(kind, tool_call_event_payload(tc, producer_context, data))
+        call_context = replace(call_context, emit_event=emit_call_event)
     if not _tool_streams_output(tc.name, tool_registry):
         return call_context
     emit_event = getattr(call_context, "emit_event", None)

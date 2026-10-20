@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { RotateCcw } from "lucide-react";
 import { ContextMenu } from "../components/ContextMenu";
@@ -7,6 +7,8 @@ import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import { canOpenThreadWindow, openThreadWindow } from "./threadWindowActions";
 import { useWorkspaceOpenMenu } from "./useWorkspaceOpenMenu";
 import type { ConversationMeta } from "../stores/types";
+import { desktop, type DesktopPetState } from "../desktop/runtime";
+import { pushToast } from "../overlays/ToastContainer";
 
 // ── Small shared components ────────────────────────────────────────────
 
@@ -134,6 +136,16 @@ export const ConversationMenu = ({
   onClose: () => void;
 }) => {
   const { t: tr } = useI18n();
+  const [miniMuted, setMiniMuted] = useState(false);
+  useEffect(() => {
+    const pets = desktop()?.pets;
+    if (!pets) return;
+    let mounted = true;
+    const apply = (state: DesktopPetState) => { if (mounted) setMiniMuted(state.mutedConversationIds.includes(conversationId)); };
+    const unsubscribe = pets.onStateChanged(apply);
+    void pets.getState().then(apply).catch(error => { if (mounted) pushToast(String(error), "error"); });
+    return () => { mounted = false; unsubscribe(); };
+  }, [conversationId]);
   const workspaceItems = useWorkspaceOpenMenu(!environment || environment === "local" ? workspaceRoot : undefined, true);
   const windowItems = [
     ...(canOpenThreadWindow({ archived, conversationType, environment }) ? [{ label: tr("在新窗口中打开"), icon: threadMenuIcon("new-window"), onClick: () => void openThreadWindow(conversationId) }] : []),
@@ -164,6 +176,10 @@ export const ConversationMenu = ({
       ...(windowItems.length || canHandoff ? [{ label: "", separator: true }] : []),
       ...windowItems,
       ...(canHandoff ? [{ label: isIsolated ? tr("移到本地工作区") : tr("移到隔离工作区"), icon: threadMenuIcon(isIsolated ? "local" : "worktree"), onClick: onHandoff }] : []),
+      ...(miniMuted ? [
+        { label: "", separator: true },
+        { label: tr("取消静音聊天"), onClick: () => { void desktop()!.pets.setNotificationMuted({ conversationId, muted: false }).catch(error => pushToast(String(error), "error")); } },
+      ] : []),
       { label: "", separator: true },
       { label: archived ? tr("取消归档") : tr("归档"), icon: archived ? <RotateCcw size={14} /> : threadMenuIcon("archive"), onClick: onArchive },
     ]} />;

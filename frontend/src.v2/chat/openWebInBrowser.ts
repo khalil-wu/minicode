@@ -10,6 +10,8 @@ interface BrowserRequestBase {
 
 type BrowserRequest = BrowserRequestBase & (
   | { kind: "open" }
+  | { kind: "new" }
+  | { kind: "focus-address" }
   | { kind: "resume"; targetId: string }
   | { kind: "present"; target: EmbeddedBrowserState }
   | { kind: "refresh"; workspaceRoot: string }
@@ -38,6 +40,22 @@ export function openWebInBrowser(url: string): boolean {
   pendingRequests.set("open", request);
   listeners.forEach((listener) => listener(request));
   return true;
+}
+
+export function openNewBrowserTab(): void {
+  const state = useAppStore.getState();
+  state.setRightStackTab("browser");
+  const request: BrowserRequest = { kind: "new", id: ++requestSequence, url: "", conversationId: state.conversationId || "" };
+  pendingRequests.set("new", request);
+  listeners.forEach(listener => listener(request));
+}
+
+export function focusBrowserAddressBar(): void {
+  const state = useAppStore.getState();
+  state.setRightStackTab("browser");
+  const request: BrowserRequest = { kind: "focus-address", id: ++requestSequence, url: "", conversationId: state.conversationId || "" };
+  pendingRequests.set("focus-address", request);
+  listeners.forEach(listener => listener(request));
 }
 
 export function refreshWebInBrowser(url: string, conversationId: string, workspaceRoot: string): boolean {

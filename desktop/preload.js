@@ -58,6 +58,42 @@ const runtimeConfig = {
   windowBindingToken: mainRuntimeConfig?.windowBindingToken || "",
   initialNavigation: mainRuntimeConfig?.initialNavigation,
   desktop: {
+    dictation: {
+      get: () => ipcRenderer.invoke("minicode:dictation:get"),
+      getLocalRuntime: () => ipcRenderer.invoke("minicode:dictation:getLocalRuntime"),
+      openProviderSettings: () => ipcRenderer.invoke("minicode:dictation:openProviderSettings"),
+      consumeProviderSettings: () => ipcRenderer.invoke("minicode:dictation:consumeProviderSettings"),
+      migratePreferences: legacy => ipcRenderer.invoke("minicode:dictation:migratePreferences", legacy),
+      configure: patch => ipcRenderer.invoke("minicode:dictation:configure", patch),
+      suspend: value => ipcRenderer.invoke("minicode:dictation:suspend", value),
+      insert: (token, text) => ipcRenderer.invoke("minicode:dictation:insert", token, text),
+      complete: token => ipcRenderer.invoke("minicode:dictation:complete", token),
+      onEvent: callback => {
+        const listener = (_event, value) => callback(value);
+        ipcRenderer.on("minicode:dictation:event", listener);
+        return () => ipcRenderer.removeListener("minicode:dictation:event", listener);
+      },
+      onState: callback => {
+        const listener = (_event, value) => callback(value);
+        ipcRenderer.on("minicode:dictation:state", listener);
+        return () => ipcRenderer.removeListener("minicode:dictation:state", listener);
+      },
+    },
+    mcpAppSandbox: {
+      prepare: frameUrl => ipcRenderer.invoke("minicode:mcpApp:prepare", frameUrl),
+      release: id => ipcRenderer.invoke("minicode:mcpApp:release", id),
+      clearData: () => ipcRenderer.invoke("minicode:mcpApp:clearData"),
+    },
+    browserPersonalData: {
+      listPasswords: () => ipcRenderer.invoke("minicode:browserPersonalData:listPasswords"),
+      getPassword: request => ipcRenderer.invoke("minicode:browserPersonalData:getPassword", request),
+      savePassword: request => ipcRenderer.invoke("minicode:browserPersonalData:savePassword", request),
+      removePassword: request => ipcRenderer.invoke("minicode:browserPersonalData:removePassword", request),
+      listContacts: () => ipcRenderer.invoke("minicode:browserPersonalData:listContacts"),
+      saveContact: request => ipcRenderer.invoke("minicode:browserPersonalData:saveContact", request),
+      removeContact: request => ipcRenderer.invoke("minicode:browserPersonalData:removeContact", request),
+      setAutofillSettings: patch => ipcRenderer.invoke("minicode:browserPersonalData:setAutofillSettings", patch),
+    },
     connections: {
       list: () => connectionCommand("list"),
       discover: (kind) => connectionCommand("discover", kind),
@@ -74,6 +110,12 @@ const runtimeConfig = {
       },
     },
     preferences: {
+      getStartupStatus: () => ipcRenderer.invoke("minicode:preferences:getStartupStatus"),
+      openStartupSettings: () => ipcRenderer.invoke("minicode:preferences:openStartupSettings"),
+      getOpenSourceLicenses: () => ipcRenderer.invoke("minicode:preferences:getOpenSourceLicenses"),
+      pickNotificationSound: () => ipcRenderer.invoke("minicode:preferences:pickNotificationSound"),
+      importNotificationSound: payload => ipcRenderer.invoke("minicode:preferences:importNotificationSound", payload),
+      previewNotificationSound: sound => ipcRenderer.invoke("minicode:preferences:previewNotificationSound", sound),
       chooseTaskDirectory: () => ipcRenderer.invoke("minicode:preferences:chooseTaskDirectory"),
       get: () => ipcRenderer.invoke("minicode:preferences:get"),
       set: (patch) => ipcRenderer.invoke("minicode:preferences:set", patch),
@@ -86,6 +128,8 @@ const runtimeConfig = {
     openPreferredPath: (target, line, options) => ipcRenderer.invoke("minicode:openPreferredPath", target, line, options),
     saveFile: (filename, bytes) => ipcRenderer.invoke("minicode:saveFile", filename, bytes),
     windowControls: {
+      listFontFamilies: () => ipcRenderer.invoke("minicode:window:fontFamilies"),
+      listFonts: () => ipcRenderer.invoke("minicode:window:fonts"),
       consumeInitialNavigation: () => ipcRenderer.sendSync("minicode:window:initialNavigation:consume"),
       openConversation: (conversationId) => ipcRenderer.invoke("minicode:window:openConversation", conversationId),
       getState: () => ipcRenderer.invoke("minicode:window:state"),
@@ -155,6 +199,12 @@ const runtimeConfig = {
     openExternal: (target) => ipcRenderer.invoke("minicode:openExternal", target),
     openPath: (target) => ipcRenderer.invoke("minicode:openPath", target),
     revealPath: (target) => ipcRenderer.invoke("minicode:revealPath", target),
+    settings: {
+      openTarget: request => ipcRenderer.invoke("minicode:settings:openTarget", request),
+    },
+    skills: {
+      reveal: request => ipcRenderer.invoke("minicode:skills:reveal", request),
+    },
     openDeepLink: (target) => ipcRenderer.invoke("minicode:deepLink:open", target),
     diagnostics: {
       export: () => ipcRenderer.invoke("minicode:diagnostics:export"),
@@ -193,6 +243,27 @@ const runtimeConfig = {
         return () => ipcRenderer.removeListener("minicode:pty:exit", handler);
       }
     },
+    pets: {
+      getState: () => ipcRenderer.invoke("minicode:pets:getState"),
+      refresh: () => ipcRenderer.invoke("minicode:pets:refresh"),
+      update: (patch) => ipcRenderer.invoke("minicode:pets:update", patch),
+      toggleMini: () => ipcRenderer.invoke("minicode:pets:toggleMini"),
+      setNotificationMuted: (request) => ipcRenderer.invoke("minicode:pets:setNotificationMuted", request),
+      openFolder: () => ipcRenderer.invoke("minicode:pets:openFolder"),
+      getSprite: (id) => ipcRenderer.invoke("minicode:pets:getSprite", id),
+      publishActivity: (activity) => ipcRenderer.invoke("minicode:pets:publishActivity", activity),
+      onActionRequested: (callback) => {
+        const listener = (_event, request) => callback(request);
+        ipcRenderer.on("minicode:pets:actionRequested", listener);
+        return () => ipcRenderer.removeListener("minicode:pets:actionRequested", listener);
+      },
+      completeAction: (result) => ipcRenderer.invoke("minicode:pets:completeAction", result),
+      onStateChanged: (callback) => {
+        const listener = (_event, state) => callback(state);
+        ipcRenderer.on("minicode:pets:stateChanged", listener);
+        return () => ipcRenderer.removeListener("minicode:pets:stateChanged", listener);
+      },
+    },
     env: {
       detect: () => ipcRenderer.invoke("minicode:env:detect"),
     },
@@ -201,6 +272,12 @@ const runtimeConfig = {
     },
     menu: {
       popup: (key) => ipcRenderer.invoke("minicode:menu:popup", key),
+      setState: (state) => ipcRenderer.invoke("minicode:menu:setState", state),
+      execute: (action) => ipcRenderer.invoke("minicode:menu:execute", action),
+    },
+    browserProfileImport: {
+      listImportableBrowserProfiles: () => ipcRenderer.invoke("minicode:browserProfileImport:list"),
+      importBrowserProfile: (request) => ipcRenderer.invoke("minicode:browserProfileImport:import", request),
     },
     browser: {
       history: (query) => ipcRenderer.invoke("minicode:browser:history", query),
@@ -212,8 +289,21 @@ const runtimeConfig = {
       type: (endpoint, targetId, selector, text) => ipcRenderer.invoke("minicode:browser:type", endpoint, targetId, selector, text),
     },
     embeddedBrowser: {
+      getSitePolicy: () => ipcRenderer.invoke("minicode:embeddedBrowser:getSitePolicy"),
+      setSitePolicy: request => ipcRenderer.invoke("minicode:embeddedBrowser:setSitePolicy", request),
+      removeSiteDevice: request => ipcRenderer.invoke("minicode:embeddedBrowser:removeSiteDevice", request),
+      listSitePermissions: () => ipcRenderer.invoke("minicode:embeddedBrowser:listSitePermissions"),
+      removeSitePermissions: request => ipcRenderer.invoke("minicode:embeddedBrowser:removeSitePermissions", request),
+      pageCommand: payload => ipcRenderer.invoke("minicode:embeddedBrowser:pageCommand", payload),
+      downloads: () => ipcRenderer.invoke("minicode:embeddedBrowser:downloads"),
+      downloadAction: payload => ipcRenderer.invoke("minicode:embeddedBrowser:downloadAction", payload),
+      onDownloadsChanged: callback => {
+        const listener = (_event, records) => callback(records);
+        ipcRenderer.on("minicode:embeddedBrowser:downloadsChanged", listener);
+        return () => ipcRenderer.removeListener("minicode:embeddedBrowser:downloadsChanged", listener);
+      },
       capture: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:capture", payload),
-      clearBrowsingData: () => ipcRenderer.invoke("minicode:embeddedBrowser:clearBrowsingData"),
+      clearBrowsingData: dataTypes => ipcRenderer.invoke("minicode:embeddedBrowser:clearBrowsingData", dataTypes),
       create: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:create", payload),
       list: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:list", payload),
       activate: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:activate", payload),
@@ -253,7 +343,13 @@ if (process.contextIsolated) {
   ipcRenderer.on("minicode:menu:extensions-marketplace", () => {
     window.dispatchEvent(new CustomEvent("open-extensions-marketplace", { detail: { tab: "all" } }));
   });
-  ipcRenderer.on("minicode:menu:settings", () => window.dispatchEvent(new Event("open-settings")));
+  ipcRenderer.on("minicode:menu:settings", (_event, detail) => window.dispatchEvent(new CustomEvent("open-settings", { detail })));
+  ipcRenderer.on("minicode:menu:open-pets-settings", () => window.dispatchEvent(new Event("open-pets-settings")));
+  ipcRenderer.on("minicode:menu:focus-composer", () => window.dispatchEvent(new Event("composer:focus")));
+  ipcRenderer.on("minicode:pets:refreshed", () => window.dispatchEvent(new Event("pets:refreshed")));
+  for (const event of ["new-project", "open-browser-tab", "focus-browser-address-bar", "toggle-file-tree", "toggle-bottom-panel", "toggle-pinned-summary", "toggle-side-panel", "find-in-thread", "find-next-in-thread", "find-previous-in-thread", "navigate-back", "navigate-forward", "previous-thread", "next-thread", "previous-tab", "next-tab", "close-tab", "open-shortcuts", "open-command-menu", "search-files", "search-chats"]) {
+    ipcRenderer.on(`minicode:menu:${event}`, () => window.dispatchEvent(new Event(event)));
+  }
   ipcRenderer.on("minicode:menu:toggle-sidebar", () => window.dispatchEvent(new Event("toggle-sidebar")));
   ipcRenderer.on("minicode:menu:toggle-context", () => window.dispatchEvent(new Event("toggle-context")));
   ipcRenderer.on("minicode:shortcut:terminal", () => window.dispatchEvent(new Event("toggle-terminal")));

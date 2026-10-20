@@ -26,6 +26,7 @@ export const AgentTurn = memo(function AgentTurn({
   hasMoreHistory = false,
   onLoadHistory,
   persistentContent,
+  collapsedContent,
 }: {
   turn: AgentLoopTurnProjection;
   wide?: boolean;
@@ -34,6 +35,7 @@ export const AgentTurn = memo(function AgentTurn({
   hasMoreHistory?: boolean;
   onLoadHistory?: () => void;
   persistentContent?: React.ReactNode;
+  collapsedContent?: React.ReactNode;
 }) {
   // Live and incomplete work starts open. Only a complete final answer folds
   // it automatically. The parent's toggle and explicit raw exec/MCP reading
@@ -138,7 +140,7 @@ export const AgentTurn = memo(function AgentTurn({
           aria-label="Agent 处理进度"
         >
           {turn.hasProcessContent && processSummary}
-          {!processExpanded && persistentContent}
+          {!processExpanded && collapsedContent}
 
           {turn.workItems ? turn.workItems.map((item) => item.kind === "user"
             ? renderCell({ key: item.id, cell: item.cell, className: "chat-turn-user-cell agent-loop-user-cell" })
@@ -166,6 +168,8 @@ export const AgentTurn = memo(function AgentTurn({
         </section>
         </ProcessDetailReadingContext.Provider>
       )}
+
+      {persistentContent}
 
       {turn.answerCell && (
         <section

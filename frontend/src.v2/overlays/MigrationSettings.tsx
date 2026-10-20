@@ -1,6 +1,6 @@
 import { useI18n, type Translate } from "../i18n";
 import { useRef, useState } from "react";
-import { Download, Upload } from "lucide-react";
+import { Download, Upload } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { getWebSocket } from "../hooks/useWebSocket";

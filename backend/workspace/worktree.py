@@ -40,9 +40,10 @@ class NotGitRepositoryError(ValueError):
 
 
 def isolated_worktree_root(repo_root: Path) -> Path:
-    """Return MiniCode's canonical repository-local worktree root."""
+    """Return the host-local root selected in Desktop Worktrees settings."""
+    from backend.services.worktree_settings_service import managed_worktree_root
 
-    return (repo_root / MINICODE_WORKTREE_RELATIVE_ROOT).resolve()
+    return managed_worktree_root()
 
 
 @dataclass
@@ -96,7 +97,7 @@ class WorktreeManager:
     适用于并行开发、测试、代码审查等场景。
     """
 
-    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None, git_runner: Callable[..., Any] | None = None):
+    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None, git_runner: Callable[..., Any] | None = None, environment_runner=None):
         """
         初始化 Worktree 管理器。
 
@@ -107,6 +108,8 @@ class WorktreeManager:
         self.repo_root = repo_root.resolve()
         self._snapshot_store = snapshot_store
         self._git_runner = git_runner
+        self._environment_runner = environment_runner
+
 
         if not self._is_git_repo():
             raise NotGitRepositoryError(f"Not a git repository: {repo_root}")
@@ -174,6 +177,7 @@ class WorktreeManager:
         branch: Optional[str] = None,
         new_branch: bool = False,
         commit: Optional[str] = None,
+        run_environment: bool = True,
     ) -> bool:
         """
         创建新的 worktree。
@@ -206,6 +210,8 @@ class WorktreeManager:
             cmd.append(commit)
 
         try:
+            from backend.services.worktree_settings_service import refresh_worktree_upstream
+            refresh_worktree_upstream(self.repo_root)
             result = self._run_git(
                 cmd,
                 cwd=self.repo_root,
@@ -218,13 +224,23 @@ class WorktreeManager:
 
             logger.info(f"Created worktree at {path}")
             logger.debug(result.stdout)
+            from backend.services.worktree_settings_service import register_managed_worktree
+            owner_root = self.list_worktrees()[0].path if (self.repo_root / ".git").is_file() else self.repo_root
+            register_managed_worktree(path, owner_root, branch=branch or "")
+            if run_environment:
+                self.run_environment(path, "setup", source_root=self.repo_root)
             return True
 
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
             logger.error(f"Failed to create worktree: {e.stderr}")
             return False
 
-    def remove_worktree(self, path: Path, force: bool = False) -> bool:
+    def run_environment(self, path: Path, phase: str, *, source_root: Path | None = None) -> str:
+        from backend.workspace.local_environment_lifecycle import run_worktree_environment
+
+        return run_worktree_environment(source_root or self.list_worktrees()[0].path, path, phase, runner=self._environment_runner)
+
+    def remove_worktree(self, path: Path, force: bool = False, *, run_environment: bool = True) -> bool:
         """
         删除 worktree。
 
@@ -236,6 +252,9 @@ class WorktreeManager:
             True 如果成功
         """
         path = path.resolve()
+
+        if run_environment:
+            self.run_environment(path, "cleanup")
 
         cmd = ["git", "worktree", "remove"]
 
@@ -257,6 +276,8 @@ class WorktreeManager:
 
             logger.info(f"Removed worktree at {path}")
             logger.debug(result.stdout)
+            from backend.services.worktree_settings_service import unregister_managed_worktree
+            unregister_managed_worktree(path)
             return True
 
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
@@ -539,6 +560,7 @@ class WorktreeManager:
             dest_path,
             branch=clean_branch,
             new_branch=False,
+            run_environment=False,
         ):
             return WorktreeRestore(
                 restored=False,
@@ -561,7 +583,7 @@ class WorktreeManager:
                 "HEAD",
             )
             if not materialized or not unstaged:
-                removed_partial = self.remove_worktree(dest_path, force=True)
+                removed_partial = self.remove_worktree(dest_path, force=True, run_environment=False)
                 suffix = "" if removed_partial else "; partial worktree cleanup also failed"
                 return WorktreeRestore(
                     restored=False,
@@ -658,7 +680,11 @@ class WorktreeManager:
                     error="Worktree snapshot failed; refusing destructive removal",
                 )
 
-        removed = self.remove_worktree(wt, force=force)
+        from backend.workspace.local_environment_lifecycle import EnvironmentScriptError
+        try:
+            removed = self.remove_worktree(wt, force=force)
+        except (EnvironmentScriptError, PermissionError, ValueError) as error:
+            return WorktreeRemoval(removed=False, snapshot=snap, head=head, error=str(error))
         if not removed:
             return WorktreeRemoval(
                 removed=False,

@@ -262,10 +262,12 @@ class ConfigRequirements:
         return requested
 
     def sandbox_mode_for_permission_mode(self, mode: str, *, sandbox_mode: str = "") -> str:
-        # An external sandbox is an explicit host-owned boundary (Codex's
-        # ExternalSandbox), independent of the tool approval mode. Ordinary
-        # UI mode changes must still derive their filesystem policy afresh.
-        if sandbox_mode == "external-sandbox":
+        # Plan remains read-only. Other explicitly captured host/config
+        # profiles survive turn projection; UI mode changes construct a new
+        # profile rather than feeding a previous mode's sandbox back here.
+        if mode == "plan" and sandbox_mode != "external-sandbox":
+            return "read-only"
+        if sandbox_mode:
             return sandbox_mode
         _approval, sandbox = permission_mode_requirements(mode)
         return sandbox

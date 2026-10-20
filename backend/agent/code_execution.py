@@ -65,7 +65,19 @@ class CodeExecutionRuntime:
         self.cells: dict[str, CodeCell] = {}
         self._by_call: dict[str, str] = {}
         self.store = tool_context.run_context.code_store
+        self.store.runtimes.add(self)
         self._closed = False
+
+    def pending_tasks(self) -> set[asyncio.Task]:
+        current = asyncio.current_task()
+        return {task for task in (
+            *(cell.task for cell in self.cells.values() if cell.task is not None),
+            *self.tool_context.pending_cleanup_tasks,
+            *self.tool_context.cleanup_tasks_by_call.values(),
+        ) if task is not current and not task.done()}
+
+    def finish_turn(self) -> None:
+        self._closed = True
 
     def _policy(self, registry: ToolRegistry, base: ToolsetPolicy, requested=()) -> ToolsetPolicy:
         loaded = {registry.get_tool_spec(name).policy_identity or name
@@ -78,7 +90,7 @@ class CodeExecutionRuntime:
             return ToolResult("This turn's code runtime has closed.", is_error=True, status="cancelled")
         cell_id = self._by_call.get(parent.tool_call_id)
         if cell_id is None:
-            if sum(cell.status == "running" for cell in self.cells.values()) >= 4:
+            if sum(cell.status == "running" for cell in self.store.cells.values()) >= 4:
                 return ToolResult("Four code cells are active. Use tool_wait to finish or stop one before starting another.", is_error=True, status="blocked")
             registry = parent.tool_registry
             base_policy = parent.metadata[ACTIVE_TOOLSET_POLICY_METADATA_KEY]
@@ -94,8 +106,11 @@ class CodeExecutionRuntime:
             cell_id = "cell_" + uuid4().hex
             cell = CodeCell(cell_id, parent, code, names, catalog, registry, base_policy)
             self.cells[cell_id] = cell
+            self.store.cells[cell_id] = cell
             self._by_call[parent.tool_call_id] = cell_id
             cell.task = asyncio.create_task(self._run(cell), name=f"code:{cell_id}")
+            if parent.run_context.retain_model is not None:
+                parent.run_context.retain_model(parent.llm, cell.task)
         else:
             cell = self.cells[cell_id]
             if cell.code != code:
@@ -104,7 +119,7 @@ class CodeExecutionRuntime:
 
     async def wait(self, cell_id: str, *, yield_time_ms: int, terminate: bool = False) -> ToolResult:
         started = time.monotonic()
-        live_cell = self.cells.get(cell_id)
+        live_cell = self.store.cells.get(cell_id)
         cell = live_cell or self.store.receipts.get(cell_id)
         if cell is None:
             previous = [{"tool": record.tool_name, "status": record.status, "output": record.tool_output,
@@ -116,7 +131,8 @@ class CodeExecutionRuntime:
                               runtime_metadata={"code_cell": report})
         if terminate and cell.status == "running":
             cell.cancel.set()
-            cell.task.cancel()
+            if not cell.task.cancelling():
+                cell.task.cancel()
             await asyncio.gather(cell.task, return_exceptions=True)
         elif cell.status == "running" and not cell.output:
             waiter = asyncio.create_task(cell.changed.wait())
@@ -311,6 +327,7 @@ class CodeExecutionRuntime:
                 cell.image_artifacts.clear()
                 cell.status = terminal_status
                 self.store.receipts[cell.id] = CodeCellReceipt(cell.id, cell.status, cell.error, cell.output, cell.hook_context, cell.discarded_calls)
+                self.store.cells.pop(cell.id)
                 cell.changed.set()
 
     async def aclose(self) -> bool:
@@ -318,6 +335,7 @@ class CodeExecutionRuntime:
         active = [cell for cell in self.cells.values() if cell.task is not None and not cell.task.done()]
         for cell in active:
             cell.cancel.set()
-            cell.task.cancel()
+            if not cell.task.cancelling():
+                cell.task.cancel()
         await asyncio.gather(*(cell.task for cell in active), return_exceptions=True)
         return bool(active)

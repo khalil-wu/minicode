@@ -5,6 +5,7 @@ import { RefreshCw, X } from "lucide-react";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { HeaderBar } from "./HeaderBar";
 import { SidebarLeft } from "./SidebarLeft";
+import { NavigationRail } from "./NavigationRail";
 import { SidebarRight } from "./SidebarRight";
 import { BottomDock } from "./BottomDock";
 import { MainSlots } from "./MainSlots";
@@ -12,7 +13,6 @@ import { ChatPane } from "../chat/ChatPane";
 import { useAppStore } from "../stores";
 import { selectPreviewSurface } from "../lib/preview-projection";
 import { isCompactWorkbenchViewport } from "../stores/shared-helpers";
-import { NavigationRail } from "./NavigationRail";
 import { SafeBoundary } from "./ChunkErrorBoundary";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
@@ -20,6 +20,7 @@ import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import { getConnectionPresentation } from "./connectionPresentation";
 
 const SkillsMarketplace = lazy(() => import("../overlays/SkillsMarketplace").then((m) => ({ default: m.SkillsMarketplace })));
+const ProjectsPage = lazy(() => import("./ProjectsPage").then((m) => ({ default: m.ProjectsPage })));
 
 const useCompactWorkbench = () => {
   const [compact, setCompact] = useState(isCompactWorkbenchViewport);
@@ -217,6 +218,7 @@ export const WorkbenchShell = () => {
   const sideChatOpen = useAppStore((s) => s.sideChatOpen);
   const appMode = useAppStore((s) => s.appMode);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const projectsOpen = useAppStore((s) => s.projectsOpen);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const leftSidebarExpandedWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
   const panelSlots = useAppStore((s) => s.panelSlots);
@@ -240,9 +242,9 @@ export const WorkbenchShell = () => {
     appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
   );
   const leftPanelAvailable = skillsMarketplaceOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
-  const rightPanelAvailable = !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode !== "code" || !codePanelMaximized);
+  const rightPanelAvailable = !projectsOpen && !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode !== "code" || !codePanelMaximized);
   const expandedRight = rightPanelExpanded && rightPanelOpen && rightPanelAvailable;
-  const bottomVisible = appMode !== "chat" && !codePanelMaximized && !settingsOpen && !skillsMarketplaceOpen && !expandedRight;
+  const bottomVisible = !codePanelMaximized && !settingsOpen && !projectsOpen && !skillsMarketplaceOpen && !expandedRight;
 
   useEffect(() => {
     if (!compact) setCompactPanel(null);
@@ -314,10 +316,10 @@ export const WorkbenchShell = () => {
     >
       <HeaderBar
         leftPanelControls={compact ? "left-sidebar-drawer" : undefined}
-        leftPanelAvailable={leftPanelAvailable}
+        leftPanelAvailable={!settingsOpen && leftPanelAvailable && !projectsOpen}
         leftPanelOpen={compact ? compactPanel === "left" : leftSidebarWidth > 0}
         rightPanelControls={compact && !expandedRight ? "right-panel-drawer" : undefined}
-        rightPanelAvailable={rightPanelAvailable}
+        rightPanelAvailable={!settingsOpen && rightPanelAvailable}
         rightPanelOpen={expandedRight || (compact ? compactPanel === "right" : rightPanelOpen)}
         onToggleLeftPanel={toggleLeftPanel}
         onToggleRightPanel={toggleWorkbenchRightPanel}
@@ -327,9 +329,11 @@ export const WorkbenchShell = () => {
       <div className="mc-desktop-body">
         <NavigationRail />
         <div className="workbench-mode-body mc-desktop-workspace" hidden={settingsOpen} style={{ flex: 1, minHeight: 0, display: settingsOpen ? "none" : "flex", overflow: "hidden" }}>
-          {!compact && leftPanelAvailable && <SidebarLeft withGlobalRail />}
+          <div hidden={projectsOpen} style={{ display: projectsOpen ? "none" : "contents" }}>
+            {!compact && leftPanelAvailable && <SidebarLeft withGlobalRail />}
+          </div>
           <div className="workbench-stage" style={{ position: "relative", flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
-            <div className="workbench-primary" data-floating={expandedRight ? "true" : "false"} hidden={skillsMarketplaceOpen} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen ? "none" : "flex", flexDirection: "column", overflow: "hidden" }} onFocusCapture={() => { if (compact) setCompactPanel(null); }}>
+            <div className="workbench-primary" data-floating={expandedRight ? "true" : "false"} hidden={skillsMarketplaceOpen || projectsOpen} style={{ flex: 1, minWidth: 0, minHeight: 0, display: skillsMarketplaceOpen || projectsOpen ? "none" : "flex", flexDirection: "column", overflow: "hidden" }} onFocusCapture={() => { if (compact) setCompactPanel(null); }}>
               <div className="workbench-content" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", overflow: "hidden" }}>
                 {appMode === "chat" ? <ChatModeShell /> : <WorkbenchModeShell mode={appMode === "code" ? "code" : "cowork"} />}
               </div>
@@ -337,7 +341,8 @@ export const WorkbenchShell = () => {
                 <BottomDock visible={bottomVisible} />
               </div>
             </div>
-            <div hidden={!skillsMarketplaceOpen} style={{ display: skillsMarketplaceOpen ? "flex" : "none", flex: 1, minWidth: 0 }}>
+            {projectsOpen && <Suspense fallback={null}><ProjectsPage /></Suspense>}
+            <div hidden={!skillsMarketplaceOpen || projectsOpen} style={{ display: skillsMarketplaceOpen && !projectsOpen ? "flex" : "none", flex: 1, minWidth: 0 }}>
               <Suspense fallback={<div role="status" className="skills-empty-state">{tr("正在加载插件与技能…")}</div>}>
                 {(marketplaceVisited || skillsMarketplaceOpen) && <SkillsMarketplace />}
               </Suspense>
@@ -353,9 +358,9 @@ export const WorkbenchShell = () => {
         </div>
       </div>
 
-      {compact && leftPanelAvailable && compactPanel === "left" && (
+      {compact && !projectsOpen && leftPanelAvailable && compactPanel === "left" && (
         <NarrowSidebarDrawer id="left-sidebar-drawer" label={tr("左侧栏")} side="left" open={!settingsOpen} onClose={() => setCompactPanel(null)}>
-          <SidebarLeft embedded onNavigate={() => setCompactPanel(null)} />
+          <SidebarLeft embedded withGlobalRail onNavigate={() => setCompactPanel(null)} />
         </NarrowSidebarDrawer>
       )}
     </div>

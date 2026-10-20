@@ -466,6 +466,7 @@ async function realShellRoundtrip(t, choice) {
     spawned = { shell, args: Array.from(args) };
     return nativePty.spawn(shell, args, options);
   } }, sanitizedPtyEnv: () => ({ ...utils.sanitizedPtyEnv(),
+    HOME: directory.replaceAll("\\", "/"), USERPROFILE: directory,
     APPDATA: path.join(directory, "appdata"), LOCALAPPDATA: path.join(directory, "local"),
     HISTFILE: path.join(directory, "shell-history"), XDG_CONFIG_HOME: path.join(directory, "config") }),
   assertTrustedPath: value => value, getWindowByInstanceId: () => capture });

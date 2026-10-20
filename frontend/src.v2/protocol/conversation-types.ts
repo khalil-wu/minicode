@@ -45,6 +45,7 @@ export type ConversationClientCommandType =
   | "user_message"
   | "user_message.queue.cancel"
   | "user_message.queue.steer"
+  | "user_message.queue.start"
   | "interrupt"
   | "ping"
   // Approval flow
@@ -189,6 +190,9 @@ export interface BudgetWarningEvent {
 }
 
 export interface GoalInfo {
+  token_budget?: number | null;
+  tokens_used?: number;
+  time_used_seconds?: number;
   id?: string;
   text?: string;
   status?: "active" | "paused" | string;
@@ -383,6 +387,7 @@ export interface UserMessageQueueUpdatedEvent {
 }
 
 export interface UserMessageCommand {
+  async_request_id?: string;
   type: "user_message";
   content: string;
   display_content?: string;
@@ -403,6 +408,7 @@ export interface UserMessageCommand {
   retry_from_message_id?: string;
   queue_if_busy?: boolean;
   streaming_behavior?: "follow_up" | "steer";
+  expected_turn_id?: string;
 }
 
 export interface UserMessageQueueCancelCommand {
@@ -414,6 +420,14 @@ export interface UserMessageQueueCancelCommand {
 
 export interface UserMessageQueueSteerCommand {
   type: "user_message.queue.steer";
+  conversation_id: string;
+  message_id: string;
+  user_message_id?: string;
+  expected_turn_id: string;
+}
+
+export interface UserMessageQueueStartCommand {
+  type: "user_message.queue.start";
   conversation_id: string;
   message_id: string;
   user_message_id?: string;
@@ -517,6 +531,7 @@ export interface ConversationDeleteCommand {
   cleanup_worktree?: boolean;
   force?: boolean;
   client_resource_cleanup?: boolean;
+  storage_review?: Record<string, unknown>;
 }
 
 export interface ConversationWorktreeCleanupCommand {

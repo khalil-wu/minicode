@@ -13,6 +13,7 @@ function service({ focused = true, otherFocused = false, settings = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-notifications-"));
   preferences.init(path.join(root, "preferences.json"), settings);
   const shown = [];
+  const sounds = [];
   const navigation = [];
   const owner = { isFocused: () => focused, isDestroyed: () => false };
   class Notification extends EventEmitter {
@@ -22,12 +23,16 @@ function service({ focused = true, otherFocused = false, settings = {} } = {}) {
     close() { this.emit("close"); }
   }
   const source = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
-  const body = source.slice(source.indexOf("const desktopNotifications = new Map();"), source.indexOf("async function captureCurrentWindowForFigma"));
+  const start = source.indexOf("const desktopNotifications = new Map();");
+  const end = source.indexOf("\n// ---------------------------------------------------------------------------", start);
+  const body = source.slice(start, end);
   const context = vm.createContext({ Notification, desktopPreferences: preferences, DESKTOP_ICON_PATH: "fixture-icon",
+    notificationSounds: { playSound: (sound) => { sounds.push(sound); return Promise.resolve(true); } },
+    app: { getPath: () => root }, appendDesktopLog: () => {},
     windowManager: { getMainWindows: () => [owner, { isFocused: () => otherFocused }], getFocusedMainWindow: () => owner, focusMainWindow: () => {} },
     normalizeDeepLinkTarget: target => target, dispatchDeepLink: target => navigation.push(target) });
   vm.runInContext(body + ";globalThis.api={showDesktopNotification,hideDesktopNotifications};", context);
-  return { api: context.api, owner, shown, navigation, close: () => {
+  return { api: context.api, owner, shown, sounds, navigation, close: () => {
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
     fs.rmSync(root, { recursive: true });
   } };
@@ -111,6 +116,18 @@ test("native dismissal releases the actual notification receipt", () => {
     fixture.shown[0].close();
     assert.equal(fixture.api.hideDesktopNotifications({ conversationId: "conversation-A" }, fixture.owner), 0);
     assert.equal(fixture.api.showDesktopNotification(request(), fixture.owner), true);
+  } finally { fixture.close(); }
+});
+
+test("the persisted sound choice reaches the producer without an additional system sound", () => {
+  const fixture = service({ focused: false, settings: { notificationSound: "classic" } });
+  try {
+    fixture.api.showDesktopNotification(request(), fixture.owner);
+    assert.equal(fixture.shown[0].payload.silent, true);
+    assert.deepEqual(fixture.sounds, ["classic"]);
+    preferences.setPreferences({ notificationSound: "none" });
+    fixture.api.showDesktopNotification(request("permission", "conversation-A", "request-2"), fixture.owner);
+    assert.deepEqual(fixture.sounds, ["classic", "none"]);
   } finally { fixture.close(); }
 });
 

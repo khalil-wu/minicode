@@ -81,11 +81,10 @@ async def cancel_and_drain_receipt(
         for task in tasks
         if task is not asyncio.current_task() and not task.done()
     }
-    pending = await cancel_and_drain(task_set, timeout=max(0.0, deadline - time.monotonic()), label=label)
-    if owner is not None and pending:
-        owner.update(pending)
-        for task in pending:
+    if owner is not None:
+        for task in task_set:
             retain_cleanup_task(task, owner)
+    pending = await cancel_and_drain(task_set, timeout=max(0.0, deadline - time.monotonic()), label=label)
     return CleanupReceipt(
         requested=bool(task_set),
         acknowledged=bool(task_set) and len(pending) < len(task_set),

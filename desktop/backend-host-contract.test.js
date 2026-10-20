@@ -42,6 +42,10 @@ test("a mismatched external backend reaches the existing startup recovery and re
   const contract = externalBackendHostContract(env);
   let fingerprint = "another-native-host";
   const context = { startupRetryInFlight:false, rollbackPreparationInProgress:false, desktopCleanupFailed:false, MANAGE_BACKEND:false, RUNTIME_TOKEN:"runtime-token", EMBEDDED_BROWSER_TOKEN:contract.token,
+    petManager: null, petInitialization: null, generalMaintenance: null, path,
+    app: { isPackaged: false, getPath: () => "fixture-home" }, getAppRoot: () => "fixture-app",
+    createPetManager: () => ({ initialize: async () => {}, restoreMini: async () => {} }),
+    desktopPreferences: { getPreferences: () => ({}) }, startGeneralMaintenance: () => ({ dispose() {} }),
     BACKEND_STARTUP_TIMEOUT_MS:5000, process:{env}, appendDesktopLog() {},
     externalBackendHostContract:() => externalBackendHostContract(env),
     backendSidecar:{resetStopRequested() {}, async waitForBackendReady() { calls.push("ready"); }},

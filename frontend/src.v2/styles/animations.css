@@ -223,13 +223,13 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .rolling-number,
-  .rolling-number-value {
+  html:not([data-reduced-motion="false"]) .rolling-number,
+  html:not([data-reduced-motion="false"]) .rolling-number-value {
     animation: none !important;
     transition: none !important;
   }
 
-  .rolling-number-old {
+  html:not([data-reduced-motion="false"]) .rolling-number-old {
     display: none;
   }
 
@@ -237,16 +237,16 @@
      (.animate-spin/.animate-pulse/.animate-ping/.animate-bounce and any
      custom infinite animations defined elsewhere) and collapse transitions so
      the UI doesn't run motion the user asked to reduce. */
-  .animate-spin,
-  .animate-ping,
-  .animate-pulse,
-  .animate-bounce {
+  html:not([data-reduced-motion="false"]) .animate-spin,
+  html:not([data-reduced-motion="false"]) .animate-ping,
+  html:not([data-reduced-motion="false"]) .animate-pulse,
+  html:not([data-reduced-motion="false"]) .animate-bounce {
     animation: none !important;
   }
 
-  *,
-  *::before,
-  *::after {
+  html:not([data-reduced-motion="false"]) *,
+  html:not([data-reduced-motion="false"]) *::before,
+  html:not([data-reduced-motion="false"]) *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

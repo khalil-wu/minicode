@@ -210,6 +210,8 @@ class TurnIterationAdmission:
             )
             return
 
+        if self.runtime is not None:
+            self.tool_context.metadata["_agent_wait_cursor"] = self.runtime.agent_activity_cursor()
         await inject_subagent_mailbox_updates(
             ctx=self.context,
             state=self.state,
@@ -231,6 +233,13 @@ class TurnIterationAdmission:
             ),
             emit_event=self.emit_event,
         )
+
+        run_context = self.tool_context.run_context
+        if run_context.goal_accounting is not None and not run_context.is_subagent:
+            for message in run_context.goal_accounting.take_user_updates():
+                self.context.append_recorded_user_goal_update(message)
+            for content in run_context.goal_accounting.take_steering():
+                self.context.append_developer_context(content)
 
         prepared_context = await prepare_turn_context(
             context=self.context,

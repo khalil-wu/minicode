@@ -35,6 +35,7 @@ export const normalizeSkillInfo = (skill: unknown, workspaceRoot?: string): Skil
       : undefined,
     default_prompt: stringValue(payload.default_prompt) || undefined,
     source_level: stringValue(payload.source_level ?? payload.level) || undefined,
+    plugin_enabled: typeof payload.plugin_enabled === "boolean" ? payload.plugin_enabled : undefined,
     active: Boolean(payload.active),
   };
 };

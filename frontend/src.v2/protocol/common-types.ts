@@ -140,7 +140,7 @@ export type McpServerMutationPayload = McpServerMutationCommon & (
       url: string;
       headers?: Record<string, string>;
       headers_helper?: string;
-      bearer_token_env_var?: string;
+      bearer_token_env_var?: string | null;
       env_http_headers?: Record<string, string>;
       oauth?: { client_id?: string; callback_port?: number };
       command?: never;

@@ -73,6 +73,10 @@ test("window-binding bridge failure reaches startup recovery and retry proves th
   const calls = [];
   let bridgeAvailable = false;
   const context = { startupRetryInFlight: false, rollbackPreparationInProgress: false, desktopCleanupFailed: false, appendDesktopLog() {}, process: { env: {} }, EMBEDDED_BROWSER_TOKEN: "private-bridge-token", MANAGE_BACKEND: true,
+    petManager: null, petInitialization: null, generalMaintenance: null, path,
+    app: { isPackaged: false, getPath: () => "fixture-home" }, getAppRoot: () => "fixture-app",
+    createPetManager: () => ({ initialize: async () => {}, restoreMini: async () => {} }),
+    desktopPreferences: { getPreferences: () => ({}) }, startGeneralMaintenance: () => ({ dispose() {} }),
     backendSidecar: { resetStopRequested() {} },
     embeddedBrowserBridge: { async start() { calls.push("bridge"); if (!bridgeAvailable) throw new Error("Binding listener unavailable"); return "http://127.0.0.1:43123"; } },
     launchManagedBackend: async () => {

@@ -74,7 +74,7 @@ async def windows(tmp_path):
         owner._register_agent_run(conversation_id=conversation.id, task=task,
             task_id="actual-task", cancel_event=asyncio.Event())
         owner._conversation_streams[conversation.id] = create_stream_state(conversation.id, "actual-assistant", "actual-turn")
-        owner.run_manager.turn_input_queue(conversation.id)
+        owner.run_manager.turn_input_queue(conversation.id).begin_turn("actual-turn")
         return task
 
     async def drain():
@@ -315,6 +315,7 @@ async def test_busy_input_keeps_original_upload_origin_and_background_execution_
         metadata={"conversation_id": conversation.id, "workspace_root": conversation.workspace_root, "attachment": attachment})
     command = UserCommand("user_message", {"client_command_id": "same-command-id", "conversation_id": conversation.id,
         "content": "use the uploaded file", "attachments": [attachment], "streaming_behavior": behavior,
+        **({"expected_turn_id": "actual-turn"} if behavior == "steer" else {}),
         "user_message_id": "follower-user", "assistant_message_id": "follower-assistant"})
     # The same client ID in the original window is a different durable input.
     other_command = UserCommand("user_message", {"client_command_id": "same-command-id", "conversation_id": other.id,
@@ -352,6 +353,7 @@ async def test_a_different_workspace_upload_cannot_be_smuggled_into_the_owner_qu
     await follower.command_dispatcher._dispatch_client_command(UserCommand("user_message", {
         "client_command_id": "invalid-upload", "conversation_id": conversation.id, "content": "wrong owner",
         "streaming_behavior": "steer", "attachments": [{"artifact_id": "other-upload", "file_name": "other.txt"}],
+        "expected_turn_id": "actual-turn",
     }), follower.connection_generation)
     await drain()
     assert owner.run_manager.turn_input_queue(conversation.id).snapshot() == ()
@@ -373,6 +375,7 @@ async def test_queued_message_controls_address_original_turn_even_when_original_
     }))
     await follower.command_dispatcher._dispatch_client_command(UserCommand("user_message.queue." + action, {
         "client_command_id": "queue-control", "conversation_id": conversation.id, "message_id": "queued-assistant",
+        **({"expected_turn_id": "actual-turn"} if action == "steer" else {}),
     }), follower.connection_generation)
     await drain()
     assert owner.run_manager.queued_user_messages(conversation.id) == []
@@ -481,6 +484,67 @@ async def test_idle_follower_start_preserves_origin_through_actual_scheduler_and
     assert len(observed) == 1
     assert any(item.get("client_command_id") == "idle-same-id" and item.get("data", {}).get("replayed") for item in follower.ws.sent)
     assert owner.run_manager.durable_client_commands.claim_client_command("idle-same-id").data["content"] == other_pending.data["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("origin", ["owner", "follower", "offline"])
+@pytest.mark.parametrize("rejected", [False, True])
+async def test_queued_dispatch_replaces_previous_turn_context_before_admission(windows, monkeypatch, origin, rejected):
+    from backend.ws.command_scope import CommandScope, bind_execution_command_scope, resolve_command_scope
+    from backend.ws.conversation_stream import bind_response_origin
+
+    manager, owner, follower, conversation, other, _, drain = windows
+    manager.register_conversation_execution_owner(conversation.id, owner)
+    owner.active_conversation_id = other.id
+    submitting = owner if origin == "owner" else follower
+    queued = UserCommand("user_message", {
+        "client_command_id": "queued-command", "conversation_id": conversation.id,
+        "user_message_id": "queued-user", "assistant_message_id": "queued-answer", "content": "queued work",
+        "_client_queue_key": submitting.run_manager.durable_client_commands.path.stem,
+    })
+    owner.run_manager.enqueue_user_message(conversation.id, queued)
+    if origin == "offline":
+        manager._sessions.pop(follower.session_id)
+    scopes = []
+
+    async def execute(command):
+        scopes.append(resolve_command_scope(owner, command.data))
+        if rejected:
+            raise ValueError("queued admission rejected")
+        await owner.send_event(AgentEvent("command.result", {
+            "command": "user_message", "level": "success", "message": "", "data": {"admitted": True},
+        }))
+
+    monkeypatch.setattr(owner.command_dispatcher, "_handle_command_inner", execute)
+    try:
+        with (bind_response_origin(owner.session_id, "previous-command"),
+              bind_execution_command_scope(owner.session_id,
+                  CommandScope(other.id, other.workspace_root, "previous-command")),
+              owner.event_outbox.bind_client_command("previous-command", "user_message",
+                  owner=(other.id, other.workspace_root)),
+              owner.event_outbox.bind_connection_generation(-1)):
+            owner.schedule_next_queued_user_message(conversation.id)
+        await asyncio.gather(*tuple(owner.command_dispatcher.execution_command_tasks))
+        await drain()
+        assert scopes == [CommandScope(conversation.id, conversation.workspace_root, "queued-command")]
+        results = [(session, payload) for session in (owner, follower) for payload in session.ws.sent
+            if payload.get("type") == "command.result"]
+        if origin == "offline":
+            assert results == []
+        else:
+            assert len(results) == 1
+            recipient, receipt = results[0]
+            assert recipient is submitting
+            assert receipt["client_command_id"] == receipt["data"]["client_command_id"] == "queued-command"
+            assert receipt["conversation_id"] == receipt["data"]["conversation_id"] == conversation.id
+            assert receipt["workspace_root"] == receipt["data"]["workspace_root"] == conversation.workspace_root
+            assert (receipt["level"] == "error") is rejected
+        assert owner.event_outbox.client_command_id == ""
+        assert not owner.run_manager.is_queue_dispatching(conversation.id)
+        assert not owner.run_manager.has_inflight_user_message(conversation.id)
+        assert owner.active_conversation_id == other.id
+    finally:
+        manager._sessions[follower.session_id] = follower
 
 
 @pytest.mark.asyncio

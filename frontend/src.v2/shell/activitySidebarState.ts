@@ -11,6 +11,7 @@ import {
   canonicalArtifactKind,
   cleanArtifactLabel,
   normalizeArtifactPreview,
+  isExecutionResultArtifact,
 } from "../lib/artifact-projection";
 import type {
   AgentProgressEntry,
@@ -401,6 +402,8 @@ function serializeMainAgentProgress(entries: AgentProgressEntry[]): AgentProgres
 export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactContentState | null): ActivityOutputItem[] {
   const items: ActivityOutputItem[] = [];
   const indexes = new Map<string, number>();
+  const internalResults = new Set(messages.flatMap(message => getToolCallsFromMessage(message)
+    .filter(isExecutionResultArtifact).map(record => record.artifactId)));
 
   const upsert = (item: ActivityOutputItem): void => {
     const id = String(item.artifactId || item.id || "").trim();
@@ -416,6 +419,7 @@ export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactCo
 
   for (const message of messages) {
     for (const artifact of message.artifacts ?? []) {
+      if (internalResults.has(artifact.artifactId)) continue;
       upsert(outputFromArtifact(artifact));
     }
     // Tool-owned artifacts (notably browser screenshots) are kept on the
@@ -435,6 +439,7 @@ export function buildOutput(messages: ChatMessage[], previewArtifact: ArtifactCo
 
   const previewId = String(previewArtifact?.artifactId || "").trim();
   if (previewArtifact && previewId
+    && !internalResults.has(previewId)
     && previewArtifact.source !== "attachment"
     && previewArtifact.source !== "local"
     && (previewArtifact.source !== "workspace" || indexes.has(previewId))) {
@@ -769,6 +774,7 @@ function outputFromArtifact(artifact: ArtifactPreview): ActivityOutputItem {
 }
 
 function outputFromToolRecord(record: ReturnType<typeof getToolCallsFromMessage>[number]): ActivityOutputItem | null {
+  if (isExecutionResultArtifact(record)) return null;
   const artifactId = String(record.artifactId || "").trim();
   if (!artifactId) return null;
   const kind = canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record);

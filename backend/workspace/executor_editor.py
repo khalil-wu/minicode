@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 import re
 from urllib.parse import quote
 
@@ -326,11 +326,16 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             common = self.resolve((await run("rev-parse", "--path-format=absolute", "--git-common-dir")).stdout.decode("utf-8").strip())
             def display(path):
                 return path.uri if self.context.turn_environment.is_remote else path.native
+            def isolated(path):
+                if self.context.turn_environment.is_remote:
+                    return path.is_relative_to(main.joinpath(".minicode/worktrees"))
+                from backend.services.worktree_settings_service import is_managed_worktree_path
+                return is_managed_worktree_path(Path(path.native), Path(main.native))
             entries = [{"path": display(self.resolve(item["worktree"])), "branch": item.get("branch", "").removeprefix("refs/heads/"),
                 "commit": item.get("HEAD", "")[:8], "is_main": index == 0, "is_current": self.resolve(item["worktree"]) == checkout_root,
-                "is_detached": "detached" in item, "is_isolated": self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees")),
+                "is_detached": "detached" in item, "is_isolated": isolated(self.resolve(item["worktree"])),
                 "can_remove": self.resolve(item["worktree"]) != checkout_root
-                    and self.resolve(item["worktree"]).is_relative_to(main.joinpath(".minicode/worktrees"))
+                    and isolated(self.resolve(item["worktree"]))
                     and (not self.context.turn_environment.is_remote
                         or self.scope.resolve_access(self.cwd.uri).can_write
                         and self.scope.resolve_access(self.resolve(item["worktree"]).uri).can_read),

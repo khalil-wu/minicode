@@ -1,12 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { bridge, popup, send, awaitResult, openFolder, windowControls, windowStateListeners } = vi.hoisted(() => {
   const windowStateListeners = new Set<(state: { isMaximized: boolean }) => void>();
   return {
-    bridge: { enabled: false },
+    bridge: { enabled: false, showBottomPanel: true },
     popup: vi.fn(async (_key: string) => undefined),
     send: vi.fn(() => true),
     awaitResult: vi.fn(async (_command: unknown, command: string) => ({
@@ -42,32 +42,40 @@ vi.mock("../protocol/ws-outbox", () => ({
   sendConversationDeleteCommand: vi.fn(async () => true),
 }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: { showBottomPanel: bridge.showBottomPanel } }) }));
 vi.mock("../workspace/openWorkspaceFolder", () => ({ openWorkspaceFolder: openFolder }));
+vi.mock("../composer/useComposerPlugins", () => ({ useComposerPlugins: () => ({ plugins: [], loading: false, error: "", refresh: vi.fn() }) }));
 
 import { HeaderBar } from "./HeaderBar";
-import { NavigationRail } from "./NavigationRail";
+import { SidebarLeft } from "./SidebarLeft";
 import { useAppStore } from "../stores";
 
 const header = (overrides = {}) => <HeaderBar
   leftPanelAvailable leftPanelOpen rightPanelAvailable rightPanelOpen
   onToggleLeftPanel={vi.fn()} onToggleRightPanel={vi.fn()} {...overrides}
 />;
+const chooseMode = (name: "代码" | "协作") => {
+  fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+  fireEvent.click(screen.getByRole("menuitem", { name, exact: true }));
+};
 const previousExecCommand = Object.getOwnPropertyDescriptor(document, "execCommand");
 
 describe("desktop chrome uses the existing workbench command and owner chain", () => {
   it("opens the settings-and-help menu before navigating and keeps the conversation draft",()=>{
     useAppStore.setState({settingsOpen:false,draft:"Keep gear-menu draft",conversationId:"A"});
-    render(<NavigationRail />);
-    fireEvent.click(screen.getByRole("button",{name:"设置与帮助"}));
+    render(<SidebarLeft embedded />);
+    fireEvent.click(screen.getByRole("button",{name:"打开个人资料菜单"}));
     expect(useAppStore.getState().settingsOpen).toBe(false);
     fireEvent.click(screen.getByRole("menuitem",{name:"帮助"}));
-    expect(useAppStore.getState()).toMatchObject({settingsOpen:true,settingsTab:"shortcuts",draft:"Keep gear-menu draft",conversationId:"A"});
+    fireEvent.click(screen.getByRole("menuitem",{name:"键盘快捷键"}));
+    expect(useAppStore.getState()).toMatchObject({settingsOpen:false,shortcutsHelpOpen:true,draft:"Keep gear-menu draft",conversationId:"A"});
   });
   beforeEach(() => {
     vi.clearAllMocks();
     windowControls.getState.mockResolvedValue({ isMaximized: false });
     windowStateListeners.clear();
     bridge.enabled = false;
+    bridge.showBottomPanel = true;
     localStorage.clear();
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     useAppStore.setState({
@@ -76,7 +84,8 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
       conversations: ["A", "B", "C", "D"].map(id => ({ id, title: id, updatedAt: "2026-10-05" })),
       messages: [{ id: "message-A", role: "user", content: "Keep my draft context", timestamp: 1, artifacts: [] }],
       draft: "unfinished", settingsOpen: false, settingsTab: "general", skillsMarketplaceOpen: false,
-      leftSidebarWidth: 0, dockCollapsed: true, rightPanelOpen: true, rightPanelExpanded: false,
+      projectsOpen: false, shortcutsHelpOpen: false, recentWorkspaces: [], availableSkills: [],
+      leftSidebarWidth: 0, dockCollapsed: true, activeBottomTab: "git", defaultTerminalLocation: "bottom", rightPanelOpen: true, rightPanelExpanded: false,
       rightStackTab: "tasks", panelSlots: [{ id: "chat", kind: "chat", label: "Chat", focused: true }],
     });
   });
@@ -103,6 +112,17 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(input.value).toBe("unfinished");
     expect(screen.queryByRole("menu")).toBeNull();
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("hides only the bottom-panel header entry when its persisted visibility is off", () => {
+    useAppStore.setState({ appMode: "code", dockCollapsed: false, activeBottomTab: "terminal" });
+    const view = render(header());
+    expect(screen.getByRole("button", { name: "关闭终端", exact: true })).toBeTruthy();
+    bridge.showBottomPanel = false;
+    view.rerender(header());
+    expect(screen.queryByRole("button", { name: "关闭终端", exact: true })).toBeNull();
+    expect(screen.getByRole("button", { name: "关闭右侧栏", exact: true })).toBeTruthy();
+    expect(useAppStore.getState()).toMatchObject({ dockCollapsed: false, activeBottomTab: "terminal", draft: "unfinished" });
   });
 
   it("shows restore for a native window already maximized before the header subscribes", async () => {
@@ -152,7 +172,7 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(left).toHaveBeenCalledOnce();
     fireEvent.click(screen.getByRole("button", { name: "视图", exact: true }));
     fireEvent.click(screen.getByRole("menuitem", { name: "打开终端" }));
-    expect(useAppStore.getState()).toMatchObject({ activeBottomTab: "terminal", dockCollapsed: false });
+    expect(useAppStore.getState()).toMatchObject({ activeBottomTab: "terminal", dockCollapsed: false, rightStackTab: "tasks", rightPanelOpen: true });
     act(() => useAppStore.setState({ appMode: "code" }));
     fireEvent.click(screen.getByRole("button", { name: "文件", exact: true }));
     fireEvent.click(screen.getByRole("menuitem", { name: "新聊天" }));
@@ -180,34 +200,27 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(send).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("switches through the chat home and Code rail entries while retaining owner/editor/draft (native=%s)", (native) => {
+  it.each([false, true])("switches through the real sidebar brand menu while retaining owner/editor/draft (native=%s)", (native) => {
     bridge.enabled = native;
     const editorTabs = [{ id: "retained-editor", path: "README.md", content: "draft code", original: "", loading: false, error: null }];
-    useAppStore.setState({ editorTabs, activeTabPath: "README.md", activeEditorPath: "README.md", skillsMarketplaceOpen: true,
+    useAppStore.setState({ editorTabs, activeTabPath: "README.md", activeEditorPath: "README.md", skillsMarketplaceOpen: false,
       panelSlots: [{ id: "chat", kind: "chat", label: "Chat", focused: false }, { id: "editor", kind: "editor", label: "File", focused: true }],
     });
     act(() => useAppStore.getState().focusPanel("chat"));
     const before = useAppStore.getState();
-    const { container } = render(<><NavigationRail />{header()}</>);
-    const rail = screen.getByRole("navigation", { name: "应用导航" });
-    const code = within(rail).getByRole("button", { name: "Code", exact: true });
-    const chat = within(rail).getByRole("button", { name: "聊天首页", exact: true });
+    const { container } = render(<><SidebarLeft embedded />{header()}</>);
+    send.mockClear();
     expect(screen.queryByRole("tablist", { name: "工作模式" })).toBeNull();
     expect(container.querySelector(".mc-header-mode-switch")).toBeNull();
     if (native) expect(container.querySelector(".mc-header-end .mc-window-controls")).toBeTruthy();
-    expect(chat.getAttribute("aria-current")).toBeNull();
-    fireEvent.click(code);
+    chooseMode("代码");
     expect(useAppStore.getState().appMode).toBe("code");
     expect(useAppStore.getState().panelSlots.find((slot) => slot.kind === "editor")?.focused).toBe(true);
-    expect(code.getAttribute("aria-current")).toBe("page");
-    expect(chat.getAttribute("aria-current")).toBeNull();
-    fireEvent.click(chat);
+    chooseMode("协作");
     expect(useAppStore.getState().appMode).toBe("cowork");
-    expect(chat.getAttribute("aria-current")).toBe("page");
-    expect(code.getAttribute("aria-current")).toBeNull();
-    fireEvent.click(code);
+    chooseMode("代码");
     expect(useAppStore.getState().appMode).toBe("code");
-    fireEvent.click(chat);
+    chooseMode("协作");
     expect(useAppStore.getState().appMode).toBe("cowork");
     const after = useAppStore.getState();
     expect(after.skillsMarketplaceOpen).toBe(false);
@@ -221,7 +234,7 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(after.currentProvider).toBe(before.currentProvider);
     expect(after.effortLevel).toBe(before.effortLevel);
     expect(after.mcpServers).toBe(before.mcpServers);
-    expect(after.leftSidebarWidth).toBeGreaterThan(0);
+    expect(screen.queryByRole("navigation", { name: "应用导航" })).toBeNull();
     expect(send).not.toHaveBeenCalled();
     expect(awaitResult).not.toHaveBeenCalled();
   });
@@ -231,13 +244,12 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
       panelSlots: [{ id: "chat", kind: "chat", label: "Chat", focused: false }, { id: "editor", kind: "editor", label: "File", focused: true, maximized: true }],
       editorTabs: [{ id: "max-editor", path: "README.md", content: "draft", original: "", loading: false, error: null }],
     });
-    render(<><NavigationRail />{header()}</>);
-    const rail = screen.getByRole("navigation", { name: "应用导航" });
-    fireEvent.click(within(rail).getByRole("button", { name: "聊天首页" }));
+    render(<><SidebarLeft embedded />{header()}</>);
+    chooseMode("协作");
     expect(useAppStore.getState().panelSlots.find((slot) => slot.kind === "editor")?.maximized).toBe(true);
-    expect(screen.getByRole("button", { name: "关闭终端" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "关闭终端" })).toBeNull();
     expect(screen.queryByRole("button", { name: "打开终端" })).toBeNull();
-    fireEvent.click(within(rail).getByRole("button", { name: "Code" }));
+    chooseMode("代码");
     expect(screen.getByRole("button", { name: "关闭终端" })).toBeTruthy();
     expect(useAppStore.getState().panelSlots.find((slot) => slot.kind === "editor")?.maximized).toBe(false);
     expect(useAppStore.getState().panelSlots.find((slot) => slot.kind === "editor")?.focused).toBe(true);
@@ -249,9 +261,10 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
   });
 
   it("initializes a missing editor slot through Code without creating or switching a conversation", () => {
-    useAppStore.setState({ settingsOpen: true, editorTabs: [], activeTabPath: null, activeEditorPath: null });
-    render(<NavigationRail />);
-    fireEvent.click(screen.getByRole("button", { name: "Code", exact: true }));
+    useAppStore.setState({ settingsOpen: false, editorTabs: [], activeTabPath: null, activeEditorPath: null });
+    render(<SidebarLeft embedded />);
+    send.mockClear();
+    chooseMode("代码");
     const state = useAppStore.getState();
     expect(state).toMatchObject({ appMode: "code", settingsOpen: false, conversationId: "A", draft: "unfinished" });
     expect(state.panelSlots.map((slot) => slot.kind)).toEqual(["chat", "editor"]);
@@ -300,36 +313,45 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "D", client_command_id: expect.any(String) }));
   });
 
-  it("uses existing rail navigation while retaining the active conversation and draft", () => {
-    render(<NavigationRail />);
-    const rail = screen.getByRole("navigation", { name: "应用导航" });
-    fireEvent.click(within(rail).getByRole("button", { name: "已安排" }));
+  it("uses the same canonical back/forward history for native menu events", () => {
+    const view = render(header());
+    act(() => useAppStore.setState({ conversationId: "B" }));
+    fireEvent(window, new Event("navigate-back"));
+    expect(send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "A" }));
+    fireEvent(window, new Event("navigate-forward"));
+    expect(send).toHaveBeenCalledOnce();
+    act(() => useAppStore.setState({ conversationId: "A", pendingConversationSwitchId: null }));
+    fireEvent(window, new Event("navigate-forward"));
+    expect(send).toHaveBeenLastCalledWith(expect.objectContaining({ type: "conversation.switch", conversation_id: "B" }));
+    expect(useAppStore.getState().draft).toBe("unfinished");
+    view.unmount(); send.mockClear();
+    fireEvent(window, new Event("navigate-back"));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("uses real sidebar scheduled and plugin navigation while retaining the active conversation and draft", () => {
+    render(<SidebarLeft embedded />);
+    send.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "已安排" }));
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "scheduler" });
-    fireEvent.click(within(rail).getByRole("button", { name: "Git 与工作树" }));
-    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, dockCollapsed: false, activeBottomTab: "git", conversationId: "A", draft: "unfinished" });
-    fireEvent.click(within(rail).getByRole("button", { name: "插件与技能" }));
+    act(() => useAppStore.getState().toggleSettings());
+    fireEvent.click(screen.getByRole("button", { name: "插件", exact: true }));
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, skillsMarketplaceOpen: true, skillsMarketplaceTab: "plugins" });
-    fireEvent.click(within(rail).getByRole("button", { name: "更多工作区视图" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "子智能体" }));
-    expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", rightStackTab: "subagents", skillsMarketplaceOpen: false });
-    fireEvent.click(within(rail).getByRole("button", { name: "聊天首页", exact: true }));
-    expect(useAppStore.getState().leftSidebarWidth).toBeGreaterThan(0);
     expect(useAppStore.getState()).toMatchObject({ conversationId: "A", draft: "unfinished" });
     expect(useAppStore.getState().messages[0].id).toBe("message-A");
     expect(send).not.toHaveBeenCalled();
     expect(awaitResult).not.toHaveBeenCalled();
   });
 
-  it("keeps Code active when a secondary workspace view is opened from the more menu", () => {
-    useAppStore.setState({ appMode: "code", settingsOpen: true });
-    render(<NavigationRail />);
-    fireEvent.click(screen.getByRole("button", { name: "更多工作区视图" }));
-    expect(screen.queryByRole("menuitem", { name: "代码与文件" })).toBeNull();
-    fireEvent.click(screen.getByRole("menuitem", { name: "浏览器" }));
-    expect(useAppStore.getState()).toMatchObject({ appMode: "code", settingsOpen: false, rightStackTab: "browser", conversationId: "A", draft: "unfinished" });
-    expect(screen.getByRole("button", { name: "Code", exact: true }).getAttribute("aria-current")).toBe("page");
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页", exact: true }));
-    expect(useAppStore.getState().appMode).toBe("cowork");
+  it("keeps Code and unsaved content when the real sidebar opens project creation", () => {
+    useAppStore.setState({ appMode: "code", settingsOpen: false, projectEditTarget: null,
+      editorTabs: [{ id: "project-editor", path: "src/main.ts", content: "unsaved code", original: "disk", loading: false }],
+    });
+    render(<SidebarLeft embedded />);
+    send.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "添加项目" }));
+    expect(useAppStore.getState()).toMatchObject({ appMode: "code", settingsOpen: false, projectEditTarget: "create", conversationId: "A", draft: "unfinished" });
+    expect(useAppStore.getState().editorTabs[0].content).toBe("unsaved code");
     expect(send).not.toHaveBeenCalled();
     expect(awaitResult).not.toHaveBeenCalled();
   });

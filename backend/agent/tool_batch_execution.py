@@ -55,6 +55,7 @@ from backend.agent.tool_execution import (
     store_result_events,
     subagent_scope_guard_reason,
     tool_result_diff,
+    tool_call_event_payload,
     toolset_policy_guard_reason,
 )
 from backend.agent.tool_execution_guardrails import (
@@ -341,6 +342,7 @@ async def _emit_final_tool_result(
                 turn_id=turn_id, iteration_id=iteration_id):
             yield event
     for event in prefix_events or []:
+        event.data = tool_call_event_payload(tc, tool_ctx, event.data)
         yield event
     emit = tool_ctx.emit_event
     if emit is not None:
@@ -350,7 +352,7 @@ async def _emit_final_tool_result(
                     "temporary": True, "supersedes_tool_call_id": item["tool_call_id"]}
                 if tool_ctx.workspace_root is not None:
                     payload["workspace_root"] = str(tool_ctx.workspace_root)
-                await emit("file.changed", payload)
+                await emit("file.changed", tool_call_event_payload(tc, tool_ctx, payload))
             except Exception as exc:
                 logger.debug("temporary file removal emit failed: %s", exc)
     if events:
@@ -361,6 +363,7 @@ async def _emit_final_tool_result(
             iteration_id=iteration_id,
         )
     for event in events:
+        event.data = tool_call_event_payload(tc, tool_ctx, event.data)
         yield event
 
 

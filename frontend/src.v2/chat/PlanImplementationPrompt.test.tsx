@@ -2,6 +2,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore, waitComposerDraftRecovery } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("../composer/RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { promptDraftKey } from "../stores/prompt-drafts";
 import { resetPendingUserMessagesForTests } from "./sendChatMessage";
 import { handleCommandResultEvent } from "./commandResultEvents";

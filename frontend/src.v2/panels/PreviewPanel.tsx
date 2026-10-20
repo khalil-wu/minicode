@@ -65,7 +65,7 @@ const isSafePreviewDocumentUrl = (url: string): boolean => {
 const isSafePreviewImageArtifact = (
   mediaType?: string,
   url?: string,
-  source?: "artifact" | "attachment" | "workspace" | "browser" | "local",
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local" | "skill",
 ): boolean => isDisplayableImageMediaType(mediaType)
   && (source === "artifact" || source === "attachment" || isSafePreviewImageUrl(String(url || "")));
 
@@ -139,7 +139,7 @@ const ArtifactView = () => {
     artifactId={previewArtifact.artifactId} conversationId={conversationId} name={name} sizeLabel={sizeLabel}
     source={previewArtifact.source as "artifact" | "attachment"} isConnected={isConnected} downloadTarget={downloadTarget} />;
   if (previewArtifact.loading) {
-    return <ArtifactFrame name={name} sizeLabel={tr("加载中")}><ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label={tr("正在加载附件预览")} /></ArtifactFrame>;
+    return <ArtifactFrame name={name} sizeLabel={tr("加载中")}><ArtifactState icon={<LoaderCircle size={18} className="animate-spin" />} label={previewArtifact.source === "skill" ? tr("正在读取技能…") : tr("正在加载附件预览")} /></ArtifactFrame>;
   }
   if (previewArtifact.error) {
     return <ArtifactFrame name={name} sizeLabel={tr("无法预览")}><ArtifactState icon={<TriangleAlert size={18} />} label={previewArtifact.error} danger /></ArtifactFrame>;
@@ -201,7 +201,7 @@ const ArtifactAudioView = ({ artifactId, conversationId, name, source, isConnect
 
 const ArtifactPdfView = ({ artifactId, conversationId, name, sizeLabel, source, url, isConnected, downloadTarget }: {
   artifactId: string; conversationId?: string; name: string; sizeLabel: string;
-  source?: "artifact" | "attachment" | "workspace" | "browser" | "local"; url?: string; isConnected: boolean; downloadTarget?: AttachmentDownloadTarget;
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local" | "skill"; url?: string; isConnected: boolean; downloadTarget?: AttachmentDownloadTarget;
 }) => {
   const { t: tr } = useI18n();
   const [retryNonce, setRetryNonce] = useState(0);
@@ -233,7 +233,7 @@ const ArtifactImageView = ({
   sizeLabel: string;
   mediaType?: string;
   url: string;
-  source?: "artifact" | "attachment" | "workspace" | "browser" | "local";
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local" | "skill";
   isConnected: boolean;
   downloadTarget?: AttachmentDownloadTarget;
 }) => {

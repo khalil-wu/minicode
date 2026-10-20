@@ -28,9 +28,11 @@ def upgrade_legacy_worktree_owners(record: dict, *, journal_root: Path, read_run
             raise WorktreeOwnerUpgradeError(f"Worktree ownership upgrade needs its original registration and admitted prompt: {resource['resource_id']}")
         created = registration.payload["metadata"]
         branch = prompt.payload.get("worktree_branch")
-        expected_path = Path(created["git_root"]) / ".minicode" / "worktrees" / record["subagent_id"]
+        from backend.services.worktree_settings_service import is_managed_worktree_path
+        resource_path = Path(resource["resource_id"])
         if (not isinstance(branch, str) or not branch or created.get("branch") != branch
-                or Path(resource["resource_id"]) != expected_path
+                or resource_path.name != record["subagent_id"]
+                or not is_managed_worktree_path(resource_path, Path(created["git_root"]))
                 or prompt.payload.get("worktree_path") != resource["resource_id"]
                 or created.get("git_root") != resource["metadata"].get("git_root")):
             raise WorktreeOwnerUpgradeError(f"Worktree creation path or branch evidence does not match its resource: {resource['resource_id']}")

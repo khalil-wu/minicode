@@ -82,6 +82,11 @@ def test_isolated_worktree_failure_does_not_leave_a_shared_success_record(
         send_event=send_event,
     )
     lifecycle = SessionLifecycle(session)
+    from backend.config import load_config_layer_stack
+    from backend.permissions.context import PermissionContext
+
+    session.permission_context_for_conversation = lambda _conversation, **_kwargs: PermissionContext(workspace_root=tmp_path)
+    session.config = SimpleNamespace(config_layer_stack=load_config_layer_stack(cwd=tmp_path))
     monkeypatch.setattr(
         "backend.services.conversation_payload_service.create_isolated_worktree_binding",
         lambda *_args, **_kwargs: SimpleNamespace(

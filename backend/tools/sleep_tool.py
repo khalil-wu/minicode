@@ -1,102 +1,73 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from typing import Any
+from datetime import datetime, timezone
 
-from backend.permissions.context import ToolExecutionContext
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 
 
 class SleepTool(BaseTool):
-    """Wait briefly without occupying a shell process."""
-
     name = "sleep"
-    should_defer = True
-    description = (
-        "Wait for a short period before checking background work or external state. "
-        "Prefer monitor for background command status; use sleep only when a real delay is needed."
-    )
+    should_defer = False
+    description = "Pause execution for a specified duration. New input for the active turn ends the sleep early without consuming it. Returns elapsed wall-clock time."
     permission = PermissionLevel.AUTO
     read_only = True
-    # The explicit 60-second argument bound is the only sleep contract; do not
-    # add a second one-second runtime watchdog.
     timeout_seconds = None
     result_kind = "status"
     display_label = "Sleep"
     max_result_chars = None
 
-    _MAX_SECONDS = 60.0
+    def get_spec(self):
+        return ToolSpec(name=self.name, capability="time.sleep", toolset="core", exposure="direct_model_only", required_args=("duration_ms",))
 
-    def get_spec(self) -> ToolSpec:
-        return ToolSpec(
-            name=self.name,
-            capability="time.sleep",
-            toolset="core",
-            exposure="core",
-            required_args=("seconds",),
-        )
+    def get_schema(self):
+        return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {
+            "duration_ms": {"type": "integer", "minimum": 1, "maximum": 43_200_000}},
+            "required": ["duration_ms"], "additionalProperties": False})
 
-    def get_schema(self) -> ToolSchema:
-        return ToolSchema(
-            name=self.name,
-            description=self.description,
-            parameters={
-                "type": "object",
-                "properties": {
-                    "seconds": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": self._MAX_SECONDS,
-                        "description": "Seconds to wait. Maximum 60; use small values.",
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Optional short reason for the wait.",
-                    },
-                },
-                "required": ["seconds"],
-            },
-        )
-
-    async def execute(
-        self,
-        args: dict[str, Any],
-        context: ToolExecutionContext | None = None,
-    ) -> ToolResult:
+    async def execute(self, args, context=None):
+        duration = args["duration_ms"]
+        if isinstance(duration, bool) or not isinstance(duration, int) or not 1 <= duration <= 43_200_000:
+            return self._error_result("duration_ms must be an integer between 1 and 43200000")
+        started = time.monotonic()
+        owner = context.run_context if context is not None else None
+        queue = owner.turn_input_queue if owner is not None else None
+        waiters = []
+        if queue is not None and not queue.pending_count():
+            waiters.append(asyncio.create_task(queue.wait_for_activity(after_seq=queue.activity_cursor(), timeout=duration / 1000)))
+        if context is not None and context.cancel_event is not None:
+            waiters.append(asyncio.create_task(context.cancel_event.wait()))
         try:
-            seconds = float(args.get("seconds"))
-        except (TypeError, ValueError):
-            return self._error_result("seconds must be a number")
-        if seconds < 0:
-            return self._error_result("seconds must be non-negative")
-        if seconds > self._MAX_SECONDS:
-            return self._error_result(f"seconds must be <= {self._MAX_SECONDS:g}")
+            if queue is not None and queue.pending_count():
+                pass
+            elif waiters:
+                await asyncio.wait(waiters, timeout=duration / 1000, return_when=asyncio.FIRST_COMPLETED)
+            else:
+                await asyncio.sleep(duration / 1000)
+        finally:
+            for waiter in waiters:
+                waiter.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+        elapsed = time.monotonic() - started
+        return ToolResult(content=json.dumps({"elapsed_seconds": elapsed}), result_kind="status", duration_ms=int(elapsed * 1000))
 
-        started = time.perf_counter()
-        cancel_event = getattr(context, "cancel_event", None) if context else None
-        try:
-            if cancel_event is not None:
-                await asyncio.wait_for(cancel_event.wait(), timeout=seconds)
-                elapsed_ms = int((time.perf_counter() - started) * 1000)
-                return ToolResult(
-                    content=f"Sleep cancelled after {elapsed_ms / 1000:.1f}s.",
-                    is_error=True,
-                    status="cancelled",
-                    result_kind=self.result_kind,
-                    display_summary="Sleep cancelled",
-                    duration_ms=elapsed_ms,
-                )
-            await asyncio.sleep(seconds)
-        except asyncio.TimeoutError:
-            pass
 
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        waited = elapsed_ms / 1000.0
-        return ToolResult(
-            content=f"Waited {waited:.1f}s.",
-            result_kind=self.result_kind,
-            display_summary=f"Waited {waited:.1f}s",
-            duration_ms=elapsed_ms,
-        )
+class CurrentTimeTool(BaseTool):
+    name = "curr_time"
+    should_defer = False
+    description = "Return the current time in UTC, formatted as YYYY-MM-DD HH:MM:SS UTC."
+    permission = PermissionLevel.AUTO
+    read_only = True
+    result_kind = "status"
+
+    def get_spec(self):
+        return ToolSpec(name=self.name, capability="time.read", toolset="core", exposure="core")
+
+    def get_schema(self):
+        return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {}, "additionalProperties": False})
+
+    async def execute(self, args, context=None):
+        return ToolResult(content=json.dumps({"current_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}), result_kind="status")

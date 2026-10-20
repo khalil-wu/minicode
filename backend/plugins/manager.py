@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -18,6 +19,7 @@ from .layout import PLUGIN_MANIFEST_DIRECTORY, MARKETPLACE_MANIFEST_FILENAME
 from .materializer import (
     MaterializationError,
     MaterializedSource,
+    _split_ref,
     is_safe_marketplace_name,
     materialize_source,
     parse_marketplace_source,
@@ -46,6 +48,8 @@ class PluginSnapshot:
 
     @property
     def enabled_plugins(self) -> tuple[Mapping[str, Any], ...]:
+        if self.payload.get("plugins_enabled") is False:
+            return ()
         return tuple(item for item in self.plugins if bool(item.get("enabled")))
 
     @property
@@ -89,6 +93,8 @@ class PluginManager:
         return self.snapshot().enabled_plugins
 
     def resolve(self, mention: str, *, require_enabled: bool = True) -> Mapping[str, Any] | None:
+        if require_enabled and self.snapshot().get("plugins_enabled") is False:
+            return None
         requested = parse_plugin_id(mention)
         requested_id = normalize_plugin_id(mention)
         candidates: list[Mapping[str, Any]] = []
@@ -304,9 +310,7 @@ def _source_fingerprint(source: Mapping[str, Any]) -> str:
     return json.dumps(dict(source), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
 
-def _read_marketplace_plugins(root: Path, marketplace: str) -> list[dict[str, Any]]:
-    """Read a MiniCode marketplace manifest without executing plugins."""
-
+def _read_marketplace_manifest(root: Path) -> tuple[Path, Mapping[str, Any]]:
     candidates = tuple(root.joinpath(*layout) for layout in _MARKETPLACE_MANIFEST_LAYOUTS)
     manifest_path = next((path for path in candidates if path.is_file()), None)
     if manifest_path is None:
@@ -320,13 +324,24 @@ def _read_marketplace_plugins(root: Path, marketplace: str) -> list[dict[str, An
     declared_name = str(payload.get("name") or "").strip()
     if not declared_name or not is_safe_marketplace_name(declared_name):
         raise MaterializationError("marketplace manifest must declare a safe name")
+    if not isinstance(payload.get("plugins"), list):
+        raise MaterializationError("marketplace manifest plugins must be an array")
+    interface = payload.get("interface")
+    if interface is not None and (not isinstance(interface, Mapping)
+        or ("displayName" in interface and not isinstance(interface["displayName"], str))):
+        raise MaterializationError("marketplace interface.displayName must be a string")
+    return manifest_path, payload
+
+
+def _read_marketplace_plugins(root: Path, marketplace: str) -> list[dict[str, Any]]:
+    """Read a marketplace manifest without executing plugins."""
+    manifest_path, payload = _read_marketplace_manifest(root)
+    declared_name = str(payload["name"]).strip()
     if declared_name.casefold() != str(marketplace or "").strip().casefold():
         raise MaterializationError(
             f"marketplace manifest name '{declared_name}' does not match registered marketplace '{marketplace}'"
         )
     raw_plugins = payload.get("plugins")
-    if not isinstance(raw_plugins, list):
-        raise MaterializationError("marketplace manifest plugins must be an array")
     # Local plugin paths are owned by the marketplace root rather than the
     # manifest metadata directory. Keep that root explicit through install.
     marketplace_root = _marketplace_root_for_manifest(manifest_path, root)
@@ -389,6 +404,10 @@ def _read_marketplace_plugins(root: Path, marketplace: str) -> list[dict[str, An
 
 
 _MARKETPLACE_MANIFEST_LAYOUTS: tuple[tuple[str, ...], ...] = (
+    (".agents", "plugins", "marketplace.json"),
+    (".agents", "plugins", "api_marketplace.json"),
+    (".claude-plugin", "marketplace.json"),
+    (".cursor-plugin", "marketplace.json"),
     (PLUGIN_MANIFEST_DIRECTORY, MARKETPLACE_MANIFEST_FILENAME),
 )
 
@@ -603,6 +622,65 @@ class MarketplaceRegistry:
         with self._mutation_lock:
             return self._add_locked(name, source, policy=policy)
 
+    def add_source(
+        self, source: str, *, ref_name: str | None = None,
+        sparse_paths: Iterable[str] = (), policy: Any | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        """Add a desktop marketplace using its manifest's declared identity."""
+        base, inline_ref = _split_ref(source.strip())
+        parsed = parse_marketplace_source(base)
+        ref = (ref_name or inline_ref or "").strip()
+        paths = tuple(sparse_paths)
+        if parsed.kind not in {"directory", "git"}:
+            raise ValueError("expected a GitHub repo, Git URL, or local marketplace folder")
+        if parsed.kind == "directory" and (ref or paths):
+            raise ValueError("Git ref and sparse paths are only supported for git marketplace sources")
+        parsed = replace(parsed, ref=ref, sparse_paths=paths)
+        descriptor = parsed.to_dict()
+        effective_policy = _effective_marketplace_policy(policy)
+        effective_policy.assert_policy_valid()
+        effective_policy.assert_source_allowed(descriptor)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self._mutation_lock:
+            records = self._raw_records()
+            if self._read_error:
+                raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
+            previous: dict[str, Any] | None = None
+            for record in records:
+                if _source_fingerprint(parse_marketplace_source(record["source"]).to_dict()) == _source_fingerprint(descriptor):
+                    previous = record
+                    if record.get("status") == "ready" and Path(record["materialized_path"]).is_dir():
+                        return record, True
+
+            identity: dict[str, Any] = {}
+            result: dict[str, Any] = {}
+
+            def validate(root: Path) -> None:
+                _, manifest = _read_marketplace_manifest(root)
+                name = str(manifest["name"]).strip()
+                _read_marketplace_plugins(root, name)
+                if any(record is not previous and record["name"].casefold() == name.casefold() for record in records):
+                    raise MaterializationError(f"Marketplace '{name}' is already registered with a different source")
+                identity["name"] = name
+                identity["interface"] = dict(manifest.get("interface") or {})
+
+            def commit(materialized: MaterializedSource) -> None:
+                name = identity["name"]
+                record = {
+                    "name": name, "interface": identity["interface"], "source": descriptor, "declared_source": descriptor,
+                    "materialized_path": str(materialized.path),
+                    "plugins": _read_marketplace_plugins(materialized.path, name),
+                    "status": "ready", "error": "",
+                    "provenance": {"registered_at": __import__("time").time(), "materialized": materialized.to_dict()},
+                }
+                self._write([*(item for item in records if item is not previous), record])
+                result.update(record)
+
+            cache_id = hashlib.sha256(_source_fingerprint(descriptor).encode()).hexdigest()[:24]
+            destination = self.path.parent / ".marketplaces" / f"source-{cache_id}"
+            materialize_source(parsed, destination, validate=validate, after_activate=commit)
+            return result, False
+
     def _add_locked(
         self,
         name: str,
@@ -734,8 +812,10 @@ class MarketplaceRegistry:
             # Re-read after activation so every resolved local path is rooted
             # at the durable destination rather than the temporary stage.
             plugins = _read_marketplace_plugins(materialized.path, marketplace_name)
+            _, manifest = _read_marketplace_manifest(materialized.path)
             refreshed = {
                 **current,
+                "interface": dict(manifest.get("interface") or {}),
                 "source": {
                     **dict(source),
                     "materialized_path": str(materialized.path),

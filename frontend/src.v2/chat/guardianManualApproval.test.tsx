@@ -19,6 +19,23 @@ const message = (reviews: GuardianAssessment[]): ChatMessage => ({ id: "answer",
   blocks: reviews.map(item => ({ type: "guardian_assessment", review: item })) });
 
 describe("Source manual denied-action approval", () => {
+  it("does not approve on a CJK candidate Enter or a key from a different composer", async () => {
+    const owner = "ime-owned-guardian";
+    const denied = review("ime-denied");
+    useAppStore.setState({ conversationId: owner, messages: [message([denied])], draft: "/approve" });
+    const send = vi.spyOn(outbox, "sendClientCommandAwaitResult").mockResolvedValue(result(owner, denied.id));
+    const approved = vi.fn();
+    render(<><div className="composer-container"><textarea aria-label="approval composer" />
+      <GuardianApprovalMenu conversationId={owner} onClose={vi.fn()} onApproved={approved} /></div><textarea aria-label="other composer" /></>);
+    const input = screen.getByRole("textbox", { name: "approval composer" });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "other composer" }), { key: "Enter" });
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => fireEvent.keyDown(input, { key: "Enter" }));
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(approved).toHaveBeenCalledOnce();
+  });
   it("disables all approval buttons in the thread until the exact request is recorded; never sends a retry turn", async () => {
     const owner = "manual-button-owner";
     const first = review("one");

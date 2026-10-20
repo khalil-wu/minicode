@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { desktop } from "../desktop/runtime";
 import { mcpProjectionMatches } from "./mcpProjectionScope";
 import type {
   BackgroundCompletedEvent,
@@ -72,6 +73,13 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
       // A completed command can belong to the previous conversation while
       // its real files still belong to the editor's mounted workspace.
       if (workspaceRootsEqual(e.workspace_root, s.workingDirectory)) invalidateMountedWorkspaceIndex(e.workspace_root, e.index_instance_id, e.revision);
+      return true;
+    }
+    case "pet.published": {
+      if (isReplayedEvent(e)) return true;
+      const pets = desktop()?.pets;
+      if (pets) void pets.refresh().then(() => pets.update({ selectedPetId: e.pet_id as string, petVisible: true }))
+        .catch(error => pushToast(String(error), "error"));
       return true;
     }
     case "terminal.output":

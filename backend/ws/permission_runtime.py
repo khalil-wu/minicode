@@ -21,7 +21,9 @@ def _managed_permission_projection(mode: str, configured_policy: ApprovalPolicy 
 
     requirements = config_stack.requirements if config_stack is not None else get_config_requirements()
     policy = policy_for_mode(mode, configured_policy)
-    effective_mode, violation = requirements.resolve_permission_mode(mode, approval_policy=policy)
+    effective_config = config_stack.effective_config() if config_stack is not None else {}
+    configured_sandbox = effective_config.get("sandbox_mode", "") if mode not in {"plan", "bypass"} else ""
+    effective_mode, violation = requirements.resolve_permission_mode(mode, approval_policy=policy, sandbox_mode=configured_sandbox)
     if violation is not None:
         raise violation
     requirement_source = requirements.source_for("allowed_approval_policies") or requirements.source_for(
@@ -30,7 +32,7 @@ def _managed_permission_projection(mode: str, configured_policy: ApprovalPolicy 
     return (
         effective_mode,
         policy.to_wire(),
-        requirements.sandbox_mode_for_permission_mode(effective_mode),
+        requirements.sandbox_mode_for_permission_mode(effective_mode, sandbox_mode=configured_sandbox),
         str(requirement_source or ""),
     )
 

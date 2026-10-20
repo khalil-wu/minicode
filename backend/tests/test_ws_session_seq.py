@@ -377,6 +377,7 @@ def test_sync_replays_old_done_and_resumes_new_turn_in_same_conversation() -> No
         available_models = ["model"]
         models_source = "test"
         conversation_repo = None
+        ws_manager = None
 
         def __init__(self, run_task: asyncio.Task[None]) -> None:
             self.sent: list[dict] = []
@@ -418,7 +419,8 @@ def test_sync_replays_old_done_and_resumes_new_turn_in_same_conversation() -> No
         async def send_event(self, event) -> None:
             self.sent.append(event.to_ws_message())
 
-        async def replay_missed_events(self, _last_seq: int, *, events: list[dict], current_seq: int) -> int:
+        async def replay_missed_events(self, _last_seq: int, *, events: list[dict], current_seq: int, wait_for_delivery: bool = True) -> int:
+            assert wait_for_delivery is False
             self.sent.append({"type": "session.replay", "events": events, "current_seq": current_seq})
             return len(events)
 

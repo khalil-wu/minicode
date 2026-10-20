@@ -36,6 +36,7 @@ beforeEach(() => {
     conversationMessages: {},
     conversationStreaming: {},
     isStreaming: false,
+    defaultTerminalLocation: "bottom",
   });
 });
 
@@ -359,10 +360,10 @@ describe("editor workspace isolation", () => {
     expect(storage.get("minicode.layout.right-open")).toBe("1");
   });
 
-  it("routes legacy terminal tab requests to the bottom drawer", () => {
+  it("routes terminal opens to the preferred bottom drawer", () => {
     useAppStore.setState({ rightPanelOpen: false, dockCollapsed: true, activeBottomTab: "git" });
 
-    useAppStore.getState().setRightStackTab("terminal");
+    useAppStore.getState().openTerminal();
 
     expect(useAppStore.getState()).toMatchObject({
       rightPanelOpen: false,

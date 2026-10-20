@@ -314,10 +314,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .subagents-tab,
-  .subagents-detail,
-  .subagents-row,
-  .subagents-back {
+  html:not([data-reduced-motion="false"]) .subagents-tab,
+  html:not([data-reduced-motion="false"]) .subagents-detail,
+  html:not([data-reduced-motion="false"]) .subagents-row,
+  html:not([data-reduced-motion="false"]) .subagents-back {
     animation: none;
     transition: none;
   }

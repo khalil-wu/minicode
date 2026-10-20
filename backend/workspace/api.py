@@ -306,6 +306,13 @@ def create_workspace_router() -> APIRouter:
             return await executor_delivery_status(service)
         return await git_delivery_status(_local_service(service).workspace_root_path())
 
+    @router.get("/local-environment")
+    async def workspace_local_environment(workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        from backend.services.local_environment_settings import workspace_environment
+        if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            return {"config_path": "", "environment": None, "actions": []}
+        return await asyncio.to_thread(workspace_environment, _local_service(service).workspace_root_path())
+
     @router.get("/environment")
     async def workspace_environment_status(workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
         if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:

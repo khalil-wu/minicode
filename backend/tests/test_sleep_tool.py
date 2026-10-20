@@ -12,10 +12,10 @@ from backend.tools.toolsets import ToolsetPolicy
 
 
 def test_sleep_waits_briefly() -> None:
-    result = asyncio.run(SleepTool().execute({"seconds": 0}))
+    result = asyncio.run(SleepTool().execute({"duration_ms": 1}))
 
     assert result.is_error is False
-    assert "Waited" in result.content
+    assert "elapsed_seconds" in result.content
     assert result.result_kind == "status"
 
 
@@ -27,11 +27,10 @@ def test_sleep_is_cancel_aware() -> None:
         cancel_event=cancel_event,
     )
 
-    result = asyncio.run(SleepTool().execute({"seconds": 5}, context=context))
+    result = asyncio.run(SleepTool().execute({"duration_ms": 5000}, context=context))
 
-    assert result.is_error is True
-    assert result.status == "cancelled"
-    assert "cancelled" in result.content
+    assert "elapsed_seconds" in result.content
+    assert result.duration_ms < 1000
 
 
 @pytest.mark.parametrize("supports_search_tool", [False, True])
@@ -41,6 +40,6 @@ def test_sleep_exposure_follows_selected_model_search_capability(tmp_path, suppo
     assert registry.get_tool("sleep") is not None
     policy = ToolsetPolicy(supports_search_tool=supports_search_tool)
     names = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=policy)}
-    assert ("sleep" in names) is not supports_search_tool
+    assert "sleep" in names
     view = registry.get_schema_view("sleep", toolset_policy=policy)
-    assert view.exposure == "deferred" and view.direct is not supports_search_tool
+    assert view.exposure == "direct_model_only" and view.direct

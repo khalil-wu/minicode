@@ -207,7 +207,7 @@ async function handleRequest(request, response) {
   if (!remote && !tokenMatches(suppliedToken)) return sendJson(response, 401, { ok: false, error: "Unauthorized" });
   const remoteHostId = remote?.[0] || null;
   if (request.method === "GET" && request.url === "/v1/health") {
-    return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser" });
+    return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser", browserEnabled: manager.getBrowserSettings("").browserEnabled });
   }
   if (request.method !== "POST" || !["/v1/command", "/v1/operation", "/v1/window-binding"].includes(request.url)) {
     return sendJson(response, 404, { ok: false, error: "Not found" });

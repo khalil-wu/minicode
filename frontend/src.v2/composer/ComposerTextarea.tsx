@@ -5,10 +5,15 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import { buildPastedTextFile, shouldAttachPastedText } from "./pastedText";
 import { useAppStore } from "../stores";
 import type { ComposerSelection } from "./inputSelection";
+import { RichComposerEditor, type ComposerInputHandle } from "./RichComposerEditor";
+import type { RichComposerDocument } from "./rich-composer-document";
 
 interface Props {
   value: string;
-  onChange: (v: string, selection?: ComposerSelection) => void;
+  onChange: (v: string, selection?: ComposerSelection, document?: RichComposerDocument) => void;
+  rich?: boolean;
+  richDocument?: RichComposerDocument;
+  documentKey?: string;
   onSelectionChange?: (v: string, selection: ComposerSelection) => void;
   selectionRequest?: ComposerSelection;
   onSubmit: () => void | Promise<void>;
@@ -27,7 +32,7 @@ interface Props {
   onHistorySearch?: () => void;
   // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Given the
   // current caret/direction, returns the prompt to fill, or null to do nothing.
-  onRecallHistory?: (direction: "up" | "down") => string | null;
+  onRecallHistory?: (direction: "up" | "down") => string | { value: string; document?: RichComposerDocument } | null;
   // Escape while focused in the composer: interrupt the running turn (cc makes
   // Escape a global interrupt even while typing). Returns true if it acted.
   onEscape?: () => boolean;
@@ -58,17 +63,38 @@ export const ComposerTextarea = ({
   onEscape,
   conversationId,
   ariaLabel,
+  rich = false,
+  richDocument,
+  documentKey,
 }: Props) => {
   const { t: tr } = useI18n();
   const draftsReady = useAppStore(state => state.composerDraftsReady);
   const sendShortcut = useAppStore((state) => state.sendShortcut);
-  const ref = useRef<HTMLTextAreaElement>(null);
+  const plainTextMode = useAppStore(state => state.composerPlainTextMode);
+  const ref = useRef<ComposerInputHandle | null>(null);
   const composingRef = useRef(false);
+  const focusedRef = useRef(true);
+  const selectionMemory = useRef<ComposerSelection>({ start: value.length, end: value.length });
+  const ownerRef = useRef(documentKey);
+  if (ownerRef.current !== documentKey) {
+    ownerRef.current = documentKey;
+    selectionMemory.current = { start: value.length, end: value.length };
+  }
+  const rememberSelection = (next: string, selection: ComposerSelection) => {
+    selectionMemory.current = selection;
+    onSelectionChange?.(next, selection);
+  };
   useLayoutEffect(() => {
     if (!selectionRequest) return;
+    selectionMemory.current = selectionRequest;
     ref.current!.setSelectionRange(selectionRequest.start, selectionRequest.end);
     ref.current!.focus({ preventScroll: true });
   }, [selectionRequest]);
+  useLayoutEffect(() => {
+    const selection = selectionMemory.current;
+    ref.current!.setSelectionRange(selection.start, selection.end);
+    if (focusedRef.current) ref.current!.focus({ preventScroll: true });
+  }, [rich]);
 
   // Allow external triggers (e.g. message edit/recall) to focus the textarea
   useEffect(() => {
@@ -78,8 +104,8 @@ export const ComposerTextarea = ({
     return () => window.removeEventListener(eventName, handleFocus);
   }, [conversationId]);
 
-  const handlePaste = (e: React.ClipboardEvent) => {
-    const items = e.clipboardData.items;
+  const handlePaste = (e: React.ClipboardEvent | ClipboardEvent) => {
+    const items = e.clipboardData!.items;
     const files: File[] = [];
     for (const item of Array.from(items)) {
       if (item.kind === "file") {
@@ -98,8 +124,8 @@ export const ComposerTextarea = ({
     // Keep ordinary long-form text editable. Only divert a paste when the
     // resulting draft would exceed the composer's safe editing budget.
     if (onDropFiles) {
-      const text = e.clipboardData.getData("text");
-      const target = e.currentTarget as HTMLTextAreaElement;
+      const text = e.clipboardData!.getData("text");
+      const target = ref.current!;
       const selectionStart = target.selectionStart;
       const selectionEnd = target.selectionEnd;
       if (shouldAttachPastedText(value, text, selectionStart, selectionEnd)) {
@@ -109,12 +135,91 @@ export const ComposerTextarea = ({
     }
   };
 
-  const handleDrop = (e: React.DragEvent) => {
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+  const handleDrop = (e: React.DragEvent | DragEvent) => {
+    if (e.dataTransfer!.files && e.dataTransfer!.files.length > 0) {
       e.preventDefault();
       e.stopPropagation();
-      const files = Array.from(e.dataTransfer.files);
+      const files = Array.from(e.dataTransfer!.files);
       onDropFiles?.(files);
+    }
+  };
+
+  const handleKeyDown = (e: KeyboardEvent | React.KeyboardEvent) => {
+    if (composingRef.current || ("nativeEvent" in e ? e.nativeEvent.isComposing : e.isComposing) || e.keyCode === 229) return;
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
+      e.preventDefault();
+      e.stopPropagation();
+      onHistorySearch?.();
+      return;
+    }
+    if (menuOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
+      e.preventDefault();
+      return;
+    }
+    if (menuOpen) return;
+    // Escape interrupts the running turn even while the composer is focused
+    // (cc: Escape is a global interrupt). Only acts when the turn is live;
+    // otherwise fall through so normal Escape handling still applies.
+    if (e.key === "Escape" && onEscape) {
+      if (onEscape()) {
+        e.preventDefault();
+        return;
+      }
+    }
+    // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Only
+    // when the caret is on the first/last line so arrows still navigate
+    // multi-line text; skipped during IME composition.
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onRecallHistory) {
+      const el = ref.current!;
+      const caret = el.selectionStart;
+      const collapsed = caret === el.selectionEnd;
+      const firstNewline = value.indexOf("\n");
+      const onFirstLine = firstNewline === -1 || caret <= firstNewline;
+      const onLastLine = caret >= value.lastIndexOf("\n") + 1;
+      const eligible = e.key === "ArrowUp" ? onFirstLine : onLastLine;
+      if (collapsed && eligible) {
+        const recalled = onRecallHistory(e.key === "ArrowUp" ? "up" : "down");
+        if (recalled !== null) {
+          e.preventDefault();
+              const text = typeof recalled === "string" ? recalled : recalled.value;
+              onChange(text, { start: text.length, end: text.length }, typeof recalled === "string" ? undefined : recalled.document);
+          return;
+        }
+      }
+    }
+    if (e.key === "Backspace" && ref.current!.selectionStart === 0 && ref.current!.selectionEnd === 0) {
+      if (skillTokens.length > 0) {
+        e.preventDefault();
+        onRemoveLastSkill?.();
+        return;
+      }
+      if (commandLabel) {
+        e.preventDefault();
+        onClearCommand?.();
+        return;
+      }
+    }
+    const modifier = e.ctrlKey || e.metaKey;
+    if (e.key === "Enter" && modifier && e.repeat && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const alternateFollowUp = sendShortcut === "enter" ? !e.shiftKey : e.shiftKey;
+    if (e.key === "Enter" && modifier && !e.altKey && alternateFollowUp && isResponseInProgress && onAlternateSubmit) {
+      e.preventDefault();
+      e.stopPropagation();
+      onAlternateSubmit();
+      return;
+    }
+    const submitWithEnter = e.key === "Enter" && !e.shiftKey && !e.altKey
+      && (modifier || sendShortcut === "enter" || (sendShortcut === "cmdIfMultiline" && !value.includes("\n")));
+    if (submitWithEnter) {
+      // Ignore Enter while an IME composition is active (CJK input commits
+      // with Enter); otherwise the half-composed text is sent. Mirrors the
+      // Keep IME composition from being mistaken for a submit shortcut.
+      e.preventDefault();
+      onSubmit();
     }
   };
 
@@ -122,96 +227,22 @@ export const ComposerTextarea = ({
   const textarea = (
     <textarea
       disabled={!draftsReady}
-      ref={ref}
+      ref={node => { ref.current = node; }}
       data-composer-input
       data-enter-behavior={sendShortcut === "mod-enter" ? "cmdAlways" : sendShortcut}
       aria-label={ariaLabel ?? tr("消息输入")}
       value={value}
-      onChange={(e) => onChange(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
-      onSelect={(e) => onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
+      onChange={(e) => { const selection = { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current }; selectionMemory.current = selection; onChange(e.currentTarget.value, selection); }}
+      onSelect={(e) => rememberSelection(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: composingRef.current })}
+      onFocus={() => { focusedRef.current = true; }}
+      onBlur={() => { focusedRef.current = false; }}
       onCompositionStart={(e) => { composingRef.current = true; onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: true }); }}
       onCompositionEnd={(e) => { composingRef.current = false; onSelectionChange?.(e.currentTarget.value, { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd, composing: false }); }}
       onPaste={handlePaste}
       onDrop={handleDrop}
-      onKeyDown={(e) => {
-        if (composingRef.current || e.nativeEvent.isComposing || e.keyCode === 229) return;
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "r") {
-          e.preventDefault();
-          e.stopPropagation();
-          onHistorySearch?.();
-          return;
-        }
-        if (menuOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
-          e.preventDefault();
-          return;
-        }
-        if (menuOpen) return;
-        // Escape interrupts the running turn even while the composer is focused
-        // (cc: Escape is a global interrupt). Only acts when the turn is live;
-        // otherwise fall through so normal Escape handling still applies.
-        if (e.key === "Escape" && onEscape) {
-          if (onEscape()) {
-            e.preventDefault();
-            return;
-          }
-        }
-        // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Only
-        // when the caret is on the first/last line so arrows still navigate
-        // multi-line text; skipped during IME composition.
-        if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onRecallHistory) {
-          const el = e.currentTarget;
-          const caret = el.selectionStart;
-          const collapsed = caret === el.selectionEnd;
-          const firstNewline = value.indexOf("\n");
-          const onFirstLine = firstNewline === -1 || caret <= firstNewline;
-          const onLastLine = caret >= value.lastIndexOf("\n") + 1;
-          const eligible = e.key === "ArrowUp" ? onFirstLine : onLastLine;
-          if (collapsed && eligible) {
-            const recalled = onRecallHistory(e.key === "ArrowUp" ? "up" : "down");
-            if (recalled !== null) {
-              e.preventDefault();
-              onChange(recalled, { start: recalled.length, end: recalled.length });
-              return;
-            }
-          }
-        }
-        if (e.key === "Backspace" && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
-          if (skillTokens.length > 0) {
-            e.preventDefault();
-            onRemoveLastSkill?.();
-            return;
-          }
-          if (commandLabel) {
-            e.preventDefault();
-            onClearCommand?.();
-            return;
-          }
-        }
-        const modifier = e.ctrlKey || e.metaKey;
-        if (e.key === "Enter" && modifier && e.repeat && !e.shiftKey && !e.altKey) {
-          e.preventDefault();
-          e.stopPropagation();
-          return;
-        }
-        const alternateFollowUp = sendShortcut === "enter" ? !e.shiftKey : e.shiftKey;
-        if (e.key === "Enter" && modifier && !e.altKey && alternateFollowUp && isResponseInProgress && onAlternateSubmit) {
-          e.preventDefault();
-          e.stopPropagation();
-          onAlternateSubmit();
-          return;
-        }
-        const submitWithEnter = e.key === "Enter" && !e.shiftKey && !e.altKey
-          && (modifier || sendShortcut === "enter" || (sendShortcut === "cmdIfMultiline" && !value.includes("\n")));
-        if (submitWithEnter) {
-          // Ignore Enter while an IME composition is active (CJK input commits
-          // with Enter); otherwise the half-composed text is sent. Mirrors the
-          // Keep IME composition from being mistaken for a submit shortcut.
-          e.preventDefault();
-          onSubmit();
-        }
-      }}
+      onKeyDown={handleKeyDown}
       placeholder={placeholder ?? tr("随心输入")}
-      autoFocus
+      autoFocus={focusedRef.current}
       className="composer-textarea bg-transparent border-0 outline-0 resize-none overflow-y-auto tracking-normal transition-colors duration-[140ms]"
       style={{
         width: "auto",
@@ -262,7 +293,18 @@ export const ComposerTextarea = ({
           </span>
         ))}
       </div>}
-      {textarea}
+      {rich ? <RichComposerEditor key={documentKey} ref={ref} value={value} document={richDocument} disabled={!draftsReady} plainTextMode={plainTextMode}
+        placeholder={placeholder ?? tr("随心输入")} ariaLabel={ariaLabel ?? tr("消息输入")}
+        enterBehavior={sendShortcut === "mod-enter" ? "cmdAlways" : sendShortcut}
+        initialSelection={selectionRequest ?? selectionMemory.current} initialFocus={focusedRef.current}
+        onFocusChange={focused => { focusedRef.current = focused; }}
+        onChange={(next, selection, document) => { selectionMemory.current = selection; onChange(next, selection, document); }}
+        onSelectionChange={rememberSelection}
+        onKeyDown={handleKeyDown} onPaste={handlePaste} onDrop={handleDrop}
+        onCompositionChange={composing => {
+          composingRef.current = composing;
+          onSelectionChange?.(value, { start: ref.current!.selectionStart, end: ref.current!.selectionEnd, composing });
+        }} /> : textarea}
     </div>
   );
 };

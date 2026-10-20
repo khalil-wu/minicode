@@ -29,8 +29,9 @@ import { isConversationRunning } from "./sessionStatus";
 import { readableToolLabel } from "../chat/toolDisplayName";
 import { pushToast } from "../overlays/ToastContainer";
 import { safeJsonParse } from "../lib/safe-parse";
-import { WorkspaceContextMenu } from "../workspace/WorkspaceContextMenu";
-import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { ProjectContextMenu } from "../workspace/ProjectContextMenu";
+import { projectExecutionRoot, projectOwnsWorkspace } from "../lib/project-registry";
+import { ProjectMarkerIcon } from "../components/ProjectMarker";
 import { fromMarkdown, markdownNodeText } from "../lib/markdown";
 import { setConversationArchived } from "../chat/archiveConversation";
 import { loadConversationMarkdown } from "../chat/conversationMarkdown";
@@ -150,12 +151,12 @@ const workspacePathParts = (path: string | null | undefined): string[] => {
   return canonical.split("/").filter(Boolean);
 };
 
-export function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[], openedPaths: string[] = []): Map<string, WorkspaceConversationGroup> {
+export function groupByWorkspace(conversations: (ConversationMeta & { sessionStatus: string })[], openedPaths: string[] = [], names = new Map<string, string>()): Map<string, WorkspaceConversationGroup> {
   const groups = new Map<string, WorkspaceConversationGroup>();
   const addWorkspace = (basePath: string) => {
     const key = workspaceGroupIdentity(basePath);
     if (!groups.has(key)) {
-      const label = workspaceDisplayName(canonicalWorkspacePath(basePath), "Computer");
+      const label = names.get(key) || workspaceDisplayName(canonicalWorkspacePath(basePath), "Computer");
       groups.set(key, { path: basePath, baseLabel: label, label, items: [] });
     }
     return groups.get(key)!;
@@ -331,11 +332,16 @@ export const ConversationsTab = ({
   const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived), [enrichedConversations]);
 
   const workspaceConversations = useMemo(() => {
-    const opened = new Set(recentWorkspaces.map((workspace) => workspaceGroupIdentity(workspace.path)));
-    return filtered.filter((conversation) => !conversation.pinned && isWorkspaceConversation(conversation)
+    const opened = new Set(recentWorkspaces.filter(project => project.pinned !== false).map((workspace) => workspaceGroupIdentity(workspace.path)));
+    return filtered.map(conversation => {
+      if (conversation.projectId !== undefined && conversation.projectId !== null) return conversation;
+      const project = recentWorkspaces.find(project => project.named && projectOwnsWorkspace(project, conversation.workspaceRoot || conversation.worktreePath || ""));
+      return project ? { ...conversation, projectId: project.path } : conversation;
+    }).filter((conversation) => !conversation.pinned && isWorkspaceConversation(conversation)
       && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
   }, [filtered, recentWorkspaces]);
-  const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.map((workspace) => workspace.path)), [workspaceConversations, recentWorkspaces]);
+  const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.filter(project => project.pinned !== false).map((workspace) => workspace.path),
+    new Map(recentWorkspaces.filter(project => project.named).map(project => [workspaceGroupIdentity(project.path), project.name]))), [workspaceConversations, recentWorkspaces]);
   const orderedProjectGroups = useMemo(() => (
     orderSidebarItems(Array.from(projectGroups.entries(), ([projectKey, group]) => ({
       projectKey,
@@ -357,7 +363,7 @@ export const ConversationsTab = ({
   const projectOptions = useMemo(() => {
     const groups = groupByWorkspace([], recentWorkspaces.map(workspace => workspace.path));
     return recentWorkspaces.map(workspace => ({ id: workspaceGroupIdentity(workspace.path),
-      name: groups.get(workspaceGroupIdentity(workspace.path))!.label }));
+      name: workspace.named ? workspace.name : groups.get(workspaceGroupIdentity(workspace.path))!.label }));
   }, [recentWorkspaces]);
   const recentConversations = useMemo(() => {
     const recent = filtered.filter(conversation => !conversation.pinned).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
@@ -466,6 +472,26 @@ export const ConversationsTab = ({
     onNavigateRef.current?.();
   }, [requestConversationSwitch]);
 
+  useEffect(() => {
+    const select = (event: Event) => {
+      const { index, conversationId: owner } = (event as CustomEvent<{ index: number; conversationId: string | null }>).detail;
+      if (useAppStore.getState().conversationId !== owner) return;
+      const rows = activityView
+        ? activityGroups.flatMap(group => group.items.map(item => ({ id: item.id, rowId: `activity-${group.key}:${item.id}` })))
+        : [
+          ...pinnedConversations.map(item => ({ id: item.id, rowId: `pinned:${item.id}` })),
+          ...orderedProjectGroups.filter(group => !collapsedGroups.has(group.projectKey)).flatMap(group =>
+            (expandedProjects.has(group.projectKey) ? group.conversations : group.conversations.slice(0, 5)).map(item => ({ id: item.id, rowId: `project:${item.id}` }))),
+          ...(showRecent ? recentConversations.map(item => ({ id: item.id, rowId: `recent:${item.id}` })) : []),
+        ];
+      const seen = new Set<string>();
+      const target = rows.filter(row => { if (seen.has(row.id)) return false; seen.add(row.id); return true; })[index];
+      if (target) handleSwitch(target.id, target.rowId);
+    };
+    window.addEventListener("select-numbered-chat", select);
+    return () => window.removeEventListener("select-numbered-chat", select);
+  }, [activityView, activityGroups, pinnedConversations, orderedProjectGroups, collapsedGroups, expandedProjects, showRecent, recentConversations, handleSwitch]);
+
   const handoffWorktree = useCallback(async (id: string, target: "local" | "worktree") => {
     const taskName = conversationsRef.current.find(conversation => conversation.id === id)?.title || id;
     let result = await runMenuCommand({ type: "conversation.worktree.handoff.preflight", conversation_id: id, target });
@@ -550,8 +576,8 @@ export const ConversationsTab = ({
     });
   }, []);
   const addProject = async () => {
-    const path = await openWorkspaceFolder();
-    if (path) onNavigateRef.current?.();
+    useAppStore.setState({ projectEditTarget: "create" });
+    onNavigateRef.current?.();
   };
   const copyConversationLink = useCallback((id: string) => {
     void copyText(`minicode://conversation?conversation_id=${encodeURIComponent(id)}`, tr("复制深度链接"));
@@ -580,7 +606,8 @@ export const ConversationsTab = ({
   }, [tr]);
 
   const startWorkspaceConversation = (projectKey: string, group: WorkspaceConversationGroup) => {
-    const workspaceRoot = group.path;
+    const project = recentWorkspaces.find(project => project.path === group.path);
+    const workspaceRoot = project ? projectExecutionRoot(project) : group.path;
     if (!workspaceRoot) return;
     if (collapsedGroupsRef.current.has(projectKey)) {
       const next = new Set(collapsedGroupsRef.current);
@@ -667,7 +694,8 @@ export const ConversationsTab = ({
       <button type="button" ref={binding?.dragActivatorRef} {...binding?.dragAttributes} aria-label={group.label}
         aria-expanded={!collapsedGroups.has(projectKey)} onClick={() => toggleGroup(projectKey)}
         className="mc-workspace-group-toggle" style={taskSectionHeaderStyle}>
-        <span className="mc-workspace-folder-icon" aria-hidden="true">{collapsedGroups.has(projectKey)
+        <span className="mc-workspace-folder-icon" aria-hidden="true">{recentWorkspaces.find(project => project.path === group.path)?.appearance
+          ? <ProjectMarkerIcon appearance={recentWorkspaces.find(project => project.path === group.path)!.appearance} size={16} /> : collapsedGroups.has(projectKey)
           ? <Folder className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-closed-${projectKey}`} />
           : <FolderOpen className="mc-workspace-folder-glyph" size={16} data-testid={`workspace-folder-open-${projectKey}`} />}</span>
         <span className="mc-workspace-label" title={group.path}>{group.label}</span>
@@ -769,7 +797,7 @@ export const ConversationsTab = ({
           {filtered.filter(conversation => !conversation.pinned).length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
         </section>}
       </div>
-      {workspaceMenu && <WorkspaceContextMenu path={workspaceMenu.path} position={workspaceMenu} anchor={workspaceMenu.anchor} onClose={() => setWorkspaceMenu(null)} />}
+      {workspaceMenu && <ProjectContextMenu path={workspaceMenu.path} position={workspaceMenu} anchor={workspaceMenu.anchor} onClose={() => setWorkspaceMenu(null)} />}
     </>
   );
 };

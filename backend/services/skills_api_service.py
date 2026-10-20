@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable
+from pathlib import Path
+
+from backend.async_cleanup import to_thread_cancel_safe
+from backend.config import SETTINGS_FILE, _update_settings_json
+from backend.hooks.runtime import raise_if_config_change_blocked, run_config_change_hook
 
 from backend.skills.marketplace import (
     import_local_skill,
@@ -9,6 +14,46 @@ from backend.skills.marketplace import (
 )
 
 MarketplaceLoader = Callable[..., Awaitable[dict[str, Any]]]
+
+
+def skills_settings_payload(*, skill_manager: Any, workspace_root: str = "") -> dict[str, Any]:
+    snapshot = skill_manager.snapshot(workspace_root or None)
+    return {"skills": snapshot.list_settings(), "available_skills": snapshot.list_all(),
+        "plugin_skills": snapshot.list_settings(source_level="plugin"),
+        "workspace_root": workspace_root}
+
+
+def skill_detail_payload(path: str, *, skill_manager: Any, workspace_root: str = "") -> dict[str, Any]:
+    detail = skill_manager.snapshot(workspace_root or None).read_skill_detail(path)
+    if detail is None:
+        raise ValueError("Skill is not registered or its contents cannot be read.")
+    return detail
+
+
+async def update_skill_enabled(path: str, enabled: bool, *, skill_manager: Any, workspace_root: str = "") -> dict[str, Any]:
+    requested = Path(path).expanduser().resolve()
+    inventory = await to_thread_cancel_safe(skills_settings_payload, skill_manager=skill_manager, workspace_root=workspace_root)
+    target = next((skill for skill in [*inventory["skills"], *inventory["plugin_skills"]]
+        if Path(skill["path"]).resolve() == requested), None)
+    if target is None:
+        raise ValueError("Only an installed user or plugin skill can be enabled or disabled here.")
+    hook = await run_config_change_hook(source="user_settings", file_path=str(SETTINGS_FILE))
+    raise_if_config_change_blocked(hook, source="user_settings", file_path=str(SETTINGS_FILE))
+
+    def apply(settings: dict[str, Any]) -> None:
+        skills = settings.setdefault("skills", {})
+        rules = [entry for entry in skills.get("config", [])
+            if entry.get("path") is None or (SETTINGS_FILE.parent / Path(entry["path"]).expanduser()).resolve() != requested]
+        rules.append({"path": str(requested), "enabled": enabled})
+        skills["config"] = rules
+
+    await to_thread_cancel_safe(_update_settings_json, apply)
+    result = await to_thread_cancel_safe(skills_settings_payload, skill_manager=skill_manager, workspace_root=workspace_root)
+    current = next(skill for skill in [*result["skills"], *result["plugin_skills"]]
+        if Path(skill["path"]).resolve() == requested)
+    if current["enabled"] != enabled:
+        raise ValueError("Another configuration layer overrides this skill setting.")
+    return result
 
 
 def installed_skill_names(skill_manager: Any | None) -> set[str]:

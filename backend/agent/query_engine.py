@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from contextlib import AsyncExitStack, aclosing
-from collections.abc import AsyncGenerator, AsyncIterator, Callable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
@@ -93,6 +93,11 @@ class AgentSession:
     command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
     _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
     _command_shutdown_task: asyncio.Task | None = field(default=None, init=False, repr=False)
+    worktree: Any | None = None
+    close_thread_resources: Callable[[], Awaitable[Any]] | None = None
+    close_model: Callable[[], Awaitable[None]] | None = None
+    model_retirement_tasks: set[asyncio.Task] = field(default_factory=set)
+    closed: bool = field(default=False, init=False)
 
     def command_manager(self, session_id: str) -> BackgroundCommandManager:
         if self._owned_commands is None:
@@ -101,18 +106,32 @@ class AgentSession:
 
     async def aclose(self) -> None:
         """Release owned resources after their real borrowers have settled."""
-        if self.guardian_host is not None and self.owns_guardian_host:
-            await self.guardian_host.aclose()
+        self.closed = True
+        await self.code_store.aclose()
+        if self.model_retirement_tasks:
+            await asyncio.gather(*self.model_retirement_tasks)
+            self.model_retirement_tasks.clear()
         if self._command_shutdown_task is not None:
             if self._command_shutdown_task.done():
                 self._command_shutdown_task.result()
             return
-        if (self._owned_commands is not None or self.owns_thread_environments or self.owns_artifact_store
+        if (self._owned_commands is not None or self.close_thread_resources is not None or self.close_model is not None
+                or self.guardian_host is not None and self.owns_guardian_host or self.owns_thread_environments or self.owns_artifact_store
                 or self.node_repl_companions is not None or self.cua_repl_companions is not None):
             async def close_resources() -> None:
                 try:
                     if self._owned_commands is not None:
                         await self._owned_commands.shutdown()
+                        if any(command.cleanup_pending for command in self._owned_commands._commands.values()):
+                            raise RuntimeError("Agent thread commands still own unsettled process cleanup")
+                    if self.close_thread_resources is not None:
+                        await self.close_thread_resources()
+                        self.close_thread_resources = None
+                    if self.guardian_host is not None and self.owns_guardian_host:
+                        await self.guardian_host.aclose()
+                    if self.close_model is not None:
+                        await self.close_model()
+                        self.close_model = None
                     if self.node_repl_companions is not None:
                         await self.node_repl_companions.aclose()
                     if self.cua_repl_companions is not None:
@@ -314,6 +333,8 @@ class QueryEngine:
                 "as steering/follow-up input or wait for the active turn to finish."
             )
         run_context = submission.runtime.run_context
+        if session.closed:
+            raise RuntimeError("The agent thread session is closed")
         if any(not task.done() for task in session.lifecycle_cleanup_tasks) or (
             run_context is not None
             and any(not task.done() for task in run_context.lifecycle_cleanup_tasks)
@@ -400,7 +421,7 @@ class QueryEngine:
         runner_scope = AsyncExitStack()
         terminal_event: AgentEvent | None = None
         from backend.agent.nested_tool_events import NestedToolEvents
-        nested_events = NestedToolEvents(journal, run_context=turn_ctx.run_context, llm=session.llm)
+        nested_events = NestedToolEvents(journal, run_context=turn_ctx.run_context, llm=session.llm, background_emit=host_emit_event)
         use_nested_stream = (session.tool_registry.get_tool("tool_exec") is not None
                 or turn_ctx.run_context.extension_actions is not None
                 or turn_ctx.skill_manager is not None)
@@ -658,6 +679,8 @@ class QueryEngine:
                 conversation_id=error.conversation_id,
                 completion_event=completion,
                 terminal_event=terminal,
+                code_store=submission.session.code_store,
+                turn_id=str(error.metadata.get("turn_id") or error.metadata.get("run_id") or ""),
             )
         except Exception as exc:
             logger.error(

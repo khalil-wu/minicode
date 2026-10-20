@@ -60,6 +60,7 @@ from backend.ws.agent_runner import (
 )
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
 from backend.ws.command_dispatcher import SessionCommandDispatcher
+from backend.ws.command_scope import CommandScope, bind_execution_command_scope
 from backend.ws.conversation_stream import bind_response_origin, response_origin
 from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.command_handlers import SessionCommandHandlersMixin
@@ -724,6 +725,8 @@ class WebSocketSession(
             workspace_root=self.session_lifecycle.current_workspace_root(),
             permission_mode=self.permission_context.mode,
             hosted_web_search=hosted_search,
+            hosted_cached_search=hosted_search and model_selection["wire_api"] == "responses",
+            config_snapshot=self.config,
             supports_search_tool=model.supports_search_tool if model is not None else self.config.llm.supports_search_tool,
             tool_mode="code_mode" if selection is not None else tool_mode,
         )
@@ -1078,7 +1081,7 @@ class WebSocketSession(
                     original.data["_client_queue_key"] = run_metadata["_client_queue_key"]
                 self.command_dispatcher.record_cancelled_user_message(original, reason=reason)
         run_context.record_user_cancelled = record_user_cancelled
-        admission_required = not bool(run_metadata.get("_parent_notification_only"))
+        admission_required = not bool(run_metadata.get("_parent_notification_only") or run_metadata.get("_goal_continuation"))
         admission_future: asyncio.Future[dict[str, Any] | None] | None = None
         if admission_required:
             admission_future = asyncio.get_running_loop().create_future()
@@ -1384,6 +1387,26 @@ class WebSocketSession(
             return
         command = self.run_manager.dequeue_user_message(conversation_id)
         if command is None:
+            from backend.services.goal_runtime import continuation_prompt
+            record = self.conversation_repo.get_conversation(conversation_id)
+            goal = record.goal if record is not None else {}
+            if goal.get("status") == "active" and goal.get("_continuation_pending"):
+                async def continue_goal():
+                    try:
+                        # The same dispatch owner handles user and automatic input.
+                        # Recheck new user arrivals before admitting automatic work.
+                        current = self.conversation_repo.get_conversation(conversation_id)
+                        if self.run_manager.queued_user_messages(conversation_id) or current.goal.get("id") != goal["id"] or current.goal.get("status") != "active":
+                            return
+                        await self.start_agent_run(continuation_prompt(current.goal), conversation_id=conversation_id,
+                            metadata={"_goal_continuation": goal["id"]})
+                    finally:
+                        self.run_manager.finish_queue_dispatch(conversation_id)
+                        if not self.running_agent_task_for(conversation_id):
+                            self.schedule_next_queued_user_message(conversation_id)
+                task = asyncio.create_task(continue_goal())
+                self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
+                return
             self.run_manager.finish_queue_dispatch(conversation_id)
             return
         command.data["_queued_user_message_dispatch"] = True
@@ -1433,7 +1456,22 @@ class WebSocketSession(
                     conversation_id
                 )
 
-        task = asyncio.create_task(_dispatch())
+        command_id = str(command.data.get("client_command_id") or "")
+        origin = (self.ws_manager.session_for_input_origin(str(command.data["_client_queue_key"]))
+            if self.ws_manager is not None and command.data.get("_client_queue_key") else self)
+        origin_id = origin.session_id if origin is not None else None
+        conversation = self.conversation_repo.get_conversation_summary(conversation_id)
+        workspace = (self.session_lifecycle.workspace_root_for_conversation(conversation)
+            if conversation is not None else "")
+        # This task is born during the previous turn's cleanup. Its entire
+        # execution, including pre-admission errors, belongs to the queued input.
+        with (bind_response_origin(origin_id, command_id),
+              bind_execution_command_scope(self.session_id,
+                  CommandScope(conversation_id, str(workspace or ""), command_id)),
+              self.event_outbox.bind_connection_generation(None),
+              self.event_outbox.bind_client_command(command_id, command.type,
+                  owner=(conversation_id, str(workspace or "")))):
+            task = asyncio.create_task(_dispatch())
         self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
 
     async def cancel_agent_runs(

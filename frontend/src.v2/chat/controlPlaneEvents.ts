@@ -258,6 +258,11 @@ export const handleControlPlaneProjectionEvent = (event: ServerEvent): boolean =
         name: project.name,
         projectType: project.project_type,
         lastOpened: project.last_opened,
+        ...(project.source_folders !== undefined ? { sourceFolders: project.source_folders } : {}),
+        ...(project.managed_workspace_root !== undefined ? { managedWorkspaceRoot: project.managed_workspace_root } : {}),
+        ...(project.pinned !== undefined ? { pinned: project.pinned } : {}),
+        ...(project.appearance !== undefined ? { appearance: project.appearance } : {}),
+        ...(project.named !== undefined ? { named: project.named } : {}),
       })));
       addInspectorPayload("workspace", "recent-workspaces", {
         event: ev.type,

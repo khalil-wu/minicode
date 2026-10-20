@@ -59,7 +59,9 @@ test("menu IPC accepts only its enum from the trusted main frame", async () => {
   const webContents = { mainFrame, getURL: () => mainFrame.url };
   const window = { webContents, isDestroyed: () => false };
   const calls = [];
-  moduleBox.exports.init({ getWindowForSender: (sender) => sender === window.webContents ? window : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }), popupApplicationMenu: (key) => { calls.push(key); return Promise.resolve(); } });
+  const states = [];
+  const executions = [];
+  moduleBox.exports.init({ getWindowForSender: (sender) => sender === window.webContents ? window : null, getWindowRecord: () => ({ windowInstanceId: 'fixture-window' }), popupApplicationMenu: (key) => { calls.push(key); return Promise.resolve(); }, setApplicationMenuState: (owner, state) => { states.push({ owner, state }); }, executeApplicationMenuAction: (owner, action) => { executions.push({ owner, action }); return true; } });
   moduleBox.exports.registerIpcHandlers();
   const popup = handlers.get("minicode:menu:popup");
   const owned = { sender: webContents, senderFrame: mainFrame };
@@ -70,6 +72,19 @@ test("menu IPC accepts only its enum from the trusted main frame", async () => {
   assert.equal(calls.length, 0);
   for (const key of ["file", "edit", "view", "help"]) await popup(owned, key, { x: 20, path: "ignored" });
   assert.deepEqual(calls, ["file", "edit", "view", "help"]);
+  const setState = handlers.get("minicode:menu:setState");
+  const state = { terminalEnabled: true, bottomPanelToggleEnabled: false, newProjectEnabled: true, editorFocused: false, accelerators: { terminal: "CommandOrControl+Shift+Y" }, acceleratorBindings: { terminal: ["CommandOrControl+Shift+Y"] }, shortcutOverrides: ["terminal"], shortcutRecording: false };
+  assert.throws(() => setState({ sender: webContents, senderFrame: { url: mainFrame.url } }, state), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+  for (const invalid of [null, {}, { ...state, editorFocused: 1 }, { ...state, extra: true }]) {
+    assert.throws(() => setState(owned, invalid), /capability fields/);
+  }
+  await setState(owned, state);
+  assert.deepEqual(states, [{ owner: window, state }]);
+  const execute = handlers.get("minicode:menu:execute");
+  assert.throws(() => execute({ sender: webContents, senderFrame: { url: mainFrame.url } }, "terminal"), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+  assert.throws(() => execute(owned, { action: "terminal" }), /action id/);
+  assert.equal(await execute(owned, "terminal"), true);
+  assert.deepEqual(executions, [{ owner: window, action: "terminal" }]);
 });
 
 test("preload forwards only the menu key and exposes no path or coordinate argument", async () => {
@@ -86,4 +101,26 @@ test("preload forwards only the menu key and exposes no path or coordinate argum
   assert.equal(calls.length, 0);
   await runtime.desktop.menu.popup("edit", { x: 0, path: "ignored" });
   assert.deepEqual(calls, [["minicode:menu:popup", "edit"]]);
+  const state = { terminalEnabled: true, bottomPanelToggleEnabled: false, newProjectEnabled: true, editorFocused: false };
+  await runtime.desktop.menu.setState(state);
+  assert.deepEqual(calls.at(-1), ["minicode:menu:setState", state]);
+  await runtime.desktop.menu.execute("terminal");
+  assert.deepEqual(calls.at(-1), ["minicode:menu:execute", "terminal"]);
+});
+
+test("preload connects native menu actions to the existing renderer event consumers", () => {
+  const handlers = new Map();
+  const received = [];
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "preload.js"), "utf8"), {
+    require: () => ({
+      ipcRenderer: { sendSync: () => ({ apiBaseUrl: "http://127.0.0.1:8000", wsBaseUrl: "ws://127.0.0.1:8000" }),
+        on: (channel, listener) => { handlers.set(channel, listener); }, invoke() {} },
+      contextBridge: { exposeInMainWorld() {} },
+    }),
+    process: { env: {}, argv: [], contextIsolated: true, platform: "win32", arch: "x64" }, Event,
+    window: { dispatchEvent: event => received.push(event.type) }, console,
+  });
+  const actions = ["new-project", "open-browser-tab", "focus-browser-address-bar", "toggle-file-tree", "toggle-bottom-panel", "toggle-pinned-summary", "toggle-side-panel", "find-in-thread", "find-next-in-thread", "find-previous-in-thread", "navigate-back", "navigate-forward", "previous-thread", "next-thread", "previous-tab", "next-tab", "close-tab", "open-shortcuts", "open-command-menu", "search-files", "search-chats"];
+  for (const action of actions) handlers.get("minicode:menu:" + action)();
+  assert.deepEqual(received, actions);
 });

@@ -10,7 +10,7 @@ function harness(found) {
   let evaluations = 0;
   const waits = [];
   const insertions = [];
-  const session = { setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, on() {}, webRequest: {} };
+  const session = { setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDevicePermissionHandler() {}, on() {}, webRequest: { onHeadersReceived() {} } };
   class View {
     constructor() {
       this.webContents = Object.assign(new EventEmitter(), {
@@ -32,7 +32,7 @@ function harness(found) {
   };
   const moduleValue = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "embedded-browser-manager.js"), "utf8"), {
-    module: moduleValue, exports: moduleValue.exports, URL, Buffer, Date: { now: () => clock }, clearTimeout,
+    module: moduleValue, exports: moduleValue.exports, __dirname, URL, Buffer, Date: { now: () => clock }, clearTimeout,
     setTimeout(callback, delay) { waits.push(delay); clock += delay; callback(); },
     require(name) { return name === "electron" ? { WebContentsView: View, app: {}, dialog: {} } : require(name); },
   });

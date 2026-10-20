@@ -10,7 +10,7 @@ import type {
 import type { ToolCallRecord } from "../lib/tool-call-reducer";
 import type { ShortcutActionId, ShortcutBindings } from "../lib/keyboard-shortcuts";
 import type { AppearanceColorRole, AppearanceColors, AppearanceVariant } from "../lib/appearance-colors";
-import type { AppearanceThemes } from "../lib/appearance-themes";
+import type { AppearanceThemes, AppearanceThemeSelection } from "../lib/appearance-themes";
 import type { CodeThemeId } from "../lib/code-themes";
 import type { CodeThemeAppearance } from "../lib/theme-sharing";
 import type {
@@ -33,7 +33,7 @@ export type ViewMode = "normal" | "verbose" | "summary";
 export type AppMode = "chat" | "code" | "cowork";
 export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
-export type RightStackTab = "preview" | "browser" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}`;
+export type RightStackTab = "preview" | "browser" | "files" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "goal" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}`;
 export type EffortLevel =
   | "off"
   | "minimal"
@@ -62,6 +62,7 @@ export interface SkillInfo {
   user_invocable?: boolean;
   default_prompt?: string;
   source_level?: string;
+  plugin_enabled?: boolean;
   active?: boolean;
 }
 
@@ -131,8 +132,8 @@ export interface ArtifactContentState {
   truncated?: boolean;
   loading?: boolean;
   error?: string;
-  source?: "artifact" | "attachment" | "workspace" | "browser" | "local";
-  /** Real disk origin of a workspace preview; uploaded/generated artifacts have none. */
+  source?: "artifact" | "attachment" | "workspace" | "browser" | "local" | "skill";
+  /** Real disk origin of a workspace or registered Skill preview. */
   sourcePath?: string;
   workspaceRoot?: string;
   loadedAt: number;
@@ -283,6 +284,7 @@ export interface DiffLineComment {
 
 export interface ConversationWorkbenchState {
   agentMode?: AgentMode;
+  goalMode?: boolean;
   diffReview: DiffReviewState | null;
   gitReviewRequest?: GitReviewRequest | null;
   previewArtifact: ArtifactContentState | null;
@@ -298,6 +300,7 @@ export interface ConversationWorkbenchState {
   rightPanelExpanded?: boolean;
   rightStackTabLocked: boolean;
   draft: string;
+  richDraft?: import("../composer/rich-composer-document").RichComposerDocument;
   attachments: ComposerAttachment[];
   quotedMessage: ComposerQuote | null;
   selectedMentions: ComposerSlice["selectedMentions"];
@@ -419,12 +422,19 @@ export interface ContextUsage {
 
 export type SettingsTab =
   | "general"
+  | "import"
+  | "storage"
+  | "config"
+  | "hooks"
+  | "worktrees"
   | "voice"
   | "appearance"
   | "personalization"
+  | "pets"
   | "shortcuts"
   | "provider"
   | "plugins"
+  | "marketplace"
   | "skills"
   | "connectors"
   | "connections"
@@ -436,6 +446,8 @@ export type SettingsTab =
   | "archived";
 
 export interface UISlice {
+  projectsOpen: boolean;
+  projectEditTarget: string | null;
   contextCardCollapsed: boolean;
   setContextCardCollapsed: (collapsed: boolean) => void;
   themeMode: ThemeMode;
@@ -444,10 +456,19 @@ export interface UISlice {
   appearanceThemes: AppearanceThemes;
   textScale: number;
   codeTextScale: number;
+  codeFontBase: 12 | 14;
   reducedMotion: boolean;
+  reducedMotionPreference: "system" | "on" | "off";
+  pointerCursors: boolean;
+  diffMarkerStyle: "color" | "symbols";
   viewMode: ViewMode;
   sendShortcut: SendShortcut;
   followUpBehavior: FollowUpBehavior;
+  defaultTerminalLocation: "bottom" | "right";
+  composerPlainTextMode: boolean;
+  primaryNumberShortcutTarget: "tabs" | "sidebar";
+  setDefaultTerminalLocation: (location: "bottom" | "right") => Promise<void>;
+  setComposerPlainTextMode: (plain: boolean) => Promise<void>;
   shortcutBindings: ShortcutBindings;
   appMode: AppMode;
   workbenchLayout: "tabs" | "split";
@@ -460,6 +481,8 @@ export interface UISlice {
   commandPaletteOpen: boolean;
   settingsOpen: boolean;
   settingsTab: SettingsTab;
+  browserSettingsSection: "general" | "history" | "downloads" | "passwords" | "contacts" | "sites";
+  setBrowserSettingsSection: (section: UISlice["browserSettingsSection"]) => void;
   shortcutsHelpOpen: boolean;
   quickOpenVisible: boolean;
   quickOpenResults: QuickOpenResult[];
@@ -509,10 +532,15 @@ export interface UISlice {
   setTextScale: (s: number) => void;
   setCodeTextScale: (s: number) => void;
   setReducedMotion: (reduced: boolean) => void;
+  setReducedMotionPreference: (preference: "system" | "on" | "off") => void;
+  setPointerCursors: (enabled: boolean) => void;
+  setDiffMarkerStyle: (style: "color" | "symbols") => void;
+  resetAdvancedAppearance: (supportsTranslucency: boolean) => void;
+  patchAppearanceTheme: (variant: AppearanceVariant, patch: Partial<Pick<AppearanceThemeSelection, "fonts" | "contrast" | "opaqueWindows">>) => Promise<void>;
   setViewMode: (m: ViewMode) => void;
   setSendShortcut: (shortcut: SendShortcut) => void;
   setFollowUpBehavior: (behavior: FollowUpBehavior) => void;
-  setShortcutBinding: (action: ShortcutActionId, binding: string) => void;
+  setShortcutBinding: (action: ShortcutActionId, binding: string, index?: number) => void;
   resetShortcutBindings: () => void;
   setAppMode: (m: AppMode) => void;
   setWorkbenchLayout: (layout: "tabs" | "split") => void;
@@ -798,6 +826,8 @@ export interface WorkspaceSlice {
   setDockHeight: (h: number) => void;
   toggleDock: () => void;
   openBottomTab: (t: WorkspaceSlice["activeBottomTab"]) => void;
+  openTerminal: () => void;
+  toggleTerminal: () => void;
   closeBottomDock: () => void;
   setActiveBottomTab: (t: WorkspaceSlice["activeBottomTab"]) => void;
   addPanel: (slot: PanelSlot | (Omit<PanelSlot, "kind"> & { kind: LegacyPanelKind })) => void;
@@ -1190,6 +1220,8 @@ export interface ProviderRawMetadata {
   prompt_cache_diagnostic?: PromptCacheDiagnostic;
 }
 
+export interface AsyncUserQuestion { title: string; options?: string[]; }
+
 export interface TextContentBlock {
   type: "text";
   itemId?: string;
@@ -1199,6 +1231,8 @@ export interface TextContentBlock {
   isStreaming?: boolean;
   providerRaw?: ProviderRawMetadata;
   finishReason?: string;
+  delivery?: "async";
+  questions?: AsyncUserQuestion[];
 }
 export interface ProcessContentBlock {
   type: "process";
@@ -1271,6 +1305,7 @@ export type ContentBlock = (GuardianAssessmentContentBlock | GuardianWarningCont
 export interface ToolHistoryPage { before: number; remaining: number; total: number; revision?: string }
 
 export interface ChatMessage {
+  asyncRequestId?: string;
   id: string;
   turnId?: string;
   toolPage?: ToolHistoryPage;
@@ -1329,6 +1364,7 @@ export interface ConversationMeta {
   id: string;
   title: string;
   updatedAt: string;
+  createdAt?: string;
   revision?: number;
   summary?: string;
   compactionState?: string;
@@ -1364,6 +1400,9 @@ export interface ConversationMeta {
 }
 
 export interface ConversationGoal {
+  tokenBudget?: number | null;
+  tokensUsed?: number;
+  timeUsedSeconds?: number;
   id?: string;
   text: string;
   status: "active" | "paused" | string;
@@ -1378,6 +1417,9 @@ export const toConversationGoal = (goal: GoalInfo | null | undefined): Conversat
   return {
     id: goal?.id,
     text,
+    tokenBudget: goal?.token_budget,
+    tokensUsed: goal?.tokens_used,
+    timeUsedSeconds: goal?.time_used_seconds,
     status: goal?.status || "active",
     createdAt: goal?.created_at,
     updatedAt: goal?.updated_at,
@@ -1410,6 +1452,7 @@ export interface SideChatThread {
   messages: ChatMessage[];
   isStreaming: boolean;
   draft: string;
+  richDraft?: import("../composer/rich-composer-document").RichComposerDocument;
   inheritedContext?: string;
   parentConversationId?: string;
   selectedContext?: CodeSelectionContext;
@@ -1488,7 +1531,7 @@ export interface ChatSlice {
   ) => void;
   setFinalAnswerAttachments: (conversationId: string | undefined, attachments: ReplyAttachmentMeta[], messageId?: string) => void;
   completeAgentMessage: (
-    item: { id: string; text: string; source?: string; status?: string },
+    item: { id: string; text: string; source?: string; status?: string; delivery?: "async"; questions?: AsyncUserQuestion[] },
     conversationId?: string,
     metadata?: Pick<TextContentBlock, "providerRaw" | "finishReason">,
     messageId?: string,
@@ -1557,7 +1600,7 @@ export interface ChatSlice {
   setLastUsage: (u: ChatSlice["lastUsage"]) => void;
   ensureSideChat: (id: string, owner?: { workspaceRoot: string; permissionMode: PermissionMode; parentConversationId?: string }) => void;
   removeSideChat: (id: string) => void;
-  setSideChatDraft: (id: string, draft: string) => void;
+  setSideChatDraft: (id: string, draft: string, richDraft?: import("../composer/rich-composer-document").RichComposerDocument) => void;
   startSideChatMessage: (
     id: string,
     content: string,
@@ -1640,12 +1683,14 @@ export interface ComposerQuote {
 }
 
 export interface ComposerSlice {
+  goalMode: boolean;
   workspaceComposerDrafts: Record<string, import("./composer-drafts").ComposerDraft>;
   composerDraftsReady: boolean;
   composerDraftStoragePending: boolean;
   composerDraftStorageError: string | null;
   composerDraftRevision: number;
   draft: string;
+  richDraft?: import("../composer/rich-composer-document").RichComposerDocument;
   attachments: ComposerAttachment[];
   quotedMessage: ComposerQuote | null;
   permissionMode: PermissionMode;
@@ -1662,7 +1707,7 @@ export interface ComposerSlice {
   selectedSkills: SkillContextRef[];
   slashPanelOpen: boolean;
   mentionPanelOpen: boolean;
-  setDraft: (d: string) => void;
+  setDraft: (d: string, richDraft?: import("../composer/rich-composer-document").RichComposerDocument) => void;
   setQuotedMessage: (message: ComposerQuote) => void;
   clearQuotedMessage: () => void;
   addAttachment: (a: ComposerAttachment) => void;
@@ -2051,6 +2096,11 @@ export interface RecentWorkspaceProjection {
   name: string;
   projectType: string;
   lastOpened: number;
+  sourceFolders?: string[];
+  managedWorkspaceRoot?: string;
+  pinned?: boolean;
+  appearance?: import("../lib/project-appearance").ProjectAppearance | null;
+  named?: boolean;
 }
 
 export interface GuidelinesReloadProjection {

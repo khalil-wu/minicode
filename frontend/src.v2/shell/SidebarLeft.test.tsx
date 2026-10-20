@@ -22,23 +22,22 @@ vi.hoisted(() => {
 
 import { SidebarLeft } from "./SidebarLeft";
 import { HeaderBar } from "./HeaderBar";
-import { NavigationRail } from "./NavigationRail";
 import { useAppStore, waitEditorDraftRecovery } from "../stores";
 import { sendClientCommand, sendClientCommandAwaitResult, sendConversationDeleteCommand } from "../protocol/ws-outbox";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import type { ChatMessage } from "../stores/types";
 import { LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 
-const renderWithNavigation = (props: { embedded?: boolean; onNavigate?: () => void } = {}) => render(<>
-  <NavigationRail />
+const renderSidebarShell = (props: { embedded?: boolean; onNavigate?: () => void } = {}) => render(<>
   <HeaderBar leftPanelAvailable={false} leftPanelOpen={false} rightPanelAvailable={false} rightPanelOpen={false}
     onToggleLeftPanel={vi.fn()} onToggleRightPanel={vi.fn()} />
-  <SidebarLeft withGlobalRail {...props} />
+  <SidebarLeft {...props} />
 </>);
 const chooseMode = (name: "代码" | "聊天") => {
-  const choice = within(screen.getByRole("navigation", { name: "应用导航" })).getByRole("button", { name: name === "代码" ? "Code" : "聊天首页", exact: true });
-  fireEvent.click(choice);
-  return choice;
+  const trigger = screen.getByRole("button", { name: "切换工作模式" });
+  fireEvent.click(trigger);
+  fireEvent.click(screen.getByRole("menuitem", { name: name === "代码" ? "代码" : "协作", exact: true }));
+  return trigger;
 };
 const initialWindowWidth = window.innerWidth;
 
@@ -212,7 +211,7 @@ describe("SidebarLeft session status", () => {
     expect(aside.style.width).toBe("520px");
   });
 
-  it("uses the actual workspace width when the navigation rail occupies part of the window", () => {
+  it("uses the actual workspace width as the workspace is resized", () => {
     let measured: ResizeObserverCallback;
     const observe = vi.fn();
     vi.stubGlobal("ResizeObserver", class {
@@ -267,7 +266,7 @@ describe("SidebarLeft session status", () => {
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "切换工作模式" }));
   });
 
-  it("switches the bell to real activity groups while retaining main task, models, MCP, and draft", () => {
+  it("keeps restored task status in the real conversation list without the removed activity button", () => {
     const now = new Date();
     useAppStore.setState({ rightStackTab: "tasks", draft: "unfinished activity draft", currentModel: "selected-model",
       currentProvider: "selected-provider", effortLevel: "high",
@@ -286,14 +285,10 @@ describe("SidebarLeft session status", () => {
     const onNavigate = vi.fn();
     render(<SidebarLeft embedded onNavigate={onNavigate} />);
     expect(screen.getByRole("region", { name: "工作区 MiniCode" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "查看任务状态" }));
-    expect(within(screen.getByRole("region", { name: "优先级" })).getByText("Waiting task")).toBeTruthy();
-    expect(within(screen.getByRole("region", { name: "优先级" })).getByLabelText("等待回复")).toBeTruthy();
-    expect(within(screen.getByRole("region", { name: "今天" })).getByText("Main task")).toBeTruthy();
-    expect(screen.getByText("Recorded task summary")).toBeTruthy();
-    expect(screen.queryByRole("region", { name: "工作区 MiniCode" })).toBeNull();
-    const active = screen.getByRole("button", { name: "返回项目与最近" });
-    expect(active.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.queryByRole("button", { name: "查看任务状态" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "返回项目与最近" })).toBeNull();
+    expect(within(screen.getByRole("region", { name: "最近" })).getByText("Waiting task")).toBeTruthy();
+    expect(screen.getByLabelText("等待回复")).toBeTruthy();
     const after = useAppStore.getState();
     expect(after.rightStackTab).toBe("tasks");
     expect(after.conversationId).toBe(before.conversationId);
@@ -305,7 +300,6 @@ describe("SidebarLeft session status", () => {
     expect(after.effortLevel).toBe(before.effortLevel);
     expect(after.mcpServers).toBe(before.mcpServers);
     expect(onNavigate).not.toHaveBeenCalled();
-    fireEvent.click(active);
     expect(screen.getByRole("region", { name: "工作区 MiniCode" })).toBeTruthy();
     expect(screen.getByRole("region", { name: "最近" })).toBeTruthy();
     expect(screen.queryByRole("region", { name: "优先级" })).toBeNull();
@@ -406,13 +400,13 @@ describe("SidebarLeft session status", () => {
     expect(screen.getByText("Restored pending prompt")).toBeTruthy();
   });
 
-  it("keeps project navigation in place when Code opens from the rail", () => {
+  it("keeps project navigation in place when Code opens from the brand menu", () => {
     useAppStore.setState({
       appMode: "cowork",
       workingDirectory: "",
     });
 
-    renderWithNavigation();
+    renderSidebarShell();
 
     chooseMode("代码");
 
@@ -430,7 +424,7 @@ describe("SidebarLeft session status", () => {
       conversations: [{ id: "conv-restored", title: "Project chat", workspaceRoot: "C:\\Desktop\\MiniCode", updatedAt: "2026-10-05T00:00:00Z" }],
       draft: "Keep the draft",
     });
-    renderWithNavigation();
+    renderSidebarShell();
     const project = screen.getByRole("region", { name: "工作区 MiniCode" });
     const folder = within(project).getByRole("button", { name: "MiniCode", exact: true });
     const list = screen.getByTestId("conversation-list");
@@ -448,79 +442,73 @@ describe("SidebarLeft session status", () => {
     expect(screen.queryByText("普通任务")).toBeNull();
   });
 
-  it("returns to conversations through the rail chat home", () => {
+  it("returns to conversations through the brand mode menu", () => {
     useAppStore.setState({ appMode: "code" });
-    renderWithNavigation();
+    renderSidebarShell();
 
     const choice = chooseMode("聊天");
 
     expect(useAppStore.getState().appMode).toBe("cowork");
-    expect(choice.getAttribute("aria-current")).toBe("page");
+    expect(choice.getAttribute("aria-expanded")).toBe("false");
     expect(screen.getByText("Restored pending prompt")).toBeTruthy();
   });
 
-  it("uses rail navigation while an embedded sidebar retains its conversation list", () => {
+  it("completes embedded sidebar navigation through its actual mode menu", () => {
     const onNavigate = vi.fn();
     useAppStore.setState({ appMode: "code" });
 
-    renderWithNavigation({ embedded: true, onNavigate });
+    renderSidebarShell({ embedded: true, onNavigate });
     chooseMode("聊天");
 
-    expect(onNavigate).not.toHaveBeenCalled();
+    expect(onNavigate).toHaveBeenCalledOnce();
     expect(screen.getByText("Restored pending prompt")).toBeTruthy();
   });
 
-  it("keeps chat home and Code in the rail without duplicate header or sidebar mode switchers", () => {
-    const { container } = renderWithNavigation();
-    const rail = screen.getByRole("navigation", { name: "应用导航" });
-    const cowork = within(rail).getByRole("button", { name: "聊天首页", exact: true });
-    const code = within(rail).getByRole("button", { name: "Code", exact: true });
+  it("uses one brand mode menu and retains the selected mode when reopened", () => {
+    const { container } = renderSidebarShell();
     expect(screen.queryByRole("tablist", { name: "工作模式" })).toBeNull();
     expect(container.querySelector(".mc-header-mode-switch")).toBeNull();
-    expect(screen.getAllByRole("button", { name: "Code", exact: true })).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "聊天首页", exact: true })).toHaveLength(1);
+    expect(screen.queryByRole("navigation", { name: "应用导航" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "切换工作模式" })).toHaveLength(1);
     expect(container.querySelector(".mc-sidebar-left")!.querySelector('[role="tablist"]')).toBeNull();
-    expect(cowork.getAttribute("aria-current")).toBe("page");
-
-    fireEvent.click(code);
+    chooseMode("代码");
     expect(useAppStore.getState().appMode).toBe("code");
-    expect(code.getAttribute("aria-current")).toBe("page");
-
-    fireEvent.click(cowork);
+    fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+    expect(screen.getByRole("menuitem", { name: "代码", exact: true }).getAttribute("aria-current")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitem", { name: "协作", exact: true }));
     expect(useAppStore.getState().appMode).toBe("cowork");
-    expect(cowork.getAttribute("aria-current")).toBe("page");
   });
 
   it("keeps settings in the persistent sidebar footer", () => {
     useAppStore.setState({ settingsOpen: false });
     render(<SidebarLeft />);
 
-    const settingsButton = screen.getByRole("button", { name: "设置" });
-    expect(settingsButton.closest(".mc-sidebar-footer")).toBeTruthy();
-    fireEvent.click(settingsButton);
+    const profile = screen.getByRole("button", { name: "打开个人资料菜单" });
+    expect(profile.closest(".mc-sidebar-footer")).toBeTruthy();
+    fireEvent.click(profile);
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
     expect(useAppStore.getState().settingsOpen).toBe(true);
   });
 
-  it("keeps a working theme toggle beside settings", () => {
+  it("keeps appearance in Settings and omits the removed footer theme toggle", () => {
     render(<SidebarLeft />);
-
-    const lightButton = screen.getByRole("button", { name: "切换到浅色模式" });
-    expect(lightButton.closest(".mc-sidebar-footer")).toBeTruthy();
-    fireEvent.click(lightButton);
-    expect(useAppStore.getState().themeMode).toBe("light");
-
-    fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
+    expect(screen.queryByRole("button", { name: "切换到浅色模式" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "切换到深色模式" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "打开个人资料菜单" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "general" });
     expect(useAppStore.getState().themeMode).toBe("dark");
   });
 
-  it("retains task navigation while leaving global settings and plugin actions to the rail", () => {
-    render(<SidebarLeft withGlobalRail />);
+  it("keeps task, scheduled, plugin and profile navigation in the real sidebar", () => {
+    render(<SidebarLeft />);
     expect(screen.getByRole("button", { name: "新聊天" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "搜索", exact: true })).toBeTruthy();
     expect(screen.getByText("Restored pending prompt")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "设置", exact: true })).toBeNull();
-    expect(screen.queryByRole("button", { name: "插件", exact: true })).toBeNull();
-    expect(screen.queryByRole("button", { name: "已安排", exact: true })).toBeNull();
+    expect(screen.getByRole("button", { name: "打开个人资料菜单" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "插件", exact: true })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "已安排", exact: true })).toBeTruthy();
   });
 
   it("keeps narrow stored widths as a full session sidebar", () => {
@@ -576,7 +564,7 @@ describe("SidebarLeft session status", () => {
       ],
     });
 
-    renderWithNavigation();
+    renderSidebarShell();
 
     chooseMode("代码");
 

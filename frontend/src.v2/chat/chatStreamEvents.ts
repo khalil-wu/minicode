@@ -13,7 +13,7 @@ import { rejectClientCommandResult, sendClientCommand } from "../protocol/ws-out
 import { isInFlightProjection } from "../stores/shared-helpers";
 import { applyUserMessageQueueUpdate } from "./sessionEvents";
 import type { StreamBuffer } from "../lib/stream-buffer";
-import { getToolCallsFromMessage, messageIndices, toolCallLocations } from "../lib/content-blocks";
+import { getToolCallsFromMessage, isCodeCellToolFact, messageIndices, toolCallLocations } from "../lib/content-blocks";
 import {
   isCommandToolRecord,
   isTerminalToolCallStatus,
@@ -344,7 +344,8 @@ const resolveToolCall = (
   const exact = freshCandidates.filter((candidate) => toolCallMatchesScope(candidate, scope));
   if (exact.length === 1) return { record: exact[0], matchScope: scope };
   if (exact.length > 1) return { reason: "ambiguous_scoped_tool_call" };
-  if (freshCandidates.length === 1 && canMigrateToolCallScope(freshCandidates[0], scope, messageId)) {
+  if (freshCandidates.length === 1 && !hasTerminalAssistantForConversation(conversationId, messageId)
+    && canMigrateToolCallScope(freshCandidates[0], scope, messageId)) {
     return {
       record: freshCandidates[0],
       matchScope: toolCallScopeFromRecord(freshCandidates[0]),
@@ -513,13 +514,18 @@ const rememberStaleTurnEventKey = (key: string) => {
   staleTurnEventKeys.add(key);
 };
 
-const markStaleTurnEventIfMissing = (conversationId?: string, messageId?: string): boolean => {
+const markStaleTurnEventIfMissing = (conversationId?: string, messageId?: string, toolEvent?: {
+  type: string; id?: string; tool_call_id?: string; turn_id?: string; call_source?: ToolCallRecord["callSource"];
+}): boolean => {
   // An event without an owner is inspector-only. Never compare it with the
   // active conversation's stream or add it to the stale-turn fence.
   if (!conversationId?.trim()) return false;
   if (!messageId) return false;
-  // DONE is the turn's delivery fence. Replayed or delayed item/tool events
-  // must never mutate an assistant message that already crossed it.
+  // A yielded cell retains its original tool records after the turn ends.
+  // Only its published receipt and exact leaf source can cross DONE.
+  if (toolEvent && messagesForConversation(conversationId, messageId).some(message => isCodeCellToolFact(message, {
+    id: toolEvent.tool_call_id || toolEvent.id || "", turnId: toolEvent.turn_id, callSource: toolEvent.call_source,
+  }, toolEvent.type === "tool_call" ? "start" : "update"))) return false;
   if (hasTerminalAssistantForConversation(conversationId, messageId)) return true;
   if (hasStreamingAssistantForConversation(conversationId, messageId)) return false;
   if (!hasStreamingAssistantForConversation(conversationId)) return false;
@@ -784,7 +790,7 @@ const applyChatStreamEvent = (
     }
     case "item.completed": {
       const ev = e as unknown as {
-        item?: { id?: string; type?: string; text?: string; source?: string; status?: string; started_at?: number; finished_at?: number };
+        item?: { id?: string; type?: string; text?: string; source?: string; status?: string; started_at?: number; finished_at?: number; delivery?: "async"; questions?: import("../stores/types").AsyncUserQuestion[] };
         finish_reason?: string;
         provider_raw?: Record<string, unknown>;
         attachments?: Array<{ path: string; size: number; is_image: boolean }>;
@@ -808,6 +814,8 @@ const applyChatStreamEvent = (
             text: ev.item.text || "",
             source: ev.item.source,
             status: ev.item.status,
+            delivery: ev.item.delivery,
+            questions: ev.item.questions,
           },
           conversationId,
           { providerRaw: ev.provider_raw, finishReason: ev.finish_reason },
@@ -881,7 +889,7 @@ const applyChatStreamEvent = (
     }
     case "tool_call": {
       const messageId = eventMessageId(e);
-      if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
+      if (markStaleTurnEventIfMissing(conversationId, messageId, e)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const scope = toolCallScopeFromEvent(e);
       const resolution = resolveToolCall(
@@ -932,7 +940,7 @@ const applyChatStreamEvent = (
     case "tool_output_delta": {
       const delta = e as ToolOutputDeltaEvent;
       const messageId = eventMessageId(e);
-      if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
+      if (markStaleTurnEventIfMissing(conversationId, messageId, delta)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       if (delta.id && delta.output) {
         const scope = toolCallScopeFromEvent(delta);
@@ -978,7 +986,7 @@ const applyChatStreamEvent = (
     case "command_output_chunk": {
       const ev = e as CommandOutputChunkEvent;
       const messageId = eventMessageId(e);
-      if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
+      if (markStaleTurnEventIfMissing(conversationId, messageId, ev)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const toolCallId = String(ev.tool_call_id || ev.id || "").trim();
       const scope = toolCallScopeFromEvent(ev);
@@ -1033,26 +1041,8 @@ const applyChatStreamEvent = (
     }
     case "tool_result": {
       const messageId = eventMessageId(e);
-      if (markStaleTurnEventIfMissing(conversationId, messageId)) return true;
+      if (markStaleTurnEventIfMissing(conversationId, messageId, e)) return true;
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
-      for (const supersededId of e.superseded_tool_call_ids ?? []) {
-        if (!supersededId || supersededId === e.id) continue;
-        useAppStore.getState().updateToolCall(supersededId, {
-          temporaryRemoved: true,
-          diff: undefined,
-        }, conversationId, undefined, messageId);
-      }
-      if (Array.isArray(e.output_files) && e.output_files.length > 0) {
-        useAppStore.getState().setFinalAnswerAttachments(
-          conversationId,
-          e.output_files.map((file) => ({
-            path: file.path,
-            size: file.size,
-            isImage: Boolean(file.is_image || file.mime_type?.startsWith("image/")),
-          })),
-          messageId,
-        );
-      }
       const scope = toolCallScopeFromEvent(e);
       const resolution = resolveToolCall(
         e.id,
@@ -1063,6 +1053,24 @@ const applyChatStreamEvent = (
       );
       const toolCall = resolution.record;
       if (toolCall) {
+        for (const supersededId of e.superseded_tool_call_ids ?? []) {
+          if (!supersededId || supersededId === e.id) continue;
+          useAppStore.getState().updateToolCall(supersededId, {
+            temporaryRemoved: true,
+            diff: undefined,
+          }, conversationId, undefined, messageId);
+        }
+        if (Array.isArray(e.output_files) && e.output_files.length > 0) {
+          useAppStore.getState().setFinalAnswerAttachments(
+            conversationId,
+            e.output_files.map((file) => ({
+              path: file.path,
+              size: file.size,
+              isImage: Boolean(file.is_image || file.mime_type?.startsWith("image/")),
+            })),
+            messageId,
+          );
+        }
         const updated = reduceToolCallResult(new Map([[e.id, toolCall]]), e).get(e.id);
         if (updated) {
           if (resolution.migrated) {
@@ -1293,7 +1301,7 @@ const applyChatStreamEvent = (
       if (target.stale) return true;
       const terminalMessageId = terminalMessageIdForEvent(conversationId, target.messageId);
       const previousMessage = messagesForConversation(conversationId, terminalMessageId).find((item) => item.role === "assistant");
-      const metadataOnly = Boolean(previousMessage?.terminalStatus);
+      const metadataOnly = Boolean(previousMessage?.terminalStatus && !isInFlightProjection(previousMessage));
       flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
       const usage = usageFromDoneEvent(e);
       const replayed = isReplayedChatEvent(e);

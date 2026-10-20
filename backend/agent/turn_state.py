@@ -137,6 +137,9 @@ def complete_agent_message_block(
     }
     if finish_reason:
         block['finishReason'] = finish_reason
+    for key in ('delivery', 'questions', 'phase'):
+        if key in item:
+            block[key] = item[key]
     safe_provider_raw = provider_raw_for_projection(provider_raw)
     if safe_provider_raw:
         block['providerRaw'] = safe_provider_raw
@@ -840,7 +843,7 @@ class AgentTurnState:
         )
         return self._run_failed_message
 
-    def _terminalized_blocks(self, terminal_status: str) -> list[dict[str, Any]]:
+    def _terminalized_blocks(self, terminal_status: str, live_tool_call_ids: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
         interrupted = terminal_status in {'cancelled', 'interrupted', 'partial'}
         cancelled = terminal_status in {'cancelled', 'interrupted'}
         failed = terminal_status == 'failed'
@@ -870,7 +873,7 @@ class AgentTurnState:
                 next_block['isStreaming'] = False
             elif next_block.get('type') == 'tool_call' and isinstance(next_block.get('record'), dict):
                 record = dict(next_block['record'])
-                if record.get('status') in {'running', 'pending'}:
+                if record.get('status') in {'running', 'pending'} and record.get('id') not in live_tool_call_ids:
                     # Keep cancellation distinct from a max-output/partial
                     # completion.  The live client renders an interrupted run
                     # as ``cancelled``; durable snapshots must preserve that
@@ -891,8 +894,8 @@ class AgentTurnState:
             blocks.append(next_block)
         return blocks
 
-    def finalize(self, *, terminal_status: str) -> AgentTurnSnapshot:
-        blocks = self._terminalized_blocks(terminal_status)
+    def finalize(self, *, terminal_status: str, live_tool_call_ids: set[str] | frozenset[str] = frozenset()) -> AgentTurnSnapshot:
+        blocks = self._terminalized_blocks(terminal_status, live_tool_call_ids)
         tool_calls = [
             dict(block['record'])
             for block in blocks

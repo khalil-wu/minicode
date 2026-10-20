@@ -1228,7 +1228,7 @@ class ContextBuilder:
         return "## Inherited Memory\n" + "\n\n".join(note_blocks)
 
 
-    async def start_turn(self, user_message: str, state: AgentState) -> LLMMessage:
+    async def start_turn(self, user_message: str, state: AgentState, *, input_role: str = "user") -> LLMMessage:
         """Render and store one model-visible user turn."""
         user_message = str(user_message or "")
         if not user_message.strip() and not state.attachments:
@@ -1282,14 +1282,14 @@ class ContextBuilder:
                 raw_content=rendered_retrieval,
             )
         admitted_message = LLMMessage(
-            role="user",
+            role=input_role,
             content=user_turn_content,
             images=attachment_plan.images,
             documents=attachment_plan.documents,
             attachment_refs=self._snapshot_attachment_refs(state.attachments),
             runtime_context=runtime_context,
-            is_user_input=True,
-            accepted_input={"single_text": not bool(state.attachments)},
+            is_user_input=input_role == "user",
+            accepted_input={"single_text": not bool(state.attachments)} if input_role == "user" else {},
             invoked_user_owned_skill_paths=tuple(invoked_paths),
         )
         self._history_store.append(admitted_message, raw_content=user_turn_content)
@@ -2669,6 +2669,43 @@ class ContextBuilder:
                 "content": text,
             }
         )
+
+    def append_developer_context(self, content: str) -> None:
+        self._history_store.append(LLMMessage(role="developer", content=content), raw_content=content)
+
+    def append_user_goal_update(self, *, objective: str | None = None, status: str | None = None,
+        clear: bool = False, message_id: str | None = None, turn_id: str = "") -> LLMMessage:
+        """Record one goal API instruction without admitting a new user turn."""
+        complete = True
+        lines = []
+        if clear:
+            lines.append("User cleared the goal.")
+        else:
+            if objective is not None:
+                encoded = json.dumps(objective, ensure_ascii=False)
+                complete = len(encoded.encode("utf-8")) <= 700
+                lines.append(f"User set the goal: {encoded}" if complete
+                    else "User set the goal: [objective omitted; exceeds the evidence limit].")
+            if status is not None:
+                lines.append(f"User set goal status: {json.dumps(status)}.")
+        body = '<codex_internal_context source="user_goal">\n' + "\n".join(lines) + '\n</codex_internal_context>'
+        message = LLMMessage(role="user", content=body, input_origin="user", is_user_input=False,
+            accepted_input={"message_id": message_id or f"goal_{new_uuid7()}", "turn_id": turn_id,
+                "single_text": complete, "kind": "user.goal" if complete else "user.goal.omitted"})
+        return self.append_recorded_user_goal_update(message)
+
+    def append_recorded_user_goal_update(self, message: LLMMessage, *, append_history: bool = True) -> LLMMessage:
+        facts = dict(message.accepted_input)
+        for existing in self._history:
+            if (existing.accepted_input or {}).get("message_id") == facts["message_id"]:
+                return existing
+        if append_history:
+            self._history_store.append(message, raw_content=message.content)
+        order = facts["order"] if "order" in facts else self.guardian_evidence.reserve_order()
+        self.record_admitted_user_input(message, text=message.content, turn_id=facts["turn_id"],
+            message_id=facts["message_id"], acceptance_order=order)
+        message.accepted_input["kind"] = facts["kind"]
+        return message
 
     def append_tool_result(
         self,

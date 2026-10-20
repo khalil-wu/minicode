@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from backend.agent.runtime import AgentRuntime, SwarmTaskStatus
@@ -235,7 +236,7 @@ class SendMessageTool(_AgentCoordinationTool):
             parameters={
                 "type": "object",
                 "properties": {
-                    "recipient": {
+                    "target": {
                         "type": "string",
                         "description": "Target teammate name/agent_type, agent id, subagent id, 'parent', or '*' to broadcast to every running teammate you own (optionally narrowed by team_name).",
                     },
@@ -260,13 +261,13 @@ class SendMessageTool(_AgentCoordinationTool):
                         "description": "Optional logical team name.",
                     },
                 },
-                "required": ["recipient", "message"],
+                "required": ["target", "message"],
                 "additionalProperties": False,
             },
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        recipient = str(args.get("recipient") or "").strip()
+        recipient = str(args.get("target") or args.get("recipient") or "").strip()
         message = str(args.get("message") or "").strip()
         if not recipient:
             return self._error_result("Missing recipient argument")
@@ -284,6 +285,11 @@ class SendMessageTool(_AgentCoordinationTool):
 
         runtime = _runtime(context)
         control = AgentControlPlane(context, runtime=runtime)
+        if control.source_v2 and self.delivery_mode == "trigger_turn" and (
+            recipient in {"parent", "team-lead"} or control.normalize_public_tree_path(recipient) == "/root"):
+            return self._error_result("Follow-up tasks can't target the root agent")
+        if control.actor_is_subagent and control.normalize_public_tree_path(recipient) == "/root":
+            recipient = "parent"
         if self.delivery_mode == "trigger_turn" and not control.can_use_operation("followup"):
             return self._error_result("The current agent cannot start a follow-up turn.")
         if recipient in {"*", "all"}:
@@ -350,7 +356,17 @@ class SendMessageTool(_AgentCoordinationTool):
                     f"Recipient {recipient} is stopped and its TaskTool resume runtime is unavailable."
                 )
             if callable(bind) and resume_now:
-                bind(recipient, context, new_session=True)
+                resume_context = context
+                if control.source_v2:
+                    root_context = context.run_context.coordination_root_context if control.actor_is_subagent else context
+                    if root_context is None:
+                        return self._error_result("Root coordination runtime is unavailable for this follow-up")
+                    parent_id = recipient_record.parent_run_id if runtime.get_subagent(recipient_record.parent_run_id) is not None else coordination_agent_id(root_context.metadata)
+                    resume_context = replace(root_context, emit_event=context.emit_event, tool_call_id=context.tool_call_id,
+                        metadata={**root_context.metadata, **{key: context.metadata[key] for key in (
+                            "assistant_message_id", "parent_message_id", "conversation_id", "turn_id", "window_instance_id", "window_owner_id") if key in context.metadata},
+                            "agent_id": parent_id})
+                bind(recipient, resume_context, new_session=True)
         try:
             # A teammate's lifecycle gate matches on the message's team. When
             # the caller addressed a named teammate (``name@team``) and did not
@@ -371,6 +387,7 @@ class SendMessageTool(_AgentCoordinationTool):
                 summary=summary,
                 sender_mailbox_epoch=_actor_mailbox_epoch(context),
                 delivery_mode=self.delivery_mode,
+                notify_parent=not control.source_v2,
             )
         except ValueError as exc:
             return self._error_result(str(exc))
@@ -408,7 +425,7 @@ class SendMessageTool(_AgentCoordinationTool):
         else:
             delivery = "queued"
         return ToolResult(
-            content=f"Message {record.message_id} sent from {sender} to {recipient}.",
+            content="" if control.source_v2 else f"Message {record.message_id} sent from {sender} to {recipient}.",
             display_summary=summary or f"Message to {recipient}",
             result_kind="subagent",
             runtime_metadata={
@@ -422,6 +439,14 @@ class SendMessageTool(_AgentCoordinationTool):
                 ),
             },
         )
+
+class SourceSendMessageTool(SendMessageTool):
+    def get_schema(self):
+        return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {
+            "target": {"type": "string", "description": "Agent id or canonical task name."},
+            "message": {"type": "string", "description": "Message to deliver without starting an idle agent."},
+        }, "required": ["target", "message"], "additionalProperties": False})
+
 
 class FollowupTaskTool(SendMessageTool):
     """Send a task that explicitly starts the recipient's next turn."""

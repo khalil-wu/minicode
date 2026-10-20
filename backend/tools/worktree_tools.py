@@ -41,6 +41,7 @@ def _is_registered_hook_worktree(path: str, context: Any) -> bool:
 
 def _owned_git_worktree_path(manager: Any, requested_path: Path) -> Path:
     from backend.workspace.worktree import isolated_worktree_root
+    from backend.services.worktree_settings_service import is_managed_worktree_path
 
     owned_root = isolated_worktree_root(Path(manager.repo_root))
     if requested_path.is_absolute():
@@ -49,6 +50,8 @@ def _owned_git_worktree_path(manager: Any, requested_path: Path) -> Path:
         candidate = (Path(manager.repo_root) / requested_path).resolve()
     else:
         candidate = (owned_root / requested_path).resolve()
+    if is_managed_worktree_path(candidate, Path(manager.repo_root)):
+        return candidate
     try:
         relative = candidate.relative_to(owned_root)
     except ValueError as exc:
@@ -268,6 +271,8 @@ class CreateWorktreeTool(BaseTool):
                     context.conversation_id, path=str(hook_path), backend="hook",
                     workspace_root=str(context.workspace_root or ""),
                 )
+            from backend.workspace.local_environment_lifecycle import run_context_worktree_environment
+            await run_context_worktree_environment(Path(context.workspace_root), hook_path, "setup", context)
             return self._success_result(
                 f"已通过 WorktreeCreate hook 创建 worktree: {hook_path}"
             )
@@ -358,6 +363,8 @@ class RemoveWorktreeTool(BaseTool):
         hook_mgr_result = None
         registered_hook = _is_registered_hook_worktree(normalized_path, context)
         if registered_hook:
+            from backend.workspace.local_environment_lifecycle import run_context_worktree_environment
+            await run_context_worktree_environment(Path(context.workspace_root), Path(normalized_path), "cleanup", context)
             hook_mgr_result = await _run_worktree_hook(
                 hook_manager,
                 "remove",
@@ -470,7 +477,9 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
             return result
 
         try:
-            return await to_thread_cancel_safe(WorktreeManager, workspace, git_runner=git_runner)
+            from backend.workspace.local_environment_lifecycle import context_environment_runner
+            return await to_thread_cancel_safe(WorktreeManager, workspace, git_runner=git_runner,
+                environment_runner=context_environment_runner(context, loop))
         except NotGitRepositoryError:
             return None
     return None

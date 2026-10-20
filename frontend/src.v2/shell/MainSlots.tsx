@@ -1,3 +1,4 @@
+import { LocalEnvironmentActions } from "./LocalEnvironmentActions";
 import { useI18n } from "../i18n";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
@@ -5,7 +6,7 @@ import { ArrowLeft, Columns2, Folder, Maximize2, Minimize2, Search, SlidersHoriz
 import { useAppStore } from "../stores";
 import type { PanelSlot } from "../stores/types";
 import { ChatPane } from "../chat/ChatPane";
-import { returnToBrowserPage } from "../chat/openWebInBrowser";
+import { openNewBrowserTab, returnToBrowserPage } from "../chat/openWebInBrowser";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
@@ -27,6 +28,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   const floating = useAppStore((s) => s.rightPanelExpanded && s.rightPanelOpen);
   const forceChat = requestedForceChat || floating;
   const panelSlots = useAppStore((s) => s.panelSlots);
+  const appMode = useAppStore((s) => s.appMode);
   const focusPanel = useAppStore((s) => s.focusPanel);
   const togglePanelMaximized = useAppStore((s) => s.togglePanelMaximized);
   const resizePanel = useAppStore((s) => s.resizePanel);
@@ -99,7 +101,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
         {(conversationTitle || showEditorLayout || activeSlot.kind === "chat") && (
           <div className="mc-workbench-toolbar">
             {conversationTitle && <span className="mc-workbench-title" title={conversationTitle}><Folder size={17} aria-hidden="true" />{conversationTitle}</span>}
-            {conversationTitle && !pendingConversationSwitchId && activeSlot.kind === "chat" && (
+            {appMode === "code" && conversationTitle && !pendingConversationSwitchId && activeSlot.kind === "chat" && (
               <button
                 type="button"
                 className="btn-ghost mc-icon-button"
@@ -143,6 +145,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
               </div>
             )}
             <div className="mc-workbench-task-actions">
+              <LocalEnvironmentActions />
               <ChatActionsButton />
               {visibleSlots.some((slot) => slot.kind === "chat") && <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("切换摘要")} title={tr("切换摘要")}
                 aria-pressed={!contextCardCollapsed && !rightPanelOpen} onClick={() => {
@@ -152,10 +155,10 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
                   else setContextCardCollapsed(!contextCardCollapsed);
                 }}><SlidersHorizontal size={17} /></button>}
               {(!rightPanelOpen || (effectiveMaximizedSlot && effectiveMaximizedSlot.kind !== "chat")) && <button
-                type="button" className="btn-ghost mc-icon-button" aria-label={tr("打开右侧栏")} title={tr("打开右侧栏")}
+                type="button" className="btn-ghost mc-icon-button" aria-label={tr("新建标签页")} title={tr("新建标签页")}
                 aria-controls="workbench-right-sidebar" onClick={() => {
                   if (effectiveMaximizedSlot && effectiveMaximizedSlot.kind !== "chat") togglePanelMaximized(effectiveMaximizedSlot.id);
-                  if (!rightPanelOpen) toggleRightPanel();
+                  openNewBrowserTab();
                 }}><PanelRightOpen size={17} /></button>}
             </div>
           </div>

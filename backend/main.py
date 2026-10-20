@@ -56,10 +56,17 @@ from backend.api.auth import (
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.api.routes_health import _build_status_payload, get_mcp_manager
 from backend.api.routes_chat import router as chat_router
+from backend.api.routes_storage import router as storage_router
+from backend.api.routes_general_maintenance import router as general_maintenance_router
 from backend.api.routes_llm import router as llm_router
 from backend.api.routes_voice import router as voice_router
 from backend.api.routes_github import router as github_router
 from backend.api.routes_git_settings import router as git_settings_router
+from backend.api.routes_projects import router as projects_router
+from backend.api.routes_import import router as import_router, start_import_sync, stop_import_sync
+from backend.api.routes_worktree_settings import router as worktree_settings_router
+from backend.api.routes_local_environments import router as local_environments_router
+from backend.api.routes_pets import router as pets_router
 from backend.api.routes_skills import router as skills_router
 from backend.api.routes_agents import router as agents_router
 from backend.api.routes_replay import router as replay_router
@@ -173,23 +180,30 @@ async def lifespan(app: FastAPI):
     _state.bootstrap = bootstrap
     try:
         await bootstrap.startup()
+        await start_import_sync()
         logger.info("MiniCode Backend startup complete")
-        yield
+        try:
+            yield
+        finally:
+            await stop_import_sync()
     finally:
         bootstrap.begin_drain()
         try:
             await _state.ws_manager.shutdown(reason="application_shutdown")
         finally:
+            from backend.agent.runtime import default_runtime_if_initialized
+            runtime = default_runtime_if_initialized()
             try:
-                await bootstrap.shutdown()
+                try:
+                    if runtime is not None and not await runtime.aclose(release_lease=False):
+                        raise RuntimeError("Agent runtime still owns unsettled child thread resources")
+                finally:
+                    await bootstrap.shutdown()
             finally:
                 if _state.bootstrap is bootstrap:
                     _state.bootstrap = None
                 # Relinquish the process lease after its session and service
                 # teardown, including interrupted startup.
-                from backend.agent.runtime import default_runtime_if_initialized
-
-                runtime = default_runtime_if_initialized()
                 if runtime is not None:
                     runtime.close(release_lease=True)
         logger.info("MiniCode Backend shutdown complete")
@@ -357,10 +371,17 @@ app.add_middleware(
 # ── Decomposed API routers ──
 
 app.include_router(chat_router)
+app.include_router(storage_router)
+app.include_router(general_maintenance_router)
 app.include_router(llm_router)
 app.include_router(voice_router)
 app.include_router(github_router)
 app.include_router(git_settings_router)
+app.include_router(projects_router)
+app.include_router(import_router)
+app.include_router(worktree_settings_router)
+app.include_router(local_environments_router)
+app.include_router(pets_router)
 app.include_router(skills_router)
 app.include_router(agents_router)
 app.include_router(replay_router)

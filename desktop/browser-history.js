@@ -37,4 +37,17 @@ function remove(ids) {
 }
 function clear() { commit([]); return true; }
 
-module.exports = { init, recordVisit, updateTitle, search, remove, clear };
+function importVisits(entries) {
+  const existing = new Set(visits.map(visit => `${visit.url}\0${visit.visitTime}`));
+  const imported = [];
+  for (const entry of entries) {
+    const key = `${entry.url}\0${entry.visitTime}`;
+    if (existing.has(key)) continue;
+    existing.add(key);
+    imported.push({ ...entry, id: crypto.randomUUID(), source: "other" });
+  }
+  if (imported.length) commit([...imported, ...visits].sort((left, right) => right.visitTime - left.visitTime));
+  return { imported: imported.length, skippedExisting: entries.length - imported.length };
+}
+
+module.exports = { init, recordVisit, updateTitle, search, remove, clear, importVisits };

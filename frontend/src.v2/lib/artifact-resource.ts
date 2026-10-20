@@ -12,7 +12,7 @@ export interface ArtifactResourceInput {
   artifactId?: string;
   conversationId?: string;
   sessionId?: string;
-  source?: ScopedArtifactSource | "workspace" | "browser" | "local";
+  source?: ScopedArtifactSource | "workspace" | "browser" | "local" | "skill";
   originalUrl?: string;
   isConnected: boolean;
 }

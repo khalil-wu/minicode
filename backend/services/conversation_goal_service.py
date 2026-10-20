@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
+import time
 
 from backend.conversations.models import utc_now_iso
 from backend.services.runtime_control_service import CommandOutcome
 from backend.services.command_target import resolve_conversation_target as resolve_goal_target
+from backend.services.goal_runtime import account_elapsed, apply_budget, new_goal
 
 GoalEventScope = Literal["none", "active", "always"]
 
@@ -105,6 +107,13 @@ def prepare_goal_action(
             "updated_at": utc_now_iso(),
             "source": source,
         }
+        if current_goal.get("status") == "active":
+            account_elapsed(next_goal)
+        if action == "resume":
+            next_goal.update(_accounted_at=time.time(), _empty_turns=0, _execution_failures=0, _continuation_pending=True)
+        else:
+            next_goal["_continuation_pending"] = False
+        apply_budget(next_goal)
         return GoalAction(
             True,
             next_goal,
@@ -136,15 +145,24 @@ def prepare_goal_action(
             "goal", "Goal exceeds the 4000-character limit.", level="error",
             data={"conversation_id": conversation_id, "goal": current_goal},
         ))
+    budget = data.get("token_budget", current_goal.get("token_budget"))
+    if budget is not None and (isinstance(budget, bool) or not isinstance(budget, int) or budget < 1):
+        return GoalAction(False, current_goal, "none", {}, CommandOutcome("goal", "token_budget must be a positive integer", level="error"))
     now = utc_now_iso()
     next_goal = {
-        "id": str(current_goal.get("id") or f"goal_{conversation_id}"),
+        **(current_goal if current_goal and current_goal.get("status") != "complete" else new_goal(text, token_budget=budget, source=source)),
         "text": text,
         "status": "active",
-        "created_at": str(current_goal.get("created_at") or now),
         "updated_at": now,
         "source": source,
+        "token_budget": budget,
+        "_continuation_pending": True,
+        "_empty_turns": 0,
+        "_execution_failures": 0,
     }
+    if current_goal.get("status") != "active":
+        next_goal["_accounted_at"] = time.time()
+    apply_budget(next_goal)
     return GoalAction(
         True,
         next_goal,

@@ -1595,6 +1595,11 @@ describe("normalizeInboundServerEvent", () => {
     };
     expect(normalizeInboundServerEvent(valid)).toMatchObject(valid);
 
+    for (const status of ["active", "paused", "blocked", "complete", "budget_limited", "usage_limited"]) {
+      const event = { ...valid, goal: { ...valid.goal, status } };
+      expect(normalizeInboundServerEvent(event)).toMatchObject(event);
+    }
+
     for (const revision of [-1, 1.5, true, Number.MAX_SAFE_INTEGER + 1]) {
       expect(normalizeInboundServerEvent({ ...valid, revision })).toBeNull();
     }

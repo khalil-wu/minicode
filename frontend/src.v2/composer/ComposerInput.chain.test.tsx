@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -12,6 +12,10 @@ vi.mock("./FooterRow", () => ({ FooterRow: () => null }));
 vi.mock("./ActionChipRegion", () => ({ ContextChipRegion: () => null }));
 vi.mock("./AttachmentStrip", () => ({ AttachmentStrip: () => null }));
 import { useAppStore } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { Composer } from "./Composer";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { appendPromptHistory } from "./prompt-history";
@@ -31,6 +35,17 @@ const typeAtCaret = (input: HTMLTextAreaElement, value: string, caret: number) =
 };
 
 describe("actual composer input consumers", () => {
+  it("does not recall another conversation's unsent draft after changing the owner", () => {
+    appendPromptHistory("C:/original", "history entry");
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;
+    typeAtCaret(input, "A private unfinished draft", 0);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    expect(useAppStore.getState().draft).toBe("history entry");
+    act(() => useAppStore.setState({ conversationId: "other-owner", draft: "", richDraft: undefined }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "ArrowDown" });
+    expect(useAppStore.getState().draft).toBe("");
+  });
   it("reuses prompt history through the real input with a caret at the recalled end", async () => {
     Element.prototype.scrollIntoView = vi.fn();
     appendPromptHistory("C:/original", "recalled prompt");

@@ -161,7 +161,9 @@ test("embedded browser settings normalize origins and supported permissions", ()
       "file:///C:/secret": ["notifications"],
     },
   }), {
-    downloadPolicy: "block",
+    downloadPolicy: "allow",
+    downloadDirectory: null,
+    browserEnabled: true, deviceToolbarAlwaysOnNewTabs: false,
     sitePermissions: { "https://example.com": ["media"] },
   });
 });
@@ -176,6 +178,8 @@ test("embedded browser settings persist per origin", () => {
 
   assert.deepEqual(getBrowserSettings("https://example.com/other"), {
     downloadPolicy: "allow",
+    downloadDirectory: null,
+    browserEnabled: true, deviceToolbarAlwaysOnNewTabs: false,
     origin: "https://example.com",
     permissions: ["notifications"],
   });
@@ -196,6 +200,8 @@ test("browser settings publish only after the settings file is committed", (t) =
   assert.throws(() => setBrowserSettings({ downloadPolicy: "allow" }), /settings disk failure/);
   assert.throws(() => setBrowserSettings({ origin: "https://example.com", permission: "media", allowed: true }), /settings disk failure/);
   assert.deepEqual(getBrowserSettings("https://example.com"), {
+    browserEnabled: true, deviceToolbarAlwaysOnNewTabs: false,
+    downloadDirectory: null,
     downloadPolicy: "ask", origin: "https://example.com", permissions: ["notifications"],
   });
   assert.equal(fs.readFileSync(settingsFile, "utf8"), stored);

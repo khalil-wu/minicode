@@ -1,6 +1,8 @@
 .inline-diff .inline-diff-line {
   border-left: 2px solid transparent;
 }
+html[data-diff-marker-style="color"] .inline-diff-marker { visibility: hidden; }
+html[data-diff-marker-style="symbols"] .inline-diff .inline-diff-line { border-left-color: transparent; }
 
 .inline-diff[data-diff-palette] { background: var(--diff-view-background); color: var(--diff-view-foreground); }
 .inline-diff[data-diff-palette] .inline-diff-line { color: var(--diff-view-foreground); }

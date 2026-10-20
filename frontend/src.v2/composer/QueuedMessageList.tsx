@@ -4,6 +4,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
+import { captureSteerTurnId } from "../lib/steer-command";
+import { pushToast } from "../overlays/ToastContainer";
 const NO_MESSAGES: ChatMessage[] = [];
 
 export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { wide?: boolean; minimal?: boolean; ownerId?: string }) => {
@@ -60,14 +62,21 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
 
   if (!conversationId || queued.length === 0) return null;
 
-  const sendQueueAction = (type: "user_message.queue.cancel" | "user_message.queue.steer", message: typeof queued[number]) => {
+  const sendQueueAction = (action: "cancel" | "send", message: typeof queued[number]) => {
     if (!message.queueMessageId) return;
-    sendClientCommand({
-      type,
+    const expectedTurnId = action === "send" ? captureSteerTurnId(useAppStore.getState(), conversationId) : undefined;
+    if (expectedTurnId === null) {
+      pushToast(tr("当前任务尚未提供回合标识，无法引导；请稍后重试。"), "warning");
+      return;
+    }
+    const target = {
       conversation_id: conversationId,
       message_id: message.queueMessageId,
       user_message_id: message.id,
-    });
+    };
+    if (action === "cancel") sendClientCommand({ type: "user_message.queue.cancel", ...target });
+    else if (expectedTurnId === undefined) sendClientCommand({ type: "user_message.queue.start", ...target });
+    else sendClientCommand({ type: "user_message.queue.steer", ...target, expected_turn_id: expectedTurnId });
   };
 
   return (
@@ -90,16 +99,16 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
             <button
               type="button"
               className="queued-message-steer"
-              onClick={() => sendQueueAction("user_message.queue.steer", message)}
-              title={message.queuePaused ? tr("发送这条消息并继续队列") : isStreaming ? tr("下一步用这条消息引导当前任务") : tr("发送这条消息")}
+              onClick={() => sendQueueAction("send", message)}
+              title={isStreaming ? tr("下一步用这条消息引导当前任务") : tr("发送这条消息并继续队列")}
             >
               <CornerDownLeft size={14} aria-hidden="true" />
-              <span>{message.queuePaused || !isStreaming ? tr("发送") : tr("引导")}</span>
+              <span>{isStreaming ? tr("引导") : tr("发送")}</span>
             </button>
             <button
               type="button"
               className="queued-message-icon"
-              onClick={() => sendQueueAction("user_message.queue.cancel", message)}
+              onClick={() => sendQueueAction("cancel", message)}
               title={tr("删除排队消息")}
               aria-label={tr("删除排队消息 {count}", { count: displayNumber })}
             >

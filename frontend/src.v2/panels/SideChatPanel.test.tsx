@@ -34,6 +34,10 @@ vi.mock("../chat/sendChatMessage", async (importOriginal) => ({
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("../composer/RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "../stores/composer-drafts";
 import { SideChatPanel } from "./SideChatPanel";
 import { openNewSideChat } from "../chat/openSideChat";
@@ -100,6 +104,26 @@ describe("SideChatPanel server lifecycle", () => {
     expect(useAppStore.getState().draft).toBe("main draft");
     expect(useAppStore.getState().attachments).toEqual([]);
     expect(useAppStore.getState().sideChats[sideId].attachments).toEqual([]);
+  });
+
+  it("captures alternate side-chat steering before asynchronous attachment preparation", async () => {
+    const context = await import("../composer/contextPayload");
+    let finishContext!: (value: { attachments: []; attachmentRefs: []; notes: string }) => void;
+    const preparation = vi.spyOn(context, "buildContextNativeAttachments").mockImplementationOnce(() => new Promise(resolve => { finishContext = resolve; }));
+    useAppStore.setState({ isConnected: true, followUpBehavior: "queue", draft: "keep main draft" });
+    render(<SideChatPanel />);
+    const id = Object.keys(useAppStore.getState().sideChats)[0];
+    await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalled());
+    act(() => useAppStore.setState(state => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], draft: "side direction", isStreaming: true,
+      messages: [{ id: "original-side-answer", turnId: "original-side-turn", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true }] } } })));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "侧边对话消息" }), { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(preparation).toHaveBeenCalled());
+    act(() => useAppStore.setState(state => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id],
+      messages: [{ id: "later-side-answer", turnId: "later-side-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 2, isStreaming: true }] } } })));
+    await act(async () => finishContext({ attachments: [], attachmentRefs: [], notes: "" }));
+    expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: id, busyBehavior: "steer", expectedTurnId: "original-side-turn" }));
+    expect(useAppStore.getState().draft).toBe("keep main draft");
+    preparation.mockRestore();
   });
 
   it.each([true, false])("keeps the side draft until a delayed submission returns %s", async (accepted) => {

@@ -51,6 +51,26 @@ it("shows the stopped state when a restored interrupted turn has no retained con
   expect(screen.getByRole("status").textContent).toContain("已停止");
 });
 
+it("keeps async questions visible and retains the chosen answer across process folding and completion", () => {
+  const turn: ChatTurnState = {
+    id: "async-live", userCell: null, activeCell: null, status: "streaming", startedAt: 1,
+    committedCells: [{ kind: "thinking", id: "work", content: "Reading the workspace.", source: "model_preamble", isStreaming: false, createdAt: 1 }],
+    finalAnswerCell: null,
+    asyncMessages: [{ type: "text", itemId: "async:live", delivery: "async", content: "Which module?", status: "completed",
+      questions: [{ title: "Which module?", options: ["A", "B"] }] }],
+  };
+  const { rerender } = render(<ChatTurn turn={turn} conversationId="async-question-owner" />);
+  expect(screen.getByText("Which module?")).toBeTruthy();
+  fireEvent.click(screen.getByRole("radio", { name: "B", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+  expect((screen.getByRole("radio", { name: "B", exact: true }) as HTMLInputElement).checked).toBe(true);
+  rerender(<ChatTurn conversationId="async-question-owner" turn={{ ...turn, status: "completed", completedAt: 3,
+    finalAnswerCell: { kind: "assistant_markdown", id: "done", markdownSource: "Independent work finished.", phase: "final", copyable: true, createdAt: 3 },
+  }} />);
+  expect((screen.getByRole("radio", { name: "B", exact: true }) as HTMLInputElement).checked).toBe(true);
+  expect(screen.getByText("Independent work finished.")).toBeTruthy();
+});
+
 describe("HistoryCellRenderer", () => {
   it.each<HistoryCellState>([
     {

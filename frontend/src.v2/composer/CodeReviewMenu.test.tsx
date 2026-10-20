@@ -13,6 +13,19 @@ beforeEach(() => { mocks.options.mockReset().mockResolvedValue(options); });
 afterEach(cleanup);
 
 describe("Code review uses the real Source base choices", () => {
+  it("ignores IME candidate Enter and keys from another input before accepting an owned menu key", async () => {
+    const selected = vi.fn();
+    render(<><div className="composer-container"><textarea aria-label="owned composer" />
+      <CodeReviewMenu owner={owner} pending={false} onClose={vi.fn()} onSelect={selected} /></div><textarea aria-label="other input" /></>);
+    await screen.findByRole("menuitem", { name: "审查未提交的更改" });
+    const input = screen.getByRole("textbox", { name: "owned composer" });
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "other input" }), { key: "Enter" });
+    expect(selected).not.toHaveBeenCalled();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(selected).toHaveBeenCalledWith("uncommitted", options);
+  });
   it("keeps missing default-base status and waits for an explicit real branch choice", async () => {
     const selected = vi.fn();
     render(<CodeReviewMenu owner={owner} pending={false} onClose={() => {}} onSelect={selected} />);

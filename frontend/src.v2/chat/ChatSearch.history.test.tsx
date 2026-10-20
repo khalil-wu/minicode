@@ -40,6 +40,21 @@ function surface(searchActive: boolean) {
 }
 
 describe("loaded transcript search", () => {
+  it("moves native-menu matches through the actual search ranges and releases listeners on close", () => {
+    const containerRef = createRef<HTMLDivElement>();
+    const view = render(<><ChatSearch containerRef={containerRef} onClose={() => {}} />
+      <main ref={containerRef}><p>needle first</p><p>needle second</p><p>needle third</p></main></>);
+    fireEvent.change(view.getByLabelText("搜索对话内容"), { target: { value: "needle" } });
+    expect(view.getByText("1/3")).toBeTruthy();
+    fireEvent(window, new Event("chat:find-next"));
+    expect(view.getByText("2/3")).toBeTruthy();
+    expect(window.getSelection()?.getRangeAt(0).startContainer.parentElement?.textContent).toBe("needle second");
+    fireEvent(window, new Event("chat:find-previous"));
+    expect(view.getByText("1/3")).toBeTruthy();
+    view.unmount();
+    fireEvent(window, new Event("chat:find-next"));
+    expect(window.getSelection()?.rangeCount).toBe(0);
+  });
   it("finds a folded command output during search and restores its disclosure preference afterward", async () => {
     const containerRef = createRef<HTMLDivElement>();
     const cell = { kind: "exec" as const, id: "folded-command", command: "build", status: "success" as const, stdoutPreview: ["hidden-error-needle"], stderrPreview: [], collapsed: true, createdAt: 1 };

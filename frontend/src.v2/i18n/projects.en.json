@@ -1,0 +1,23 @@
+{
+  "更改 {name} 的标记": "Change marker for {name}",
+  "项目标记": "Project marker",
+  "图标": "Icons",
+  "表情符号": "Emojis",
+  "搜索标记": "Search symbols",
+  "移除标记": "Remove marker",
+  "选择来源文件夹": "Choose a source folder",
+  "输入已在桌面端授权的本机文件夹路径。": "Enter a local folder path already authorized in the desktop app.",
+  "编辑项目": "Edit project",
+  "创建项目": "Create project",
+  "新项目": "New project",
+  "项目名称": "Project name",
+  "来源文件夹": "Source folders",
+  "移除文件夹 {path}": "Remove folder {path}",
+  "添加此电脑上的文件夹": "Add folder on this computer",
+  "移除项目": "Remove project",
+  "从项目列表移除“{name}”？文件和聊天记录会保留。": "Remove “{name}” from projects? Its files and chats will be kept.",
+  "归档聊天": "Archive chats",
+  "归档“{name}”中的所有聊天？": "Archive all chats in “{name}”?",
+  "取消置顶项目": "Unpin project",
+  "置顶项目": "Pin project"
+}

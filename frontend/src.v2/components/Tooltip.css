@@ -40,7 +40,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-tip-bubble {
+  html:not([data-reduced-motion="false"]) .mc-tip-bubble {
     animation: none;
   }
 }

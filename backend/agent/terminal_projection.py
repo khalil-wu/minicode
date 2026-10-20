@@ -141,9 +141,8 @@ async def terminal_boundary_events(
     from backend.async_cleanup import to_thread_cancel_safe
 
     code_execution = turn_kernel.run_context.code_execution
-    if code_execution is not None and await code_execution.aclose() and status == "completed":
-        status, reason = "partial", "code_cells_pending"
-        _set_terminal_reason(state, reason, status=status)
+    if code_execution is not None and status != "completed":
+        await code_execution.aclose()
 
     checkpoint_status = await to_thread_cancel_safe(turn_kernel.finalize_checkpoint,
         session_id=session_id,

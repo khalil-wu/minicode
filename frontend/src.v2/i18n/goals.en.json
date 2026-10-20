@@ -1,0 +1,17 @@
+{
+  "追求目标": "Pursuing goal",
+  "已暂停目标": "Paused goal",
+  "目标受阻": "Goal stalled",
+  "目标用量受限": "Goal usage limited",
+  "目标受预算限制": "Goal limited",
+  "目标已达成": "Goal achieved",
+  "编辑目标": "Edit goal",
+  "刚刚更新": "Updated just now",
+  "{minutes} 分钟前更新": "Updated {minutes} min ago",
+  "还原目标": "Revert",
+  "保存目标失败": "Failed to save goal objective",
+  "目标操作失败": "Failed to update goal",
+  "替换当前目标？": "Replace current goal?",
+  "此操作会保留聊天，并用当前输入内容替换已保存的目标。": "This will keep the chat but replace the saved goal with your current composer text",
+  "替换目标": "Replace goal"
+}

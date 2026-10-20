@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any, BinaryIO
+from .compression import open_history_binary
 
 
 class TranscriptCursorMissing(ValueError):
@@ -30,7 +31,7 @@ def read_message(path: Path, index: list[list[Any]], message_id: str) -> dict[st
     row = next((row for row in index if row[0] == message_id), None)
     if row is None:
         return None
-    with path.open("rb") as stream:
+    with open_history_binary(path) as stream:
         return _read_indexed_message(stream, row)
 
 
@@ -66,7 +67,7 @@ def read_page(
     if start > 0 and rows[start][1] == "assistant" and rows[start - 1][1] == "user":
         start -= 1
     messages = []
-    with path.open("rb") as stream:
+    with open_history_binary(path) as stream:
         for position in range(start, end):
             if position == replacement_index:
                 messages.append(replacement)

@@ -257,37 +257,25 @@ async def mailbox_handoff_case(startup_case):
     await asyncio.gather(*(task for task, _ in startup_case.runtime._subagent_mailbox_turns.values()),
         return_exceptions=True)
     await asyncio.gather(*startup_case.workers, return_exceptions=True)
+    await startup_case.runtime.aclose(release_lease=True)
     await startup_case.hooks.finalize_async_hooks()
-    startup_case.runtime.close(release_lease=True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("delivery,cancelled", [
     ("foreground", False), ("background", False), ("teammate", False), ("background", True),
 ])
-async def test_late_followups_wait_for_original_session_and_adapter_then_run_once(
+async def test_late_followups_reuse_resident_session_and_retire_replaced_adapter_once(
     mailbox_handoff_case, monkeypatch, delivery, cancelled,
 ):
-    from backend.agent.query_engine import AgentSession
     from backend.tools.agent_tools import TaskStopTool
 
     case = mailbox_handoff_case
-    session_entered, session_release = asyncio.Event(), asyncio.Event()
     adapter_entered, adapter_release = asyncio.Event(), asyncio.Event()
     resumed_entered, resumed_release = asyncio.Event(), asyncio.Event()
     calls, closed_adapters = [], []
     adapters = []
-    original_close = AgentSession.aclose
     original_prepare = case.tool._prepare_subagent_llm_resolution
-    first_session = None
-
-    async def close_session(session):
-        nonlocal first_session
-        if first_session is None:
-            first_session = session
-            session_entered.set()
-            await session_release.wait()
-        await original_close(session)
 
     class OwnedModel(_RecordingLLM):
         async def stream_chat(self, messages, tools=None, metadata=None):
@@ -312,43 +300,39 @@ async def test_late_followups_wait_for_original_session_and_adapter_then_run_onc
         adapters.append(adapter)
         return replace(resolution, llm=adapter, owns_llm=True)
 
-    monkeypatch.setattr(AgentSession, "aclose", close_session)
     monkeypatch.setattr(case.tool, "_prepare_subagent_llm_resolution", prepare)
     foreground = asyncio.create_task(_launch(case, delivery))
     try:
-        owner = foreground
-        if delivery != "foreground":
-            _, accepted = await foreground
-            assert not accepted.is_error, accepted.content
-            owner = case.workers[-1]
-        gate = asyncio.create_task(session_entered.wait())
-        await asyncio.wait({gate, owner}, return_when=asyncio.FIRST_COMPLETED)
-        if not gate.done():
-            result = owner.result() if owner.done() else "Child did not reach its cleanup boundary"
-            gate.cancel()
-            pytest.fail(str(result))
-        child_id = next(reversed(case.runtime._subagents))
+        child_id, accepted = await foreground
+        assert not accepted.is_error, accepted.content
+        await asyncio.gather(*case.workers)
+        await case.runtime.wait_for_subagent_execution(child_id)
+        first_session = case.runtime.subagent_session(child_id)
+        assert first_session is not None and not first_session.closed
+        assert closed_adapters == []
         old = case.runtime.get_subagent(child_id)
-        sent = await asyncio.gather(*(FollowupTaskTool().execute(
-            {"target": child_id, "message": text}, context=case.context,
-        ) for text in ("late task alpha", "late task beta")))
-        assert all(not result.is_error for result in sent)
-        assert len(calls) == 1
-        assert case.runtime.get_subagent(child_id).mailbox_epoch == old.mailbox_epoch
         if cancelled:
             result = await TaskStopTool().execute({"subagent_id": child_id}, context=case.context)
             assert not result.is_error
-        session_release.set()
+            assert case.runtime.get_subagent(child_id).status == "completed"
+        sending = asyncio.create_task(FollowupTaskTool().execute(
+            {"target": child_id, "message": "late task alpha"}, context=case.context))
         await asyncio.wait_for(adapter_entered.wait(), timeout=5)
+        queued = await SendMessageTool().execute(
+            {"recipient": child_id, "message": "late task beta"}, context=case.context)
+        assert not queued.is_error
         assert len(calls) == 1
-        assert case.runtime.get_subagent(child_id).mailbox_epoch == old.mailbox_epoch
+        assert case.runtime.get_subagent(child_id).mailbox_epoch == old.mailbox_epoch + 1
         assert len([kind for kind, _ in case.events if kind == "subagent.start"]) == 1
         adapter_release.set()
+        sent = await sending
+        assert not sent.is_error, sent.content
         await asyncio.wait_for(resumed_entered.wait(), timeout=5)
         current = case.runtime.get_subagent(child_id)
         assert current.agent_path == old.agent_path
         assert current.mailbox_epoch == old.mailbox_epoch + 1
         assert current.status == "running"
+        assert case.runtime.subagent_session(child_id) is first_session and not first_session.closed
         assert sum("late task alpha" in message for message in calls[1]) == 1
         assert sum("late task beta" in message for message in calls[1]) == 1
         fence = {"agent_path": old.agent_path, "mailbox_epoch": old.mailbox_epoch}
@@ -361,19 +345,20 @@ async def test_late_followups_wait_for_original_session_and_adapter_then_run_onc
         await foreground
         await asyncio.gather(*case.workers, return_exceptions=cancelled)
         assert len(calls) == 2
-        assert closed_adapters == adapters
+        assert closed_adapters == [adapters[0]]
         assert case.runtime.get_subagent(child_id).status == "completed"
         starts = [data for kind, data in case.events if kind == "subagent.start"]
         assert [data["mailbox_epoch"] for data in starts] == [1, 2]
         assert [data["status"] for kind, data in case.events if kind == "subagent.done"] == [
-            "cancelled" if cancelled else "completed", "completed",
+            "completed", "completed",
         ]
         assert not case.runtime.has_live_subagent_task(child_id)
         with case.runtime._swarm_store._connect() as connection:
             deliveries = connection.execute("SELECT status FROM mailbox_deliveries").fetchall()
         assert [row["status"] for row in deliveries] == ["acked", "acked"]
+        assert await case.runtime.close_subagent_session(child_id)
+        assert first_session.closed and closed_adapters == adapters
     finally:
-        session_release.set()
         adapter_release.set()
         resumed_release.set()
         await asyncio.gather(foreground, *case.workers, return_exceptions=True)
@@ -527,13 +512,14 @@ async def test_queue_only_after_answer_waits_for_explicit_followup(mailbox_hando
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("resource", ["session", "adapter", "worktree_exception", "worktree_kept_clean"])
-async def test_failed_original_cleanup_cannot_admit_a_mailbox_turn(mailbox_handoff_case, monkeypatch, resource):
+async def test_failed_resident_eviction_keeps_ownership_and_does_not_admit_another_thread(mailbox_handoff_case, monkeypatch, resource):
     from backend.agent.query_engine import AgentSession
 
     case = mailbox_handoff_case
     entered, release = asyncio.Event(), asyncio.Event()
     original_prepare = case.tool._prepare_subagent_llm_resolution
     original_close = AgentSession.aclose
+    original_adapter_close = getattr(case.model, "aclose", None)
     original_worktree_cleanup = None
     physical_release = threading.Event()
 
@@ -556,7 +542,7 @@ async def test_failed_original_cleanup_cannot_admit_a_mailbox_turn(mailbox_hando
         original_worktree_cleanup = worktree.cleanup_agent_worktree
 
         loop = asyncio.get_running_loop()
-        def fail_worktree(info):
+        def fail_worktree(info, **kwargs):
             loop.call_soon_threadsafe(entered.set)
             physical_release.wait()
             if resource == "worktree_exception":
@@ -566,10 +552,16 @@ async def test_failed_original_cleanup_cannot_admit_a_mailbox_turn(mailbox_hando
         monkeypatch.setattr(worktree, "cleanup_agent_worktree", fail_worktree)
 
     child_id, _ = await _launch(case, "background", **({"isolation": "worktree"} if original_worktree_cleanup else {}))
+    await asyncio.gather(*case.workers)
+    session = case.runtime.subagent_session(child_id)
+    case.runtime._subagent_limits[case.context.conversation_id] = 1
+    case.runtime.start_subagent(subagent_id="eviction-contender", parent_run_id="parent", agent_type="worker", pending=True)
+    retiring = asyncio.create_task(case.runtime.acquire_subagent_session("eviction-contender",
+        lambda: pytest.fail("Failed eviction cannot admit a new resident"), conversation_id=case.context.conversation_id))
     try:
-        await _await_gate_or_owner(entered, case.workers[0])
-        sending = asyncio.create_task(FollowupTaskTool().execute(
-            {"target": child_id, "message": "accepted before retirement fault"}, context=case.context,
+        await _await_gate_or_owner(entered, retiring)
+        sending = asyncio.create_task(SendMessageTool().execute(
+            {"recipient": child_id, "message": "accepted before retirement fault"}, context=case.context,
         ))
         if original_worktree_cleanup is not None:
             physical_release.set()
@@ -577,16 +569,17 @@ async def test_failed_original_cleanup_cannot_admit_a_mailbox_turn(mailbox_hando
         assert sent.is_error is (original_worktree_cleanup is not None)
         if original_worktree_cleanup is not None:
             assert "isolated workspace is being retired" in sent.content
-        started = case.runtime.start_subagent_mailbox_turn(child_id)
         release.set()
         physical_release.set()
-        await asyncio.gather(*case.workers, return_exceptions=True)
         error = "Clean worktree cleanup did not release" if resource == "worktree_kept_clean" else f"{resource} retirement fault"
-        assert error in await started
+        with pytest.raises(RuntimeError, match=error):
+            await retiring
         assert case.model.calls == 1
         assert len([kind for kind, _ in case.events if kind == "subagent.start"]) == 1
-        with pytest.raises(RuntimeError, match=error):
-            await case.runtime.wait_for_subagent_execution(child_id)
+        await case.runtime.wait_for_subagent_execution(child_id)
+        assert case.runtime.get_subagent(child_id).status == "completed"
+        assert case.runtime.subagent_session(child_id) is session
+        assert case.runtime.subagent_session("eviction-contender") is None
         if original_worktree_cleanup is None:
             retained, = case.runtime.list_swarm_messages(participant_id=child_id)
             assert retained.message_id == sent.runtime_metadata["message_id"]
@@ -597,14 +590,15 @@ async def test_failed_original_cleanup_cannot_admit_a_mailbox_turn(mailbox_hando
         release.set()
         physical_release.set()
         monkeypatch.setattr(AgentSession, "aclose", original_close)
-        await asyncio.gather(*case.workers, return_exceptions=True)
+        if original_adapter_close is None:
+            monkeypatch.delattr(case.model, "aclose", raising=False)
+        else:
+            monkeypatch.setattr(case.model, "aclose", original_adapter_close)
+        await asyncio.gather(retiring, *case.workers, return_exceptions=True)
         if original_worktree_cleanup is not None:
-            from backend.agent.worktree import resume_agent_worktree
-            record = case.runtime.get_subagent(child_id)
-            info = resume_agent_worktree(record.resume_config["worktree_path"],
-                expected_repo_root=case.workspace, expected_subagent_id=child_id,
-                expected_worktree_branch=record.resume_config["worktree_branch"])
-            original_worktree_cleanup(info)
+            monkeypatch.setattr(worktree, "cleanup_agent_worktree", original_worktree_cleanup)
+        assert await case.runtime.close_subagent_session(child_id)
+        case.runtime.complete_subagent("eviction-contender", "completed")
 
 
 @pytest.mark.asyncio
@@ -671,29 +665,23 @@ async def test_followup_startup_failure_retains_mail_without_automatic_retry(mai
 @pytest.mark.asyncio
 @pytest.mark.parametrize("termination", ["runtime_close", "lease_loss", "parent_cancel"])
 async def test_mailbox_scheduler_stops_at_runtime_and_linked_parent_ownership(mailbox_handoff_case, monkeypatch, termination):
-    from backend.agent.query_engine import AgentSession
-
     case = mailbox_handoff_case
     entered, release = asyncio.Event(), asyncio.Event()
-    original_close = AgentSession.aclose
-    first = True
+    original_emit = case.context.emit_event
 
-    async def close(session):
-        nonlocal first
-        if first:
-            first = False
+    async def emit(event_type, payload):
+        if event_type == "subagent.done":
             entered.set()
             await release.wait()
-        await original_close(session)
+        await original_emit(event_type, payload)
 
-    monkeypatch.setattr(AgentSession, "aclose", close)
+    case.context.emit_event = emit
     child_id, _ = await _launch(case, "background", cancel_with_parent=True)
     try:
         await _await_gate_or_owner(entered, case.workers[0])
-        sent = await FollowupTaskTool().execute(
-            {"target": child_id, "message": "pending when owner stops"}, context=case.context,
-        )
-        assert not sent.is_error
+        case.runtime.send_swarm_message(sender_id="parent", recipient_id=child_id,
+            content="pending when owner stops", conversation_id=case.context.conversation_id,
+            delivery_mode="trigger_turn")
         started = case.runtime.start_subagent_mailbox_turn(child_id)
         if termination == "runtime_close":
             case.runtime.close(release_lease=True)
@@ -708,6 +696,8 @@ async def test_mailbox_scheduler_stops_at_runtime_and_linked_parent_ownership(ma
         release.set()
         await asyncio.gather(*case.workers, return_exceptions=True)
         await started
+        if case.runtime._session_shutdown_task is not None:
+            await case.runtime._session_shutdown_task
         assert case.model.calls == 1
         assert len([kind for kind, _ in case.events if kind == "subagent.start"]) == 1
         assert case.runtime.get_subagent(child_id).mailbox_epoch == 1
@@ -769,19 +759,10 @@ async def test_lease_loss_at_mailbox_close_retires_original_resources_before_bar
 async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
     mailbox_handoff_case, monkeypatch, delivery, branch_changed,
 ):
-    from backend.agent.query_engine import AgentSession
-
     case = mailbox_handoff_case
-    entered, release, resumed, finish = (asyncio.Event() for _ in range(4))
-    original_close = AgentSession.aclose
+    resumed, finish = asyncio.Event(), asyncio.Event()
     original_stream = case.model.stream_chat
     received = []
-
-    async def close(session):
-        if not entered.is_set():
-            entered.set()
-            await release.wait()
-        await original_close(session)
 
     async def stream(messages, tools=None, metadata=None):
         received.append([str(message.content) for message in messages])
@@ -791,11 +772,12 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         async for event in original_stream(messages, tools=tools, metadata=metadata):
             yield event
 
-    monkeypatch.setattr(AgentSession, "aclose", close)
     monkeypatch.setattr(case.model, "stream_chat", stream)
     child_id, _ = await _launch(case, "background", isolation="worktree")
     try:
-        await _await_gate_or_owner(entered, case.workers[0])
+        await case.workers[0]
+        resident = case.runtime.subagent_session(child_id)
+        assert resident is not None and not resident.closed
         original = case.runtime.get_subagent(child_id)
         original_resource, = original.cleanup_resources
         path = Path(original_resource["resource_id"])
@@ -807,15 +789,10 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         sent = await sender.execute({"target": child_id, "recipient": child_id,
             "message": "exact worktree accepted mailbox task"}, context=case.context)
         assert not sent.is_error
-        first_worker = case.workers[0]
-        release.set()
-        await first_worker
         if delivery == "queue_only":
             assert await case.runtime.start_subagent_mailbox_turn(child_id) is None
             held, = case.runtime.get_subagent(child_id).cleanup_resources
-            assert held["state"] == "continuation"
-            assert held["receipt"] == "pending_mailbox_continuation"
-            assert held["metadata"]["continuation"]["message_ids"] == [sent.runtime_metadata["message_id"]]
+            assert held["state"] == "active"
             assert path.exists() and len(received) == 1
             started = await FollowupTaskTool().execute({"target": child_id, "message": "explicit next turn"}, context=case.context)
             assert not started.is_error
@@ -825,6 +802,7 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         current = case.runtime.get_subagent(child_id)
         resource, = current.cleanup_resources
         assert current.agent_path == original.agent_path and current.mailbox_epoch == 2
+        assert case.runtime.subagent_session(child_id) is resident
         assert resource["resource_id"] == original_resource["resource_id"]
         assert resource["metadata"]["git_root"] == original_resource["metadata"]["git_root"]
         assert resource["metadata"]["head_commit"] == original_resource["metadata"]["head_commit"]
@@ -837,7 +815,9 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         finish.set()
         await scheduler
         await asyncio.gather(*case.workers)
-        assert len(received) == 2 and not path.exists()
+        assert len(received) == 2 and path.exists()
+        assert await case.runtime.close_subagent_session(child_id)
+        assert resident.closed and not path.exists()
         if branch_changed:
             assert subprocess.run(["git", "show-ref", "--verify", "--quiet", "refs/heads/agent-created-branch"],
                 cwd=case.workspace).returncode == 0
@@ -846,7 +826,6 @@ async def test_accepted_mail_holds_original_worktree_until_its_exact_next_turn(
         final, = case.runtime.get_subagent(child_id).cleanup_resources
         assert final["state"] == "released" and final["receipt"] == "removed_clean_worktree"
     finally:
-        release.set()
         finish.set()
         await asyncio.gather(*case.workers, return_exceptions=True)
 
@@ -863,15 +842,17 @@ async def test_worktree_retirement_rejects_new_mail_before_durable_append(
     loop = asyncio.get_running_loop()
     original = worktree.cleanup_agent_worktree
 
-    def close(info):
+    def close(info, **kwargs):
         loop.call_soon_threadsafe(entered.set)
         release.wait()
-        return original(info)
+        return original(info, **kwargs)
 
     monkeypatch.setattr(worktree, "cleanup_agent_worktree", close)
     child_id, _ = await _launch(case, "background", isolation="worktree")
+    await asyncio.gather(*case.workers)
+    retiring = asyncio.create_task(case.runtime.close_subagent_session(child_id))
     try:
-        await _await_gate_or_owner(entered, case.workers[0])
+        await _await_gate_or_owner(entered, retiring)
         record = case.runtime.get_subagent(child_id)
         resource, = record.cleanup_resources
         assert resource["state"] == "retiring"
@@ -883,12 +864,12 @@ async def test_worktree_retirement_rejects_new_mail_before_durable_append(
         assert sent.is_error and "isolated workspace is being retired" in sent.content
         assert case.runtime.list_swarm_messages(participant_id=child_id) == []
         release.set()
-        await asyncio.gather(*case.workers)
+        assert await retiring
         assert not Path(resource["resource_id"]).exists()
         assert case.model.calls == 1
     finally:
         release.set()
-        await asyncio.gather(*case.workers, return_exceptions=True)
+        await asyncio.gather(retiring, *case.workers, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -906,22 +887,24 @@ async def test_lifecycle_only_mail_does_not_retain_a_clean_worktree(mailbox_hand
 
     monkeypatch.setattr(AgentSession, "aclose", close)
     child_id, _ = await _launch(case, "background", isolation="worktree")
+    await asyncio.gather(*case.workers)
+    retiring = asyncio.create_task(case.runtime.close_subagent_session(child_id))
     try:
-        await _await_gate_or_owner(entered, case.workers[0])
+        await _await_gate_or_owner(entered, retiring)
         sent = await SendMessageTool().execute({"recipient": child_id,
             "message": '{"type":"shutdown_response","request_id":"lifecycle-audit","approved":true}'},
             context=case.context)
         assert not sent.is_error
         path = Path(case.runtime.get_subagent(child_id).resume_config["worktree_path"])
         release.set()
-        await asyncio.gather(*case.workers)
-        assert await case.runtime.start_subagent_mailbox_turn(child_id) is None
+        assert await retiring
+        assert "closed" in await case.runtime.start_subagent_mailbox_turn(child_id)
         assert case.model.calls == 1 and not path.exists()
         resource, = case.runtime.get_subagent(child_id).cleanup_resources
         assert resource["state"] == "released"
     finally:
         release.set()
-        await asyncio.gather(*case.workers, return_exceptions=True)
+        await asyncio.gather(retiring, *case.workers, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -934,12 +917,14 @@ async def test_failed_worktree_retirement_recovers_its_durable_resource_owner(
     case = mailbox_handoff_case
     original = worktree.cleanup_agent_worktree
 
-    def fail(info):
+    def fail(info, **kwargs):
         raise RuntimeError("retiring worktree cleanup fault")
 
     monkeypatch.setattr(worktree, "cleanup_agent_worktree", fail)
     child_id, _ = await _launch(case, "background", isolation="worktree")
     await asyncio.gather(*case.workers, return_exceptions=True)
+    with pytest.raises(RuntimeError, match="retiring worktree cleanup fault"):
+        await case.runtime.close_subagent_session(child_id)
     record = case.runtime.get_subagent(child_id)
     resource, = record.cleanup_resources
     path = Path(resource["resource_id"])
@@ -969,7 +954,7 @@ async def test_failed_worktree_retirement_recovers_its_durable_resource_owner(
 async def test_departing_worker_cannot_delete_a_reassigned_worktree(
     mailbox_handoff_case, monkeypatch, replacement, published,
 ):
-    from backend.agent.worktree import cleanup_agent_worktree, resume_agent_worktree
+    from backend.agent.worktree import resume_agent_worktree
 
     case = mailbox_handoff_case
     entered, release = asyncio.Event(), threading.Event()
@@ -985,9 +970,15 @@ async def test_departing_worker_cannot_delete_a_reassigned_worktree(
     if not published:
         monkeypatch.setattr(case.runtime, "register_subagent_cleanup_resource", Mock(return_value=False))
     child_id, _ = await _launch(case, "background", isolation="worktree")
+    retiring = case.workers[0]
+    if published:
+        await retiring
+        retiring = asyncio.create_task(case.runtime.close_subagent_session(child_id))
     info = None
+    previous = None
+    reassigned = None
     try:
-        await _await_gate_or_owner(entered, case.workers[0])
+        await _await_gate_or_owner(entered, retiring)
         previous = case.runtime.get_subagent(child_id)
         resource, = previous.cleanup_resources
         path = Path(resource["resource_id"])
@@ -1003,17 +994,23 @@ async def test_departing_worker_cannot_delete_a_reassigned_worktree(
         assert case.runtime._swarm_store.upsert_subagent(reassigned,
             expected_owner_token=case.runtime._runtime_owner_token) == reassigned
         release.set()
-        await asyncio.gather(*case.workers, return_exceptions=True)
+        await asyncio.gather(retiring, *case.workers, return_exceptions=True)
         assert path.exists()
         assert case.runtime._swarm_store.get_subagent(child_id) == reassigned
         with pytest.raises(RuntimeError, match="Physical worktree cleanup lost"):
-            await case.runtime.wait_for_subagent_execution(child_id)
+            if published:
+                await retiring
+            else:
+                await case.runtime.wait_for_subagent_execution(child_id)
         assert case.model.calls == int(published)
     finally:
         release.set()
-        await asyncio.gather(*case.workers, return_exceptions=True)
+        await asyncio.gather(retiring, *case.workers, return_exceptions=True)
         if info is not None:
-            cleanup_agent_worktree(info)
+            assert case.runtime._swarm_store.upsert_subagent(previous.to_dict(),
+                expected_owner_token=reassigned["runtime_owner_token"]) is not None
+            case.runtime._subagents[child_id] = previous
+            await case.runtime.close_subagent_session(child_id)
 
 
 @pytest.mark.asyncio

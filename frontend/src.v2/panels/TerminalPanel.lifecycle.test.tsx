@@ -5,6 +5,9 @@ import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { TerminalPanel } from "./TerminalPanel";
+import { installAppThemeTokens } from "../../test/app-theme-tokens";
+import { emptyAppearanceColors, applyAppearanceColors } from "../lib/appearance-colors";
+import { defaultThemePreferences, emptyAppearanceThemes } from "../lib/appearance-themes";
 
 const mocks = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -18,11 +21,11 @@ const mocks = vi.hoisted(() => {
     list: vi.fn(), snapshot: vi.fn(), spawn: vi.fn(), restart: vi.fn(), clearPty: vi.fn(),
     write: vi.fn(), resize: vi.fn(), kill: vi.fn(), ackExit: vi.fn(),
     send: vi.fn(), awaitResult: vi.fn(), clearScreen: vi.fn(), renderOutput: vi.fn(),
-    resetScreen: vi.fn(), terminalOptions: {} as { convertEol?: boolean; fontFamily?: string },
+    resetScreen: vi.fn(), terminalOptions: {} as { convertEol?: boolean; fontFamily?: string; fontSize?: number },
     viewport: { viewportY: 0, baseY: 0 },
     selection: undefined as { start: { x: number; y: number }; end: { x: number; y: number } } | undefined,
     selectText: vi.fn(), scrollToLine: vi.fn(), scrollToBottom: vi.fn(),
-    instances: [] as Array<{ host?: HTMLElement; content: string; disposed: boolean; buffer: { active: { viewportY: number; baseY: number } }; selection?: { start: { x: number; y: number }; end: { x: number; y: number } } }>,
+    instances: [] as Array<{ host?: HTMLElement; content: string; disposed: boolean; options: { fontFamily?: string; fontSize?: number; theme?: Record<string, string> }; buffer: { active: { viewportY: number; baseY: number } }; selection?: { start: { x: number; y: number }; end: { x: number; y: number } } }>,
   };
 });
 
@@ -50,7 +53,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   disposed = false;
   host?: HTMLElement;
   screen?: HTMLPreElement;
-  options: { convertEol?: boolean; fontFamily?: string };
+  options: { convertEol?: boolean; fontFamily?: string; fontSize?: number; theme?: Record<string, string> };
   buffer = { active: { viewportY: 0, baseY: 0 } };
   selection?: { start: { x: number; y: number }; end: { x: number; y: number } };
   constructor(options: { convertEol?: boolean }) { this.options = { ...options }; mocks.terminalOptions = this.options; mocks.instances.push(this); }
@@ -122,6 +125,8 @@ describe("terminal lifecycle", () => {
       conversationId: "conv-a", workingDirectory: "C:/conv-a", terminalSessions: [],
       activeTerminalSessionId: null, terminalSnapshots: {}, conversationWorkbenchStates: {},
       previewServers: [], resolvedTheme: "dark", conversations: [],
+      appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes(),
+      codeTextScale: 1, codeFontBase: 12,
     });
   });
 
@@ -143,6 +148,41 @@ describe("terminal lifecycle", () => {
     await waitFor(() => expect(mocks.terminalOptions.fontFamily).toBe(stack));
   });
 
+  it("applies the saved font and palette to every existing terminal without replacing its output or selection", async () => {
+    const removeTokens = installAppThemeTokens();
+    localStorage.clear();
+    mocks.list.mockResolvedValue([pty("conv-a", "term-a"), pty("conv-a", "term-b")]);
+    const view = render(<TerminalPanel />);
+    try {
+      await screen.findByRole("tab", { name: "pwsh 1" });
+      act(() => useAppStore.getState().setActiveTerminalSession("term-b"));
+      await waitFor(() => expect(mocks.instances).toHaveLength(2));
+      expect(mocks.instances.map(instance => instance.options.fontSize)).toEqual([13, 13]);
+      const first = mocks.instances[0];
+      const output = first.content;
+      first.selection = { start: { x: 1, y: 0 }, end: { x: 5, y: 0 } };
+      await act(async () => useAppStore.getState().importAppearanceTheme("dark", {
+        codeThemeId: "github", theme: { ...defaultThemePreferences("dark"), accent: "#2468ac", surface: "#101010", ink: "#d0d0d0",
+          fonts: { ui: null, content: null, code: "Fixture Mono", codeFace: { family: "Fixture Mono", fullName: "Fixture Mono Medium Oblique", postscriptName: "FixtureMono-MediumOblique" } } },
+      }));
+      for (const instance of mocks.instances) {
+        expect(instance.options.fontFamily).toContain('"Fixture Mono"');
+        expect(instance.options.fontFamily).toContain('"MiniCode selected FixtureMono-MediumOblique"');
+        expect(instance.options.theme).toMatchObject({ background: "#101010ff", foreground: "#d0d0d0ff", cursor: "#2468acff" });
+        expect(instance.disposed).toBe(false);
+      }
+      expect(first.content).toBe(output);
+      expect(first.selection).toEqual({ start: { x: 1, y: 0 }, end: { x: 5, y: 0 } });
+      act(() => useAppStore.getState().setCodeTextScale(1.25));
+      expect(mocks.instances.map(instance => instance.options.fontSize)).toEqual([16, 16]);
+    } finally {
+      view.unmount();
+      useAppStore.setState({ appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes() });
+      applyAppearanceColors("dark", emptyAppearanceColors());
+      localStorage.clear(); removeTokens();
+    }
+  });
+
   it("preserves previously read long output and each real session surface instead of rebuilding from the 80k cache", async () => {
     mocks.list.mockResolvedValue([pty("conv-a", "term-a"), pty("conv-a", "term-b")]);
     render(<TerminalPanel />);
@@ -158,12 +198,14 @@ describe("terminal lifecycle", () => {
     const selectedLog = first.content.split("\n")[101];
     const resetCount = mocks.resetScreen.mock.calls.length;
     act(() => useAppStore.getState().setActiveTerminalSession("term-b"));
+    await waitFor(() => expect(mocks.instances.some((instance) => instance.host?.dataset.terminalSession === "term-b" && !instance.host.hidden)).toBe(true));
     const second = mocks.instances.find((instance) => instance.host?.dataset.terminalSession === "term-b")!;
     second.buffer.active.viewportY = 0;
     second.selection = { start: { x: 2, y: 0 }, end: { x: 5, y: 0 } };
     expect(firstHost!.hidden).toBe(true);
     act(() => mocks.output!({ sessionId: "term-a", conversationId: "conv-a", data: "BACKGROUND\r\n", startCursor: 20 + longOutput.length, endCursor: 20 + longOutput.length + 12 }));
     act(() => useAppStore.getState().setActiveTerminalSession("term-a"));
+    await waitFor(() => expect(first.host!.hidden).toBe(false));
     expect(first.host).toBe(firstHost);
     expect(first.host!.hidden).toBe(false);
     expect(first.content).toContain("LOG_0000");
@@ -179,7 +221,7 @@ describe("terminal lifecycle", () => {
     expect(first.buffer.active.viewportY).toBe(80);
     expect(mocks.resetScreen).toHaveBeenCalledTimes(resetCount);
     act(() => useAppStore.getState().setActiveTerminalSession("term-b"));
-    expect(second.host!.hidden).toBe(false);
+    await waitFor(() => expect(second.host!.hidden).toBe(false));
     expect(second.selection).toEqual({ start: { x: 2, y: 0 }, end: { x: 5, y: 0 } });
   });
 

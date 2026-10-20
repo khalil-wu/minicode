@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from backend.tools.toolsets import ToolsetPolicy
 
 from backend.permissions.context import ToolExecutionContext
+from backend.atomic_io import await_task_despite_cancellation
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     cancel_and_drain,
@@ -743,6 +744,8 @@ class CapabilityRegistry:
                 raise
 
         execution_task = asyncio.ensure_future(invoke())
+        if context is not None and context.run_context is not None and context.run_context.retain_model is not None:
+            context.run_context.retain_model(context.llm, execution_task)
         cancel_wait_task = (
             asyncio.create_task(cancel_event.wait())
             if cancel_event is not None
@@ -763,12 +766,15 @@ class CapabilityRegistry:
                     cancel_reason = "interrupted"
                     raise asyncio.CancelledError
         except asyncio.CancelledError:
-            receipt = await cancel_and_drain_receipt(
+            # A CancelEvent can enter cleanup before the enclosing task is
+            # cancelled. Both requests must wait for this same bounded drain.
+            cleanup = asyncio.create_task(cancel_and_drain_receipt(
                 [execution_task],
                 timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
                 label=f"{cancel_reason} registry tool {name}",
                 owner=getattr(context, "pending_cleanup_tasks", None),
-            )
+            ))
+            receipt = await await_task_despite_cancellation(cleanup)
             if receipt.pending and context is not None:
                 # The wrapper can finish while the concrete tool still owns
                 # resources. Its call watcher must follow that actual child.

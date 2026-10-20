@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any
 
 from backend.permissions.checker import PermissionChecker
@@ -93,6 +94,67 @@ class RequestUserInputTool(BaseTool):
         return self._error_result(
             "request_user_input requires the host's user input handler. The questions were not shown; do not assume an answer."
         )
+
+
+class RequestUserInputAsyncTool(BaseTool):
+    name = "request_user_input_async"
+    description = "Ask the user questions while continuing independent work. Returns immediately; answers arrive as new user input. Options are optional and free-text answers are always allowed. Use only for missing information, preferences, constraints, clarification, or approval."
+    should_defer = False
+    permission = PermissionLevel.AUTO
+    read_only = True
+    idempotent = False
+    result_kind = "status"
+    display_label = "Ask user"
+
+    def get_spec(self):
+        return ToolSpec(name=self.name, capability="user.ask", toolset="core", exposure="core", required_args=("questions",))
+
+    def get_schema(self):
+        return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {
+            "questions": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                "title": {"type": "string", "minLength": 1},
+                "options": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+            }, "required": ["title"], "additionalProperties": False}},
+        }, "required": ["questions"], "additionalProperties": False})
+
+    async def execute(self, args, context=None):
+        questions = args["questions"]
+        if any(not question["title"].strip() or any(not option.strip() for option in question.get("options", [])) for question in questions):
+            return self._error_result("Question titles and options must not be blank")
+        text = "\n\n".join(question["title"] + "".join(f"\n- {option}" for option in question.get("options", [])) for question in questions)
+        return await emit_async_user_message(context, text=text, questions=questions)
+
+
+class SendMessageToUserAsyncTool(BaseTool):
+    name = "send_message_to_user_async"
+    description = "Send a user-visible message and continue working. Returns immediately; any user response arrives as new input."
+    should_defer = False
+    permission = PermissionLevel.AUTO
+    read_only = True
+    idempotent = False
+    result_kind = "status"
+
+    def get_spec(self):
+        return ToolSpec(name=self.name, capability="user.reply", toolset="core", exposure="core", required_args=("message",))
+
+    def get_schema(self):
+        return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {
+            "message": {"type": "string", "minLength": 1}}, "required": ["message"], "additionalProperties": False})
+
+    async def execute(self, args, context=None):
+        return await emit_async_user_message(context, text=args["message"])
+
+
+async def emit_async_user_message(context, *, text, questions=None):
+    if context is None or context.emit_event is None:
+        return ToolResult(content="The host cannot deliver this user message", is_error=True)
+    item = {"id": f"async:{context.tool_call_id}", "type": "agent_message", "text": text,
+        "source": "async", "phase": "final_answer", "delivery": "async", "status": "completed"}
+    if questions is not None:
+        item["questions"] = questions
+    await context.emit_event("item.started", {"tool_call_id": context.tool_call_id, "item": {**item, "text": "", "status": "in_progress"}})
+    await context.emit_event("item.completed", {"tool_call_id": context.tool_call_id, "item": item})
+    return ToolResult(content=json.dumps({"accepted": True}), result_kind="status")
 
 
 class BriefTool(BaseTool):

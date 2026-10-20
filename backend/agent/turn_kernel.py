@@ -421,7 +421,10 @@ class TurnKernel:
                 )
             )
         try:
-            context_builder.append_user("[Request interrupted by user]")
+            from backend.agents.source_roles import source_agent_options
+            snapshot = self.run_context.model_execution
+            if snapshot is None or source_agent_options(snapshot.config)["interrupt_message"]:
+                context_builder.append_user("[Request interrupted by user]")
         except Exception as exc:
             logger.warning("Cancel-path interruption marker append failed: %s", exc)
             events.append(

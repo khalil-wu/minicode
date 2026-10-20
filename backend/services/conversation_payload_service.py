@@ -66,6 +66,7 @@ class ConversationDeleteRequest:
     cleanup_worktree: bool
     force_cleanup: bool
     client_resource_cleanup: bool = False
+    storage_review: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -205,11 +206,15 @@ def _request_flag(data: dict[str, Any], name: str) -> bool:
 
 
 def parse_conversation_delete_request(data: dict[str, Any]) -> ConversationDeleteRequest:
+    storage_review = data.get("storage_review")
+    if storage_review is not None and not isinstance(storage_review, dict):
+        raise ValueError("storage_review must be an object")
     return ConversationDeleteRequest(
         conversation_id=str(data.get("conversation_id", "")),
         cleanup_worktree=_request_flag(data, "cleanup_worktree"),
         force_cleanup=_request_flag(data, "force"),
         client_resource_cleanup=_request_flag(data, "client_resource_cleanup"),
+        storage_review=storage_review,
     )
 
 
@@ -480,7 +485,7 @@ def create_isolated_worktree_binding(
     branch = generated_branch_name(conversation_id)
     try:
         worktree_root.mkdir(parents=True, exist_ok=True)
-        created = manager.create_worktree(worktree_path, branch=branch, new_branch=True)
+        created = manager.create_worktree(worktree_path, branch=branch, new_branch=True, run_environment=False)
     except Exception as exc:
         return IsolatedWorktreeCreationResult(
             created=False,
@@ -496,11 +501,18 @@ def create_isolated_worktree_binding(
         )
 
     copied, skipped = copy_worktree_includes(base_root, worktree_path)
+    try:
+        environment_output = manager.run_environment(worktree_path, "setup", source_root=base_source)
+    except (RuntimeError, OSError, ValueError) as error:
+        return IsolatedWorktreeCreationResult(created=False, conversation_id=conversation_id,
+            error_event=AgentEvent.error(f"The worktree was retained at {worktree_path}. {error}", recoverable=True))
     include_note = ""
     if copied:
         include_note = f" Copied {len(copied)} managed local file(s) from .worktreeinclude."
     if skipped:
         include_note += f" Skipped {len(skipped)} unsafe or existing include entry(s)."
+    if environment_output:
+        include_note += "\n" + environment_output
 
     return IsolatedWorktreeCreationResult(
         created=True,
@@ -577,13 +589,13 @@ def cleanup_isolated_worktree(
         }
 
     base_root = main_worktree_root(worktree_path)
-    isolated_root = isolated_worktree_root(base_root)
-    if not is_path_within(worktree_path, isolated_root):
+    from backend.services.worktree_settings_service import is_managed_worktree_path
+    if not is_managed_worktree_path(worktree_path, base_root):
         return {
             "removed": False,
             "conversation_id": conversation_id,
             "path": str(worktree_path),
-            "error": "Only isolated worktrees under .minicode/worktrees can be removed",
+            "error": "Only MiniCode-managed worktrees can be removed",
         }
 
     from backend.sandbox.runner import SandboxUnavailableError

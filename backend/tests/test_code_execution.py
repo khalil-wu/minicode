@@ -398,6 +398,26 @@ def test_nested_tool_callback_cannot_complete_parent_or_inject_model_messages(tm
     asyncio.run(scenario())
 
 
+def test_nested_async_question_reaches_the_ui_and_journal_without_injecting_model_history(tmp_path):
+    from backend.tools.agent_user_tools import RequestUserInputAsyncTool
+    async def scenario():
+        model = ScriptModel('text(await tools.request_user_input_async({questions:[{title:"QA_ASYNC_QUESTION",options:["A","B"]}]}));')
+        model._settings = LLMSettings(api_key="fixture", model="gpt-6.1-sol")
+        info = ModelDefinition(provider="custom", id="gpt-6.1-sol", name="Source async fixture", api="openai-responses", base_url="")
+        state, builder, journal, events, _ = await run_model(tmp_path, model, [RequestUserInputAsyncTool()], mode="confirm", model_info=info)
+        messages = [event for event in events if event.type in {"item.started", "item.completed"} and event.data.get("item", {}).get("delivery") == "async"]
+        assert [event.type for event in messages] == ["item.started", "item.completed"]
+        question = messages[-1].data["item"]
+        assert question["questions"] == [{"title": "QA_ASYNC_QUESTION", "options": ["A", "B"]}]
+        assert messages[-1].data["call_source"]["kind"] == "code_mode"
+        retained = [event.payload for event in journal.read_events() if event.event_type == "progress" and event.payload.get("item_id") == question["id"]]
+        assert retained[-1]["delivery"] == "async"
+        assert retained[-1]["questions"] == question["questions"]
+        assert not any("QA_ASYNC_QUESTION" in message.get("content", "") and message["role"] == "assistant" for message in journal.reconstruct_history())
+        assert state.terminal_status == "completed", model.reports
+    asyncio.run(scenario())
+
+
 def test_unawaited_calls_do_not_start_and_large_output_retains_a_valid_handle(tmp_path):
     async def scenario():
         writer = FixtureTool("write_marker", effect=True)
@@ -542,7 +562,7 @@ def test_native_text_tool_input_uses_the_canonical_patch_executor(tmp_path):
     asyncio.run(scenario())
 
 
-def test_parent_cannot_claim_completion_while_a_code_cell_is_still_running(tmp_path):
+def test_completed_turn_retains_background_cell_until_its_session_closes(tmp_path):
     class PrematureModel(ScriptModel):
         async def stream_chat(self, messages, tools=None, metadata=None):
             if self.calls:
@@ -551,12 +571,17 @@ def test_parent_cannot_claim_completion_while_a_code_cell_is_still_running(tmp_p
             else:
                 async for event in super().stream_chat(messages, tools, metadata): yield event
     async def scenario():
+        observed = {}
+        async def observe(event):
+            if event.type == "done":
+                observed["terminal_status"] = event.data["status"]
+                observed["pending"] = event.data.get("lifecycle_cleanup_pending_count", 0)
         model = PrematureModel('await new Promise(resolve => setTimeout(resolve,60000));text("late");', yield_time_ms=0)
-        state, _, _, events, run_context = await run_model(tmp_path, model)
-        assert state.terminal_status == "partial"
-        assert state.stopped_reason == "code_cells_pending"
+        state, _, _, events, run_context = await run_model(tmp_path, model, observe=observe)
+        assert state.terminal_status == "completed"
+        assert observed == {"terminal_status": "completed", "pending": 0}
         assert all(cell.task.done() for cell in run_context.code_execution.cells.values())
-        assert next(event for event in reversed(events) if event.type == "done").data["status"] == "partial"
+        assert next(event for event in reversed(events) if event.type == "done").data["status"] == "completed"
     asyncio.run(scenario())
 
 

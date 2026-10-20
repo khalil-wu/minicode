@@ -1,7 +1,6 @@
 import { useI18n } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  ArrowLeft,
   Archive,
   Cable,
   CalendarClock,
@@ -19,11 +18,17 @@ import {
   BookOpenText,
   SquareTerminal,
   UserRoundCog,
+  Download,
 } from "../lib/icons";
+import { HardDrive, FileCog, Webhook, FolderGit2 } from "../lib/icons";
 import { useAppStore } from "../stores";
+import { visibleLeftSidebarWidth } from "../stores/shared-helpers";
 import { fetchLLMSettings } from "../protocol/api";
+import { runtime } from "../desktop/runtime";
+import { openDictationProviderSettings } from "../lib/dictation-preferences";
+import { pushToast } from "./ToastContainer";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useEscapeKey } from "../hooks/useFocusTrap";
 import "./SettingsCenter.css";
 import {
   type Tab,
@@ -32,6 +37,7 @@ import {
   toUiProvider,
 } from "./settingsShared";
 import { GeneralTab } from "./GeneralTab";
+import { OpenSourceLicenses } from "./OpenSourceLicenses";
 import { VoiceSettings } from "./VoiceSettings";
 import { AppearanceTab } from "./AppearanceTab";
 import { PersonalizationTab } from "./PersonalizationTab";
@@ -43,30 +49,62 @@ import { ProviderTab } from "./ProviderTab";
 import { ConnectorsTab } from "./ConnectorsTab";
 import { ConnectionsTab } from "./ConnectionsTab";
 import { SchedulerTab } from "./SchedulerTab";
-import { AdvancedTab } from "./AdvancedTab";
+import { SourceEnvironmentsTab } from "./SourceEnvironmentsTab";
 import { FeatureFlagsTab } from "./FeatureFlagsTab";
-import { PluginsTab } from "./PluginsTab";
+import { PluginsTab, PluginSettingsToolbar } from "./PluginsTab";
 import { SkillsTab } from "./SkillsTab";
 import { formatSettingsLoadError } from "./settingsLoad";
 import { SETTINGS_OPTIONS } from "./settingsSearch";
-import { formatShortcut, SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
+import { formatShortcut, isCodeShortcut, SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
 import { FEATURE_FLAG_LABELS } from "./FeatureFlagsTab";
+import { ImportSettingsTab } from "./ImportSettingsTab";
+import { ConfigTab } from "./ConfigTab";
+import { HooksTab } from "./HooksTab";
+import { StorageTab } from "./StorageTab";
+import { WorktreesTab } from "./WorktreesTab";
+import { SourcePetsTab } from "./SourcePetsTab";
+import { createPetChat } from "../pets/createPetChat";
+import { SourcePetIcon } from "../pets/SourcePetIcon";
+import { usePluginsFeature } from "../hooks/usePluginsFeature";
 
 export const SettingsCenter = () => {
   const { t: tr } = useI18n();
   const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const sidebarWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+  useEffect(() => {
+    const resize = () => setWindowWidth(window.innerWidth);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
   const setRemoteImagePolicy = useAppStore((s) => s.setRemoteImagePolicy);
-  const pageRef = useFocusTrap(settingsOpen);
+  const pageRef = useRef<HTMLDivElement>(null);
+  useEscapeKey(toggleSettings, settingsOpen, pageRef);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const previous = document.activeElement as HTMLElement;
+    const page = pageRef.current!;
+    const frame = requestAnimationFrame(() => {
+      if (document.activeElement === previous) page.querySelector<HTMLInputElement>(".settings-search input")!.focus();
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      if (previous.isConnected && (page.contains(document.activeElement) || document.activeElement === document.body)) previous.focus({ preventScroll: true });
+    };
+  }, [settingsOpen]);
 
   const activeTab = useAppStore((s) => s.settingsTab);
   const setActiveTab = useAppStore((s) => s.setSettingsTab);
   const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const shortcutBindings = useAppStore((s) => s.shortcutBindings);
+  const appMode = useAppStore((s) => s.appMode);
+  const { enabled: pluginsEnabled } = usePluginsFeature();
   const mcpCount = useAppStore((s) => s.mcpServers.length);
-  const skillCount = useAppStore((s) => s.availableSkills.length);
+  const [skillCount, setSkillCount] = useState<number>();
+  useEffect(() => { setSkillCount(undefined); }, [workingDirectory]);
   const [provider, setProvider] = useState<ProviderId>("custom");
   const [settingsPayload, setSettingsPayload] = useState<LLMSettingsPayload | null>(null);
   const settingsPayloadRef = useRef<LLMSettingsPayload | null>(null);
@@ -77,6 +115,17 @@ export const SettingsCenter = () => {
   const activeTabButtonRef = useRef<HTMLButtonElement>(null);
   const contentRef = useRef<HTMLElement>(null);
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
+  const [integrationSearch, setIntegrationSearch] = useState("");
+  const [pluginCount, setPluginCount] = useState<number>();
+  const [marketplaceCount, setMarketplaceCount] = useState<number>();
+  const [licensesOpen, setLicensesOpen] = useState(false);
+  const generalBeforeLicenses = useRef(0);
+  useEffect(() => { if (activeTab !== "general") setLicensesOpen(false); }, [activeTab]);
+  useLayoutEffect(() => {
+    if (activeTab === "general" && contentRef.current) contentRef.current.scrollTop = licensesOpen ? 0 : generalBeforeLicenses.current;
+  }, [licensesOpen]);
+  const [marketplaceRequest, setMarketplaceRequest] = useState(0);
+  const [mcpEditorRequest, setMcpEditorRequest] = useState(0);
   const pagePositions = useRef(new Map<Tab, number>());
   useLayoutEffect(() => {
     if (contentRef.current) contentRef.current.scrollTop = pagePositions.current.get(activeTab) || 0;
@@ -84,7 +133,7 @@ export const SettingsCenter = () => {
   const [visitedTabs, setVisitedTabs] = useState<Tab[]>([activeTab]);
   const [searchTarget, setSearchTarget] = useState<{ tab: Tab; title: string; sourceTitle: string } | null>(null);
   useEffect(() => {
-    if (settingsOpen) setVisitedTabs((tabs) => tabs.includes(activeTab) ? tabs : [...tabs, activeTab]);
+    if (settingsOpen) setVisitedTabs((tabs) => [...new Set([...tabs, activeTab, ...(activeTab === "config" ? ["provider" as const, "features" as const] : [])])]);
   }, [activeTab, settingsOpen]);
 
   useEffect(() => {
@@ -146,7 +195,7 @@ export const SettingsCenter = () => {
 
   useEffect(() => {
     if (!settingsOpen) return;
-    if (activeTab !== "general" && activeTab !== "provider") return;
+    if (activeTab !== "general" && activeTab !== "provider" && activeTab !== "config") return;
     if (settingsPayloadRef.current) {
       setSettingsLoadState("ready");
       return;
@@ -189,32 +238,44 @@ export const SettingsCenter = () => {
 
   const tabs = [
     { id: "general" as const, group: tr("个人"), label: tr("常规"), description: tr("设置工作方式、消息跟进、过程展示与内容加载。"), keywords: tr("协作 代码 远程 Markdown 图片"), icon: <Settings /> },
+    { id: "import" as const, group: tr("个人"), label: tr("导入"), description: tr("将其他 AI 应用的配置、项目和聊天导入 MiniCode"), keywords: "Claude Code Cursor", icon: <Download /> },
     { id: "appearance" as const, group: tr("个人"), label: tr("外观"), description: tr("调整界面主题、字号与显示密度。"), keywords: tr("系统 浅色 深色 紧凑 字号"), icon: <Sun /> },
+    { id: "archived" as const, group: tr("个人"), label: tr("已归档聊天"), description: tr("存放已归档任务及消息，并可恢复到任务列表。"), keywords: tr("会话 消息 恢复 隐藏"), icon: <Archive /> },
     { id: "voice" as const, group: tr("个人"), label: tr("语音"), description: tr("设置麦克风与听写服务，录音转成可编辑草稿。"), keywords: tr("听写 录音 转录 麦克风 词汇"), icon: <Mic /> },
+    { id: "storage" as const, group: tr("个人"), label: tr("存储"), description: tr("管理保存在这台电脑上的聊天和工作树。"), keywords: "disk storage cleanup", icon: <HardDrive /> },
+    { id: "config" as const, group: tr("个人"), label: tr("配置"), description: tr("为新聊天配置权限、网络访问和智能体回复。"), keywords: "config model permissions", icon: <FileCog /> },
     { id: "personalization" as const, group: tr("个人"), label: tr("个性化"), description: tr("管理影响模型行为的指令、任务记忆与来源。"), keywords: tr("INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则"), icon: <UserRoundCog /> },
+    { id: "pets" as const, group: tr("个人"), label: tr("Mini 与宠物"), description: tr("Mini 管理聊天并显示需要关注的事项"), keywords: "mini pets avatar sprite hatch", icon: <SourcePetIcon active={activeTab === "pets"} /> },
     { id: "shortcuts" as const, group: tr("个人"), label: tr("快捷键"), description: tr("查看当前可用的键盘操作。"), keywords: tr("命令面板 终端 侧栏 发送 换行"), icon: <Keyboard /> },
     { id: "provider" as const, group: tr("个人"), label: tr("模型"), description: tr("配置提供商、接口、认证与默认模型。"), keywords: tr("API 密钥 Base URL 推理 供应商"), icon: <Cpu /> },
     { id: "plugins" as const, group: tr("集成"), label: tr("插件"), description: tr("管理插件、技能和 MCP。"), keywords: tr("导入 Zip 验证 打包 Hook App MCP 技能 服务"), icon: <Puzzle /> },
+    { id: "marketplace" as const, group: tr("集成"), label: tr("插件市场"), description: tr("管理插件市场"), keywords: "marketplace git source upgrade", icon: <Puzzle /> },
     { id: "skills" as const, group: tr("集成"), label: tr("技能"), description: tr("查看任务工作流，并选择用于下一条消息。"), keywords: tr("SKILL.md 工作流 市场 安装"), icon: <BookOpenText /> },
     { id: "connectors" as const, group: tr("集成"), label: "MCP", description: tr("安装和管理外部工具服务、连接与认证状态。"), keywords: tr("stdio HTTP 服务 工具 市场"), icon: <Cable /> },
     { id: "browser" as const, group: tr("集成"), label: tr("浏览器"), description: tr("管理内置浏览器页面、下载与站点权限。"), keywords: tr("控制台 网络 下载 数据 网站"), icon: <Globe2 /> },
-    { id: "connections" as const, group: tr("集成"), label: tr("连接"), description: tr("连接到远程设备。"), keywords: tr("SSH WSL 远程 设备"), icon: <Cable /> },
+    { id: "hooks" as const, group: tr("编码"), label: tr("钩子"), description: tr("管理来自配置和已启用插件的生命周期钩子。"), keywords: "hooks lifecycle command", icon: <Webhook /> },
+    { id: "connections" as const, group: tr("编码"), label: tr("连接"), description: tr("连接到远程设备。"), keywords: tr("SSH WSL 远程 设备"), icon: <Cable /> },
     { id: "scheduler" as const, group: tr("集成"), label: tr("已安排"), description: tr("管理自动运行的任务与最近记录。"), keywords: tr("计划 Cron 时区 Worktree 自动"), icon: <CalendarClock /> },
-    { id: "workspaceGit" as const, group: tr("编码"), label: tr("Git 与工作树"), description: tr("查看当前工作区的变更、分支与工作树。"), keywords: tr("diff 状态 文件 提交"), icon: <GitBranch /> },
+    { id: "workspaceGit" as const, group: tr("编码"), label: "Git", description: tr("查看当前工作区的变更、分支与工作树。"), keywords: tr("diff 状态 文件 提交"), icon: <GitBranch /> },
     { id: "features" as const, group: tr("编码"), label: tr("实验功能"), description: tr("启用或停用当前运行时支持的实验能力。"), keywords: tr("开关 运行时 SDK 预览"), icon: <FlaskConical /> },
-    { id: "advanced" as const, group: tr("编码"), label: tr("环境"), description: tr("检查开发工具、环境变量与运行诊断。"), keywords: tr("Git Python Node.js Docker Ollama 后端 运行状态"), icon: <SquareTerminal /> },
-    { id: "archived" as const, group: tr("已归档"), label: tr("已归档任务"), description: tr("存放已归档任务及消息，并可恢复到任务列表。"), keywords: tr("会话 消息 恢复 隐藏"), icon: <Archive /> },
+    { id: "advanced" as const, group: tr("编码"), label: tr("环境"), description: tr("本地环境用于配置项目工作树的设置脚本和操作。"), keywords: "environment setup cleanup actions worktree", icon: <SquareTerminal /> },
+    { id: "worktrees" as const, group: tr("编码"), label: tr("工作树"), description: tr("查看工作副本，并选择保留多少个旧工作树。"), keywords: "worktree root upstream cleanup", icon: <FolderGit2 /> },
   ];
-  const integrationOpen = ["plugins", "skills", "connectors"].includes(activeTab);
-  const navigationTab = integrationOpen ? "plugins" : activeTab;
+  const integrationOpen = ["plugins", "skills", "connectors", "marketplace"].includes(activeTab);
+  useEffect(() => {
+    if (settingsOpen && ((pluginsEnabled === false && ["plugins", "skills", "marketplace"].includes(activeTab)) || (activeTab === "plugins" && pluginCount === 0) || (activeTab === "skills" && skillCount === 0) || (activeTab === "marketplace" && marketplaceCount === 0))) {
+      setActiveTab("connectors");
+    }
+  }, [activeTab, pluginCount, settingsOpen, setActiveTab, skillCount, marketplaceCount, pluginsEnabled]);
+  const navigationTab = integrationOpen ? "plugins" : ["provider", "features"].includes(activeTab) ? "config" : activeTab;
   const activeTabMeta = tabs.find((tab) => tab.id === navigationTab)!;
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
   const visibleTabs = normalizedSettingsQuery
-    ? tabs.filter((tab) => !["skills", "connectors"].includes(tab.id) && `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
-    : tabs.filter((tab) => !["skills", "connectors"].includes(tab.id));
+    ? tabs.filter((tab) => !["connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id) && `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
+    : tabs.filter((tab) => !["connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id));
 
   const searchableOptions = [...SETTINGS_OPTIONS.map((option) => ({ ...option, sourceTitle: option.title, title: tr(option.title), description: tr(option.description) })),
-    ...SHORTCUT_DEFINITIONS.map((shortcut) => ({ tab: "shortcuts" as const, sourceTitle: shortcut.label, title: tr(shortcut.label), description: tr("快捷键绑定：{binding}", { binding: formatShortcut(shortcutBindings[shortcut.id]) || tr("未绑定") }), keywords: `${shortcut.action} ${formatShortcut(shortcutBindings[shortcut.id])}` })),
+    ...SHORTCUT_DEFINITIONS.filter(shortcut => appMode === "code" || !isCodeShortcut(shortcut.id)).map((shortcut) => ({ tab: "shortcuts" as const, sourceTitle: shortcut.label, title: tr(shortcut.label), description: tr("快捷键绑定：{binding}", { binding: formatShortcut(shortcutBindings[shortcut.id]) || tr("未绑定") }), keywords: `${shortcut.action} ${formatShortcut(shortcutBindings[shortcut.id])}` })),
     ...Object.entries(FEATURE_FLAG_LABELS).map(([key, flag]) => ({ tab: "features" as const, sourceTitle: flag.title, title: tr(flag.title), description: tr(flag.description), keywords: key })),
   ];
   const matchingOptions = normalizedSettingsQuery ? searchableOptions.filter((option) =>
@@ -232,22 +293,13 @@ export const SettingsCenter = () => {
     <main
       ref={pageRef}
       className="settings-workspace settings-center"
+      style={{ "--settings-sidebar-width": `${visibleLeftSidebarWidth(sidebarWidth, windowWidth)}px` } as import("react").CSSProperties}
       hidden={!settingsOpen}
       aria-label={tr("设置")}
       tabIndex={-1}
-      onKeyDown={(e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          e.stopPropagation();
-          toggleSettings();
-        }
-      }}
     >
       <aside className="settings-workspace-sidebar">
         <div className="settings-navigation-heading">
-        <button type="button" className="settings-back-button" onClick={toggleSettings} aria-label={tr("返回应用")}>
-          <ArrowLeft size={16} />
-        </button>
         <h2>{tr("设置")}</h2>
         </div>
         <label className="settings-search">
@@ -257,11 +309,16 @@ export const SettingsCenter = () => {
         <nav className="settings-center-tabs" aria-label={tr("设置分类")}>
           {matchingOptions.length > 0 && <div className="settings-search-results" aria-label={tr("设置选项结果")}>
             {matchingOptions.map((option) => <button key={`${option.tab}:${option.title}`} type="button"
-              className="settings-search-result" onClick={() => { setActiveTab(option.tab); setSearchTarget({ tab: option.tab, title: option.title, sourceTitle: option.sourceTitle }); }}>
+              className="settings-search-result" onClick={() => {
+                if (option.tab === "provider" && option.sourceTitle === "听写模型" && runtime()?.remoteHost) {
+                  void openDictationProviderSettings().catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); return;
+                }
+                setActiveTab(option.tab); setSearchTarget({ tab: option.tab, title: option.title, sourceTitle: option.sourceTitle });
+              }}>
               <strong>{tabs.find((tab) => tab.id === option.tab)?.label} / {option.title}</strong><span>{option.description}</span>
             </button>)}
           </div>}
-          {[tr("个人"), tr("集成"), tr("编码"), tr("已归档")].map((group) => {
+          {[tr("个人"), tr("集成"), tr("编码")].map((group) => {
             const groupTabs = visibleTabs.filter((tab) => tab.group === group);
             if (groupTabs.length === 0) return null;
             return (
@@ -290,33 +347,53 @@ export const SettingsCenter = () => {
 
       <header className="settings-workspace-header" aria-hidden="true" />
 
-      <section className="settings-center-main" ref={contentRef} onScroll={(event) => pagePositions.current.set(activeTab, event.currentTarget.scrollTop)} aria-labelledby="settings-page-title">
+      <section className="settings-center-main" ref={contentRef} onScroll={(event) => { if (!(activeTab === "general" && licensesOpen)) pagePositions.current.set(activeTab, event.currentTarget.scrollTop); }} aria-labelledby="settings-page-title">
           <div className="settings-center-content">
-            <header className="settings-page-heading">
+            {!(activeTab === "general" && licensesOpen) && <header className="settings-page-heading">
               <div className="settings-page-heading-copy">
               <h2 id="settings-page-title">{activeTabMeta.label}</h2>
+              {integrationOpen && <p>{tr("管理插件、技能和 MCP。")}</p>}
               </div>
-              <div ref={setToolbarHost} className="settings-page-heading-actions" />
-            </header>
-            {integrationOpen && <nav className="settings-integration-tabs" aria-label={tr("插件能力")}>
+              <div ref={setToolbarHost} className="settings-page-heading-actions">
+                {integrationOpen && <PluginSettingsToolbar
+                  onAddMarketplace={() => { setActiveTab("plugins"); setMarketplaceRequest(request => request + 1); }}
+                  onAddMcpServer={() => { setActiveTab("connectors"); setMcpEditorRequest(request => request + 1); }}
+                  onBrowseDirectory={() => useAppStore.getState().toggleSkillsMarketplace("settings", activeTab === "skills" ? "skills" : "plugins")}
+                />}
+              </div>
+            </header>}
+            {integrationOpen && <div className="settings-integration-controls"><nav className="settings-integration-tabs" aria-label={tr("插件能力")}>
               {([
-                { id: "plugins", label: tr("插件"), name: tr("已安装插件"), count: undefined },
-                { id: "skills", label: tr("技能"), name: tr("技能管理"), count: skillCount },
+                { id: "plugins", label: tr("插件"), name: tr("已安装插件"), count: pluginCount },
                 { id: "connectors", label: "MCP", name: tr("MCP 服务"), count: mcpCount },
-              ] as const).map(item => <button key={item.id} type="button" aria-label={item.name} aria-pressed={activeTab === item.id}
+                { id: "skills", label: tr("技能"), name: tr("已安装技能"), count: skillCount },
+                { id: "marketplace", label: tr("市场"), name: tr("插件市场"), count: marketplaceCount },
+              ] as const).filter(item => item.id === "connectors" || (pluginsEnabled !== false && item.count !== undefined && item.count > 0)).map(item => <button key={item.id} type="button" aria-label={item.name} aria-pressed={activeTab === item.id}
                 onClick={() => { setSearchTarget(null); setActiveTab(item.id); }}>{item.label}{item.count !== undefined && <span>{item.count}</span>}</button>)}
-            </nav>}
+            </nav>
+            <label className="settings-search settings-integration-search">
+              <Search size={16} aria-hidden="true" />
+              <input value={integrationSearch} onChange={event => setIntegrationSearch(event.target.value)}
+                aria-label={activeTab === "connectors" ? tr("搜索 MCP 服务器") : activeTab === "skills" ? tr("搜索技能") : activeTab === "marketplace" ? tr("搜索插件市场") : tr("搜索插件")}
+                placeholder={activeTab === "connectors" ? tr("搜索 MCP 服务器") : activeTab === "skills" ? tr("搜索技能") : activeTab === "marketplace" ? tr("搜索插件市场") : tr("搜索插件")} />
+            </label></div>}
             <div className="settings-page-body">
-              {Array.from(new Set([...visitedTabs, ...(settingsOpen ? [activeTab] : [])])).map((tab) => <div
-                className="settings-tab-pane" key={tab} data-settings-tab={tab} hidden={tab !== activeTab}>
+              {Array.from(new Set([...visitedTabs, ...(settingsOpen ? [activeTab, ...(integrationOpen ? ["plugins" as const, "connectors" as const, "skills" as const] : [])] : [])])).filter(tab => tab !== "marketplace").map((tab) => <div
+                className="settings-tab-pane" key={tab} data-settings-tab={tab === "plugins" && activeTab === "marketplace" ? "marketplace" : tab} hidden={tab !== activeTab && !(activeTab === "marketplace" && tab === "plugins") && !(activeTab === "config" && ["provider", "features"].includes(tab))}>
               {tab === "appearance" && <AppearanceTab />}
+              {tab === "import" && <ImportSettingsTab active={settingsOpen && tab === activeTab} />}
+              {tab === "config" && <ConfigTab active={settingsOpen && tab === activeTab} />}
+              {tab === "hooks" && <HooksTab active={settingsOpen && tab === activeTab} toolbarHost={toolbarHost} />}
+              {tab === "storage" && <StorageTab active={settingsOpen && tab === activeTab} />}
+              {tab === "worktrees" && <WorktreesTab active={settingsOpen && tab === activeTab} />}
               {tab === "personalization" && <PersonalizationTab active={settingsOpen && tab === activeTab} />}
               {tab === "shortcuts" && <ShortcutsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "shortcuts" ? searchTarget.title : undefined} />}
               {tab === "general" && (
-                <GeneralTab
+                <><div hidden={licensesOpen}><GeneralTab
                   remoteImagePolicy={remoteImagePolicy}
                   setRemoteImagePolicy={setRemoteImagePolicy}
-                />
+                  onOpenLicenses={() => { generalBeforeLicenses.current = contentRef.current?.scrollTop || 0; setLicensesOpen(true); }}
+                /></div>{licensesOpen && <OpenSourceLicenses onBack={() => setLicensesOpen(false)} />}</>
               )}
               {tab === "provider" && (
                 settingsLoadState === "error" && !settingsPayload ? (
@@ -346,20 +423,25 @@ export const SettingsCenter = () => {
                   onProviderChange={handleProviderChange}
                   onSettingsPayloadChange={handleSettingsPayloadChange}
                   searchTarget={searchTarget?.tab === "provider" ? searchTarget.title : undefined}
-                  isActive={settingsOpen && tab === activeTab}
+                  isActive={settingsOpen && (tab === activeTab || activeTab === "config")}
                 /></>
               )}
-              {tab === "skills" && <SkillsTab onReturnToApp={toggleSettings} />}
+              {tab === "skills" && <SkillsTab active={settingsOpen && integrationOpen} search={integrationSearch} onSkillsChange={setSkillCount} />}
               {tab === "voice" && <VoiceSettings active={settingsOpen && tab === activeTab} />}
-              {tab === "connectors" && <ConnectorsTab />}
+              {tab === "connectors" && <ConnectorsTab search={integrationSearch} editorRequest={mcpEditorRequest}
+                onEditorChange={() => { if (contentRef.current && activeTab === "connectors") contentRef.current.scrollTop = 0; }} />}
               {tab === "connections" && <ConnectionsTab active={settingsOpen && tab === activeTab} />}
               {tab === "browser" && <BrowserIntegrationTab active={settingsOpen && tab === activeTab} />}
               {tab === "scheduler" && <SchedulerTab active={settingsOpen && tab === activeTab} title={tr("定时任务")} description={tr("自动运行的任务和最近结果。")} />}
               {tab === "workspaceGit" && <WorkspaceGitTab active={settingsOpen && tab === activeTab} />}
-              {tab === "features" && <FeatureFlagsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "features" ? searchTarget.title : undefined} />}
-              {tab === "plugins" && <PluginsTab toolbarHost={toolbarHost} active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "plugins" ? searchTarget.title : undefined} />}
-              {tab === "advanced" && <AdvancedTab active={settingsOpen && tab === activeTab} />}
-              {tab === "archived" && <ArchivedTab />}
+              {tab === "features" && <FeatureFlagsTab active={settingsOpen && (tab === activeTab || activeTab === "config")} searchTarget={searchTarget?.tab === "features" ? searchTarget.title : undefined} />}
+              {tab === "plugins" && <PluginsTab managedToolbar search={integrationSearch} marketplaceRequest={marketplaceRequest}
+                onPluginsChange={setPluginCount} onMarketplacesChange={setMarketplaceCount} managedView={activeTab === "marketplace" ? "marketplaces" : "plugins"}
+                loadInventory={settingsOpen && integrationOpen} active={settingsOpen && (tab === activeTab || activeTab === "marketplace")}
+                searchTarget={searchTarget?.tab === "plugins" ? searchTarget.title : undefined} />}
+              {tab === "advanced" && <SourceEnvironmentsTab active={settingsOpen && tab === activeTab} />}
+              {tab === "pets" && <SourcePetsTab active={settingsOpen && tab === activeTab} onCreatePet={createPetChat} />}
+              {tab === "archived" && <ArchivedTab toolbarHost={toolbarHost} active={settingsOpen && tab === activeTab} />}
               </div>)}
             </div>
           </div>

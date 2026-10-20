@@ -332,6 +332,7 @@ class TaskScheduler:
         self._on_change = on_change
         self._loop_task: asyncio.Task[None] | None = None
         self._running = False
+        self._last_worktree_cleanup_at = 0.0
         self._heartbeat_gate: Callable[..., str | None] | None = None
         self._heartbeat_target_runs: dict[str, str] = {}
         # Structured evidence for the most recent corrupt state-file read and
@@ -592,6 +593,12 @@ class TaskScheduler:
         ]
         rows.sort(key=lambda row: (str(row.get("started_at") or row.get("scheduled_at") or ""), str(row.get("id") or "")), reverse=True)
         return rows[offset:offset + limit]
+
+    def active_conversation_ids(self) -> set[str]:
+        """Actual pending, running or draining work, without history pagination."""
+        return {run.conversation_id for run in self._runs.values()
+            if run.conversation_id and (run.status in {"pending", "running"} or run.cleanup_pending
+                or run.id in self._run_tasks and not self._run_tasks[run.id].done())}
 
     def add_task(
         self,
@@ -884,6 +891,15 @@ class TaskScheduler:
         try:
             while self._running:
                 self._tick(datetime.now(UTC))
+                if time.monotonic() - self._last_worktree_cleanup_at >= 600:
+                    from backend.async_cleanup import to_thread_cancel_safe
+                    from backend.api import _state
+                    from backend.services.worktree_settings_service import cleanup_managed_worktrees
+                    self._last_worktree_cleanup_at = time.monotonic()
+                    results = await to_thread_cancel_safe(cleanup_managed_worktrees, ws_manager=_state.ws_manager)
+                    for result in results:
+                        if not result["removed"]:
+                            logger.info("Managed worktree cleanup skipped %s: %s", result["path"], result["error"])
                 await asyncio.sleep(30)
         except asyncio.CancelledError:
             pass

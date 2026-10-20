@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 from backend.skills.marketplace import list_extensions_marketplace
 from backend.services.skills_api_service import (
@@ -19,8 +20,12 @@ from backend.services.skills_api_service import (
     remove_skill,
     import_skill,
     skills_marketplace_payload,
+    skills_settings_payload,
+    skill_detail_payload,
+    update_skill_enabled,
 )
 from backend.plugins.package import package_plugin_directory, validate_plugin_directory
+from backend.hooks.runtime import ConfigChangeHookBlocked
 from backend.plugins.policy import PluginSettingsError
 from backend.services.plugin_settings_service import (
     get_plugin_settings,
@@ -30,6 +35,7 @@ from backend.services.plugin_settings_service import (
     update_plugin_enabled,
 )
 from backend.plugins.manager import MarketplaceRegistry, PluginManager
+from backend.plugins.materializer import MaterializationError
 from backend.config import load_config_layer_stack
 from backend.config import SETTINGS_FILE
 from backend.hooks.runtime import run_config_change_hook
@@ -50,6 +56,53 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+class SkillEnabledRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1)
+    enabled: bool
+    workspace_root: str = ""
+
+
+def _settings_skill_manager():
+    if _state.bootstrap is None or _state.bootstrap.skill_manager is None:
+        raise HTTPException(503, detail="Skill inventory is unavailable")
+    return _state.bootstrap.skill_manager
+
+
+@router.get("/api/skills/settings")
+async def get_skill_settings_api(response: Response, workspace_root: str = "") -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return await to_thread_cancel_safe(skills_settings_payload,
+        skill_manager=_settings_skill_manager(), workspace_root=workspace_root)
+
+
+@router.put("/api/skills/settings")
+async def update_skill_settings_api(request: SkillEnabledRequest, response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        result = await update_skill_enabled(request.path, request.enabled,
+            skill_manager=_settings_skill_manager(), workspace_root=request.workspace_root)
+    except (ValueError, ConfigChangeHookBlocked) as error:
+        raise HTTPException(400, detail=str(error)) from error
+    _state.invalidate_status_cache()
+    return result
+
+
+@router.get("/api/skills/detail")
+async def get_skill_detail_api(
+    response: Response,
+    skill_path: str = Query(..., min_length=1),
+    workspace_root: str = "",
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await to_thread_cancel_safe(skill_detail_payload, skill_path,
+            skill_manager=_settings_skill_manager(), workspace_root=workspace_root)
+    except ValueError as error:
+        raise HTTPException(404, detail=str(error)) from error
+
 
 _SKILL_ASSET_MEDIA_TYPES = {
     ".png": "image/png",
@@ -205,14 +258,19 @@ def add_plugin_marketplace_api(
         from backend.plugins.policy import _plugin_policy_from_stack
 
         policy = _plugin_policy_from_stack(load_config_layer_stack())
-        record = MarketplaceRegistry().add(request.name, request.source, policy=policy)
+        registry = MarketplaceRegistry()
+        if isinstance(request.source, str):
+            record, already_added = registry.add_source(request.source, ref_name=request.ref_name, sparse_paths=request.sparse_paths or (), policy=policy)
+        else:
+            record = registry.add(request.name, request.source, policy=policy)
+            already_added = False
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    except ValueError as exc:
+    except (ValueError, MaterializationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail=f"Plugin policy unavailable: {exc}") from exc
-    return {"marketplace": record}
+    return {"marketplace": record, "already_added": already_added}
 
 
 @router.delete("/api/plugins/marketplaces/{marketplace_name}")
@@ -316,6 +374,12 @@ async def update_plugin_state_api(plugin_name: str, request: PluginStateUpdateRe
             result["runtime_refresh"] = runtime_refresh
     _state.invalidate_status_cache()
     return result
+
+
+@router.post("/api/plugins/runtime/refresh")
+async def refresh_plugin_runtime_api(response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"runtime_refresh": await _refresh_plugin_runtime_state()}
 
 
 @router.post("/api/plugins/import")

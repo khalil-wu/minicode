@@ -506,6 +506,10 @@ class AnthropicAdapter(LLMAdapter):
             kwargs["extra_headers"] = extra_headers
 
         if side_options is not None and side_options.hosted_web_search:
+            if side_options.web_search_indexed_web_access is not None:
+                raise RuntimeError("Indexed web search is unavailable for the Anthropic Messages search tool")
+            if not side_options.web_search_external_web_access:
+                raise RuntimeError("Cached web search is unavailable for the Anthropic Messages search tool")
             if not self.supports_hosted_web_search():
                 raise RuntimeError(
                     "Hosted web search is unavailable for this Anthropic-compatible provider"

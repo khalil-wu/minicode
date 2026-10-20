@@ -2,6 +2,8 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 
 const {
   sendMock,
@@ -39,6 +41,8 @@ const {
 const writeTextMock = vi.fn(() => Promise.resolve());
 const scrollIntoViewMock = vi.fn();
 let notifyTabResize = () => {};
+let browserFixtureCount = 1;
+let browserFixtureMounts = 0;
 
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => false,
@@ -58,7 +62,27 @@ vi.mock("../protocol/api", () => ({
 }));
 
 vi.mock("../panels/BrowserPanel", () => ({
-  BrowserPanel: () => <div>Browser Control panel</div>,
+  BrowserPanel: ({ onLastTabClosed, tabHosts = {}, onTabsChanged, tabInteractions }: {
+    onLastTabClosed?: () => void; tabHosts?: Record<string, HTMLElement>;
+    onTabsChanged?: (tabs: {id: string; title: string; active: boolean}[]) => void;
+    tabInteractions?: (id: string) => import("react").HTMLAttributes<HTMLDivElement>;
+  }) => {
+    const [active, setActive] = useState("fixture-browser-1");
+    const panel = useAppStore(state => state.rightStackTab);
+    useEffect(() => { browserFixtureMounts++; return () => { browserFixtureMounts--; }; }, []);
+    useEffect(() => { onTabsChanged?.(Array.from({length:browserFixtureCount}, (_, index) => ({
+      id:`fixture-browser-${index + 1}`, title:index === 0 ? "浏览器" : `浏览器 ${index + 1}`, active:active === `fixture-browser-${index + 1}`,
+    }))); }, [active, onTabsChanged]);
+    return <><div>Browser Control panel<button onClick={onLastTabClosed}>Close last browser tab fixture</button>
+      <button onClick={() => { useAppStore.getState().setRightStackTab("files"); onLastTabClosed?.(); }}>Replace new tab with files fixture</button></div>
+      {Array.from({length:browserFixtureCount}, (_, index) => {
+        const id = `fixture-browser-${index + 1}`, label = index === 0 ? "浏览器" : `浏览器 ${index + 1}`;
+        return tabHosts[id] ? createPortal(<div {...tabInteractions?.(id)} data-sidebar-tab-frame="browser">
+          <button role="tab" data-sidebar-tab="browser" aria-label={`打开${label}`} aria-selected={active === id && panel === "browser"}
+            onClick={() => { setActive(id); useAppStore.getState().setRightStackTab("browser"); }}>{label}</button>
+        </div>,tabHosts[id],id) : null;
+      })}</>;
+  },
 }));
 
 vi.mock("../panels/PreviewPanel", () => ({
@@ -72,6 +96,7 @@ vi.mock("../panels/DiffPanel", () => ({
 vi.mock("../panels/TerminalPanel", () => ({
   TerminalPanel: () => <div>Terminal panel</div>,
 }));
+vi.mock("../panels/FilesPanel", () => ({ FilesPanel: () => <div>Files panel</div> }));
 
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ send: sendMock, sessionId: "session-sidebar-test" }),
@@ -85,7 +110,7 @@ vi.mock("../protocol/ws-outbox", () => ({
   sendConversationDeleteCommand: deleteConversationMock,
 }));
 
-import { useAppStore } from "../stores";
+import { useAppStore, waitEditorDraftRecovery } from "../stores";
 import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "../stores/composer-drafts";
 import { SidebarRight } from "./SidebarRight";
 import type { ChatMessage } from "../stores/types";
@@ -99,6 +124,8 @@ const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "rol
 });
 
 const resetSidebarState = () => {
+  browserFixtureCount = 1;
+  browserFixtureMounts = 0;
   useMcpAppSurfaces.setState({ entries: [] });
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600, writable: true });
   vi.stubGlobal("ResizeObserver", class {
@@ -201,6 +228,108 @@ describe("SidebarRight activity", () => {
 
   afterEach(() => {
     cleanup();
+    window.__MINICODE_RUNTIME__ = undefined;
+  });
+
+  it("uses the actual mixed tab order for native next, previous and close actions", async () => {
+    browserFixtureCount = 2;
+    useAppStore.setState({ rightStackTab: "browser", appMode: "cowork", draft: "Keep native tab draft" });
+    render(<SidebarRight />);
+    const first = await screen.findByRole("tab", { name: "打开浏览器", exact: true });
+    const second = await screen.findByRole("tab", { name: "打开浏览器 2", exact: true });
+    act(() => useAppStore.getState().setRightStackTab("files"));
+    const files = await screen.findByRole("tab", { name: "打开文件", exact: true });
+    fireEvent(window, new Event("next-tab"));
+    await waitFor(() => expect(first.getAttribute("aria-selected")).toBe("true"));
+    fireEvent(window, new Event("previous-tab"));
+    await waitFor(() => expect(files.getAttribute("aria-selected")).toBe("true"));
+    fireEvent(window, new Event("close-tab"));
+    await waitFor(() => expect(second.getAttribute("aria-selected")).toBe("true"));
+    expect(screen.queryByRole("tab", { name: "打开文件", exact: true })).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightStackTab: "browser", draft: "Keep native tab draft" });
+  });
+
+  it("routes numbered selection to actual browser leaf tabs and mixed file tabs with their captured owner", async () => {
+    browserFixtureCount = 2;
+    useAppStore.setState({ conversationId: "number-owner", rightStackTab: "browser", appMode: "cowork", settingsOpen: false, skillsMarketplaceOpen: false, projectsOpen: false, draft: "Keep numbered tab draft" });
+    render(<SidebarRight />);
+    const second = await screen.findByRole("tab", { name: "打开浏览器 2", exact: true });
+    fireEvent(window, new CustomEvent("select-numbered-tab", { detail: { index: 1, conversationId: "number-owner" } }));
+    await waitFor(() => expect(second.getAttribute("aria-selected")).toBe("true"));
+    const dirtyTab = { id: "kept-native", path: "C:/kept-native.ts", content: "Native focus unsaved", original: "Disk", loading: false };
+    act(() => useAppStore.setState({ appMode: "code", editorTabs: [dirtyTab], activeTabPath: dirtyTab.path,
+      panelSlots: [{ id: "chat", kind: "chat" }, { id: "editor", kind: "editor", focused: true }] }));
+    fireEvent(window, new CustomEvent("select-numbered-tab", { detail: { index: 0, conversationId: "number-owner", surface: "sidebar" } }));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "打开浏览器", exact: true }).getAttribute("aria-selected")).toBe("true"));
+    expect(useAppStore.getState().editorTabs).toMatchObject([dirtyTab]);
+    act(() => useAppStore.setState({ appMode: "cowork" }));
+    act(() => useAppStore.getState().setRightStackTab("files"));
+    const files = await screen.findByRole("tab", { name: "打开文件", exact: true });
+    fireEvent(window, new CustomEvent("select-numbered-tab", { detail: { index: 0, conversationId: "retired-owner" } }));
+    expect(files.getAttribute("aria-selected")).toBe("true");
+    fireEvent(window, new CustomEvent("select-numbered-tab", { detail: { index: 1, conversationId: "number-owner" } }));
+    await waitFor(() => expect(second.getAttribute("aria-selected")).toBe("true"));
+    fireEvent(window, new CustomEvent("select-numbered-tab", { detail: { index: 2, conversationId: "number-owner" } }));
+    await waitFor(() => expect(files.getAttribute("aria-selected")).toBe("true"));
+    expect(useAppStore.getState().draft).toBe("Keep numbered tab draft");
+  });
+
+  it("routes numbered selection to the focused code editor tabs without replacing unsaved buffers", async () => {
+    await waitEditorDraftRecovery();
+    const tabs = ["first", "second"].map(name => ({ id: name, path: `C:/NumberedEditor/${name}.ts`, content: `${name} unsaved`, original: `${name} disk`, loading: false, error: null }));
+    useAppStore.setState({ conversationId: "editor-owner", appMode: "code", settingsOpen: false, skillsMarketplaceOpen: false, projectsOpen: false,
+      editorTabs: tabs, activeTabPath: tabs[0].path, activeEditorPath: tabs[0].path,
+      panelSlots: [{ id: "chat", kind: "chat" }, { id: "code", kind: "editor", focused: true }], draft: "Keep code chat draft" });
+    render(<SidebarRight />);
+    fireEvent(window, new CustomEvent("select-numbered-tab", { detail: { index: 1, conversationId: "editor-owner" } }));
+    expect(useAppStore.getState().activeTabPath).toBe(tabs[1].path);
+    expect(useAppStore.getState().editorTabs).toMatchObject(tabs);
+    expect(useAppStore.getState()).toMatchObject({ appMode: "code", conversationId: "editor-owner", draft: "Keep code chat draft" });
+  });
+
+  it("routes native tab actions to the focused Code editor without dropping dirty buffers", () => {
+    const close = vi.fn();
+    window.addEventListener("editor:close-tab", close);
+    useAppStore.setState({ appMode: "code", rightPanelOpen: false, settingsOpen: false, projectsOpen: false, skillsMarketplaceOpen: false,
+      panelSlots: [{ id: "editor", kind: "editor", label: "Editor", focused: true }],
+      activeTabPath: "first.ts", editorTabs: [
+        { id: "first.ts", path: "first.ts", content: "dirty first", original: "first", loading: false },
+        { id: "second.ts", path: "second.ts", content: "dirty second", original: "second", loading: false },
+      ] });
+    try {
+      render(<SidebarRight visible={false} />);
+      fireEvent(window, new Event("next-tab"));
+      expect(useAppStore.getState().activeTabPath).toBe("second.ts");
+      fireEvent(window, new Event("previous-tab"));
+      expect(useAppStore.getState().activeTabPath).toBe("first.ts");
+      fireEvent(window, new Event("close-tab"));
+      expect(close).toHaveBeenCalledOnce();
+      expect(useAppStore.getState().editorTabs.map(tab => tab.content)).toEqual(["dirty first", "dirty second"]);
+    } finally { window.removeEventListener("editor:close-tab", close); }
+  });
+
+  it("uses the existing native window-close lifecycle only when no visible tab can close", () => {
+    const close = vi.fn(async () => {});
+    window.__MINICODE_RUNTIME__ = { desktop: { windowControls: { close } } } as never;
+    useAppStore.setState({ appMode: "cowork", rightPanelOpen: false, draft: "Keep before native lifecycle" });
+    const view = render(<SidebarRight visible={false} />);
+    fireEvent(window, new Event("close-tab"));
+    expect(close).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().draft).toBe("Keep before native lifecycle");
+    view.unmount();
+    fireEvent(window, new Event("close-tab"));
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("closes the live owned tab after returning from settings before the visibility prop catches up", async () => {
+    const close = vi.fn(async () => {});
+    window.__MINICODE_RUNTIME__ = { desktop: { windowControls: { close } } } as never;
+    useAppStore.setState({ appMode: "cowork", rightStackTab: "files", rightPanelOpen: true, settingsOpen: false, projectsOpen: false, skillsMarketplaceOpen: false });
+    render(<SidebarRight visible={false} />);
+    await waitFor(() => expect(document.querySelector('[data-workspace-tab-key="files"]')).toBeTruthy());
+    fireEvent(window, new Event("close-tab"));
+    expect(close).not.toHaveBeenCalled();
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
   });
 
   it("expands the existing preview and restores it without remounting the panel", async () => {
@@ -233,6 +362,64 @@ describe("SidebarRight activity", () => {
     expect(useAppStore.getState().rightStackTab).toBe("browser");
   });
 
+  it("mixes browser pages and panels in one draggable keyboard order without remounting owners", async () => {
+    browserFixtureCount = 2;
+    useAppStore.setState({ rightStackTab: "browser", appMode: "cowork" });
+    render(<SidebarRight />);
+    const first = await screen.findByRole("tab", {name:"打开浏览器",exact:true});
+    const second = await screen.findByRole("tab", {name:"打开浏览器 2",exact:true});
+    act(() => useAppStore.getState().setRightStackTab("diff"));
+    const changes = await screen.findByRole("tab", {name:"打开变更",exact:true});
+    expect(first.getAttribute("aria-selected")).toBe("false");
+    const track = screen.getByRole("tablist", { name: "右侧栏面板" });
+    const frames = Array.from(track.querySelectorAll<HTMLElement>("[data-workspace-tab-key]"));
+    for (const frame of frames) {
+      Object.defineProperties(frame, { setPointerCapture: { configurable: true, value: vi.fn() }, hasPointerCapture: { configurable: true, value: () => true }, releasePointerCapture: { configurable: true, value: vi.fn() } });
+      vi.spyOn(frame, "getBoundingClientRect").mockImplementation(() => {
+        const index = Array.from(track.querySelectorAll("[data-workspace-tab-key]")).indexOf(frame);
+        return { left: index * 100, right: index * 100 + 100, top: 0, bottom: 40, width: 100, height: 40, x: index * 100, y: 0, toJSON() {} };
+      });
+    }
+    fireEvent.pointerDown(changes, { button: 0, pointerId: 1, clientX: 250, clientY: 20 });
+    fireEvent.pointerMove(changes.parentElement!, { pointerId: 1, clientX: 110, clientY: 20 });
+    fireEvent.pointerUp(changes.parentElement!, { pointerId: 1, clientX: 110, clientY: 20 });
+    expect(screen.getAllByRole("tab").map(tab => tab.getAttribute("aria-label"))).toEqual(["打开浏览器","打开变更","打开浏览器 2"]);
+    expect(browserFixtureMounts).toBe(1);
+    expect(screen.getByRole("tab", {name:"打开浏览器 2",exact:true})).toBe(second);
+    fireEvent.keyDown(first,{key:"ArrowRight"});
+    expect(document.activeElement).toBe(changes);
+    fireEvent.keyDown(changes,{key:"ArrowRight"});
+    expect(document.activeElement).toBe(second);
+    expect(second.getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(second,{key:"Home"});
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first,{key:"End"});
+    expect(document.activeElement).toBe(second);
+  });
+
+  it("replaces the new browser tab with the requested Files surface without closing the sidebar", async () => {
+    useAppStore.setState({ rightStackTab:"browser", appMode:"cowork" });
+    render(<SidebarRight />);
+    await screen.findByRole("tab", {name:"打开浏览器",exact:true});
+    fireEvent.click(screen.getByText("Replace new tab with files fixture"));
+    await screen.findByText("Files panel");
+    expect(useAppStore.getState()).toMatchObject({rightStackTab:"files",rightPanelOpen:true,quickOpenVisible:false});
+    expect(screen.queryByRole("tab", {name:"打开浏览器",exact:true})).toBeNull();
+  });
+
+  it("returns to the adjacent panel when the browser closes its last native tab", async () => {
+    useAppStore.setState({ rightStackTab: "browser", appMode: "cowork" });
+    render(<SidebarRight />);
+    await screen.findByText("Browser Control panel");
+    act(() => useAppStore.getState().setRightStackTab("diff"));
+    await screen.findByText("Diff panel");
+    act(() => useAppStore.getState().setRightStackTab("browser"));
+    fireEvent.click(screen.getByText("Close last browser tab fixture"));
+    expect(useAppStore.getState().rightStackTab).toBe("diff");
+    expect(useAppStore.getState().rightPanelOpen).toBe(true);
+    expect(screen.queryByRole("tab", { name: "打开浏览器" })).toBeNull();
+  });
+
   it("starts with one quiet primary tab and keeps other panels in the launcher", () => {
     useAppStore.setState({ rightStackTab: "tasks" });
     render(<SidebarRight />);
@@ -263,7 +450,7 @@ describe("SidebarRight activity", () => {
 
     expect(tablist.className).toContain("mc-sidebar-right-tabs");
     expect(tablist.nextElementSibling).toBe(actions);
-    expect(actions.contains(screen.getByRole("button", { name: "添加面板" }))).toBe(true);
+    expect(actions.contains(screen.getByRole("button", { name: "新建标签页" }))).toBe(true);
     expect(actions.contains(screen.getByRole("button", { name: "关闭右侧栏" }))).toBe(true);
   });
 
@@ -271,10 +458,10 @@ describe("SidebarRight activity", () => {
     useAppStore.setState({ rightStackTab: "tasks", rightStackTabLocked: false });
     render(<SidebarRight />);
 
-    fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
     expect(screen.queryByRole("menuitem", { name: "运行详情" })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "运行状态" })).toBeNull();
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+
     act(() => useAppStore.getState().setRightStackTab("inspector"));
 
     expect(useAppStore.getState()).toMatchObject({
@@ -1187,26 +1374,13 @@ describe("SidebarRight activity", () => {
     expect(useAppStore.getState().rightStackTab).toBe("diff");
   });
 
-  it("opens the anchored panel menu without replacing the current panel", () => {
-    useAppStore.setState({
-      rightStackTab: "diff",
-      rightStackTabLocked: true,
-      quickOpenVisible: false,
-    });
-
+  it("opens a browser new tab directly and keeps the previous panel mounted", () => {
+    useAppStore.setState({ rightStackTab: "diff", rightStackTabLocked: true });
     render(<SidebarRight />);
-
-    fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-    expect(screen.getByRole("menu")).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /文件/ })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /侧边聊天/ })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: /终端/ })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "上下文" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "预览" })).toBeTruthy();
-    expect(screen.getByRole("menuitem", { name: "产物" })).toBeTruthy();
-    expect(screen.getByRole("tabpanel", { name: "打开变更" })).toBeTruthy();
-    expect(useAppStore.getState().quickOpenVisible).toBe(false);
-    expect(useAppStore.getState().rightStackTab).toBe("diff");
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(useAppStore.getState().rightStackTab).toBe("browser");
+    expect(screen.getByText("Diff panel")).toBeTruthy();
   });
 
   it("keeps the desktop card mounted while open state fades", () => {
@@ -1223,41 +1397,64 @@ describe("SidebarRight activity", () => {
     expect(sidebar?.dataset.open).toBe("true");
   });
 
-  it("retains side-chat input across menus, tab switches and panel hiding", async () => {
+  it("retains side-chat input across menus, tab switches and panel hiding", async ({ onTestFinished }) => {
+    const rect = new DOMRect(0, 0, 600, 80);
+    for (const [name, value] of [["getClientRects", () => [rect]], ["getBoundingClientRect", () => rect]] as const) {
+      const previous = Object.getOwnPropertyDescriptor(Range.prototype, name);
+      Object.defineProperty(Range.prototype, name, { configurable: true, value });
+      onTestFinished(() => { if (previous) Object.defineProperty(Range.prototype, name, previous); else Reflect.deleteProperty(Range.prototype, name); });
+    }
+    const scroll = vi.spyOn(window, "scrollBy").mockImplementation(() => {});
+    onTestFinished(() => scroll.mockRestore());
     deleteConversationMock.mockClear();
-    useAppStore.setState({ rightStackTab: "tasks", isConnected: true });
+    useAppStore.setState({ rightStackTab: "tasks", isConnected: true, composerPlainTextMode: false });
     render(<SidebarRight />);
     act(() => useAppStore.getState().toggleSideChat());
     const input = await screen.findByRole("textbox", { name: "侧边对话消息" });
     const id = Object.keys(useAppStore.getState().sideChats)[0];
-    fireEvent.change(input, { target: { value: "keep this draft" } });
+    expect(input.getAttribute("contenteditable")).toBe("true");
+    const markdown = "keep **this** draft";
+    fireEvent.paste(input, { clipboardData: { items: [], files: [], types: ["text/plain"], getData: (type: string) => type === "text/html" ? "" : markdown } });
     await waitFor(() => expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(false));
+    expect(input.querySelector("strong")?.textContent).toBe("this");
+    const richDraft = useAppStore.getState().sideChats[id].richDraft!;
+    expect(richDraft.markdown).toBe(markdown);
+    expect(richDraft.document).toMatchObject({ type: "doc", content: [{ type: "paragraph", content: [
+      { type: "text", text: "keep " }, { type: "text", text: "this", marks: [{ type: "strong" }] }, { type: "text", text: " draft" },
+    ] }] });
     fireEvent.click(screen.getByRole("tab", { name: "打开上下文" }));
-    fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
     expect(input.isConnected).toBe(true);
-    expect((input as HTMLTextAreaElement).value).toBe("keep this draft");
-    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(input.textContent).toBe("keep this draft");
+    expect(input.closest<HTMLElement>('[role="tabpanel"]')?.hidden).toBe(true);
+    expect(useAppStore.getState().sideChats[id].richDraft).toEqual(richDraft);
+
     fireEvent.click(screen.getByRole("tab", { name: "打开侧边聊天" }));
     fireEvent.click(screen.getByRole("button", { name: "关闭右侧栏" }));
     expect(input.isConnected).toBe(true);
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
     expect(deleteConversationMock).not.toHaveBeenCalled();
     act(() => useAppStore.getState().toggleSideChat());
     expect(screen.getByRole("textbox", { name: "侧边对话消息" })).toBe(input);
     fireEvent.click(screen.getByRole("button", { name: "关闭侧边聊天标签页" }));
     expect(deleteConversationMock).not.toHaveBeenCalled();
-    expect(useAppStore.getState().sideChats[id].draft).toBe("keep this draft");
+    expect(useAppStore.getState().sideChats[id].draft).toBe(markdown);
+    expect(useAppStore.getState().sideChats[id].richDraft).toEqual(richDraft);
     await flushComposerDrafts();
     await resetComposerDraftStorageForTests(true);
     const recovered = (await loadComposerDrafts()).find(record => record.owner.kind === "side" && record.owner.id === id)!;
-    expect(recovered.draft.draft).toBe("keep this draft");
+    expect(recovered.draft.draft).toBe(markdown);
+    expect(recovered.draft.richDraft).toEqual(richDraft);
     act(() => useAppStore.setState({ sideChats: {} }));
     act(() => {
       useAppStore.setState({ sideChats: { [id]: { id, messages: [], isStreaming: false, workspaceRoot: recovered.owner.workspaceRoot,
-        ...recovered.side, draft: recovered.draft.draft, attachments: recovered.draft.attachments } } });
+        ...recovered.side, draft: recovered.draft.draft, richDraft: recovered.draft.richDraft, attachments: recovered.draft.attachments } } });
       useAppStore.getState().toggleSideChat();
     });
     const reopened = await screen.findByRole("textbox", { name: "侧边对话消息" });
-    expect((reopened as HTMLTextAreaElement).value).toBe("keep this draft");
+    expect(reopened.textContent).toBe("keep this draft");
+    expect(reopened.querySelector("strong")?.textContent).toBe("this");
+    expect(useAppStore.getState().sideChats[id].richDraft).toEqual(richDraft);
     expect(Object.keys(useAppStore.getState().sideChats)).toEqual([id]);
     expect(deleteConversationMock).not.toHaveBeenCalled();
   });
@@ -1279,8 +1476,8 @@ describe("SidebarRight activity", () => {
 
     render(<SidebarRight />);
 
-    fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "浏览器" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
+
 
     expect(useAppStore.getState().rightStackTab).toBe("browser");
     expect(await screen.findByText("Browser Control panel")).toBeTruthy();
@@ -1311,20 +1508,11 @@ describe("SidebarRight activity", () => {
   it("keeps the trailing close control reachable after several panels open", () => {
     useAppStore.setState({ rightStackTab: "tasks", rightStackTabLocked: true });
     render(<SidebarRight />);
-
-    for (const label of ["子智能体", "产物", "浏览器"]) {
-      fireEvent.click(screen.getByRole("button", { name: "添加面板" }));
-      fireEvent.click(screen.getByRole("menuitem", { name: label, exact: true }));
-    }
-
-    const browserTab = screen.getByRole("tab", { name: "打开浏览器" });
-    const browserFrame = browserTab.closest<HTMLElement>(".mc-sidebar-right-tab-frame");
-    expect(scrollIntoViewMock.mock.instances.at(-1)).toBe(browserFrame);
-
-    fireEvent.click(screen.getByRole("button", { name: "关闭浏览器标签页" }));
-
-    expect(screen.queryByRole("tab", { name: "打开浏览器" })).toBeNull();
+    for (const tab of ["subagents", "artifacts", "diff"] as const) act(() => useAppStore.getState().setRightStackTab(tab));
+    expect(screen.getByRole("button", { name: "新建标签页" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "关闭变更标签页" }));
     expect(useAppStore.getState().rightStackTab).toBe("artifacts");
+    expect(screen.getByRole("button", { name: "关闭右侧栏" })).toBeTruthy();
   });
 
   it("shows delegated work after an external Agents navigation request", () => {
@@ -1615,6 +1803,22 @@ describe("SidebarRight diagnostics", () => {
     await waitFor(() => {
       expect(useAppStore.getState().rightStackTab).toBe("diagnostics");
     });
+  });
+
+  it("closes the source Goal editor through the shared adjacent-tab consumer when its goal is cleared", async () => {
+    useAppStore.setState({ conversationId: "sidebar-goal-owner", isConnected: true,
+      activeGoal: { text: "Actual saved goal", status: "active" } });
+    render(<SidebarRight />);
+    act(() => useAppStore.getState().setRightStackTab("goal"));
+    expect(await screen.findByRole("tab", { name: "打开编辑目标" })).toBeTruthy();
+    expect(await screen.findByRole("textbox", { name: "目标" })).toBeTruthy();
+    act(() => useAppStore.getState().setRightStackTab("files"));
+    expect(await screen.findByRole("tab", { name: "打开文件" })).toBeTruthy();
+    act(() => useAppStore.getState().setRightStackTab("goal"));
+    act(() => useAppStore.setState({ activeGoal: null }));
+    await waitFor(() => expect(screen.queryByRole("tab", { name: "打开编辑目标" })).toBeNull());
+    expect(useAppStore.getState().rightStackTab).toBe("files");
+    expect(screen.getByRole("tab", { name: "打开文件" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("locks diagnostics after manual selection so preview updates do not steal focus", async () => {

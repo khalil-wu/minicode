@@ -321,6 +321,10 @@ class SkillManager:
             self.discover()
         meta = self._loader.get_meta_by_path(source_path)
         if meta is None:
+            key = self._loader._path_key(Path(source_path))
+            meta = next((meta for meta, _ in self._loader.list_settings_metas()
+                if self._loader._path_key(meta.source_path) == key), None)
+        if meta is None:
             return None
         raw_path = meta.icon_large if variant == "large" else meta.icon
         if not raw_path:
@@ -338,26 +342,44 @@ class SkillManager:
         if not self._discovered:
             self.discover()
 
-        result: list[dict[str, Any]] = []
-        for meta in self._loader.list_metas():
-            result.append({
-                "name": meta.name,
-                "description": meta.description,
-                "display_name": meta.display_name,
-                "short_description": meta.short_description,
-                "icon": meta.icon,
-                "icon_large": meta.icon_large,
-                "brand_color": meta.brand_color,
-                "path": str(meta.source_path),
-                "active": False,
-                "level": meta.source_level,
-                "source_level": meta.source_level,
-                "mcp_dependencies": meta.mcp_dependencies,
-                "allow_implicit_invocation": meta.allow_implicit_invocation,
-                "user_invocable": meta.user_invocable,
-                "default_prompt": meta.default_prompt,
-            })
-        return result
+        return [self._public_meta(meta) for meta in self._loader.list_metas()]
+
+    def list_settings(self, *, source_level: str = "user") -> list[dict[str, Any]]:
+        if not self._discovered:
+            self.discover()
+        return [{**self._public_meta(meta), "enabled": enabled}
+            for meta, enabled in self._loader.list_settings_metas() if meta.source_level == source_level]
+
+    def read_skill_detail(self, source_path: str | Path) -> dict[str, Any] | None:
+        if not self._discovered:
+            self.discover()
+        loaded = self._loader.load_settings_full(source_path)
+        if loaded is None:
+            return None
+        full, enabled = loaded
+        return {**self._public_meta(full.meta), "enabled": enabled, "content": full.content,
+            "raw_content": full.raw_content}
+
+    @staticmethod
+    def _public_meta(meta: SkillMeta) -> dict[str, Any]:
+        return {
+            "name": meta.name,
+            "description": meta.description,
+            "display_name": meta.display_name,
+            "short_description": meta.short_description,
+            "icon": meta.icon,
+            "icon_large": meta.icon_large,
+            "brand_color": meta.brand_color,
+            "path": str(meta.source_path),
+            "active": False,
+            "level": meta.source_level,
+            "source_level": meta.source_level,
+            "plugin_enabled": meta.plugin_enabled,
+            "mcp_dependencies": meta.mcp_dependencies,
+            "allow_implicit_invocation": meta.allow_implicit_invocation,
+            "user_invocable": meta.user_invocable,
+            "default_prompt": meta.default_prompt,
+        }
 
     @staticmethod
     def _skill_key(source_path: Path | str) -> str:

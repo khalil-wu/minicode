@@ -81,7 +81,7 @@ def test_short_managed_command_finishes_without_background_notifications(tmp_pat
     asyncio.run(scenario())
 
 
-def test_cancel_during_initial_wait_stops_the_owned_command(tmp_path):
+def test_turn_cancel_during_initial_wait_preserves_the_owned_command_until_explicit_cancel(tmp_path):
     async def scenario():
         manager = BackgroundCommandManager(session_id="command-tests")
         ready, cancel = asyncio.Event(), asyncio.Event()
@@ -96,8 +96,12 @@ def test_cancel_during_initial_wait_stops_the_owned_command(tmp_path):
                 await asyncio.wait_for(task, timeout=10)
             commands = manager.list_commands(include_completed=True, conversation_id=context.conversation_id)
             assert len(commands) == 1
-            assert commands[0]["status"] == "cancelled"
+            assert commands[0]["status"] == "running"
             assert not commands[0]["cleanup_pending"]
+            command_id = commands[0]["command_id"]
+            assert await manager.cancel(command_id, conversation_id=context.conversation_id)
+            stopped = manager.get_status(command_id, conversation_id=context.conversation_id)
+            assert stopped.status == "cancelled" and not stopped.cleanup_pending
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

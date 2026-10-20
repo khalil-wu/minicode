@@ -2,6 +2,8 @@ import type { ThemeRegistrationRaw } from "@shikijs/core";
 import type { CodeThemeVariant } from "./code-themes";
 
 export type CodeThemeChromeSeed = {
+  contrast?: number;
+  opaqueWindows?: boolean;
   accent: string;
   accentSource: "custom";
   ink: string;
@@ -97,13 +99,16 @@ function semanticCandidate(theme: ThemeRegistrationRaw, surface: string, ink: st
 
 export function codeThemeChromeSeed(theme: ThemeRegistrationRaw, variant: CodeThemeVariant): CodeThemeChromeSeed {
   const original = defaults[variant];
-  const surface = firstColor(theme.colors, surfaceKeys) ?? original.surface;
-  const ink = firstColor(theme.colors, inkKeys) ?? original.ink;
-  const primary = accent(theme, surface, ink) ?? original.accent;
-  return { accent: primary, accentSource: "custom", surface, ink, semanticColors: {
-    diffAdded: firstColor(theme.colors, addedKeys) ?? semanticCandidate(theme, surface, ink, { min: 80, max: 170 }, 125) ?? original.semanticColors.diffAdded,
-    diffRemoved: firstColor(theme.colors, removedKeys) ?? semanticCandidate(theme, surface, ink, { min: 345, max: 15 }, 0) ?? original.semanticColors.diffRemoved,
-    skill: firstColor(theme.colors, skillKeys) ?? semanticCandidate(theme, surface, ink, { min: 210, max: 320 }, 265)
+  const chrome = (theme as ThemeRegistrationRaw & { chromeTheme?: Partial<CodeThemeChromeSeed> }).chromeTheme;
+  const surface = chrome?.surface ?? firstColor(theme.colors, surfaceKeys) ?? original.surface;
+  const ink = chrome?.ink ?? firstColor(theme.colors, inkKeys) ?? original.ink;
+  const primary = chrome?.accent ?? accent(theme, surface, ink) ?? original.accent;
+  return { ...(chrome?.contrast === undefined ? {} : { contrast: chrome.contrast }),
+    ...(chrome?.opaqueWindows === undefined ? {} : { opaqueWindows: chrome.opaqueWindows }),
+    accent: primary, accentSource: "custom", surface, ink, semanticColors: {
+    diffAdded: chrome?.semanticColors?.diffAdded ?? firstColor(theme.colors, addedKeys) ?? semanticCandidate(theme, surface, ink, { min: 80, max: 170 }, 125) ?? original.semanticColors.diffAdded,
+    diffRemoved: chrome?.semanticColors?.diffRemoved ?? firstColor(theme.colors, removedKeys) ?? semanticCandidate(theme, surface, ink, { min: 345, max: 15 }, 0) ?? original.semanticColors.diffRemoved,
+    skill: chrome?.semanticColors?.skill ?? firstColor(theme.colors, skillKeys) ?? semanticCandidate(theme, surface, ink, { min: 210, max: 320 }, 265)
       ?? (!same(primary, surface) && !same(primary, ink) ? primary : original.semanticColors.skill),
   } };
 }

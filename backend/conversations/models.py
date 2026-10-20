@@ -21,6 +21,9 @@ ConversationPermissionMode = Literal[
 ConversationPermissionRuleLevel = Literal["auto", "confirm", "diff", "deny"]
 DEFAULT_CONVERSATION_PERMISSION_MODE: ConversationPermissionMode = "confirm"
 DEFAULT_CONVERSATION_TYPE: ConversationType = "main"
+CONVERSATION_ID_PATTERN = re.compile(
+    r"^(?:conv|side|local)_[A-Za-z0-9_-]{6,80}$|^(?:conv|side)-[A-Za-z0-9_-]{6,80}$"
+)
 
 
 def inherited_execution_cwd(payload: dict[str, Any]) -> str:

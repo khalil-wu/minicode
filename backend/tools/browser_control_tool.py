@@ -568,6 +568,16 @@ class BrowserControlTool(BaseTool):
         payload["operation_timeout_ms"] = max(1, int(browser_remaining_seconds() * 1000))
         headers = {"authorization": f"Bearer {token}"}
         async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:
+            if action == "discover":
+                health = await client.get(f"{endpoint.rstrip('/')}/v1/health", headers=headers)
+                health.raise_for_status()
+                capabilities = health.json()
+                if capabilities["browserEnabled"] is False:
+                    return ToolResult(
+                        content="Browser: MiniCode Embedded Browser\nBuilt-in browser control: disabled in Browser settings. Do not control it until the user enables it.",
+                        result_kind=self.result_kind,
+                        display_summary="内置浏览器控制已停用",
+                    )
             try:
                 response = await client.post(f"{endpoint.rstrip('/')}/v1/command", headers=headers, json=payload)
             except (asyncio.CancelledError, httpx.TimeoutException) as exc:
@@ -596,6 +606,7 @@ class BrowserControlTool(BaseTool):
         if action == "discover":
             lines = [
                 f"Browser: {result.get('browser') or 'MiniCode Embedded Browser'}",
+                "Built-in browser control: enabled",
                 f"Targets: {len(targets)}",
                 *_format_targets(targets).splitlines(),
             ]

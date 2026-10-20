@@ -251,15 +251,20 @@ def _workspace_sandbox_policy(
     timeout: float | None,
     env_overrides: dict[str, str] | None = None,
 ) -> SandboxPolicy:
+    from backend.services.local_environment_settings import worktree_shell_policy
+    from backend.runtime_env import ShellEnvironmentPolicy
+
     snapshot = getattr(context, "sandbox_policy", None)
     if isinstance(snapshot, SandboxPolicy):
         return replace(
             snapshot,
+            shell_environment_policy=worktree_shell_policy(snapshot.shell_environment_policy, workspace),
             env_overrides={**snapshot.env_overrides, **dict(env_overrides or {})},
             timeout=timeout,
         )
     return SandboxPolicy(
         workspace_root=workspace,
+        shell_environment_policy=worktree_shell_policy(ShellEnvironmentPolicy(), workspace),
         writable_roots=_sandbox_writable_roots(workspace, context),
         allow_network=bool(getattr(context, "allow_network", False)),
         env_overrides=dict(env_overrides or {}),

@@ -191,7 +191,7 @@ describe("FooterRow permission picker", () => {
 
     fireEvent.click(attach);
     expect(clickSpy).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("menuitem", { name: "文件" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "文件和文件夹" }));
     expect(clickSpy).toHaveBeenCalledTimes(1);
 
     const files = [
@@ -201,6 +201,35 @@ describe("FooterRow permission picker", () => {
     fireEvent.change(input, { target: { files } });
 
     expect(uploadComposerFiles).toHaveBeenCalledWith(files);
+  });
+
+  it.each(["chat", "workspace", "switch", "create", "away-and-back"])("retires the file picker when its %s scope changes before selection", (change) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ plugins: [] }), { status: 200 })));
+    useAppStore.setState({ workingDirectory: "C:/picker-original", draft: "Keep this draft", attachments: [] });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    vi.spyOn(input, "click").mockImplementation(() => {});
+    fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "文件和文件夹" }));
+    act(() => {
+      if (change === "workspace") useAppStore.setState({ workingDirectory: "C:/picker-new" });
+      else if (change === "switch") useAppStore.setState({ pendingConversationSwitchId: "new-chat" });
+      else if (change === "create") useAppStore.setState({ pendingConversationCreateId: "new-request" });
+      else {
+        useAppStore.setState({ conversationId: "new-chat" });
+        if (change === "away-and-back") useAppStore.setState({ conversationId: "conv-footer" });
+      }
+    });
+    fireEvent.change(input, { target: { files: [new File(["original"], "old-selection.txt")] } });
+    expect(uploadComposerFiles).not.toHaveBeenCalled();
+    expect(useAppStore.getState()).toMatchObject({ draft: "Keep this draft", attachments: [] });
+    if (change === "away-and-back") {
+      fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+      fireEvent.click(screen.getByRole("menuitem", { name: "文件和文件夹" }));
+      const next = [new File(["new"], "new-selection.txt")];
+      fireEvent.change(input, { target: { files: next } });
+      expect(uploadComposerFiles).toHaveBeenCalledExactlyOnceWith(next);
+    }
   });
 
   it("exposes one responsive layout region per existing control group", () => {
@@ -791,6 +820,40 @@ describe("FooterRow permission picker", () => {
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(screen.queryByRole("slider")).toBeNull();
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps model-menu Tab navigation inside its controls and confirms the current effort with Enter", async () => {
+    useAppStore.setState({ runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"] } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    const trigger = screen.getByRole("button", { name: /模型与推理强度/ });
+    fireEvent.click(trigger);
+    const slider = screen.getByRole("slider");
+    await waitFor(() => expect(document.activeElement).toBe(slider));
+    fireEvent.keyDown(slider, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "选择模型" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Tab" });
+    expect(document.activeElement).toBe(slider);
+    fireEvent.keyDown(slider, { key: "Enter" });
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("closes stale controls during conversation switches and contains menu Escape before the global interrupt handler", async () => {
+    useAppStore.setState({ runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "high"] } } });
+    const interrupt = vi.fn();
+    window.addEventListener("keydown", interrupt);
+    const view = render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度/ }));
+    fireEvent.keyDown(screen.getByRole("slider"), { key: "Escape" });
+    expect(interrupt).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度/ }));
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "other-owner" }));
+    expect(screen.queryByRole("dialog", { name: "模型与推理强度" })).toBeNull();
+    expect(screen.getByRole("button", { name: /模型与推理强度/ })).toHaveProperty("disabled", true);
+    window.removeEventListener("keydown", interrupt);
+    view.unmount();
+    act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
   });
 
   it("closes the model list when keyboard focus moves to the next composer control", async () => {

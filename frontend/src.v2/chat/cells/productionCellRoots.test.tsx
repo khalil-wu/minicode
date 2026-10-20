@@ -159,7 +159,7 @@ describe("image progress uses the actual terminal status", () => {
   });
 
   it.each(["running", "completed"] as const)("retains %s waiting-for-bytes behavior", (status) => {
-    seedMessage([imageProgress(status)]);
+    seedMessage([imageProgress(status)], status === "running");
     renderOwnedAnswer();
     expect(document.querySelector(".assistant-cell-image-placeholder")?.getAttribute("data-running")).toBe("true");
     expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();

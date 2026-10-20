@@ -29,4 +29,14 @@ describe("ContextChipRegion", () => {
     fireEvent.click(screen.getByRole("button", { name: "从上下文中移除 app.tsx" }));
     expect(useAppStore.getState().selectedMentions).toEqual([]);
   });
+
+  it("keeps each real reference removable without adding a clear-all control", () => {
+    useAppStore.setState({ actionChip: null, mentionResults: [], selectedMentions: [
+      { name: "app.tsx", path: "src/app.tsx", kind: "file" }, { name: "Notes", path: "plugin://notes@personal", configName: "notes@personal", kind: "plugin" },
+    ] });
+    render(<ContextChipRegion />);
+    expect(screen.queryByRole("button", { name: "清空上下文引用" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "从上下文中移除 app.tsx" }));
+    expect(useAppStore.getState().selectedMentions).toMatchObject([{ kind: "plugin", name: "Notes", configName: "notes@personal" }]);
+  });
 });

@@ -28,6 +28,7 @@ from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     cancel_and_drain,
 )
+from backend.atomic_io import await_task_despite_cancellation
 from backend.config import DATA_ROOT, TokenBudget
 from backend.agent.runtime_records import (
     AgentRole,
@@ -359,6 +360,9 @@ class AgentRuntime:
         self._subagent_tasks: dict[str, asyncio.Task[Any]] = {}
         self._subagent_task_metadata: dict[str, dict[str, Any]] = {}
         self._subagent_slot_reservations: set[str] = set()
+        self._subagent_reservation_conversations: dict[str, str] = {}
+        self._subagent_limits: dict[str, int] = {}
+        self._subagent_v2_conversations: set[str] = set()
         self._subagent_capacity_waiters: set[tuple[asyncio.AbstractEventLoop, asyncio.Event]] = set()
         self._subagent_cancel_events: dict[str, asyncio.Event] = {}
         self._subagent_completion_events: dict[str, asyncio.Event] = {}
@@ -367,6 +371,11 @@ class AgentRuntime:
         self._subagent_mailbox_suspended: set[str] = set()
         self._subagent_execution_finished: dict[str, asyncio.Future[None]] = {}
         self._subagent_execution_started: dict[str, asyncio.Future[None]] = {}
+        # These are the existing AgentSession services of canonical child
+        # threads. A turn worker ending does not end its terminal/VM services.
+        self._subagent_sessions: dict[str, Any] = {}
+        self._subagent_session_lock = asyncio.Lock()
+        self._session_shutdown_task: asyncio.Task | None = None
         self._subagent_mailbox_resumers: dict[
             str, tuple[asyncio.AbstractEventLoop, Callable[[list[MailboxMessageClaim]], Awaitable[None]]]
         ] = {}
@@ -576,6 +585,14 @@ class AgentRuntime:
         stop their own heartbeat thread.
         """
 
+        if release_lease and self._subagent_sessions:
+            if self._session_shutdown_task is None or self._session_shutdown_task.done():
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    return asyncio.run(self.aclose(release_lease=True))
+                self._session_shutdown_task = loop.create_task(self.aclose(release_lease=True), name="agent-runtime-session-shutdown")
+            return False
         if release_lease:
             self._subagent_mailbox_shutdown = True
             for task, _ in tuple(self._subagent_mailbox_turns.values()):
@@ -598,6 +615,15 @@ class AgentRuntime:
             self._lease_lost = True
         return released
 
+    async def aclose(self, *, release_lease: bool = True) -> bool:
+        self._subagent_mailbox_shutdown = True
+        completed = True
+        for agent_id in tuple(self._subagent_sessions):
+            completed = await self.close_subagent_session(agent_id, reason="runtime_shutdown") and completed
+        if not completed:
+            return False
+        return self.close(release_lease=True) if release_lease else True
+
     def _owns_record(self, record: AgentRunRecord | SubagentRunRecord) -> bool:
         return bool(
             not self._lease_lost
@@ -619,18 +645,23 @@ class AgentRuntime:
         agent_path: str,
         *,
         excluding_subagent_id: str = "",
+        conversation_id: str = "",
     ) -> str:
         candidate = str(agent_path or "").strip()
         excluded = str(excluding_subagent_id or "").strip()
         if not candidate:
             return ""
+        logical = AgentPath.parse(candidate).logical_name
+        v2 = conversation_id in self._subagent_v2_conversations
         for record in self._subagents.values():
-            if record.subagent_id != excluded and str(record.agent_path or "") == candidate:
+            same_logical_path = v2 and self._conversation_id_for_agent(record.subagent_id) == conversation_id and AgentPath.parse(record.agent_path).logical_name == logical
+            if record.subagent_id != excluded and (str(record.agent_path or "") == candidate or same_logical_path):
                 return record.subagent_id
         for subagent_id, metadata in self._subagent_task_metadata.items():
             if subagent_id == excluded or not isinstance(metadata, dict):
                 continue
-            if str(metadata.get("agent_path") or "") == candidate:
+            same_logical_path = v2 and self._conversation_id_for_agent(subagent_id) == conversation_id and AgentPath.parse(metadata.get("agent_path", "")).logical_name == logical
+            if str(metadata.get("agent_path") or "") == candidate or same_logical_path:
                 return subagent_id
         return ""
 
@@ -900,26 +931,13 @@ class AgentRuntime:
             raise RuntimeError(f"Subagent {subagent_id} is queued by another runtime.")
         if pending and existing is not None and existing.status == "pending":
             raise RuntimeError(f"Subagent {subagent_id} is already queued.")
-        if not pending and subagent_id in self._subagent_slot_reservations:
+        conversation_id = self._conversation_id_for_agent(parent_run_id)
+        if not pending:
+            if subagent_id not in self._subagent_slot_reservations and (not teammate_name or conversation_id in self._subagent_limits):
+                if not self.try_reserve_subagent_slots([subagent_id], conversation_id=conversation_id):
+                    raise RuntimeError(f"Maximum concurrent subagents reached ({self._subagent_limits.get(conversation_id, MAX_CONCURRENT_SUBAGENTS)}).")
             self._subagent_slot_reservations.discard(subagent_id)
-        elif not pending:
-            if not teammate_name:
-                # Bounded workers share the global capacity; named teammates
-                # have a separate lifecycle and no bounded-worker ceiling.
-                active = sum(
-                    1
-                    for item in self._subagents.values()
-                    if item.status == "running" and not item.teammate_name
-                )
-                reserved = sum(
-                    1
-                    for subagent_id in self._subagent_slot_reservations
-                    if not (self._subagents.get(subagent_id) and self._subagents[subagent_id].teammate_name)
-                )
-                if active + reserved >= MAX_CONCURRENT_SUBAGENTS:
-                    raise RuntimeError(
-                        f"Maximum concurrent subagents reached ({MAX_CONCURRENT_SUBAGENTS})."
-                    )
+            self._subagent_reservation_conversations.pop(subagent_id, None)
         # Explicit background workers use an unlinked cancellation owner by
         # default. Foreground workers remain linked to the parent.
         if detach_from_parent is None and cancel_with_parent is None:
@@ -950,6 +968,7 @@ class AgentRuntime:
         path_owner = self._agent_path_owner(
             candidate_agent_path,
             excluding_subagent_id=subagent_id,
+            conversation_id=conversation_id,
         )
         if path_owner:
             raise RuntimeError(
@@ -977,7 +996,7 @@ class AgentRuntime:
             write_scope=write_scope or [],
             resume_config={**(existing.resume_config if promoting_pending else {}), **(resume_config or {})},
             cleanup_resources=[dict(item) for item in existing.cleanup_resources
-                if item.get("state") == "continuation"] if existing is not None else [],
+                if subagent_id in self._subagent_sessions or item.get("state") == "continuation"] if existing is not None else [],
             current_activity=current_activity,
             status="pending" if pending else "running",
             accepted_at=existing.accepted_at if promoting_pending else epoch_ms(),
@@ -1037,17 +1056,26 @@ class AgentRuntime:
         )
         return record
 
-    def try_reserve_subagent_slots(self, subagent_ids: list[str]) -> bool:
+    def configure_subagent_limit(self, conversation_id: str, limit: int, *, source_v2: bool = False) -> None:
+        self._subagent_limits[conversation_id] = limit
+        if source_v2:
+            self._subagent_v2_conversations.add(conversation_id)
+        else:
+            self._subagent_v2_conversations.discard(conversation_id)
+        self._notify_subagent_capacity()
+
+    def try_reserve_subagent_slots(self, subagent_ids: list[str], *, conversation_id: str = "") -> bool:
         clean_ids = list(dict.fromkeys(str(value or "").strip() for value in subagent_ids if str(value or "").strip()))
         teammate_ids = {
             subagent_id
             for subagent_id, item in self._subagents.items()
-            if item.teammate_name
+            if item.teammate_name and conversation_id not in self._subagent_limits
         }
         active = sum(
             1
             for item in self._subagents.values()
-            if item.status == "running" and not item.teammate_name
+            if item.status == "running" and (not conversation_id or self._conversation_id_for_agent(item.subagent_id) == conversation_id)
+            and (not item.teammate_name or conversation_id in self._subagent_limits)
         )
         needed = sum(
             1
@@ -1058,10 +1086,12 @@ class AgentRuntime:
         )
         reserved = sum(
             1 for subagent_id in self._subagent_slot_reservations if subagent_id not in teammate_ids
+            and (not conversation_id or self._subagent_reservation_conversations.get(subagent_id) == conversation_id)
         )
-        if active + reserved + needed > MAX_CONCURRENT_SUBAGENTS:
+        if active + reserved + needed > self._subagent_limits.get(conversation_id, MAX_CONCURRENT_SUBAGENTS):
             return False
         self._subagent_slot_reservations.update(clean_ids)
+        self._subagent_reservation_conversations.update(dict.fromkeys(clean_ids, conversation_id))
         return True
 
     async def acquire_subagent_slot(
@@ -1069,6 +1099,7 @@ class AgentRuntime:
         subagent_id: str,
         *,
         cancel_event: asyncio.Event | None = None,
+        conversation_id: str = "",
     ) -> bool:
         """Wait until one of MiniCode's bounded worker slots can be reserved.
 
@@ -1084,7 +1115,7 @@ class AgentRuntime:
         while True:
             if cancel_event is not None and cancel_event.is_set():
                 return False
-            if self.try_reserve_subagent_slots([clean_id]):
+            if self.try_reserve_subagent_slots([clean_id], conversation_id=conversation_id):
                 return True
 
             loop = asyncio.get_running_loop()
@@ -1094,7 +1125,7 @@ class AgentRuntime:
             try:
                 # Recheck after registration so a slot released immediately
                 # before the waiter was installed cannot strand this job.
-                if self.try_reserve_subagent_slots([clean_id]):
+                if self.try_reserve_subagent_slots([clean_id], conversation_id=conversation_id):
                     return True
                 if cancel_event is not None and cancel_event.is_set():
                     return False
@@ -1127,6 +1158,7 @@ class AgentRuntime:
 
     def release_subagent_slot(self, subagent_id: str) -> None:
         self._subagent_slot_reservations.discard(str(subagent_id or "").strip())
+        self._subagent_reservation_conversations.pop(subagent_id, None)
         self._notify_subagent_capacity()
 
     def complete_subagent(
@@ -1213,6 +1245,67 @@ class AgentRuntime:
         self._subagent_execution_finished[subagent_id] = finished
         self._subagent_execution_started[subagent_id] = started
 
+    def subagent_session(self, subagent_id: str) -> Any | None:
+        return self._subagent_sessions.get(subagent_id)
+
+    async def acquire_subagent_session(self, subagent_id: str, create: Callable[[], Any], *, conversation_id: str) -> Any:
+        """Load/touch the child thread's own services within Source residency."""
+        async with self._subagent_session_lock:
+            if self._subagent_mailbox_shutdown:
+                raise RuntimeError("The agent runtime is shutting down")
+            existing = self._subagent_sessions.pop(subagent_id, None)
+            if existing is not None:
+                self._subagent_sessions[subagent_id] = existing
+                return existing
+            residents = [agent_id for agent_id in self._subagent_sessions
+                if self._conversation_id_for_agent(agent_id) == conversation_id]
+            limit = self._subagent_limits.get(conversation_id, MAX_CONCURRENT_SUBAGENTS)
+            if len(residents) >= limit:
+                for candidate in residents:
+                    record = self.get_subagent(candidate) or self.load_persisted_subagent(candidate)
+                    session = self._subagent_sessions[candidate]
+                    if (record is not None and record.status not in {"pending", "running"}
+                            and not session.active_turn and self.subagent_execution_is_finished(candidate)
+                            and not self._swarm_store.has_unacknowledged_trigger_turn_mail(candidate, record.mailbox_epoch + 1)):
+                        await self._close_subagent_session_resources(candidate)
+                        break
+                else:
+                    raise RuntimeError(f"Loaded agent thread limit reached ({limit}); no idle thread can be evicted")
+            session = create()
+            self._subagent_sessions[subagent_id] = session
+            return session
+
+    async def _close_subagent_session_resources(self, subagent_id: str) -> None:
+        session = self._subagent_sessions[subagent_id]
+        async def close_resources() -> None:
+            await session.aclose()
+            if session._command_shutdown_task is not None:
+                await session._command_shutdown_task
+        await await_task_despite_cancellation(asyncio.create_task(close_resources(), name=f"subagent-service-close:{subagent_id}"))
+        self._subagent_sessions.pop(subagent_id)
+        worker = self._subagent_tasks.get(subagent_id)
+        if worker is None or worker.done():
+            self._subagent_parent_run_ids.pop(subagent_id, None)
+            self._subagent_owner_task_ids.pop(subagent_id, None)
+            self._subagent_session_ids.pop(subagent_id, None)
+
+    async def close_subagent_session(self, subagent_id: str, *, reason: str = "closed") -> bool:
+        """Close a thread, distinct from interrupting only its current turn."""
+        await self._stop_subagent_mailbox_schedulers({subagent_id})
+        task = self._subagent_tasks.get(subagent_id)
+        registration = self._registry.get(subagent_id, kind="subagent")
+        if task is not None and task is not asyncio.current_task() and not task.done() and not (registration is not None and registration.sealed):
+            self.cancel_subagent_task(subagent_id, reason=reason)
+            pending = await self._drain_subagent_owners([(subagent_id, task)])
+            if pending:
+                self._mark_subagent_cleanup(subagent_id, reason=reason)
+                self._retain_subagent_cleanup_owner(subagent_id, task)
+                return False
+        async with self._subagent_session_lock:
+            if subagent_id in self._subagent_sessions:
+                await self._close_subagent_session_resources(subagent_id)
+        return self._reconcile_terminal_subagent_cleanup(subagent_id)
+
     def subagent_execution_is_finished(self, subagent_id: str) -> bool:
         finished = self._subagent_execution_finished.get(subagent_id)
         return finished is None or finished.done()
@@ -1289,7 +1382,10 @@ class AgentRuntime:
 
             attempted: set[str] = set()
             while True:
-                finished = self._subagent_execution_finished.get(subagent_id)
+                # Residency teardown must settle before this scheduler can
+                # publish a new mailbox incarnation or adopt its workspace.
+                async with self._subagent_session_lock:
+                    finished = self._subagent_execution_finished.get(subagent_id)
                 if finished is not None:
                     await asyncio.shield(finished)
                 record = self.get_subagent(subagent_id)
@@ -1500,6 +1596,7 @@ class AgentRuntime:
         path_owner = self._agent_path_owner(
             candidate_agent_path,
             excluding_subagent_id=clean_subagent_id,
+            conversation_id=self._conversation_id_for_agent(clean_parent_run_id),
         )
         if path_owner:
             raise RuntimeError(
@@ -1523,9 +1620,10 @@ class AgentRuntime:
         self._subagent_tasks.pop(subagent_id, None)
         self._subagent_task_metadata.pop(subagent_id, None)
         self._subagent_cancel_events.pop(subagent_id, None)
-        self._subagent_parent_run_ids.pop(subagent_id, None)
-        self._subagent_owner_task_ids.pop(subagent_id, None)
-        self._subagent_session_ids.pop(subagent_id, None)
+        if subagent_id not in self._subagent_sessions:
+            self._subagent_parent_run_ids.pop(subagent_id, None)
+            self._subagent_owner_task_ids.pop(subagent_id, None)
+            self._subagent_session_ids.pop(subagent_id, None)
         self.release_subagent_slot(subagent_id)
         _notify_subagent_activity_changed(self)
         if subagent_id not in self._subagents:
@@ -1605,6 +1703,7 @@ class AgentRuntime:
         agent_ids: list[str] | tuple[str, ...] = (),
         conversation_id: str = "",
         status: str = "",
+        recipient_ids: tuple[str, ...] = (),
     ) -> int:
         clean_ids = tuple(
             dict.fromkeys(
@@ -1629,6 +1728,7 @@ class AgentRuntime:
                     "agent_ids": clean_ids,
                     "conversation_id": owner,
                     "status": str(status or "").strip(),
+                    "recipient_ids": recipient_ids,
                     "timestamp": epoch_ms(),
                 }
             )
@@ -1812,7 +1912,13 @@ class AgentRuntime:
     ) -> Literal["cancelled", "done", "not_found"]:
         task = self._subagent_tasks.get(subagent_id)
         if task is None:
-            return "not_found"
+            record = self._subagents.get(subagent_id)
+            return "done" if record is not None and record.status not in {"pending", "running"} else "not_found"
+        registration = self._registry.get(subagent_id, kind="subagent")
+        if registration is not None and registration.sealed:
+            if task.done():
+                self.release_subagent_task(subagent_id, expected_task=task)
+            return "done"
         metadata = self._subagent_task_metadata.get(subagent_id)
         if isinstance(metadata, dict):
             metadata["cancel_reason"] = str(reason or "cancelled")[:128]
@@ -2375,6 +2481,8 @@ class AgentRuntime:
         completed = not pending_ids
         for subagent_id in subagent_ids:
             if subagent_id not in pending_ids:
+                if subagent_id in self._subagent_sessions:
+                    completed = await self.close_subagent_session(subagent_id, reason=reason) and completed
                 completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
         return completed
 
@@ -2390,8 +2498,9 @@ class AgentRuntime:
         session = str(session_id or "").strip()
         if not session:
             return True
-        mailbox_ids = {agent_id for agent_id, record in self._subagents.items()
-            if record.session_id == session or self._subagent_session_ids.get(agent_id) == session}
+        mailbox_ids = {agent_id for agent_id in set(self._subagents) | set(self._subagent_sessions)
+            if (record := self.get_subagent(agent_id) or self.load_persisted_subagent(agent_id)) is not None
+            and (record.session_id == session or self._subagent_session_ids.get(agent_id) == session)}
         await self._stop_subagent_mailbox_schedulers(mailbox_ids)
         owned = [
             (subagent_id, task)
@@ -2424,6 +2533,9 @@ class AgentRuntime:
         for subagent_id, task in owned:
             if task not in initially_timed_out and task.done():
                 completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
+        for subagent_id in mailbox_ids:
+            if subagent_id in self._subagent_sessions and all(agent_id != subagent_id or task not in initially_timed_out for agent_id, task in owned):
+                completed = await self.close_subagent_session(subagent_id, reason=reason) and completed
         return completed
 
     def subagent_tasks_for_conversation(self, conversation_id: str) -> set[asyncio.Task[Any]]:
@@ -2542,6 +2654,8 @@ class AgentRuntime:
         completed = not pending_ids
         for subagent_id in subagent_ids:
             if subagent_id not in pending_ids:
+                if subagent_id in self._subagent_sessions:
+                    completed = await self.close_subagent_session(subagent_id, reason=reason) and completed
                 completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
         return completed
 
@@ -2563,7 +2677,11 @@ class AgentRuntime:
         This restores neither history nor a running worker. The existing
         TaskTool checkpoint path owns trigger-turn execution recovery.
         """
-        record = _subagent_from_dict(payload)
+        # A finishing worker can still be in the live inventory after its
+        # in-memory record was evicted. That inventory metadata does not own
+        # the persisted incarnation, checkpoint configuration or mailbox epoch.
+        stored = self._swarm_store.get_subagent(payload["subagent_id"])
+        record = _subagent_from_dict(stored if stored is not None else payload)
         self._subagents[record.subagent_id] = record
         return record
 
@@ -2838,6 +2956,11 @@ class AgentRuntime:
                 mailbox_epoch=mailbox_epoch,
             )
             return None
+        if registration.sealed:
+            stored = self._swarm_store.get_subagent_result(subagent_id)
+            if (stored is not None and stored["agent_path"] == run_record.agent_path
+                    and stored["mailbox_epoch"] == run_record.mailbox_epoch):
+                return _subagent_result_from_dict(stored)
         public_usage = project_public_usage(usage)
         input_tokens = int(public_usage.get("input_tokens") or 0)
         output_tokens = int(public_usage.get("output_tokens") or 0)
@@ -3242,6 +3365,7 @@ class AgentRuntime:
         sender_mailbox_epoch: int | None = None,
         recipient_mailbox_epoch: int | None = None,
         delivery_mode: Literal["queue_only", "trigger_turn"] = "trigger_turn",
+        notify_parent: bool = True,
     ) -> SwarmMessageRecord:
         from backend.agent.mailbox_delivery import is_structured_protocol_message
 
@@ -3360,23 +3484,25 @@ class AgentRuntime:
             # session watches, so a child->leader message leaves a marker
             # there; the mailbox itself remains the source of the content.
             parent_run = self.get_agent_owner_run(virtual_parent_run_id)
-            enqueue_parent_notification(
-                parent_run_id=virtual_parent_run_id,
-                conversation_id=str(getattr(parent_run, "conversation_id", "") or conversation_id),
-                session_id=str(getattr(parent_run, "session_id", "") or ""),
-                subagent_id=sender_id,
-                payload={"message_id": record.message_id, "delivery_mode": delivery_mode},
-                kind="mailbox_wake",
-                idempotency_key=f"mailbox_wake:{record.message_id}",
-                base_dir=self._outbox_root,
-                mailbox_epoch=resolved_sender_epoch,
-            )
+            if notify_parent:
+                enqueue_parent_notification(
+                    parent_run_id=virtual_parent_run_id,
+                    conversation_id=str(getattr(parent_run, "conversation_id", "") or conversation_id),
+                    session_id=str(getattr(parent_run, "session_id", "") or ""),
+                    subagent_id=sender_id,
+                    payload={"message_id": record.message_id, "delivery_mode": delivery_mode},
+                    kind="mailbox_wake",
+                    idempotency_key=f"mailbox_wake:{record.message_id}",
+                    base_dir=self._outbox_root,
+                    mailbox_epoch=resolved_sender_epoch,
+                )
         elif effective_recipient_id not in {"", "all", "*"}:
             activity_ids.append(effective_recipient_id)
         self._record_agent_activity(
             "message",
             agent_ids=activity_ids,
             conversation_id=conversation_id,
+            recipient_ids=tuple(broadcast_epochs) if broadcast_epochs else tuple(activity_ids[1:]),
         )
         return record
 
@@ -3842,6 +3968,8 @@ class AgentRuntime:
             memory_subagent_ids = next_ids
         durable_ids = self._swarm_store.conversation_agent_ids(owner)
         owned_subagent_ids = memory_subagent_ids | set(durable_ids["subagent_ids"])
+        if owned_subagent_ids.intersection(self._subagent_sessions):
+            raise RuntimeError("Conversation still owns loaded child sessions; close them before purging it")
         if any(
             task is not None and not task.done()
             for subagent_id in owned_subagent_ids
@@ -3903,7 +4031,7 @@ class AgentRuntime:
             self._subagent_parent_run_ids.pop(subagent_id, None)
             self._subagent_owner_task_ids.pop(subagent_id, None)
             self._subagent_session_ids.pop(subagent_id, None)
-            self._subagent_slot_reservations.discard(subagent_id)
+            self.release_subagent_slot(subagent_id)
             self._subagent_mailbox_suspended.discard(subagent_id)
             self._subagent_mailbox_resumers.pop(subagent_id, None)
             self._subagent_mailbox_turns.pop(subagent_id, None)
@@ -4059,6 +4187,15 @@ class AgentRuntime:
                 "cleanup_pending": (record.cleanup_pending if record is not None else False)
                 or status not in {"pending", "running"},
             }
+        for subagent_id, session in self._subagent_sessions.items():
+            commands = tuple(session._owned_commands._commands.values()) if session._owned_commands is not None else ()
+            live_commands = [command for command in commands if command.status == "running" or command.cleanup_pending]
+            if not live_commands and not session.code_store.pending_tasks() and not session.closed:
+                continue
+            record = self.get_subagent(subagent_id) or self.load_persisted_subagent(subagent_id)
+            active[subagent_id] = {"id": subagent_id, "status": record.status,
+                "cleanup_pending": session.closed or any(command.cleanup_pending for command in live_commands),
+                "background_commands": len(live_commands), "background_code": bool(session.code_store.pending_tasks())}
         return [active[subagent_id] for subagent_id in sorted(active)]
 
     def list_runs(self, *, conversation_id: str = "", include_subagents: bool = False) -> dict[str, Any]:

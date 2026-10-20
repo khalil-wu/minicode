@@ -31,6 +31,8 @@ test("actual main drain retains a failed closed-window operation and retries it 
   const context = {
     module: { exports: {} }, Promise,
     remoteDesktop: null,
+    dictationHotkeys: { async dispose() { events.push("dictation-stopped"); } },
+    generalMaintenance: null, petManager: null, petInitialization: null,
     EMBEDDED_BROWSER_TOKEN: "owned-fixture-token",
     appendDesktopLog(message) { events.push(message); },
     windowManager: { clearWindowStateSaveTimer() {}, persistWindowState() {} },
@@ -52,6 +54,7 @@ test("actual main drain retains a failed closed-window operation and retries it 
   assert.equal(attempts, 2);
   assert.equal(lifecycle.windowCleanupTasks.size, 0);
   assert.ok(events.indexOf("window-pty-exited") < events.indexOf("backend-exited"));
+  assert.ok(events.indexOf("dictation-stopped") < events.indexOf("backend-exited"));
 });
 
 test("actual rollback preparation orders committed closes, backend exit and trusted compatibility CLI", async () => {

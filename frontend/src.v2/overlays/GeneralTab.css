@@ -1,0 +1,55 @@
+.settings-segmented.settings-follow-up-segmented {
+  padding: 0;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+}
+
+.settings-follow-up-segmented .settings-segment {
+  min-height: 24px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 10px;
+  font-weight: var(--fw-regular);
+}
+
+.settings-follow-up-segmented .settings-segment[data-active="true"] {
+  border: 0;
+  background: var(--surface-soft);
+}
+
+.settings-open-source-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  margin-bottom: 16px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.settings-open-source-notices {
+  margin: 0;
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.settings-general-task-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-action-button.settings-general-task-reset {
+  border-color: transparent;
+  background: transparent;
+  font-weight: var(--fw-regular);
+}

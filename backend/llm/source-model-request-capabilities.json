@@ -12,7 +12,11 @@
           "description": "2x speed, increased usage"
         }
       ],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ]
     },
     "gpt-6.1-sol": {
       "support_verbosity": true,
@@ -25,7 +29,11 @@
           "description": "2x speed, increased usage"
         }
       ],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ]
     },
     "gpt-6-sol": {
       "support_verbosity": true,
@@ -38,7 +46,11 @@
           "description": "1.5x speed"
         }
       ],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ]
     },
     "gpt-6-luna": {
       "support_verbosity": true,
@@ -51,7 +63,11 @@
           "description": "1.5x speed"
         }
       ],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": [
+        "send_user_message_async",
+        "clock"
+      ]
     },
     "gpt-5.6-sol": {
       "support_verbosity": true,
@@ -64,7 +80,8 @@
           "description": "1.5x speed, increased usage"
         }
       ],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": []
     },
     "gpt-5.6-terra": {
       "support_verbosity": true,
@@ -77,7 +94,8 @@
           "description": "1.5x speed, increased usage"
         }
       ],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": []
     },
     "gpt-5.6-luna": {
       "support_verbosity": true,
@@ -90,21 +108,24 @@
           "description": "1.5x speed, increased usage"
         }
       ],
-      "multi_agent_version": "v1"
+      "multi_agent_version": "v1",
+      "experimental_supported_tools": []
     },
     "gpt-daybreak-blue-latest": {
       "support_verbosity": true,
       "default_verbosity": "low",
       "supports_reasoning_summary_parameter": true,
       "service_tiers": [],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": []
     },
     "gpt-daybreak-red-latest": {
       "support_verbosity": true,
       "default_verbosity": "high",
       "supports_reasoning_summary_parameter": true,
       "service_tiers": [],
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "experimental_supported_tools": []
     },
     "gpt-5.5": {
       "support_verbosity": true,
@@ -117,7 +138,8 @@
           "description": "1.5x speed, increased usage"
         }
       ],
-      "multi_agent_version": null
+      "multi_agent_version": null,
+      "experimental_supported_tools": []
     },
     "codex-auto-review": {
       "support_verbosity": true,
@@ -130,7 +152,8 @@
           "description": "1.5x speed, increased usage"
         }
       ],
-      "multi_agent_version": "v1"
+      "multi_agent_version": "v1",
+      "experimental_supported_tools": []
     }
   }
 }

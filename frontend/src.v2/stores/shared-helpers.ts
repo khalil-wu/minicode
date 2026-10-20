@@ -24,7 +24,7 @@ import {
   isTerminalToolCallStatus,
   type ToolCallRecord,
 } from "../lib/tool-call-reducer";
-import { DEFAULT_SHORTCUT_BINDINGS, SHORTCUT_DEFINITIONS, type ShortcutBindings } from "../lib/keyboard-shortcuts";
+import { DEFAULT_SHORTCUT_BINDINGS, SHORTCUT_DEFINITIONS, type ShortcutActionId, type ShortcutBindings } from "../lib/keyboard-shortcuts";
 import {
   normalizeWorkspacePath,
   normalizeWorkspaceRoot,
@@ -44,7 +44,10 @@ export const LS = {
   appearanceDark: APPEARANCE_STORAGE_KEYS.dark,
   textScale: "minicode.textScale",
   codeTextScale: "minicode.codeTextScale",
+  codeFontBase: "minicode.codeFontBase",
   reducedMotion: "minicode.reducedMotion",
+  pointerCursors: "minicode.usePointerCursors",
+  diffMarkerStyle: "minicode.appearanceDiffMarkerStyle",
   viewMode: "minicode.activity.viewMode",
   sendShortcut: "minicode.composer.sendShortcut",
   followUpBehavior: "minicode.composer.followUpBehavior",
@@ -81,6 +84,8 @@ export const DEFAULT_WORKSPACE_KEY = "__default__";
 export const LEFT_SIDEBAR_DEFAULT_WIDTH = 340;
 export const LEFT_SIDEBAR_MIN_WIDTH = 240;
 export const LEFT_SIDEBAR_MAX_WIDTH = 520;
+export const visibleLeftSidebarWidth = (width: number, shellWidth: number) => width === 0 ? 0
+  : Math.max(LEFT_SIDEBAR_MIN_WIDTH, Math.min(width, LEFT_SIDEBAR_MAX_WIDTH, shellWidth - 240));
 export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 600;
 export const COMPACT_WORKBENCH_MAX_WIDTH = 1199;
 
@@ -140,13 +145,17 @@ export const applyTextScale = (s: number) => {
   document.documentElement.style.setProperty("--app-text-scale", String(s));
 };
 
-export const applyCodeTextScale = (s: number) => {
+export const applyCodeTextScale = (s: number, base = initialCodeFontBase()) => {
   document.documentElement.style.setProperty("--code-text-scale", String(s));
+  document.documentElement.style.setProperty("--code-font-base", `${base}px`);
+  document.documentElement.style.setProperty("--code-font-size", `${base * s}px`);
 };
 
 export const applyReducedMotion = (reduced: boolean) => {
   document.documentElement.setAttribute("data-reduced-motion", reduced ? "true" : "false");
 };
+export const applyPointerCursors = (enabled: boolean) => document.documentElement.setAttribute("data-pointer-cursors", String(enabled));
+export const applyDiffMarkerStyle = (style: "color" | "symbols") => document.documentElement.setAttribute("data-diff-marker-style", style);
 
 export const initialViewMode = (): UISlice["viewMode"] => {
   const stored = readLS(LS.viewMode);
@@ -760,10 +769,26 @@ export const initialResolvedTheme = (): ResolvedTheme => resolveTheme(initialThe
 
 export const initialCodeTextScale = (): number => {
   const value = parseFloat(readLS(LS.codeTextScale) ?? "");
-  return clamp(11 / 14, 24 / 14, Number.isFinite(value) ? value : 1);
+  const base = initialCodeFontBase();
+  return clamp(8 / base, 24 / base, Number.isFinite(value) ? value : 1);
 };
 
-export const initialReducedMotion = (): boolean => readLS(LS.reducedMotion) === "1";
+export const initialCodeFontBase = (): 12 | 14 => {
+  const base = readLS(LS.codeFontBase);
+  return base === "14" || (base === null && readLS(LS.codeTextScale) !== null) ? 14 : 12;
+};
+export const initialReducedMotionPreference = (): UISlice["reducedMotionPreference"] => {
+  const stored = readLS(LS.reducedMotion);
+  return stored === "1" || stored === "on" ? "on" : stored === "0" || stored === "off" ? "off" : "system";
+};
+export const reducedMotionFor = (preference: UISlice["reducedMotionPreference"]): boolean => preference === "on"
+  || preference === "system" && typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+export const initialReducedMotion = (): boolean => reducedMotionFor(initialReducedMotionPreference());
+export const readAppearancePreferences = () => ({
+  textScale: initialTextScale(), codeTextScale: initialCodeTextScale(), codeFontBase: initialCodeFontBase(),
+  reducedMotionPreference: initialReducedMotionPreference(), reducedMotion: initialReducedMotion(),
+  pointerCursors: readLS(LS.pointerCursors) === "1", diffMarkerStyle: readLS(LS.diffMarkerStyle) === "symbols" ? "symbols" as const : "color" as const,
+});
 
 export const initialSendShortcut = (): UISlice["sendShortcut"] => {
   const shortcut = readLS(LS.sendShortcut);
@@ -775,19 +800,23 @@ export const initialFollowUpBehavior = (): UISlice["followUpBehavior"] => (
 );
 
 export const initialShortcutBindings = (): ShortcutBindings => {
-  try {
-    const raw = safeJsonParse<unknown>(readLS(LS.shortcutBindings) ?? "{}", {});
-    const parsed = raw && typeof raw === "object" && !Array.isArray(raw)
-      ? raw as Record<string, unknown>
-      : {};
-    const bindings = { ...DEFAULT_SHORTCUT_BINDINGS };
-    for (const definition of SHORTCUT_DEFINITIONS) {
-      if (typeof parsed[definition.id] === "string") bindings[definition.id] = parsed[definition.id] as string;
-    }
-    return bindings;
-  } catch {
-    return { ...DEFAULT_SHORTCUT_BINDINGS };
+  const raw = safeJsonParse<unknown>(readLS(LS.shortcutBindings) ?? "{}", {});
+  const parsed = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+  const bindings = { ...DEFAULT_SHORTCUT_BINDINGS };
+  const customized = new Set<ShortcutActionId>();
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    const saved = parsed[definition.id];
+    // Existing single-binding preferences implicitly included Source aliases.
+    if (typeof saved === "string") bindings[definition.id] = saved === definition.defaultBinding
+      ? [...DEFAULT_SHORTCUT_BINDINGS[definition.id]] : saved ? [saved] : [];
+    else if (Array.isArray(saved) && saved.every(chord => typeof chord === "string")) bindings[definition.id] = [...saved];
+    if (JSON.stringify(bindings[definition.id]) !== JSON.stringify(DEFAULT_SHORTCUT_BINDINGS[definition.id])) customized.add(definition.id);
   }
+  for (const definition of SHORTCUT_DEFINITIONS) {
+    if (!customized.has(definition.id)) bindings[definition.id] = bindings[definition.id]
+      .filter(chord => ![...customized].some(action => bindings[action].includes(chord)));
+  }
+  return bindings;
 };
 
 const pendingToolCallToRecord = (

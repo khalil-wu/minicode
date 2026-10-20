@@ -33,13 +33,22 @@ vi.mock("../panels/EditorPanel", () => ({
 
 import { useAppStore } from "../stores";
 import { MainSlots } from "./MainSlots";
-import { NavigationRail } from "./NavigationRail";
+import { SidebarLeft } from "./SidebarLeft";
 import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 
+const chooseMode = (name: "代码" | "协作") => {
+  fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+  fireEvent.click(screen.getByRole("menuitem", { name, exact: true }));
+};
+const expectCodeSelected = () => {
+  fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+  expect(screen.getByRole("menuitem", { name: "代码", exact: true }).getAttribute("aria-current")).toBe("true");
+  fireEvent.keyDown(screen.getByRole("menu", { name: "工作模式" }), { key: "Escape" });
+};
 const LayoutFixture = () => {
   const layout = useAppStore((state) => state.workbenchLayout);
   const appMode = useAppStore((state) => state.appMode);
-  return <><NavigationRail /><MainSlots mode={appMode === "code" ? layout : "tabs"} forceChat={appMode !== "code"} /></>;
+  return <><SidebarLeft embedded /><MainSlots mode={appMode === "code" ? layout : "tabs"} forceChat={appMode !== "code"} /></>;
 };
 
 describe("MainSlots", () => {
@@ -60,6 +69,9 @@ describe("MainSlots", () => {
     useAppStore.setState({
       appMode: "code",
       settingsOpen: false,
+      isConnected: false,
+      recentWorkspaces: [],
+      projectsOpen: false,
       skillsMarketplaceOpen: false,
       conversationId: null,
       pendingConversationSwitchId: null,
@@ -166,7 +178,7 @@ describe("MainSlots", () => {
     expect(chat.getAttribute("data-conversation-owner")).toBe("owner-A");
   });
 
-  it("uses the actual Code and chat-home rail entries without a duplicate workbench switcher", async () => {
+  it("uses the actual sidebar mode menu while retaining the chat and editor trees", async () => {
     useAppStore.setState({
       panelSlots: [
         { id: "main-chat", kind: "chat", label: "Chat", focused: true },
@@ -174,14 +186,11 @@ describe("MainSlots", () => {
       ],
     });
     render(<LayoutFixture />);
-    const chat = screen.getByRole("button", { name: "聊天首页" });
-    const editor = screen.getByRole("button", { name: "Code" });
-    fireEvent.click(editor);
-    expect(editor.getAttribute("aria-current")).toBe("page");
+    chooseMode("代码");
+    expectCodeSelected();
     expect(useAppStore.getState().panelSlots.find((slot) => slot.focused)?.kind).toBe("editor");
     await screen.findByText("Editor pane");
-    fireEvent.click(chat);
-    expect(chat.getAttribute("aria-current")).toBe("page");
+    chooseMode("协作");
     expect(screen.getByText("Chat pane").closest<HTMLElement>('[data-panel-slot-kind="chat"]')?.style.display).toBe("flex");
     expect(screen.queryByRole("tablist", { name: "主工作区" })).toBeNull();
     expect(screen.queryByRole("tablist", { name: "工作模式" })).toBeNull();
@@ -213,7 +222,7 @@ describe("MainSlots", () => {
     expect(useAppStore.getState().panelSlots[0].size).toBeCloseTo(useAppStore.getState().panelSlots[1].size ?? 0, 5);
   });
 
-  it("keeps compact Code on the editor and switches to chat through the same rail", async () => {
+  it("keeps compact Code on the editor and switches to chat through the sidebar brand menu", async () => {
     surfaceWidth = 700;
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -232,9 +241,9 @@ describe("MainSlots", () => {
 
     expect(await screen.findByText("Editor pane")).toBeTruthy();
     expect(screen.getByText("Chat pane").closest<HTMLElement>('[data-panel-slot-kind="chat"]')?.style.display).toBe("none");
-    expect(screen.getByRole("button", { name: "Code" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "切换工作模式" })).toBeTruthy();
     expect(screen.queryByRole("tablist", { name: "主工作区" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页" }));
+    chooseMode("协作");
 
     expect(screen.getByText("Chat pane")).toBeTruthy();
     expect(screen.getByText("Editor pane").closest<HTMLElement>('[data-panel-slot-kind="editor"]')?.style.display).toBe("none");
@@ -249,11 +258,11 @@ describe("MainSlots", () => {
     render(<LayoutFixture />);
     const input = await screen.findByRole("textbox", { name: "Editor input" });
     fireEvent.change(input, { target: { value: "unfinished file search" } });
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页" }));
+    chooseMode("协作");
     expect(input.isConnected).toBe(true);
     expect(screen.queryByRole("textbox", { name: "Editor input" })).toBeNull();
     expect(useAppStore.getState().editorTabs).toHaveLength(0);
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    chooseMode("代码");
     expect(screen.getByRole("textbox", { name: "Editor input" })).toBe(input);
     expect((input as HTMLInputElement).value).toBe("unfinished file search");
   });
@@ -280,7 +289,7 @@ describe("MainSlots", () => {
     act(() => { surfaceWidth = 760; notifySurfaceResize(); });
     expect(window.innerWidth).toBe(1200);
     expect(chatFrame.style.display).toBe("none");
-    expect(screen.getByRole("button", { name: "Code" }).getAttribute("aria-current")).toBe("page");
+    expectCodeSelected();
     expect(screen.queryByRole("separator", { name: "调整主面板宽度" })).toBeNull();
     expect(useAppStore.getState().workbenchLayout).toBe("split");
 
@@ -297,7 +306,7 @@ describe("MainSlots", () => {
     expect(useAppStore.getState().draft).toBe("Keep this question");
   });
 
-  it("keeps wide single-page Code on the editor and retains it behind chat home", async () => {
+  it("keeps wide single-page Code on the editor and retains it behind the collaboration chat", async () => {
     useAppStore.setState({
       panelSlots: [
         { id: "main-chat", kind: "chat", label: "Chat", focused: false, size: 1 },
@@ -314,7 +323,7 @@ describe("MainSlots", () => {
     expect(screen.queryByRole("tablist", { name: "主工作区" })).toBeNull();
     expect(screen.queryByRole("separator", { name: "调整主面板宽度" })).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页" }));
+    chooseMode("协作");
 
     expect(screen.getByText("Chat pane")).toBeTruthy();
     expect(screen.getByText("Editor pane").closest<HTMLElement>('[data-panel-slot-kind="editor"]')?.style.display).toBe("none");
@@ -340,7 +349,7 @@ describe("MainSlots", () => {
     const chatPane = screen.getByText("Chat pane");
 
     expect(screen.queryByRole("tab", { name: "文件" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    chooseMode("代码");
 
     const editorPane = await screen.findByText("Editor pane");
     expect(editorPane.closest<HTMLElement>('[data-panel-slot-kind="editor"]')?.style.display).toBe("flex");
@@ -351,7 +360,7 @@ describe("MainSlots", () => {
     expect(useAppStore.getState().messages).toBe(messages);
     expect(useAppStore.getState().draft).toBe("unfinished draft");
 
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页" }));
+    chooseMode("协作");
     expect(screen.getByText("Chat pane")).toBe(chatPane);
     expect(screen.queryByRole("tab", { name: "文件" })).toBeNull();
     expect(chatPane.closest<HTMLElement>('[data-panel-slot-kind="chat"]')?.style.display).toBe("flex");
@@ -361,7 +370,7 @@ describe("MainSlots", () => {
     expect(useAppStore.getState().draft).toBe("unfinished draft");
   });
 
-  it("moves focus and maximization through actual panel and rail controls while retaining both trees", async () => {
+  it("moves focus and maximization through actual panel and sidebar mode controls while retaining both trees", async () => {
     useAppStore.setState({
       appMode: "code",
       panelSlots: [
@@ -389,9 +398,9 @@ describe("MainSlots", () => {
       { id: "main-editor", focused: false, maximized: false },
     ]);
 
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页" }));
+    chooseMode("协作");
     expect(chatFrame.style.display).toBe("flex");
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    chooseMode("代码");
     expect(editorFrame.style.display).toBe("flex");
     expect(chatFrame.style.display).toBe("flex");
     expect(useAppStore.getState().panelSlots).toMatchObject([
@@ -515,11 +524,11 @@ describe("MainSlots", () => {
     });
     render(<LayoutFixture />);
     const chat = screen.getByText("Chat pane");
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    chooseMode("代码");
     await screen.findByText("Editor pane");
     expect(screen.getByText("Chat pane")).toBe(chat);
     expect(chat.closest<HTMLElement>('[data-panel-slot-kind="chat"]')!.style.display).toBe("none");
-    fireEvent.click(screen.getByRole("button", { name: "聊天首页" }));
+    chooseMode("协作");
     expect(screen.getByText("Chat pane")).toBe(chat);
     expect(chat.closest<HTMLElement>('[data-panel-slot-kind="chat"]')!.style.display).toBe("flex");
   });
@@ -541,7 +550,7 @@ describe("MainSlots", () => {
     expect(useAppStore.getState().appMode).toBe("code");
     expect(editor.closest<HTMLElement>('[data-panel-slot-kind="editor"]')!.style.display).toBe("flex");
     expect(chat.closest<HTMLElement>('[data-panel-slot-kind="chat"]')!.style.display).toBe("none");
-    expect(screen.getByRole("button", { name: "Code" }).getAttribute("aria-current")).toBe("page");
+    expectCodeSelected();
     expect(screen.queryByRole("tablist", { name: "主工作区" })).toBeNull();
     expect(useAppStore.getState().workbenchLayout).toBe(layout);
     expect(useAppStore.getState().editorTabs[0].content).toBe("retained");
@@ -551,11 +560,11 @@ describe("MainSlots", () => {
     useAppStore.setState({ appMode: "chat", rightPanelOpen: false, contextCardCollapsed: false });
     render(<MainSlots forceChat />);
     const chat = screen.getByTestId("chat-owner-fixture");
-    fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
     expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, appMode: "chat", contextCardCollapsed: false });
     expect(screen.getByTestId("chat-owner-fixture")).toBe(chat);
     act(() => useAppStore.getState().toggleRightPanel());
-    expect(screen.getByRole("button", { name: "打开右侧栏" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "新建标签页" })).toBeTruthy();
     expect(screen.getByTestId("chat-owner-fixture")).toBe(chat);
   });
 

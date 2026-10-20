@@ -26,6 +26,7 @@ beforeEach(() => {
   mocks.send.mockClear();
   mocks.getState.mockReset().mockResolvedValue({ isMaximized: false, isFocused: false });
   window.__MINICODE_RUNTIME__ = { desktop: { notify: mocks.notify, hideNotifications: mocks.hide,
+    menu: { setState: vi.fn(async () => {}) },
     windowControls: { getState: mocks.getState, onStateChanged: (callback: typeof mocks.focus) => { mocks.focus = callback; return () => { mocks.focus = null; mocks.removeFocus(); }; } },
     onDeepLink: () => () => {},
   } } as never;

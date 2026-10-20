@@ -31,6 +31,10 @@ vi.mock("../desktop/runtime", async (load) => ({ ...await load<typeof import("..
 vi.mock("../protocol/workspace", () => ({ listWorkspaceTree: vi.fn(async () => ({ children: [] })), searchWorkspaceFiles: vi.fn(async () => []) }));
 vi.mock("./FooterRow", () => ({ FooterRow: ({ onSend }: { onSend: () => void }) => <button onClick={onSend}>Send main</button> }));
 import { useAppStore } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { Composer } from "./Composer";
 import { SideChatPanel } from "../panels/SideChatPanel";
 

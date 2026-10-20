@@ -1,7 +1,7 @@
 import { useI18n, type Translate, type TranslationKey } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, Trash2 } from "../lib/icons";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -12,7 +12,8 @@ import { showConfirm } from "./DialogService";
 import type { EffortLevel } from "../stores/types";
 import { useAppStore } from "../stores";
 import { selectableModelsForProvider } from "../lib/provider-models";
-import { isDesktop, openExternal } from "../desktop/runtime";
+import { isDesktop, openExternal, runtime } from "../desktop/runtime";
+import { saveDictationPreferences } from "../lib/dictation-preferences";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import {
   type ProviderId,
@@ -106,6 +107,7 @@ type ProviderDraft = {
   imageModel: string;
   imageSize: string;
   imageQuality: string;
+  dictationModel: string;
 };
 
 type ProviderCard = {
@@ -141,6 +143,8 @@ export const ProviderTab = ({
   isActive?: boolean;
 }) => {
   const { t: tr } = useI18n();
+  const localDictationProvider = !runtime()?.remoteHost;
+  const dictationRevision = useAppStore(state => JSON.stringify([state.workbenchPreferences.speechProvider, state.workbenchPreferences.speechModel]));
   const [provider, setProvider] = useState<ProviderId>(selectedProvider);
   const activeConversationId = useAppStore((state) => state.conversationId);
   const oauthFlow = useAppStore((state) => {
@@ -173,6 +177,7 @@ export const ProviderTab = ({
   const [imageModel, setImageModel] = useState("");
   const [imageSize, setImageSize] = useState("1024x1024");
   const [imageQuality, setImageQuality] = useState("");
+  const [dictationModel, setDictationModel] = useState("");
   const [saving, setSaving] = useState(false);
   const [modelsStatus, setModelsStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [modelsResult, setModelsResult] = useState<LLMModelsRefreshResult | null>(null);
@@ -244,6 +249,7 @@ export const ProviderTab = ({
     imageModel,
     imageSize,
     imageQuality,
+    dictationModel,
   });
 
   const restoreDetailDraft = (draft: ProviderDraft) => {
@@ -256,6 +262,7 @@ export const ProviderTab = ({
     setCustomWireApi(draft.customWireApi); setProxyMode(draft.proxyMode); setThinkingBudget(draft.thinkingBudget);
     setResponsesReasoningSummary(draft.responsesReasoningSummary); setPromptCacheRetention(draft.promptCacheRetention);
     setMaxTokens(draft.maxTokens); setImageModel(draft.imageModel); setImageSize(draft.imageSize); setImageQuality(draft.imageQuality);
+    setDictationModel(draft.dictationModel);
   };
   const rememberDetail = () => {
     if (providerView === "detail" && detailKey.current) detailDrafts.current.set(detailKey.current, draftFromState());
@@ -326,6 +333,9 @@ export const ProviderTab = ({
     setImageModel(section?.image_model ?? fallback.image_model ?? "");
     setImageSize(section?.image_size ?? fallback.image_size ?? "1024x1024");
     setImageQuality(section?.image_quality ?? fallback.image_quality ?? "");
+    const speech = useAppStore.getState().workbenchPreferences;
+    const speechProvider = speech.speechProvider || settingsPayloadRef.current?.provider;
+    setDictationModel(localDictationProvider && speechProvider === backendProvider(nextProvider) ? speech.speechModel : "");
     applyCapabilitySection(nextProvider, section ?? fallback, selectedModel);
   };
 
@@ -353,7 +363,7 @@ export const ProviderTab = ({
     if (detailDraftPinnedRef.current) return;
     setProvider(selectedProvider);
     applyProviderSection(selectedProvider, savedOrHistorySectionForUiProvider(settingsPayload, selectedProvider));
-  }, [selectedProvider, settingsPayload]);
+  }, [selectedProvider, settingsPayload, dictationRevision]);
 
   useEffect(() => {
     if (!isActive) return;
@@ -550,6 +560,7 @@ export const ProviderTab = ({
       settingsPayloadRef.current = savedPayload;
       onSettingsPayloadChange?.(savedPayload);
       applyProviderSection(provider, savedOrHistorySectionForUiProvider(savedPayload, provider));
+      if (localDictationProvider) window.dispatchEvent(new CustomEvent("dictation:service-changed", { detail: { provider: entry.provider || backendProvider(provider) } }));
       pushToast(tr("提供商配置已删除"), "success");
     } catch (error) {
       pushToast(tr("提供商删除失败：{v0}", { v0: formatProviderError(error) }), "error");
@@ -643,6 +654,12 @@ export const ProviderTab = ({
       settingsPayloadRef.current = savedPayload;
       onSettingsPayloadChange?.(savedPayload);
       const bp = backendProvider(draft.provider);
+      const speech = useAppStore.getState().workbenchPreferences;
+      if (localDictationProvider && !options.activate && effectiveCustomWireApi(draft.provider, draft.baseUrl, draft.customWireApi) !== "anthropic"
+        && (draft.dictationModel.trim() || (speech.speechProvider || savedPayload.provider) === bp)) {
+        await saveDictationPreferences({ speechProvider: bp, speechModel: draft.dictationModel.trim(), speechEnabled: Boolean(draft.dictationModel.trim()) });
+      }
+      if (localDictationProvider) window.dispatchEvent(new CustomEvent("dictation:service-changed", { detail: { provider: bp } }));
       const section = savedPayload[bp] as ProviderSection | undefined;
       setProvider(draft.provider);
       onProviderChange(draft.provider);
@@ -775,6 +792,8 @@ export const ProviderTab = ({
       imageModel: section?.image_model ?? fallback.image_model ?? "",
       imageSize: section?.image_size ?? fallback.image_size ?? "1024x1024",
       imageQuality: section?.image_quality ?? fallback.image_quality ?? "",
+      dictationModel: (useAppStore.getState().workbenchPreferences.speechProvider || settingsPayloadRef.current?.provider) === backendProvider(nextProvider)
+        ? useAppStore.getState().workbenchPreferences.speechModel : "",
     };
   };
 
@@ -1444,6 +1463,10 @@ export const ProviderTab = ({
         <summary style={{ cursor: "pointer", padding: "10px 0", color: "var(--text-secondary)", fontSize: "var(--text-sm)" }}>
           {tr("高级设置")}</summary>
         <div style={{ display: "grid", gap: 10 }}>
+      {localDictationProvider && effectiveWireApi !== "anthropic" && <Section title={tr("听写模型")} description={tr("使用此服务的音频转录接口，留空以停用。随提供商配置保存。") }>
+        <input aria-label={tr("转录模型")} value={dictationModel} disabled={busy} autoComplete="off"
+          placeholder={tr("填写服务商支持的转录模型")} onChange={(event) => setDictationModel(event.target.value)} style={inputStyle} />
+      </Section>}
       <Section
         title={tr("网络连接")}
         description={proxyMode === "direct"

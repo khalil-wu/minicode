@@ -24,7 +24,7 @@ export function claimSubmittedDraft({ conversationId, workspaceRoot, userMessage
   };
   const signature = () => {
     const { active, draft, scope } = location();
-    return JSON.stringify([draft.draft, draft.attachments, draft.selectedMentions, draft.selectedSkills,
+    return JSON.stringify([draft.draft, draft.richDraft, draft.attachments, draft.selectedMentions, draft.selectedSkills,
       draft.quotedMessage, readDiffCommentState(scope).comments, active ? selectedCommand() : null]);
   };
   const baseline = signature();

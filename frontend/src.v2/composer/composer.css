@@ -633,8 +633,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .composer-effort-fill,
-  .composer-effort-thumb {
+  html:not([data-reduced-motion="false"]) .composer-effort-fill,
+  html:not([data-reduced-motion="false"]) .composer-effort-thumb {
     transition: none;
   }
 }
@@ -1108,4 +1108,4 @@
 .composer-dictation[data-phase='recording'] .composer-dictation-status { color: var(--state-danger); }
 .composer-dictation-meter { display: inline-block; width: 32px; height: 3px; overflow: hidden; border-radius: 2px; background: var(--border-subtle); }
 .composer-dictation-meter i { display: block; width: 100%; height: 100%; background: var(--state-danger); transform-origin: left; transition: transform var(--duration-fast) linear; }
-@media (prefers-reduced-motion: reduce) { .composer-dictation-meter i { transition: none; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .composer-dictation-meter i { transition: none; } }

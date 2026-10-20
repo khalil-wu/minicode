@@ -5,6 +5,8 @@ import { useAppStore } from "../stores";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import type { CommandResultEvent } from "../protocol/events";
 import { handleRuntimeEvent } from "./runtimeEvents";
+import { captureSteerTurnId } from "../lib/steer-command";
+import { pushToast } from "../overlays/ToastContainer";
 
 const wsMock = vi.hoisted(() => ({
   sent: [] as unknown[],
@@ -445,6 +447,7 @@ describe("sendChatMessage attachment feedback", () => {
       conversationStreaming: { "conv-test": true },
       messages: [{
         id: "assistant-running",
+        turnId: "real-active-turn",
         role: "assistant",
         content: "working",
         artifacts: [],
@@ -808,6 +811,7 @@ describe("sendChatMessage attachment feedback", () => {
       conversationStreaming: { "conv-test": true },
       messages: [{
         id: "assistant-running",
+        turnId: "real-active-turn",
         role: "assistant",
         content: "working",
         artifacts: [],
@@ -828,7 +832,115 @@ describe("sendChatMessage attachment feedback", () => {
       type: "user_message",
       queue_if_busy: true,
       streaming_behavior: "steer",
+      expected_turn_id: "real-active-turn",
     });
+  });
+
+  it.each(["side", "background"])("captures the owner's actual turn for %s steering", location => {
+    const messages = [{ id: "assistant-a", turnId: "actual-a-turn", role: "assistant" as const, content: "working", artifacts: [], timestamp: 1, isStreaming: true }];
+    useAppStore.setState({ conversationId: "reader-b", isStreaming: true,
+      messages: [{ ...messages[0], id: "assistant-b", turnId: "actual-b-turn" }], draft: "keep B draft",
+      sideChats: location === "side" ? { a: { id: "a", draft: "keep side draft", messages, isStreaming: true } } : {},
+      conversationMessages: { a: messages }, conversationStreaming: { a: true } });
+    expect(sendChatMessage({ conversationId: "a", displayContent: "steer A", allowWhileStreaming: true, busyBehavior: "steer" })).toBe(true);
+    expect(sent[0]).toMatchObject({ conversation_id: "a", streaming_behavior: "steer", expected_turn_id: "actual-a-turn" });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "reader-b", draft: "keep B draft" });
+  });
+
+  it("keeps the draft when a busy optimistic assistant has no real turn identity", () => {
+    const messages = [{ id: "assistant-is-not-a-turn", role: "assistant" as const, content: "", artifacts: [], timestamp: 1, isStreaming: true }];
+    useAppStore.setState({ conversationId: "conv-test", messages, isStreaming: true, sideChats: {}, draft: "keep missing-target draft" });
+    expect(sendChatMessage({ displayContent: "keep missing-target draft", allowWhileStreaming: true, busyBehavior: "steer" })).toBe(false);
+    expect(sent).toEqual([]);
+    expect(useAppStore.getState()).toMatchObject({ draft: "keep missing-target draft", messages });
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("回合标识"), "warning");
+  });
+
+  it("keeps the initially captured steer target through permission confirmation and a newer real turn", async () => {
+    let release!: (accepted: boolean) => void;
+    const confirmation = new Promise<boolean>(resolve => { release = resolve; });
+    useAppStore.setState({ conversationId: "conv-test", workingDirectory: "C:/owner", isStreaming: true, sideChats: {},
+      conversations: [{ id: "conv-test", title: "Owner", workspaceRoot: "C:/owner" }],
+      messages: [{ id: "old-assistant", turnId: "old-real-turn", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true }],
+      pendingPermissionModeChanges: { "conv-test": { workspaceRoot: "C:/owner", confirmation } } });
+    const submission = sendChatMessage({ displayContent: "old turn direction", allowWhileStreaming: true, busyBehavior: "steer" });
+    useAppStore.setState({ pendingPermissionModeChanges: {}, messages: [{ id: "new-assistant", turnId: "new-real-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 2, isStreaming: true }] });
+    release(true);
+    expect(await submission).toBe(true);
+    expect(sent[0]).toMatchObject({ streaming_behavior: "steer", expected_turn_id: "old-real-turn" });
+  });
+
+  it("does not turn a normal send into a steer after asynchronous context preparation", () => {
+    useAppStore.setState({ isStreaming: false, sideChats: {} });
+    const expectedTurnId = captureSteerTurnId(useAppStore.getState());
+    useAppStore.setState({ isStreaming: true, messages: [{ id: "later-assistant", turnId: "later-turn", role: "assistant", content: "working", artifacts: [], timestamp: 2, isStreaming: true }] });
+    expect(sendChatMessage({ displayContent: "normal original send", allowWhileStreaming: true, busyBehavior: "steer", expectedTurnId })).toBe(true);
+    expect(sent[0]).toMatchObject({ streaming_behavior: "follow_up", queue_if_busy: true });
+    expect(sent[0]).not.toHaveProperty("expected_turn_id");
+  });
+
+  it("submits an old captured target for explicit rejection after that turn became idle", async () => {
+    useAppStore.setState({ isStreaming: false, messages: [], sideChats: {}, draft: "preserve authored direction" });
+    const onRejected = vi.fn();
+    vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({ type: "command.result", command: "user_message", level: "error",
+      message: "The selected turn has already ended.", data: { conversation_id: "conv-test", reason: "steer_target_unavailable", admitted: false, queued: false,
+        expected_turn_id: "ended-real-turn", active_turn_id: "" } });
+    expect(await sendChatMessage({ displayContent: "preserve authored direction", allowWhileStreaming: true, busyBehavior: "steer",
+      expectedTurnId: "ended-real-turn", awaitAdmission: true, onRejected })).toBe(false);
+    expect(vi.mocked(sendClientCommandAwaitResult).mock.lastCall?.[0]).toMatchObject({ streaming_behavior: "steer", expected_turn_id: "ended-real-turn" });
+    expect(onRejected).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().draft).toBe("preserve authored direction");
+  });
+
+  it("withdraws only the ACKed rejected steer's local queue display while preserving receipt evidence and a real neighboring queue", async () => {
+    const owner = "rejected-steer-owner";
+    const attachmentRefs = [{ id: "kept-attachment", name: "notes.txt", kind: "document" as const, artifactId: "real-artifact" }];
+    const live = { id: "current-answer", turnId: "new-real-turn", role: "assistant" as const, content: "current work", artifacts: [], timestamp: 1, isStreaming: true };
+    const realQueue = { id: "actual-queued-user", role: "user" as const, content: "already accepted queue", artifacts: [], timestamp: 2,
+      queueState: "queued" as const, queueMessageId: "actual-queued-answer", queuePosition: 1 };
+    useAppStore.setState({ conversationId: "reader-b", messages: [], isStreaming: false, sideChats: {}, draft: "keep B draft", workingDirectory: "C:/b",
+      conversationMessages: { [owner]: [live, realQueue] }, conversationStreaming: { [owner]: true } });
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(async (command, _type, options) => {
+      options?.onReceived?.();
+      expect(useAppStore.getState().conversationMessages[owner].find(message => message.id === "rejected-user")?.queueState).toBe("queued");
+      return { type: "command.result", command: "user_message", client_command_id: command.client_command_id, level: "error",
+        message: "The expected turn already ended; input was not queued.", data: { conversation_id: owner, admitted: false, queued: false,
+          reason: "steer_target_mismatch", expected_turn_id: "old-real-turn", active_turn_id: "new-real-turn" } };
+    });
+    const onRejected = vi.fn();
+    expect(await sendChatMessage({ conversationId: owner, displayContent: "keep rejected direction", attachmentRefs,
+      allowWhileStreaming: true, busyBehavior: "steer", expectedTurnId: "old-real-turn", awaitAdmission: true,
+      userMessageId: "rejected-user", assistantMessageId: "rejected-answer", onRejected })).toBe(false);
+    const state = useAppStore.getState();
+    const rejected = state.conversationMessages[owner].find(message => message.id === "rejected-user")!;
+    expect(rejected).toMatchObject({ content: "keep rejected direction", attachmentRefs });
+    expect(rejected.queueState).toBeUndefined(); expect(rejected.queueMessageId).toBeUndefined();
+    expect(state.conversationMessages[owner].find(message => message.id === realQueue.id)).toBe(realQueue);
+    expect(state.conversationMessages[owner].find(message => message.id === live.id)).toBe(live);
+    expect(state.conversationStreaming[owner]).toBe(true);
+    expect(state).toMatchObject({ conversationId: "reader-b", draft: "keep B draft", isStreaming: false });
+    expect(onRejected).toHaveBeenCalledOnce();
+    expect(state.conversationMessages[owner].some(message => message.role === "system" && message.content.includes("expected turn already ended"))).toBe(true);
+  });
+
+  it("withdraws a rejected delivery's queue display when its definitive result arrives after the UI wait timed out", async () => {
+    let deliveryId = "";
+    useAppStore.setState({ conversationId: "conv-test", sideChats: {}, draft: "keep draft", isStreaming: true,
+      messages: [{ id: "live-answer", turnId: "real-live-turn", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true }] });
+    vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(async (command, _type, options) => {
+      deliveryId = command.client_command_id!;
+      options?.onReceived?.();
+      throw new Error("result timeout after durable receipt");
+    });
+    expect(await sendChatMessage({ displayContent: "saved direction", allowWhileStreaming: true, busyBehavior: "steer", awaitAdmission: true,
+      userMessageId: "late-user", assistantMessageId: "late-answer" })).toBe(false);
+    expect(useAppStore.getState().messages.find(message => message.id === "late-user")?.queueState).toBe("queued");
+    handleUserMessageAdmission({ type: "command.result", command: "user_message", client_command_id: deliveryId, level: "error",
+      message: "The original turn is no longer active.", data: { conversation_id: "conv-test", admitted: false, queued: false,
+        reason: "steer_target_unavailable", expected_turn_id: "real-live-turn", active_turn_id: "" } });
+    const saved = useAppStore.getState().messages.find(message => message.id === "late-user")!;
+    expect(saved).toMatchObject({ content: "saved direction" }); expect(saved.queueState).toBeUndefined();
+    expect(useAppStore.getState()).toMatchObject({ draft: "keep draft", isStreaming: true });
   });
 
   it("restores structured plugin and browser context when recalling a user turn", async () => {

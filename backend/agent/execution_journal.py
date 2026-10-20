@@ -1209,8 +1209,9 @@ class ExecutionJournal:
         *,
         reason: str = "cancelled",
         content: str | None = None,
+        preserve_call_ids: frozenset[str] = frozenset(),
     ) -> list[JournalEvent]:
-        """Synthesize tool_result facts for every unresolved tool_use."""
+        """Close unresolved calls whose actual owner has reached terminal."""
         closed: list[JournalEvent] = []
         clean_reason = str(reason or "cancelled").strip().lower()
         synthetic_status = (
@@ -1236,6 +1237,8 @@ class ExecutionJournal:
         # the surrounding child reached a terminal state.
         message = content or "[Tool result missing due to internal error]"
         for item in self.unresolved_tool_uses():
+            if item["tool_call_id"] in preserve_call_ids:
+                continue
             event = self.append_tool_result(
                 {
                     "tool_call_id": item["tool_call_id"],

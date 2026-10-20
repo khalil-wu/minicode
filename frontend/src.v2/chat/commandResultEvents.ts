@@ -82,6 +82,7 @@ const RIGHT_STACK_TABS = new Set<RightStackTab>([
   "tasks",
   "diff",
   "plan",
+  "goal",
   "subagents",
   "artifacts",
   "inspector",

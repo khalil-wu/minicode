@@ -5,6 +5,7 @@ import { normalizeWorkspacePath, workspaceRootsEqual } from "./workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
 import nativeFileExtensions from "../../../desktop/native-open-file-extensions.json";
+import { matchesExternalBrowserClick, type LinkClickModifiers } from "./shortcut-navigation";
 
 export function isNativeExternalFile(path: string) {
   const name = path.split(/[\\/]/).at(-1)!;
@@ -39,13 +40,14 @@ export async function openPreferredWorkspace(workspaceRoot: string, targetId: Fi
   } catch (error) { pushToast(error instanceof Error ? error.message : String(error), "error"); }
 }
 
-export async function openPreferredWebLink(url: string, conversationId?: string): Promise<boolean> {
+export async function openPreferredWebLink(url: string, conversationId?: string, click?: LinkClickModifiers): Promise<boolean> {
   if (!isDesktop()) { window.open(url, "_blank", "noopener,noreferrer"); return true; }
   try {
     const parsed = new URL(url);
     const preferences = await getDesktopPreferences();
     const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
-    const target = local ? preferences.localUrlOpenTarget : preferences.urlOpenTarget;
+    const target = click && matchesExternalBrowserClick(click, preferences.externalBrowserLinkShortcut)
+      ? "external-browser" : local ? preferences.localUrlOpenTarget : preferences.urlOpenTarget;
     if (conversationId !== undefined && (useAppStore.getState().conversationId !== conversationId || useAppStore.getState().pendingConversationSwitchId)) {
       throw new Error("会话已切换，请回到原请求后打开链接。");
     }

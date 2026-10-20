@@ -341,8 +341,8 @@ button.skills-logo {
 .skills-scope-tabs { flex-wrap: wrap; }
 @media (hover: none) { .skills-row-end .skills-icon-button { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
-  .skills-workspace { animation: none; }
-  .skills-catalog-row, .skills-row-end .skills-icon-button { transition: none; }
+  html:not([data-reduced-motion="false"]) .skills-workspace { animation: none; }
+  html:not([data-reduced-motion="false"]) .skills-catalog-row, html:not([data-reduced-motion="false"]) .skills-row-end .skills-icon-button { transition: none; }
 }
 
 .skills-item-copy {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getDesktopPreferences, isDesktop, onDesktopPreferencesChanged, setDesktopPreferences, type DesktopPreferences } from "../desktop/runtime";
+import { getDesktopPreferences, isDesktop, onDesktopPreferencesChanged, setDesktopPreferences, type DesktopPreferences, type DesktopPreferencesPatch } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
 
 export function useDesktopPreferences() {
@@ -8,11 +8,17 @@ export function useDesktopPreferences() {
   useEffect(() => {
     if (!isDesktop()) return;
     let mounted = true;
-    const unsubscribe = onDesktopPreferencesChanged((value) => { if (mounted) setPreferences(value); });
-    void getDesktopPreferences().then((value) => { if (mounted) setPreferences(value); }).catch((reason) => { if (mounted) setError(String(reason)); });
+    let receivedState = false;
+    const unsubscribe = onDesktopPreferencesChanged((value) => {
+      receivedState = true;
+      if (mounted) { setPreferences(value); setError(""); }
+    });
+    void getDesktopPreferences().then((value) => {
+      if (mounted && !receivedState) { setPreferences(value); setError(""); }
+    }).catch((reason) => { if (mounted && !receivedState) setError(String(reason)); });
     return () => { mounted = false; unsubscribe(); };
   }, []);
-  const update = async (patch: Partial<Omit<DesktopPreferences, "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale">>) => {
+  const update = async (patch: DesktopPreferencesPatch) => {
     try { const value = await setDesktopPreferences(patch); setPreferences(value); }
     catch (reason) { pushToast(reason instanceof Error ? reason.message : String(reason), "error"); }
   };

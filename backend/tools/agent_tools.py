@@ -24,6 +24,7 @@ from backend.agent.mailbox_delivery import (
     _run_is_conversation_leader, format_subagent_mailbox_injection, is_structured_protocol_message,
 )
 from backend.async_cleanup import to_thread_cancel_safe
+from backend.atomic_io import await_task_despite_cancellation
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
 from backend.agent.public_projection import project_public_subagent_result
@@ -45,7 +46,7 @@ from backend.agents.source_roles import (
     get_execution_agent as get_custom_agent,
     is_legacy_read_only_role,
     role_tool_denials,
-    source_spawn_version,
+    source_agent_options,
 )
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, AppConfig, TokenBudget, load_config
@@ -116,6 +117,9 @@ class _SubagentExecutionRetirement:
     started: asyncio.Future[None]
     cleanup_error: BaseException | None = None
     worktree_cleanup_error: BaseException | None = None
+    session: AgentSession | None = None
+    session_retained: bool = False
+    registered_foreground_worker: bool = False
 
 from backend.tools.subagent_support import (
     MAX_PARALLEL_CONCURRENCY,
@@ -192,6 +196,8 @@ def _task_tool_parameters(
                 "type": "string",
                 "description": f"Complete self-contained instructions for this {subject}.",
             },
+            "task_name": {"type": "string", "description": "Canonical task-path segment for this child."},
+            "fork_turns": {"type": "string", "description": "Parent history to inherit: none, all, or a positive number of recent turns."},
             "agent_type": {
                 "type": "string",
                 "enum": agent_types,
@@ -315,6 +321,17 @@ def _task_tool_parameters(
     }
 
 
+def _child_coordination_options(context: ToolExecutionContext, config: AppConfig, *, version: str = "") -> dict[str, Any]:
+    from backend.tools.agent_control_plane import AgentControlPlane
+
+    snapshot = context.model_execution
+    options = source_agent_options(config, model=snapshot.model if snapshot is not None else "",
+        definition=snapshot.model_info if snapshot is not None else None,
+        version=version or context.run_context.multi_agent_version)
+    child_depth = len(AgentControlPlane(context).actor_public_tree_path().strip("/").split("/"))
+    return {**options, "nested_delegation": options["version"] == "v1" and child_depth < options["max_depth"]}
+
+
 class TaskTool(BaseTool):
     """Delegate a bounded task to an isolated subagent."""
 
@@ -343,11 +360,14 @@ class TaskTool(BaseTool):
     def get_spec(self):
         from backend.tools.contracts import ToolSpec
 
+        from backend.agents.source_roles import source_agent_options
+        coordination = source_agent_options(self._schema_config) if self._schema_config is not None else None
+
         return ToolSpec(
             name=self.name,
             capability="agent.delegate",
             toolset="agent",
-            exposure="core",
+            exposure="hidden" if coordination is not None and (not coordination["enabled"] or coordination["version"] == "v2") else "core",
             required_args=("description", "prompt"),
         )
 
@@ -451,6 +471,19 @@ class TaskTool(BaseTool):
     ) -> ToolResult:
         workspace_root = context.workspace_root if context is not None else None
         captured_config = context.model_execution.config if context is not None and context.model_execution is not None else self._schema_config
+        coordination = source_agent_options(captured_config, model=context.model_execution.model,
+            definition=context.model_execution.model_info, version=context.run_context.multi_agent_version) if context is not None and context.model_execution is not None else source_agent_options(captured_config) if captured_config is not None else None
+        if coordination is not None:
+            if not coordination["enabled"]:
+                return self._error_result("Multi-agent tools are disabled by the current configuration")
+            if coordination["max_children"] == 0:
+                return self._error_result("The configured agent thread limit leaves no child execution slots")
+            require_runtime_from_context(context).configure_subagent_limit(context.conversation_id, coordination["max_children"], source_v2=coordination["version"] == "v2")
+            if coordination["version"] == "v1":
+                from backend.tools.agent_control_plane import AgentControlPlane
+                path = AgentControlPlane(context).actor_public_tree_path()
+                if len(path.strip("/").split("/")) - 1 >= coordination["max_depth"]:
+                    return self._error_result("Maximum agent nesting depth reached")
         definitions = discover_agents(workspace_root, config=captured_config) if captured_config is not None else discover_agents(workspace_root)
         try:
             parallel = args.get("parallel_tasks")
@@ -687,7 +720,7 @@ class TaskTool(BaseTool):
         try:
             single_runtime_config = _subagent_metadata(args)
             child_options = parent_metadata.get(CHILD_AGENT_OPTIONS_METADATA_KEY, {})
-            requested_fork = _normalize_fork_turns(child_options.get("fork_turns", "none"))
+            requested_fork = _normalize_fork_turns(args.get("fork_turns", child_options.get("fork_turns", "none")))
             role_requested = bool(str(args.get("agent_type") or "").strip())
             if requested_fork == "all" and not role_requested:
                 agent_type = str(parent_metadata.get("agent_role", "default")).removeprefix("subagent:")
@@ -787,7 +820,9 @@ class TaskTool(BaseTool):
     @staticmethod
     def _requested_child_metadata(args: dict[str, Any]) -> dict[str, Any]:
         metadata = _subagent_metadata(args)
-        metadata["_source_role_requested"] = bool(str(args.get("agent_type") or "").strip())
+        metadata["_task_name"] = normalize_agent_task_name(args.get("task_name"), required=False)
+        metadata["_fork_turns"] = normalize_agent_fork_turns(args.get("fork_turns"), default="none")
+        metadata["_source_role_requested"] = args.get("_source_role_requested", bool(str(args.get("agent_type") or "").strip()))
         if "cancel_with_parent" not in args and "detach_from_parent" not in args:
             metadata.pop("cancel_with_parent")
             metadata.pop("detach_from_parent")
@@ -834,6 +869,7 @@ class TaskTool(BaseTool):
         subagent_id = f"subagent-{uuid4().hex[:8]}"
         acquired = await runtime.acquire_subagent_slot(
             subagent_id,
+                    conversation_id=context.conversation_id,
             cancel_event=context.cancel_event if context is not None else None,
         )
         if not acquired:
@@ -845,14 +881,15 @@ class TaskTool(BaseTool):
                 result_kind="subagent",
             )
         try:
-            result = await self._run_single_subtask(
+            worker = asyncio.create_task(self._run_single_subtask(
                 description=description,
                 prompt=prompt,
                 agent_type=agent_type,
                 context=context,
                 subagent_id=subagent_id,
                 subagent_metadata=subagent_metadata,
-            )
+            ), name=f"subagent-foreground:{subagent_id}")
+            result = await worker
             result.runtime_metadata.setdefault("subagent_id", subagent_id)
             child_record = runtime.get_subagent(subagent_id)
             if child_record is not None:
@@ -931,6 +968,12 @@ class TaskTool(BaseTool):
                 result_kind="subagent",
             )
         try:
+            from backend.agents.source_roles import source_agent_options
+            coordination = source_agent_options(context.model_execution.config, model=context.model_execution.model, definition=context.model_execution.model_info, version=context.run_context.multi_agent_version) if context.model_execution is not None else None
+            wait_for_slot = coordination is None or coordination["version"] != "v2"
+            if not wait_for_slot and not runtime.try_reserve_subagent_slots([subagent_id], conversation_id=context.conversation_id):
+                await _close_subagent_llm_resolution(llm_resolution)
+                return self._error_result(f"Maximum concurrent agents reached ({coordination['max_children'] + 1}, including root)")
             subagent_id = self._spawn_background_subtask(
                 description=description,
                 prompt=prompt,
@@ -938,11 +981,12 @@ class TaskTool(BaseTool):
                 context=context,
                 subagent_metadata=subagent_metadata,
                 subagent_id=subagent_id,
-                wait_for_slot=True,
+                wait_for_slot=wait_for_slot,
                 task_created_checked=True,
                 prepared_llm_resolution=llm_resolution,
             )
         except RuntimeError as exc:
+            runtime.release_subagent_slot(subagent_id)
             with suppress(Exception):
                 await _close_subagent_llm_resolution(llm_resolution)
             path_conflict = "Agent path" in str(exc) and "already owned" in str(exc)
@@ -958,6 +1002,7 @@ class TaskTool(BaseTool):
                 result_kind="subagent",
             )
         except BaseException:
+            runtime.release_subagent_slot(subagent_id)
             with suppress(Exception):
                 await _close_subagent_llm_resolution(llm_resolution)
             raise
@@ -1067,7 +1112,7 @@ class TaskTool(BaseTool):
             batch_paths: set[str] = set()
             for subagent_id, task in zip(subagent_ids, tasks, strict=True):
                 canonical_task_name = _normalize_child_task_name(
-                    task.get("_task_name")
+                    task.get("task_name") or task.get("_task_name")
                 )
                 candidate_path = runtime.validate_subagent_task_registration(
                     subagent_id,
@@ -1217,6 +1262,9 @@ class TaskTool(BaseTool):
             child_config["detach_from_parent"] = True
             child_config["cancel_with_parent"] = False
         raw_profile = (subagent_metadata or {}).get("_execution_profile")
+        coordination = _child_coordination_options(context, captured_config,
+            version=(subagent_metadata or {}).get("_source_spawn_version", ""))
+        child_config["source_spawn_version"] = coordination["version"]
         if isinstance(raw_profile, AgentExecutionProfile):
             execution_profile = raw_profile
         elif isinstance(raw_profile, dict):
@@ -1225,6 +1273,8 @@ class TaskTool(BaseTool):
             execution_profile = build_agent_execution_profile(
                 team_mode=_is_team_subagent(child_config), background=True,
                 agent_triggers_enabled=feature_enabled("agent_triggers"),
+                multi_agent_v2=coordination["version"] == "v2",
+                nested_delegation=coordination["nested_delegation"],
             )
         permission_provider = context.run_context.permission_context_provider
         child_permission = self._build_permission_context(
@@ -1277,6 +1327,7 @@ class TaskTool(BaseTool):
                 if wait_for_slot:
                     acquired = await runtime.acquire_subagent_slot(
                         subagent_id,
+                    conversation_id=context.conversation_id,
                         cancel_event=subagent_cancel_event,
                     )
                     if not acquired:
@@ -1574,7 +1625,9 @@ class TaskTool(BaseTool):
         prompt_summary = record.prompt_summary or f"Resume {agent_type}"
 
         resume_workspace_root: Path | None = None
-        if str(previous_config.get("isolation") or "") == "worktree":
+        released_worktree = any(item["resource_kind"] == "worktree" and item["state"] == "released"
+            and item["resource_id"] == previous_config.get("worktree_path") for item in record.cleanup_resources)
+        if str(previous_config.get("isolation") or "") == "worktree" and not released_worktree:
             raw_worktree = str(previous_config.get("worktree_path") or "").strip()
             current_root = Path(context.workspace_root).resolve() if context and context.workspace_root else None
             if not raw_worktree or current_root is None:
@@ -1587,13 +1640,11 @@ class TaskTool(BaseTool):
             owner_root = find_git_root(current_root)
             if owner_root is None:
                 raise RuntimeError("Cannot resolve the resumed worktree's repository owner")
-            allowed_root = (owner_root / ".minicode" / "worktrees").resolve()
-            try:
-                candidate.relative_to(allowed_root)
-            except ValueError as exc:
+            from backend.services.worktree_settings_service import is_managed_worktree_path
+            if not is_managed_worktree_path(candidate, owner_root):
                 raise RuntimeError(
                     f"Subagent {subagent_id} has an invalid persisted worktree path."
-                ) from exc
+                )
             if not candidate.is_dir():
                 raise RuntimeError(
                     f"Subagent {subagent_id}'s persisted worktree no longer exists."
@@ -1650,11 +1701,8 @@ class TaskTool(BaseTool):
             ),
             **(
                 {
-                    "model": (
-                        f"{previous_config.get('provider')}/{previous_config['model']}"
-                        if previous_config.get("provider")
-                        else str(previous_config["model"])
-                    )
+                    "provider": str(previous_config.get("provider") or ""),
+                    "model": str(previous_config["model"]),
                 }
                 if previous_config.get("model")
                 else {}
@@ -1709,6 +1757,8 @@ class TaskTool(BaseTool):
             subagent_metadata["_resume_source_role"] = True
             subagent_metadata["_resumed_role_name"] = previous_config["source_role_name"]
             subagent_metadata["_source_role_requested"] = False
+        if "source_spawn_version" in previous_config:
+            subagent_metadata["_source_spawn_version"] = previous_config["source_spawn_version"]
         if persisted_task_name:
             subagent_metadata["_task_name"] = persisted_task_name
         if mailbox_claims:
@@ -1724,6 +1774,7 @@ class TaskTool(BaseTool):
         )
         acquired = await runtime.acquire_subagent_slot(
             subagent_id,
+                    conversation_id=context.conversation_id,
             cancel_event=context.cancel_event if context is not None else None,
         )
         if not acquired:
@@ -1799,6 +1850,7 @@ class TaskTool(BaseTool):
             role_requested=(subagent_metadata or {}).get("_source_role_requested", True),
             resume_source_role=(subagent_metadata or {}).get("_resume_source_role", False),
             resumed_role_name=(subagent_metadata or {}).get("_resumed_role_name"),
+            multi_agent_version=(subagent_metadata or {}).get("_source_spawn_version", ""),
         )
 
     async def _run_single_subtask(
@@ -1914,7 +1966,7 @@ class TaskTool(BaseTool):
             if reserved_quota > 0:
                 rollout_budget.release_reservation(reservation_id)
             try:
-                if llm_resolution.owns_llm:
+                if llm_resolution.owns_llm and not retirement.session_retained:
                     await _close_subagent_llm_resolution(llm_resolution)
             except BaseException as exc:
                 retirement.cleanup_error = exc
@@ -1928,6 +1980,9 @@ class TaskTool(BaseTool):
                     retirement.finished.exception()
                 else:
                     retirement.finished.set_result(None)
+                if retirement.registered_foreground_worker:
+                    require_runtime_from_context(context).release_subagent_task(
+                        effective_subagent_id, expected_task=asyncio.current_task())
 
     async def _run_single_subtask_impl(
         self,
@@ -2008,7 +2063,7 @@ class TaskTool(BaseTool):
         fork_snapshot = (
             None
             if resume_snapshot
-            else _fork_snapshot_for_child(parent_metadata, fork_turns)
+            else _fork_snapshot_for_child(parent_metadata, fork_turns, parent_builder=context.run_context.context_builder)
         )
         # Journal and UI events carry the actual resolved child config, not the
         # request spelling. Resume can therefore recreate the same durable
@@ -2019,7 +2074,10 @@ class TaskTool(BaseTool):
         subagent_config["source_role_overrides"] = llm_resolution.role_overrides
         subagent_config["source_role_name"] = llm_resolution.source_role_name
         subagent_config["legacy_role_alias"] = (subagent_metadata or {}).get("_legacy_role_alias")
-        subagent_config["source_spawn_version"] = source_spawn_version(llm_resolution.config)
+        coordination = _child_coordination_options(context,
+            context.model_execution.config if context.model_execution is not None else llm_resolution.config,
+            version=(subagent_metadata or {}).get("_source_spawn_version", ""))
+        subagent_config["source_spawn_version"] = coordination["version"]
         subagent_config["team_mode"] = team_mode = _is_team_subagent(subagent_config)
         raw_execution_profile = (
             (subagent_metadata or {}).get("_execution_profile")
@@ -2037,6 +2095,8 @@ class TaskTool(BaseTool):
                 team_mode=team_mode,
                 background=background,
                 agent_triggers_enabled=feature_enabled("agent_triggers"),
+                multi_agent_v2=subagent_config["source_spawn_version"] == "v2",
+                nested_delegation=coordination["nested_delegation"],
             )
         if execution_profile.team_mode != team_mode:
             raise ValueError(
@@ -2170,6 +2230,7 @@ class TaskTool(BaseTool):
                     "fork_turns": fork_turns,
                     "source_role_overrides": llm_resolution.role_overrides,
                     "source_role_name": llm_resolution.source_role_name,
+                    "source_spawn_version": subagent_config["source_spawn_version"],
                     "legacy_role_alias": subagent_config["legacy_role_alias"],
                 },
                 teammate_name=str(subagent_config.get("teammate_name") or ""),
@@ -2191,6 +2252,14 @@ class TaskTool(BaseTool):
             "agent_path": str(getattr(subagent_record, "agent_path", "") or ""),
             "mailbox_epoch": int(getattr(subagent_record, "mailbox_epoch", 0) or 0),
         }
+        if not background and not runtime.has_live_subagent_task(subagent_id):
+            runtime.register_subagent_task(subagent_id, asyncio.current_task(),
+                cancel_event=subagent_cancel_event, parent_run_id=parent_run_id,
+                parent_tool_call_id=context.tool_call_id, owner_task_id=context.task_id,
+                session_id=context.session_id, model=llm_resolution.model, provider=llm_resolution.provider,
+                reasoning_effort=llm_resolution.effort, agent_type=agent_type,
+                prompt_summary=description, input_prompt=prompt, canonical_task_name=child_task_name)
+            retirement.registered_foreground_worker = True
         runtime.register_subagent_execution(subagent_id, retirement.finished, retirement.started)
         self.bind_mailbox_resumer(subagent_id, context)
         mailbox_claims = (subagent_metadata or {}).get("_resume_mailbox_claims")
@@ -2202,7 +2271,8 @@ class TaskTool(BaseTool):
             "reasoning_effort": llm_resolution.effort,
         }
         child_run_context: RunContext | None = None
-        child_agent_session: AgentSession | None = None
+        child_agent_session: AgentSession | None = runtime.subagent_session(subagent_id)
+        resumed_resident_session = child_agent_session is not None
         journal_events: list[dict[str, Any]] = []
         journal: ExecutionJournal | None = None
         cached_transcript_seq = -1
@@ -2258,13 +2328,13 @@ class TaskTool(BaseTool):
             require_running: bool = True,
             transcript_snapshot: dict[str, Any] | None = None,
             include_transcript: bool = True,
+            retained_code_fact: bool = False,
         ) -> bool:
             nonlocal emitted_transcript_seq, execution_metadata
-            if not _accepts_current_incarnation(
-                require_running=require_running
-            ):
+            current_incarnation = _accepts_current_incarnation(require_running=require_running)
+            if not current_incarnation and not retained_code_fact:
                 return False
-            if child_run_context is not None:
+            if child_run_context is not None and current_incarnation and not retained_code_fact:
                 step_model = child_run_context.active_model_execution or child_run_context.model_execution
                 current_execution = {
                     "model": step_model.model, "provider": step_model.provider,
@@ -2274,7 +2344,7 @@ class TaskTool(BaseTool):
                     execution_metadata = current_execution
                     if runtime is not None:
                         runtime.update_subagent_lifecycle(subagent_id, **subagent_fence, **execution_metadata)
-            if runtime is not None and event_type == "subagent.progress" and data.get("activity_kind") in {
+            if runtime is not None and current_incarnation and not retained_code_fact and event_type == "subagent.progress" and data.get("activity_kind") in {
                 "provider", "tool", "tool_result", "status", "failure",
             }:
                 runtime.update_subagent_lifecycle(
@@ -2290,6 +2360,8 @@ class TaskTool(BaseTool):
             # Progress/done constructors provide a generic lifecycle envelope;
             # this producer owns the actual coordination parent for the child.
             payload = {**data, **subagent_fence, **execution_metadata, "parent_run_id": parent_run_id}
+            if retained_code_fact:
+                payload.update({key: data[key] for key in ("model", "provider", "reasoning_effort")})
             payload["parent_tool_call_id"] = context.tool_call_id
             parent_message_id = self._parent_transcript_message_id(context)
             if parent_message_id:
@@ -2323,7 +2395,7 @@ class TaskTool(BaseTool):
             await emit_event(event_type, payload)
             return True
 
-        agent_worktree = None
+        agent_worktree = child_agent_session.worktree if child_agent_session is not None else None
         worktree_acquisition_unpublished = False
         parent_prompt_cache_safe_params = parent_metadata.get("prompt_cache_safe_params")
         current_turn_metadata: dict[str, Any] = {}
@@ -2348,6 +2420,13 @@ class TaskTool(BaseTool):
             except BaseException as exc:
                 admission_error = exc
             try:
+                if admission_error is None and retirement.session_retained and (
+                    resumed_resident_session or retirement.started.done() and not retirement.started.cancelled()
+                ):
+                    return ""
+                if retirement.session_retained:
+                    await runtime.close_subagent_session(subagent_id, reason="startup_not_admitted")
+                    return ""
                 return await _cleanup_owned_resources()
             finally:
                 if admission_error is not None:
@@ -2381,33 +2460,44 @@ class TaskTool(BaseTool):
                     retirement.cleanup_error = exc
                     raise
                 retirement.cleanup_error = None
+            return await _cleanup_worktree_resource()
+
+        async def _cleanup_worktree_resource(*, discard_mail: bool = False, closing_thread: bool = False) -> str:
+            nonlocal agent_worktree
             if agent_worktree is None:
                 return ""
             from backend.agent.worktree import cleanup_agent_worktree, has_worktree_changes
 
-            info, agent_worktree = agent_worktree, None
+            info = agent_worktree
+            record = runtime.get_subagent(subagent_id) or runtime.load_persisted_subagent(subagent_id)
+            resource_fence = {"agent_path": record.agent_path, "mailbox_epoch": record.mailbox_epoch}
             try:
                 if runtime.begin_subagent_worktree_retirement(
-                    subagent_id, resource_id=str(info.worktree_path), **subagent_fence,
+                    subagent_id, resource_id=str(info.worktree_path), discard_mail=discard_mail, **resource_fence,
                     acquired_metadata=({"git_root": str(info.git_root), "branch": info.branch,
                         "worktree_branch": info.temporary_branch,
                         "head_commit": info.head_commit} if worktree_acquisition_unpublished else None),
                 ):
+                    agent_worktree = None
+                    if child_agent_session is not None:
+                        child_agent_session.worktree = None
                     return ""
             except BaseException as exc:
                 retirement.worktree_cleanup_error = exc
                 raise
 
+            from backend.workspace.local_environment_lifecycle import context_environment_runner
+            environment_runner = context_environment_runner(context, asyncio.get_running_loop())
             def cleanup() -> tuple[bool, str, bool]:
                 had_changes = has_worktree_changes(info)
-                kept, kept_path = cleanup_agent_worktree(info)
+                kept, kept_path = cleanup_agent_worktree(info, environment_runner=environment_runner)
                 return kept, kept_path, had_changes
 
             try:
                 try:
                     kept, kept_path, had_changes = await to_thread_cancel_safe(
                         runtime.cleanup_subagent_worktree_resource, subagent_id,
-                        resource_id=str(info.worktree_path), cleanup=cleanup, **subagent_fence,
+                        resource_id=str(info.worktree_path), cleanup=cleanup, **resource_fence,
                     )
                 except SubagentResourceOwnershipError:
                     raise
@@ -2415,18 +2505,25 @@ class TaskTool(BaseTool):
                     retirement.worktree_cleanup_error = exc
                     runtime._mark_subagent_cleanup(subagent_id, reason="worktree_cleanup_failed")
                     logger.warning("Worktree cleanup failed for %s: %s", subagent_id, exc)
+                    if discard_mail or closing_thread:
+                        raise
                     return f"Worktree left at {info.worktree_path} (branch {info.branch}); cleanup failed."
                 if kept and not had_changes:
                     retirement.worktree_cleanup_error = RuntimeError(
                         f"Clean worktree cleanup did not release {info.worktree_path}"
                     )
                     runtime._mark_subagent_cleanup(subagent_id, reason="worktree_cleanup_failed")
+                    if discard_mail or closing_thread:
+                        raise retirement.worktree_cleanup_error
                 if runtime is not None and (not kept or had_changes):
                     runtime.settle_subagent_cleanup_resource(
                         subagent_id, resource_kind="worktree", resource_id=str(info.worktree_path),
                         state="retained" if kept else "released",
                         receipt="retained_user_changes" if kept else "removed_clean_worktree",
                     )
+                    agent_worktree = None
+                    if child_agent_session is not None:
+                        child_agent_session.worktree = None
                 if kept:
                     return (
                         f"The subagent worked in an isolated git worktree with changes kept at: "
@@ -2473,6 +2570,30 @@ class TaskTool(BaseTool):
             })
 
         try:
+            child_agent_session = await runtime.acquire_subagent_session(subagent_id, lambda: AgentSession(
+                llm=llm, tool_registry=tool_registry, artifact_store=self._artifact_store,
+                permission_checker=permission_checker, agent_settings=sub_settings, token_budget=sub_budget,
+            ), conversation_id=context.conversation_id)
+            retirement.session = child_agent_session
+            previous_close = child_agent_session.close_model
+            if previous_close is not None and child_agent_session.llm is not llm:
+                pending = child_agent_session.code_store.pending_tasks(llm=child_agent_session.llm)
+                if pending:
+                    async def retire_model(tasks=tuple(pending), close=previous_close):
+                        await asyncio.gather(*tasks, return_exceptions=True)
+                        await close()
+                    retired = asyncio.create_task(retire_model(), name=f"subagent-model-retirement:{subagent_id}")
+                    child_agent_session.model_retirement_tasks.add(retired)
+                    def model_retired(task, session=child_agent_session):
+                        if not task.cancelled() and task.exception() is None:
+                            session.model_retirement_tasks.discard(task)
+                    retired.add_done_callback(model_retired)
+                else:
+                    await previous_close()
+            child_agent_session.llm = llm
+            child_agent_session.close_model = (lambda: _close_subagent_llm_resolution(llm_resolution)) if llm_resolution.owns_llm else None
+            child_agent_session.close_thread_resources = lambda: _cleanup_worktree_resource(closing_thread=True)
+            retirement.session_retained = True
             if team_mode and runtime is not None:
                 if resume_snapshot:
                     teams = runtime.list_swarm_teams(
@@ -2549,6 +2670,8 @@ class TaskTool(BaseTool):
                 if context is not None and context.workspace_root
                 else Path.cwd()
             )
+            if child_agent_session.worktree is not None:
+                resume_workspace_root = child_agent_session.worktree.worktree_path
             if resume_workspace_root is not None:
                 from backend.agent.worktree import resume_agent_worktree
 
@@ -2577,7 +2700,7 @@ class TaskTool(BaseTool):
             raw_child_cwd = str(subagent_config.get("cwd") or "").strip()
             if raw_child_cwd:
                 explicit_child_workspace = Path(raw_child_cwd).resolve()
-            if subagent_config.get("isolation") == "worktree" and resume_workspace_root is None:
+            if subagent_config.get("isolation") == "worktree" and resume_workspace_root is None and agent_worktree is None:
                 from backend.agent.worktree import (
                     cleanup_stale_worktrees,
                     create_agent_worktree,
@@ -2610,6 +2733,9 @@ class TaskTool(BaseTool):
                         "Worktree isolation failed for %s: %s", subagent_id, worktree_reason
                     )
                     raise RuntimeError(f"Worktree isolation failed: {worktree_reason}")
+                from backend.workspace.local_environment_lifecycle import run_context_worktree_environment
+                await run_context_worktree_environment(parent_workspace_root, agent_worktree.worktree_path, "setup", context)
+            child_agent_session.worktree = agent_worktree
 
             if runtime is not None and subagent_record is not None:
                 durable_resume_config = dict(subagent_record.resume_config)
@@ -3208,6 +3334,28 @@ class TaskTool(BaseTool):
                 return True
 
             async def subagent_event_bridge(event_type: str, data: dict[str, Any]) -> None:
+                source = data.get("call_source") or {}
+                call_id = str(data.get("tool_call_id") or data.get("id") or data.get("step_id") or "")
+                owned_cell = child_agent_session.code_store.live_tool_calls().get(call_id) if source.get("kind") == "code_mode" else None
+                if (event_type in {"tool_call", "tool_result", "agent.progress", "runtime.span"}
+                        and owned_cell is not None and source.get("cell_id") == owned_cell.id
+                        and (event_type == "tool_result" or not _accepts_current_incarnation())):
+                    # A resident cell retains its original journal and turn.
+                    # Deliver that evidence without changing a newer worker's
+                    # lifecycle, model header or mailbox incarnation.
+                    progress = AgentEvent.subagent_progress(
+                        subagent_id=subagent_id, iteration=sub_state.iterations,
+                        max_iterations=sub_settings.max_iterations,
+                        activity_kind="tool_result" if event_type == "tool_result" else "tool",
+                        user_visible=_subagent_event_is_user_visible(event_type, data),
+                        **subagent_fence,
+                    )
+                    progress.data.update(source_event_type=event_type, call_source=dict(source))
+                    original_model = owned_cell.parent.model_execution
+                    progress.data.update(model=original_model.model, provider=original_model.provider,
+                        reasoning_effort=original_model.thinking_level)
+                    await _emit_incarnation_event("subagent.progress", progress.data, retained_code_fact=True)
+                    return
                 if event_type in {"subagent.start", "subagent.progress", "subagent.done"}:
                     if journal is not None and data.get("delegation") is not None:
                         journal.append_lifecycle("subagent_delegation_updated", {
@@ -3266,16 +3414,12 @@ class TaskTool(BaseTool):
             # A named teammate keeps one child context across its own turns.
             # This is a child run/context owner inside the same MiniCode control
             # plane, not a provider-specific harness/session.
-            child_agent_session = AgentSession(
-                llm=llm,
-                tool_registry=tool_registry,
-                artifact_store=self._artifact_store,
-                permission_checker=permission_checker,
-                agent_settings=sub_settings,
-                token_budget=sub_budget,
-                context_builder=sub_context_builder,
-                approval_handler=subagent_approval_handler,
-            )
+            child_agent_session.tool_registry = tool_registry
+            child_agent_session.permission_checker = permission_checker
+            child_agent_session.agent_settings = sub_settings
+            child_agent_session.token_budget = sub_budget
+            child_agent_session.context_builder = sub_context_builder
+            child_agent_session.approval_handler = subagent_approval_handler
 
             child_model_snapshot = ModelExecutionSnapshot(
                 config=llm_resolution.config, llm=llm,
@@ -3398,6 +3542,9 @@ class TaskTool(BaseTool):
                     cost_session_id=parent_run_context.cost_session_id,
                     requires_explicit_workspace=parent_run_context.requires_explicit_workspace,
                     conversation_repository=parent_run_context.conversation_repository,
+                    goal_accounting=parent_run_context.goal_accounting,
+                    multi_agent_version=subagent_config["source_spawn_version"],
+                    coordination_root_context=parent_run_context.coordination_root_context or context,
                     guardian_evidence_source=(parent_run_context.guardian_root_evidence_source
                         if subagent_config["source_spawn_version"] == "v2"
                         else None),
@@ -4182,6 +4329,9 @@ class TaskTool(BaseTool):
                         sub_state.checkpoint_manager = context.checkpoint_manager
                     await _run_query_turn(current_prompt, sub_state)
 
+                if shutdown_requested:
+                    await runtime.close_subagent_session(subagent_id, reason="shutdown_requested")
+
             elapsed_ms = int((time.perf_counter() - start_time) * 1000)
             streamed_summary = "".join(summary_parts).strip()
             summary = sub_state.reply.strip() or streamed_summary
@@ -4274,9 +4424,11 @@ class TaskTool(BaseTool):
                 prompt_cache_fork = _current_prompt_cache_fork_diagnostic()
                 if prompt_cache_fork:
                     done_event.data["prompt_cache_fork"] = prompt_cache_fork
-                await _emit_incarnation_event(
-                    "subagent.done", done_event.data, require_running=False
-                )
+                # The sealed result is authoritative; finish its one delivery
+                # even if the caller stops while the notification is awaiting.
+                await await_task_despite_cancellation(asyncio.create_task(_emit_incarnation_event(
+                    "subagent.done", done_event.data, require_running=False,
+                )))
             return ToolResult(
                 content=result_text,
                 is_error=False,
@@ -4490,6 +4642,7 @@ class TaskTool(BaseTool):
             try:
                 acquired = await runtime.acquire_subagent_slot(
                     subagent_id,
+                    conversation_id=context.conversation_id,
                     cancel_event=parent_cancel_event,
                 )
                 if not acquired:
@@ -4509,7 +4662,7 @@ class TaskTool(BaseTool):
                     subtask_index=index,
                     total_subtasks=total,
                     subagent_id=subagent_id,
-                    subagent_metadata={**_subagent_metadata(tasks[index]), "_source_role_requested": tasks[index]["_source_role_requested"]},
+                    subagent_metadata={**self._requested_child_metadata(tasks[index]), "_source_role_requested": tasks[index]["_source_role_requested"]},
                 )
             except asyncio.CancelledError:
                 if parent_cancel_event is not None and parent_cancel_event.is_set():

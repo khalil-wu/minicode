@@ -1,6 +1,7 @@
 import { formatHex } from "culori";
 import { z } from "zod";
 import type { AppearanceThemeSelection, AppearanceThemes } from "./appearance-themes";
+import { fontStack, prepareThemeFonts } from "./theme-fonts";
 
 export type AppearanceVariant = "light" | "dark";
 export type AppearanceColorRole = "accent" | "surface" | "ink";
@@ -12,6 +13,12 @@ export const appearanceColorValuesSchema = z.object({ accent: hexColor, surface:
 const colorValues = appearanceColorValuesSchema;
 const savedColors = z.object({ light: colorValues.nullable(), dark: colorValues.nullable() });
 export const emptyAppearanceColors = (): AppearanceColors => ({ light: null, dark: null });
+// Inactive variants cannot read the currently painted variant's computed style.
+// These are the authored base values in styles/tokens.css, not a theme preset.
+export const defaultAppearanceColors: Record<AppearanceVariant, AppearanceColorValues> = {
+  light: { accent: formatHex("oklch(0.38 0 0)")!, surface: "#ffffff", ink: "#1a1c1f" },
+  dark: { accent: formatHex("oklch(0.82 0 0)")!, surface: formatHex("oklch(0.205 0.002 250)")!, ink: formatHex("oklch(0.930 0.002 250)")! },
+};
 export const parseAppearanceColors = (raw: string | null): AppearanceColors =>
   raw === null ? emptyAppearanceColors() : savedColors.parse(JSON.parse(raw));
 
@@ -146,6 +153,17 @@ export const effectiveAppearanceColors = (): AppearanceColorValues => {
 
 export function applyAppearanceColors(variant: AppearanceVariant, saved: AppearanceColors, themes?: AppearanceThemes) {
   const root = document.documentElement;
+  const fonts = themes?.[variant]?.fonts;
+  for (const [property, key, base] of [
+    ["--font-ui", "ui", "var(--font-app)"], ["--font-prose", "content", "var(--font-app)"],
+    ["--font-mono", "code", '"SFMono-Regular", Menlo, Consolas, monospace'],
+  ] as const) {
+    const family = fonts?.[key];
+    if (family) root.style.setProperty(property, `${fontStack(family, fonts?.[`${key}Face`])}, ${base}`);
+    else root.style.removeProperty(property!);
+  }
+  void prepareThemeFonts(fonts);
+  if (!fonts?.content && fonts?.ui) root.style.setProperty("--font-prose", "var(--font-ui)");
   if (themes?.[variant]) root.dataset.codeTheme = themes[variant].codeThemeId;
   else delete root.dataset.codeTheme;
   if (appliedRoots.has(root)) {

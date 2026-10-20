@@ -1,0 +1,5 @@
+Reference bundle: Hatch Pet shipped with OpenAI Codex 26.1013.4894.0.
+Source: app/resources/skills/skills/.curated/hatch-pet in the locally installed reference.
+MiniCode adaptations: tool entry points, local runtime facts, private pet publication,
+reference-image attachment and generated-file handling. Deterministic image scripts
+retain the source geometry and review algorithms; generation tool labels are adapted.

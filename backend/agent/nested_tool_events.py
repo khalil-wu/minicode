@@ -17,8 +17,10 @@ _CALLBACK_DRAIN_TIMEOUT_SECONDS = 2.5
 
 async def publish_tool_event(run_context, event, source):
     event.data["call_source"] = asdict(source)
+    item = event.data.get("item", {})
+    async_user_message = event.type in {"item.started", "item.completed"} and item.get("type") == "agent_message" and item.get("delivery") == "async"
     if event.type in {"done", "error", "agent.run.started", "agent.run.completed", "agent.terminal.intent",
-                      "item.started", "item.completed", "agent_message.delta", "text_chunk", "thinking", "thinking_delta", "context_compacted"}:
+                      "item.started", "item.completed", "agent_message.delta", "text_chunk", "thinking", "thinking_delta", "context_compacted"} and not async_user_message:
         if run_context.execution_journal is not None:
             await to_thread_cancel_safe(run_context.execution_journal.append_lifecycle,
                 "nested_tool_event", {"event_type": event.type, **event.data})
@@ -38,12 +40,28 @@ class CallbackCompleted:
 
 
 class NestedToolEvents:
-    def __init__(self, journal: QueryJournalRecorder, *, run_context: RunContext, llm=None):
+    def __init__(self, journal: QueryJournalRecorder, *, run_context: RunContext, llm=None, background_emit=None):
         self.journal = journal
         self.run_context = run_context
         self.llm = llm
+        self.background_emit = background_emit
         self._queue: asyncio.Queue[_QueuedEvent | BaseException | None] = asyncio.Queue()
         self._closed = False
+
+    def _retained_code_cell(self, event: AgentEvent) -> bool:
+        source = event.data.get("call_source") or {}
+        store = self.run_context.code_store
+        call_id = str(event.data.get("tool_call_id") or event.data.get("id") or event.data.get("step_id") or "")
+        cell = store.live_tool_calls().get(call_id) if store is not None else None
+        return (source.get("kind") == "code_mode" and cell is not None
+                and cell.parent.run_context is self.run_context and source.get("cell_id") == cell.id
+                and source.get("parent_call_id") == cell.parent.tool_call_id)
+
+    async def _publish_background(self, event: AgentEvent) -> None:
+        if not self._retained_code_cell(event):
+            raise asyncio.CancelledError
+        if self.background_emit is not None:
+            await self.background_emit(event.type, event.data)
 
     async def publish(self, event: AgentEvent) -> None:
         # Recording stays available during cleanup, after the consumer closes.
@@ -51,12 +69,13 @@ class NestedToolEvents:
         mark_model_only_tool_event(event, self.run_context.active_tool_registry)
         await self.journal.record_event_async(event)
         if self._closed:
-            raise asyncio.CancelledError
+            await self._publish_background(event)
+            return
         pending = _QueuedEvent(event, asyncio.get_running_loop().create_future())
         await self._queue.put(pending)
         await pending.acknowledged
         if self._closed:
-            raise asyncio.CancelledError
+            await self._publish_background(event)
 
     async def run_callback(self, callback):
         """Serve nested calls while the triggering observer is still awaiting.
@@ -102,7 +121,10 @@ class NestedToolEvents:
         while not self._queue.empty():
             queued = self._queue.get_nowait()
             if isinstance(queued, _QueuedEvent) and not queued.acknowledged.done():
-                queued.acknowledged.cancel()
+                if self._retained_code_cell(queued.event):
+                    queued.acknowledged.set_result(None)
+                else:
+                    queued.acknowledged.cancel()
 
     async def stream(self, runner: AsyncIterator[AgentEvent]) -> AsyncIterator[AgentEvent]:
         async def produce():

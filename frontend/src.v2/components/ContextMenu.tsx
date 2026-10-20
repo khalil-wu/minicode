@@ -7,6 +7,7 @@ import { Tip } from "./Tooltip";
 
 export interface ContextMenuItem {
   label: string;
+  content?: React.ReactNode;
   icon?: React.ReactNode;
   rightIcon?: React.ReactNode;
   rightIconTooltip?: string;
@@ -109,6 +110,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
   const ref = useRef<HTMLDivElement>(null);
   const [adjusted, setAdjusted] = useState(position);
   const [submenu, setSubmenu] = useState<{ index: number; anchor: HTMLButtonElement; focusFirst: boolean } | null>(null);
+  const typeahead = useRef({ value: "", time: 0 });
   const reserveIcon = items.some(item => item.icon !== undefined);
   const openSubmenu = (index: number, button: HTMLButtonElement, focusFirst: boolean) => setSubmenu({ index, anchor: button, focusFirst });
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -123,6 +125,19 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
       const button = document.activeElement as HTMLButtonElement;
       const index = Number(button.dataset.menuIndex);
       if (items[index]?.submenu) { event.preventDefault(); event.stopPropagation(); openSubmenu(index, button, true); }
+      return;
+    }
+    if (event.key.length === 1 && event.key.trim() && !event.ctrlKey && !event.metaKey && !event.altKey
+      && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || (event.target as HTMLElement).isContentEditable)) {
+      const now = Date.now();
+      const value = `${now - typeahead.current.time < 1000 ? typeahead.current.value : ""}${event.key.toLocaleLowerCase()}`;
+      typeahead.current = { value, time: now };
+      const query = [...value].every(char => char === value[0]) ? value[0] : value;
+      const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)'));
+      const current = buttons.indexOf(document.activeElement as HTMLButtonElement);
+      const ordered = [...buttons.slice(current + 1), ...buttons.slice(0, current + 1)];
+      const match = ordered.find(button => items[Number(button.dataset.menuIndex)].label.toLocaleLowerCase().startsWith(query));
+      if (match) { event.preventDefault(); event.stopPropagation(); match.focus(); }
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -185,7 +200,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
               margin: "5px 10px",
             }}
           />
-        ) : (
+        ) : item.content ? <div key={i} className="mc-menu-custom-row" role="group" aria-label={item.label}>{item.content}</div> : (
           <button
             key={i}
             type="button"
@@ -200,7 +215,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
             className="mc-menu-item"
             disabled={item.disabled}
             onMouseEnter={event => item.submenu ? openSubmenu(i, event.currentTarget, false) : setSubmenu(null)}
-            onFocus={() => { if (!item.submenu) setSubmenu(null); }}
+            onFocus={() => { if (submenu?.index !== i) setSubmenu(null); }}
             onClick={event => item.submenu ? openSubmenu(i, event.currentTarget, true) : onSelect(item)}
             style={{
               display: "flex",

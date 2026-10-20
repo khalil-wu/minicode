@@ -1,12 +1,15 @@
 import { useEffect } from "react";
+import { toggleChangesPanel } from "../lib/changes-panel";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
-import { matchesShortcut, matchesShiftedShortcutVariant, type ShortcutActionId } from "../lib/keyboard-shortcuts";
+import { isCodeShortcut, matchesShortcut, matchesShiftedShortcutVariant, nativeShortcutAction, type ShortcutActionId } from "../lib/keyboard-shortcuts";
 import { buildInterruptCommand } from "../lib/interrupt-command";
+import { numberedShortcut } from "../lib/shortcut-navigation";
+import { SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
 
 const announceViewMode = (mode: string) => {
   pushToast(`View mode: ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`, "info", 1200);
@@ -27,6 +30,11 @@ export const useKeyboardShortcuts = () => {
       const state = useAppStore.getState();
       if (state.settingsOpen && state.settingsTab === "shortcuts" && document.querySelector('[data-shortcut-recording="true"]')) return;
       if (event.isComposing || event.keyCode === 229 || !matchesShortcut(event, state.shortcutBindings.globalSearch)) return;
+      if (window.__MINICODE_RUNTIME__?.desktop?.menu) {
+        event.preventDefault(); event.stopPropagation();
+        void window.__MINICODE_RUNTIME__.desktop.menu.execute("globalSearch");
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       if (capabilityFeatureEnabled(state.runtimeCapabilities, "global_search", true)) state.toggleQuickOpen();
@@ -34,13 +42,24 @@ export const useKeyboardShortcuts = () => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       const mod = e.metaKey || e.ctrlKey;
-      // Native/browser zoom owns these chords; leave numeric font settings alone.
-      if (mod && !e.altKey && ["=", "+", "-", "0"].includes(e.key)) return;
       const s = useAppStore.getState();
       const createConversationInCurrentMode = () => {
         s.createConversation({ appMode: "cowork", bindWorkspace: s.appMode === "code" && Boolean(s.workingDirectory) });
       };
-      const match = (action: ShortcutActionId) => matchesShortcut(e, s.shortcutBindings[action]);
+      const match = (action: ShortcutActionId) => (s.appMode === "code" || !isCodeShortcut(action)) && matchesShortcut(e, s.shortcutBindings[action]);
+      const editorFocused = Boolean(document.activeElement?.closest(".monaco-editor"));
+      if (editorFocused && (match("saveFile") || match("saveAllFiles"))) {
+        e.preventDefault();
+        window.dispatchEvent(new Event(match("saveAllFiles") ? "editor:save-all" : "editor:save"));
+        return;
+      }
+      // Frameless renderer input uses the same owned command as a native menu click.
+      const nativeAction = nativeShortcutAction(e, s.shortcutBindings, s.appMode === "code");
+      if (window.__MINICODE_RUNTIME__?.desktop?.menu && nativeAction) {
+        e.preventDefault();
+        void window.__MINICODE_RUNTIME__.desktop.menu.execute(nativeAction);
+        return;
+      }
       const modalOpen = isTopLevelModalOpen(s);
       const routeToComposer = (action: () => void) => {
         window.dispatchEvent(new Event("composer:focus"));
@@ -76,17 +95,6 @@ export const useKeyboardShortcuts = () => {
         return;
       }
 
-      // Alt+1/2/3 for mode switching (no Ctrl required)
-      if (e.altKey && !mod) {
-        const mode = e.key === "1" ? "chat" : e.key === "2" ? "code" : e.key === "3" ? "cowork" : null;
-        if (mode) {
-          e.preventDefault();
-          useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
-          s.setAppMode(mode);
-          return;
-        }
-      }
-
       if (e.key === "Escape") {
         if (modalOpen || isModalTarget(e.target)) return;
         // Only an actually-running turn can be interrupted. Without this gate a
@@ -101,14 +109,12 @@ export const useKeyboardShortcuts = () => {
 
       if (!mod && !e.altKey && !e.key.startsWith("F")) return;
 
-      // Ctrl/Cmd+1..9 jumps directly to the Nth non-archived conversation.
-      if (!e.shiftKey && !e.altKey && e.key >= "1" && e.key <= "9") {
+      const numbered = numberedShortcut(e, s.primaryNumberShortcutTarget);
+      if (numbered && !SHORTCUT_DEFINITIONS.some(shortcut => match(shortcut.id))) {
         e.preventDefault();
-        const convs = s.conversations.filter((c) => !c.archived);
-        const target = convs[Number(e.key) - 1];
-        if (target && target.id !== s.conversationId) {
-          s.requestConversationSwitch(target.id);
-        }
+        window.dispatchEvent(new CustomEvent(numbered.target === "tabs" ? "select-numbered-tab" : "select-numbered-chat", {
+          detail: { index: numbered.index, conversationId: s.conversationId },
+        }));
         return;
       }
 
@@ -120,7 +126,7 @@ export const useKeyboardShortcuts = () => {
       if (match("clearComposer")) {
         e.preventDefault();
         s.setDraft("");
-        routeToComposer(() => document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.focus());
+        routeToComposer(() => document.querySelector<HTMLElement>("[data-composer-input]")?.focus());
         return;
       }
       if (match("processDetail")) {
@@ -130,10 +136,9 @@ export const useKeyboardShortcuts = () => {
         announceViewMode(next);
         return;
       }
-      if (match("toggleDiff")) {
+      if (match("toggleDiff") || match("sidePanel")) {
         e.preventDefault();
-        if (s.rightPanelOpen && s.rightStackTab === "diff") s.toggleRightPanel();
-        else { s.setAppMode("code"); s.setRightStackTab("diff"); }
+        toggleChangesPanel();
         return;
       }
       if (match("openPreview")) {
@@ -173,9 +178,7 @@ export const useKeyboardShortcuts = () => {
       if (match("shortcutHelp")) { e.preventDefault(); s.toggleShortcutsHelp(); return; }
       if (match("terminal")) {
         e.preventDefault();
-        s.setAppMode("code");
-        if (!s.rightPanelExpanded && !s.panelSlots.some((slot) => slot.maximized) && !s.dockCollapsed && s.activeBottomTab === "terminal") s.closeBottomDock();
-        else s.openBottomTab("terminal");
+        s.toggleTerminal();
         return;
       }
       if (match("closePanel")) {

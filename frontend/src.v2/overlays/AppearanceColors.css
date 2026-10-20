@@ -56,3 +56,22 @@
   box-shadow: var(--shadow-panel);
 }
 .appearance-color-popover .react-colorful { width: 136px; height: 136px; }
+
+.appearance-font-controls { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 8px; }
+.appearance-font-picker { width: max-content; max-width: 144px; }
+.appearance-font-picker .mc-select-trigger { border-radius: 999px; }
+.appearance-font-style-picker { width: max-content; max-width: 144px; }
+.appearance-font-style-picker .mc-select-trigger { border-radius: 999px; }
+.appearance-segmented { display: inline-flex; align-items: center; gap: 2px; }
+.appearance-segmented button { min-height: 28px; padding: 4px 10px; border: 0; border-radius: 999px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
+.appearance-segmented button[aria-checked="true"] { background: var(--surface-hover); color: var(--text-primary); }
+.settings-appearance-advanced > .settings-appearance-advanced-trigger { width: 100%; justify-content: space-between; }
+.settings-appearance-advanced-trigger > span { display: inline-flex; align-items: center; gap: 5px; }
+.settings-appearance-advanced-trigger > span > svg { transform: rotate(-90deg); transition: transform var(--transition-fast); }
+.settings-appearance-advanced[open] > .settings-appearance-advanced-trigger > span > svg { transform: rotate(0); }
+.appearance-reset-advanced { padding: 2px 0; border: 0; background: transparent; color: var(--text-secondary); cursor: pointer; font: inherit; }
+.appearance-custom-font-trigger { display: inline-flex; align-items: center; justify-content: space-between; gap: 7px; min-width: 72px; max-width: 144px; min-height: 28px; padding: 4px 9px; border: 1px solid var(--border-subtle); border-radius: 999px; background: transparent; color: var(--text-primary); font: inherit; cursor: pointer; }
+.appearance-custom-font-menu { position: fixed; z-index: var(--z-context-menu); display: grid; gap: 6px; width: 240px; padding: 6px; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-panel); }
+.appearance-custom-font-menu button { border: 0; border-radius: 6px; padding: 6px 8px; background: transparent; color: inherit; text-align: left; cursor: pointer; font: inherit; }
+.appearance-custom-font-menu button:hover { background: var(--surface-hover); }
+.appearance-custom-font-menu input { min-width: 0; padding: 6px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--surface-base); color: inherit; font: inherit; }

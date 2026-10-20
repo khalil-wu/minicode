@@ -8,7 +8,9 @@ from backend.llm.base import LLMMessage
 
 def admitted_response_items(message: LLMMessage, item: dict[str, Any]) -> list[dict[str, Any]]:
     facts = message.accepted_input
-    if not message.is_user_input or facts is None or "order" not in facts or "model_item_id" not in facts:
+    goal_kind = (facts or {}).get("kind")
+    user_goal = goal_kind in {"user.goal", "user.goal.omitted"}
+    if not (message.is_user_input or user_goal) or facts is None or "order" not in facts or "model_item_id" not in facts:
         return [item]
 
     # Runtime and task context keep their exact text and role, outside the
@@ -34,6 +36,8 @@ def admitted_response_items(message: LLMMessage, item: dict[str, Any]) -> list[d
         metadata["content_item_kinds"] = [kinds[part["type"]] for part in parts]
         if message.input_origin == "heartbeat" and facts["single_text"] and len(parts) == 1:
             metadata["content_item_kinds"] = ["user.heartbeat"]
+        elif user_goal:
+            metadata["content_item_kinds"] = [goal_kind]
     accepted = {"type": "message", "id": facts["model_item_id"], "role": "user", "content": parts,
         "internal_chat_message_metadata_passthrough": metadata}
     return [*([{"role": "user", "content": prefix}] if prefix else []), accepted,

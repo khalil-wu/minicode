@@ -11,6 +11,7 @@ const native = vi.hoisted(() => ({
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => true,
   embeddedBrowserList: native.list,
+  embeddedBrowserGetSettings: async () => ({ browserEnabled: true, deviceToolbarAlwaysOnNewTabs: false }),
   embeddedBrowserNavigate: native.navigate,
   embeddedBrowserSetBounds: native.bounds,
   embeddedBrowserActivate: async () => true,
@@ -40,7 +41,7 @@ describe("browser owner entry", () => {
     expect(status.tabIndex).toBe(0);
     status.focus();
     expect(document.activeElement).toBe(status);
-    expect(view.queryByLabelText("地址栏")).toBeNull();
+    expect(view.queryByLabelText("搜索或输入网址")).toBeNull();
     expect(view.container.querySelector(".mc-browser-spin")).toBeNull();
     expect(native.list).not.toHaveBeenCalled();
     expect(native.navigate).not.toHaveBeenCalled();
@@ -52,10 +53,10 @@ describe("browser owner entry", () => {
       url: "https://example.com/", active: true, loading: false, canGoBack: false, canGoForward: false }]);
     useAppStore.setState({ conversationId: "A" });
     const view = render(<BrowserPanel />);
-    await waitFor(() => expect(view.getByLabelText("地址栏")).toBeTruthy());
+    await waitFor(() => expect(view.getByLabelText("搜索或输入网址")).toBeTruthy());
     act(() => useAppStore.setState({ conversationId: null }));
     expect(view.getByRole("status").textContent).toContain("请先选择会话");
-    expect(view.queryByLabelText("地址栏")).toBeNull();
+    expect(view.queryByLabelText("搜索或输入网址")).toBeNull();
     expect(native.bounds).toHaveBeenCalledWith({ id: "native-a", conversationId: "A", x: 0, y: 0, width: 0, height: 0 });
     expect(native.navigate).not.toHaveBeenCalled();
   });
@@ -68,14 +69,14 @@ describe("browser owner entry", () => {
     act(() => useAppStore.setState({ conversationId: null }));
     await act(async () => resolve([{ id: "late-a", conversationId: "A", title: "old page", url: "https://example.com/" }]));
     expect(view.getByRole("status").textContent).toContain("请先选择会话");
-    expect(view.queryByLabelText("地址栏")).toBeNull();
+    expect(view.queryByLabelText("搜索或输入网址")).toBeNull();
     expect(view.container.querySelector(".mc-browser-spin")).toBeNull();
   });
 
   it("restores the normal address entry after an actual conversation is selected", async () => {
     const view = render(<BrowserPanel />);
     act(() => useAppStore.setState({ conversationId: "chosen-owner" }));
-    await waitFor(() => expect(view.getByLabelText("地址栏")).toBeTruthy());
+    await waitFor(() => expect(view.getByLabelText("搜索或输入网址")).toBeTruthy());
     expect(native.list).toHaveBeenCalledWith("chosen-owner");
     expect(view.queryByText("请先选择会话，再使用浏览器")).toBeNull();
     expect(native.navigate).not.toHaveBeenCalled();

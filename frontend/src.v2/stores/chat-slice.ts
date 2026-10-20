@@ -29,6 +29,7 @@ import {
   getContentBlocks,
   getThinkingFromMessage,
   getToolCallsFromMessage,
+  isCodeCellToolFact,
   stripLegacyContentFields,
   toolCallLocations,
 } from "../lib/content-blocks";
@@ -49,6 +50,7 @@ import {
   conversationResetPayload,
   visibleDiffReviewForConversation,
   resumedFromInFlightProjection,
+  isInFlightProjection,
   LS,
   writeLS,
 } from "./shared-helpers";
@@ -278,17 +280,22 @@ function recordDroppedAnswerText(
   });
 }
 
-function findStreamingIndexForMessage(messages: AppStore["messages"], messageId?: string): number {
+function findOpenAssistantIndexForMessage(messages: AppStore["messages"], messageId?: string, toolCall?: ToolCallRecord): number {
   const targetId = messageId?.trim();
   if (!targetId) return findLastStreamingIndex(messages);
   // Live assistant records are appended near the tail. Searching from the
   // beginning turned every text/thinking delta into a full-history walk on a
   // long task, even though the target is normally the final message.
+  // Idle ownership can precede replayed same-turn evidence. An exact message
+  // remains writable until its terminal fence, without reviving its spinner.
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (
       message.role === "assistant"
-      && Boolean(message.isStreaming)
+      && (Boolean(message.isStreaming || message.isThinkingStreaming)
+        || (!message.terminalStatus && message.completedAt == null)
+        || isInFlightProjection(message)
+        || (toolCall && isCodeCellToolFact(message, toolCall, "start")))
       && message.id === targetId
     ) return index;
   }
@@ -519,6 +526,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         messages: nextMessages,
         ...(!keptNewInput ? {
           draft: restoredDraft,
+          richDraft: undefined,
           selectedMentions: mentionRefs,
           selectedSkills: skillRefs,
           quotedMessage: recalled.quotedMessage ?? null,
@@ -685,7 +693,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         s.conversationId &&
         s.conversations.some((conversation) => conversation.id === s.conversationId),
       );
-      const cachedCurrent = currentStillKnown
+      // Restore can confirm the same owner before its inventory arrives.
+      // Those visible messages already belong to it and must enter the cache.
+      const cachedCurrent = currentStillKnown || sameConversation
         ? cacheMessagesForConversation(s, s.conversationId)
         : {
             conversationMessages: s.conversationMessages,
@@ -721,6 +731,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           ? { runtimeCapabilities: null, availableSkills: [], slashCommands: [] }
           : {}),
         draft: "",
+        richDraft: undefined,
         attachments: [],
         quotedMessage: null,
         selectedMentions: [],
@@ -947,7 +958,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     const normalizedTurnId = turnId?.trim();
     if (!normalizedTurnId) return;
     set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
-      const index = findStreamingIndexForMessage(messages, messageId);
+      const index = findOpenAssistantIndexForMessage(messages, messageId);
       if (index < 0) return null;
       const message = messages[index];
       if (message.turnId && message.turnId !== normalizedTurnId) return null;
@@ -962,7 +973,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   startAgentMessage: (itemId, conversationId, messageId, source) => {
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
@@ -992,7 +1003,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   appendAgentMessageDelta: (itemId, delta, conversationId, messageId, source) => {
     let droppedDelta = false;
     set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
-      const idx = findStreamingIndexForMessage(messages, messageId);
+      const idx = findOpenAssistantIndexForMessage(messages, messageId);
       if (idx < 0 || !delta) {
         // An empty delta loses nothing; a non-empty one with no owner does.
         droppedDelta = idx < 0 && Boolean(delta);
@@ -1035,7 +1046,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   setFinalAnswerAttachments: (conversationId, attachments, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         next[idx] = { ...next[idx], replyAttachments: attachments };
@@ -1046,7 +1057,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     let droppedAnswer = false;
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId);
         if (idx < 0) {
           droppedAnswer = true;
           return null;
@@ -1060,6 +1071,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           itemId: item.id,
           content: item.text,
           source: item.source || "model_final",
+          delivery: item.delivery,
+          questions: item.questions,
           status: item.status || "completed",
           isStreaming: false,
           ...metadata,
@@ -1094,7 +1107,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   appendThinkingChunk: (content, conversationId, metadata, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
@@ -1133,7 +1146,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }),
   settleThinking: (conversationId, messageId) =>
     set((s) => updateMessagesForConversation(s, conversationId, (messages) => {
-      const idx = findStreamingIndexForMessage(messages, messageId);
+      const idx = findOpenAssistantIndexForMessage(messages, messageId);
       if (idx < 0) return null;
       const message = messages[idx];
       const currentBlocks = message.blocks ?? [];
@@ -1146,7 +1159,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   appendProcessItem: (item, conversationId, messageId) =>
     set((s) => {
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
@@ -1281,7 +1294,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       const targetItemId = itemId.trim();
       if (!targetItemId || !delta) return {};
       return updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId);
         if (idx < 0) return null;
         const message = messages[idx];
         const blocks = message.blocks ?? [];
@@ -1324,7 +1337,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   appendToolCallBlock: (tc, conversationId, messageId) =>
     set((s) => {
       const result = updateMessagesForConversation(s, conversationId, (messages) => {
-        const idx = findStreamingIndexForMessage(messages, messageId);
+        const idx = findOpenAssistantIndexForMessage(messages, messageId, tc);
         if (idx < 0) return null;
         const next = messages.slice();
         const msg = next[idx];
@@ -1403,10 +1416,13 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         : undefined;
       const targetId = conversationId || s.conversationId || undefined;
       const isActiveTarget = !targetId || targetId === s.conversationId;
+      const sourceMessages = isActiveTarget ? s.messages : s.sideChats[targetId!]?.messages ?? s.conversationMessages[targetId!] ?? [];
+      const targetMessageId = messageId?.trim();
+      const sawOtherLiveAssistant = Boolean(targetMessageId && sourceMessages.some((message) => message.role === "assistant"
+        && message.id !== targetMessageId && (message.isStreaming || message.isThinkingStreaming)));
       if (messageId && usage) {
-        const previous = (isActiveTarget ? s.messages : s.sideChats[targetId!]?.messages ?? s.conversationMessages[targetId!] ?? [])
-          .find((message) => message.id === messageId && message.role === "assistant");
-        if (previous?.terminalStatus && !previous.isStreaming && !previous.isThinkingStreaming) {
+        const previous = sourceMessages.find((message) => message.id === messageId && message.role === "assistant");
+        if (previous?.terminalStatus && !isInFlightProjection(previous) && !previous.isStreaming && !previous.isThinkingStreaming) {
           return updateMessagesForConversation(s, conversationId, (messages) => messages.map((message) => message.id === messageId
             ? {
                 ...message,
@@ -1421,16 +1437,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         }
       }
       let matchedStreamingMessage = false;
-      let sawOtherLiveAssistant = false;
       const result = updateMessagesForConversation(
         s,
         conversationId,
         (messages) => {
-          const targetMessageId = messageId?.trim();
           const nextMessages = messages.map((m) => {
-            if (!m.isStreaming && !m.isThinkingStreaming) return m;
+            if (!m.isStreaming && !m.isThinkingStreaming
+              && (!targetMessageId || m.id !== targetMessageId || m.role !== "assistant"
+                || Boolean((m.terminalStatus || m.completedAt != null) && !isInFlightProjection(m)))) return m;
             if (targetMessageId && m.id !== targetMessageId) {
-              if (m.role === "assistant") sawOtherLiveAssistant = true;
               return m;
             }
             matchedStreamingMessage = true;
@@ -1447,6 +1462,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
                 };
               }
               if (block.type === "tool_call" && (block.record.status === "running" || block.record.status === "pending")) {
+                if (terminalStatus === "completed" && isCodeCellToolFact(m, block.record, "update")) return block;
                 // A tool call still running/pending at turn end never received
                 // its result (lost tool_result / missed terminal event). Do not
                 // fabricate "success". User interruption cancels the open
@@ -1510,15 +1526,17 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
           });
           return targetMessageId && !matchedStreamingMessage ? null : nextMessages;
         },
-        false,
+        sawOtherLiveAssistant,
       );
+      // Rejecting or sealing one optimistic turn does not finish another
+      // assistant that is still running in the same conversation.
+      if (sawOtherLiveAssistant) return result;
       if (result === s) {
         // The terminal event named a message that is no longer streaming (it
         // was already sealed, or the id belongs to a turn this client never
         // rendered). Leaving the flags set strands the spinner forever, because
         // `done` is the only fence that clears it. Nothing else is live, so the
         // conversation is idle regardless of which message the id pointed at.
-        if (sawOtherLiveAssistant) return result;
         if (targetId && s.sideChats[targetId]) {
           return {
             sideChats: {
@@ -1719,11 +1737,12 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       delete next[id];
       return { sideChats: next };
     }),
-  setSideChatDraft: (id, draft) =>
+  setSideChatDraft: (id, draft, richDraft) =>
     set((s) => {
       const thread = s.sideChats[id];
       if (!thread) return s;
-      return { sideChats: { ...s.sideChats, [id]: { ...thread, draft } } };
+      return { sideChats: { ...s.sideChats, [id]: { ...thread, draft,
+        richDraft: draft ? richDraft ?? (thread.draft === draft ? thread.richDraft : undefined) : undefined } } };
     }),
   startSideChatMessage: (id, content, messageIds) =>
     set((s) => {

@@ -64,9 +64,11 @@ it("does not reuse or publish same-name inventory from a previous workspace", as
   const completions: Array<(value: Awaited<ReturnType<typeof sendClientCommandAwaitResult>>) => void> = [];
   vi.mocked(sendClientCommandAwaitResult).mockImplementation(() => new Promise((resolve) => completions.push(resolve)));
   render(<ConnectorsTab />);
+  fireEvent.click(screen.getByRole("button", { name: "编辑 shared" }));
   fireEvent.click(screen.getByRole("button", { name: "查看 MCP 内容 shared" }));
   await waitFor(() => expect(completions).toHaveLength(1));
   act(() => useAppStore.setState({ conversationId: "B", workingDirectory: "C:/workspace-B" }));
+  fireEvent.click(screen.getByRole("button", { name: "编辑 shared" }));
   fireEvent.click(screen.getByRole("button", { name: "查看 MCP 内容 shared" }));
   await waitFor(() => expect(completions).toHaveLength(2));
   const result = (name: string) => ({ type: "command.result" as const, command: "mcp.inventory.list", level: "success", message: "", data: { inventory: { server_name: "shared", resources: [{ name, uri: `audit://${name}` }], resource_templates: [], prompts: [] } } });

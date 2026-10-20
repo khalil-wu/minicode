@@ -27,6 +27,7 @@ from backend.async_cleanup import retain_cleanup_task, to_thread_cancel_safe
 from backend.services.conversation_projection_service import (
     replay_pending_conversation_projections as _replay_pending_conversation_projections,
 )
+from backend.services.conversation_goal_service import build_goal_updated_payload
 from backend.agent.context import ContextBuilder
 from backend.agent.execution_journal import execution_journal_owner, conversation_projection_owner_fields, turn_user_prompt_id, turn_input_consumption_id, turn_input_rejection_id
 from backend.agent.lifecycle_generation import LifecycleGenerationState
@@ -2686,6 +2687,8 @@ class SessionAgentRunnerMixin:
                 or options_map.get("deliver_as")
                 or "steer"
             ).strip().lower()
+            if deliver_as != "followup" and (run_manager is None or not conversation_id):
+                raise ValueError("No originating turn is available for extension steering")
             if run_manager is not None and conversation_id:
                 if deliver_as == "followup":
                     return run_manager.enqueue_user_message(conversation_id, command)
@@ -2695,14 +2698,16 @@ class SessionAgentRunnerMixin:
                     .get("message_id")
                     or ""
                 ).strip()
+                command.data["expected_turn_id"] = str(run_metadata.get("run_id") or "").strip()
                 item = run_manager.enqueue_turn_steer(
                     conversation_id,
                     command,
+                    expected_turn_id=command.data["expected_turn_id"],
                     target_message_id=target_message_id,
                 )
                 if item is not None:
                     return item
-                return run_manager.enqueue_user_message(conversation_id, command)
+                raise ValueError("The extension's originating turn is no longer available for steering")
             run_metadata.setdefault("_extension_pending_user_messages", []).append(
                 command
             )
@@ -3791,7 +3796,8 @@ class SessionAgentRunnerMixin:
         run_context = run_context or RunContext()
         run_context.prepare_turn_owner()
         run_context.turn_kind = "review" if run_metadata.get("code_review") is not None else "regular"
-        run_context.accept_scheduled_input = lambda command: self.run_manager.enqueue_scheduled_input(target_conversation_id, command)
+        run_context.accept_scheduled_input = lambda command: self.run_manager.enqueue_scheduled_input(target_conversation_id, command,
+            expected_turn_id=str(run_metadata.get("run_id") or "").strip())
         transition = run_metadata.pop("_conversation_transition", None)
         query_claim = (
             query_guards.handoff(transition, owner_id=owner_id)
@@ -3835,6 +3841,9 @@ class SessionAgentRunnerMixin:
         )
         try:
             run_metadata["conversation_run_generation"] = query_claim.generation
+            from backend.services.goal_runtime import GoalTurnAccounting
+            run_context.goal_accounting = GoalTurnAccounting(self.conversation_repo, target_conversation_id,
+                automatic=bool(run_metadata.get("_goal_continuation")))
             await self._run_agent_locked(
                 user_message,
                 attachments=attachments,
@@ -3887,6 +3896,12 @@ class SessionAgentRunnerMixin:
             # setup leaves the client with no terminal event at all: the
             # scheduler fallback declines to fabricate one for a run that was
             # never durably admitted, so the conversation stays busy forever.
+            if run_context.goal_accounting is not None and not run_context.goal_accounting.finished:
+                goal = run_context.goal_accounting.finish(status="cancelled")
+                if goal is not None:
+                    await self.send_payload(build_goal_updated_payload(conversation_id=target_conversation_id,
+                        goal=goal, source="turn_cancelled", revision=run_context.goal_accounting.revision),
+                        log_context="goal.updated")
             if not str(run_metadata.get("run_id") or "").strip():
                 message_id = _client_assistant_message_id(run_metadata)
                 done_event = AgentEvent.done(
@@ -3971,7 +3986,16 @@ class SessionAgentRunnerMixin:
                 return
             raise
         finally:
-            self.run_manager.release_query_claim(query_claim)
+            try:
+                accounting = run_context.goal_accounting
+                if accounting is not None and not accounting.finished:
+                    goal = accounting.execution_unavailable()
+                    if goal is not None:
+                        await self.send_payload(build_goal_updated_payload(conversation_id=target_conversation_id,
+                            goal=goal, source="execution_unavailable", revision=accounting.revision),
+                            log_context="goal.updated")
+            finally:
+                self.run_manager.release_query_claim(query_claim)
 
     async def _run_agent_locked(
         self,
@@ -4574,6 +4598,7 @@ class SessionAgentRunnerMixin:
         parent_notification_only = bool(
             run_metadata.get("_parent_notification_only", False)
         )
+        internal_turn = parent_notification_only or bool(run_metadata.get("_goal_continuation"))
         if lifecycle_runtime is not None:
             self._bind_lifecycle_runtime_host_actions(
                 lifecycle_runtime,
@@ -4828,7 +4853,7 @@ class SessionAgentRunnerMixin:
             history_start: int,
             history_end: int,
         ) -> None:
-            if parent_notification_only:
+            if internal_turn and getattr(boundary_input, "consumed_steer", None) is None:
                 return
             consumed_steer = getattr(boundary_input, "consumed_steer", None)
             user_message_id = str(
@@ -4982,7 +5007,7 @@ class SessionAgentRunnerMixin:
         run_metadata["commit_turn_admission"] = _commit_turn_admission
 
         async def _report_turn_admission(*, boundary_input: Any = None) -> None:
-            if parent_notification_only:
+            if internal_turn and getattr(boundary_input, "consumed_steer", None) is None:
                 return
             consumed_steer = getattr(boundary_input, "consumed_steer", None)
             admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
@@ -5025,7 +5050,7 @@ class SessionAgentRunnerMixin:
                 await manager.publish_turn_input_admission(self, conversation.id)
 
         async def _publish_turn_admission(*, boundary_input: Any = None) -> None:
-            if parent_notification_only:
+            if internal_turn and getattr(boundary_input, "consumed_steer", None) is None:
                 return
             consumed_steer = getattr(boundary_input, "consumed_steer", None)
             admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
@@ -5085,33 +5110,58 @@ class SessionAgentRunnerMixin:
         goal_text = str(goal.get("text") or "").strip()
         if goal_text:
             goal_status = str(goal.get("status") or "active").strip().lower()
-            if goal_status == "paused":
+            if goal_status != "active":
                 agent_state.task_summary = (
-                    f"Conversation goal is paused: {goal_text}\n"
+                    f"Conversation goal is {goal_status}: {goal_text}\n"
                     "Do not proactively continue this goal unless the user asks to resume or work on it."
                 )
             else:
-                agent_state.task_summary = (
-                    f"Current conversation goal: {goal_text}\n"
-                    "Treat user turns as progress toward this goal unless the user clearly changes direction."
-                )
+                from backend.services.goal_runtime import continuation_prompt
+                agent_state.task_summary = continuation_prompt(goal)
         self.last_agent_state = agent_state
 
         conv_id = conversation.id
+
+        def _live_code_call(call_id: str):
+            store = run_context.code_store
+            cell = store.live_tool_calls().get(call_id) if store is not None else None
+            return cell if cell is not None and cell.parent.run_context is run_context else None
+
+        def _live_code_call_ids() -> set[str]:
+            store = run_context.code_store
+            return {call_id for call_id, cell in store.live_tool_calls().items()
+                    if cell.parent.run_context is run_context} if store is not None else set()
+
+        def _owned_code_fact(event_type: str, data: dict[str, Any]):
+            if event_type not in {"tool_call", "tool_result", "tool_output_delta", "command_output_chunk", "runtime.span",
+                                  "approval_request", "ask_user", "request_user_input", "artifact.preview", "file.changed"}:
+                return None
+            call_id = str(data.get("tool_call_id") or data.get("id") or data.get("step_id") or "")
+            cell = _live_code_call(call_id)
+            source = data.get("call_source") or {}
+            claim = next((record for record in agent_state.tool_calls if record.tool_call_id == call_id), None)
+            return cell if (cell is not None
+                and ((claim is None and call_id in cell.pending_tools) or (claim is not None and source == claim.call_source))
+                and source.get("kind") == "code_mode" and source.get("cell_id") == cell.id
+                and source.get("parent_call_id") == cell.parent.tool_call_id) else None
 
         async def _stream_callback(
             line: str,
             stream: str = "stdout",
             tool_call_id: str = "",
         ) -> None:
-            if not _accepts_projection_events():
-                return
             payload: dict[str, Any] = {
                 "conversation_id": conv_id,
                 "message_id": assistant_message_id,
                 "content": line,
                 "stream": stream if stream in {"stdout", "stderr"} else "stdout",
             }
+            if not _accepts_projection_events():
+                claim = next((record for record in agent_state.tool_calls if record.tool_call_id == tool_call_id), None)
+                if claim is not None and _live_code_call(tool_call_id) is not None:
+                    await _emit_runtime_event("command_output_chunk", {**payload, "id": tool_call_id,
+                        "tool_call_id": tool_call_id, "call_source": claim.call_source})
+                return
             canonical_turn_id = str(stream_state.get("turn_id") or "").strip()
             if canonical_turn_id:
                 payload["turn_id"] = canonical_turn_id
@@ -5129,9 +5179,31 @@ class SessionAgentRunnerMixin:
         async def _emit_runtime_event(event_type: str, data: dict[str, Any]) -> None:
             accepts_parent_projection = _accepts_projection_events()
             child_lifecycle = event_type in {"subagent.start", "subagent.progress", "subagent.done"}
-            if not accepts_parent_projection and not child_lifecycle:
+            cell = _owned_code_fact(event_type, data)
+            if not accepts_parent_projection and not child_lifecycle and cell is None:
                 return
             payload = dict(data)
+            if cell is not None:
+                call_id = str(payload.get("tool_call_id") or payload.get("id") or payload.get("step_id") or "")
+                payload.update(conversation_id=conversation.id, message_id=assistant_message_id,
+                    turn_id=cell.parent.turn_id, task_id=run_task_id)
+                if event_type == "tool_call":
+                    turn_state.record_tool_call(payload)
+                elif event_type == "tool_result":
+                    turn_state.record_tool_result(payload)
+                elif event_type in {"tool_output_delta", "command_output_chunk"}:
+                    turn_state.record_tool_output_delta({**payload, "id": call_id,
+                        "output": payload.get("output", payload.get("content", ""))})
+                elif event_type == "runtime.span" and payload.get("event") == "tool.started":
+                    turn_state.record_tool_execution_started(payload)
+                async with self._conversation_projection_lock(conversation.id):
+                    snapshot = turn_state.finalize(terminal_status="completed", live_tool_call_ids=_live_code_call_ids())
+                    tool_record = next((record for record in snapshot.tool_calls if record["id"] == call_id), None)
+                    if tool_record is not None:
+                        await to_thread_cancel_safe(self.conversation_repo.update_tool_call,
+                            conversation.id, message_id=assistant_message_id, tool_call=tool_record)
+                await self.send_event(AgentEvent(type=event_type, data=payload))
+                return
             payload.setdefault("conversation_id", conversation.id)
             if child_lifecycle:
                 payload.setdefault("parent_message_id", assistant_message_id)
@@ -5228,11 +5300,12 @@ class SessionAgentRunnerMixin:
                 latest_turn_diff = {**payload, "truncated": False}
 
         def _partial_turn_message() -> dict[str, Any]:
-            snapshot = turn_state.finalize(terminal_status="partial")
+            snapshot = turn_state.finalize(terminal_status="partial", live_tool_call_ids=_live_code_call_ids())
             runtime = run_context.agent_runtime
             run = runtime.get_run(run_metadata["run_id"]) if runtime is not None else None
             message: dict[str, Any] = {
                 "id": assistant_message_id,
+                "turn_id": run_metadata["run_id"],
                 "role": "assistant",
                 "content": snapshot.content,
                 "timestamp": datetime.fromtimestamp((run.started_at if run is not None else turn_started_at_ms) / 1000, UTC).isoformat(),
@@ -5903,7 +5976,8 @@ class SessionAgentRunnerMixin:
 
             terminal_duration_ms = query_run_completed_payload.get("duration_ms")
             turn_state.reconcile_committed_tool_results(agent_state.tool_calls)
-            turn_snapshot = turn_state.finalize(terminal_status=terminal_status)
+            turn_snapshot = turn_state.finalize(terminal_status=terminal_status,
+                live_tool_call_ids=_live_code_call_ids() if terminal_status == "completed" else frozenset())
             assistant_blocks = turn_snapshot.blocks
             assistant_citations = turn_snapshot.citations
             if not usage_payload:
@@ -5986,6 +6060,7 @@ class SessionAgentRunnerMixin:
                         )
             run_manager = getattr(self, "run_manager", None)
             conversation_summary_payload: dict[str, Any] | None = None
+            terminal_conversation_committed = False
             assistant_message: dict[str, Any] | None = None
             new_summary: str | None = None
             if terminal_projection_owned and (
@@ -6007,6 +6082,7 @@ class SessionAgentRunnerMixin:
                 )
                 assistant_message = {
                     "id": assistant_message_id,
+                    "turn_id": run_metadata["run_id"],
                     "role": "assistant",
                     "content": assistant_content,
                     "timestamp": datetime.fromtimestamp(completed_at / 1000, UTC).isoformat(),
@@ -6049,6 +6125,11 @@ class SessionAgentRunnerMixin:
                 terminal_fences[conversation.id] = assistant_message_id
                 try:
                     async with self._conversation_projection_lock(conversation.id):
+                        if assistant_message is not None:
+                            latest_snapshot = turn_state.finalize(terminal_status=terminal_status,
+                                live_tool_call_ids=_live_code_call_ids() if terminal_status == "completed" else frozenset())
+                            assistant_message["blocks"] = latest_snapshot.blocks
+                            assistant_message["tool_calls"] = latest_snapshot.tool_calls
                         await self._flush_ui_agent_state_now_unlocked(conversation.id)
                         pending_ui_state = self.ui_agent_state_store.pending.get(
                             conversation.id
@@ -6150,6 +6231,7 @@ class SessionAgentRunnerMixin:
                         )
                         if updated_conversation is None:
                             raise RuntimeError("conversation disappeared during terminal commit")
+                        terminal_conversation_committed = True
                         await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_committed",
                             {
@@ -6218,6 +6300,16 @@ class SessionAgentRunnerMixin:
                             },
                         )
                     )
+            if terminal_conversation_committed and run_context.goal_accounting is not None:
+                goal = run_context.goal_accounting.finish(status=terminal_status, content=assistant_content,
+                    has_activity=bool(assistant_tool_calls), reason=query_terminal_reason)
+                if goal is not None:
+                    current_summary = self.conversation_repo.get_conversation_summary(conversation.id)
+                    if conversation_summary_payload is not None:
+                        conversation_summary_payload.update(revision=current_summary.revision, updated_at=current_summary.updated_at)
+                    await self.send_payload(build_goal_updated_payload(conversation_id=conversation.id,
+                        goal=goal, source="turn_completed", revision=run_context.goal_accounting.revision),
+                        log_context="goal.updated")
             if pollution_state_changed and conversation_summary_payload is None:
                 conversation_summary_payload = {
                     "type": "conversation.summary.updated",

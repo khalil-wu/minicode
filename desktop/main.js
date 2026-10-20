@@ -1,4 +1,4 @@
-const { app, BrowserWindow, crashReporter, dialog, Menu, Notification, session, shell } = require("electron");
+const { app, BrowserWindow, crashReporter, dialog, Menu, Notification, powerMonitor, protocol, safeStorage, session, shell, webContents } = require("electron");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
@@ -24,22 +24,25 @@ const { setupWindowsSandbox } = require("./windows-sandbox-setup");
 const { popupApplicationMenu } = require("./menu-popup");
 const desktopPreferences = require("./preferences");
 const browserHistory = require("./browser-history");
+const { createBrowserProfileImporter } = require("./browser-profile-import");
+const { createBrowserPersonalData } = require("./browser-personal-data");
+const { registerMcpAppScheme, createMcpAppSandbox } = require("./mcp-app-sandbox");
+const { startGeneralMaintenance } = require("./general-maintenance");
+const notificationSounds = require("./notification-sounds");
+const { createPetManager } = require("./pet-manager");
+const { createPetActionBridge } = require("./pet-action-bridge");
+const { createDictationHotkeys } = require("./dictation-hotkeys");
 const { RemoteDesktop } = require("./remote-desktop");
 let remoteDesktop = null;
-
-// html.to.design capture is an explicitly enabled development aid. Keep the
-// dependency out of the packaged startup path and save captures locally.
-const FIGMA_CAPTURE_ENABLED =
-  !app.isPackaged && process.env.MINICODE_ENABLE_FIGMA_CAPTURE === "1";
-let figmaCaptureSdk = null;
-if (FIGMA_CAPTURE_ENABLED) {
-  try {
-    figmaCaptureSdk = require("@divriots/h2d-electron-sdk");
-    figmaCaptureSdk.mountCapture(app);
-  } catch (error) {
-    console.warn("[desktop] html.to.design capture could not be initialized", error);
-  }
-}
+let petManager = null;
+let petInitialization = null;
+let mcpAppSandbox = null;
+let generalMaintenance = null;
+registerMcpAppScheme(protocol);
+const petActionBridge = createPetActionBridge(windowManager.getWindowByInstanceId);
+const dictationHotkeys = createDictationHotkeys({ app, getMainWindows: windowManager.getMainWindows,
+  getFocusedMainWindow: windowManager.getFocusedMainWindow, getFocusedWebContents: () => webContents.getFocusedWebContents() });
+app.on("browser-window-focus", (_event, window) => dictationHotkeys.noteFocusedWindow(window));
 
 // ---------------------------------------------------------------------------
 // Optional native PTY
@@ -193,6 +196,7 @@ desktopPreferences.init(path.join(app.getPath("userData"), "desktop-preferences.
   defaultTaskDirectory: process.env.MINICODE_DEFAULT_TASK_DIRECTORY || path.join(app.getPath("documents"), "MiniCode"),
 });
 browserHistory.init(path.join(app.getPath("userData"), "browser-history.json"));
+const browserPersonalData = createBrowserPersonalData({ filePath: path.join(app.getPath("userData"), "browser-personal-data.enc"), safeStorage });
 crashReporting.init({ crashReporter, app, logger: appendDesktopLog });
 
 const singleInstanceLock = app.requestSingleInstanceLock();
@@ -591,8 +595,7 @@ function acknowledgeDeepLink(id, win) {
   return true;
 }
 
-function sendWorkbenchMenuEvent(channel) {
-  const win = windowManager.getFocusedMainWindow();
+function sendWorkbenchMenuEvent(channel, win = windowManager.getFocusedMainWindow()) {
   if (!win || win.isDestroyed()) return false;
   win.webContents.send(channel);
   windowManager.focusMainWindow(win);
@@ -636,7 +639,7 @@ function showDesktopNotification(payload, owner) {
         ? payload.title.trim()
         : "MiniCode",
     body: typeof payload?.body === "string" ? payload.body : "",
-    silent: false,
+    silent: true,
     icon: DESKTOP_ICON_PATH,
   });
   notification.on("click", () => {
@@ -647,6 +650,8 @@ function showDesktopNotification(payload, owner) {
   notification.on("close", () => desktopNotifications.delete(notification));
 
   notification.show();
+  void notificationSounds.playSound(desktopPreferences.getPreferences().notificationSound, app.getPath("userData"))
+    .catch(error => appendDesktopLog(`[notifications] sound failed: ${error.message}`));
   desktopNotifications.set(notification, {
     kind: payload.kind,
     requestId: payload.requestId,
@@ -658,186 +663,291 @@ function showDesktopNotification(payload, owner) {
   return true;
 }
 
-async function captureCurrentWindowForFigma() {
-  const win = windowManager.getFocusedMainWindow();
-  if (!figmaCaptureSdk || !win || win.isDestroyed()) {
-    dialog.showErrorBox(
-      "Figma capture unavailable",
-      "Start MiniCode with MINICODE_ENABLE_FIGMA_CAPTURE=1 and try again.",
-    );
-    return;
-  }
-
-  try {
-    const { bytes, filename } = await figmaCaptureSdk.captureWebContents(win.webContents);
-    const suggestedName = `${filename || `minicode-${Date.now()}`}.h2d`;
-    const result = await dialog.showSaveDialog(win, {
-      title: "Save current window for Figma",
-      defaultPath: path.join(app.getPath("documents"), suggestedName),
-      filters: [{ name: "html.to.design capture", extensions: ["h2d"] }],
-      properties: ["createDirectory", "showOverwriteConfirmation"],
-    });
-    if (result.canceled || !result.filePath) return;
-    const outputPath = result.filePath.toLowerCase().endsWith(".h2d")
-      ? result.filePath
-      : `${result.filePath}.h2d`;
-    await fs.promises.writeFile(outputPath, Buffer.from(bytes));
-    appendDesktopLog(`[desktop] Figma capture saved: ${outputPath}`);
-    shell.showItemInFolder(outputPath);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    appendDesktopLog(`[desktop] Figma capture failed: ${message}`);
-    dialog.showErrorBox("Figma capture failed", message);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Application menu
 // ---------------------------------------------------------------------------
 
-function buildApplicationMenu() {
+const applicationMenuStates = new WeakMap();
+
+function setApplicationMenuState(window, state) {
+  applicationMenuStates.set(window, state);
+  void dictationHotkeys.suspend(window.webContents.id, state.shortcutRecording === true, "application-menu")
+    .catch(error => appendDesktopLog(`[desktop] dictation shortcut capture: ${error.message}`));
+  window.webContents.setIgnoreMenuShortcuts(state.shortcutRecording === true);
+  if (window === windowManager.getFocusedMainWindow()) buildApplicationMenu(window);
+}
+
+function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
+  const locale = desktopPreferences.getPreferences().localeOverride ?? app.getLocale();
+  const chinese = /^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(locale);
+  const label = (zh, en) => chinese ? zh : en;
+  const state = owner && applicationMenuStates.get(owner);
+  const targetWindow = () => owner ?? windowManager.getFocusedMainWindow();
+  const send = (event) => sendWorkbenchMenuEvent(event, targetWindow());
+  const browserCommand = (action) => {
+    const window = targetWindow();
+    return window && embeddedBrowserManager.runMenuCommand(window, webContents.getFocusedWebContents(), action);
+  };
+  const find = (action, event) => {
+    if (!browserCommand(action)) send(event);
+  };
+  const stepZoom = (delta) => {
+    if (browserCommand(delta === 0 ? "reset-zoom" : delta > 0 ? "zoom-in" : "zoom-out")) return;
+    const window = targetWindow();
+    if (window && !window.isDestroyed()) {
+      window.webContents.setZoomLevel(delta === 0 ? 0 : window.webContents.getZoomLevel() + delta * 0.5);
+    }
+  };
+  const close = () => {
+    if (!browserCommand("close")) send("minicode:menu:close-tab");
+  };
+  const canReloadBrowser = owner && embeddedBrowserManager.canReloadVisiblePage(owner, webContents.getFocusedWebContents());
+  const hidden = (title, accelerator, click) => ({
+    label: title, accelerator, acceleratorWorksWhenHidden: true, visible: false, click,
+  });
+  const sidebarAccelerator = state?.editorFocused ? "Ctrl+B" : "Ctrl+Shift+S";
+  const editorWorkspace = state?.bottomPanelToggleEnabled === true;
   const template = [
+    ...(process.platform === "darwin" ? [{ role: "appMenu" }] : []),
     {
       id: "minicode-menu-file",
-      label: "文件",
+      label: label("文件", "File"),
       submenu: [
         {
-          label: "新建窗口",
-          accelerator: "Ctrl+Shift+N",
+          label: label("新建窗口", "New Window"),
+          visible: false, acceleratorWorksWhenHidden: true,
           click: () => {
             if (!windowManager.getMainWindow()) { void attemptAppStartup("new-window"); return; }
-            void windowManager.createNewWindow().catch((error) => { appendDesktopLog(`[desktop] new window failed: ${error.message}`); dialog.showErrorBox("New window failed", error.message); });
+            void windowManager.createNewWindow().catch((error) => {
+              appendDesktopLog("[desktop] new window failed: " + error.message);
+              dialog.showErrorBox("New window failed", error.message);
+            });
           },
         },
         {
-          label: "新建聊天",
-          accelerator: "Ctrl+N",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:new-chat"); },
+          label: label("新聊天", "New Chat"), accelerator: "Ctrl+N",
+          click: () => send("minicode:menu:new-chat"),
         },
+        { label: label("新建临时聊天", "New Temporary Chat"), accelerator: "Ctrl+Shift+N", enabled: false },
         {
-          label: "快速聊天",
-          accelerator: "Alt+Ctrl+N",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:quick-chat"); },
+          label: label("新建项目…", "New Project…"), enabled: state?.newProjectEnabled === true,
+          click: () => send("minicode:menu:new-project"),
         },
+        hidden("New Chat", "Ctrl+Shift+O", () => send("minicode:menu:new-chat")),
+        ...editorWorkspace ? [{ type: "separator" }] : [],
         {
-          label: "打开文件夹…",
-          accelerator: "Ctrl+O",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:open-folder"); },
-        },
-        {
-          label: "扩展市场",
-          accelerator: "Ctrl+Shift+X",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:extensions-marketplace"); },
-        },
-        {
-          label: "设置…",
-          accelerator: "Ctrl+,",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:settings"); },
+          label: label("打开文件夹…", "Open Folder…"), accelerator: "Ctrl+O",
+          visible: editorWorkspace, acceleratorWorksWhenHidden: true,
+          click: () => send("minicode:menu:open-folder"),
         },
         { type: "separator" },
-        { label: "关闭窗口", accelerator: "Ctrl+W", click: () => { void windowManager.requestCloseWindow(windowManager.getFocusedMainWindow(), "keyboard"); } },
-        { role: "quit", label: "退出" },
+        { label: label("关闭", "Close"), accelerator: "Ctrl+W", click: close },
+        hidden("Close", "Ctrl+F4", close),
+        { type: "separator" },
+        { role: "quit", label: label("退出 " + app.getName(), "Quit " + app.getName()), accelerator: "Ctrl+Q" },
       ],
     },
     {
       id: "minicode-menu-edit",
-      label: "编辑",
+      label: label("编辑", "Edit"),
+      role: "editMenu",
       submenu: [
-        { role: "undo", label: "撤销" },
-        { role: "redo", label: "重做" },
+        { role: "undo", label: label("撤销", "Undo") },
+        { role: "redo", label: label("重做", "Redo") },
         { type: "separator" },
-        { role: "cut", label: "剪切" },
-        { role: "copy", label: "复制" },
-        { role: "paste", label: "粘贴" },
-        { role: "selectAll", label: "全选" },
+        { role: "cut", label: label("剪切", "Cut") },
+        { role: "copy", label: label("复制", "Copy") },
+        { role: "paste", label: label("粘贴", "Paste") },
+        { role: "delete", label: label("删除", "Delete") },
+        { type: "separator" },
+        { role: "selectAll", label: label("全选", "Select All") },
+        { type: "separator" },
+        {
+          label: label("设置…", "Settings…"), accelerator: "Ctrl+,",
+          click: () => send("minicode:menu:settings"),
+        },
       ],
     },
     {
       id: "minicode-menu-view",
-      label: "视图",
+      label: label("视图", "View"),
       submenu: [
-        { role: "zoomIn", label: "放大" },
-        { role: "zoomOut", label: "缩小" },
-        { role: "resetZoom", label: "恢复实际大小" },
+        {
+          label: label("显示/隐藏侧边栏", "Toggle Sidebar"), accelerator: sidebarAccelerator,
+          click: () => send("minicode:menu:toggle-sidebar"),
+        },
+        ...state?.editorFocused ? [] : [hidden("Toggle Sidebar", "Ctrl+B", () => send("minicode:menu:toggle-sidebar"))],
+        {
+          label: label("显示/隐藏底部面板", "Toggle Bottom Panel"), accelerator: "Ctrl+J",
+          visible: editorWorkspace, acceleratorWorksWhenHidden: true,
+          enabled: state?.bottomPanelToggleEnabled === true,
+          click: () => send("minicode:menu:toggle-bottom-panel"),
+        },
+        {
+          label: label("切换摘要面板固定状态", "Toggle Pinned Summary"),
+          click: () => send("minicode:menu:toggle-pinned-summary"),
+        },
+        {
+          label: label("打开终端", "Open Terminal"), accelerator: "Ctrl+\u0060",
+          visible: editorWorkspace, acceleratorWorksWhenHidden: true,
+          enabled: state?.terminalEnabled === true,
+          click: () => send("minicode:shortcut:terminal"),
+        },
+        {
+          label: label("显示/隐藏导航面板", "Toggle navigation panel"), accelerator: "Ctrl+Shift+E",
+          click: () => send("minicode:menu:toggle-file-tree"),
+        },
+        {
+          label: label("显示/隐藏“变更”面板", "Toggle Changes Panel"), accelerator: "Ctrl+Alt+B",
+          click: () => send("minicode:menu:toggle-side-panel"),
+        },
+        hidden("Open Browser Tab", "Ctrl+T", () => send("minicode:menu:open-browser-tab")),
+        hidden("Focus Browser Address Bar", undefined, () => send("minicode:menu:focus-browser-address-bar")),
+        { ...hidden("Reload Browser Page", "Ctrl+R", () => browserCommand("reload")), enabled: Boolean(canReloadBrowser) },
+        { ...hidden("Force Reload Browser Page", "Ctrl+Shift+R", () => browserCommand("hard-reload")), enabled: Boolean(canReloadBrowser) },
+        hidden("Browser Back", "Alt+Left", () => browserCommand("back")),
+        hidden("Browser Forward", "Alt+Right", () => browserCommand("forward")),
         { type: "separator" },
         {
-          label: "切换侧边栏",
-          accelerator: "Ctrl+B",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:toggle-sidebar"); },
+          label: label("查找", "Find"), accelerator: "Ctrl+F",
+          click: () => find("open-find", "minicode:menu:find-in-thread"),
         },
+        hidden("Find Next", "Ctrl+G", () => find("find-next", "minicode:menu:find-next-in-thread")),
+        hidden("Find Previous", "Shift+F3", () => find("find-previous", "minicode:menu:find-previous-in-thread")),
+        { type: "separator" },
         {
-          label: "切换上下文面板",
-          accelerator: "Ctrl+\\",
-          click: () => { sendWorkbenchMenuEvent("minicode:menu:toggle-context"); },
+          label: label("返回", "Back"), accelerator: "Ctrl+[",
+          click: () => send("minicode:menu:navigate-back"),
         },
+        { label: label("前进", "Forward"), click: () => send("minicode:menu:navigate-forward") },
+        { type: "separator" },
         {
-          label: "切换终端",
-          accelerator: "Ctrl+`",
-          click: () => { sendWorkbenchMenuEvent("minicode:shortcut:terminal"); },
+          label: label("侧边栏中的上一项", "Previous Sidebar Item"), accelerator: "Ctrl+Alt+[",
+          click: () => send("minicode:menu:previous-thread"),
         },
+        hidden("Previous Sidebar Item", "Ctrl+Alt+Left", () => send("minicode:menu:previous-thread")),
         {
-          label: "重新加载",
-          accelerator: "F5",
+          label: label("下一个侧边栏项目", "Next Sidebar Item"), accelerator: "Ctrl+Alt+]",
+          click: () => send("minicode:menu:next-thread"),
+        },
+        hidden("Next Sidebar Item", "Ctrl+Alt+Right", () => send("minicode:menu:next-thread")),
+        { type: "separator" },
+        {
+          label: label("上一个标签页", "Previous Tab"), accelerator: "Ctrl+Shift+[",
+          click: () => send("minicode:menu:previous-tab"),
+        },
+        hidden("Previous Tab", "Ctrl+PageUp", () => send("minicode:menu:previous-tab")),
+        {
+          label: label("下一个标签页", "Next Tab"), accelerator: "Ctrl+Shift+]",
+          click: () => send("minicode:menu:next-tab"),
+        },
+        hidden("Next Tab", "Ctrl+PageDown", () => send("minicode:menu:next-tab")),
+        { type: "separator" },
+        { label: label("放大", "Zoom In"), accelerator: "Ctrl+Plus", click: () => stepZoom(1) },
+        hidden("Zoom In", "Ctrl+=", () => stepZoom(1)),
+        { label: label("缩小", "Zoom Out"), accelerator: "Ctrl+-", click: () => stepZoom(-1) },
+        { label: label("实际大小", "Actual Size"), accelerator: "Ctrl+0", click: () => stepZoom(0) },
+        { type: "separator" },
+        {
+          label: label("切换全屏", "Toggle Full Screen"), accelerator: "F11",
           click: () => {
-            const win = windowManager.getFocusedMainWindow();
-            if (win && !win.isDestroyed()) windowManager.reloadWindow(win);
+            const window = targetWindow();
+            if (window && !window.isDestroyed()) window.setFullScreen(!window.isFullScreen());
           },
         },
-        { label: "强制重新加载", accelerator: "Ctrl+Shift+R", click: () => {
-          const win = windowManager.getFocusedMainWindow();
-          if (win) windowManager.reloadWindow(win, true);
-        } },
-        { role: "toggleDevTools", label: "切换开发者工具" },
-        { type: "separator" },
-        { role: "togglefullscreen", label: "全屏" },
-        ...(FIGMA_CAPTURE_ENABLED
-          ? [
-              { type: "separator" },
-              {
-                label: "捕获当前窗口到 Figma…",
-                accelerator: "Ctrl+Shift+F12",
-                click: () => { void captureCurrentWindowForFigma(); },
-              },
-            ]
-          : []),
+        hidden("Open command menu", "Ctrl+K", () => send("minicode:menu:open-command-menu")),
+        hidden("Search Files…", "Ctrl+P", () => send("minicode:menu:search-files")),
       ],
     },
+    ...(process.platform === "darwin" ? [{
+      role: "windowMenu", label: label("窗口", "Window"),
+      submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }],
+    }] : []),
     {
-      label: "窗口",
-      submenu: [{ role: "minimize", label: "最小化" }, { role: "close", label: "关闭窗口" }],
-    },
-    {
-      id: "minicode-menu-help",
-      label: "帮助",
+      id: "minicode-menu-help", role: "help",
+      label: label("帮助", "Help"),
       submenu: [
+        { label: label("文档", "Documentation"), click: () => shell.openExternal("https://developers.openai.com/codex/app") },
         {
-          label: "显示桌面日志",
-          click: () => {
-            const logPath = utils.getDesktopLogPath();
-            appendDesktopLog("[desktop] reveal log requested");
-            shell.showItemInFolder(logPath);
-          },
+          label: label("显示键盘快捷键", "Keyboard Shortcuts"), accelerator: "Ctrl+/",
+          click: () => send("minicode:menu:open-shortcuts"),
         },
+        { label: label("新功能", "What's New"), click: () => shell.openExternal("https://developers.openai.com/codex/changelog") },
+        { type: "separator" },
+        { label: label("故障排除", "Troubleshooting"), click: () => shell.openExternal("https://developers.openai.com/codex/app/troubleshooting") },
+        { label: label("系统状态", "System Status"), click: () => shell.openExternal("https://status.openai.com") },
+        { type: "separator" },
+        ...updater.isAvailable() ? [{
+          label: label("检查更新…", "Check for Updates…"), click: () => { void updater.check(); },
+        }] : [],
         {
-          label: "导出诊断信息",
+          label: label("关于 " + app.getName(), "About " + app.getName()),
           click: () => {
-            const result = exportDesktopDiagnostics();
-            shell.showItemInFolder(result.path);
+            app.setAboutPanelOptions({ applicationName: app.getName(), applicationVersion: app.getVersion() });
+            app.showAboutPanel();
           },
         },
       ],
     },
   ];
-  const locale = desktopPreferences.getPreferences().localeOverride ?? app.getLocale();
-  if (!/^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(locale)) {
-    const labels = { "文件": "File", "新建窗口": "New Window", "新建聊天": "New Chat", "快速聊天": "Quick Chat", "打开文件夹…": "Open Folder…", "扩展市场": "Extensions", "设置…": "Settings…", "关闭窗口": "Close Window", "退出": "Quit", "编辑": "Edit", "撤销": "Undo", "重做": "Redo", "剪切": "Cut", "复制": "Copy", "粘贴": "Paste", "全选": "Select All", "视图": "View", "放大": "Zoom In", "缩小": "Zoom Out", "恢复实际大小": "Actual Size", "切换侧边栏": "Toggle Sidebar", "切换上下文面板": "Toggle Context Panel", "切换终端": "Toggle Terminal", "重新加载": "Reload", "强制重新加载": "Force Reload", "切换开发者工具": "Toggle Developer Tools", "全屏": "Full Screen", "捕获当前窗口到 Figma…": "Capture Window to Figma…", "窗口": "Window", "最小化": "Minimize", "帮助": "Help", "显示桌面日志": "Show Desktop Logs", "导出诊断信息": "Export Diagnostics" };
-    const localizeItems = (items) => items.forEach((item) => {
-      if (item.label) item.label = labels[item.label];
-      if (item.submenu) localizeItems(item.submenu);
-    });
-    localizeItems(template);
-  }
+  const commands = [
+    ["newWindow", ["新建窗口", "New Window"]], ["newConversation", ["新聊天", "New Chat"]], ["newProject", ["新建项目…", "New Project…"]],
+    ["openFolder", ["打开文件夹…", "Open Folder…"]], ["closeTab", ["关闭", "Close"]], ["quit", ["退出 " + app.getName(), "Quit " + app.getName()]],
+    ["settings", ["设置…", "Settings…"]], ["leftSidebar", ["显示/隐藏侧边栏", "Toggle Sidebar"]], ["bottomPanel", ["显示/隐藏底部面板", "Toggle Bottom Panel"]],
+    ["pinnedSummary", ["切换摘要面板固定状态", "Toggle Pinned Summary"]], ["terminal", ["打开终端", "Open Terminal"]],
+    ["fileTree", ["显示/隐藏导航面板", "Toggle navigation panel"]], ["sidePanel", ["显示/隐藏“变更”面板", "Toggle Changes Panel"]],
+    ["browserTab", ["打开浏览器标签页", "Open Browser Tab"]], ["browserAddress", ["聚焦浏览器地址栏", "Focus Browser Address Bar"]],
+    ["browserReload", ["重新加载浏览器页面", "Reload Browser Page"]], ["browserHardReload", ["Force Reload Browser Page"]],
+    ["browserBack", ["Browser Back"]], ["browserForward", ["Browser Forward"]], ["find", ["查找", "Find"]], ["findNext", ["Find Next"]], ["findPrevious", ["Find Previous"]],
+    ["navigateBack", ["返回", "Back"]], ["navigateForward", ["前进", "Forward"]],
+    ["previousConversation", ["侧边栏中的上一项", "Previous Sidebar Item"]], ["nextConversation", ["下一个侧边栏项目", "Next Sidebar Item"]],
+    ["previousTab", ["上一个标签页", "Previous Tab"]], ["nextTab", ["下一个标签页", "Next Tab"]],
+    ["zoomIn", ["放大", "Zoom In"]], ["zoomOut", ["缩小", "Zoom Out"]], ["zoomReset", ["实际大小", "Actual Size"]],
+    ["fullScreen", ["切换全屏", "Toggle Full Screen"]], ["commandPalette", ["Open command menu"]], ["globalSearch", ["Search Files…"]],
+    ["shortcutHelp", ["显示键盘快捷键", "Keyboard Shortcuts"]],
+  ];
+  const commandByLabel = new Map(commands.flatMap(([action, labels]) => labels.map(title => [title, action])));
+  const assigned = new Set();
+  const additionalShortcuts = [];
+  const applyKeymap = (items) => {
+    for (const item of items) {
+      const action = commandByLabel.get(item.label);
+      if (action) {
+        if (!assigned.has(action)) {
+          assigned.add(action);
+          item.id = "minicode-shortcut-" + action;
+          if (state?.accelerators) item.accelerator = state.accelerators[action] ?? undefined;
+          if (action === "closeTab" && state?.editorFocused && state.accelerators?.closeEditor) item.accelerator = state.accelerators.closeEditor;
+          if (action === "leftSidebar" && state?.editorFocused && state.accelerators?.leftSidebar
+            && state.accelerators.leftSidebar === state.accelerators.saveAllFiles) {
+            item.accelerator = state.acceleratorBindings
+              ? state.acceleratorBindings.leftSidebar.find(chord => !state.acceleratorBindings.saveAllFiles.includes(chord))
+              : state.shortcutOverrides.includes("leftSidebar") ? undefined : "Ctrl+B";
+          }
+          for (const accelerator of (state?.acceleratorBindings?.[action] || []).slice(1)) {
+            if (accelerator === item.accelerator || action === "leftSidebar" && state.editorFocused && state.acceleratorBindings.saveAllFiles.includes(accelerator)) continue;
+            additionalShortcuts.push({ ...item, id: undefined, accelerator, visible: false, acceleratorWorksWhenHidden: true });
+          }
+        } else if (state?.acceleratorBindings || state?.shortcutOverrides?.includes(action) || state?.accelerators && !state.accelerators[action]) {
+          item.accelerator = undefined;
+        }
+      }
+      if (item.submenu) applyKeymap(item.submenu);
+    }
+  };
+  applyKeymap(template);
+  template.find(item => item.id === "minicode-menu-file").submenu.push(...additionalShortcuts);
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function executeApplicationMenuAction(window, action) {
+  buildApplicationMenu(window);
+  const item = Menu.getApplicationMenu().getMenuItemById("minicode-shortcut-" + action);
+  if (!item) throw new TypeError("Unknown native menu command: " + action);
+  if (!item.enabled) return false;
+  if (item.role === "quit") app.quit();
+  else item.click(item, window, {});
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -999,18 +1109,28 @@ windowManager.init({
   frontendDevUrl: FRONTEND_DEV_URL,
   getAppRoot,
   onMainWindowCreated: (mainWindow, record) => {
+    mcpAppSandbox.attachOwner(mainWindow.webContents);
+    record.dictationSenderId = mainWindow.webContents.id;
     if (!record.remoteHostId) record.runtime = getBackendRuntimeConfig();
     else installRendererCspHeaders(mainWindow.webContents.session);
     updater.registerWindow(record.windowInstanceId);
+    mainWindow.on("focus", () => buildApplicationMenu(mainWindow));
     mainWindow.webContents.on("did-navigate", () => {
+      dictationHotkeys.releaseWindow(record.dictationSenderId);
       updater.invalidateActivity(record.windowInstanceId, "activity.renderer_navigation");
+      petActionBridge.release(record.windowInstanceId);
     });
     mainWindow.webContents.on("render-process-gone", () => {
+      dictationHotkeys.releaseWindow(record.dictationSenderId);
       updater.invalidateActivity(record.windowInstanceId, "activity.renderer_gone");
+      petActionBridge.release(record.windowInstanceId);
     });
   },
   onMainWindowClosed: (_mainWindow, record) => {
     updater.unregisterWindow(record.windowInstanceId);
+    petManager?.releaseActivity(record.windowInstanceId);
+    petActionBridge.release(record.windowInstanceId);
+    dictationHotkeys.releaseWindow(record.dictationSenderId);
     void releaseWindowResources(record);
     if (pendingDeepLink?.windowInstanceId === record.windowInstanceId) pendingDeepLink.windowInstanceId = null;
   },
@@ -1020,10 +1140,16 @@ windowManager.init({
 
 embeddedBrowserManager.init({
   appendDesktopLog,
+  getLocale: () => desktopPreferences.getPreferences().localeOverride ?? app.getLocale(),
+  getShortcutPreferences: desktopPreferences.getPreferences,
   getWindowByInstanceId: windowManager.getWindowByInstanceId,
   getMainWindows: windowManager.getMainWindows,
   assessBrowserNavigationPolicy: cdpBridge.assessBrowserNavigationPolicy,
   browserHistory,
+  browserPersonalData,
+  onMenuStateChanged: (window) => {
+    if (window === windowManager.getFocusedMainWindow()) buildApplicationMenu(window);
+  },
 });
 
 embeddedBrowserBridge.init({
@@ -1035,6 +1161,18 @@ embeddedBrowserBridge.init({
 });
 
 ipcHandlers.init({
+  dictationHotkeys,
+  getBackendRuntimeConfig,
+  browserPersonalData,
+  getMcpAppSandbox: () => mcpAppSandbox,
+  getPetManager: async () => { await petInitialization; return petManager; },
+  refreshPets: async () => {
+    petInitialization = petManager.initialize();
+    const state = await petInitialization;
+    for (const window of windowManager.getMainWindows()) window.webContents.send("minicode:pets:refreshed");
+    return state;
+  },
+  completePetAction: (ownerId, result) => petActionBridge.complete(ownerId, result),
   getRemoteDesktop: () => {
     if (!remoteDesktop) remoteDesktop = new RemoteDesktop({ userData: app.getPath("userData"),
       bridgeEndpoint: process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT, windowManager,
@@ -1045,10 +1183,16 @@ ipcHandlers.init({
   onLocaleChanged: buildApplicationMenu,
   browserHistory,
   getMainWindows: windowManager.getMainWindows,
+  browserProfileImport: createBrowserProfileImporter({ history: browserHistory }),
   createNewWindow: windowManager.createNewWindow,
   focusMainWindow: windowManager.focusMainWindow,
   requestCloseWindow: windowManager.requestCloseWindow,
-  popupApplicationMenu: (key, window) => popupApplicationMenu(Menu.getApplicationMenu(), key, window),
+  popupApplicationMenu: (key, window) => {
+    buildApplicationMenu(window);
+    return popupApplicationMenu(Menu.getApplicationMenu(), key, window);
+  },
+  setApplicationMenuState,
+  executeApplicationMenuAction,
   setupWindowsSandbox: () => setupWindowsSandbox({
     scriptPath: app.isPackaged
       ? path.join(process.resourcesPath, "windows-sandbox", "setup-desktop-user-sandbox.ps1")
@@ -1113,7 +1257,57 @@ async function attemptAppStartup(source = "startup") {
       await backendSidecar.waitForBackendReady(runtime.apiBaseUrl, BACKEND_STARTUP_TIMEOUT_MS);
       await verifyExternalBackendHostContract(runtime.apiBaseUrl, RUNTIME_TOKEN, externalContract);
     }
-    await windowManager.createMainWindow();
+    if (!petManager) {
+      petManager = createPetManager({
+        configRoot: process.env.MINICODE_CONFIG_DIR || path.join(app.getPath("home"), ".minicode"),
+        builtinAssetRoot: app.isPackaged
+          ? path.join(process.resourcesPath, "frontend", "dist", "pets")
+          : path.join(getAppRoot(), "frontend", "public", "pets"),
+        getMainWindow: windowManager.getFocusedMainWindow,
+        getLocale: () => desktopPreferences.getPreferences().localeOverride ?? app.getLocale(),
+        onOpenSettings: async window => {
+          const target = window || await windowManager.createMainWindow();
+          sendWorkbenchMenuEvent("minicode:menu:open-pets-settings", target);
+        },
+        onOpenMain: async () => {
+          const target = windowManager.getFocusedMainWindow() || await windowManager.createMainWindow();
+          sendWorkbenchMenuEvent("minicode:menu:focus-composer", target);
+        },
+        onOpenTask: async (ownerId, conversationId) => {
+          const target = windowManager.getWindowByInstanceId(ownerId) || await windowManager.createMainWindow();
+          dispatchDeepLink({ kind: "conversation", conversationId }, target);
+        },
+        onTaskAction: (ownerId, taskId, actionId) => petActionBridge.request(ownerId, taskId, actionId),
+        onTaskFollowup: (ownerId, taskId, prompt) => petActionBridge.requestFollowup(ownerId, taskId, prompt),
+        onStateChanged: state => {
+          for (const window of windowManager.getMainWindows()) window.webContents.send("minicode:pets:stateChanged", state);
+        },
+      });
+    }
+    petInitialization = petManager.initialize();
+    const initializedPets = petManager;
+    // The workspace can open while this optional local feature reports its
+    // own load error. Pet requests retain the rejected initialization receipt.
+    const mainWindowReady = windowManager.createMainWindow();
+    void petInitialization.then(async () => {
+      await mainWindowReady;
+      if (petManager === initializedPets) return initializedPets.restoreMini();
+    }).catch(error => appendDesktopLog(`[pets] restore failed: ${error.message}`));
+    await mainWindowReady;
+    generalMaintenance?.dispose();
+    generalMaintenance = startGeneralMaintenance({
+      getPreferences: desktopPreferences.getPreferences,
+      getIdleSeconds: () => powerMonitor.getSystemIdleTime(),
+      runMaintenance: async payload => {
+        const response = await fetch(`${resolvedApiBaseUrl}/api/settings/general/maintenance`, {
+          method: "POST", headers: { "Content-Type": "application/json", "X-MiniCode-Token": RUNTIME_TOKEN },
+          body: JSON.stringify(payload),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        return response.json();
+      },
+      onError: error => appendDesktopLog(`[history maintenance] ${error.message}`),
+    });
     closeStartupFailureWindow();
     appendDesktopLog(`[desktop] startup attempt succeeded (${source})`);
     return true;
@@ -1155,12 +1349,18 @@ let rollbackPreparationInProgress = false;
 
 async function drainDesktopResources() {
   try {
+    await dictationHotkeys.dispose();
+    generalMaintenance?.dispose();
+    generalMaintenance = null;
     windowManager.clearWindowStateSaveTimer();
     windowManager.persistWindowState();
     const pending = Array.from(windowCleanupTasks, ([record, task]) =>
       desktopCleanupFailed && record.cleanupError ? releaseWindowResources(record, true) : task);
     await Promise.all(pending);
     await ptyManager.killAllSessions();
+    petManager?.dispose();
+    petManager = null;
+    petInitialization = null;
     if (remoteDesktop) await remoteDesktop.close();
     await backendSidecar.stopBackendSidecar();
     if (backendSidecar.getBackendProcess()) throw new Error("The backend is still running; rollback data cannot be prepared.");
@@ -1243,6 +1443,7 @@ app.on("child-process-gone", (_event, details) => {
 
 app.whenReady().then(async () => {
   app.setAppUserModelId("MiniCode.Desktop");
+  mcpAppSandbox = createMcpAppSandbox({ session });
   installRendererCspHeaders();
   if (process.defaultApp && process.argv.length >= 2) {
     app.setAsDefaultProtocolClient("minicode", process.execPath, [path.resolve(process.argv[1])]);
@@ -1264,6 +1465,7 @@ app.whenReady().then(async () => {
       getWindowRecord: windowManager.getWindowRecord,
       logger: appendDesktopLog,
       getActivePtySessions: () => ptyManager.listActiveSessions(),
+      getActiveDownloadIds: embeddedBrowserManager.getActiveDownloadIds,
       prepareRollback: prepareAutomaticRollback,
       completeRollback: () => { rollbackPreparationInProgress = false; },
     });

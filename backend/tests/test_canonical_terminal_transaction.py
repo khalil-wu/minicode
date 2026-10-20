@@ -506,7 +506,8 @@ def test_crash_recovery_uses_receipt_linkage_not_superseded_completed_intent(
 
 
 @pytest.mark.parametrize("retry_safe", [False, True])
-def test_synthetic_pair_repair_preserves_unknown_execution_and_manual_policy(tmp_path, retry_safe):
+@pytest.mark.parametrize("status,reason", [("completed", ""), ("failed", "runtime_error"), ("cancelled", "consumer_closed")])
+def test_synthetic_pair_repair_preserves_unknown_execution_and_manual_policy(tmp_path, retry_safe, status, reason):
     from backend.agent.query_journal import QueryJournalRecorder
     from backend.agent.state import AgentState
     from backend.agent.context import ContextBuilder
@@ -521,11 +522,11 @@ def test_synthetic_pair_repair_preserves_unknown_execution_and_manual_policy(tmp
         "unknown-call", "custom_side_effect", {}, side_effect_kind="external",
         idempotent=retry_safe, idempotency_key="exact-key" if retry_safe else "",
     ))
-    recorder.record_terminal_intent(AgentEvent.done(status="cancelled", reason="consumer_closed"))
+    recorder.record_terminal_intent(AgentEvent.done(status=status, reason=reason))
     recorder.record_event(AgentEvent(type="agent.run.completed", data={
-        "run_id": "uncertain-run", "status": "cancelled",
+        "run_id": "uncertain-run", "status": status,
     }))
-    recorder.record_terminal(AgentEvent.done(status="cancelled", reason="consumer_closed"))
+    recorder.record_terminal(AgentEvent.done(status=status, reason=reason))
     terminal = next(event.payload for event in journal.read_events() if event.event_type == "terminal")
     assert journal.unresolved_tool_uses() == []
     assert terminal["unresolved_tool_uses"] == []
@@ -534,4 +535,4 @@ def test_synthetic_pair_repair_preserves_unknown_execution_and_manual_policy(tmp
     assert terminal["manual_recovery_required"] is (not retry_safe)
     synthetic = next(event.payload for event in journal.read_events() if event.event_type == "tool_result")
     assert synthetic["synthetic"] is True
-    assert synthetic["status"] == "cancelled"
+    assert synthetic["status"] == ("cancelled" if status == "cancelled" else "failed")

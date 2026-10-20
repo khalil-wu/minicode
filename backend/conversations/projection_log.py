@@ -6,6 +6,7 @@ import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from .compression import materialize_history_for_append, open_history_binary
 
 
 def value_change(before: Any, after: Any) -> dict[str, Any] | None:
@@ -86,6 +87,7 @@ def append_projection(
         entries.append({"revision": seed_revision, "change": {"value": previous}})
     entries.append({"revision": revision, "change": value_change(previous, current)})
     encoded = "".join(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n" for entry in entries).encode("utf-8")
+    path = materialize_history_for_append(path)
     with path.open("r+b" if path.exists() else "w+b") as handle:
         handle.seek(committed_bytes)
         handle.truncate()
@@ -97,7 +99,7 @@ def append_projection(
 
 def read_projection(path: Path, *, committed_bytes: int, revision: int) -> dict[str, Any]:
     """Read exactly the committed prefix; an incomplete committed entry is corruption."""
-    with path.open("rb") as handle:
+    with open_history_binary(path) as handle:
         raw = handle.read(committed_bytes)
     if len(raw) != committed_bytes or not raw.endswith(b"\n"):
         raise ValueError("Committed conversation projection is truncated")

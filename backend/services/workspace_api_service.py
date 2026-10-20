@@ -37,10 +37,14 @@ async def capture_workspace_execution(session, conversation_id: str, *, environm
     if not directory:
         raise HTTPException(409, "The conversation has no fixed execution owner.")
     cwd_uri = (ExecutorPath.parse(directory).uri if directory.startswith("file:") else Path(directory).expanduser().resolve().as_uri())
+    from backend.workspace.project_sources import local_project_source_selection
+    project_id, folders = (None, ()) if directory.startswith("file:") else local_project_source_selection(directory)
+    roots = (cwd_uri,) if directory.startswith("file:") else tuple(root.as_uri() for root in folders)
     snapshot = await capture_conversation_environments(environment_manager=session.environment_manager,
         execution_registry=session.ws_manager.execution_contexts, conversation_repository=session.conversation_repo,
         conversation_id=conversation_id, permission_context=permission, config_stack=session.config.config_layer_stack,
-        cwd_uri=cwd_uri, workspace_root_uris=(cwd_uri,), require_existing_attachment=directory.startswith("file:"))
+        cwd_uri=cwd_uri, workspace_root_uris=roots, require_existing_attachment=directory.startswith("file:"),
+        project_source_cwd=cwd_uri if project_id is not None else None)
     try:
         attachment = select_turn_environment(snapshot, environment_id)
         context = ToolExecutionContext(permission=permission, session_id=session.session_id, conversation_id=conversation_id,
@@ -334,11 +338,11 @@ def workspace_git_worktree_payload(root: Path, *, workspace_root: Path | None = 
         manager = WorktreeManager(root)
         worktrees = manager.list_worktrees()
         status = summarize_worktree_status(root, worktrees)
-        isolated_root = isolated_worktree_root(status.main_repo_path or root)
+        from backend.services.worktree_settings_service import is_managed_worktree_path
 
         entries: list[dict[str, Any]] = []
         for worktree in status.worktrees:
-            is_isolated = is_path_within(worktree.path, isolated_root)
+            is_isolated = is_managed_worktree_path(worktree.path, status.main_repo_path or root)
             entries.append(
                 {
                     "path": str(worktree.path),
@@ -427,18 +431,18 @@ def remove_workspace_git_worktree_payload(*, root: Path, path: str, force: bool)
         manager = WorktreeManager(root)
         worktrees = manager.list_worktrees()
         status = summarize_worktree_status(root, worktrees)
-        isolated_root = isolated_worktree_root(status.main_repo_path or root)
+        from backend.services.worktree_settings_service import is_managed_worktree_path
         target_entry = next((item for item in worktrees if item.path.resolve() == target), None)
         if target_entry is None:
             return {"removed": False, "path": str(target), "error": "Worktree not found"}
         if target == status.current_path:
             return {"removed": False, "path": str(target), "error": "Cannot remove current worktree"}
-        if not is_path_within(target, isolated_root):
+        if not is_managed_worktree_path(target, status.main_repo_path or root):
             return {
                 "removed": False,
                 "path": str(target),
                 "branch": target_entry.branch,
-                "error": "Only isolated worktrees under .minicode/worktrees can be removed",
+                "error": "Only MiniCode-managed worktrees can be removed",
             }
 
         removal = manager.safe_remove_worktree(target, force=force)

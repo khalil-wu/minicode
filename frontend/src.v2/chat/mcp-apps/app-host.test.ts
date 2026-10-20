@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { expect, it, vi } from "vitest";
-import { AppFrameTransport } from "./app-host";
+import { AppFrameTransport, AppWebviewTransport, type McpAppWebview } from "./app-host";
 import { reduceToolCallResult, reduceToolCallStart } from "../../lib/tool-call-reducer";
 import { toToolCallRecord } from "../transcriptHydration";
 import { mergeResumeToolCalls } from "../../stores/shared-helpers";
@@ -37,4 +37,30 @@ it("keeps the registered App receipt through live results, history and reconnect
   expect(toToolCallRecord({ ...live, mcpApp: undefined, mcp_app: app })?.mcpApp).toEqual(app);
   expect(mergeResumeToolCalls([], [{ id: "actual", name: live.name, args: {}, mcp_app: app }])[0]).toMatchObject({ record: { mcpApp: app } });
   expect(toToolCallRecord({ ...live, mcpApp: undefined, summary: JSON.stringify({ _meta: { ui: { resourceUri: app.resourceUri } } }) })?.mcpApp).toBeUndefined();
+});
+
+it("routes desktop App RPC through only its guest preload channel", async () => {
+  const webview = document.createElement("webview") as McpAppWebview;
+  webview.send = vi.fn();
+  const transport = new AppWebviewTransport(webview);
+  const received = vi.fn(), errors = vi.fn();
+  transport.onmessage = received; transport.onerror = errors;
+  await transport.start();
+  const message = { jsonrpc: "2.0" as const, method: "ui/notifications/initialized", params: {} };
+  const dispatch = (channel: string, value: unknown) => webview.dispatchEvent(Object.assign(new Event("ipc-message"), { channel, args: [value] }));
+  dispatch("other-app:message", message);
+  expect(received).not.toHaveBeenCalled();
+  dispatch("minicode:mcpApp:message", message);
+  expect(received).toHaveBeenCalledWith(message);
+  dispatch("minicode:mcpApp:message", "invalid json-rpc");
+  expect(errors).toHaveBeenCalledTimes(1);
+  const delivery = transport.send(message);
+  await Promise.resolve();
+  expect(webview.send).not.toHaveBeenCalled();
+  webview.dispatchEvent(new Event("dom-ready"));
+  await delivery;
+  expect(webview.send).toHaveBeenCalledWith("minicode:mcpApp:message", message);
+  await transport.close();
+  dispatch("minicode:mcpApp:message", message);
+  expect(received).toHaveBeenCalledTimes(1);
 });

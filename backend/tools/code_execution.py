@@ -1,4 +1,4 @@
-"""Model-facing execute/wait tools for the turn-owned JavaScript runtime."""
+"""Model-facing execute/wait tools for session-owned JavaScript cells."""
 from __future__ import annotations
 
 import base64

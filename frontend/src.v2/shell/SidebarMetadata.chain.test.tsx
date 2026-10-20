@@ -11,7 +11,7 @@ const { send } = vi.hoisted(() => ({ send: vi.fn(async (command: { type: string 
 })) }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), sendClientCommandAwaitResult: send,
   commandResultSucceeded: (event: { level: string }) => event.level !== "error" }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, revealPath: vi.fn() }));
+vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), isDesktop: () => false, revealPath: vi.fn() }));
 vi.mock("../workspace/openWorkspaceFolder", () => ({ openWorkspaceFolder: vi.fn() }));
 
 const record = (extra = {}) => ({ id: "task", title: "Actual task", updated_at: "2026-10-14T01:00:00Z", revision: 1,

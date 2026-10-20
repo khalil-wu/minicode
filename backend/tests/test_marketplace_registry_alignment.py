@@ -304,8 +304,7 @@ def test_concurrent_registry_mutations_do_not_lose_records(tmp_path: Path) -> No
     "foreign_layout",
     [
         ".codex-plugin/marketplace.json",
-        ".claude-plugin/marketplace.json",
-        ".agents/plugins/marketplace.json",
+        ".other-plugin/marketplace.json",
     ],
 )
 def test_marketplace_ignores_foreign_manifest_layouts(
@@ -321,6 +320,79 @@ def test_marketplace_ignores_foreign_manifest_layouts(
 
     with pytest.raises(MaterializationError, match="marketplace manifest not found"):
         registry.refresh("demo-market")
+
+
+@pytest.mark.parametrize("layout", [
+    ".minicode-plugin/marketplace.json", ".agents/plugins/marketplace.json",
+    ".agents/plugins/api_marketplace.json", ".claude-plugin/marketplace.json",
+    ".cursor-plugin/marketplace.json",
+])
+def test_desktop_add_reads_marketplace_identity_and_catalog(tmp_path: Path, layout: str) -> None:
+    source_root = tmp_path / "catalog"
+    _plugin(source_root)
+    _write_catalog(source_root, layout=layout)
+    registry = MarketplaceRegistry(tmp_path / "state" / "registry.json")
+
+    record, already_added = registry.add_source(str(source_root))
+
+    assert not already_added
+    assert record["name"] == "demo-market"
+    assert record["status"] == "ready"
+    assert record["plugins"][0]["id"] == "demo-plugin@demo-market"
+    assert Path(record["plugins"][0]["path"]) == source_root / "plugins" / "demo-plugin"
+    duplicate, already_added = registry.add_source(str(source_root))
+    assert already_added
+    assert duplicate["name"] == "demo-market"
+    assert len(registry.list()) == 1
+
+
+def test_desktop_add_rejects_collision_without_registering_another_source(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    _write_catalog(first)
+    _write_catalog(second)
+    registry = MarketplaceRegistry(tmp_path / "state" / "registry.json")
+    registry.add_source(str(first))
+
+    with pytest.raises(MaterializationError, match="already registered with a different source"):
+        registry.add_source(str(second))
+
+    assert len(registry.list()) == 1
+    assert registry.list()[0]["source"]["path"] == str(first)
+
+
+@pytest.mark.parametrize("options", [{"ref_name": "main"}, {"sparse_paths": ["plugins/review"]}])
+def test_desktop_add_reports_git_only_options_on_local_sources(tmp_path: Path, options: dict) -> None:
+    registry = MarketplaceRegistry(tmp_path / "state" / "registry.json")
+    with pytest.raises(ValueError, match="only supported for git"):
+        registry.add_source(str(tmp_path), **options)
+    assert not registry.path.exists()
+
+
+def test_desktop_add_api_preserves_source_contract_and_reports_validation_errors(tmp_path: Path, monkeypatch) -> None:
+    from fastapi import HTTPException, Response
+    from backend.api import routes_skills
+    from backend.api.models import PluginMarketplaceRequest
+    from backend.plugins.policy import ManagedPluginPolicy
+
+    source_root = tmp_path / "catalog"
+    _write_catalog(source_root, layout=".agents/plugins/marketplace.json")
+    registry = MarketplaceRegistry(tmp_path / "state" / "registry.json")
+    policy = ManagedPluginPolicy({}, None, (), {})
+    monkeypatch.setattr(routes_skills, "MarketplaceRegistry", lambda: registry)
+    monkeypatch.setattr(routes_skills, "load_config_layer_stack", lambda: None)
+    monkeypatch.setattr("backend.plugins.policy._plugin_policy_from_stack", lambda _stack: policy)
+
+    request = PluginMarketplaceRequest(source=str(source_root), ref_name=None, sparse_paths=None)
+    result = routes_skills.add_plugin_marketplace_api(request, Response())
+    assert result["marketplace"]["name"] == "demo-market"
+    assert result["marketplace"]["status"] == "ready"
+    assert result["already_added"] is False
+
+    with pytest.raises(HTTPException) as captured:
+        routes_skills.add_plugin_marketplace_api(PluginMarketplaceRequest(source=str(source_root), ref_name="main"), Response())
+    assert captured.value.status_code == 400
+    assert "only supported for git" in captured.value.detail
 
 
 def test_remote_plugin_cache_identity_cannot_collide_on_hyphens(tmp_path: Path) -> None:

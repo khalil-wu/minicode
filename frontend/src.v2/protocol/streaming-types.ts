@@ -371,6 +371,7 @@ export interface ToolOutputDeltaEvent {
   id: string;
   output: string;
   stream?: "stdout" | "stderr" | string;
+  call_source?: ToolCallSourcePayload;
   turn_id?: string;
   iteration_id?: string;
   step_id?: string;
@@ -385,6 +386,7 @@ export interface CommandOutputChunkEvent {
   turn_id?: string;
   id?: string;
   tool_call_id?: string;
+  call_source?: ToolCallSourcePayload;
 }
 
 export interface PermissionDecisionEvent {
@@ -470,6 +472,7 @@ export interface AgentProgressEvent {
 }
 
 export interface RuntimeSpanEvent {
+  call_source?: ToolCallSourcePayload;
   type: "runtime.span";
   conversation_id: string;
   event: string;
@@ -758,6 +761,7 @@ export interface SubagentEventEvent {
 }
 
 export interface SubagentProgressEvent {
+  call_source?: ToolCallSourcePayload;
   model?: string;
   provider?: string;
   reasoning_effort?: string;
@@ -913,6 +917,7 @@ export interface SubagentMailboxEvent {
 }
 
 export interface RuntimeQueuedUserMessageSnapshot {
+  async_request_id?: string;
   conversation_id: string;
   message_id: string;
   user_message_id?: string;
@@ -926,6 +931,7 @@ export interface RuntimeQueuedUserMessageSnapshot {
 }
 
 export interface RuntimePendingTurnInputSnapshot {
+  async_request_id?: string;
   conversation_id: string;
   mode: "steer";
   message_id: string;

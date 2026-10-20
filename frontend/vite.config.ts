@@ -146,6 +146,9 @@ export default defineConfig(async ({ command, mode }) => {
               || /\/src\.v2\/chat\/[^/]+Events\.tsx?$/.test(normalized)
             ) return "websocket-runtime";
             if (!normalized.includes("/node_modules/")) return undefined;
+            if (/\/node_modules\/(?:react|react-dom|scheduler)\//.test(normalized)) return "react-vendor";
+            if (/\/node_modules\/(?:prosemirror-[^/]+|orderedmap|rope-sequence|w3c-keyname)\//.test(normalized)) return "composer-richtext-vendor";
+            if (/\/node_modules\/(?:@dnd-kit|@tanstack)\//.test(normalized)) return "interaction-vendor";
             if (normalized.includes("/@monaco-editor/react/")) return "monaco-react";
             if (normalized.includes("/monaco-editor/esm/vs/languages/definitions/")) return "monaco-languages";
             if (normalized.includes("/monaco-editor/esm/vs/features/")) {
@@ -169,6 +172,7 @@ export default defineConfig(async ({ command, mode }) => {
               || normalized.includes("/mdast-")
               || normalized.includes("/hast-")
               || normalized.includes("/katex/")
+              || /\/node_modules\/(?:markdown-it|mdurl|linkify-it|uc\.micro|punycode\.js|entities)\//.test(normalized)
             ) {
               return "markdown-vendor";
             }
@@ -176,6 +180,8 @@ export default defineConfig(async ({ command, mode }) => {
               normalized.includes("/@iconify/")
               || normalized.includes("/@iconify-icons/")
               || normalized.includes("/@lobehub/icons/")
+              || normalized.includes("/lucide-react/")
+              || normalized.includes("/material-icon-theme/")
             ) {
               return "icons-vendor";
             }

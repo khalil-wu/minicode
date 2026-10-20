@@ -210,8 +210,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-select-popover,
-  .mc-select-trigger > svg {
+  html:not([data-reduced-motion="false"]) .mc-select-popover,
+  html:not([data-reduced-motion="false"]) .mc-select-trigger > svg {
     animation: none;
     transition: none;
   }

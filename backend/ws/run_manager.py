@@ -346,7 +346,7 @@ class SessionRunManager:
         self._persist_user_queues(queues=queues)
         return removed
 
-    def pop_queued_user_message(self, conversation_id: str, message_id: str) -> Any | None:
+    def pop_queued_user_message(self, conversation_id: str, message_id: str, *, expected_turn_id: str = "") -> Any | None:
         """Remove and return one queued prompt without disturbing FIFO order."""
         queue = self.queued_user_messages(conversation_id)
         if not queue:
@@ -363,6 +363,8 @@ class SessionRunManager:
         if index < 0:
             return None
         command = commands.pop(index)
+        if expected_turn_id:
+            command.data["expected_turn_id"] = expected_turn_id
         queues = dict(self._user_message_queues)
         if commands:
             queues[conversation_id] = deque(commands)
@@ -487,23 +489,45 @@ class SessionRunManager:
             self._turn_input_queues[conversation_id] = queue
         return queue
 
+    def steer_target_rejection(self, conversation_id: str, expected_turn_id: str) -> dict[str, Any] | None:
+        stream = self._session._conversation_streams.get(conversation_id) or {}
+        active_turn_id = str(stream.get("turn_id") or "").strip()
+        queue = self._turn_input_queues.get(conversation_id)
+        context = self._run_contexts.get(conversation_id)
+        reason = ""
+        if not expected_turn_id:
+            reason = "steer_target_required"
+        elif (self.running_task_for(conversation_id) is None or not active_turn_id
+                or stream.get("terminal_fenced") or queue is None or queue.sealed or not queue.turn_id
+                or context is not None and context.turn_terminal_receipt is not None and context.turn_terminal_receipt.done()):
+            reason = "steer_target_unavailable"
+        elif expected_turn_id != active_turn_id or expected_turn_id != queue.turn_id:
+            reason = "steer_target_mismatch"
+        if reason:
+            return {"reason": reason, "error_code": reason, "conversation_id": conversation_id,
+                    "expected_turn_id": expected_turn_id, "active_turn_id": active_turn_id,
+                    "admitted": False, "queued": False}
+        return None
+
     def enqueue_turn_steer(
         self,
         conversation_id: str,
         command: Any,
         *,
+        expected_turn_id: str,
         target_message_id: str = "",
+        queued_message_id: str = "",
     ) -> TurnInput | None:
-        queue = self._turn_input_queues.get(conversation_id)
-        if queue is None or queue.sealed:
+        if self.steer_target_rejection(conversation_id, expected_turn_id) is not None:
             return None
-        context = self._run_contexts.get(conversation_id)
-        if context is not None and context.turn_terminal_receipt is not None and context.turn_terminal_receipt.done():
-            return None
+        queue = self._turn_input_queues[conversation_id]
         return queue.enqueue_command(
             command,
             mode="steer",
             target_message_id=target_message_id,
+            expected_turn_id=expected_turn_id,
+            before_publish=(lambda _item: self.pop_queued_user_message(conversation_id, queued_message_id,
+                expected_turn_id=expected_turn_id)) if queued_message_id else None,
         )
 
     def enqueue_user_message_as_steer(
@@ -511,26 +535,29 @@ class SessionRunManager:
         conversation_id: str,
         command: Any,
         *,
+        expected_turn_id: str,
         target_message_id: str = "",
     ) -> TurnInput | None:
         """Atomically accept a newly arrived prompt into the active turn.
 
-        This is the direct-prompt counterpart to promoting an item that is
-        already in the follow-up queue. The original command is made durable
-        only after the turn-local queue accepts it, so callers can safely fall
-        back to normal FIFO enqueue when the current turn has crossed its final
-        boundary.
+        The captured turn must still own both the public stream and the
+        turn-local queue. Acceptance persists the input before publishing it;
+        retrying its client request reuses that durable acceptance.
         """
-        queue = self._turn_input_queues.get(conversation_id)
-        if queue is None or queue.sealed:
+        if self.steer_target_rejection(conversation_id, expected_turn_id) is not None:
             return None
-        context = self._run_contexts.get(conversation_id)
-        if context is not None and context.turn_terminal_receipt is not None and context.turn_terminal_receipt.done():
-            return None
+        queue = self._turn_input_queues[conversation_id]
+        command_id = str(command.data.get("client_command_id") or "")
+        if command_id:
+            for pending in self._durable_turn_inputs.get(conversation_id, ()):
+                if (pending.data.get("client_command_id") == command_id
+                        and pending.data.get("_client_queue_key") == command.data.get("_client_queue_key")):
+                    return TurnInput.from_command(pending, mode="steer", target_message_id=target_message_id)
         return queue.enqueue_command(
             command,
             mode="steer",
             target_message_id=target_message_id,
+            expected_turn_id=expected_turn_id,
             before_publish=lambda _item: self._persist_user_queues(
                 turn_inputs={
                     **self._durable_turn_inputs,
@@ -539,14 +566,22 @@ class SessionRunManager:
             ),
         )
 
-    def enqueue_scheduled_input(self, conversation_id: str, command: ScheduledInputCommand) -> TurnInput | None:
+    def enqueue_scheduled_input(self, conversation_id: str, command: ScheduledInputCommand, *, expected_turn_id: str) -> TurnInput:
+        rejection = self.steer_target_rejection(conversation_id, expected_turn_id)
+        if rejection is not None:
+            raise ValueError(rejection["reason"])
         conversation = self._session.conversation_repo.get_conversation(conversation_id)
         host = self._session.guardian_host_for_conversation(conversation_id,
             evidence_checkpoint=conversation.context_snapshot.get("guardian_evidence"))
         command.data["_guardian_acceptance_order"] = host.evidence.reserve_order()
-        queue = self._turn_input_queues.get(conversation_id)
-        return self.enqueue_user_message_as_steer(conversation_id, command,
-            target_message_id=queue.turn_id if queue is not None else "")
+        command.data["expected_turn_id"] = expected_turn_id
+        item = self.enqueue_user_message_as_steer(conversation_id, command,
+            expected_turn_id=expected_turn_id,
+            target_message_id=str(self._session._conversation_streams[conversation_id].get("message_id") or ""))
+        if item is None:
+            rejection = self.steer_target_rejection(conversation_id, expected_turn_id)
+            raise ValueError(rejection["reason"] if rejection is not None else "steer_target_unavailable")
+        return item
 
     def pending_turn_input_snapshot(self) -> list[dict[str, Any]]:
         """Return non-destructive turn-local input state for session restore."""

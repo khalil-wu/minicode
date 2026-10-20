@@ -2,7 +2,7 @@ import { ArrowLeft, BookOpenText, Check, ChevronDown, FolderOpen, Globe2, Messag
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useAppStore } from "../stores";
-import type { MarketplaceSkill, SkillInfo } from "../stores/types";
+import type { MarketplaceSkill } from "../stores/types";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout, LONG_HTTP_TIMEOUT_MS } from "../protocol/api";
 import { BrandIcon } from "../components/BrandIcon";
@@ -12,6 +12,9 @@ import { openSettings } from "../lib/settings-navigation";
 import { selectSkillForComposer } from "../lib/select-skill-for-composer";
 import { showConfirm, showPrompt } from "./DialogService";
 import { PluginsTab } from "./PluginsTab";
+import { InstalledSkillDetailsDialog } from "./InstalledSkillDetailsDialog";
+import type { SettingsSkill } from "./SkillDetailsDialog";
+import { useSkillSettings } from "./useSkillSettings";
 import { pushToast } from "./ToastContainer";
 import "./SkillsMarketplace.css";
 
@@ -69,6 +72,7 @@ export const SkillsMarketplace = () => {
 const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | null; active: boolean }) => {
   const availableSkills = useAppStore((s) => s.availableSkills);
   const marketplaceSkills = useAppStore((s) => s.marketplaceSkills);
+  const { workspaceRoot, skills: userSkills, pluginSkills, error: settingsError, pendingPath, reload: reloadSkills, toggle: toggleSkill } = useSkillSettings(active);
   const [scope, setScope] = useState("all");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(false);
@@ -78,7 +82,9 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
   const pendingRef = useRef(false);
   const loadAbortRef = useRef<AbortController | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
-  const [detail, setDetail] = useState<{ kind: "installed"; skill: SkillInfo } | { kind: "public"; skill: MarketplaceSkill } | null>(null);
+  const [detail, setDetail] = useState<{ kind: "public"; skill: MarketplaceSkill } | null>(null);
+  const [installedDetailPath, setInstalledDetailPath] = useState<string | null>(null);
+  useEffect(() => { setInstalledDetailPath(null); }, [workspaceRoot]);
   const detailRef = useRef<HTMLElement>(null);
   const detailTrigger = useRef<HTMLElement | null>(null);
   useEffect(() => {
@@ -109,8 +115,9 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
   const refresh = useCallback((force = false) => {
     if (scope === "public") void loadMarketplace(force);
     sendClientCommand({ type: "skills.list" }, { silent: true });
-  }, [loadMarketplace, scope]);
-  useEffect(() => { if (active) refresh(); }, [active, refresh]);
+    void reloadSkills();
+  }, [loadMarketplace, scope, reloadSkills]);
+  useEffect(() => { if (active) { if (scope === "public") void loadMarketplace(); sendClientCommand({ type: "skills.list" }, { silent: true }); } }, [active, scope, loadMarketplace]);
   useEffect(() => () => loadAbortRef.current?.abort(), []);
   useEffect(() => { if (!active) setMenu(null); }, [active]);
 
@@ -141,24 +148,29 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
   };
   const q = query.trim().toLocaleLowerCase();
   const matches = (text: string) => !q || text.toLocaleLowerCase().includes(q);
-  const installed = availableSkills.filter((skill) => matches(`${skill.name} ${skill.display_name ?? ""} ${skill.description}`));
+  const inventory = new Map<string, SettingsSkill>();
+  for (const skill of availableSkills) if (skill.path) inventory.set(skill.path, { ...skill, path: skill.path, enabled: true });
+  for (const skill of [...userSkills, ...pluginSkills]) inventory.set(skill.path, skill);
+  const allInstalled = [...inventory.values()];
+  const selected = allInstalled.find(skill => skill.path === installedDetailPath);
+  const installed = allInstalled.filter((skill) => matches(`${skill.name} ${skill.display_name ?? ""} ${skill.description}`));
   const scoped = scope === "all" ? installed : installed.filter((skill) => skill.source_level === scope);
   const catalog = marketplaceSkills.filter((skill) => matches(`${skill.name} ${skill.title} ${skill.description}`));
-  const installedNames = new Set(availableSkills.map((skill) => skill.name));
-  const detailInstalled = detail && (installedNames.has(detail.skill.name) || (detail.kind === "public" && marketplaceSkills.some((skill) => skill.name === detail.skill.name && skill.installed)));
-  const scopes = Object.entries(sourceLabels).filter(([key]) => key === "builtin" || key === "user" || key === scope || availableSkills.some((skill) => skill.source_level === key));
-  const showSkillDetails = (skill: SkillInfo) => { detailTrigger.current = document.activeElement as HTMLElement; setDetail({ kind: "installed", skill }); setMenu(null); };
+  const installedNames = new Set(allInstalled.map((skill) => skill.name));
+  const detailInstalled = detail && (installedNames.has(detail.skill.name) || (marketplaceSkills.some((skill) => skill.name === detail.skill.name && skill.installed)));
+  const scopes = Object.entries(sourceLabels).filter(([key]) => key === "builtin" || key === "user" || key === scope || allInstalled.some((skill) => skill.source_level === key));
+  const showSkillDetails = (skill: SettingsSkill) => { setInstalledDetailPath(skill.path); setMenu(null); };
   const closeDetails = () => { setDetail(null); window.requestAnimationFrame(() => detailTrigger.current?.focus()); };
-  const skillMenu = (skill: SkillInfo, target: HTMLButtonElement) => {
+  const skillMenu = (skill: SettingsSkill, target: HTMLButtonElement) => {
     const rect = target.getBoundingClientRect();
     setMenu({ kind: "skill", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [
-      { label: "用于下一条消息", disabled: skill.user_invocable === false, icon: <MessageSquarePlus />, onClick: () => selectSkillForComposer(skill) },
+      { label: "用于下一条消息", disabled: !skill.enabled || skill.plugin_enabled === false || skill.user_invocable === false, icon: <MessageSquarePlus />, onClick: () => selectSkillForComposer(skill) },
       { label: "查看技能详情", onClick: () => showSkillDetails(skill) },
       ...(skill.source_level === "user" ? [{ label: "卸载技能", danger: true, disabled: Boolean(operation), icon: <Trash2 />, onClick: () => void mutate("remove", skill.name) }] : []),
       ...(skill.source_level === "plugin" ? [{ label: "管理所属插件", onClick: () => useAppStore.setState({ skillsMarketplaceTab: "plugins" }) }] : []),
     ] });
   };
-  const renderInstalled = (skill: SkillInfo) => <article className="skills-catalog-row" key={`${skill.source_level}:${skill.path ?? skill.name}`}>
+  const renderInstalled = (skill: SettingsSkill) => <article className="skills-catalog-row" key={`${skill.source_level}:${skill.path ?? skill.name}`}>
     <SkillLogo value={skill.display_name || skill.name} iconUrl={skill.icon_large || skill.icon} />
     <button type="button" className="skills-item-copy skills-item-open" onClick={() => showSkillDetails(skill)} aria-label={`查看技能详情 ${skill.name}`}><span className="skills-item-title"><strong>{skill.display_name || skill.name}</strong>{skill.active && <span>本轮已加载</span>}</span><span className="skills-item-description" title={skill.description}>{skill.short_description || skill.description}</span></button>
     <div className="skills-row-end"><Check className="skills-installed-check" aria-label="已安装" /><button type="button" className="skills-icon-button" onClick={(event) => skillMenu(skill, event.currentTarget)} aria-label={`管理技能 ${skill.name}`} aria-haspopup="menu"><MoreHorizontal /></button></div>
@@ -172,30 +184,21 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
         setMenu({ kind: "add", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [{ label: "导入本地技能", icon: <FolderOpen />, onClick: () => void mutate("import") }, { label: "浏览公开技能", icon: <Globe2 />, onClick: () => setScope("public") }] });
       }}>添加 <ChevronDown /></button>
     </>, toolbarHost)}
+    {active && selected && <InstalledSkillDetailsDialog skill={selected} workspaceRoot={workspaceRoot} pending={Boolean(pendingPath)} onToggle={() => void toggleSkill(selected)} onClose={() => setInstalledDetailPath(null)} />}
+    {settingsError && <div className="skills-detail-note" role="alert">{settingsError}</div>}
     {detail && <section ref={detailRef} tabIndex={-1} className="skills-detail-page" aria-label="技能详情" onKeyDown={(event) => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeDetails(); }
     }}>
       <button type="button" className="skills-detail-back" onClick={closeDetails}><ArrowLeft size={16} />返回技能列表</button>
-      <div className="skills-detail-heading"><SkillLogo value={detail.kind === "installed" ? detail.skill.display_name || detail.skill.name : detail.skill.title} iconUrl={detail.kind === "installed" ? detail.skill.icon_large || detail.skill.icon : detail.skill.iconUrl} /><div>
-        <h1>{detail.kind === "installed" ? detail.skill.display_name || detail.skill.name : detail.skill.title}</h1><code>{detail.skill.name}</code>
+      <div className="skills-detail-heading"><SkillLogo value={detail.skill.title} iconUrl={detail.skill.iconUrl} /><div>
+        <h1>{detail.skill.title}</h1><code>{detail.skill.name}</code>
       </div></div>
       <div className="skills-detail-description">{detail.skill.description}</div>
-      {detail.kind === "installed" ? <>
-        <dl className="skills-detail-meta"><div><dt>来源</dt><dd>{sourceLabels[detail.skill.source_level || ""] || detail.skill.source_level || "本地"}</dd></div>
-          {detail.skill.version && <div><dt>版本</dt><dd>{detail.skill.version}</dd></div>}
-          <div><dt>调用方式</dt><dd>{detail.skill.user_invocable === false ? "由模型按需调用" : "可用于下一条消息"}{detail.skill.allow_implicit_invocation === false ? " · 不自动触发" : ""}</dd></div>
-          {detail.skill.path && <div><dt>源文件</dt><dd><code>{detail.skill.path}</code></dd></div>}
-        </dl>
-        {(detail.skill.mcp_dependencies?.length || 0) > 0 && <div className="skills-detail-note"><strong>依赖的 MCP 服务</strong><p>{detail.skill.mcp_dependencies!.join("、")}</p><button type="button" className="skills-text-button" onClick={() => { useAppStore.setState({ skillsMarketplaceOpen: false }); openSettings("connectors"); }}>打开 MCP 设置</button></div>}
-        <div className="skills-detail-actions"><button type="button" className="skills-text-button" disabled={detail.skill.user_invocable === false} onClick={() => selectSkillForComposer(detail.skill)}><MessageSquarePlus size={16} />用于下一条消息</button>
-          {detail.skill.source_level === "user" && <button type="button" className="skills-text-button" disabled={Boolean(operation)} onClick={() => void mutate("remove", detail.skill.name)}>卸载技能</button>}
-          {detail.skill.source_level === "plugin" && <button type="button" className="skills-text-button" onClick={() => useAppStore.setState({ skillsMarketplaceTab: "plugins" })}>管理所属插件</button>}
-        </div>
-      </> : <>
+      <>
         <dl className="skills-detail-meta"><div><dt>来源</dt><dd>{detail.skill.source || "OpenAI 技能目录"}</dd></div><div><dt>安装范围</dt><dd>个人技能目录</dd></div></dl>
         {(detail.skill.triggers?.length || 0) > 0 && <div className="skills-detail-note"><strong>适用任务</strong><p>{detail.skill.triggers.join("、")}</p></div>}
         <button type="button" className="skills-text-button" disabled={Boolean(operation) || Boolean(detailInstalled)} onClick={() => void mutate("install", detail.skill.name)}>{operation === `install:${detail.skill.name}` ? "安装中…" : detailInstalled ? "已安装到个人技能目录" : "安装到个人技能目录"}</button>
-      </>}
+      </>
     </section>}
     <div hidden={Boolean(detail)}>
     <header className="skills-page-heading"><h1>技能</h1><p>通过任务专用技能扩展 MiniCode</p></header>

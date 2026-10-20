@@ -22,4 +22,4 @@
 .remote-directory-dialog button:disabled { opacity: .5; cursor: default; }
 .remote-directory-spinner { animation: remote-directory-spin 1s linear infinite; }
 @keyframes remote-directory-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .remote-directory-spinner { animation: none; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .remote-directory-spinner { animation: none; } }

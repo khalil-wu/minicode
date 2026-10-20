@@ -11,14 +11,36 @@ from backend.conversations.repository import ConversationRepository
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.durable_user_queue import DurableUserMessageQueue
 from backend.ws.handler import WebSocketSession
-from backend.ws.handlers.misc import handle_interrupt_command, handle_user_message_queue_steer
+from backend.ws.handlers.misc import handle_interrupt_command, handle_user_message_queue_start
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
+from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
 
 
 async def _noop(*args, **kwargs):
     pass
+
+
+@pytest.mark.asyncio
+async def test_interrupt_receipt_waits_for_the_owned_handler(session):
+    entered, released = asyncio.Event(), asyncio.Event()
+
+    async def dispatch(kind, payload):
+        assert kind == "interrupt" and payload["message_id"] == "assistant-owned"
+        entered.set()
+        await released.wait()
+        return True
+
+    session.command_registry = SimpleNamespace(dispatch=dispatch)
+    command = UserCommand(type="interrupt", data={"conversation_id": "conv_stop_owner", "message_id": "assistant-owned"})
+    pending = asyncio.create_task(session.command_dispatcher._handle_command_inner(command))
+    await entered.wait()
+    assert not any(event.type == "command.result" for event in session.events)
+    released.set()
+    await pending
+    assert session.events[-1].type == "command.result"
+    assert session.events[-1].data["command"] == "interrupt"
 
 
 @pytest_asyncio.fixture
@@ -59,6 +81,7 @@ async def session(tmp_path):
     value.session_lifecycle.workspace_root_for_conversation = lambda conv=None: None
     value.session_lifecycle.schedule_task_runtime_update = lambda: None
     value.guardian_host_for_conversation = lambda owner, **kwargs: SessionApprovalRuntimeMixin.guardian_host_for_conversation(value, owner, **kwargs)
+    value.emit_command_result = SessionPermissionRuntimeMixin.emit_command_result.__get__(value)
     manager = value.run_manager = SessionRunManager(value)
     manager._notification_wakes_closed = True
     value.command_dispatcher = SessionCommandDispatcher(value, root_dir=tmp_path / "commands")
@@ -300,7 +323,7 @@ async def test_new_input_does_not_resume_old_queue_but_explicit_queue_send_does(
     assert session.started == ["new"]
     assert manager.user_queue_paused("conv_stop_owner")
     assert manager.dequeue_user_message("conv_stop_owner") is None
-    await handle_user_message_queue_steer(session, {"conversation_id": "conv_stop_owner", "message_id": "old"})
+    await handle_user_message_queue_start(session, {"conversation_id": "conv_stop_owner", "message_id": "old"})
     await asyncio.gather(*list(session.command_dispatcher.execution_command_tasks))
     assert session.started == ["new", "old"]
     assert not manager.user_queue_paused("conv_stop_owner")

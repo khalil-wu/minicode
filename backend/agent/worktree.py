@@ -22,6 +22,10 @@ from pathlib import Path
 from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.runtime_env import sanitized_git_env
 from backend.services.git_settings_service import generated_branch_name
+from backend.services.worktree_settings_service import (
+    is_managed_worktree_path, managed_worktree_root, refresh_worktree_upstream,
+    register_managed_worktree, unregister_managed_worktree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +108,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
     if not head:
         return None, f"could not resolve HEAD in {git_root} (empty repository?)"
 
-    worktrees_dir = git_root / ".minicode" / "worktrees"
+    worktrees_dir = managed_worktree_root()
     worktree_path = worktrees_dir / slug
     branch = generated_branch_name(slug)
     if worktree_path.exists():
@@ -114,6 +118,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
     except OSError as exc:
         return None, f"could not create {worktrees_dir}: {exc}"
 
+    refresh_worktree_upstream(git_root)
     result = _git(
         git_root, "worktree", "add", "-b", branch, str(worktree_path), head
     )
@@ -125,6 +130,7 @@ def create_agent_worktree(slug: str, base: Path) -> tuple[AgentWorktree | None, 
     _ensure_excluded(git_root)
     logger.info("Created agent worktree %s (branch %s)", worktree_path, branch)
     resolved_path = worktree_path.resolve()
+    register_managed_worktree(resolved_path, git_root, branch=branch)
     _ACTIVE_WORKTREE_PATHS.add(canonical_file_path_key(resolved_path))
     return (
         AgentWorktree(
@@ -179,8 +185,10 @@ def has_worktree_changes(worktree: AgentWorktree) -> bool:
         return True
 
 
-def remove_agent_worktree(worktree: AgentWorktree) -> bool:
+def remove_agent_worktree(worktree: AgentWorktree, *, environment_runner=None) -> bool:
     """Remove a clean agent worktree and delete its temporary branch."""
+    from backend.workspace.local_environment_lifecycle import run_worktree_environment
+    run_worktree_environment(worktree.git_root, worktree.worktree_path, "cleanup", runner=environment_runner)
     result = _git(
         worktree.git_root, "worktree", "remove", "--force", str(worktree.worktree_path)
     )
@@ -193,10 +201,11 @@ def remove_agent_worktree(worktree: AgentWorktree) -> bool:
     if branch_result is None or branch_result.returncode != 0:
         logger.warning("Could not delete agent worktree branch %s", temporary_branch)
     logger.info("Removed agent worktree %s", worktree.worktree_path)
+    unregister_managed_worktree(worktree.worktree_path)
     return True
 
 
-def cleanup_agent_worktree(worktree: AgentWorktree) -> tuple[bool, str]:
+def cleanup_agent_worktree(worktree: AgentWorktree, *, environment_runner=None) -> tuple[bool, str]:
     """Remove the worktree when unchanged; keep it (with its path) otherwise.
 
     Returns ``(kept, worktree_path_if_kept)``.
@@ -205,7 +214,7 @@ def cleanup_agent_worktree(worktree: AgentWorktree) -> tuple[bool, str]:
     if has_worktree_changes(worktree):
         logger.info("Agent worktree has changes, keeping: %s", worktree.worktree_path)
         return True, str(worktree.worktree_path)
-    if not remove_agent_worktree(worktree):
+    if not remove_agent_worktree(worktree, environment_runner=environment_runner):
         return True, str(worktree.worktree_path)
     return False, ""
 
@@ -235,8 +244,7 @@ def resume_agent_worktree(
         expected_base = Path(expected_repo_root).resolve()
         repo_root = (find_git_root(expected_base) or expected_base).resolve()
         path = Path(worktree_path).resolve()
-        expected_path = (repo_root / ".minicode" / "worktrees" / subagent_id).resolve()
-        if path != expected_path:
+        if path.name != subagent_id or not is_managed_worktree_path(path, repo_root):
             return None
         if not path.is_dir():
             return None

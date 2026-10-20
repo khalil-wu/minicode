@@ -8,6 +8,9 @@ const { NATIVE_MENU_KEYS } = require("./menu-popup");
 const { openInTarget } = require("./open-targets");
 const windowAppearance = require("./window-appearance");
 const nativeFileExtensions = require("./native-open-file-extensions.json");
+const notificationSounds = require("./notification-sounds");
+const systemSettings = require("./system-settings");
+const systemFonts = require("./system-fonts");
 
 const {
   isHttpUrl,
@@ -219,6 +222,8 @@ function registerIpcHandlers() {
   const {
     setupWindowsSandbox,
     popupApplicationMenu,
+    setApplicationMenuState,
+    executeApplicationMenuAction,
     getWindowForSender,
     getWindowRecord,
     showDesktopNotification,
@@ -321,6 +326,22 @@ function registerIpcHandlers() {
   // Window controls
   // -----------------------------------------------------------------------
 
+  ipcMain.handle("minicode:pets:getState", withMainSender("minicode:pets:getState", async () => (await ctx.getPetManager()).getState()));
+  ipcMain.handle("minicode:pets:refresh", withMainSender("minicode:pets:refresh", () => ctx.refreshPets()));
+  ipcMain.handle("minicode:pets:update", withMainSender("minicode:pets:update", async (_event, patch) => (await ctx.getPetManager()).update(patch)));
+  ipcMain.handle("minicode:pets:toggleMini", withMainSender("minicode:pets:toggleMini", async () => (await ctx.getPetManager()).toggleMini()));
+  ipcMain.handle("minicode:pets:setNotificationMuted", withMainSender("minicode:pets:setNotificationMuted", async (_event, request) => (await ctx.getPetManager()).setNotificationMuted(request)));
+  ipcMain.handle("minicode:pets:openFolder", withMainSender("minicode:pets:openFolder", async () => (await ctx.getPetManager()).openFolder()));
+  ipcMain.handle("minicode:pets:getSprite", withMainSender("minicode:pets:getSprite", async (_event, id) => (await ctx.getPetManager()).getSprite(id)));
+  ipcMain.handle("minicode:pets:publishActivity", withMainSender("minicode:pets:publishActivity", async (event, activity) => {
+    const owner = ctx.getWindowRecord(ctx.getWindowForSender(event.sender)).windowInstanceId;
+    return (await ctx.getPetManager()).publishActivity(activity, owner);
+  }));
+  ipcMain.handle("minicode:pets:completeAction", withMainSender("minicode:pets:completeAction", (event, result) => {
+    const owner = ctx.getWindowRecord(ctx.getWindowForSender(event.sender)).windowInstanceId;
+    return ctx.completePetAction(owner, result);
+  }));
+
   ipcMain.on("minicode:runtime:get", withMainSender("minicode:runtime:get", (event) => {
     const win = getWin(event);
     const record = getWindowRecord(win);
@@ -369,6 +390,15 @@ function registerIpcHandlers() {
   }));
   ipcMain.handle("minicode:window:state", withMainSender("minicode:window:state", event => ({ isMaximized: getWin(event).isMaximized(), isFocused: getWin(event).isFocused() })));
   ipcMain.handle("minicode:window:appearance:get", withMainSender("minicode:window:appearance:get", event => windowAppearance.get(getWin(event))));
+  ipcMain.handle("minicode:window:fontFamilies", withMainSender("minicode:window:fontFamilies", () => systemFonts.listFontFamilies()));
+  ipcMain.handle("minicode:window:fonts", withMainSender("minicode:window:fonts", () => new Promise((resolve, reject) => {
+    execFile("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+      "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); Add-Type -AssemblyName System.Drawing; $fonts=[Drawing.Text.InstalledFontCollection]::new(); ConvertTo-Json -Compress -InputObject @($fonts.Families.Name | Sort-Object -Unique)"],
+    { windowsHide: true, encoding: "utf8" }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(JSON.parse(stdout));
+    });
+  })));
   ipcMain.handle("minicode:window:appearance:set", withMainSender("minicode:window:appearance:set", (event, options) => windowAppearance.set(getWin(event), options)));
 
   ipcMain.handle("minicode:window:maximize", withMainSender("minicode:window:maximize", (event) => {
@@ -409,6 +439,58 @@ function registerIpcHandlers() {
       terminalShellTargets: ctx.desktopPreferences.terminalShellTargets().map(({ id, label }) => ({ id, label })) };
   };
   ipcMain.handle("minicode:preferences:get", withMainSender("minicode:preferences:get", () => preferencesSnapshot()));
+  ipcMain.handle("minicode:dictation:get", withMainSender("minicode:dictation:get", () => ctx.dictationHotkeys.get()));
+  ipcMain.handle("minicode:dictation:getLocalRuntime", withMainSender("minicode:dictation:getLocalRuntime", () => {
+    const { apiBaseUrl, runtimeToken, revision } = ctx.getBackendRuntimeConfig();
+    return { apiBaseUrl, runtimeToken, revision };
+  }));
+  ipcMain.handle("minicode:dictation:openProviderSettings", withMainSender("minicode:dictation:openProviderSettings", async event => {
+    const source = getWin(event);
+    let target = !getWindowRecord(source).remoteHostId ? source
+      : ctx.getMainWindows().find(window => !getWindowRecord(window).remoteHostId);
+    if (target) {
+      getWindowRecord(target).pendingProviderSettings = true;
+      target.webContents.send("minicode:menu:settings", { tab: "provider" });
+    }
+    else target = await ctx.createNewWindow({ settingsTab: "provider" });
+    ctx.focusMainWindow(target);
+    return true;
+  }));
+  ipcMain.handle("minicode:dictation:consumeProviderSettings", withMainSender("minicode:dictation:consumeProviderSettings", event => {
+    const record = getWindowRecord(getWin(event));
+    const pending = record.pendingProviderSettings;
+    record.pendingProviderSettings = false;
+    return pending;
+  }));
+  ipcMain.handle("minicode:dictation:migratePreferences", withMainSender("minicode:dictation:migratePreferences", async (event, legacy) => {
+    const record = getWindowRecord(getWin(event));
+    ctx.desktopPreferences.migrateDictationPreferences(record.remoteHostId ? `remote:${record.remoteHostId}` : "local", legacy);
+    const snapshot = await preferencesSnapshot();
+    for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
+    return snapshot;
+  }));
+  ipcMain.handle("minicode:dictation:configure", withMainSender("minicode:dictation:configure", (_event, patch) => {
+    if (Object.keys(patch).some(key => !["holdHotkey", "toggleHotkey"].includes(key)) || Object.values(patch).some(value => typeof value !== "string")) throw new Error("Invalid dictation shortcut configuration");
+    return ctx.dictationHotkeys.configure(patch);
+  }));
+  ipcMain.handle("minicode:dictation:suspend", withMainSender("minicode:dictation:suspend", (event, value) => ctx.dictationHotkeys.suspend(event.sender.id, value === true)));
+  ipcMain.handle("minicode:dictation:insert", withMainSender("minicode:dictation:insert", (event, token, text) => ctx.dictationHotkeys.insert(event.sender.id, token, text)));
+  ipcMain.handle("minicode:dictation:complete", withMainSender("minicode:dictation:complete", (event, token) => ctx.dictationHotkeys.complete(event.sender.id, token)));
+  ipcMain.handle("minicode:preferences:getStartupStatus", withMainSender("minicode:preferences:getStartupStatus", () => systemSettings.getStartupStatus(app)));
+  ipcMain.handle("minicode:preferences:openStartupSettings", withMainSender("minicode:preferences:openStartupSettings", () => systemSettings.openStartupSettings(shell)));
+  ipcMain.handle("minicode:preferences:getOpenSourceLicenses", withMainSender("minicode:preferences:getOpenSourceLicenses", () => systemSettings.getOpenSourceLicenses(app)));
+  ipcMain.handle("minicode:preferences:pickNotificationSound", withMainSender("minicode:preferences:pickNotificationSound", event => notificationSounds.pickSound(dialog, getWin(event))));
+  ipcMain.handle("minicode:preferences:previewNotificationSound", withMainSender("minicode:preferences:previewNotificationSound", (_event, sound) => {
+    if (!notificationSounds.isNotificationSound(sound)) throw new TypeError("Unsupported notification sound.");
+    return notificationSounds.playSound(sound, app.getPath("userData"), { restart: true });
+  }));
+  ipcMain.handle("minicode:preferences:importNotificationSound", withMainSender("minicode:preferences:importNotificationSound", async (_event, payload) => {
+    const sound = notificationSounds.importSound(payload, app.getPath("userData"));
+    ctx.desktopPreferences.setPreferences({ notificationSound: sound });
+    const snapshot = await preferencesSnapshot();
+    for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
+    return snapshot;
+  }));
   ipcMain.handle("minicode:preferences:set", withMainSender("minicode:preferences:set", async (_event, patch) => {
     ctx.desktopPreferences.setPreferences(patch);
     if ("localeOverride" in patch) ctx.onLocaleChanged();
@@ -427,7 +509,25 @@ function registerIpcHandlers() {
   }));
   ipcMain.handle("minicode:browser:history", withMainSender("minicode:browser:history", (_event, query) => ctx.browserHistory.search(query)));
   ipcMain.handle("minicode:browser:removeHistory", withMainSender("minicode:browser:removeHistory", (_event, ids) => ctx.browserHistory.remove(ids)));
-  ipcMain.handle("minicode:embeddedBrowser:clearBrowsingData", withMainSender("minicode:embeddedBrowser:clearBrowsingData", () => ctx.embeddedBrowserManager.clearBrowsingData()));
+  ipcMain.handle("minicode:browserProfileImport:list", withMainSender("minicode:browserProfileImport:list", () => ctx.browserProfileImport.listImportableBrowserProfiles()));
+  ipcMain.handle("minicode:browserProfileImport:import", withMainSender("minicode:browserProfileImport:import", (_event, request) => ctx.browserProfileImport.importBrowserProfile(request)));
+  for (const method of ["listPasswords", "getPassword", "savePassword", "removePassword", "listContacts", "saveContact", "removeContact", "setAutofillSettings"]) {
+    const channel = `minicode:browserPersonalData:${method}`;
+    ipcMain.handle(channel, withMainSender(channel, (_event, request) => ctx.browserPersonalData[method](request)));
+  }
+  ipcMain.handle("minicode:embeddedBrowser:listSitePermissions", withMainSender("minicode:embeddedBrowser:listSitePermissions", () => ctx.embeddedBrowserManager.listSitePermissions()));
+  ipcMain.handle("minicode:embeddedBrowser:getSitePolicy", withMainSender("minicode:embeddedBrowser:getSitePolicy", () => ctx.embeddedBrowserManager.getSitePolicy()));
+  ipcMain.handle("minicode:embeddedBrowser:setSitePolicy", withMainSender("minicode:embeddedBrowser:setSitePolicy", (_event, request) => ctx.embeddedBrowserManager.setSitePolicy(request)));
+  ipcMain.handle("minicode:embeddedBrowser:removeSiteDevice", withMainSender("minicode:embeddedBrowser:removeSiteDevice", (_event, request) => ctx.embeddedBrowserManager.removeSiteDevice(request)));
+  ipcMain.on("minicode:browserPassword:submitted", (event, request) => { void ctx.embeddedBrowserManager.handlePasswordSubmission(event, request); });
+  ipcMain.on("minicode:browserLink:click", (event, request) => { event.returnValue = ctx.embeddedBrowserManager.handleLinkClick(event, request); });
+  ipcMain.handle("minicode:embeddedBrowser:removeSitePermissions", withMainSender("minicode:embeddedBrowser:removeSitePermissions", (_event, request) => ctx.embeddedBrowserManager.removeSitePermissions(request)));
+  ipcMain.handle("minicode:mcpApp:prepare", withMainSender("minicode:mcpApp:prepare", (event, frameUrl) => {
+    return ctx.getMcpAppSandbox().prepare(event.sender.id, frameUrl, ctx.getRuntimeConfig(getWin(event)).apiBaseUrl);
+  }));
+  ipcMain.handle("minicode:mcpApp:release", withMainSender("minicode:mcpApp:release", (event, id) => ctx.getMcpAppSandbox().release(event.sender.id, id)));
+  ipcMain.handle("minicode:mcpApp:clearData", withMainSender("minicode:mcpApp:clearData", () => ctx.getMcpAppSandbox().clearData()));
+  ipcMain.handle("minicode:embeddedBrowser:clearBrowsingData", withMainSender("minicode:embeddedBrowser:clearBrowsingData", (_event, dataTypes) => ctx.embeddedBrowserManager.clearBrowsingData(dataTypes)));
   ipcMain.handle("minicode:embeddedBrowser:capture", withMainSender("minicode:embeddedBrowser:capture", (event, payload) => ctx.embeddedBrowserManager.capture(browserPayload(event, payload))));
   ipcMain.handle("minicode:openPreferredPath", withMainSender("minicode:openPreferredPath", async (_event, target, line, options = {}) => {
     const resolved = assertReadablePath(target, "File open target");
@@ -559,6 +659,58 @@ function registerIpcHandlers() {
     }
   }));
 
+  ipcMain.handle("minicode:settings:openTarget", withMainSender("minicode:settings:openTarget", async (event, request) => {
+    if (!request || !["config", "hook", "data"].includes(request.kind)
+      || (request.workspaceRoot !== undefined && typeof request.workspaceRoot !== "string")
+      || (request.kind === "hook" && typeof request.hookKey !== "string")) {
+      throw new TypeError("A registered settings action is required.");
+    }
+    const window = getWin(event);
+    if (getWindowRecord(window).remoteHostId) {
+      throw new Error("Remote settings paths cannot be opened by the local file manager.");
+    }
+    const runtime = ctx.getRuntimeConfig(window);
+    const url = new URL("/api/settings/open-target", runtime.apiBaseUrl);
+    url.searchParams.set("kind", request.kind);
+    url.searchParams.set("workspace_root", request.workspaceRoot ?? "");
+    if (request.kind === "hook") url.searchParams.set("hook_key", request.hookKey);
+    const response = await fetch(url, { headers: { "X-MiniCode-Token": runtime.runtimeToken }, cache: "no-store" });
+    if (!response.ok) throw new Error((await response.json()).detail);
+    const target = await response.json();
+    if (typeof target.path !== "string" || !path.isAbsolute(target.path)) {
+      throw new Error("The settings service did not return an absolute registered path.");
+    }
+    const error = await shell.openPath(target.path);
+    if (error) throw new Error(error);
+    return true;
+  }));
+
+  ipcMain.handle("minicode:skills:reveal", withMainSender("minicode:skills:reveal", async (event, request) => {
+    if (!request || typeof request.path !== "string" || !path.isAbsolute(request.path)
+      || typeof request.workspaceRoot !== "string") {
+      throw new TypeError("A Skill path and its workspace owner are required.");
+    }
+    const window = getWin(event);
+    if (getWindowRecord(window).remoteHostId) {
+      throw new Error("Skill files on a remote host cannot be revealed in the local file manager.");
+    }
+    const runtime = ctx.getRuntimeConfig(window);
+    const url = new URL("/api/skills/detail", runtime.apiBaseUrl);
+    url.searchParams.set("skill_path", request.path);
+    url.searchParams.set("workspace_root", request.workspaceRoot);
+    const response = await fetch(url, { headers: { "X-MiniCode-Token": runtime.runtimeToken }, cache: "no-store" });
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail);
+    }
+    const skill = await response.json();
+    if (typeof skill.path !== "string" || !path.isAbsolute(skill.path) || !isSamePath(skill.path, request.path)) {
+      throw new Error("The Skill catalog did not return the requested file.");
+    }
+    shell.showItemInFolder(skill.path);
+    return true;
+  }));
+
   ipcMain.handle("minicode:deepLink:open", withMainSender("minicode:deepLink:open", (_event, target) => {
     if (typeof target !== "string" || !target.trim()) {
       return false;
@@ -657,6 +809,9 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:embeddedBrowser:runAction", withMainSender("minicode:embeddedBrowser:runAction", (_event, payload) => {
     return embeddedBrowser?.runNavigationAction(browserPayload(_event, payload)) ?? false;
   }));
+  ipcMain.handle("minicode:embeddedBrowser:pageCommand", withMainSender("minicode:embeddedBrowser:pageCommand", (event, payload) => embeddedBrowser.runPageCommand(browserPayload(event, payload))));
+  ipcMain.handle("minicode:embeddedBrowser:downloads", withMainSender("minicode:embeddedBrowser:downloads", () => embeddedBrowser.listDownloads()));
+  ipcMain.handle("minicode:embeddedBrowser:downloadAction", withMainSender("minicode:embeddedBrowser:downloadAction", (_event, payload) => embeddedBrowser.runDownloadAction(payload)));
   ipcMain.handle("minicode:embeddedBrowser:inspect", withMainSender("minicode:embeddedBrowser:inspect", async (_event, payload) => {
     const action = payload?.kind === "network"
       ? "get_network_logs"
@@ -884,6 +1039,22 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:menu:popup", withMainSender("minicode:menu:popup", (_event, key) => {
     if (!NATIVE_MENU_KEYS.has(key)) throw new TypeError("请选择文件、编辑、视图或帮助菜单。");
     return popupApplicationMenu(key, getWin(_event));
+  }));
+  ipcMain.handle("minicode:menu:setState", withMainSender("minicode:menu:setState", (event, state) => {
+    const keys = ["terminalEnabled", "bottomPanelToggleEnabled", "newProjectEnabled", "editorFocused"];
+    if (!state || Object.keys(state).length !== keys.length + 4 || keys.some(key => typeof state[key] !== "boolean") || typeof state.shortcutRecording !== "boolean"
+      || !state.accelerators || typeof state.accelerators !== "object" || Array.isArray(state.accelerators)
+      || Object.values(state.accelerators).some(value => value !== null && typeof value !== "string")
+      || !state.acceleratorBindings || typeof state.acceleratorBindings !== "object" || Array.isArray(state.acceleratorBindings)
+      || Object.values(state.acceleratorBindings).some(value => !Array.isArray(value) || value.some(chord => typeof chord !== "string"))
+      || !Array.isArray(state.shortcutOverrides) || state.shortcutOverrides.some(value => typeof value !== "string")) {
+      throw new TypeError("Native menu state requires capability fields, the current accelerator map and its recording state.");
+    }
+    return setApplicationMenuState(getWin(event), state);
+  }));
+  ipcMain.handle("minicode:menu:execute", withMainSender("minicode:menu:execute", (event, action) => {
+    if (typeof action !== "string") throw new TypeError("Native menu command must be an action id.");
+    return executeApplicationMenuAction(getWin(event), action);
   }));
 }
 

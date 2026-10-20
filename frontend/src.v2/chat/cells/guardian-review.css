@@ -27,4 +27,4 @@
 .guardian-patch-header { display: inline-flex; gap: 6px; max-width: 100%; }
 .guardian-patch-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .guardian-patch-header:hover .guardian-review-chevron { opacity: 1; }
-@media (prefers-reduced-motion: reduce) { .guardian-review-chevron { transition: none; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .guardian-review-chevron { transition: none; } }

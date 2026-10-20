@@ -281,10 +281,13 @@ class TurnInputQueue:
         mode: TurnInputMode = "steer",
         target_message_id: str = "",
         before_publish: Callable[[TurnInput], None] | None = None,
+        expected_turn_id: str | None = None,
     ) -> TurnInput | None:
         waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...] = ()
         with self._lock:
             if self._phase is MailboxDeliveryPhase.SEALED:
+                return None
+            if expected_turn_id is not None and (not expected_turn_id or expected_turn_id != self._turn_id):
                 return None
             item = TurnInput.from_command(
                 command,

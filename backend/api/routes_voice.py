@@ -1,21 +1,22 @@
 """Explicitly configured dictation; provider compatibility is not availability."""
 from __future__ import annotations
 
-import io
+import asyncio
 import json
 import time
-import wave
 from typing import Literal
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from backend.config import get_llm_settings_payload, load_config_layer_stack
 from backend.services.llm_adapter_factory import build_provider_adapter
+from backend.services.dictation_history import dictation_history
 
 router = APIRouter()
+_transcribing_recordings: set[str] = set()
 # These are observations from this backend run, not a promise that a remote
 # service remains online. The UI shows the observation time explicitly.
 _checks: dict[tuple[str, str, str], dict] = {}
@@ -42,7 +43,7 @@ def voice_service_status(provider: str = "", model: str = "", *, settings_data: 
         reason = "配置已就绪，尚未确认远端转录接口是否可用。"
     check = _checks.get((selected, endpoint, model.strip()))
     if check and compatible and configured:
-        reason = "检测结果记录最近一次转录请求；更换服务配置后请重新检测。"
+        reason = "最近一次听写成功。" if check["ok"] else "最近一次听写未成功。"
     return {
         "provider": selected, "label": section.get("display_name") or {"openai": "OpenAI", "anthropic": "Anthropic", "custom": "自定义服务"}[selected],
         "endpoint": endpoint, "compatible": compatible, "configured": configured,
@@ -63,58 +64,90 @@ def get_voice_status(provider: str = Query(""), model: str = Query("")):
     return voice_service_status(provider, model)
 
 
-class VoiceCheckRequest(BaseModel):
+@router.get("/api/voice/recordings")
+def list_voice_recordings():
+    return {"recordings": dictation_history.list()}
+
+
+@router.post("/api/voice/recordings")
+async def save_voice_recording(
+    audio: UploadFile = File(...), language: str = Form(""),
+    duration_ms: int = Form(..., ge=0),
+    status: Literal["saved", "cancelled", "interrupted"] = Form("saved"),
+    conversation_id: str = Form(""), workspace_root: str = Form(""),
+):
+    data = await audio.read()
+    if not data:
+        raise HTTPException(status_code=422, detail="录音没有音频内容。")
+    return dictation_history.create(data, mime_type=audio.content_type or "audio/webm", language=language,
+        duration_ms=duration_ms, status=status, conversation_id=conversation_id, workspace_root=workspace_root)
+
+
+def _recording_audio(recording_id: str) -> tuple[dict, bytes]:
+    try:
+        return dictation_history.read_audio(recording_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="录音已被删除或不在最近 20 条记录中。") from None
+
+
+@router.get("/api/voice/recordings/{recording_id}/audio")
+def download_voice_recording(recording_id: str):
+    record, audio = _recording_audio(recording_id)
+    extension = "mp4" if "mp4" in record["mime_type"] else "webm"
+    return Response(audio, media_type=record["mime_type"], headers={
+        "Content-Disposition": f'attachment; filename="dictation-{record["id"]}.{extension}"',
+        "Cache-Control": "no-store",
+    })
+
+
+@router.delete("/api/voice/recordings/{recording_id}")
+def delete_voice_recording(recording_id: str):
+    try:
+        dictation_history.delete(recording_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="录音已被删除。") from None
+    return {"deleted": recording_id}
+
+
+class RecordingTranscriptionRequest(BaseModel):
     provider: Literal["", "openai", "anthropic", "custom"] = ""
     model: str = Field(min_length=1, max_length=200)
+    expected_endpoint: str
+    dictionary: list[str] = Field(default_factory=list)
 
 
-@router.post("/api/voice/check")
-async def check_voice_service(request: VoiceCheckRequest):
+@router.post("/api/voice/recordings/{recording_id}/transcribe")
+async def transcribe_voice_recording(recording_id: str, request: RecordingTranscriptionRequest):
+    record, audio = _recording_audio(recording_id)
     settings_data = load_config_layer_stack().effective_config()
     service = _require_service(request.provider, request.model, settings_data)
-    recording = io.BytesIO()
-    with wave.open(recording, "wb") as sample:
-        sample.setnchannels(1)
-        sample.setsampwidth(2)
-        sample.setframerate(16000)
-        sample.writeframes(b"\x00\x00" * 16000)
-    adapter = build_provider_adapter(service["provider"], model_override=request.model, settings_snapshot=settings_data)
-    async def verify():
-        try:
-            await adapter.transcribe_audio(recording.getvalue(), filename="connection-check.wav", model=request.model)
-            check = {"ok": True, "at": time.time(), "error": ""}
-        except (ValueError, NotImplementedError, httpx.HTTPError) as exc:
-            check = {"ok": False, "at": time.time(), "error": str(exc)}
-        finally:
-            await adapter.aclose()
-        _checks[(service["provider"], service["endpoint"], request.model)] = check
-        yield json.dumps({**service, "last_check": check}, ensure_ascii=False)
-    return StreamingResponse(verify(), media_type="application/json", headers={"Cache-Control": "no-store"})
-
-
-@router.post("/api/voice/transcribe")
-async def transcribe_voice(
-    audio: UploadFile = File(...), model: str = Form(..., min_length=1, max_length=200),
-    provider: str = Form(""), language: str = Form(""), vocabulary: str = Form(""), expected_endpoint: str = Form(...),
-):
-    settings_data = load_config_layer_stack().effective_config()
-    service = _require_service(provider, model, settings_data)
-    if service["endpoint"] != expected_endpoint:
-        raise HTTPException(status_code=409, detail="录音期间听写服务地址发生变化，请确认配置后重新开始。")
-    data = await audio.read(25 * 1024 * 1024 + 1)
-    if len(data) > 25 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="录音超过 25 MiB，请缩短后重试。")
-    adapter = build_provider_adapter(service["provider"], model_override=model, settings_snapshot=settings_data)
+    if service["endpoint"] != request.expected_endpoint:
+        raise HTTPException(status_code=409, detail="听写服务地址已变化，请确认配置后重试。")
+    if recording_id in _transcribing_recordings:
+        raise HTTPException(status_code=409, detail="这段录音正在转录。")
+    extension = "mp4" if "mp4" in record["mime_type"] else "webm"
 
     async def transcribe():
+        if recording_id in _transcribing_recordings:
+            yield json.dumps({"error": "这段录音正在转录。"}, ensure_ascii=False)
+            return
+        adapter = build_provider_adapter(service["provider"], model_override=request.model, settings_snapshot=settings_data)
+        _transcribing_recordings.add(recording_id)
         try:
-            text = await adapter.transcribe_audio(data, filename=audio.filename or "recording.webm", model=model, language=language, prompt=vocabulary)
-            _checks[(service["provider"], service["endpoint"], model)] = {"ok": True, "at": time.time(), "error": ""}
+            text = await adapter.transcribe_audio(audio, filename="recording." + extension, model=request.model,
+                language=record["language"], prompt="\n".join(word.strip() for word in request.dictionary if word.strip()))
+            dictation_history.update(recording_id, text=text, status="completed", error="")
+            _checks[(service["provider"], service["endpoint"], request.model)] = {"ok": True, "at": time.time(), "error": ""}
             yield json.dumps({"text": text}, ensure_ascii=False)
+        except asyncio.CancelledError:
+            dictation_history.update(recording_id, status="interrupted")
+            raise
         except (ValueError, NotImplementedError, httpx.HTTPError) as exc:
-            _checks[(service["provider"], service["endpoint"], model)] = {"ok": False, "at": time.time(), "error": str(exc)}
+            dictation_history.update(recording_id, status="failed", error=str(exc))
+            _checks[(service["provider"], service["endpoint"], request.model)] = {"ok": False, "at": time.time(), "error": str(exc)}
             yield json.dumps({"error": str(exc)}, ensure_ascii=False)
         finally:
+            _transcribing_recordings.discard(recording_id)
             await adapter.aclose()
 
     return StreamingResponse(transcribe(), media_type="application/json", headers={"Cache-Control": "no-store"})

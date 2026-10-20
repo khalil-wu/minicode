@@ -65,6 +65,8 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   composerDraftStorageError: null,
   composerDraftRevision: 0,
   draft: "",
+  richDraft: undefined,
+  goalMode: false,
   attachments: [],
   quotedMessage: null,
   permissionMode: initialPermissionMode(),
@@ -83,7 +85,8 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   selectedSkills: [],
   slashPanelOpen: false,
   mentionPanelOpen: false,
-  setDraft: (d) => set({ draft: d }),
+  setDraft: (d, richDraft) => set(state => ({ draft: d,
+    richDraft: d ? richDraft ?? (state.draft === d ? state.richDraft : undefined) : undefined })),
   setQuotedMessage: (message) => set({ quotedMessage: message }),
   clearQuotedMessage: () => set({ quotedMessage: null }),
   addAttachment: (a) =>

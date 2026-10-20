@@ -28,6 +28,7 @@ DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     # Existing behaviour defaults remain unchanged.
     "reactive_compact": True,
     "plugin_lifecycle_api": True,
+    "plugins": True,
     "plugin_skills": True,
     "sdk_query": True,
     "mcp_roots": True,

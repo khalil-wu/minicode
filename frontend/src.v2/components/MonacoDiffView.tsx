@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { lazy, Suspense, useRef, useLayoutEffect, useId, useMemo } from "react";
+import { lazy, Suspense, useRef, useLayoutEffect, useEffect, useId, useMemo } from "react";
 import type * as Monaco from "monaco-editor/editor/editor.api.js";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import { extractFilePathFromDiff, parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
@@ -7,6 +7,7 @@ import { useAppStore } from "../stores";
 import { defineMiniCodeMonacoTheme, miniCodeMonacoThemeName } from "../panels/monacoTheme";
 import { loadMiniCodeEditorFeatures } from "../panels/monacoEditorFeatures";
 import { useOwnedDiffModelCleanup } from "./useOwnedDiffModelCleanup";
+import { codeFontFamily, THEME_FONTS_READY } from "../lib/theme-fonts";
 
 const MonacoDiffEditor = lazy(async () => {
   const scope = globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker?: () => Worker } };
@@ -139,11 +140,21 @@ export function MonacoDiffView({
   const appearanceColors = useAppStore((state) => state.appearanceColors);
   const appearanceThemes = useAppStore((state) => state.appearanceThemes);
   const codeTextScale = useAppStore((state) => state.codeTextScale);
+  const codeBase = useAppStore((state) => state.codeFontBase);
+  const markers = useAppStore((state) => state.diffMarkerStyle);
   useLayoutEffect(() => {
     // The shared theme owns both TextMate colors and the distinct Diff line /
     // word palette, so another editor cannot reset these keys behind this view.
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, theme);
   }, [theme, appearanceColors, appearanceThemes]);
+  useEffect(() => {
+    const update = () => {
+      if (!monacoRef.current || !diffEditorRef.current) return;
+      monacoRef.current.editor.remeasureFonts(); diffEditorRef.current.updateOptions({ fontFamily: codeFontFamily() });
+    };
+    window.addEventListener(THEME_FONTS_READY, update);
+    return () => window.removeEventListener(THEME_FONTS_READY, update);
+  }, []);
 
   const { original, modified, filePath, originalLines, modifiedLines } = useMemo(() => {
     const parsed = parseUnifiedDiffExcerpt(patch);
@@ -228,9 +239,10 @@ export function MonacoDiffView({
             renderSideBySide: true,
             minimap: { enabled: false },
             scrollBeyondLastLine: false,
-            fontFamily: getComputedStyle(document.documentElement).getPropertyValue("--editor-font-family").trim(),
-            fontSize: Math.round(14 * codeTextScale),
-            lineHeight: Math.round(22 * codeTextScale),
+            fontFamily: codeFontFamily(),
+            fontSize: codeBase * codeTextScale,
+            lineHeight: Math.round((22 / 14) * codeBase * codeTextScale),
+            renderIndicators: markers === "symbols",
             fontLigatures: false,
             lineNumbers: "on",
             wordWrap: "on",

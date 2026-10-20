@@ -130,8 +130,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-bottom-drawer,
-  .mc-bottom-drawer-resize::after {
+  html:not([data-reduced-motion="false"]) .mc-bottom-drawer,
+  html:not([data-reduced-motion="false"]) .mc-bottom-drawer-resize::after {
     transition: none;
   }
 }

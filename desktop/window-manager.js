@@ -269,7 +269,7 @@ function nextWindowOwnerId() {
   return `secondary-${slot}`;
 }
 
-async function createNewWindow({ conversationId = null, restoreLastConversation = false, remoteHostId = null, runtime = null } = {}) {
+async function createNewWindow({ conversationId = null, restoreLastConversation = false, remoteHostId = null, runtime = null, settingsTab } = {}) {
   const { app } = require("electron");
   const target = getFrontendTarget();
   const windowOwnerId = nextWindowOwnerId();
@@ -297,6 +297,7 @@ async function createNewWindow({ conversationId = null, restoreLastConversation 
       preload: preloadFile,
       contextIsolation: true,
       nodeIntegration: false,
+      webviewTag: true,
       sandbox: true,
       additionalArguments: [
         ...getRendererAdditionalArguments(),
@@ -308,6 +309,7 @@ async function createNewWindow({ conversationId = null, restoreLastConversation 
   });
   const record = { window: mainWindow, webContents: mainWindow.webContents, windowOwnerId, windowInstanceId, windowBindingToken,
     remoteHostId, runtime, initialNavigation: restoreLastConversation ? null : { conversationId },
+    pendingProviderSettings: settingsTab === "provider",
     nativeCloseAttempt: false, requestedReload: null, unloadIntent: null };
   mainWindows.set(record.webContents, record);
 
@@ -360,31 +362,6 @@ async function createNewWindow({ conversationId = null, restoreLastConversation 
     record.unloadIntent = null;
     record.closeConfirmed = false;
     record.closeSource = undefined;
-  });
-
-  mainWindow.webContents.on("before-input-event", (event, input) => {
-    if (input.type !== "keyDown") return;
-    if ((input.control || input.meta) && !input.alt && input.key.toLowerCase() === "r") {
-      reloadWindow(mainWindow, input.shift === true);
-      event.preventDefault();
-      return;
-    }
-    // Ctrl+` toggles terminal panel
-    if (input.control && !input.alt && input.key === "`") {
-      mainWindow.webContents.send("minicode:shortcut:terminal");
-      event.preventDefault();
-      return;
-    }
-    // Support both the unshifted = key and +, including numpad keys.
-    // Consume the event after zooming so the menu cannot zoom a second time.
-    if ((input.control || input.meta) && !input.alt && ["=", "+", "-", "0"].includes(input.key)) {
-      const zoomLevel = input.key === "0"
-        ? 0
-        : mainWindow.webContents.getZoomLevel() + (input.key === "-" ? -0.5 : 0.5);
-      mainWindow.webContents.setZoomLevel(zoomLevel);
-      event.preventDefault();
-    }
-    // File search uses the renderer binding.
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

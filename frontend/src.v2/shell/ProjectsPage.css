@@ -1,0 +1,17 @@
+.mc-projects-page { height: 100%; min-width: 0; overflow: auto; color: var(--text-primary); background: var(--surface-base); }
+.mc-projects-content { width: min(100% - 64px, 1000px); margin: 0 auto; padding: 64px 0; }
+.mc-projects-content h1 { margin: 0 0 32px; font-size: var(--text-xl); font-weight: var(--fw-semibold); }
+.mc-projects-toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 32px; }
+.mc-projects-search { display: flex; align-items: center; flex: 1; gap: 10px; color: var(--text-muted); }
+.mc-projects-search input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text-primary); font: inherit; }
+.mc-projects-columns { display: grid; grid-template-columns: 1fr 165px; padding: 0 86px 12px 32px; color: var(--text-muted); border-bottom: 1px solid var(--border-subtle); }
+.mc-projects-columns button { border: 0; padding: 0; background: transparent; color: inherit; text-align: left; font: inherit; font-size: var(--mc-font-secondary); cursor: pointer; }
+.mc-project-heading { display: flex; align-items: center; gap: 12px; min-height: 62px; border-bottom: 1px solid var(--border-subtle); }
+.mc-project-name { flex: 1; border: 0; background: transparent; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-project-icon { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-muted); cursor: pointer; }
+.mc-project-icon:hover { background: var(--surface-hover); color: var(--text-primary); }
+.mc-project-heading time { width: 150px; font-size: var(--mc-font-secondary); color: var(--text-muted); }
+.mc-project-chats { display: grid; gap: 2px; padding: 8px 32px 16px; }
+.mc-project-chats button { padding: 8px 10px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-secondary); text-align: left; font: inherit; cursor: pointer; }
+.mc-project-chats button:hover { background: var(--surface-hover); }
+@media (max-width: 760px) { .mc-projects-content { width: calc(100% - 32px); padding-top: 32px; } .mc-project-heading time, .mc-projects-columns > button:last-child { display: none; } .mc-projects-columns { grid-template-columns: 1fr; } }

@@ -28,6 +28,10 @@ import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
 import { sendClientCommandAwaitResult, sendPromptResponseCommand } from "../protocol/ws-outbox";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
+import { getToolCallsFromMessage } from "../lib/content-blocks";
+import { projectMessagesToTurns } from "../chat/chatSurfaceState";
+import { sendChatMessage } from "../chat/sendChatMessage";
+import { QueuedMessageList } from "../composer/QueuedMessageList";
 import {
   getWebSocket,
   resetPendingClientCommandAcksForTests,
@@ -433,6 +437,50 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(useAppStore.getState().isConnected).toBe(true);
   });
 
+  it("restores background A while reading B and commits replayed terminal evidence after an idle snapshot", () => {
+    const owner = "long-a";
+    const reader = "reader-b";
+    const history = [{ id: "answer-a", turnId: "turn-a", role: "assistant" as const, content: "", artifacts: [], timestamp: 1, isStreaming: true,
+      blocks: [{ type: "tool_call" as const, record: { id: "command-a", name: "run_command", args: { command: "node long-task.mjs" },
+        turnId: "turn-a", status: "running" as const, startedAt: 1, stdoutPreview: "kept real output" } }] }];
+    useAppStore.setState({ conversationId: reader, messages: [], draft: "keep B unsent draft", workingDirectory: "C:/b",
+      conversations: [{ id: owner, title: "A", updatedAt: "2026-10-20" }, { id: reader, title: "B", updatedAt: "2026-10-20" }],
+      conversationMessages: { [owner]: history }, conversationStreaming: { [owner]: true },
+      conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, conversationAgentStates: {}, sideChats: {},
+      pendingConversationSwitchId: null, pendingConversationCreateId: null });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const first = MockWebSocket.instances[0];
+    act(() => first.emit("open"));
+    act(() => first.emitMessage({ type: "session.restored", active_conversation_id: reader, conversation_switched_follows: false,
+      last_seq: 0, current_seq: 0, replayed_events: 0, requested_last_seq: 0,
+      session: { active_conversation_id: reader, active_stream_conversation_ids: [owner] } }));
+    act(() => first.emit("close", 1006));
+    expect(useAppStore.getState().conversationMessages[owner][0].isStreaming).toBe(true);
+    act(() => vi.advanceTimersByTime(1_500));
+    const recovered = MockWebSocket.instances[1];
+    act(() => recovered.emit("open"));
+    act(() => recovered.emitMessage({ type: "session.restored", active_conversation_id: reader, conversation_switched_follows: false,
+      last_seq: 0, current_seq: 2, replayed_events: 2, requested_last_seq: 0,
+      session: { active_conversation_id: reader, active_task_id: null, active_stream_conversation_ids: [] } }));
+    const idleMessage = useAppStore.getState().conversationMessages[owner][0];
+    expect(idleMessage.terminalStatus).toBeUndefined();
+    expect(getToolCallsFromMessage(idleMessage)[0].status).toBe("running");
+    expect(projectMessagesToTurns([idleMessage], false)[0].committedCells[0]).toMatchObject({ status: "partial" });
+    act(() => recovered.emitMessage({ type: "session.replay", last_seq: 0, current_seq: 2, replayed_events: 2, events: [
+      { type: "tool_result", conversation_id: owner, message_id: "answer-a", turn_id: "turn-a", id: "command-a", status: "success",
+        summary: "Actual exit 0", seq: 1, previous_replay_seq: 0, event_id: "a-result" },
+      { type: "done", conversation_id: owner, message_id: "answer-a", turn_id: "turn-a", status: "completed", reason: "real-terminal",
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, input_includes_cache_read: true },
+        seq: 2, previous_replay_seq: 1, event_id: "a-done" },
+    ] }));
+    const state = useAppStore.getState();
+    expect(state).toMatchObject({ conversationId: reader, draft: "keep B unsent draft", isStreaming: false, connectionPhase: "connected" });
+    expect(state.conversationMessages[owner][0]).toMatchObject({ terminalStatus: "completed", terminationReason: "real-terminal", isStreaming: false });
+    expect(getToolCallsFromMessage(state.conversationMessages[owner][0])[0]).toMatchObject({ status: "success", stdoutPreview: "kept real output" });
+    expect(getLastReceivedServerSeqForTests()).toBe(2);
+  });
+
   it("runs exactly five reconnect attempts before entering the failed phase", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
@@ -462,6 +510,36 @@ describe("useWebSocketConnection socket ownership", () => {
 
     act(() => vi.advanceTimersByTime(600_001));
     expect(MockWebSocket.instances).toHaveLength(6);
+  });
+
+  it("replays submitted steer commands with their original turn fences after a new run appears", async () => {
+    const owner = "steer-replay-owner";
+    useAppStore.setState({ conversationId: owner, draft: "keep authored draft", workingDirectory: "C:/steer-owner", composerDraftsReady: true,
+      conversations: [{ id: owner, title: "Owner", updatedAt: "2026-10-20", workspaceRoot: "C:/steer-owner" }],
+      isStreaming: true, sideChats: {}, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, conversationAgentStates: {},
+      pendingConversationSwitchId: null, pendingConversationCreateId: null,
+      messages: [{ id: "old-answer", turnId: "original-turn", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true },
+        { id: "queued-user", role: "user", content: "queued direction", artifacts: [], timestamp: 2, queueState: "queued", queueMessageId: "queued-answer" }] });
+    render(<><Harness /><QueuedMessageList /></>);
+    act(() => vi.advanceTimersByTime(0)); const first = MockWebSocket.instances[0]; act(() => first.emit("open"));
+    act(() => first.emitMessage({ type: "session.restored", active_conversation_id: owner, conversation_switched_follows: false,
+      session: { active_conversation_id: owner, active_stream_conversation_ids: [owner] } }));
+    fireEvent.click(screen.getByRole("button", { name: "引导" }));
+    expect(sendChatMessage({ conversationId: owner, displayContent: "original direction", allowWhileStreaming: true, busyBehavior: "steer" })).toBe(true);
+    await flushQueuedCommands();
+    const submitted = sentCommands(first).filter(command => command.type === "user_message" || command.type === "user_message.queue.steer");
+    expect(submitted).toHaveLength(2);
+    for (const command of submitted) expect(command).toMatchObject({ expected_turn_id: "original-turn" });
+    act(() => first.emit("close", 1006));
+    act(() => useAppStore.setState({ messages: [{ id: "new-answer", turnId: "new-current-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 3, isStreaming: true }] }));
+    act(() => vi.advanceTimersByTime(1500)); const recovered = MockWebSocket.instances[1]; act(() => recovered.emit("open"));
+    act(() => recovered.emitMessage({ type: "session.restored", active_conversation_id: owner, conversation_switched_follows: false,
+      session: { active_conversation_id: owner, active_stream_conversation_ids: [owner] } }));
+    await flushQueuedCommands();
+    const replayed = sentCommands(recovered).filter(command => command.type === "user_message" || command.type === "user_message.queue.steer");
+    expect(replayed).toEqual(submitted);
+    expect(useAppStore.getState().messages[0].turnId).toBe("new-current-turn");
+    expect(useAppStore.getState().draft).toBe("keep authored draft");
   });
 
   it("projects permanent close as a terminal connection failure", () => {

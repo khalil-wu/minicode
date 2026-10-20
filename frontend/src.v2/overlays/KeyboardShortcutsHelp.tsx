@@ -1,20 +1,23 @@
 import { useI18n } from "../i18n";
-import { X } from "lucide-react";
+import { Search, X } from "lucide-react";
+import { useState } from "react";
 import { useAppStore } from "../stores";
 import { useFocusTrap } from "../hooks/useFocusTrap";
-import { formatShortcut, SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
+import { formatShortcut, isCodeShortcut, SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
 
 export const KeyboardShortcutsHelp = () => {
   const { t: tr } = useI18n();
+  const [query, setQuery] = useState("");
   const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
   const toggleShortcutsHelp = useAppStore((s) => s.toggleShortcutsHelp);
   const shortcutBindings = useAppStore((s) => s.shortcutBindings);
+  const appMode = useAppStore((s) => s.appMode);
   const sendShortcut = useAppStore((s) => s.sendShortcut);
   const dialogRef = useFocusTrap(shortcutsHelpOpen);
   const shortcuts = [
     ...SHORTCUT_DEFINITIONS
-      .filter((definition) => Boolean(shortcutBindings[definition.id]))
-      .map((definition) => ({ keys: formatShortcut(shortcutBindings[definition.id]), label: tr(definition.label) })),
+      .filter((definition) => shortcutBindings[definition.id].length > 0 && (appMode === "code" || !isCodeShortcut(definition.id)))
+      .map((definition) => ({ keys: shortcutBindings[definition.id].map(formatShortcut), label: tr(definition.label) })),
     ...(sendShortcut === "cmdIfMultiline" ? [
       { keys: "Enter", label: tr("发送单行消息") },
       { keys: "Ctrl/Cmd + Enter", label: tr("发送多行消息") },
@@ -59,7 +62,7 @@ export const KeyboardShortcutsHelp = () => {
           }
         }}
         style={{
-          width: "min(440px, 90vw)",
+          width: "min(624px, 90vw)",
           maxHeight: "70vh",
           background: "var(--surface-raised)",
           border: "1px solid var(--border-subtle)",
@@ -81,15 +84,12 @@ export const KeyboardShortcutsHelp = () => {
             <X size={18} />
           </button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px 16px" }}>
-          {shortcuts.map((s) => (
-            <div key={`${s.keys}:${s.label}`} style={{ display: "contents" }}>
-              <kbd className="mc-kbd" style={{ textAlign: "right" }}>
-                {s.keys}
-              </kbd>
-              <span style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", padding: "3px 0" }}>
-                {s.label}
-              </span>
+        <label className="settings-shortcut-search"><Search size={15} aria-hidden="true" /><input value={query} onChange={event => setQuery(event.currentTarget.value)} aria-label={tr("搜索快捷键")} placeholder={tr("搜索快捷键")} /></label>
+        <div style={{ display: "grid", gap: 12, paddingTop: 20 }}>
+          {shortcuts.filter(shortcut => `${shortcut.label} ${shortcut.keys}`.toLowerCase().includes(query.trim().toLowerCase())).map(shortcut => (
+            <div key={`${shortcut.keys}:${shortcut.label}`} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+              <span style={{ fontSize: "var(--text-sm)", color: "var(--text-secondary)", padding: "3px 0" }}>{shortcut.label}</span>
+              <span style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>{(typeof shortcut.keys === "string" ? [shortcut.keys] : shortcut.keys).map(chord => <kbd key={chord} className="mc-kbd">{chord}</kbd>)}</span>
             </div>
           ))}
         </div>

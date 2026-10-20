@@ -145,6 +145,8 @@ def build_agent_loop_components(
     )
     issuing_snapshot = bootstrap.run_context.model_execution
     active_toolset_policy = effective_toolset_policy(
+        model_execution=issuing_snapshot,
+        multi_agent_version=bootstrap.run_context.multi_agent_version,
         base_policy=base_toolset_policy,
         tool_registry=tool_registry,
         disabled_tools=state.disabled_tools,
@@ -162,6 +164,8 @@ def build_agent_loop_components(
             callable(getattr(tool_context.llm, "supports_hosted_web_search", None))
             and tool_context.llm.supports_hosted_web_search()
         ),
+        hosted_cached_search=(callable(getattr(tool_context.llm, "hosted_web_search_supports_cached", None))
+            and tool_context.llm.hosted_web_search_supports_cached()),
         tool_mode=(
             "code_mode"
             if getattr(bootstrap.agent_session, "active_tool_names", None) is not None

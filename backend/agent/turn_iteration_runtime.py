@@ -188,6 +188,8 @@ class TurnIterationRuntime:
             permission_context=self.tool_context.permission,
         )
         active_policy = effective_toolset_policy(
+            model_execution=snapshot,
+            multi_agent_version=run_context.multi_agent_version,
             base_policy=base_policy,
             tool_registry=self.tool_registry,
             disabled_tools=(
@@ -205,6 +207,8 @@ class TurnIterationRuntime:
                 callable(getattr(self.llm, "supports_hosted_web_search", None))
                 and self.llm.supports_hosted_web_search()
             ),
+            hosted_cached_search=(callable(getattr(self.llm, "hosted_web_search_supports_cached", None))
+                and self.llm.hosted_web_search_supports_cached()),
             supports_search_tool=(snapshot.model_info.supports_search_tool if snapshot is not None and snapshot.model_info is not None
                 else snapshot.config.llm.supports_search_tool if snapshot is not None
                 else getattr(getattr(self.llm, "_settings", None), "supports_search_tool", False)),
@@ -362,7 +366,11 @@ class TurnIterationRuntime:
                         dict(item) for item in boundary_input.attachments
                     ]
                 try:
-                    admitted_message = await self.context.start_turn(boundary_input.content, self.state)
+                    goal_steering = bool(self.metadata.get("_goal_continuation")) and boundary_input.consumed_steer is None
+                    if goal_steering:
+                        admitted_message = await self.context.start_turn(boundary_input.content, self.state, input_role="developer")
+                    else:
+                        admitted_message = await self.context.start_turn(boundary_input.content, self.state)
                 finally:
                     self.state.attachments = original_attachments
                 source = str(self.metadata.get("query_source") or "user")
@@ -376,7 +384,7 @@ class TurnIterationRuntime:
                     origin = "agent" if (
                         self.turn_kernel.run_record.parent_run_id
                         or source.startswith(("memory", "side_query", "extension", "guardian"))
-                        or source == "auto_followup"
+                        or source == "auto_followup" or goal_steering
                     ) else "user"
                 admitted_message.input_origin = origin
                 accepted_id = (
@@ -390,9 +398,10 @@ class TurnIterationRuntime:
                 order = accepted_input.get("_guardian_acceptance_order")
                 if order is None:
                     order = evidence.reserve_order()
-                self.context.record_admitted_user_input(admitted_message,
-                    text=boundary_input.content, turn_id=str(self.metadata["turn_id"]),
-                    message_id=accepted_id, acceptance_order=order)
+                if not goal_steering:
+                    self.context.record_admitted_user_input(admitted_message,
+                        text=boundary_input.content, turn_id=str(self.metadata["turn_id"]),
+                        message_id=accepted_id, acceptance_order=order)
                 commit_turn_admission = self.metadata.get("commit_turn_admission")
                 if callable(commit_turn_admission):
                     committed = commit_turn_admission(

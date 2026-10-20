@@ -16,7 +16,7 @@ from backend.config import (
     _load_settings_json,
     _write_settings_json as _config_write_settings_json,
 )
-from backend.feature_flags import feature_enabled
+from backend.feature_flags import feature_enabled, load_feature_flags
 from backend.hooks.runtime import raise_if_config_change_blocked
 from backend.plugins.dependencies import find_reverse_dependents, verify_and_demote
 from backend.plugins.identity import (
@@ -303,6 +303,10 @@ def get_plugin_settings(
         effective_config,
         settings_data,
     )
+    plugins_enabled = load_feature_flags(
+        {**settings_data, **effective_config},
+        managed_requirements=resolved_stack.requirements.feature_requirements if resolved_stack is not None else {},
+    ).enabled("plugins")
     inventory: dict[str, dict[str, Any]] = {}
 
     for manifest_path in _iter_plugin_manifests(roots):
@@ -408,7 +412,7 @@ def get_plugin_settings(
     inventory = _prefer_active_store_entries(inventory)
     for entry in inventory.values():
         plugin_dir = Path(str(entry["path"]))
-        entry["skill_count"] = _count_plugin_skills(plugin_dir)
+        entry["skill_count"] = _count_plugin_skills(plugin_dir, [Path(path) for path in entry["manifest_paths"]])
         entry["installed_version"] = str(entry.get("version") or "")
         if str((entry.get("provenance") or {}).get("store") or "") == "versioned":
             entry["active_version"] = plugin_dir.name
@@ -506,6 +510,7 @@ def get_plugin_settings(
         plugins,
         effective_policy,
         configured_states=configured_states,
+        plugins_enabled=plugins_enabled,
     )
     return {
         "plugins": plugins,
@@ -523,6 +528,7 @@ def get_plugin_settings(
         },
         "configured_explicit": configured_explicit,
         "feature_enabled": feature_enabled("plugin_lifecycle_api", True),
+        "plugins_enabled": plugins_enabled,
         "policy": {
             "configured": bool(
                 configured_explicit
@@ -546,6 +552,7 @@ def _plugin_inventory_fingerprint(
     policy: ManagedPluginPolicy,
     *,
     configured_states: Mapping[str, Any] | None = None,
+    plugins_enabled: bool = True,
 ) -> str:
     material: list[dict[str, Any]] = []
     for entry in plugins:
@@ -567,6 +574,7 @@ def _plugin_inventory_fingerprint(
             "manifests": manifests,
         })
     payload = {
+        "plugins_enabled": plugins_enabled,
         "policy": policy.fingerprint,
         "configured_plugins": {
             str(key): value
@@ -1057,7 +1065,10 @@ def load_enabled_plugin_hook_sources(
     """Return source-aware hook declarations for enabled MiniCode plugins."""
     sources: list[dict[str, Any]] = []
     seen_manifests: set[str] = set()
-    for plugin in get_plugin_snapshot(config_stack=config_stack).get("plugins", []):
+    snapshot = get_plugin_snapshot(config_stack=config_stack)
+    if snapshot.get("plugins_enabled") is False:
+        return []
+    for plugin in snapshot.get("plugins", []):
         if not isinstance(plugin, Mapping) or not bool(plugin.get("enabled")):
             continue
         plugin_root = Path(str(plugin.get("path") or "")).resolve()
@@ -1135,6 +1146,8 @@ def load_enabled_plugin_extension_sources(
     sources: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     snapshot = get_plugin_snapshot(config_stack=config_stack)
+    if snapshot.get("plugins_enabled") is False:
+        return []
     for plugin in snapshot.get("plugins", []):
         if not isinstance(plugin, Mapping) or not bool(plugin.get("enabled")):
             continue
@@ -1309,7 +1322,10 @@ def resolve_enabled_plugin_mentions(
         config_stack = load_config_layer_stack(cwd=workspace_root)
     inventory_by_id: dict[str, Mapping[str, Any]] = {}
     inventory_by_name: dict[str, list[Mapping[str, Any]]] = {}
-    for item in get_plugin_snapshot(config_stack=config_stack).get("plugins", []):
+    snapshot = get_plugin_snapshot(config_stack=config_stack)
+    if snapshot.get("plugins_enabled") is False:
+        return []
+    for item in snapshot.get("plugins", []):
         if not isinstance(item, Mapping) or not bool(item.get("enabled")):
             continue
         raw_id = str(item.get("id") or item.get("name") or "").strip()

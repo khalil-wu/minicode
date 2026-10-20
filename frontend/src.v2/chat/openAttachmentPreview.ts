@@ -1,9 +1,13 @@
 import { getWebSocket } from "../hooks/useWebSocket";
 import { pushToast } from "../overlays/ToastContainer";
 import {
+  apiBase,
   artifactRawResourceUrlWithToken,
   attachmentRawResourceUrlWithToken,
+  authHeaders,
+  errorMessageFromResponseText,
   fetchAttachmentPreview,
+  fetchWithTimeout,
   workspaceRawResourceUrlWithToken,
 } from "../protocol/api";
 import { fetchWorkspaceFilePreview } from "../protocol/workspace";
@@ -70,6 +74,12 @@ export interface ConversationBrowserFilePreviewTarget {
   executionCwd: string;
   path: string;
   name: string;
+}
+
+export interface RegisteredSkillPreviewTarget {
+  path: string;
+  workspaceRoot: string;
+  conversationId?: string | null;
 }
 
 const normalizedMediaType = (value?: string): string =>
@@ -358,6 +368,37 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
         : "文件预览加载失败。";
       failPreview(lease, conversationId, base, message);
     });
+  return true;
+};
+
+/** Open the exact catalog file without changing the chat, workspace or editor. */
+export const openRegisteredSkillPreview = (target: RegisteredSkillPreviewTarget): boolean => {
+  const state = useAppStore.getState();
+  const conversationId = target.conversationId === undefined ? state.conversationId ?? "" : target.conversationId ?? "";
+  if (conversationId !== (state.conversationId ?? "")) {
+    pushToast("聊天已切换，请回到原聊天后打开技能。", "error");
+    return false;
+  }
+  const base = { artifactId: `skill:${target.workspaceRoot}:${target.path}`, name: basename(target.path),
+    source: "skill" as const, sourcePath: target.path, workspaceRoot: target.workspaceRoot,
+    mediaType: "text/markdown", kind: "document" };
+  const lease = beginPreviewRequest(conversationId, { abortable: true });
+  openPreviewSurface(base.artifactId, base.name, conversationId);
+  publishPreview(lease, conversationId, { ...base, content: "", loading: true, loadedAt: Date.now() });
+  const query = new URLSearchParams({ skill_path: target.path, workspace_root: target.workspaceRoot });
+  void fetchWithTimeout(`${apiBase()}/api/skills/detail?${query}`, {
+    headers: authHeaders(), cache: "no-store", signal: lease.controller!.signal,
+  }).then(async response => {
+    if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
+    const detail = await response.json() as { path: string; raw_content: string };
+    if (!isPreviewRequestCurrent(lease)) return;
+    publishPreview(lease, conversationId, { ...base, sourcePath: detail.path, content: detail.raw_content,
+      sizeBytes: new TextEncoder().encode(detail.raw_content).byteLength, contentChars: detail.raw_content.length,
+      loading: false, loadedAt: Date.now() });
+  }).catch(error => {
+    if (!isPreviewRequestCurrent(lease) || lease.controller!.signal.aborted) return;
+    failPreview(lease, conversationId, base, error instanceof Error ? error.message : String(error));
+  });
   return true;
 };
 

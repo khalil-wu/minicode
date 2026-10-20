@@ -25,6 +25,7 @@ import { useAppStore } from "../stores";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { showConfirm } from "./DialogService";
+import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
@@ -46,7 +47,7 @@ describe("CommandPalette pending user action guard", () => {
   ] as const)("opens %s through its concrete workspace entry", (label, target) => {
     useAppStore.setState({ conversationId: "conv-entry", workingDirectory: "C:/Workspace", runtimeSession: null,
       runtimeCapabilities: null, workspaceSearchOpen: false, dockCollapsed: true, rightPanelOpen: false,
-      previewServiceManagerRequest: null, appMode: "cowork" });
+      previewServiceManagerRequest: null, appMode: "code" });
     render(<CommandPalette />);
     fireEvent.change(screen.getByRole("combobox"), { target: { value: label } });
     fireEvent.click(screen.getByRole("option", { name: new RegExp(label) }));
@@ -75,8 +76,11 @@ describe("CommandPalette pending user action guard", () => {
   });
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetOpenWebInBrowserForTests();
     useAppStore.setState({
       commandPaletteOpen: true,
+      appMode: "cowork",
+      defaultTerminalLocation: "bottom",
       conversations: [],
       pendingApproval: null,
       pendingDiffReview: null,
@@ -188,23 +192,75 @@ describe("CommandPalette pending user action guard", () => {
     expect(screen.getByText("运行 /status")).toBeTruthy();
   });
 
-  it("opens Terminal in the bottom drawer", () => {
+  it.each([
+    { appMode: "cowork", defaultTerminalLocation: "right" },
+    { appMode: "code", defaultTerminalLocation: "bottom" },
+  ] as const)("opens the preferred $defaultTerminalLocation Terminal in $appMode", ({ appMode, defaultTerminalLocation }) => {
     useAppStore.setState({
       runtimeSession: null,
-      appMode: "cowork",
+      appMode,
+      defaultTerminalLocation,
       dockCollapsed: true,
       activeBottomTab: "git",
+      rightPanelOpen: false,
+      rightStackTab: "tasks",
     });
     render(<CommandPalette />);
 
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "打开终端" } });
     fireEvent.click(screen.getByText("打开终端"));
 
-    expect(useAppStore.getState()).toMatchObject({
-      appMode: "code",
-      activeBottomTab: "terminal",
-      dockCollapsed: false,
-    });
+    expect(useAppStore.getState()).toMatchObject(defaultTerminalLocation === "bottom" ? {
+      appMode, activeBottomTab: "terminal", dockCollapsed: false, rightPanelOpen: false,
+    } : { appMode, activeBottomTab: "git", dockCollapsed: true, rightStackTab: "terminal", rightPanelOpen: true });
+  });
+
+  it.each(["cowork", "code"] as const)("removes internal launchers and scopes editor commands in %s", (appMode) => {
+    useAppStore.setState({ appMode, runtimeSession: null, runtimeCapabilities: null });
+    render(<CommandPalette />);
+    for (const label of ["打开检查器", "打开运行状态", "运行诊断", "智能体编辑器"]) {
+      expect(screen.queryByRole("option", { name: new RegExp(label) })).toBeNull();
+    }
+    for (const label of ["打开编辑器", "搜索项目内容", "查看代码问题", "管理预览服务", "打开预览",
+      "检测开发服务器", "打开当前应用预览", "聚焦编辑器", "最大化当前面板", "关闭当前面板", "重置工作区布局", "打开 Git",
+      "新建隔离会话", "切换主题", "打开子智能体"]) {
+      expect(Boolean(screen.queryByRole("option", { name: new RegExp(`^${label}`) }))).toBe(appMode === "code");
+    }
+    for (const label of ["打开差异面板", "打开上下文", "打开浏览器", "打开终端", "快速打开文件"]) {
+      expect(screen.getByRole("option", { name: new RegExp(`^${label}`) })).toBeTruthy();
+    }
+  });
+
+  it.each([
+    ["cowork", "打开上下文", "tasks"], ["cowork", "打开差异面板", "diff"],
+    ["code", "打开上下文", "tasks"], ["code", "打开差异面板", "diff"],
+  ] as const)("routes %s / %s without changing the chat, draft, approval or main slots", (appMode, label, tab) => {
+    const approval = { requestId: "approval-kept", conversationId: "conv-kept", toolName: "run_command", args: { command: "pwd" } };
+    const attachment = { id: "file-kept", name: "notes.txt", type: "text/plain", size: 1, status: "ready" as const };
+    const quote = { id: "quote-kept", role: "assistant" as const, content: "Keep quoted text" };
+    const panelSlots = [{ id: "main-chat", kind: "chat" as const, label: "Chat", focused: true },
+      { id: "main-editor", kind: "editor" as const, label: "Editor" }];
+    useAppStore.setState({ appMode, conversationId: "conv-kept", runtimeSession: null, draft: "Keep unsent text",
+      attachments: [attachment], quotedMessage: quote, pendingApproval: approval, panelSlots,
+      rightPanelOpen: false, rightStackTab: "browser" });
+    render(<CommandPalette />);
+    fireEvent.click(screen.getByRole("option", { name: new RegExp(`^${label}`) }));
+    expect(useAppStore.getState()).toMatchObject({ appMode, conversationId: "conv-kept", draft: "Keep unsent text",
+      attachments: [attachment], quotedMessage: quote, pendingApproval: approval, panelSlots,
+      rightPanelOpen: true, rightStackTab: tab, commandPaletteOpen: false });
+  });
+
+  it("opens a browser tab through the actual request producer without switching the layout", () => {
+    useAppStore.setState({ appMode: "cowork", conversationId: "conv-browser", runtimeSession: null,
+      rightPanelOpen: false, rightStackTab: "tasks", draft: "Keep browser draft" });
+    const requests: unknown[] = [];
+    const unsubscribe = subscribeBrowserRequests(request => requests.push(request));
+    render(<CommandPalette />);
+    fireEvent.click(screen.getByRole("option", { name: /^打开浏览器/ }));
+    unsubscribe();
+    expect(requests).toEqual([expect.objectContaining({ kind: "new", conversationId: "conv-browser", url: "" })]);
+    expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", draft: "Keep browser draft",
+      rightPanelOpen: true, rightStackTab: "browser", commandPaletteOpen: false });
   });
 
   it("sends /plan to the backend-owned slash executor", async () => {

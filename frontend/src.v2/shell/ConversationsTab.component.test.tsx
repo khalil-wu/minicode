@@ -9,7 +9,7 @@ const { sendClientCommandMock, openWorkspaceFolderMock, showConfirmMock } = vi.h
   showConfirmMock: vi.fn(async () => false),
 }))
 
-vi.mock('../desktop/runtime', () => ({ isDesktop: () => false, revealPath: vi.fn() }))
+vi.mock('../desktop/runtime', () => ({ isDesktop: () => false, desktop: () => undefined, revealPath: vi.fn() }))
 vi.mock('../overlays/ToastContainer', () => ({ pushToast: vi.fn() }))
 vi.mock('../workspace/openWorkspaceFolder', () => ({ openWorkspaceFolder: openWorkspaceFolderMock }))
 vi.mock('../overlays/DialogService', () => ({ showConfirm: showConfirmMock }))
@@ -65,6 +65,25 @@ describe('ConversationsTab project navigation', () => {
   })
 
   afterEach(() => { cleanup(); vi.useRealTimers() })
+
+  it('routes numbered chat selection through the visible pinned and sorted recents order without clearing drafts', () => {
+    const original = useAppStore.getState().requestConversationSwitch
+    const request = vi.fn()
+    useAppStore.setState({ requestConversationSwitch: request, recentWorkspaces: [], draft: 'Keep numeric navigation draft',
+      conversations: [
+        { id: 'older', title: 'Older', updatedAt: '2026-08-01' },
+        { id: 'pinned', title: 'Pinned', updatedAt: '2026-08-02', pinned: true },
+        { id: 'latest', title: 'Latest', updatedAt: '2026-08-15' },
+      ], sidebarOrder: null })
+    try {
+      render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
+      act(() => window.dispatchEvent(new CustomEvent('select-numbered-chat', { detail: { index: 1, conversationId: 'conv-represented' } })))
+      expect(request).toHaveBeenCalledExactlyOnceWith('latest')
+      expect(useAppStore.getState().draft).toBe('Keep numeric navigation draft')
+      act(() => window.dispatchEvent(new CustomEvent('select-numbered-chat', { detail: { index: 0, conversationId: 'retired-owner' } })))
+      expect(request).toHaveBeenCalledTimes(1)
+    } finally { useAppStore.setState({ requestConversationSwitch: original }) }
+  })
 
   it('keeps project and recent occurrences but routes the selection to only the clicked row', () => {
     useAppStore.setState({ draft: 'Unsent original input' })
@@ -345,6 +364,7 @@ describe('ConversationsTab project navigation', () => {
   })
 
   it('removes a workspace through its context menu while retaining conversations across reopen', async () => {
+    showConfirmMock.mockResolvedValueOnce(true)
     const { unmount } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     const folder = screen.getByRole('button', { name: 'Represented', exact: true })
     const actions = screen.getByRole('button', { name: '项目操作：Represented' })
@@ -357,7 +377,7 @@ describe('ConversationsTab project navigation', () => {
     expect(actions.getAttribute('aria-expanded')).toBe('false')
     expect(document.activeElement).toBe(actions)
     fireEvent.click(actions)
-    fireEvent.click(screen.getByRole('menuitem', { name: '移除工作区' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: '移除项目' }))
     expect(actions.getAttribute('aria-expanded')).toBe('false')
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: 'workspace.recent.remove', path: 'C:\\Represented', preserve_history: true,
@@ -376,13 +396,14 @@ describe('ConversationsTab project navigation', () => {
   })
 
   it('keeps the workspace visible if preserving history fails', async () => {
+    showConfirmMock.mockResolvedValueOnce(true)
     vi.mocked(sendClientCommandAwaitResult).mockResolvedValueOnce({
       type: 'command.result', command: 'workspace.recent.remove', level: 'error', message: '无法保存历史会话',
     })
     render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     fireEvent.contextMenu(screen.getByRole('button', { name: 'Represented', exact: true }))
-    fireEvent.click(screen.getByRole('menuitem', { name: '移除工作区' }))
-    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('无法保存历史会话', 'error', 5000))
+    fireEvent.click(screen.getByRole('menuitem', { name: '移除项目' }))
+    await waitFor(() => expect(pushToast).toHaveBeenCalledWith('Error: 无法保存历史会话', 'error'))
     expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByText('Existing workspace task')).toBeTruthy()
   })
 
@@ -506,21 +527,22 @@ describe('ConversationsTab project navigation', () => {
     expect(useAppStore.getState().conversationId).toBe('conv-represented')
   })
 
-  it('keeps the add-project entry available on an empty sidebar and navigates after a real folder opens', async () => {
+  it('opens actual named project creation on an empty sidebar and closes compact navigation without selecting a folder', async () => {
     useAppStore.setState({ conversations: [], recentWorkspaces: [] })
     const onNavigate = vi.fn()
     render(<ConversationsTab conversationId="" onNavigate={onNavigate} onSetConfirmDialog={vi.fn()} />)
     expect(screen.getByText('项目')).toBeTruthy()
     expect(screen.getByText('开始你的第一个任务')).toBeTruthy()
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加项目' })) })
-    expect(openWorkspaceFolderMock).toHaveBeenCalledExactlyOnceWith()
+    expect(openWorkspaceFolderMock).not.toHaveBeenCalled()
+    expect(useAppStore.getState().projectEditTarget).toBe('create')
     expect(onNavigate).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('region', { name: '工作区 OpenedProject' })).toBeNull()
 
     onNavigate.mockClear()
-    openWorkspaceFolderMock.mockResolvedValueOnce(null)
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: '添加项目' })) })
-    expect(onNavigate).not.toHaveBeenCalled()
+    expect(onNavigate).toHaveBeenCalledTimes(1)
+    expect(openWorkspaceFolderMock).not.toHaveBeenCalled()
   })
 
   it('shows five chats per project and retains the chosen expansion through modes and activity', () => {

@@ -576,7 +576,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-connection-banner[data-kind="reconnecting"] .mc-connection-banner-dot {
+  html:not([data-reduced-motion="false"]) .mc-connection-banner[data-kind="reconnecting"] .mc-connection-banner-dot {
     animation: none;
   }
 }
@@ -791,7 +791,7 @@ body:has(.settings-workspace.settings-center) .toast-container {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-connection-status-spinner {
+  html:not([data-reduced-motion="false"]) .mc-connection-status-spinner {
     animation: none;
   }
 }

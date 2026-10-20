@@ -61,7 +61,7 @@
 .mc-diff-git-actions > button:disabled { opacity: .45; cursor: default; }
 .mc-diff-show-more { margin: 8px; padding: 5px 8px; border: 0; border-radius: 5px; background: var(--surface-soft); color: var(--text-secondary); font: inherit; font-size: var(--text-xs); cursor: pointer; }
 @media (prefers-reduced-motion: reduce) {
-  .mc-diff-file-section-body, .mc-diff-file-disclosure { transition: none; }
+  html:not([data-reduced-motion="false"]) .mc-diff-file-section-body, html:not([data-reduced-motion="false"]) .mc-diff-file-disclosure { transition: none; }
 }
 
 .mc-diff-toolbar { padding-block: 2px; }

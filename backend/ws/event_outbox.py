@@ -668,6 +668,7 @@ class EventOutbox:
         *,
         events: list[dict[str, Any]] | None = None,
         current_seq: int | None = None,
+        wait_for_delivery: bool = True,
     ) -> int:
         if events is None:
             events, has_gap = self.replay_window_after(last_seq)
@@ -688,5 +689,6 @@ class EventOutbox:
                 "events": events,
             },
             log_context="session.replay",
+            wait_for_delivery=wait_for_delivery,
         )
         return len(events) if sent else 0

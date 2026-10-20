@@ -7,6 +7,9 @@ import { useWebSocketConnection } from "./hooks/useWebSocket";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useDesktopEvents } from "./hooks/useDesktopEvents";
 import { useNativeWindowAppearance } from "./hooks/useNativeWindowAppearance";
+import { useDesktopPets } from "./hooks/useDesktopPets";
+import { useDesktopBehaviorPreferences } from "./hooks/useDesktopBehaviorPreferences";
+import { useNativeDictation } from "./hooks/useNativeDictation";
 import { useWorkspaceGit } from "./hooks/useWorkspaceGit";
 import { useAppStore } from "./stores";
 import { ChunkErrorBoundary, SafeBoundary } from "./shell/ChunkErrorBoundary";
@@ -19,6 +22,7 @@ const SettingsCenter = lazy(() => import("./overlays/SettingsCenter").then((m) =
 const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHelp").then((m) => ({ default: m.KeyboardShortcutsHelp })));
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
+const ProjectDialogHost = lazy(() => import("./overlays/ProjectDialog").then(m => ({ default: m.ProjectDialogHost })));
 
 const RouteLoading = ({ settings = false }: { settings?: boolean }) => {
   const { t } = useI18n();
@@ -35,6 +39,9 @@ const AppContent = () => {
   useKeyboardShortcuts();
   useDesktopEvents();
   useNativeWindowAppearance();
+  useDesktopPets();
+  useDesktopBehaviorPreferences();
+  useNativeDictation();
   useWorkspaceGit();
 
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
@@ -43,6 +50,7 @@ const AppContent = () => {
   const shortcutsHelpOpen = useAppStore((s) => s.shortcutsHelpOpen);
   const liveArtifactsOpen = useAppStore((s) => s.liveArtifactsOpen);
   const agentEditorOpen = useAppStore((s) => s.agentEditorOpen);
+  const projectEditTarget = useAppStore(s => s.projectEditTarget);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const agentEditorEnabled = capabilityFeatureEnabled(runtimeCapabilities, "agent_editor", true);
   const [settingsVisited, setSettingsVisited] = useState(settingsOpen);
@@ -51,7 +59,7 @@ const AppContent = () => {
   useEffect(() => { if (agentEditorOpen && agentEditorEnabled) setAgentEditorVisited(true); }, [agentEditorOpen, agentEditorEnabled]);
   const overlayRoute = [
     commandPaletteOpen, settingsOpen, shortcutsHelpOpen,
-    liveArtifactsOpen, agentEditorOpen && agentEditorEnabled,
+    liveArtifactsOpen, agentEditorOpen && agentEditorEnabled, projectEditTarget,
   ].join(":");
 
   return (
@@ -65,6 +73,7 @@ const AppContent = () => {
           {commandPaletteOpen && <CommandPalette />}
           {shortcutsHelpOpen && <KeyboardShortcutsHelp />}
           {liveArtifactsOpen && <LiveArtifacts />}
+          {projectEditTarget && <ProjectDialogHost />}
         </Suspense>
       </ChunkErrorBoundary>
       <div hidden={!settingsOpen} style={{ display: settingsOpen ? "contents" : "none" }}>

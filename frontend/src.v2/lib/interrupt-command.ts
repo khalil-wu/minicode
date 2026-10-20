@@ -18,7 +18,7 @@ const streamingAssistantForConversation = (
       : state.conversationMessages[conversationId] ?? []);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
-    if (message.role === "assistant" && message.isStreaming) return message;
+    if (message.role === "assistant" && (message.isStreaming || message.isThinkingStreaming)) return message;
   }
   return undefined;
 };

@@ -331,6 +331,8 @@ for (const transport of ["connected", "closed"]) {
     const drainCode = source.slice(source.indexOf("async function drainDesktopResources()"), source.indexOf("async function prepareAutomaticRollback()"));
     const events = [], logs = [];
     const context = { module: { exports: {} }, Promise, remoteDesktop: remote, EMBEDDED_BROWSER_TOKEN: "local-lifecycle",
+      dictationHotkeys: { async dispose() { events.push("dictation-stopped"); } },
+      generalMaintenance: null, petManager: null, petInitialization: null,
       appendDesktopLog: message => logs.push(message),
       windowManager: { clearWindowStateSaveTimer() {}, persistWindowState() {} },
       embeddedBrowserBridge: { releaseWindow() {}, async stop() { events.push("bridge-stopped"); } },

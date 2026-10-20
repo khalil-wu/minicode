@@ -172,7 +172,9 @@ def _goal(value: Any, field: str = "goal") -> None:
     ):
         if name in record and record[name] is not None:
             _text(record[name], f"{field}.{name}", maximum)
-    if str(record.get("status") or "") and str(record.get("status")) not in {"active", "paused"}:
+    if str(record.get("status") or "") and str(record.get("status")) not in {
+        "active", "paused", "complete", "blocked", "budget_limited", "usage_limited",
+    }:
         raise ValueError(f"{field}.status is invalid")
     _optional_iso(record.get("created_at"), f"{field}.created_at")
     _optional_iso(record.get("updated_at"), f"{field}.updated_at")

@@ -89,7 +89,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     openGitReview: (request) => {
       if (get().appMode === "chat") get().setAppMode("code");
       set((state) => {
-        const panelSlots = state.panelSlots.some((slot) => slot.maximized)
+        const panelSlots = state.appMode === "code" && state.panelSlots.some((slot) => slot.maximized)
           ? state.panelSlots.map((slot) => ({ ...slot, maximized: false }))
           : state.panelSlots;
         if (panelSlots !== state.panelSlots) persistPanelSlots(panelSlots);
@@ -123,9 +123,29 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         if (panelSlots !== state.panelSlots) persistPanelSlots(panelSlots);
         return {
           activeBottomTab: t, dockCollapsed: false, rightPanelExpanded: false, panelSlots,
-          appMode: state.appMode === "chat" ? "code" : state.appMode,
+          appMode: t !== "terminal" && state.appMode === "chat" ? "code" : state.appMode,
         };
       });
+    },
+    openTerminal: () => {
+      const state = get();
+      if (state.defaultTerminalLocation === "right") {
+        const maximized = state.appMode === "code" ? state.panelSlots.find(slot => slot.maximized) : undefined;
+        if (maximized) state.togglePanelMaximized(maximized.id);
+        if (state.activeBottomTab === "terminal") state.closeBottomDock();
+        state.setRightStackTab("terminal");
+      } else {
+        if (state.rightPanelOpen && state.rightStackTab === "terminal") state.toggleRightPanel();
+        state.openBottomTab("terminal");
+      }
+    },
+    toggleTerminal: () => {
+      const state = get();
+      if (state.defaultTerminalLocation === "right" && state.rightPanelOpen && state.rightStackTab === "terminal"
+        && !(state.appMode === "code" && state.panelSlots.some(slot => slot.maximized))) state.toggleRightPanel();
+      else if (state.defaultTerminalLocation === "bottom" && !state.rightPanelExpanded
+        && !(state.appMode === "code" && state.panelSlots.some(slot => slot.maximized)) && !state.dockCollapsed && state.activeBottomTab === "terminal") state.closeBottomDock();
+      else state.openTerminal();
     },
     closeBottomDock: () => {
       writeLS(LS.layout.dockCollapsed, "1");

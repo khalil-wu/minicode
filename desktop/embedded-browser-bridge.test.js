@@ -30,6 +30,22 @@ test("embedded browser bridge requires its token and forwards commands", async (
   }
 });
 
+test("authenticated health reports the actual browser control preference without admitting a page action", async () => {
+  let enabled = false;
+  bridge.init({ token: "bridge-test-token", manager: {
+    getBrowserSettings() { return { browserEnabled: enabled }; },
+    async executeControlCommand() { assert.fail("health must not execute a page action"); },
+  } });
+  const endpoint = await bridge.start();
+  try {
+    assert.equal((await fetch(`${endpoint}/v1/health`)).status, 401);
+    const options = { headers: { authorization: "Bearer bridge-test-token" } };
+    assert.equal((await (await fetch(`${endpoint}/v1/health`, options)).json()).browserEnabled, false);
+    enabled = true;
+    assert.equal((await (await fetch(`${endpoint}/v1/health`, options)).json()).browserEnabled, true);
+  } finally { await bridge.stop(); }
+});
+
 test("stop closes an authenticated request with an unfinished body", async () => {
   let calls = 0;
   bridge.init({

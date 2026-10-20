@@ -47,11 +47,17 @@ describe("workbench review and expanded surface ownership", () => {
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, appMode: "code", rightPanelOpen: true, rightStackTab: "diff" });
     expect(useAppStore.getState().gitReviewRequest).toMatchObject({ path: "src/main.ts", section: "staged", workspaceRoot: "C:/A", conversationId: "A" });
 
-    useAppStore.setState({ appMode: "cowork", panelSlots: [{ id: "editor", kind: "editor", focused: true, maximized: true }] });
+    const retainedCodeSlots = [{ id: "editor", kind: "editor" as const, focused: true, maximized: true }];
+    useAppStore.setState({ appMode: "cowork", panelSlots: retainedCodeSlots });
     useAppStore.getState().openGitReview({ path: "src/main.ts", section: "working", workspaceRoot: "C:/A", conversationId: "A" });
-    expect(useAppStore.getState().appMode).toBe("cowork");
-    expect(useAppStore.getState().panelSlots.some((slot) => slot.maximized)).toBe(false);
+    expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", rightPanelOpen: true, rightStackTab: "diff" });
+    expect(useAppStore.getState().panelSlots).toBe(retainedCodeSlots);
     expect(useAppStore.getState().gitReviewRequest?.section).toBe("working");
+
+    useAppStore.setState({ appMode: "code" });
+    useAppStore.getState().openGitReview({ path: "src/main.ts", section: "staged", workspaceRoot: "C:/A", conversationId: "A" });
+    expect(useAppStore.getState().panelSlots.some((slot) => slot.maximized)).toBe(false);
+    expect(useAppStore.getState()).toMatchObject({ appMode: "code", rightPanelOpen: true, rightStackTab: "diff" });
   });
 
   it("reveals source and conversation focus without losing editor buffers", () => {

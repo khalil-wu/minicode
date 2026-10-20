@@ -350,7 +350,7 @@ html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mo
 .md-body .md-file-code-reference:hover { color: var(--text-primary); background: var(--surface-hover); }
 
 @media (prefers-reduced-motion: reduce) {
-  .md-body .md-file-chip {
+  html:not([data-reduced-motion="false"]) .md-body .md-file-chip {
     transition: none;
   }
 }

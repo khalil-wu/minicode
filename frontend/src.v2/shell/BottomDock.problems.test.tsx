@@ -17,7 +17,7 @@ it('opens Problems without an editor tab and counts errors separately from hints
     { id: 'error', path: '/project/a.ts', severity: 'error', source: 'TypeScript', message: 'Compiler error', range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 2 }, workerDiagnostic: true },
     { id: 'hint', path: '/project/a.ts', severity: 'hint', source: 'TypeScript', message: 'Unused declaration', range: { startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 2 }, workerDiagnostic: true },
   ] }, navigate: vi.fn(), quickFixes: vi.fn(), applyFix: vi.fn(), refresh: vi.fn() })
-  useAppStore.setState({ workingDirectory: '/project', editorTabs: [], dockCollapsed: false, activeBottomTab: 'git', settingsOpen: false, skillsMarketplaceOpen: false, rightPanelExpanded: false })
+  useAppStore.setState({ appMode: 'code', workingDirectory: '/project', editorTabs: [], dockCollapsed: false, activeBottomTab: 'git', settingsOpen: false, skillsMarketplaceOpen: false, rightPanelExpanded: false })
   render(<BottomDock />)
   fireEvent.click(screen.getByRole('tab', { name: '问题' }))
   expect(useAppStore.getState().activeBottomTab).toBe('problems')

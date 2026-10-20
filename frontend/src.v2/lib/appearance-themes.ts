@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AppearanceVariant } from "./appearance-colors";
 import { CODE_THEME_CATALOG, type CodeThemeId } from "./code-themes";
+import { themeFontsSchema } from "./theme-fonts";
 
 const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 export const semanticThemeColorsSchema = z.object({
@@ -13,6 +14,7 @@ export const appearanceThemeSelectionSchema = z.object({
   contrast: z.number().int().min(0).max(100),
   opaqueWindows: z.boolean(),
   semanticColors: semanticThemeColorsSchema,
+  fonts: themeFontsSchema.optional(),
 });
 const selectionSchema = appearanceThemeSelectionSchema;
 export type AppearanceThemeSelection = z.infer<typeof selectionSchema>;

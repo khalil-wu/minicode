@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import logging
 from typing import Any, TYPE_CHECKING
 
@@ -148,23 +149,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
 
     last_conversation_id = data.get("last_conversation_id")
     last_workspace_root = data.get("last_workspace_root")
-    requested_last_seq = seq_from_restore_payload(data)
-    current_seq = session.event_outbox.current_replay_seq
-    replay_log_degraded = session.event_outbox.replay_log_degraded
-    cursor_reset = requested_last_seq > current_seq
-    last_seq = current_seq if cursor_reset else requested_last_seq
-    missed_by_seq = bool(last_seq and last_seq < current_seq)
-    replay_candidates, event_log_gap = (
-        session.event_outbox.replay_window_after(last_seq)
-        if last_seq
-        else ([], False)
-    )
-    event_log_gap = bool(event_log_gap or cursor_reset or replay_log_degraded)
-    if event_log_gap:
-        # A partial replay after an authoritative restore snapshot can regress
-        # already-hydrated state. Fall back as one indivisible snapshot instead.
-        replay_candidates = []
-    replay_can_cover_miss = bool(replay_candidates) and not event_log_gap
+    manager = session.ws_manager
     restore_manager = SessionRestoreManager(session.conversation_repo)
     result = await restore_manager.restore_session(
         session_id=session.session_id,
@@ -194,19 +179,21 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
                     return
                 generation = session.conversation_runtime._hydration_generation
                 conversation = await session.reconcile_persisted_ui_agent_state(owner)
-                current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
-                if current_view is not None:
-                    current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
-                if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
-                    return
-                session.permission_context = session.permission_context_for_conversation(conversation, source="session.restore")
-                session.refresh_llm_selection()
-                await session.send_payload(
-                    build_restore_conversation_switched_payload(
-                        restored_conversation_id=owner, active_payload=current_view,
-                        is_hydrating=False, runtime_snapshot=session.runtime_snapshot(),
-                    ), log_context="conversation.switched",
-                )
+                boundary = manager.conversation_stream_lock(owner) if manager is not None else nullcontext()
+                async with boundary:
+                    current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+                    if current_view is not None:
+                        current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
+                    if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
+                        return
+                    session.permission_context = session.permission_context_for_conversation(conversation, source="session.restore")
+                    session.refresh_llm_selection()
+                    await session.send_payload(
+                        build_restore_conversation_switched_payload(
+                            restored_conversation_id=owner, active_payload=current_view,
+                            is_hydrating=False, runtime_snapshot=session.runtime_snapshot(),
+                        ), log_context="conversation.switched", wait_for_delivery=False,
+                    )
                 await session.reemit_pending_state(conversation_id=owner)
 
             session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
@@ -223,78 +210,100 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
 
         _clear_active_conversation_runtime(session)
 
-    workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
-    restored_workspace = (
-        {"root_path": str(workspace_root), "name": workspace_root.name}
-        if workspace_root is not None
-        else None
-    )
-    if active_payload is not None:
-        active_payload = await asyncio.to_thread(restore_tool_artifact_sources, active_payload, session.artifact_store)
-    runtime_snapshot = build_restored_runtime_snapshot(
-        session.runtime_snapshot(),
-        restored_conversation_id=restored_conversation_id,
-        active_payload=active_payload,
-    )
-    provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
-    provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
-    base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
-    wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
-
-    await session.send_payload(
-        build_session_restored_payload(
-            result,
+    # Public history, cursor and FIFO publication share the same boundary as
+    # live events and observers. Workspace/private hydration stays outside it.
+    boundary = manager.conversation_stream_lock(restored_conversation_id) if manager is not None and restored_conversation_id else nullcontext()
+    async with boundary:
+        workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
+        restored_workspace = (
+            {"root_path": str(workspace_root), "name": workspace_root.name}
+            if workspace_root is not None
+            else None
+        )
+        if restored_conversation_id:
+            active_payload = await asyncio.to_thread(session.conversation_repo.get_conversation_view, restored_conversation_id)
+        if active_payload is not None:
+            active_payload = await asyncio.to_thread(restore_tool_artifact_sources, active_payload, session.artifact_store)
+        if restored_conversation_id:
+            result["conversation"] = active_payload
+            result["messages"] = active_payload["transcript"] if active_payload is not None else []
+        requested_last_seq = seq_from_restore_payload(data)
+        current_seq = session.event_outbox.current_replay_seq
+        replay_log_degraded = session.event_outbox.replay_log_degraded
+        cursor_reset = requested_last_seq > current_seq
+        last_seq = current_seq if cursor_reset else requested_last_seq
+        missed_by_seq = bool(last_seq and last_seq < current_seq)
+        replay_candidates, event_log_gap = (
+            session.event_outbox.replay_window_after(last_seq) if last_seq else ([], False)
+        )
+        event_log_gap = bool(event_log_gap or cursor_reset or replay_log_degraded)
+        if event_log_gap:
+            replay_candidates = []
+        replay_can_cover_miss = bool(replay_candidates) and not event_log_gap
+        runtime_snapshot = build_restored_runtime_snapshot(
+            session.runtime_snapshot(),
             restored_conversation_id=restored_conversation_id,
             active_payload=active_payload,
-            restored_workspace=restored_workspace,
-            runtime_snapshot=runtime_snapshot,
-            selected_model=session.selected_model,
-            provider=session.provider,
-            available_models=session.available_models,
-            models_source=session.models_source,
-            missed_events=bool(
-                cursor_reset
-                or event_log_gap
-                or (
-                    session.event_outbox.events_dropped_during_disconnect
-                    and missed_by_seq
-                    and not replay_can_cover_miss
-                )
-            ),
-            event_log_gap=event_log_gap,
-            snapshot_required=bool(cursor_reset or event_log_gap),
-            cursor_reset=cursor_reset,
-            requested_last_seq=requested_last_seq,
-            last_seq=last_seq,
-            current_seq=current_seq,
-            replayed_events=len(replay_candidates),
-            provider_id=provider_id,
-            base_url=base_url,
-            wire_api=wire_api,
-        ),
-        log_context="session.restored",
-    )
-    session.event_outbox.clear_disconnect_drop_marker()
+        )
+        provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
+        provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
+        base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
+        wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
 
-    if restored_conversation_id and active_payload:
         await session.send_payload(
-            build_restore_conversation_switched_payload(
+            build_session_restored_payload(
+                result,
                 restored_conversation_id=restored_conversation_id,
                 active_payload=active_payload,
-                is_hydrating=is_hydrating,
+                restored_workspace=restored_workspace,
                 runtime_snapshot=runtime_snapshot,
+                selected_model=session.selected_model,
+                provider=session.provider,
+                available_models=session.available_models,
+                models_source=session.models_source,
+                missed_events=bool(
+                    cursor_reset
+                    or event_log_gap
+                    or (
+                        session.event_outbox.events_dropped_during_disconnect
+                        and missed_by_seq
+                        and not replay_can_cover_miss
+                    )
+                ),
+                event_log_gap=event_log_gap,
+                snapshot_required=bool(cursor_reset or event_log_gap),
+                cursor_reset=cursor_reset,
+                requested_last_seq=requested_last_seq,
+                last_seq=last_seq,
+                current_seq=current_seq,
+                replayed_events=len(replay_candidates),
+                provider_id=provider_id,
+                base_url=base_url,
+                wire_api=wire_api,
             ),
-            log_context="conversation.switched",
+            log_context="session.restored", wait_for_delivery=False,
         )
-        if is_hydrating:
-            session.start_active_conversation_hydration(restored_conversation_id)
+        session.event_outbox.clear_disconnect_drop_marker()
 
-    if replay_candidates:
-        await session.event_outbox.replay_missed_events(
-            last_seq,
-            events=replay_candidates,
-            current_seq=current_seq,
-        )
+        if restored_conversation_id and active_payload:
+            await session.send_payload(
+                build_restore_conversation_switched_payload(
+                    restored_conversation_id=restored_conversation_id,
+                    active_payload=active_payload,
+                    is_hydrating=is_hydrating,
+                    runtime_snapshot=runtime_snapshot,
+                ),
+                log_context="conversation.switched", wait_for_delivery=False,
+            )
+            if is_hydrating:
+                session.start_active_conversation_hydration(restored_conversation_id)
+
+        if replay_candidates:
+            await session.event_outbox.replay_missed_events(
+                last_seq,
+                events=replay_candidates,
+                current_seq=current_seq, wait_for_delivery=False,
+            )
     # Replay the frozen incremental window first, then replace it with the
     # authoritative accumulated stream snapshot. This avoids duplicated text.
     await session.reemit_pending_state()
@@ -310,8 +319,9 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
     from backend.services.session_restore_service import build_session_synced_payload, seq_from_restore_payload
     from backend.ws.session_restore import SessionRestoreManager
 
-    # Other windows can switch/delete this owner during the disk read. Freeze
-    # the runtime snapshot only after its page belongs to the current owner.
+    manager = session.ws_manager
+    # Recovery can acquire the private projection lock; finish that work before
+    # entering the public stream boundary used by terminal notifications.
     while True:
         owner = session.active_conversation_id
         if owner:
@@ -319,72 +329,75 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
 
             async with session._conversation_projection_lock(owner):
                 await recover_persisted_conversation_projections(session.conversation_repo, conversation_id=owner)
-        active_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner) if owner else None
-        if active_view is not None:
-            active_view = await asyncio.to_thread(restore_tool_artifact_sources, active_view, session.artifact_store)
-        if owner == session.active_conversation_id:
+        boundary = manager.conversation_stream_lock(owner) if manager is not None and owner else nullcontext()
+        async with boundary:
+            active_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner) if owner else None
+            if active_view is not None:
+                active_view = await asyncio.to_thread(restore_tool_artifact_sources, active_view, session.artifact_store)
+            if owner != session.active_conversation_id:
+                continue
+
+            requested_last_seq = seq_from_restore_payload(data)
+            current_seq = session.event_outbox.current_replay_seq
+            replay_log_degraded = session.event_outbox.replay_log_degraded
+            cursor_reset = requested_last_seq > current_seq
+            last_seq = current_seq if cursor_reset else requested_last_seq
+            replay_candidates, event_log_gap = (
+                session.event_outbox.replay_window_after(last_seq)
+                if last_seq
+                else ([], False)
+            )
+            event_log_gap = bool(event_log_gap or cursor_reset or replay_log_degraded)
+            if event_log_gap:
+                replay_candidates = []
+            replay_can_cover_miss = bool(replay_candidates) and not event_log_gap
+            restore_manager = SessionRestoreManager(session.conversation_repo)
+            result = await restore_manager.sync_session(
+                session_id=session.session_id,
+                session_snapshot=session.runtime_snapshot(),
+            )
+            workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
+            runtime_snapshot = result.get("session") if isinstance(result.get("session"), dict) else {}
+            provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
+            provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
+            base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
+            wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
+
+            await session.send_payload(
+                build_session_synced_payload(
+                    result,
+                    protocol_version=RUNTIME_PROTOCOL_VERSION,
+                    active_conversation=active_view,
+                    active_conversation_id=session.active_conversation_id,
+                    workspace_root=workspace_root,
+                    selected_model=session.selected_model,
+                    provider=session.provider,
+                    available_models=session.available_models,
+                    models_source=session.models_source,
+                    last_seq=last_seq,
+                    current_seq=current_seq,
+                    replayed_events=len(replay_candidates),
+                    event_log_gap=event_log_gap,
+                    snapshot_required=bool(
+                        cursor_reset
+                        or event_log_gap
+                        or (last_seq and last_seq < current_seq and not replay_can_cover_miss)
+                    ),
+                    cursor_reset=cursor_reset,
+                    requested_last_seq=requested_last_seq,
+                    provider_id=provider_id,
+                    base_url=base_url,
+                    wire_api=wire_api,
+                ),
+                log_context="session.synced", wait_for_delivery=False,
+            )
+            if replay_candidates:
+                await session.event_outbox.replay_missed_events(
+                    last_seq,
+                    events=replay_candidates,
+                    current_seq=current_seq, wait_for_delivery=False,
+                )
             break
-
-    requested_last_seq = seq_from_restore_payload(data)
-    current_seq = session.event_outbox.current_replay_seq
-    replay_log_degraded = session.event_outbox.replay_log_degraded
-    cursor_reset = requested_last_seq > current_seq
-    last_seq = current_seq if cursor_reset else requested_last_seq
-    replay_candidates, event_log_gap = (
-        session.event_outbox.replay_window_after(last_seq)
-        if last_seq
-        else ([], False)
-    )
-    event_log_gap = bool(event_log_gap or cursor_reset or replay_log_degraded)
-    if event_log_gap:
-        replay_candidates = []
-    replay_can_cover_miss = bool(replay_candidates) and not event_log_gap
-    restore_manager = SessionRestoreManager(session.conversation_repo)
-    result = await restore_manager.sync_session(
-        session_id=session.session_id,
-        session_snapshot=session.runtime_snapshot(),
-    )
-    workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
-    runtime_snapshot = result.get("session") if isinstance(result.get("session"), dict) else {}
-    provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
-    provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
-    base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
-    wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
-
-    await session.send_payload(
-        build_session_synced_payload(
-            result,
-            protocol_version=RUNTIME_PROTOCOL_VERSION,
-            active_conversation=active_view,
-            active_conversation_id=session.active_conversation_id,
-            workspace_root=workspace_root,
-            selected_model=session.selected_model,
-            provider=session.provider,
-            available_models=session.available_models,
-            models_source=session.models_source,
-            last_seq=last_seq,
-            current_seq=current_seq,
-            replayed_events=len(replay_candidates),
-            event_log_gap=event_log_gap,
-            snapshot_required=bool(
-                cursor_reset
-                or event_log_gap
-                or (last_seq and last_seq < current_seq and not replay_can_cover_miss)
-            ),
-            cursor_reset=cursor_reset,
-            requested_last_seq=requested_last_seq,
-            provider_id=provider_id,
-            base_url=base_url,
-            wire_api=wire_api,
-        ),
-        log_context="session.synced",
-    )
-    if replay_candidates:
-        await session.event_outbox.replay_missed_events(
-            last_seq,
-            events=replay_candidates,
-            current_seq=current_seq,
-        )
     # A stream or approval can change without changing transcript length.  The
     # replay log is the source of truth for those mutations; this snapshot is
     # only the authoritative fallback when the bounded log has a gap.

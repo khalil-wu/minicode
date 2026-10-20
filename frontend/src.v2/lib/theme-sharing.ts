@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { AppearanceVariant } from "./appearance-colors";
 import { CODE_THEME_CATALOG, isCodeThemeIdForVariant, type CodeThemeId } from "./code-themes";
+import { themeFontsSchema } from "./theme-fonts";
 
 const sharePrefix = "codex-theme-v1:";
 class ThemeShareError extends Error {}
@@ -8,7 +9,7 @@ const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/).transform(value => value.
 const codeThemeId = z.custom<CodeThemeId>(value => typeof value === "string" && CODE_THEME_CATALOG.some(theme => theme.id === value));
 
 // Codex app-shared kN/$Tt and app-initial d0s/l0s. Only user share text is
-// parsed here; the stored/application snapshot deliberately excludes fonts.
+// parsed here; typography is stored per appearance variant.
 export const chromeThemeColorsSchema = z.object({
   accent: hexColor,
   accentSource: z.enum(["chatgpt", "custom"]).optional(),
@@ -17,6 +18,7 @@ export const chromeThemeColorsSchema = z.object({
   opaqueWindows: z.boolean(),
   semanticColors: z.object({ diffAdded: hexColor, diffRemoved: hexColor, skill: hexColor }),
   surface: hexColor,
+  fonts: themeFontsSchema.optional(),
 });
 export type ChromeThemeColors = z.infer<typeof chromeThemeColorsSchema>;
 

@@ -5,7 +5,7 @@ vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable:
 import { useAppStore } from "../stores";
 import { BottomDock } from "../shell/BottomDock";
 
-beforeEach(() => useAppStore.setState({ dockCollapsed: false, activeBottomTab: "budget", settingsOpen: false,
+beforeEach(() => useAppStore.setState({ appMode: "code", dockCollapsed: false, activeBottomTab: "budget", settingsOpen: false,
   skillsMarketplaceOpen: false, rightPanelExpanded: false, budgetBuckets: [], lastUsage: null,
   usageTotals: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, turns: 0 } }));
 afterEach(cleanup);

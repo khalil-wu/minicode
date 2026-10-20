@@ -291,6 +291,7 @@ export type TurnWorkItem =
   | { kind: "user"; id: string; cell: UserMessageCellState };
 
 export interface ChatTurnState {
+  asyncMessages?: import("../../stores/types").TextContentBlock[];
   id: string;
   /** Pure streaming receipts preserve the file evidence owned by this projection. */
   resourceKey?: object;

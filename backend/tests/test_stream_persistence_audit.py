@@ -236,20 +236,21 @@ async def test_extension_reload_keeps_project_configuration(tmp_path, monkeypatc
 def test_failed_steer_write_is_not_published_or_saved_later(tmp_path, monkeypatch):
     repository = ConversationRepository(tmp_path / "conversations")
     session = SimpleNamespace(session_id="fixture", conversation_repo=repository,
-        turn_wait_state=TurnWaitState())
+        turn_wait_state=TurnWaitState(), _conversation_streams={"conv_probe": {"turn_id": "r1", "message_id": "active"}})
     manager = SessionRunManager(session)
     queue = manager.durable_queue
     try:
         queue.save({}, {}, {})
         session.turn_wait_state.turn_input_queues["conv_probe"] = TurnInputQueue()
         session.turn_wait_state.turn_input_queues["conv_probe"].begin_turn("r1")
+        manager.run_tasks["conv_probe"] = object()
         command = UserCommand("user_message", {"content": "steer once", "assistant_message_id": "a1", "user_message_id": "u1"})
         with monkeypatch.context() as patch:
             def fail(*args, **kwargs):
                 raise PermissionError("temporary denial")
             patch.setattr("backend.ws.durable_user_queue.atomic_write_text", fail)
             with pytest.raises(PermissionError):
-                manager.enqueue_user_message_as_steer("conv_probe", command, target_message_id="active")
+                manager.enqueue_user_message_as_steer("conv_probe", command, expected_turn_id="r1", target_message_id="active")
         assert manager.pending_turn_input_snapshot() == []
         manager._persist_user_queues()
         assert json.loads(queue.path.read_text())["turn_inputs"] == {}

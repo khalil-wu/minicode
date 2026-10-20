@@ -6,6 +6,25 @@ import { ContextMenu } from "./ContextMenu";
 afterEach(cleanup);
 
 describe("ContextMenu keyboard navigation", () => {
+  it("typeaheads and returns through a five-level submenu without selecting a different level", () => {
+    const action = vi.fn();
+    render(<ContextMenu position={{ x: 0, y: 0 }} onClose={vi.fn()} items={[
+      { label: "Archive" }, { label: "Copy", submenu: [{ label: "Copy source", submenu: [{ label: "Files", submenu: [{ label: "Nested", submenu: [
+        { label: "Unavailable", disabled: true }, { label: "Alpha" }, { label: "Beta", onClick: action },
+      ] }] }] }] },
+    ]} />);
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "c" });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Copy" }));
+    for (const label of ["Copy source", "Files", "Nested", "Alpha"]) {
+      fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: label }));
+    }
+    fireEvent.keyDown(document.activeElement!, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Beta" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Nested" }));
+    expect(action).not.toHaveBeenCalled();
+  });
   it("opens a submenu after separators with Right, navigates only that menu, and returns with Left", () => {
     const close = vi.fn(), choose = vi.fn();
     render(<ContextMenu position={{ x: 20, y: 20 }} onClose={close} items={[

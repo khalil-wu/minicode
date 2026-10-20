@@ -16,6 +16,7 @@ export type WorkspaceServerEventType =
   // File watcher
   | "file.changed"
   | "workspace.project_index.invalidated"
+  | "pet.published"
   // Commands / artifacts
   | "command.result"
   | "command_output_chunk"
@@ -216,6 +217,11 @@ export interface WorkspaceRecentProjectPayload {
   name: string;
   project_type: string;
   last_opened: number;
+  source_folders?: string[];
+  managed_workspace_root?: string;
+  pinned?: boolean;
+  appearance?: import("../lib/project-appearance").ProjectAppearance | null;
+  named?: boolean;
 }
 
 export interface WorkspaceRecentListEvent {

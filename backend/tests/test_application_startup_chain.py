@@ -46,6 +46,11 @@ async def test_interrupted_startup_closes_allocated_owners(tmp_path, monkeypatch
             events.append("sessions_closed")
 
     class Runtime:
+        async def aclose(self, *, release_lease):
+            assert not release_lease
+            events.append("child_services_closed")
+            return True
+
         def close(self, *, release_lease):
             assert release_lease
             events.append("lease_released")
@@ -56,7 +61,7 @@ async def test_interrupted_startup_closes_allocated_owners(tmp_path, monkeypatch
     with pytest.raises(type(startup_error)):
         async with main.lifespan(main.app):
             raise AssertionError("Failed startup must not enter serving scope")
-    assert events == ["allocated", "sessions_closed", "services_closed", "lease_released"]
+    assert events == ["allocated", "sessions_closed", "child_services_closed", "services_closed", "lease_released"]
     assert main._state.bootstrap is None
 
 
@@ -82,6 +87,11 @@ async def test_session_shutdown_error_still_closes_services_and_releases_lease(m
             raise RuntimeError("session teardown failed")
 
     class Runtime:
+        async def aclose(self, *, release_lease):
+            assert not release_lease
+            events.append("child_services_closed")
+            return True
+
         def close(self, **kwargs):
             events.append("lease_released")
 
@@ -91,7 +101,43 @@ async def test_session_shutdown_error_still_closes_services_and_releases_lease(m
     with pytest.raises(RuntimeError, match="session teardown failed"):
         async with main.lifespan(main.app):
             pass
-    assert events == ["services_closed", "lease_released"]
+    assert events == ["child_services_closed", "services_closed", "lease_released"]
+    assert main._state.bootstrap is None
+
+
+@pytest.mark.asyncio
+async def test_unsettled_child_services_fail_shutdown_before_releasing_the_runtime(monkeypatch):
+    events = []
+
+    class Bootstrap:
+        begin_drain = main.AppBootstrap.begin_drain
+        def __init__(self, **kwargs):
+            pass
+        async def startup(self):
+            pass
+        async def shutdown(self):
+            events.append("services_closed")
+
+    class Manager:
+        async def shutdown(self, **kwargs):
+            events.append("sessions_closed")
+
+    class Runtime:
+        async def aclose(self, *, release_lease):
+            assert not release_lease
+            events.append("child_cleanup_pending")
+            return False
+        def close(self, *, release_lease):
+            assert release_lease
+            events.append("runtime_close_requested")
+
+    monkeypatch.setattr(main, "AppBootstrap", Bootstrap)
+    monkeypatch.setattr(main._state, "ws_manager", Manager())
+    monkeypatch.setattr(runtime, "default_runtime_if_initialized", lambda: Runtime())
+    with pytest.raises(RuntimeError, match="unsettled child thread resources"):
+        async with main.lifespan(main.app):
+            pass
+    assert events == ["sessions_closed", "child_cleanup_pending", "services_closed", "runtime_close_requested"]
     assert main._state.bootstrap is None
 
 

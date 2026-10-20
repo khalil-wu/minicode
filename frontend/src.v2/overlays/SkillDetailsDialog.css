@@ -1,0 +1,15 @@
+.skill-details-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: 24px; background: var(--backdrop-subtle); }
+.skill-details-dialog { display: flex; flex-direction: column; width: min(640px, 100%); max-height: min(800px, calc(100dvh - 48px)); border: 1px solid var(--border-subtle); border-radius: var(--radius-xl); background: var(--surface-base); box-shadow: var(--shadow-lg); outline: none; }
+.skill-details-toolbar { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 24px 24px 12px; }
+.skill-details-toolbar > div { display: flex; align-items: center; gap: 16px; }
+.skill-details-close, .skill-details-more { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); cursor: pointer; }
+.skill-details-close:hover, .skill-details-more:hover { background: var(--surface-hover); color: var(--text-primary); }
+.skill-details-scroll { overflow-y: auto; padding: 4px 24px 24px; }
+.skill-details-scroll > h2 { margin: 0; font-size: var(--mc-font-heading); font-weight: var(--fw-semibold); }
+.skill-details-description { margin: 8px 0 24px; color: var(--text-secondary); line-height: var(--leading-relaxed); }
+.skill-details-loading { color: var(--text-muted); }
+.skill-details-body { font-size: var(--mc-font-body); line-height: var(--leading-relaxed); }
+.skill-details-dialog > footer { display: flex; flex-shrink: 0; justify-content: flex-end; padding: 16px 24px 24px; }
+.skill-details-dialog > footer > button { min-height: 32px; padding: 0 14px; border: 0; border-radius: var(--radius-full); font: inherit; cursor: pointer; }
+.settings-skill-open { padding: 0; border: 0; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.settings-skill-open > span { overflow: hidden; color: var(--text-secondary); font-size: inherit; font-weight: var(--fw-medium); text-overflow: ellipsis; white-space: nowrap; }

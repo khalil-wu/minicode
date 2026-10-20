@@ -11,7 +11,7 @@ const { EventEmitter } = require("node:events");
 function loadProduction(file, electron) {
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, file), "utf8"), {
-    module, exports: module.exports, Buffer, URL, console, process,
+    module, exports: module.exports, __dirname, Buffer, URL, console, process,
     setTimeout, clearTimeout,
     require(name) { return name === "electron" ? electron : require(name); },
   }, { filename: file });
@@ -99,7 +99,7 @@ function browserFixture() {
   class Contents extends EventEmitter {
     constructor() {
       super(); this.id = id++; this.url = ""; this.dead = false;
-      this.session = { on() {}, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, webRequest: {} };
+      this.session = { on() {}, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDevicePermissionHandler() {}, webRequest: { onHeadersReceived() {} } };
     }
     setWindowOpenHandler() {}
     getURL() { return this.url; }
@@ -136,13 +136,14 @@ function browserFixture() {
 
 test("rejected browser settings leave download authorization unchanged", () => {
   const { browser } = browserFixture();
+  const before = browser.getBrowserSettings().downloadPolicy;
   for (const invalid of [
     { origin: "invalid" },
     { origin: "https://example.com", permission: "unknown" },
     { permission: "notifications" },
   ]) {
     assert.throws(() => browser.setBrowserSettings({ downloadPolicy: "allow", ...invalid }));
-    assert.equal(browser.getBrowserSettings().downloadPolicy, "block");
+    assert.equal(browser.getBrowserSettings().downloadPolicy, before);
   }
 });
 

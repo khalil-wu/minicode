@@ -14,3 +14,6 @@
 
 # Preserve the upstream license wording and whitespace in generated notices.
 /backend/network/resources/**/THIRD_PARTY_NOTICES.txt whitespace=-blank-at-eol
+# The generated aggregate preserves upstream markup, headings, and indentation.
+# Review its collector and dependency inputs instead of a half-million-line diff.
+/desktop/THIRD_PARTY_NOTICES.txt text eol=lf -diff linguist-generated=true

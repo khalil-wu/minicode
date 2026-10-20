@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import json
 import yaml
 from dataclasses import dataclass, field
 from collections import deque
@@ -47,6 +46,7 @@ class SkillMeta:
     original_name: str = ""
     alias_root: Path | None = None
     agent_plugin: bool = False
+    plugin_enabled: bool = True
 
     def to_layer1_summary(self) -> str:
         """Render MiniCode's absolute-path catalog line."""
@@ -83,6 +83,7 @@ class SkillLoader:
         self._project_root = self._normalize_project_root(project_root)
         self._discovered = False
         self._catalog: list[SkillMeta] = []
+        self._settings_catalog: list[tuple[SkillMeta, bool]] = []
         self._path_cache: dict[str, SkillMeta] = {}
         self._full_cache: dict[str, SkillFull] = {}
         self._role_disabled_paths: set[str] = set()
@@ -91,6 +92,7 @@ class SkillLoader:
         self._role_plugins_enabled = True
         self._skills_configuration = SkillsConfiguration()
         self._direct_skill_roots: set[str] = set()
+        self._disabled_plugin_roots: set[str] = set()
         self._config_stack = None
 
     @property
@@ -120,6 +122,7 @@ class SkillLoader:
         self._project_root = normalized
         self._discovered = False
         self._catalog.clear()
+        self._settings_catalog.clear()
         self._path_cache.clear()
         self._full_cache.clear()
 
@@ -222,7 +225,8 @@ class SkillLoader:
         if explicit_roots:
             owned_roots.extend(Path(part).expanduser().resolve() for part in explicit_roots.split(os.pathsep) if part.strip())
 
-        for plugin in snapshot.enabled_plugins:
+        enabled_paths = {self._path_key(Path(str(plugin["path"]))) for plugin in snapshot.enabled_plugins}
+        for plugin in snapshot.plugins:
             plugin_dir = Path(str(plugin.get("path") or ""))
             plugin_name = str(plugin.get("name") or plugin.get("id") or plugin_dir.name).strip()
             if not plugin_name or not plugin_dir.is_dir():
@@ -232,32 +236,17 @@ class SkillLoader:
                 resolved_plugin_dir == root or root in resolved_plugin_dir.parents for root in owned_roots
             ):
                 continue
-            manifest_paths = [Path(str(path)) for path in plugin.get("manifest_paths", [])]
-            if not manifest_paths:
-                manifest_paths = [plugin_dir / ".minicode-plugin" / "plugin.json"]
-            skills_dirs: list[Path] = []
-            for manifest_path in manifest_paths:
-                try:
-                    from backend.plugins.manifest import _read_plugin_manifest
+            from backend.plugins.manifest import plugin_skill_sources
 
-                    raw = _read_plugin_manifest(manifest_path)
-                    configured = raw.get("skills") if isinstance(raw, dict) else None
-                    configured_paths = [configured] if isinstance(configured, str) else configured if isinstance(configured, list) else []
-                    for configured_path in configured_paths:
-                        if not isinstance(configured_path, str) or not configured_path.strip():
-                            continue
-                        candidate = (plugin_dir / configured_path).resolve()
-                        candidate.relative_to(plugin_dir.resolve())
-                        skills_dirs.append(candidate)
-                except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
-                    continue
-            if not skills_dirs:
-                skills_dirs.append(plugin_dir / "skills")
+            skills_dirs, direct_children = plugin_skill_sources(plugin_dir,
+                [Path(str(path)) for path in plugin.get("manifest_paths", [])] or None)
             for skills_dir in skills_dirs:
                 if skills_dir.is_dir():
                     dirs.append((f"plugin:{plugin.get('id') or plugin_name}", skills_dir))
-                    if plugin.get("skill_discovery_mode") == "direct_children":
+                    if direct_children:
                         self._direct_skill_roots.add(self._path_key(skills_dir))
+                    if self._path_key(plugin_dir) not in enabled_paths:
+                        self._disabled_plugin_roots.add(self._path_key(skills_dir))
         return dirs
 
     def discover(self) -> list[SkillMeta]:
@@ -277,6 +266,7 @@ class SkillLoader:
         stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
         self._skills_configuration = skills_configuration_from_stack(stack)
         self._direct_skill_roots.clear()
+        self._disabled_plugin_roots.clear()
 
         # Search roots are already ordered from nearest workspace scope to
         # user/system fallbacks. Keep same-name skills as distinct catalog
@@ -286,12 +276,13 @@ class SkillLoader:
                 continue
 
             agent_plugin = self._path_key(base_dir) in self._direct_skill_roots
-            skill_files = sorted((child / "SKILL.md" for child in base_dir.iterdir() if child.is_dir() and (child / "SKILL.md").is_file())) if agent_plugin else self._discover_skill_files(base_dir)
+            skill_files = self.skill_files_for_root(base_dir, direct_children=agent_plugin)
             for skill_file in skill_files:
                 meta = self._parse_frontmatter(skill_file, level)
                 if meta:
                     meta.alias_root = base_dir
                     meta.agent_plugin = agent_plugin
+                    meta.plugin_enabled = self._path_key(base_dir) not in self._disabled_plugin_roots
                     if meta.products and "codex" not in meta.products:
                         continue
                     path_key = self._path_key(meta.source_path)
@@ -318,7 +309,9 @@ class SkillLoader:
                 disabled_paths.difference_update(matched)
             else:
                 disabled_paths.update(matched)
-        catalog = [meta for meta in catalog if self._path_key(meta.source_path) not in disabled_paths]
+        self._settings_catalog = [(meta, self._path_key(meta.source_path) not in disabled_paths)
+            for meta in catalog]
+        catalog = [meta for meta in catalog if meta.plugin_enabled and self._path_key(meta.source_path) not in disabled_paths]
 
         self._catalog = catalog
         self._discovered = True
@@ -326,6 +319,13 @@ class SkillLoader:
         self._full_cache.clear()
         logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in catalog))
         return list(catalog)
+
+    @staticmethod
+    def skill_files_for_root(base_dir: Path, *, direct_children: bool) -> list[Path]:
+        if direct_children:
+            return sorted(child / "SKILL.md" for child in base_dir.iterdir()
+                if child.is_dir() and (child / "SKILL.md").is_file())
+        return SkillLoader._discover_skill_files(base_dir)
 
     @staticmethod
     def _discover_skill_files(base_dir: Path) -> list[Path]:
@@ -390,6 +390,20 @@ class SkillLoader:
         if not meta:
             logger.warning("Skill '%s' 不存在或名称不唯一", skill_name)
             return None
+        return self._load_full_meta(meta)
+
+    def load_settings_full(self, source_path: str | Path) -> tuple[SkillFull, bool] | None:
+        """Read an exact registered Skill for details, including disabled entries."""
+        path_key = self._path_key(Path(source_path))
+        entry = next((entry for entry in self.list_settings_metas()
+            if self._path_key(entry[0].source_path) == path_key), None)
+        if entry is None:
+            return None
+        meta, enabled = entry
+        full = self._load_full_meta(meta)
+        return (full, enabled) if full is not None else None
+
+    def _load_full_meta(self, meta: SkillMeta) -> SkillFull | None:
         cache_key = self._path_key(meta.source_path)
         if cache_key in self._full_cache:
             return self._full_cache[cache_key]
@@ -397,7 +411,8 @@ class SkillLoader:
         # 读取完整文件
         skill_file = meta.source_path
         try:
-            raw = skill_file.read_text(encoding="utf-8-sig")
+            with skill_file.open(encoding="utf-8-sig", newline="") as stream:
+                raw = stream.read()
             content = self._extract_body(raw)
         except (OSError, UnicodeDecodeError) as exc:
             logger.error("读取 %s 失败: %s", skill_file, exc)
@@ -408,7 +423,7 @@ class SkillLoader:
 
         logger.info(
             "加载 Skill '%s' Layer 2: ~%d tokens",
-            skill_name, full.token_estimate,
+            meta.name, full.token_estimate,
         )
         return full
 
@@ -444,6 +459,12 @@ class SkillLoader:
         if not self._discovered:
             self.discover()
         return list(self._catalog)
+
+    def list_settings_metas(self) -> list[tuple[SkillMeta, bool]]:
+        """Registered inventory includes disabled entries without admitting them."""
+        if not self._discovered:
+            self.discover()
+        return list(self._settings_catalog)
 
     def get_metas(self, skill_name: str) -> list[SkillMeta]:
         if not self._discovered:

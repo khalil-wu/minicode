@@ -31,6 +31,13 @@
   color: var(--text-primary);
 }
 
+html[data-pointer-cursors="false"] :where(button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="radio"], [role="switch"], [role="tab"], label:has(input[type="checkbox"]), .cursor-pointer) {
+  cursor: default !important;
+}
+html[data-pointer-cursors="true"] :where(button:not(:disabled), a[href], [role="button"]:not([aria-disabled="true"]), [role="menuitem"]:not([aria-disabled="true"]), [role="switch"]:not(:disabled)) {
+  cursor: pointer;
+}
+
 #root :where(button, input, select, textarea) {
   font-family: var(--font-ui);
   font-synthesis: none;
@@ -819,18 +826,14 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .settings-workspace.settings-center {
   position: fixed;
   z-index: var(--z-modal);
-  inset: calc(var(--header-height) + 8px) 8px 8px var(--desktop-rail-width);
-  border: 1px solid var(--desktop-frame-border);
-  border-radius: 16px;
+  inset: var(--header-height) 0 0 var(--desktop-rail-width);
+  border: 0;
+  border-radius: 0;
 }
 
 .settings-workspace-sidebar {
   background: var(--workbench-sidebar) !important;
   border-right-color: var(--border-subtle) !important;
-}
-
-@media (max-width: 1199px) {
-  .settings-workspace.settings-center { inset: var(--header-height) 0 0 var(--desktop-rail-width); border: 0; border-radius: 0; }
 }
 
 .settings-center-main {
@@ -856,8 +859,9 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .settings-page-heading h2 {
-  font-size: 24px !important;
-  font-weight: var(--fw-semibold) !important;
+  font-size: 28px !important;
+  font-weight: var(--fw-medium) !important;
+  line-height: 1.2;
   letter-spacing: 0 !important;
 }
 

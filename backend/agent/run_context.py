@@ -17,6 +17,8 @@ from backend.llm.errors import sanitize_llm_error_message
 from backend.runtime_env import default_user_shell
 
 if TYPE_CHECKING:
+    from backend.permissions.context import ToolExecutionContext
+    from backend.services.goal_runtime import GoalTurnAccounting
     from backend.agent.environment_selection import EnvironmentManagerLease, ThreadEnvironments, TurnEnvironmentRequest, TurnEnvironmentSnapshot
     from backend.environments.manager import EnvironmentManager
     from backend.mcp.environment_runtime import PreparedEnvironmentCapabilities
@@ -120,6 +122,9 @@ class RunContext:
     command_prompt_allow_rules_setter: Callable[..., Any] | None = None
     teammate_plan_approval_requester: Callable[..., Any] | None = None
     conversation_repository: ConversationRepository | None = None
+    goal_accounting: GoalTurnAccounting | None = None
+    multi_agent_version: str = ""
+    coordination_root_context: ToolExecutionContext | None = None
     turn_input_queue: TurnInputQueue | None = None
     # These are the real owner and canonical terminal, shared by host input
     # submission. They never come from public command metadata.
@@ -166,6 +171,14 @@ class RunContext:
         return captured
 
     async def close_environment_snapshots(self) -> None:
+        if self.code_execution is not None and self.code_execution.pending_tasks():
+            self.code_store.retire(self.code_execution, self._close_environment_snapshots)
+            return
+        await self._close_environment_snapshots()
+        if self.code_execution is not None:
+            self.code_store.runtimes.discard(self.code_execution)
+
+    async def _close_environment_snapshots(self) -> None:
         current, initial = self.turn_environments, self.initial_turn_environments
         self.turn_environments = self.initial_turn_environments = None
         if current is not None:

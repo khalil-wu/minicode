@@ -18,15 +18,18 @@ import {
   Minimize2,
   MessageCircle,
   ChevronDown,
+  Target,
 } from "../lib/icons";
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
+import { openNewBrowserTab } from "../chat/openWebInBrowser";
 import { draftWindowOwnerId } from "../stores/draft-window-owner";
 import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { rightPanelDefaultWidth, rightPanelMaximumWidth, rightPanelWidthFromRatio } from "./right-panel-width";
 import type { RightStackTab } from "../stores/types";
 import { ContextMenu } from "../components/ContextMenu";
 import { SideChatPanel } from "../panels/SideChatPanel";
+import type { BrowserTabSummary } from "../panels/BrowserPanel";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
 import { projectAgentViews } from "../lib/agent-view-model";
 import { mcpServerNeedsAttention } from "../lib/mcp-status";
@@ -52,7 +55,7 @@ interface SidebarRightProps {
 const normalizeInitialTab = (tab: SidebarRightProps["initialTab"]): StackTab => {
   if (tab === "details") return "inspector";
   if (tab === "context") return "tasks";
-  if (tab === "plan" || tab === "terminal") return "tasks";
+  if (tab === "plan") return "tasks";
   return tab ?? "tasks";
 };
 
@@ -64,6 +67,9 @@ const LazyPreviewPanel = lazy(() =>
 const LazyBrowserPanel = lazy(() =>
   import("../panels/BrowserPanel").then((module) => ({ default: module.BrowserPanel })),
 );
+const LazyTerminalPanel = lazy(() => import("../panels/TerminalPanel").then(module => ({ default: module.TerminalPanel })));
+const LazyFilesPanel = lazy(() => import("../panels/FilesPanel").then(module => ({ default: module.FilesPanel })));
+const LazyGoalPanel = lazy(() => import("../panels/GoalPanel").then(module => ({ default: module.GoalPanel })));
 const LazyDiffPanel = lazy(() =>
   import("../panels/DiffPanel").then((module) => ({ default: module.DiffPanel })),
 );
@@ -97,14 +103,12 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const sideChatOpen = useAppStore((s) => s.sideChatOpen);
   const closeSideChat = useAppStore((s) => s.closeSideChat);
-  const openBottomTab = useAppStore((s) => s.openBottomTab);
   const toggleQuickOpen = useAppStore((s) => s.toggleQuickOpen);
   const shortcutBindings = useAppStore((s) => s.shortcutBindings);
   const [localTab, setLocalTab] = useState<StackTab>(normalizeInitialTab(initialTab));
   const [openTabIds, setOpenTabIds] = useState<StackTab[]>(() => initialTab !== undefined
     ? [normalizeInitialTab(initialTab)]
     : rightPanelOpen ? [normalizeInitialTab(rightStackTab)] : []);
-  const [launcherPosition, setLauncherPosition] = useState<{ x: number; y: number } | null>(null);
   const [openedPanelPosition, setOpenedPanelPosition] = useState<{ x: number; y: number } | null>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
   const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
@@ -127,17 +131,18 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const resizeCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => resizeCleanupRef.current?.(), []);
   const tabListRef = useRef<HTMLDivElement | null>(null);
-  const launcherButtonRef = useRef<HTMLButtonElement | null>(null);
+  const tabFocusFrame = useRef<number | null>(null);
+  const cancelTabFocus = () => { if (tabFocusFrame.current !== null) window.cancelAnimationFrame(tabFocusFrame.current); tabFocusFrame.current = null; };
+  useEffect(() => () => cancelTabFocus(), []);
   const requestedActiveTab = initialTab === undefined ? rightStackTab : localTab;
-  const normalizedRequestedTab = requestedActiveTab === "plan" || requestedActiveTab === "terminal" ? "tasks" : requestedActiveTab;
+  const normalizedRequestedTab = requestedActiveTab === "plan" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
   const expanded = initialTab === undefined && rightPanelExpanded;
-  const canExpand = initialTab === undefined && (["browser", "preview", "diff", "artifacts"].includes(activeTab) || activeTab.startsWith("mcp-app:"));
+  const canExpand = initialTab === undefined && (["browser", "preview", "diff", "artifacts", "terminal", "sidechat", "files", "subagents", "goal"].includes(activeTab) || activeTab.startsWith("mcp-app:"));
   const setActiveTab = initialTab === undefined ? setRightStackTab : setLocalTab;
-  const closeLauncher = useCallback(() => setLauncherPosition(null), []);
   useEffect(() => {
-    if (!visible) { closeLauncher(); setOpenedPanelPosition(null); }
-  }, [visible, closeLauncher]);
+    if (!visible) { setOpenedPanelPosition(null); }
+  }, [visible]);
 
   const subagents = useAppStore((s) => s.subagents);
   const activePreviewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact);
@@ -158,43 +163,203 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     { id: "diff", label: tr("变更"), badge: diffReview ? "1" : gitChangeCount ? String(gitChangeCount) : undefined, icon: <FileDiff {...sidebarIconProps} /> },
     { id: "preview", label: tr("预览"), badge: previewSurfaceArtifact ? tr("开") : undefined, icon: <MonitorPlay {...sidebarIconProps} /> },
     { id: "browser", label: tr("浏览器"), icon: <Globe2 {...sidebarIconProps} /> },
+    { id: "terminal", label: tr("终端"), icon: <TerminalSquare {...sidebarIconProps} /> },
+    { id: "files", label: tr("文件"), icon: <FolderOpen {...sidebarIconProps} /> },
+    { id: "goal", label: tr("编辑目标"), icon: <Target {...sidebarIconProps} /> },
     { id: "sidechat", label: tr("侧边聊天"), icon: <MessageCirclePlus {...sidebarIconProps} /> },
     { id: "artifacts", label: tr("产物"), badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
     { id: "subagents", label: tr("子智能体"), badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
     { id: "inspector", label: tr("运行详情"), icon: <FileSearch {...sidebarIconProps} /> },
     { id: "diagnostics", label: tr("运行状态"), badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
   ];
+  const [browserTabs, setBrowserTabs] = useState<BrowserTabSummary[]>([]);
+  const [browserTabHosts, setBrowserTabHosts] = useState<Record<string, HTMLElement>>({});
+  const browserHostCallbacks = useRef(new Map<string, (node: HTMLDivElement | null) => void>());
+  const browserHostRef = (id: string) => {
+    if (!browserHostCallbacks.current.has(id)) browserHostCallbacks.current.set(id, node => {
+      setBrowserTabHosts(current => {
+        const next = { ...current };
+        if (node) next[id] = node;
+        else delete next[id];
+        return next;
+      });
+    });
+    return browserHostCallbacks.current.get(id)!;
+  };
+  const [tabOrder, setTabOrder] = useState<string[]>([]);
+  const tabPointerDrag = useRef<{ key: string; pointerId: number; x: number; y: number; active: boolean; element: HTMLDivElement } | null>(null);
+  const suppressTabClick = useRef(false);
   const tabById = useMemo(() => new Map(tabs.map((tab) => [tab.id, tab])), [tabs]);
   const openedTabs = openTabIds
     .map((id) => tabById.get(id))
     .filter((tab): tab is { id: StackTab; label: string; badge?: string; icon: React.ReactNode } => Boolean(tab));
+  type SharedTab = { key: string; label: string; panel: typeof openedTabs[number]; nativeId?: string };
+  const sharedTabs = openedTabs.flatMap<SharedTab>(panel => panel.id === "browser"
+    ? browserTabs.map(tab => ({ key: `browser:${tab.id}`, label: tab.title, panel, nativeId: tab.id }))
+    : [{ key: panel.id, label: panel.label, panel }]);
+  const orderedTabs = [...sharedTabs].sort((left, right) => {
+    const position = (tab: SharedTab) => tabOrder.includes(tab.key) ? tabOrder.indexOf(tab.key) : tabOrder.length + sharedTabs.indexOf(tab);
+    return position(left) - position(right);
+  });
+  const sharedTabKeys = sharedTabs.map(tab => tab.key).join("\n");
+  useEffect(() => {
+    const live = new Set(sharedTabKeys.split("\n"));
+    setTabOrder(current => current.filter(key => live.has(key)));
+  }, [sharedTabKeys]);
+  const activateSharedTab = (key: string) => {
+    const frame = Array.from(tabListRef.current!.querySelectorAll<HTMLElement>("[data-workspace-tab-key]"))
+      .find(node => node.dataset.workspaceTabKey === key)!;
+    const button = frame.querySelector<HTMLButtonElement>('button[role="tab"]')!;
+    button.click(); button.focus();
+  };
+  const scheduleTabActivation = (key: string) => {
+    cancelTabFocus();
+    tabFocusFrame.current = window.requestAnimationFrame(() => { tabFocusFrame.current = null; activateSharedTab(key); });
+  };
+  const finishTabDrag = () => {
+    const drag = tabPointerDrag.current;
+    if (!drag) return;
+    tabPointerDrag.current = null;
+    suppressTabClick.current = drag.active;
+    if (drag.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
+  };
+  useEffect(() => () => finishTabDrag(), []);
+  const tabInteractions = (key: string): React.HTMLAttributes<HTMLDivElement> & { "data-workspace-tab-key": string } => ({
+    "data-workspace-tab-key": key,
+    style: { touchAction: "none" },
+    onMouseDown: cancelTabFocus,
+    onPointerDown: event => {
+      suppressTabClick.current = false;
+      if (event.button !== 0) return;
+      const button = (event.target as HTMLElement).closest("button");
+      if (button && button.getAttribute("role") !== "tab") return;
+      tabPointerDrag.current = { key, pointerId: event.pointerId, x: event.clientX, y: event.clientY, active: false, element: event.currentTarget };
+    },
+    onPointerMove: event => {
+      const drag = tabPointerDrag.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      if (!drag.active) {
+        if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 5) return;
+        drag.active = true;
+        drag.element.setPointerCapture(drag.pointerId);
+      }
+      event.preventDefault(); event.stopPropagation();
+      const frames = Array.from(tabListRef.current!.querySelectorAll<HTMLElement>("[data-workspace-tab-key]"));
+      const others = frames.filter(frame => frame.dataset.workspaceTabKey !== drag.key);
+      const position = others.findIndex(frame => { const bounds = frame.getBoundingClientRect(); return event.clientX <= bounds.left + bounds.width / 2; });
+      const keys = others.map(frame => frame.dataset.workspaceTabKey!);
+      keys.splice(position < 0 ? keys.length : position, 0, drag.key);
+      setTabOrder(current => keys.join("\n") === current.join("\n") ? current : keys);
+    },
+    onPointerUp: event => { if (tabPointerDrag.current?.active) { event.preventDefault(); event.stopPropagation(); } finishTabDrag(); },
+    onPointerCancel: finishTabDrag,
+    onLostPointerCapture: finishTabDrag,
+    onClickCapture: event => { if (suppressTabClick.current && event.detail > 0) { event.preventDefault(); event.stopPropagation(); } suppressTabClick.current = false; },
+    onKeyDown: event => {
+      cancelTabFocus();
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button[role="tab"]');
+      if (!button) return;
+      event.preventDefault(); event.stopPropagation();
+      const buttons = Array.from(tabListRef.current!.querySelectorAll<HTMLButtonElement>('button[role="tab"]'));
+      const current = buttons.indexOf(button);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+        : (current + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+      buttons[next].click(); buttons[next].focus();
+    },
+  });
   const addOpenTab = useCallback((tab: StackTab) => {
     setOpenTabIds((current) => current.includes(tab) ? current : [...current, tab]);
   }, []);
-  const openRightTab = (tab: StackTab) => {
-    activateTab(tab);
-  };
   const closeOpenTab = useCallback((tab: StackTab) => {
     const tabIndex = openTabIds.indexOf(tab);
     if (tabIndex < 0) return;
     if (tab.startsWith("mcp-app:")) closeMcpAppPanel(tab.slice("mcp-app:".length));
-    const nextTabs = openTabIds.filter((id) => id !== tab);
+    const requested = initialTab === undefined ? useAppStore.getState().rightStackTab : activeTab;
+    const liveTabs = requested !== tab && !openTabIds.includes(requested) && useAppStore.getState().rightPanelOpen
+      ? [...openTabIds, requested] : openTabIds;
+    const nextTabs = liveTabs.filter((id) => id !== tab);
     setOpenTabIds(nextTabs);
+    if (tab === "browser") setBrowserTabs([]);
     if (tab === "sidechat") closeSideChat();
     if (nextTabs.length === 0) {
       setActiveTab("tasks");
       if (useAppStore.getState().rightPanelOpen) toggleRightPanel();
       return;
     }
-    if (activeTab !== tab) return;
-    const fallbackTab = nextTabs[Math.min(tabIndex, nextTabs.length - 1)] ?? "tasks";
+    if (requested !== tab) return;
+    const frameIndex = orderedTabs.findIndex(frame => frame.panel.id === tab);
+    const remainingFrames = orderedTabs.filter(frame => frame.panel.id !== tab);
+    const adjacent = remainingFrames[Math.min(frameIndex, remainingFrames.length - 1)];
+    const fallbackTab = adjacent?.panel.id ?? nextTabs[Math.min(tabIndex, nextTabs.length - 1)];
     const panelWasOpen = useAppStore.getState().rightPanelOpen;
     setActiveTab(fallbackTab);
     if (initialTab === undefined && !panelWasOpen && useAppStore.getState().rightPanelOpen) toggleRightPanel();
-    window.requestAnimationFrame(() => {
-      tabListRef.current?.querySelector<HTMLButtonElement>(`[data-sidebar-tab="${fallbackTab}"]`)?.focus();
-    });
-  }, [activeTab, setActiveTab, openTabIds, closeSideChat, rightPanelOpen, toggleRightPanel, initialTab]);
+    if (adjacent) scheduleTabActivation(adjacent.key);
+  }, [activeTab, setActiveTab, openTabIds, orderedTabs, closeSideChat, rightPanelOpen, toggleRightPanel, initialTab]);
+  const closeGoalEditor = useCallback(() => closeOpenTab("goal"), [closeOpenTab]);
+  useEffect(() => {
+    const close = (event: Event) => {
+      if ((event as CustomEvent<{ conversationId: string }>).detail.conversationId === conversationId) closeGoalEditor();
+    };
+    window.addEventListener("goal:close-editor", close);
+    return () => window.removeEventListener("goal:close-editor", close);
+  }, [conversationId, closeGoalEditor]);
+  const nativeTabClosed = (id: string, wasActive: boolean) => {
+    if (!wasActive || (initialTab === undefined ? useAppStore.getState().rightStackTab : activeTab) !== "browser") return;
+    const index = orderedTabs.findIndex(tab => tab.nativeId === id);
+    const remaining = orderedTabs.filter(tab => tab.nativeId !== id);
+    const adjacent = remaining[Math.min(index, remaining.length - 1)];
+    setActiveTab(adjacent.panel.id);
+    scheduleTabActivation(adjacent.key);
+  };
+  useEffect(() => {
+    if (initialTab !== undefined) return;
+    const run = (event: Event) => {
+      const state = useAppStore.getState();
+      const numbered = event.type === "select-numbered-tab" ? (event as CustomEvent<{ index: number; conversationId: string | null; surface?: "sidebar" }>).detail : null;
+      if (numbered && numbered.conversationId !== state.conversationId) return;
+      const workspaceVisible = !state.settingsOpen && !state.skillsMarketplaceOpen && !state.projectsOpen;
+      const inSidebar = sidebarRef.current?.contains(document.activeElement);
+      const editorFocused = workspaceVisible && numbered?.surface !== "sidebar" && state.appMode === "code" && !inSidebar
+        && state.panelSlots.find(slot => slot.focused)?.kind === "editor";
+      if (editorFocused && state.activeTabPath) {
+        if (numbered) { const tab = state.editorTabs[numbered.index]; if (tab) state.setActiveTab(tab.path); return; }
+        if (event.type === "close-tab") window.dispatchEvent(new Event("editor:close-tab"));
+        else {
+          const index = state.editorTabs.findIndex(tab => tab.path === state.activeTabPath);
+          const next = (index + (event.type === "next-tab" ? 1 : -1) + state.editorTabs.length) % state.editorTabs.length;
+          state.setActiveTab(state.editorTabs[next].path);
+        }
+        return;
+      }
+      if (workspaceVisible && state.rightPanelOpen && orderedTabs.length > 0) {
+        if (numbered) { const tab = orderedTabs[numbered.index]; if (tab) activateSharedTab(tab.key); return; }
+        const index = orderedTabs.findIndex(tab => tab.panel.id === state.rightStackTab
+          && (!tab.nativeId || browserTabs.find(browser => browser.id === tab.nativeId)?.active));
+        const tab = orderedTabs[index];
+        if (event.type === "close-tab") {
+          if (tab.nativeId) browserTabHosts[tab.nativeId].querySelector<HTMLButtonElement>('button:not([role="tab"])')!.click();
+          else closeOpenTab(tab.panel.id);
+        } else {
+          const next = (index + (event.type === "next-tab" ? 1 : -1) + orderedTabs.length) % orderedTabs.length;
+          scheduleTabActivation(orderedTabs[next].key);
+        }
+        return;
+      }
+      if (event.type === "close-tab") void window.__MINICODE_RUNTIME__?.desktop?.windowControls.close();
+    };
+    window.addEventListener("previous-tab", run);
+    window.addEventListener("next-tab", run);
+    window.addEventListener("close-tab", run);
+    window.addEventListener("select-numbered-tab", run);
+    return () => {
+      window.removeEventListener("previous-tab", run);
+      window.removeEventListener("next-tab", run);
+      window.removeEventListener("close-tab", run);
+      window.removeEventListener("select-numbered-tab", run);
+    };
+  }, [initialTab, visible, orderedTabs, browserTabs, browserTabHosts, closeOpenTab]);
   useEffect(() => {
     if (rightPanelOpen && (activeTab !== "sidechat" || sideChatOpen)) addOpenTab(activeTab);
   }, [activeTab, addOpenTab, rightPanelOpen, sideChatOpen]);
@@ -227,7 +392,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   useLayoutEffect(() => {
     const track = tabListRef.current!;
     const revealActive = () => {
-      track.querySelector<HTMLElement>(`[data-sidebar-tab-frame="${activeTab}"]`)
+      track.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.closest<HTMLElement>("[data-workspace-tab-key]")
         ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
       setTabsOverflow(track.scrollWidth > track.clientWidth);
     };
@@ -235,7 +400,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     const observer = new ResizeObserver(revealActive);
     observer.observe(track);
     return () => observer.disconnect();
-  }, [activeTab, openTabIds]);
+  }, [activeTab, openTabIds, browserTabs, browserTabHosts, tabOrder]);
 
   useEffect(() => {
     if (diffReview || gitChangeCount > 0) addOpenTab("diff");
@@ -260,7 +425,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const activateTab = (tab: StackTab) => {
     addOpenTab(tab);
     setActiveTab(tab);
-    closeLauncher();
+
     setOpenedPanelPosition(null);
   };
 
@@ -288,24 +453,6 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     (sidebarRef.current as HTMLElement & { inert: boolean }).inert = !visible || (!embedded && !rightPanelOpen);
   }, [embedded, rightPanelOpen, visible]);
 
-  const moveTabFocus = (index: number) => {
-    window.setTimeout(() => {
-      const id = openedTabs[index]?.id;
-      if (!id) return;
-      tabListRef.current?.querySelector<HTMLButtonElement>(`[data-sidebar-tab="${id}"]`)?.focus();
-    }, 0);
-  };
-  const handlePrimaryTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, index: number) => {
-    let nextIndex = index;
-    if (event.key === "ArrowRight") nextIndex = (index + 1) % openedTabs.length;
-    else if (event.key === "ArrowLeft") nextIndex = (index - 1 + openedTabs.length) % openedTabs.length;
-    else if (event.key === "Home") nextIndex = 0;
-    else if (event.key === "End") nextIndex = openedTabs.length - 1;
-    else return;
-    event.preventDefault();
-    activateTab(openedTabs[nextIndex].id);
-    moveTabFocus(nextIndex);
-  };
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>) => {
     if (embedded) return;
@@ -425,9 +572,10 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         {expanded && <button type="button" className="mc-sidebar-return-chat" aria-label={tr("返回主聊天")} title={tr("返回主聊天")}
           onClick={() => setRightPanelExpanded(false)}><MessageCircle size={15} /><span>{mainConversationTitle}</span></button>}
         <div ref={tabListRef} className="mc-sidebar-right-tabs" role="tablist" aria-label={tr("右侧栏面板")}>
-        {openedTabs.map((t, index) => (
+        {orderedTabs.map(({ panel: t, nativeId, key }) => nativeId ? <div key={key} ref={browserHostRef(nativeId)} className="mc-sidebar-browser-tab-host" /> : (
           <div
-            key={t.id}
+            key={key}
+            {...tabInteractions(key)}
             className="mc-sidebar-right-tab-frame"
             data-active={activeTab === t.id ? "true" : "false"}
             data-sidebar-tab-frame={t.id}
@@ -441,7 +589,6 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
               aria-controls={`right-panel-${t.id}`}
               data-sidebar-tab={t.id}
               onClick={() => activateTab(t.id)}
-              onKeyDown={(event) => handlePrimaryTabKeyDown(event, index)}
               title={t.label}
               aria-label={tr("打开{label}", { label: t.label })}
               className="mc-sidebar-right-tab"
@@ -477,7 +624,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             aria-expanded={openedPanelPosition !== null}
             onClick={(event) => {
               const rect = event.currentTarget.getBoundingClientRect();
-              closeLauncher();
+
               setOpenedPanelPosition((position) => position ? null : { x: Math.max(8, rect.right - 240), y: rect.bottom + 6 });
             }}
           ><ChevronDown size={15} /></button>}
@@ -490,19 +637,11 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             onClick={() => setRightPanelExpanded(!expanded)}
           >{expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>}
           <button
-            ref={launcherButtonRef}
             type="button"
-            onClick={() => {
-              setOpenedPanelPosition(null);
-              const rect = launcherButtonRef.current!.getBoundingClientRect();
-              setLauncherPosition((position) => position ? null : { x: Math.max(8, rect.right - 260), y: rect.bottom + 6 });
-            }}
-            title={tr("添加面板")}
-            aria-label={tr("添加面板")}
-            aria-haspopup="menu"
-            aria-expanded={launcherPosition !== null}
+            onClick={() => { setOpenedPanelPosition(null); openNewBrowserTab(); }}
+            title={tr("新建标签页")}
+            aria-label={tr("新建标签页")}
             className="mc-sidebar-right-action mc-sidebar-right-action-add mc-icon-button"
-            data-active={launcherPosition ? "true" : "false"}
           >
             <Plus size={18} strokeWidth={1.8} />
           </button>
@@ -522,32 +661,18 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       {openedPanelPosition && <ContextMenu
         position={openedPanelPosition}
         onClose={() => setOpenedPanelPosition(null)}
-        items={openedTabs.map((tab) => ({
-          label: `${tab.label}${activeTab === tab.id ? tr(" · 当前") : ""}`,
-          icon: tab.icon,
-          onClick: () => openRightTab(tab.id),
+        items={orderedTabs.map((tab) => ({
+          label: `${tab.label}${activeTab === tab.panel.id && (!tab.nativeId || browserTabs.find(item => item.id === tab.nativeId)?.active) ? tr(" · 当前") : ""}`,
+          icon: tab.panel.icon,
+          onClick: () => activateSharedTab(tab.key),
         }))}
-      />}
-      {launcherPosition && <ContextMenu
-        position={launcherPosition}
-        onClose={closeLauncher}
-        items={[
-          { label: tr("终端"), icon: <TerminalSquare {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.terminal), onClick: () => openBottomTab("terminal") },
-          { label: tr("侧边聊天"), icon: <MessageCirclePlus {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.sideChat), onClick: () => openRightTab("sidechat") },
-          { label: tr("浏览器"), icon: <Globe2 {...sidebarIconProps} />, onClick: () => openRightTab("browser") },
-          { label: tr("文件"), icon: <FolderOpen {...sidebarIconProps} />, shortcut: formatShortcut(shortcutBindings.globalSearch), onClick: toggleQuickOpen },
-          { label: "", separator: true },
-          ...tabs.filter((tab) => !["sidechat", "browser", "inspector", "diagnostics"].includes(tab.id)).map((tab) => ({
-            label: tab.label, icon: tab.icon, onClick: () => openRightTab(tab.id),
-          })),
-        ]}
       />}
       {openedTabs.map(({ id: panelTab }) => <div
         key={panelTab}
         className="mc-sidebar-panel-view flex-1 overflow-hidden text-sm flex flex-col"
         id={`right-panel-${panelTab}`}
         role="tabpanel"
-        aria-labelledby={`right-tab-${panelTab}`}
+        aria-labelledby={panelTab === "browser" ? `right-browser-tab-${browserTabs.find(tab => tab.active)?.id}` : `right-tab-${panelTab}`}
         hidden={activeTab !== panelTab}
         style={{ display: activeTab === panelTab ? "flex" : "none" }}
       >
@@ -567,11 +692,17 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="browser" />}>
                 <SafeBoundary fallback={<PanelErrorFallback panelName={tr("浏览器")} />}>
-                  <LazyBrowserPanel />
+                  <LazyBrowserPanel tabHosts={browserTabHosts} tabInteractions={id => tabInteractions(`browser:${id}`)} onTabsChanged={setBrowserTabs} onTabClosed={nativeTabClosed} onLastTabClosed={() => closeOpenTab("browser")} />
                 </SafeBoundary>
               </Suspense>
             </ChunkErrorBoundary>
           )}
+          {panelTab === "terminal" && rightPanelOpen && <Suspense fallback={<PanelSkeleton kind="terminal" />}>
+            <LazyTerminalPanel visible={visible && activeTab === "terminal"} />
+          </Suspense>}
+          {panelTab === "files" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyFilesPanel active={visible && rightPanelOpen && activeTab === "files"} /></Suspense>}
+          {panelTab === "goal" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyGoalPanel key={conversationId || ""}
+            active={visible && rightPanelOpen && activeTab === "goal"} onClose={closeGoalEditor} /></Suspense>}
           {panelTab === "tasks" && <ScrollablePanel><ActivityTab /></ScrollablePanel>}
           {panelTab === "diff" && (
             <ChunkErrorBoundary>

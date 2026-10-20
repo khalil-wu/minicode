@@ -801,115 +801,93 @@ async def handle_user_message_queue_cancel(session: "WebSocketSession", data: di
 
 
 async def handle_user_message_queue_steer(session: "WebSocketSession", data: dict[str, Any]) -> bool:
-    conversation_id = str(
-        data.get("conversation_id") or session.active_conversation_id or ""
-    ).strip()
+    conversation_id = str(data.get("conversation_id") or "").strip()
     message_id = str(data.get("message_id") or "").strip()
+    expected_turn_id = str(data.get("expected_turn_id") or "").strip()
     if not conversation_id or not message_id:
-        await emit_command_error(
-            session,
-            "user_message.queue.steer",
-            "conversation_id and message_id are required",
-        )
+        await emit_command_error(session, "user_message.queue.steer", "conversation_id and message_id are required")
+        return True
+    rejection = session.run_manager.steer_target_rejection(conversation_id, expected_turn_id)
+    if rejection is not None:
+        await emit_command_error(session, "user_message.queue.steer",
+            "The requested turn is not available for steering; the queued message was retained.",
+            data={**rejection, "message_id": message_id})
         return True
     if not session.run_manager.begin_queue_steering(conversation_id):
-        # Another steer already owns this conversation's queue; saying nothing
-        # made the steer button look dead on a double click.
-        await session.emit_command_result(
-            "user_message.queue.steer",
-            "Another queued message is already being steered.",
-            level="warning",
-            data={
-                "conversation_id": conversation_id,
-                "message_id": message_id,
-                "reason": "steer_in_progress",
-                "retryable": True,
-            },
-        )
+        await session.emit_command_result("user_message.queue.steer", "Another queued message is already being steered.",
+            level="warning", data={"conversation_id": conversation_id, "message_id": message_id, "reason": "steer_in_progress"})
         return True
+    accepted = False
     try:
-        selected_command = session.run_manager.pop_queued_user_message(conversation_id, message_id)
+        selected_command = next((command for command in session.run_manager.queued_user_messages(conversation_id)
+            if str(command.data.get("assistant_message_id") or "").strip() == message_id), None)
         if selected_command is None:
-            await session.emit_command_result(
-                "user_message.queue.steer",
-                "Queued message is no longer available.",
-                level="warning",
-                data={"conversation_id": conversation_id, "message_id": message_id},
-            )
+            await session.emit_command_result("user_message.queue.steer", "Queued message is no longer available.",
+                level="warning", data={"conversation_id": conversation_id, "message_id": message_id})
             return True
-
+        stream_state = session._conversation_streams[conversation_id]
+        steered = session.run_manager.enqueue_turn_steer(conversation_id, selected_command,
+            expected_turn_id=expected_turn_id, target_message_id=str(stream_state["message_id"]), queued_message_id=message_id)
+        if steered is None:
+            rejection = session.run_manager.steer_target_rejection(conversation_id, expected_turn_id) or {
+                "conversation_id": conversation_id, "expected_turn_id": expected_turn_id,
+                "active_turn_id": str(stream_state.get("turn_id") or ""), "reason": "steer_target_unavailable",
+                "error_code": "steer_target_unavailable", "admitted": False, "queued": False}
+            await emit_command_error(session, "user_message.queue.steer",
+                "The requested turn is not available for steering; the queued message was retained.",
+                data={**rejection, "message_id": message_id})
+            return True
+        accepted = True
         session.run_manager.set_user_queue_paused(conversation_id, "")
-
-        running = session.running_agent_task_for(conversation_id)
-        stream_state = getattr(session, "_conversation_streams", {}).get(conversation_id) or {}
-        target_message_id = str(stream_state.get("message_id") or "").strip()
-        steered = (
-            session.run_manager.enqueue_turn_steer(
-                conversation_id,
-                selected_command,
-                target_message_id=target_message_id,
-            )
-            if running is not None
-            else None
-        )
-        if steered is not None:
-            await session.send_event(
-                AgentEvent.user_message_queue_updated(
-                    status="dequeued",
-                    conversation_id=conversation_id,
-                    message_id=steered.message_id or message_id,
-                    user_message_id=steered.user_message_id,
-                    reason="steered_current_turn",
-                    target_message_id=steered.target_message_id,
-                    turn_mode="steer",
-                )
-            )
-            reject_pending_approvals = getattr(session, "_reject_pending_approvals", None)
-            if callable(reject_pending_approvals):
-                await reject_pending_approvals(
-                    reason="user_steer",
-                    guidance="The user redirected the current task; this pending action was superseded.",
-                    conversation_id=conversation_id,
-                )
-            for position, command in enumerate(session.run_manager.queued_user_messages(conversation_id), 1):
-                command_data = getattr(command, "data", {})
-                await session.send_event(
-                    AgentEvent.user_message_queue_updated(
-                        status="queued",
-                        conversation_id=conversation_id,
-                        message_id=str(command_data.get("assistant_message_id") or ""),
-                        user_message_id=str(command_data.get("user_message_id") or ""),
-                        position=position,
-                        reason="queue_reordered",
-                        paused=False,
-                    )
-                )
-            return True
-
-        # Compatibility fallback for the narrow race before the active run has
-        # installed its turn-local queue. Rebuild the normal queue with the
-        # selected prompt first, then interrupt as older clients expect.
-        queue = session.run_manager.restore_turn_input_as_follow_up(
-            conversation_id,
-            selected_command,
-        )
-        for position, command in enumerate(queue, 1):
-            command_data = getattr(command, "data", {})
-            await session.send_event(
-                AgentEvent.user_message_queue_updated(
-                    status="queued",
-                    conversation_id=conversation_id,
-                    message_id=str(command_data.get("assistant_message_id") or ""),
-                    user_message_id=str(command_data.get("user_message_id") or ""),
-                    position=position,
-                    reason="user_steered" if position == 1 else "queue_reordered",
-                )
-            )
-        await session.cancel_agent_runs(conversation_id=conversation_id, reason="user_steered")
+        await session.send_event(AgentEvent.user_message_queue_updated(status="dequeued", conversation_id=conversation_id,
+            message_id=steered.message_id or message_id, user_message_id=steered.user_message_id,
+            reason="steered_current_turn", target_message_id=steered.target_message_id, turn_mode="steer"))
+        await session._reject_pending_approvals(reason="user_steer",
+            guidance="The user redirected the current task; this pending action was superseded.", conversation_id=conversation_id)
+        for position, command in enumerate(session.run_manager.queued_user_messages(conversation_id), 1):
+            await session.send_event(AgentEvent.user_message_queue_updated(status="queued", conversation_id=conversation_id,
+                message_id=str(command.data.get("assistant_message_id") or ""), user_message_id=str(command.data.get("user_message_id") or ""),
+                position=position, reason="queue_reordered", paused=False))
+        await session.emit_command_result("user_message.queue.steer", "", level="success",
+            data={"conversation_id": conversation_id, "message_id": message_id, "turn_id": expected_turn_id,
+                  "expected_turn_id": expected_turn_id, "queued": True, "turn_mode": "steer"})
     finally:
         session.run_manager.finish_queue_steering(conversation_id)
-    if session.running_agent_task_for(conversation_id) is None:
-        session.schedule_next_queued_user_message(conversation_id)
+        if accepted and session.running_agent_task_for(conversation_id) is None:
+            session.schedule_next_queued_user_message(conversation_id)
+    return True
+
+
+async def handle_user_message_queue_start(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.agent.conversation_query_guard import conversation_query_guards
+
+    conversation_id = str(data.get("conversation_id") or "").strip()
+    message_id = str(data.get("message_id") or "").strip()
+    if not conversation_id or not message_id:
+        await emit_command_error(session, "user_message.queue.start", "conversation_id and message_id are required")
+        return True
+    manager = session.run_manager
+    if (session.running_agent_task_for(conversation_id) is not None or manager.is_queue_dispatching(conversation_id)
+            or manager.has_pending_lifecycle_cleanup(conversation_id) or conversation_query_guards().active_claim(conversation_id) is not None
+            or conversation_query_guards().has_transition(conversation_id)
+            or not manager.begin_queue_steering(conversation_id)):
+        await emit_command_error(session, "user_message.queue.start", "The conversation already has an active or pending turn; the queued message was retained.",
+            data={"conversation_id": conversation_id, "message_id": message_id, "reason": "queue_start_busy", "queued": False})
+        return True
+    try:
+        queue = manager.promote_queued_user_message(conversation_id, message_id)
+        if queue is None:
+            await emit_command_error(session, "user_message.queue.start", "Queued message is no longer available.",
+                data={"conversation_id": conversation_id, "message_id": message_id, "reason": "queue_message_unavailable"})
+            return True
+        manager.set_user_queue_paused(conversation_id, "")
+    finally:
+        manager.finish_queue_steering(conversation_id)
+    # This synchronous boundary claims the existing durable dispatcher before
+    # another command can start a turn. The normal admission owns actual start.
+    session.schedule_next_queued_user_message(conversation_id)
+    await session.emit_command_result("user_message.queue.start", "", level="success",
+        data={"conversation_id": conversation_id, "message_id": message_id, "queued": True, "turn_mode": "follow_up"})
     return True
 
 
@@ -1376,6 +1354,7 @@ HANDLERS: dict[str, Any] = {
     "interrupt": handle_interrupt_command,
     "user_message.queue.cancel": handle_user_message_queue_cancel,
     "user_message.queue.steer": handle_user_message_queue_steer,
+    "user_message.queue.start": handle_user_message_queue_start,
     "skills.list": handle_skills_list,
     "skills.install": handle_skills_install,
     "skills.marketplace.list": handle_skills_marketplace_list,

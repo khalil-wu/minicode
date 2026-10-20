@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -519,11 +520,13 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
         terminal_output_payload,
     )
 
-    command_request = parse_terminal_exec_command(data)
-    if command_request.error_event is not None:
-        await emit_command_error(session, "terminal.exec", command_request.error_event)
-        return True
-    command = command_request.command
+    local_action = data.get("local_environment_action")
+    if local_action is None:
+        command_request = parse_terminal_exec_command(data)
+        if command_request.error_event is not None:
+            await emit_command_error(session, "terminal.exec", command_request.error_event)
+            return True
+        command = command_request.command
 
     scope = await _resolve_terminal_scope(session, data, "terminal.exec")
     if scope is None:
@@ -532,6 +535,13 @@ async def handle_terminal_exec(session: "WebSocketSession", data: dict[str, Any]
     from backend.services.workspace_service import resolve_workspace_cwd
 
     workspace_root = Path(scope.workspace_root).resolve()
+    if local_action is not None:
+        from backend.services.local_environment_settings import LocalEnvironmentActionRequest, environment_action
+        try:
+            command = await asyncio.to_thread(environment_action, workspace_root, LocalEnvironmentActionRequest.model_validate(local_action))
+        except (ValueError, OSError) as error:
+            await emit_command_error(session, "terminal.exec", str(error))
+            return True
     cwd = str(resolve_workspace_cwd(workspace_root, str(data.get("cwd", "")).strip() or None))
     checker = session.permission_checker.with_workspace_root(workspace_root)
     target_conversation = session.conversation_repo.get_conversation(conversation_id)

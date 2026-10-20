@@ -1,5 +1,6 @@
 import type { ChatMessage, ContentBlock } from "../stores/types";
 import type { ToolCallRecord } from "./tool-call-reducer";
+import { safeJsonParse } from "./safe-parse";
 
 type LegacyMessageFields = {
   thinking?: string;
@@ -97,6 +98,55 @@ export function getContentBlocks(message: ChatMessage): ContentBlock[] {
     });
   }
   return blocks;
+}
+
+/** A successful exec receipt is the published ownership of a yielded cell. */
+export function hasRunningCodeCellReceipt(message: ChatMessage, source: ToolCallRecord["callSource"]): boolean {
+  if (source?.kind !== "code_mode" || !source.cell_id || !source.parent_call_id) return false;
+  return getToolCallsFromMessage(message).some(parent => parent.id === source.parent_call_id
+    && parent.name === "tool_exec" && parent.status === "success"
+    && [parent.summary, parent.outputPreview, parent.contentPreview].some(content => {
+      const receipt = content ? safeJsonParse<{ cell_id?: string; status?: string } | null>(content, null) : null;
+      return receipt?.cell_id === source.cell_id && receipt.status === "running";
+    }));
+}
+
+export function isCodeCellToolFact(
+  message: ChatMessage,
+  incoming: Pick<ToolCallRecord, "id" | "turnId" | "callSource">,
+  kind: "start" | "update",
+): boolean {
+  if (message.role !== "assistant" || !incoming.turnId || (message.turnId && incoming.turnId !== message.turnId)
+    || (message.terminalStatus && message.terminalStatus !== "completed")
+    || !hasRunningCodeCellReceipt(message, incoming.callSource)) return false;
+  const parent = getToolCallsFromMessage(message).find(record => record.id === incoming.callSource!.parent_call_id);
+  if (parent?.turnId !== incoming.turnId) return false;
+  const calls = getToolCallsFromMessage(message).filter(record => record.id === incoming.id);
+  if (calls.length === 0) return kind === "start";
+  if (calls.length !== 1) return false;
+  const existing = calls[0];
+  return existing.turnId === incoming.turnId && existing.callSource?.kind === "code_mode"
+    && existing.callSource.cell_id === incoming.callSource!.cell_id
+    && existing.callSource.parent_call_id === incoming.callSource!.parent_call_id
+    && existing.callSource.runtime_call_id === incoming.callSource!.runtime_call_id;
+}
+
+/** An idle ownership snapshot stops presentation; it is not a tool result. */
+export function getPresentedContentBlocks(message: ChatMessage, blocks = getContentBlocks(message)): ContentBlock[] {
+  if (message.isStreaming !== false || message.isThinkingStreaming) return blocks;
+  return blocks.map((block): ContentBlock => {
+    if (block.type === "tool_call" && (block.record.status === "running" || block.record.status === "pending")
+      && !isCodeCellToolFact(message, block.record, "update")) {
+      return { ...block, record: { ...block.record, status: "partial" } };
+    }
+    if ((block.type === "progress" || block.type === "process") && block.status === "running") {
+      return { ...block, status: "partial" };
+    }
+    if (block.type === "text" && block.isStreaming) {
+      return { ...block, isStreaming: false, status: "partial" };
+    }
+    return block;
+  });
 }
 
 export function getThinkingFromMessage(message: ChatMessage): string {

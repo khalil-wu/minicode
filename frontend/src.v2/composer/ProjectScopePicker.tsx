@@ -2,7 +2,8 @@ import { useI18n } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { Check, Folder, GitBranch, Laptop, Plus, Search, X } from "../lib/icons";
 import { useAppStore } from "../stores";
-import { activateWorkspaceFolder, openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { activateWorkspaceFolder } from "../workspace/openWorkspaceFolder";
+import { projectExecutionRoot, projectOwnsWorkspace, projectWorkspaceRoots } from "../lib/project-registry";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { isDesktop } from "../desktop/runtime";
@@ -34,13 +35,15 @@ export function ProjectScopePicker() {
     document.addEventListener("mousedown", outside);
     return () => document.removeEventListener("mousedown", outside);
   }, [open]);
-  const filtered = projects.filter(project => `${project.path} ${projectName(project.path)}`.toLowerCase().includes(query.toLowerCase()));
+  const selectedProject = projects.find(project => project.path === conversation?.projectId)
+    ?? projects.find(project => projectOwnsWorkspace(project, workspaceRoot));
+  const filtered = projects.filter(project => `${project.name} ${project.path} ${projectWorkspaceRoots(project).join(" ")}`.toLowerCase().includes(query.toLowerCase()));
   const branch = workspaceRoot && workspaceGit && workspaceRootsEqual(workspaceGit.currentPath, workspaceRoot)
     ? workspaceGit.branch
     : workspaceRoot && conversation && workspaceRootsEqual(conversation.worktreePath || conversation.workspaceRoot, workspaceRoot) ? conversation.gitBranch : undefined;
   return <div ref={picker} className="composer-project-scope">
     <button ref={trigger} type="button" aria-label={tr("选择项目")} aria-expanded={open} aria-haspopup="dialog" title={workspaceRoot} onClick={() => { setOpen(value => !value); setQuery(""); }}>
-      <Folder size={16} /><span>{workspaceRoot ? projectName(workspaceRoot) : tr("选择项目")}</span>
+      <Folder size={16} /><span>{selectedProject?.name || (workspaceRoot ? projectName(workspaceRoot) : tr("选择项目"))}</span>
     </button>
     {workspaceRoot && isDesktop() && <span className="composer-scope-location"><Laptop size={16} /><span>{workspaceGit?.isWorktree && workspaceRootsEqual(workspaceGit.currentPath, workspaceRoot) ? tr("工作树") : tr("本地")}</span></span>}
     {branch && <button type="button" className="composer-scope-branch" aria-label={tr("查看分支 {branch}", { branch })} title={branch} onClick={() => useAppStore.getState().openBottomTab("git")}><GitBranch size={16} /><span>{branch}</span></button>}
@@ -57,13 +60,13 @@ export function ProjectScopePicker() {
     }}>
       <label><Search size={15} /><input aria-label={tr("搜索项目")} placeholder={tr("搜索项目")} value={query} onChange={event => setQuery(event.target.value)} /></label>
       <div className="composer-project-options">
-      {filtered.map(project => <button type="button" key={project.path} aria-pressed={workspaceRootsEqual(project.path, workspaceRoot)} title={project.path} onClick={() => {
-        close(); if (!workspaceRootsEqual(project.path, workspaceRoot)) void activateWorkspaceFolder(project.path, "cowork");
-      }}><Folder size={16} /><span>{projectName(project.path)}</span>{workspaceRootsEqual(project.path, workspaceRoot) && <Check size={16} className="composer-project-selected" aria-hidden="true" />}</button>)}
+      {filtered.map(project => <button type="button" key={project.path} aria-pressed={project.path === selectedProject?.path} title={projectWorkspaceRoots(project).join("\n")} onClick={() => {
+        close(); if (!projectOwnsWorkspace(project, workspaceRoot)) void activateWorkspaceFolder(projectExecutionRoot(project), "cowork");
+      }}><Folder size={16} /><span>{project.name || projectName(project.path)}</span>{project.path === selectedProject?.path && <Check size={16} className="composer-project-selected" aria-hidden="true" />}</button>)}
       {!filtered.length && <p className="composer-add-status">{tr("没有匹配的项目")}</p>}
       </div>
       <div className="composer-project-actions">
-        <button type="button" onClick={() => { close(); void openWorkspaceFolder("cowork"); }}><Plus size={16} /><span>{tr("新建项目")}</span></button>
+        <button type="button" onClick={() => { close(); useAppStore.setState({ projectEditTarget: "create" }); }}><Plus size={16} /><span>{tr("新建项目")}</span></button>
         <button type="button" aria-pressed={!workspaceRoot} onClick={() => { close(); if (workspaceRoot) void useAppStore.getState().createConversation({ bindWorkspace: false, appMode: "cowork" }); }}><X size={16} /><span>{tr("不在项目中工作")}</span></button>
       </div>
     </div>}

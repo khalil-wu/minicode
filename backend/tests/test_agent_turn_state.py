@@ -132,3 +132,18 @@ def test_interrupted_answer_candidate_keeps_usable_partial_answer(source):
     snapshot = state.finalize(terminal_status="cancelled")
     assert snapshot.content == "Verified result"
     assert snapshot.blocks[0]["source"] == "partial"
+
+
+def test_completed_turn_preserves_only_known_live_tool_owners():
+    state = AgentTurnState(now_ms=lambda: 1234)
+    state.record_tool_call({"id": "live-cell-call", "name": "held_process", "args": {},
+        "call_source": {"kind": "code_mode", "cell_id": "cell-original", "parent_call_id": "exec-original", "runtime_call_id": "1"}})
+    state.record_tool_call({"id": "unknown-call", "name": "read_file", "args": {}})
+    snapshot = state.finalize(terminal_status="completed", live_tool_call_ids={"live-cell-call"})
+    live, unknown = snapshot.tool_calls
+    assert live["status"] == "running" and "error" not in live and "finishedAt" not in live
+    assert unknown["status"] == "failed" and unknown["terminationReason"] == "missing_tool_result"
+    state.record_tool_result({"id": "live-cell-call", "status": "success", "summary": "actual completion"})
+    completed = state.finalize(terminal_status="completed")
+    assert completed.tool_calls[0]["status"] == "success"
+    assert completed.tool_calls[0]["summary"] == "actual completion"

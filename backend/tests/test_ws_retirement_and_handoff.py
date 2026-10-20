@@ -73,9 +73,12 @@ async def test_retirement_preserves_disk_pending_work_and_releases_owner_lease(m
     other = old.conversation_repo.create_conversation(conversation_id='conv-disk-inflight').id
     old.active_conversation_id = cid
     manager = old.run_manager
-    manager.turn_input_queue(cid)
+    task = asyncio.create_task(asyncio.Event().wait())
+    old._register_agent_run(conversation_id=cid, task=task, task_id="steer-origin-task", cancel_event=asyncio.Event())
+    old._conversation_streams[cid] = create_stream_state(cid, "steer-origin-answer", "steer-origin-turn")
+    manager.turn_input_queue(cid).begin_turn("steer-origin-turn")
     steer = message(cid, 'steer')
-    assert manager.enqueue_user_message_as_steer(cid, steer) is not None
+    assert manager.enqueue_user_message_as_steer(cid, steer, expected_turn_id="steer-origin-turn") is not None
     # Preaccepted by a provider chunk, but not yet acknowledged into context.
     assert manager.turn_input_queue(cid).pop_steer() is not None
     manager.enqueue_user_message(cid, message(cid, 'follow-up'))

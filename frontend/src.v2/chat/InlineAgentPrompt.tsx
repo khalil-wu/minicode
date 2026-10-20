@@ -198,7 +198,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const { t: tr } = useI18n();
   const [responding, setResponding] = useState(false);
   const subagents = useAppStore((s) => s.subagents);
-  const collaborationTool = ["task", "task_status", "task_stop", "send_message"].includes(request.toolName);
+  const collaborationTool = ["task", "spawn_agent", "task_status", "task_stop", "interrupt_agent", "send_message", "followup_task"].includes(request.toolName);
   const collaborationArgs = request.toolName === "task" && Array.isArray(request.args.parallel_tasks)
     ? request.args.parallel_tasks as Record<string, unknown>[]
     : [request.args];
@@ -347,7 +347,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         {collaborationTool && collaborationArgs.map((args, index) => {
           const targets = Array.isArray(args.subagent_ids)
             ? args.subagent_ids
-            : [args.recipient || args.subagent_id].filter(Boolean);
+            : [args.target || args.recipient || args.subagent_id].filter(Boolean);
           const targetLabel = targets.map((target) => approvalSourceLabel(tr, {
             ...request, sourceAgent: String(target), sourceThread: undefined,
           }, subagents)).join("、");

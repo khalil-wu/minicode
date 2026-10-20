@@ -18,6 +18,7 @@ type FieldKind = "array" | "boolean" | "number" | "record" | "string" | "nullabl
 const REQUIRED_ROUTING_FIELDS: Partial<
   Record<ServerEventType, Readonly<Record<string, FieldKind>>>
 > = {
+  "pet.published": { pet_id: "string", conversation_id: "string" },
   "scheduler.heartbeat.renderer_state.request": { conversation_id: "string" },
   "workspace.project_index.invalidated": { conversation_id: "string", workspace_root: "string", index_instance_id: "string", revision: "number" },
   "item.started": { conversation_id: "string", item: "record" },
@@ -1069,7 +1070,7 @@ const isGoalPayload = (value: unknown): value is Record<string, unknown> => {
   if (!isOptionalBoundedText(value, "source", 256)) return false;
   if (!isOptionalIsoTimestamp(value, "created_at") || !isOptionalIsoTimestamp(value, "updated_at")) return false;
   if ("status" in value && value.status !== null && value.status !== undefined
-    && !["active", "paused"].includes(String(value.status))) return false;
+    && !["active", "paused", "blocked", "complete", "budget_limited", "usage_limited"].includes(String(value.status))) return false;
   return true;
 };
 

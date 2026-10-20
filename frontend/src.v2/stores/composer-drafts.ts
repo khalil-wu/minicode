@@ -1,10 +1,13 @@
 import type { AgentMode, AppStore, ComposerAttachment, ComposerQuote, ComposerSlice, SkillContextRef } from "./types";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { draftWindowOwnerId } from "./draft-window-owner";
+import type { RichComposerDocument } from "../composer/rich-composer-document";
 
 export interface ComposerDraft {
   agentMode?: AgentMode;
+  goalMode?: boolean;
   draft: string;
+  richDraft?: RichComposerDocument;
   attachments: ComposerAttachment[];
   quotedMessage: ComposerQuote | null;
   selectedMentions: ComposerSlice["selectedMentions"];
@@ -14,19 +17,22 @@ export interface ComposerDraft {
 
 export const emptyComposerDraft = (): ComposerDraft => ({
   agentMode: "build",
+  goalMode: false,
   draft: "", attachments: [], quotedMessage: null, selectedMentions: [], selectedSkills: [], allowedRemoteImageDomains: [],
 });
 
 export const composerDraftOf = (state: ComposerDraft): ComposerDraft => ({
   agentMode: state.agentMode,
+  goalMode: state.goalMode,
   draft: state.draft, attachments: state.attachments, quotedMessage: state.quotedMessage,
+  ...(state.richDraft ? { richDraft: state.richDraft } : {}),
   selectedMentions: state.selectedMentions, selectedSkills: state.selectedSkills,
   allowedRemoteImageDomains: state.allowedRemoteImageDomains,
 });
 
 export const composerWorkspaceKey = (root: string) => normalizeWorkspaceRoot(root);
 export const hasComposerDraft = (draft: ComposerDraft) => Boolean(
-  (draft.agentMode && draft.agentMode !== "build") || draft.draft || draft.attachments.length || draft.quotedMessage || draft.selectedMentions.length || draft.selectedSkills.length || draft.allowedRemoteImageDomains.length,
+  draft.goalMode || (draft.agentMode && draft.agentMode !== "build") || draft.draft || draft.attachments.length || draft.quotedMessage || draft.selectedMentions.length || draft.selectedSkills.length || draft.allowedRemoteImageDomains.length,
 );
 
 type DraftOwner = { kind: "conversation" | "workspace" | "side"; id: string; workspaceRoot: string };
@@ -150,7 +156,7 @@ export function collectComposerDrafts(state: AppStore, revision: number): DraftS
   for (const [id, draft] of Object.entries(state.conversationWorkbenchStates)) add({ kind: "conversation", id,
     workspaceRoot: workspaces.get(id) || "" }, draft);
   for (const thread of Object.values(state.sideChats)) add({ kind: "side", id: thread.id, workspaceRoot: thread.workspaceRoot || "" }, {
-    ...emptyComposerDraft(), draft: thread.draft, attachments: thread.attachments || [],
+    ...emptyComposerDraft(), draft: thread.draft, richDraft: thread.richDraft, attachments: thread.attachments || [],
   }, { inheritedContext: thread.inheritedContext, parentConversationId: thread.parentConversationId, selectedContext: thread.selectedContext, contextRefs: thread.contextRefs,
     model: thread.model, permissionMode: thread.permissionMode });
   add(state.conversationId ? { kind: "conversation", id: state.conversationId, workspaceRoot: state.workingDirectory }
@@ -158,7 +164,7 @@ export function collectComposerDrafts(state: AppStore, revision: number): DraftS
   return { records, files, revision };
 }
 
-const draftFields = ["agentMode", "draft", "attachments", "quotedMessage", "selectedMentions", "selectedSkills", "allowedRemoteImageDomains"] as const;
+const draftFields = ["agentMode", "goalMode", "draft", "richDraft", "attachments", "quotedMessage", "selectedMentions", "selectedSkills", "allowedRemoteImageDomains"] as const;
 const sameDraft = (left: ComposerDraft, right: ComposerDraft) => draftFields.every(field => left[field] === right[field]);
 const sameDraftMap = (left: Record<string, ComposerDraft>, right: Record<string, ComposerDraft>) => left === right || (
   Object.keys(left).length === Object.keys(right).length && Object.keys(left).every(key => right[key] && sameDraft(left[key], right[key]))
@@ -174,7 +180,7 @@ export const composerDraftInputsEqual = (left: ReturnType<typeof selectComposerD
   && (left.sideChats === right.sideChats || (Object.keys(left.sideChats).length === Object.keys(right.sideChats).length
     && Object.keys(left.sideChats).every(id => {
       const a = left.sideChats[id], b = right.sideChats[id];
-      return b && a.draft === b.draft && a.attachments === b.attachments && a.inheritedContext === b.inheritedContext && a.parentConversationId === b.parentConversationId
+      return b && a.draft === b.draft && a.richDraft === b.richDraft && a.attachments === b.attachments && a.inheritedContext === b.inheritedContext && a.parentConversationId === b.parentConversationId
         && a.selectedContext === b.selectedContext && a.contextRefs === b.contextRefs && a.workspaceRoot === b.workspaceRoot
         && a.model === b.model && a.permissionMode === b.permissionMode;
     })))

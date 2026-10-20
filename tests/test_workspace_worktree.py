@@ -136,7 +136,9 @@ def test_worktree_manager_create_and_remove_use_isolated_branch_commands(tmp_pat
             timeout=ANY,
         )
 
-    with patch("backend.workspace.worktree.subprocess.run") as run:
+    with patch("backend.workspace.worktree.subprocess.run") as run, patch.object(
+        manager, "list_worktrees", return_value=[WorktreeInfo(repo.resolve(), "main", "abc", False, False)],
+    ):
         run.return_value.stdout = ""
         assert manager.remove_worktree(target, force=True) is True
         run.assert_called_with(

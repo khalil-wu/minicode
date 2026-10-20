@@ -248,10 +248,11 @@ def _merge_manifest_metadata(entry: dict[str, Any], manifest_path: Path) -> None
     for target, source in scalar_fields.items():
         if not entry.get(target):
             entry[target] = str(interface.get(source) or "").strip()
-    if not entry.get("websiteUrl"):
-        website_url = str(interface.get("websiteUrl") or interface.get("websiteURL") or "").strip()
-        if website_url.startswith(("https://", "http://")):
-            entry["websiteUrl"] = website_url
+    for target in ("websiteUrl", "privacyPolicyUrl", "termsOfServiceUrl"):
+        if not entry.get(target):
+            url = str(interface.get(target) or interface.get(target[:-3] + "URL") or "").strip()
+            if url.startswith(("https://", "http://")):
+                entry[target] = url
     if not entry.get("capabilities"):
         capabilities = interface.get("capabilities")
         if isinstance(capabilities, list):
@@ -279,33 +280,57 @@ def _resolve_manifest_asset(manifest_path: Path, value: Any) -> Path | None:
         return None
     return candidate if candidate.is_file() else None
 
-def _count_plugin_skills(plugin_dir: Path) -> int:
-    names: set[str] = set()
+def plugin_skill_sources(plugin_dir: Path, manifest_paths: Iterable[Path] | None = None) -> tuple[list[Path], bool]:
+    """Resolve the same manifest roots and format for inventory and runtime discovery."""
     skills_dirs: list[Path] = []
-    manifest_path = _primary_plugin_manifest(plugin_dir)
-    try:
-        if manifest_path is None:
-            raise FileNotFoundError(str(plugin_dir))
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    direct_children = False
+    valid_manifest = False
+    for manifest_path in manifest_paths if manifest_paths is not None else _plugin_manifest_paths(plugin_dir):
+        try:
+            raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if isinstance(raw, Mapping) and is_agent_plugin_schema(raw):
+            direct_children = True
+            try:
+                raw = resolve_agent_manifest(raw, plugin_dir)
+            except ValueError:
+                return [], direct_children
+        if not isinstance(raw, Mapping):
+            continue
+        valid_manifest = True
         configured = raw.get("skills") if isinstance(raw, Mapping) else None
         configured_paths = [configured] if isinstance(configured, str) else configured if isinstance(configured, list) else []
         for configured_path in configured_paths:
             if not isinstance(configured_path, str) or not configured_path.strip():
                 continue
             candidate = (plugin_dir / configured_path).resolve()
-            candidate.relative_to(plugin_dir.resolve())
+            try:
+                candidate.relative_to(plugin_dir.resolve())
+            except ValueError:
+                continue
             skills_dirs.append(candidate)
-    except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
-        pass
+    if not valid_manifest:
+        return [], direct_children
     if not skills_dirs:
         skills_dirs.append(plugin_dir / "skills")
+    return list(dict.fromkeys(skills_dirs)), direct_children
+
+
+def _count_plugin_skills(plugin_dir: Path, manifest_paths: Iterable[Path] | None = None) -> int:
+    from backend.skills.loader import SkillLoader
+
+    loader = SkillLoader()
+    skills_dirs, direct_children = plugin_skill_sources(plugin_dir, manifest_paths)
+    paths: set[str] = set()
     for skills_dir in skills_dirs:
         if not skills_dir.is_dir():
             continue
-        for skill_dir in skills_dir.iterdir():
-            if skill_dir.is_dir() and (skill_dir / "SKILL.md").is_file():
-                names.add(skill_dir.name)
-    return len(names)
+        for skill_file in loader.skill_files_for_root(skills_dir, direct_children=direct_children):
+            meta = loader._parse_frontmatter(skill_file, "plugin")
+            if meta is not None and (not meta.products or "codex" in meta.products):
+                paths.add(loader._path_key(meta.source_path))
+    return len(paths)
 
 def _plugin_manifest_paths(plugin_dir: Path) -> list[Path]:
     manifest = plugin_manifest_path(plugin_dir)

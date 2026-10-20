@@ -13,11 +13,14 @@ import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { openPreviewServiceManager } from "../lib/preview-server-actions";
+import { openNewBrowserTab } from "../chat/openWebInBrowser";
+import { formatShortcut } from "../lib/keyboard-shortcuts";
 
 interface PaletteAction {
   id: string;
   label: string;
   hint?: string;
+  codeOnly?: boolean;
   group: "最近会话" | "导航" | "工作区" | "命令";
   run: () => void | Promise<void>;
 }
@@ -65,7 +68,9 @@ const hasPendingUserAction = (): boolean => {
 export const CommandPalette = () => {
   const { t: tr } = useI18n();
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
+  const appMode = useAppStore((s) => s.appMode);
   const themeMode = useAppStore((s) => s.themeMode);
+  const shortcuts = useAppStore((s) => s.shortcutBindings);
   const panelSlots = useAppStore((s) => s.panelSlots);
   const slashCommands = useAppStore((s) => s.slashCommands);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
@@ -77,13 +82,12 @@ export const CommandPalette = () => {
   const removePanel = useAppStore((s) => s.removePanel);
   const resetPanelLayout = useAppStore((s) => s.resetPanelLayout);
   const openBottomTab = useAppStore((s) => s.openBottomTab);
+  const openTerminal = useAppStore(s => s.openTerminal);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
-  const setAppMode = useAppStore((s) => s.setAppMode);
   const conversations = useAppStore((s) => s.conversations);
   const conversationId = useAppStore((s) => s.conversationId);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
-  const agentEditorEnabled = capabilityFeatureEnabled(runtimeCapabilities, "agent_editor", true);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
   const dialogRef = useFocusTrap(commandPaletteOpen);
@@ -103,14 +107,6 @@ export const CommandPalette = () => {
   if (!commandPaletteOpen) return null;
 
   const focusedPane = panelSlots.find((slot) => slot.focused) ?? panelSlots[0];
-  const openDockTab = (tab: "terminal" | "git" | "timeline" | "debug" | "budget") => {
-    setAppMode("code");
-    openBottomTab(tab);
-  };
-  const openRightStack = (tab: "preview" | "tasks" | "plan" | "subagents" | "inspector" | "diagnostics") => {
-    setAppMode("code");
-    setRightStackTab(tab);
-  };
   const runRuntimeSlashCommand = async (commandLine: string) => {
     await executeRuntimeSlashCommand(commandLine, {
       getState: useAppStore.getState,
@@ -170,7 +166,7 @@ export const CommandPalette = () => {
     {
       id: "conversation.new",
       label: tr("新建会话"),
-      hint: "Ctrl+N",
+      hint: formatShortcut(shortcuts.newConversation),
       group: "导航",
       run: () => {
         const state = useAppStore.getState();
@@ -179,6 +175,7 @@ export const CommandPalette = () => {
     },
     {
       id: "conversation.new.isolated",
+      codeOnly: true,
       label: tr("新建隔离会话"),
       hint: tr("独立分支"),
       group: "导航",
@@ -195,6 +192,7 @@ export const CommandPalette = () => {
     },
     {
       id: "theme.cycle",
+      codeOnly: true,
       label: tr("切换主题"),
       hint: tr("当前：{v0}", { v0: themeMode }),
       group: "导航",
@@ -206,12 +204,13 @@ export const CommandPalette = () => {
     {
       id: "settings",
       label: tr("打开设置"),
-      hint: "Ctrl+,",
+      hint: formatShortcut(shortcuts.settings),
       group: "导航",
       run: () => openSettings(),
     },
     {
       id: "panel.editor",
+      codeOnly: true,
       label: tr("打开编辑器"),
       hint: tr("工作区文件"),
       group: "工作区",
@@ -220,13 +219,15 @@ export const CommandPalette = () => {
     },
     ...(globalSearchEnabled ? [{
       id: "workspace.search.content",
+      codeOnly: true,
       label: tr("搜索项目内容"),
-      hint: tr("Ctrl+Shift+F · 正文与替换"),
+      hint: formatShortcut(shortcuts.workspaceSearch),
       group: "工作区" as const,
       run: () => useAppStore.getState().openWorkspaceSearch(),
     }] : []),
     {
       id: "workspace.problems",
+      codeOnly: true,
       label: tr("查看代码问题"),
       hint: tr("诊断与修复"),
       group: "工作区",
@@ -234,6 +235,7 @@ export const CommandPalette = () => {
     },
     {
       id: "preview.servers",
+      codeOnly: true,
       label: tr("管理预览服务"),
       hint: tr("启动、停止、日志与配置"),
       group: "工作区",
@@ -241,31 +243,34 @@ export const CommandPalette = () => {
     },
     {
       id: "preview.open",
+      codeOnly: true,
       label: tr("打开预览"),
       hint: tr("右侧面板"),
       group: "工作区",
-      run: () => openRightStack("preview"),
+      run: () => setRightStackTab("preview"),
     },
     {
       id: "preview.detect",
+      codeOnly: true,
       label: tr("检测开发服务器"),
       hint: tr("预览面板"),
       group: "工作区",
       run: () => {
         useAppStore.getState().setPreviewServers([]);
-        openRightStack("preview");
+        setRightStackTab("preview");
         sendClientCommand({ type: "preview.detect" });
       },
     },
     {
       id: "preview.open.current",
+      codeOnly: true,
       label: tr("打开当前应用预览"),
       hint: useAppStore.getState().livePreviewUrl ?? tr("暂无地址"),
       group: "工作区",
       run: () => {
         const url = useAppStore.getState().livePreviewUrl;
         if (url) openLivePreview(url);
-        else openRightStack("preview");
+        else setRightStackTab("preview");
       },
     },
     {
@@ -273,41 +278,29 @@ export const CommandPalette = () => {
       label: tr("打开差异面板"),
       hint: tr("审阅改动"),
       group: "工作区",
-      run: () => addPanel({ id: `diff-${Date.now()}`, kind: "diff", label: "Diff" }),
+      run: () => setRightStackTab("diff"),
+    },
+    {
+      id: "browser.open",
+      label: tr("打开浏览器"),
+      hint: tr("新建标签页"),
+      group: "工作区",
+      run: openNewBrowserTab,
     },
     {
       id: "output.open",
       label: tr("打开上下文"),
       hint: tr("来源与产物"),
       group: "工作区",
-      run: () => openRightStack("tasks"),
+      run: () => setRightStackTab("tasks"),
     },
     {
       id: "panel.subagents",
+      codeOnly: true,
       label: tr("打开子智能体"),
       hint: "/agents",
       group: "工作区",
-      run: () => openRightStack("subagents"),
-    },
-    {
-      id: "panel.inspector",
-      label: tr("打开检查器"),
-      group: "工作区",
-      run: () => openRightStack("inspector"),
-    },
-    {
-      id: "diagnostics.open",
-      label: tr("打开运行状态"),
-      hint: tr("诊断"),
-      group: "工作区",
-      run: () => openRightStack("diagnostics"),
-    },
-    {
-      id: "doctor.run",
-      label: tr("运行诊断"),
-      hint: "/api/doctor",
-      group: "命令",
-      run: () => openRightStack("diagnostics"),
+      run: () => setRightStackTab("subagents"),
     },
     {
       id: "pane.focus.chat",
@@ -321,6 +314,7 @@ export const CommandPalette = () => {
     },
     {
       id: "pane.focus.editor",
+      codeOnly: true,
       label: tr("聚焦编辑器"),
       hint: tr("工作区"),
       group: "工作区",
@@ -332,6 +326,7 @@ export const CommandPalette = () => {
     },
     {
       id: "pane.maximize",
+      codeOnly: true,
       label: focusedPane?.maximized ? tr("还原当前面板") : tr("最大化当前面板"),
       hint: focusedPane?.label ?? focusedPane?.kind,
       group: "工作区",
@@ -342,8 +337,9 @@ export const CommandPalette = () => {
     },
     {
       id: "pane.close",
+      codeOnly: true,
       label: tr("关闭当前面板"),
-      hint: "Ctrl+\\",
+      hint: formatShortcut(shortcuts.closePanel),
       group: "工作区",
       run: () => {
         const state = useAppStore.getState();
@@ -353,6 +349,7 @@ export const CommandPalette = () => {
     },
     {
       id: "layout.reset",
+      codeOnly: true,
       label: tr("重置工作区布局"),
       hint: tr("对话 + 编辑器 + 面板"),
       group: "工作区",
@@ -360,29 +357,30 @@ export const CommandPalette = () => {
     },
     {
       id: "dock.git",
+      codeOnly: true,
       label: tr("打开 Git"),
       hint: tr("代码改动"),
       group: "工作区",
-      run: () => openDockTab("git"),
+      run: () => openBottomTab("git"),
     },
     {
       id: "dock.terminal",
       label: tr("打开终端"),
       hint: tr("终端与进程"),
       group: "工作区",
-      run: () => openDockTab("terminal"),
+      run: openTerminal,
     },
     ...(globalSearchEnabled ? [{
       id: "quick.open",
       label: tr("快速打开文件"),
-      hint: "Ctrl+P",
+      hint: formatShortcut(shortcuts.globalSearch),
       group: "导航" as const,
       run: () => useAppStore.getState().toggleQuickOpen(),
     }] : []),
     {
       id: "sidebar.toggle",
       label: tr("切换左侧栏"),
-      hint: "Ctrl+B",
+      hint: formatShortcut(shortcuts.leftSidebar),
       group: "导航",
       run: () => {
         const store = useAppStore.getState();
@@ -421,17 +419,10 @@ export const CommandPalette = () => {
       group: "导航",
       run: () => runRuntimeSlashCommand("/skills"),
     },
-    ...(agentEditorEnabled ? [{
-      id: "agents.editor",
-      label: tr("智能体编辑器"),
-      hint: tr("管理子智能体角色"),
-      group: "导航" as const,
-      run: () => useAppStore.getState().toggleAgentEditor(),
-    }] : []),
     ...runtimeSlashActions,
   ];
   const groupOrder: PaletteAction["group"][] = ["最近会话", "导航", "工作区", "命令"];
-  const actions = [...unsortedActions].sort(
+  const actions = unsortedActions.filter(action => !action.codeOnly || appMode === "code").sort(
     (left, right) => groupOrder.indexOf(left.group) - groupOrder.indexOf(right.group),
   );
 

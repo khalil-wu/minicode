@@ -550,6 +550,8 @@ class SideQueryOptions:
     disable_reasoning: bool = False
     enable_prompt_cache: bool = True
     hosted_web_search: bool = False
+    web_search_external_web_access: bool = True
+    web_search_indexed_web_access: bool | None = None
     web_search_allowed_domains: tuple[str, ...] = ()
     web_search_blocked_domains: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
@@ -1334,6 +1336,12 @@ class LLMAdapter(ABC):
         return False
 
     def hosted_web_search_supports_blocked_domains(self) -> bool:
+        return False
+
+    def hosted_web_search_supports_cached(self) -> bool:
+        return False
+
+    def hosted_web_search_supports_indexed(self) -> bool:
         return False
 
 

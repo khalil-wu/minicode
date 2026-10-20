@@ -74,4 +74,4 @@
 .mc-changes-branch-selected { margin-inline-start: auto; }
 .mc-changes-branch-spinner { animation: mc-changes-branch-spin 1s linear infinite; }
 @keyframes mc-changes-branch-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .mc-changes-branch-spinner { animation: none; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .mc-changes-branch-spinner { animation: none; } }

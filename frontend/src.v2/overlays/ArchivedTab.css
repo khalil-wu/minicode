@@ -1,0 +1,26 @@
+.settings-archived-chats { display: grid; gap: 32px; }
+.settings-archive-delete-all { display: flex; justify-content: flex-end; }
+.settings-archive-delete-all:empty { display: none; }
+.settings-archive-toolbar { display: flex; align-items: center; gap: 10px; }
+.settings-archive-toolbar > .settings-search { flex: 1; min-width: 0; }
+.settings-archive-filter { white-space: nowrap; }
+.settings-archive-filter > svg:last-child { margin-left: 18px; }
+.settings-archive-groups { display: grid; gap: 42px; }
+.settings-archive-project { display: grid; gap: 16px; }
+.settings-archive-project-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.settings-archive-project-heading > h3 { margin: 0; color: var(--text-primary); font-size: var(--mc-font-body); font-weight: var(--fw-medium); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.settings-archive-project-heading > span { margin-left: auto; flex-shrink: 0; color: var(--text-muted); font-size: var(--mc-font-secondary); }
+.settings-archive-project-heading > svg { color: var(--text-secondary); flex-shrink: 0; }
+.settings-archive-chat-row { display: flex; align-items: center; gap: 20px; min-height: 62px; padding-block: 12px; border-bottom: 1px solid var(--border-subtle); }
+.settings-archive-chat-row:last-child { border-bottom: 0; }
+.settings-archive-chat-row > .settings-archive-copy { flex: 1; }
+.settings-archive-chat-row .settings-archive-title { font-weight: var(--fw-medium); }
+.settings-archive-menu-heading { display: block; padding: 6px 10px; color: var(--text-muted); font-size: var(--mc-font-caption); }
+.settings-center-content:has(.settings-tab-pane:not([hidden]) .settings-archive-detail) > .settings-page-heading { display: none; }
+.settings-archive-detail { display: grid; gap: 24px; }
+.settings-archive-breadcrumb { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: var(--mc-font-secondary); }
+.settings-archive-breadcrumb button { display: inline-flex; align-items: center; padding: 3px 0; border: 0; color: inherit; background: transparent; font: inherit; cursor: pointer; }
+.settings-archive-breadcrumb button:hover { color: var(--text-primary); }
+.settings-archive-breadcrumb > span { color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-archive-detail-transcript article { padding-block: 18px; font-size: var(--mc-font-body); }
+@media (max-width: 760px) { .settings-archive-toolbar { flex-wrap: wrap; } .settings-archive-toolbar > .settings-search { flex-basis: 100%; } .settings-archive-chat-row { gap: 10px; } .settings-archive-filter > svg:last-child { margin-left: 6px; } }

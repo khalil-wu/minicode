@@ -5,6 +5,7 @@ import asyncio
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 import json
 import re
 from uuid import uuid4
@@ -114,6 +115,11 @@ async def _registered(service, programs, inventory, target, *, write=False):
 
 
 async def _isolated(service, inventory, target):
+    if not service.context.turn_environment.is_remote:
+        from backend.services.worktree_settings_service import is_managed_worktree_path
+        if not is_managed_worktree_path(Path(target.native), Path(inventory.main.native)):
+            raise HTTPException(409, "Only MiniCode-managed worktrees can be removed")
+        return target.parent
     root = await _canonical(service, inventory.main.joinpath(".minicode/worktrees"))
     if target == root or not target.is_relative_to(root):
         raise HTTPException(409, "Only isolated worktrees under .minicode/worktrees can be removed")
@@ -122,9 +128,14 @@ async def _isolated(service, inventory, target):
 
 async def _action_parent(service, inventory, parent):
     """An explicit GUI worktree action may mutate its registered directory pool."""
-    root = await _canonical(service, inventory.main.joinpath(".minicode/worktrees"))
     parent = await _canonical(service, parent)
-    if not parent.is_relative_to(root):
+    if service.context.turn_environment.is_remote:
+        root = await _canonical(service, inventory.main.joinpath(".minicode/worktrees"))
+        allowed = parent.is_relative_to(root)
+    else:
+        from backend.services.worktree_settings_service import is_managed_worktree_parent
+        allowed = is_managed_worktree_parent(Path(parent.native), Path(inventory.main.native))
+    if not allowed:
         raise HTTPException(409, "Worktree action parent is outside the registered isolated directory")
     scoped = copy(service)
     scoped.scope = executor_git_action_scope(service.scope, write_paths=(parent,), policy_cwd=parent)
@@ -162,7 +173,12 @@ async def _snapshot_records(service, programs, inventory):
         if service.resolve(record["main_repo_path"]) != inventory.main or service.resolve(record["common_git_dir"]) != inventory.common:
             raise HTTPException(409, f"Snapshot belongs to a different repository: {ref}")
         original = service.resolve(record["original_path"])
-        if original == inventory.main.joinpath(".minicode/worktrees") or not original.is_relative_to(inventory.main.joinpath(".minicode/worktrees")):
+        if service.context.turn_environment.is_remote:
+            allowed = original != inventory.main.joinpath(".minicode/worktrees") and original.is_relative_to(inventory.main.joinpath(".minicode/worktrees"))
+        else:
+            from backend.services.worktree_settings_service import is_managed_worktree_path
+            allowed = is_managed_worktree_path(Path(original.native), Path(inventory.main.native))
+        if not allowed:
             raise HTTPException(409, f"Snapshot path is outside isolated worktrees: {ref}")
         records.append({**record, "snapshot_sha": sha, "snapshot_ref": ref})
     return sorted(records, key=lambda item: item["created_at"], reverse=True)
@@ -268,12 +284,18 @@ async def _remove(service, programs, path, force):
         result = {"removed": False, "path": _display(service, target), "branch": entry.get("branch", "").removeprefix("refs/heads/")}
         if dirty and not force:
             return {**result, "error": "Worktree has local changes; force is required"}
+        if not service.context.turn_environment.is_remote:
+            from backend.workspace.local_environment_lifecycle import run_context_worktree_environment
+            await run_context_worktree_environment(Path(inventory.main.native), Path(target.native), "cleanup", service.context, application_config=service.application_config)
         if dirty:
             snapshot = await _snapshot(service, programs, inventory, target, entry)
             result.update(snapshot_id=snapshot["id"], snapshot_ref=snapshot["snapshot_ref"])
             await _prune(service, programs, inventory, snapshot["id"])
         _, code, error = await _git(service, programs, "worktree", "remove", *(["--force"] if force else []),
             "--", target.native, write=True, write_paths=(target.parent,), allowed=(0, 1, 128))
+        if code == 0 and not service.context.turn_environment.is_remote:
+            from backend.services.worktree_settings_service import unregister_managed_worktree
+            unregister_managed_worktree(Path(target.native))
         return {**result, "removed": code == 0, "error": error.strip() if code else None}
 
 
@@ -321,6 +343,9 @@ async def _restore(service, programs, snapshot_id, dest):
                     if not file.is_relative_to(target):
                         raise HTTPException(409, "Restored file resolves outside the target worktree")
                     await service.filesystem.write_file(file.uri, blob.stdout, sandbox=service.sandbox, follow_symlinks=False)
+            if not service.context.turn_environment.is_remote:
+                from backend.services.worktree_settings_service import register_managed_worktree
+                register_managed_worktree(Path(target.native), Path(inventory.main.native))
         return {"restored": code == 0, "snapshot_id": snapshot_id, "path": _display(service, target),
             "branch": record["branch"], "error": error.strip() if code else None}
 

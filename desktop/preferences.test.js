@@ -19,9 +19,11 @@ function fixture() {
 
 test("persisted preferences drive close and typed notification policy after restart", () => {
   const { file } = fixture();
-  preferences.setPreferences({ localeOverride: "en-US", confirmBeforeClose: "always", turnCompletionNotifications: "never", permissionNotifications: false, questionNotifications: true });
+  preferences.setPreferences({ localeOverride: "en-US", confirmBeforeClose: "always", turnCompletionNotifications: "never", permissionNotifications: false, questionNotifications: true, showContextWindowUsage: true, showBottomPanel: false });
   preferences.init(file);
   assert.equal(preferences.getPreferences().localeOverride, "en-US");
+  assert.equal(preferences.getPreferences().showContextWindowUsage, true);
+  assert.equal(preferences.getPreferences().showBottomPanel, false);
   assert.equal(preferences.needsCloseConfirmation("button"), true);
   assert.equal(preferences.needsCloseConfirmation("native"), true);
   assert.equal(preferences.shouldNotify("completion", false), false);
@@ -33,6 +35,50 @@ test("persisted preferences drive close and typed notification policy after rest
   assert.equal(preferences.needsCloseConfirmation("keyboard"), true);
   assert.equal(preferences.shouldNotify("completion", true), false);
   assert.equal(preferences.shouldNotify("completion", false), true);
+});
+
+test("projectless chats follow the runtime default until a directory is explicitly selected", () => {
+  const { directory, file } = fixture();
+  assert.equal(preferences.getPreferences().defaultTaskDirectory, path.join(directory, "tasks"));
+  assert.equal(preferences.getPreferences().taskDirectoryOverride, null);
+  preferences.setPreferences({ showBottomPanel: false });
+  const saved = JSON.parse(fs.readFileSync(file, "utf8"));
+  assert.equal(saved.defaultTaskDirectory, null);
+  assert.equal("taskDirectoryOverride" in saved, false);
+  const nextDefault = path.join(directory, "new-runtime-default");
+  preferences.init(file, { defaultTaskDirectory: nextDefault });
+  assert.equal(preferences.getPreferences().defaultTaskDirectory, nextDefault);
+  assert.equal(preferences.getPreferences().taskDirectoryOverride, null);
+  assert.equal(preferences.getPreferences().showBottomPanel, false);
+});
+
+test("projectless Reset clears only the override and preserves legacy paths, files and other preferences", () => {
+  const { directory, file } = fixture();
+  const original = path.join(directory, "original-task-folder");
+  fs.mkdirSync(original);
+  const content = path.join(original, "unsaved-work.txt");
+  fs.writeFileSync(content, "Keep task data and draft content");
+  const legacy = JSON.stringify({ defaultTaskDirectory: original, localeOverride: "en-US", showBottomPanel: false });
+  fs.writeFileSync(file, legacy);
+  const dynamicDefault = path.join(directory, "runtime-default");
+  preferences.init(file, { defaultTaskDirectory: dynamicDefault });
+  assert.equal(fs.readFileSync(file, "utf8"), legacy);
+  assert.equal(preferences.getPreferences().taskDirectoryOverride, original);
+  assert.equal(preferences.getPreferences().defaultTaskDirectory, original);
+  preferences.setPreferences({ defaultTaskDirectory: dynamicDefault });
+  assert.equal(preferences.getPreferences().taskDirectoryOverride, dynamicDefault);
+  const reset = preferences.setPreferences({ defaultTaskDirectory: null });
+  assert.equal(reset.defaultTaskDirectory, dynamicDefault);
+  assert.equal(reset.taskDirectoryOverride, null);
+  assert.equal(fs.existsSync(dynamicDefault), false);
+  const nextDefault = path.join(directory, "runtime-default-after-restart");
+  preferences.init(file, { defaultTaskDirectory: nextDefault });
+  assert.equal(preferences.getPreferences().defaultTaskDirectory, nextDefault);
+  assert.equal(preferences.getPreferences().taskDirectoryOverride, null);
+  assert.equal(preferences.getPreferences().localeOverride, "en-US");
+  assert.equal(preferences.getPreferences().showBottomPanel, false);
+  assert.equal(fs.readFileSync(content, "utf8"), "Keep task data and draft content");
+  assert.equal(JSON.parse(fs.readFileSync(file, "utf8")).defaultTaskDirectory, null);
 });
 
 test("preference publication follows the durable write and rejects undeclared settings", (t) => {
@@ -71,6 +117,58 @@ test("owned preference IPC broadcasts saved values and rejects a foreign frame",
   assert.equal(broadcasts[0].value.showFullAccess, false);
   assert.throws(() => set({ sender: webContents, senderFrame: {} }, { showFullUrl: true }), { code: "ERR_UNTRUSTED_IPC_SENDER" });
   assert.equal(preferences.getPreferences().showFullUrl, false);
+});
+
+test("native projectless Change, cancel and Reset publish effective paths to every window through the existing IPC", async () => {
+  const { directory, file } = fixture();
+  const selected = path.join(directory, "selected-folder");
+  fs.mkdirSync(selected);
+  fs.writeFileSync(path.join(selected, "keep.txt"), "original task data");
+  const handlers = new Map();
+  const broadcasts = [[], []];
+  const mainFrame = {};
+  const windows = broadcasts.map(messages => ({ isDestroyed: () => false,
+    webContents: { mainFrame, send: (channel, value) => messages.push({ channel, value }) } }));
+  const event = { sender: windows[0].webContents, senderFrame: mainFrame };
+  let canceled = false;
+  const chooserPaths = [];
+  const moduleValue = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "ipc-handlers.js"), "utf8"), { module: moduleValue, process, console,
+    require(name) { return name === "electron" ? {
+      app: { getLocale: () => "zh-CN" },
+      ipcMain: { on() {}, handle(channel, callback) { handlers.set(channel, callback); } },
+      dialog: { async showOpenDialog(_window, options) { chooserPaths.push(options.defaultPath); return { canceled, filePaths: [selected] }; } },
+    } : require(name); },
+  });
+  moduleValue.exports.init({ desktopPreferences: { ...preferences, fileOpenTargets: () => [], terminalShellTargets: () => [] },
+    getMainWindows: () => windows, getWindowForSender: sender => windows.find(window => window.webContents === sender),
+    getWindowRecord: () => ({ windowInstanceId: "projectless-owner" }) });
+  moduleValue.exports.registerIpcHandlers();
+  const get = handlers.get("minicode:preferences:get");
+  const choose = handlers.get("minicode:preferences:chooseTaskDirectory");
+  const set = handlers.get("minicode:preferences:set");
+  assert.equal((await get(event)).taskDirectoryOverride, null);
+  const chosen = await choose(event);
+  assert.equal(chosen.defaultTaskDirectory, fs.realpathSync(selected));
+  assert.equal(chosen.taskDirectoryOverride, fs.realpathSync(selected));
+  assert.equal(chooserPaths[0], path.join(directory, "tasks"));
+  const saved = fs.readFileSync(file, "utf8");
+  canceled = true;
+  assert.equal(await choose(event), null);
+  assert.equal(fs.readFileSync(file, "utf8"), saved);
+  assert.equal(chooserPaths[1], fs.realpathSync(selected));
+  assert.equal(broadcasts.every(messages => messages.length === 1), true);
+  const reset = await set(event, { defaultTaskDirectory: null });
+  assert.equal(reset.defaultTaskDirectory, path.join(directory, "tasks"));
+  assert.equal(reset.taskDirectoryOverride, null);
+  for (const messages of broadcasts) {
+    assert.deepEqual(messages.map(message => message.channel), ["minicode:preferences:changed", "minicode:preferences:changed"]);
+    assert.equal(messages[1].value.defaultTaskDirectory, reset.defaultTaskDirectory);
+    assert.equal(messages[1].value.taskDirectoryOverride, null);
+  }
+  preferences.init(file, { defaultTaskDirectory: path.join(directory, "changed-runtime-default") });
+  assert.equal((await get(event)).defaultTaskDirectory, path.join(directory, "changed-runtime-default"));
+  assert.equal(fs.readFileSync(path.join(selected, "keep.txt"), "utf8"), "original task data");
 });
 
 function shellFixture(envPatch = {}, platform = "win32") {

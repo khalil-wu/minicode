@@ -29,12 +29,16 @@ class GenerateImageTool(BaseTool):
     description = (
         "Generate an image from a textual prompt using the image channel explicitly "
         "configured for the active provider profile. Use only when the user asks to "
-        "create or render an image."
+        "create or render an image. Attach input_images to preserve visual identity "
+        "or edit reference images. Set output_path to save a new image file for subsequent tools."
     )
     permission = PermissionLevel.AUTO
     read_only = False
     open_world = True
     always_load = True
+    mutates_workspace = True
+    requires_execution_environment = True
+    workspace_path_fields = ("input_images", "output_path")
     mutates_external_state = True
     side_effect_kind = TOOL_SIDE_EFFECT_EXTERNAL
     idempotent = False
@@ -129,6 +133,17 @@ class GenerateImageTool(BaseTool):
                         "enum": ["auto", "low", "medium", "high", "standard", "hd"],
                         "description": "Optional provider-supported quality; omit to use the profile default.",
                     },
+                    "input_images": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                        "maxItems": 16,
+                        "description": "Reference PNG, JPEG or WebP paths in the accepted execution environment. All images are attached to one edit request in this order.",
+                    },
+                    "output_path": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Optional new file path in the accepted execution environment. Existing files are never replaced.",
+                    },
                 },
                 "required": ["prompt"],
                 "additionalProperties": False,
@@ -213,13 +228,6 @@ class GenerateImageTool(BaseTool):
                 ),
             )
 
-        await self._emit_progress(
-            context,
-            progress_id=progress_id,
-            status="running",
-            message="正在生成图像",
-            detail="图像请求已提交",
-        )
         adapter = OpenAIAdapter(
             LLMSettings(
                 api_key=str(settings["api_key"]),
@@ -235,13 +243,27 @@ class GenerateImageTool(BaseTool):
             )
         )
         try:
+            from backend.tools.image_generation_io import prepare_image_output, read_reference_images, save_image_output
+
+            reference_paths = args.get("input_images", [])
+            output_path = args.get("output_path")
+            if (reference_paths or output_path) and context is None:
+                raise ValueError("Image file inputs and outputs require an accepted execution context.")
+            if output_path:
+                await prepare_image_output(output_path, context)
+            input_images = await read_reference_images(reference_paths, context) if reference_paths else None
+            await self._emit_progress(context, progress_id=progress_id, status="running",
+                message="正在生成图像", detail="正在发送图像请求")
             images = await adapter.generate_images(
                 prompt,
                 size=str(args.get("size") or settings.get("size") or "1024x1024"),
                 quality=str(args.get("quality") or settings.get("quality") or ""),
+                input_images=input_images,
                 metadata=metadata,
                 turn_context=turn_context,
             )
+            if output_path:
+                await save_image_output(output_path, images[0][0], context)
         except Exception as exc:
             classification = classify_llm_error(exc)
             detail = redact_secrets(_clean_error_message(exc) or str(exc)).strip()[:400]
@@ -283,7 +305,7 @@ class GenerateImageTool(BaseTool):
         return ToolResult(
             content=(
                 f"Generated {len(images)} validated image(s). The host attached the image "
-                "artifact to this assistant turn."
+                "artifact to this assistant turn." + (f" Saved image to {output_path}." if output_path else "")
             ),
             images=[
                 {"data": image_data, "media_type": media_type}

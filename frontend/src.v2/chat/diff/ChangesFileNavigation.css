@@ -109,5 +109,5 @@
 .mc-changes-file-comments { display: inline-flex; align-items: center; gap: 3px; color: var(--text-muted); }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-changes-directory-chevron { transition: none; }
+  html:not([data-reduced-motion="false"]) .mc-changes-directory-chevron { transition: none; }
 }

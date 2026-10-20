@@ -21,7 +21,7 @@ import { isPreviewableMediaPath } from "../lib/media-types";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { safeJsonParse } from "../lib/safe-parse";
 import { cachedEditorDrafts } from "./editor-drafts";
-import { applyWorkbenchPreferences, defaultWorkbenchPreferences, type WorkbenchPreferences } from "../lib/workbench-preferences";
+import { applyWorkbenchPreferences, migrateWorkbenchPreferences, persistedWorkbenchPreferences, type WorkbenchPreferences } from "../lib/workbench-preferences";
 
 const panelSlotsAfterClosingLastEditor = (state: AppStore) => {
   if (state.appMode !== "code") {
@@ -39,6 +39,9 @@ const panelSlotsAfterClosingLastEditor = (state: AppStore) => {
 
 export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (set, get) => {
   const initialEditorState = editorStateForWorkspace("");
+  const storedPreferences = safeJsonParse<Partial<WorkbenchPreferences> & { speechVocabulary?: string }>(readLS("minicode.workbench.preferences") ?? "{}", {});
+  const workbenchPreferences = migrateWorkbenchPreferences(storedPreferences);
+  if ("speechVocabulary" in storedPreferences) writeLS("minicode.workbench.preferences", JSON.stringify(workbenchPreferences));
   type WorkspaceEditorState = Pick<AppStore, "editorTabs" | "activeTabPath" | "activeEditorPath" | "editorOpenRequests">;
   const updateWorkspace = (workspaceRoot: string, update: (state: WorkspaceEditorState) => Partial<WorkspaceEditorState>) => {
     set((state) => {
@@ -52,10 +55,10 @@ export const createEditorSlice: StateCreator<AppStore, [], [], EditorSlice> = (s
   };
   return {
     inlineCompletionUsage: { requests: 0, inputTokens: 0, outputTokens: 0, lastError: "", pending: false },
-    workbenchPreferences: { ...defaultWorkbenchPreferences, ...safeJsonParse<Partial<WorkbenchPreferences>>(readLS("minicode.workbench.preferences") ?? "{}", {}) },
+    workbenchPreferences,
     setWorkbenchPreferences: (patch) => set((state) => {
       const workbenchPreferences = { ...state.workbenchPreferences, ...patch };
-      writeLS("minicode.workbench.preferences", JSON.stringify(workbenchPreferences));
+      writeLS("minicode.workbench.preferences", JSON.stringify(persistedWorkbenchPreferences(workbenchPreferences)));
       applyWorkbenchPreferences(workbenchPreferences);
       return { workbenchPreferences };
     }),

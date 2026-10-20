@@ -4,7 +4,7 @@ export interface WorkbenchPreferences {
   speechProvider: string;
   speechModel: string;
   speechLanguage: string;
-  speechVocabulary: string;
+  dictationDictionary: string[];
   microphoneId: string;
   aiEnabled: boolean;
   aiModel: string;
@@ -21,16 +21,32 @@ export interface WorkbenchPreferences {
   previewTabs: boolean;
   snippets: CodeSnippet[];
 }
+export type DictationPreferences = Pick<WorkbenchPreferences, "speechEnabled" | "speechProvider" | "speechModel" | "speechLanguage" | "microphoneId" | "dictationDictionary">;
+const dictationPreferenceKeys = new Set(["speechEnabled", "speechProvider", "speechModel", "speechLanguage", "microphoneId", "dictationDictionary", "speechVocabulary"]);
+let desktopDictationPreferences = false;
+export const usesDesktopDictationPreferences = () => desktopDictationPreferences;
+export function useDesktopDictationPreferences() { desktopDictationPreferences = true; }
+export function dictationPreferencesOf(preferences: DictationPreferences): DictationPreferences {
+  return { speechEnabled: preferences.speechEnabled, speechProvider: preferences.speechProvider, speechModel: preferences.speechModel,
+    speechLanguage: preferences.speechLanguage, microphoneId: preferences.microphoneId, dictationDictionary: preferences.dictationDictionary };
+}
+export function persistedWorkbenchPreferences(preferences: WorkbenchPreferences) {
+  return desktopDictationPreferences ? Object.fromEntries(Object.entries(preferences).filter(([key]) => !dictationPreferenceKeys.has(key))) : preferences;
+}
 export const defaultWorkbenchPreferences: WorkbenchPreferences = {
-  speechEnabled: false, speechProvider: "", speechModel: "", speechLanguage: "zh", speechVocabulary: "", microphoneId: "",
+  speechEnabled: false, speechProvider: "", speechModel: "", speechLanguage: "zh", dictationDictionary: [], microphoneId: "",
   aiEnabled: false, aiModel: "", aiProvider: "", aiMaxTokens: 256,
   proseSize: 14,
   wordWrap: true, minimap: true, tabSize: 4, insertSpaces: true,
   formatOnSave: false, lineNumbers: true, stickyScroll: true, previewTabs: true, snippets: [],
 };
+export function migrateWorkbenchPreferences(stored: Partial<WorkbenchPreferences> & { speechVocabulary?: string }): WorkbenchPreferences {
+  const { speechVocabulary, ...preferences } = stored;
+  return { ...defaultWorkbenchPreferences, ...preferences,
+    dictationDictionary: preferences.dictationDictionary ?? (speechVocabulary?.trim() ? [speechVocabulary.trim()] : []) };
+}
 export function applyWorkbenchPreferences(preferences: WorkbenchPreferences) {
   const style = document.documentElement.style;
-  for (const property of ["--font-ui", "--font-prose", "--font-mono", "--editor-font-family"]) style.removeProperty(property);
   style.setProperty("--mc-font-reading", preferences.proseSize + "px");
   style.setProperty("--prose-font-size", preferences.proseSize + "px");
 }

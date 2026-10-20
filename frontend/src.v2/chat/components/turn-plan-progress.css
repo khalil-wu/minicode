@@ -144,7 +144,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .turn-plan-spinner,
-  .turn-plan-step-spinner,
-  .turn-plan-popover { animation: none; }
+  html:not([data-reduced-motion="false"]) .turn-plan-spinner,
+  html:not([data-reduced-motion="false"]) .turn-plan-step-spinner,
+  html:not([data-reduced-motion="false"]) .turn-plan-popover { animation: none; }
 }

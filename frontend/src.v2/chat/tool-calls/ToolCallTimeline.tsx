@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useAppStore } from "../../stores";
-import { getToolCallsFromMessage } from "../../lib/content-blocks";
+import { getPresentedContentBlocks, getToolCallsFromMessage } from "../../lib/content-blocks";
 import type { CSSProperties } from "react";
 import type { AgentProgressEntry, ChatMessage } from "../../stores/types";
 import { readableToolLabel } from "../toolDisplayName";
@@ -64,7 +64,14 @@ const PHASE_ORDER: TimelinePhase[] = ["context", "model", "tool", "approval", "s
 export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
   const messages = useAppStore((s) => s.messages);
   const agentProgress = useAppStore((s) => s.agentProgress);
-  const allItems = useMemo(() => buildRunTimelineItems(messages, agentProgress), [messages, agentProgress]);
+  const isStreaming = useAppStore((s) => s.isStreaming);
+  // The inspector's live view follows ownership too. Replay/export helpers
+  // continue to use the unchanged raw records and their original timestamps.
+  const allItems = useMemo(() => buildRunTimelineItems(
+    messages.map(message => ({ ...message, blocks: getPresentedContentBlocks(message) })),
+    agentProgress.map(entry => !isStreaming && entry.status === "running"
+      ? { ...entry, status: "partial" } : entry),
+  ), [messages, agentProgress, isStreaming]);
   const items = limit > 0 && allItems.length > limit ? allItems.slice(-limit) : allItems;
 
   if (items.length === 0) {

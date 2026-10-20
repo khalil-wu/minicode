@@ -22,6 +22,10 @@ vi.hoisted(() => {
 
 import { useKeyboardShortcuts } from "./useKeyboardShortcuts";
 import { useAppStore } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("../composer/RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { ComposerTextarea } from "../composer/ComposerTextarea";
 
@@ -65,6 +69,31 @@ describe("useKeyboardShortcuts modal routing", () => {
   afterEach(() => {
     cleanup();
     document.body.innerHTML = "";
+    window.__MINICODE_RUNTIME__ = undefined;
+  });
+
+  it("dispatches a configured native chord once through the owned menu command without forcing Code", () => {
+    const execute = vi.fn(async () => true);
+    window.__MINICODE_RUNTIME__ = { desktop: { menu: { execute } } } as never;
+    useAppStore.setState({ appMode: "cowork", settingsOpen: false, shortcutsHelpOpen: false, skillsMarketplaceOpen: false,
+      liveArtifactsOpen: false, agentEditorOpen: false, draft: "Unsent text", rightPanelOpen: false,
+      shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, terminal: ["Mod+Shift+Y"] } });
+    render(<ShortcutHarness />);
+    const key = new KeyboardEvent("keydown", { key: "Y", code: "KeyY", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true });
+    window.dispatchEvent(key);
+    expect(execute).toHaveBeenCalledExactlyOnceWith("terminal");
+    expect(key.defaultPrevented).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", draft: "Unsent text", rightPanelOpen: false });
+  });
+
+  it.each(["chat", "cowork", "code"] as const)("the Changes shortcut preserves the %s mode and current draft outside Electron", appMode => {
+    useAppStore.setState({ appMode, settingsOpen: false, shortcutsHelpOpen: false, skillsMarketplaceOpen: false, liveArtifactsOpen: false,
+      agentEditorOpen: false, draft: "Keep changes draft", conversationId: "changes-owner", workingDirectory: "C:/CurrentProject", rightPanelOpen: true, rightStackTab: "tasks" });
+    render(<ShortcutHarness />);
+    fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+    expect(useAppStore.getState()).toMatchObject({ appMode, rightStackTab: "diff", rightPanelOpen: true, draft: "Keep changes draft", conversationId: "changes-owner", workingDirectory: "C:/CurrentProject" });
+    fireEvent.keyDown(window, { key: "b", code: "KeyB", ctrlKey: true, altKey: true });
+    expect(useAppStore.getState()).toMatchObject({ appMode, rightPanelOpen: false, draft: "Keep changes draft" });
   });
 
   it("leaves IME shortcuts and composition-confirm Escape with their input", () => {
@@ -94,7 +123,7 @@ describe("useKeyboardShortcuts modal routing", () => {
     fireEvent.keyDown(input, { key: "p", ctrlKey: true });
     expect(useAppStore.getState().quickOpenVisible).toBe(true);
     expect(localEditorKey).not.toHaveBeenCalled();
-    useAppStore.setState({ quickOpenVisible: false, shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, globalSearch: "Mod+Shift+P" } });
+    useAppStore.setState({ quickOpenVisible: false, shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, globalSearch: ["Mod+Shift+P"] } });
     fireEvent.keyDown(input, { key: "p", ctrlKey: true });
     expect(useAppStore.getState().quickOpenVisible).toBe(false);
     expect(localEditorKey).toHaveBeenCalledOnce();
@@ -115,12 +144,12 @@ describe("useKeyboardShortcuts modal routing", () => {
   });
 
   it("distinguishes Save All from single-file save while an editor input has focus", () => {
-    useAppStore.setState({ settingsOpen: false, shortcutsHelpOpen: false, skillsMarketplaceOpen: false, liveArtifactsOpen: false, automationsOpen: false, agentEditorOpen: false });
+    useAppStore.setState({ appMode: "code", settingsOpen: false, shortcutsHelpOpen: false, skillsMarketplaceOpen: false, liveArtifactsOpen: false, automationsOpen: false, agentEditorOpen: false });
     const single = vi.fn();
     const all = vi.fn();
     window.addEventListener("editor:save", single);
     window.addEventListener("editor:save-all", all);
-    render(<><textarea aria-label="Editor input" /><ShortcutHarness /></>);
+    render(<><div className="monaco-editor"><textarea aria-label="Editor input" /></div><ShortcutHarness /></>);
     const input = document.querySelector("textarea")!;
     input.focus();
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "S", code: "KeyS", ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }));
@@ -151,8 +180,8 @@ describe("useKeyboardShortcuts modal routing", () => {
     expect(state.liveArtifactsOpen).toBe(false);
   });
 
-  it("opens General settings from Shift+E without closing an open settings dialog", async () => {
-    useAppStore.setState({ settingsTab: "provider" });
+  it("preserves a configured Code shortcut to General settings without closing an open settings dialog", async () => {
+    useAppStore.setState({ settingsTab: "provider", appMode: "code", shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, openGeneralSettings: ["Mod+Shift+E"] } });
     render(<ShortcutHarness />);
 
     window.dispatchEvent(new KeyboardEvent("keydown", {
@@ -256,9 +285,10 @@ describe("useKeyboardShortcuts modal routing", () => {
     expect(useAppStore.getState().agentEditorOpen).toBe(false);
   });
 
-  it.each(["r", "R"])("opens prompt history for Ctrl+%s", async (key) => {
+  it.each(["r", "R"])("preserves a configured Code prompt-history binding for Ctrl+%s", async (key) => {
     useAppStore.setState({ settingsOpen: false, shortcutsHelpOpen: false, skillsMarketplaceOpen: false,
-      liveArtifactsOpen: false, automationsOpen: false, agentEditorOpen: false, commandPaletteOpen: false, quickOpenVisible: false });
+      liveArtifactsOpen: false, automationsOpen: false, agentEditorOpen: false, commandPaletteOpen: false, quickOpenVisible: false,
+      appMode: "code", shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, promptHistory: ["Mod+R"] } });
     const onHistorySearch = vi.fn();
     window.addEventListener("composer:history-search", onHistorySearch);
     render(<ShortcutHarness />);
@@ -282,6 +312,7 @@ describe("useKeyboardShortcuts modal routing", () => {
       liveArtifactsOpen: false, automationsOpen: false, agentEditorOpen: false,
       commandPaletteOpen: false, quickOpenVisible: false,
       appMode: "code", conversationId: "composer-focus", workingDirectory: "C:/workspace",
+      shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, clearComposer: ["Mod+L"] },
       draft: "main draft",
       panelSlots: [
         { id: "main-chat", kind: "chat", label: "Chat", size: 1, focused: false },
@@ -308,7 +339,7 @@ describe("useKeyboardShortcuts modal routing", () => {
   it("honors an edited shortcut and stops using its old binding", () => {
     useAppStore.setState({
       commandPaletteOpen: false,
-      shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, commandPalette: "Mod+Shift+K" },
+      shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, commandPalette: ["Mod+Shift+K"] },
     });
     render(<ShortcutHarness />);
 

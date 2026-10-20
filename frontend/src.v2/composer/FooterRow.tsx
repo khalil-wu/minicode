@@ -1,5 +1,5 @@
 import { useI18n, type Translate, type TranslationKey } from "../i18n";
-import { ArrowUp, Check, ChevronDown, ChevronRight, Folder, Globe, Hand, ListChecks, Plus, RotateCcw, ShieldAlert, Square, TerminalSquare, X } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, Folder, Globe, Hand, ListChecks, Plus, RotateCcw, ShieldAlert, Square, TerminalSquare, X } from "../lib/icons";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
@@ -15,8 +15,11 @@ import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
 import { Button } from "../components/Button";
 import { ComposerAddMenu } from "./ComposerAddMenu";
-import { isDesktop, openExternal, pickDirectory } from "../desktop/runtime";
+import { isDesktop, openExternal } from "../desktop/runtime";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { Target } from "../lib/icons";
+import { updateThreadGoal } from "./goal-state";
+import "./goal.css";
 
 interface Props {
   sendState: SendButtonState;
@@ -60,6 +63,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const { preferences } = useDesktopPreferences();
   const permissionMode = useAppStore((s) => s.permissionMode);
   const agentMode = useAppStore((s) => s.agentMode);
+  const goalMode = useAppStore((s) => s.goalMode);
   const setAgentMode = useAppStore((s) => s.setAgentMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
   const conversationId = useAppStore((s) => s.conversationId);
@@ -83,13 +87,19 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const setModelSelection = useAppStore((s) => s.setModelSelection);
   const fileInputId = useId();
   const fileRef = useRef<HTMLInputElement>(null);
+  const filePickerActive = useRef(false);
+  useEffect(() => useAppStore.subscribe((state, previous) => {
+    if (state.conversationId !== previous.conversationId || state.workingDirectory !== previous.workingDirectory
+      || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
+      || state.pendingConversationCreateId !== previous.pendingConversationCreateId) filePickerActive.current = false;
+  }), []);
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const addTrigger = useRef<HTMLButtonElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setAddOpen(false); }, [conversationId, workingDirectory]);
+  useEffect(() => { setAddOpen(false); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
   useEffect(() => {
     const openAddMenu = () => { setAddOpen(true); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); };
     window.addEventListener("composer:open-add-menu", openAddMenu);
@@ -127,7 +137,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         : null;
     if (!root) return;
     const trigger = root.querySelector<HTMLButtonElement>(':scope > button[aria-expanded]');
-    const options = () => Array.from(root.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)'));
+    const options = () => Array.from(root.querySelectorAll<HTMLElement>('[role="option"]:not(:disabled), .composer-effort-model-toggle:not(:disabled), .composer-effort-reset:not(:disabled), input[type="range"]'));
     queueMicrotask(() => {
       const items = options();
       (root.querySelector<HTMLInputElement>('input[type="range"]')
@@ -136,24 +146,39 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     const handleMenuKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopPropagation();
         setModelOpen(false);
         setPermissionOpen(false);
         setEffortOpen(false);
         queueMicrotask(() => trigger?.focus());
         return;
       }
-      if (event.target instanceof HTMLInputElement && event.target.type === "range") return;
       const items = options();
       if (!items.length) return;
-      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const current = items.indexOf(document.activeElement as HTMLElement);
+      const slider = event.target instanceof HTMLInputElement && event.target.type === "range";
+      if (event.key === "Enter" && slider) {
+        event.preventDefault(); event.stopPropagation();
+        setEffortOpen(false);
+        queueMicrotask(() => trigger?.focus());
+        return;
+      }
+      if (event.key === "Tab") {
+        event.preventDefault(); event.stopPropagation();
+        items[(current + (event.shiftKey ? -1 : 1) + items.length) % items.length].focus();
+        return;
+      }
+      if (slider && !["ArrowDown", "ArrowUp"].includes(event.key)) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
+        event.stopPropagation();
         const next = event.key === "ArrowDown"
           ? (current + 1 + items.length) % items.length
           : (current - 1 + items.length) % items.length;
         items[next].focus();
       } else if (event.key === "Home" || event.key === "End") {
         event.preventDefault();
+        event.stopPropagation();
         items[event.key === "Home" ? 0 : items.length - 1].focus();
       }
     };
@@ -183,38 +208,33 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    uploadComposerFiles(Array.from(files));
+    const selected = Array.from(files);
+    const accepted = filePickerActive.current;
+    filePickerActive.current = false;
     e.target.value = "";
+    if (accepted) uploadComposerFiles(selected);
   };
 
   const openFilePicker = (event?: React.MouseEvent | React.KeyboardEvent) => {
     event?.preventDefault();
     event?.stopPropagation();
+    filePickerActive.current = true;
     fileRef.current?.click();
   };
 
-  const addFolder = async () => {
+  const editGoal = () => {
     const owner = useAppStore.getState();
-    const folder = await pickDirectory();
-    if (!folder) return;
-    const state = useAppStore.getState();
-    if (state.conversationId !== owner.conversationId || !workspaceRootsEqual(state.workingDirectory, owner.workingDirectory)) {
-      pushToast(tr("会话已切换，请在当前会话重新选择文件夹。"), "warning");
-      return;
-    }
-    state.addSelectedMention({ kind: "folder", path: folder, name: folder.split(/[/\\]/).filter(Boolean).pop()! });
+    useAppStore.setState({ goalMode: true });
+    if (owner.agentMode === "plan") void owner.setAgentMode("build");
+    window.dispatchEvent(new Event("composer:focus"));
   };
 
-  const editGoal = async () => {
+  const clearGoalMode = () => {
     const owner = useAppStore.getState();
-    const targetConversationId = await owner.ensureComposerConversation();
-    if (!targetConversationId) return;
-    const { showPrompt } = await import("../overlays/DialogService");
-    const text = await showPrompt({ title: tr("目标"), message: tr("设置这项任务持续追求的目标。清空内容可移除已有目标。"),
-      defaultValue: owner.activeGoal?.text || "", placeholder: tr("描述目标…"), confirmLabel: tr("保存") });
-    if (text === null) return;
-    sendClientCommand({ type: "conversation.goal.set", action: text.trim() ? "set" : "clear", text,
-      conversation_id: targetConversationId, source: "frontend.composer" });
+    useAppStore.setState({ goalMode: false });
+    if (owner.activeGoal && owner.conversationId) void updateThreadGoal(owner.conversationId, "clear")
+      .catch(error => pushToast(error instanceof Error ? error.message : tr("目标操作失败"), "error"));
+    window.dispatchEvent(new Event("composer:focus"));
   };
 
   const confirmUltraWithFullAccess = async (level: EffortLevel | undefined, owner: ReturnType<typeof useAppStore.getState>) => {
@@ -376,9 +396,9 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   return (
     <div ref={footerRef} className="flex flex-col gap-0">
       {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} goalAvailable={!pendingConversationSwitchId}
-        onFiles={openFilePicker} onFolder={isDesktop() ? () => void addFolder() : undefined}
+        onFiles={openFilePicker}
         onGoal={() => void editGoal()} onPlan={() => setAgentMode(agentMode === "plan" ? "build" : "plan")}
-        onPlugin={id => useAppStore.getState().addSelectedMention({ kind: "plugin", name: id, configName: id, path: `plugin://${id}` })}
+        onPlugin={(id, name) => useAppStore.getState().addSelectedMention({ kind: "plugin", name, configName: id, path: `plugin://${id}` })}
         onClose={() => { setAddOpen(false); addTrigger.current!.focus(); }} />}
       {prMonitor && (
         <div style={prMonitorStyle(prMonitor.ciStatus)}>
@@ -448,6 +468,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             aria-label={tr("添加文件等内容")}
             aria-haspopup="menu"
             aria-expanded={addOpen}
+            disabled={Boolean(pendingConversationSwitchId)}
             onClick={() => { setAddOpen(value => !value); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }}
           >
             <Plus size={compact ? 16 : 18} strokeWidth={1.8} />
@@ -466,7 +487,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             label={permLabel}
             title={tr("更改权限")}
             icon={<PermissionIcon size={15} />}
-            disabled={availablePermissionModes === undefined}
+            disabled={availablePermissionModes === undefined || Boolean(pendingConversationSwitchId)}
             warning={permissionMode === "bypass"}
           >
             <div className="composer-permission-heading"><span>{tr("应如何批准操作？")}</span><button type="button" onClick={openPermissionsHelp}>{tr("了解更多")}</button></div>
@@ -487,12 +508,14 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
           </Picker>
 
           {agentMode === "plan" && <button type="button" className="composer-plan-chip" aria-label={tr("关闭计划模式")} title={tr("计划模式")} onClick={() => setAgentMode("build")}><ListChecks size={15} /><span>{tr("计划")}</span><X size={13} /></button>}
+          {goalMode && <button type="button" className="composer-goal-mode" aria-label={tr("清除目标")} title={tr("清除目标")}
+            onClick={clearGoalMode}><Target className="goal-mode-target" size={14} /><X className="goal-mode-clear" size={14} />{tr("目标")}</button>}
 
         </div>
 
         <span className="composer-footer-spacer" aria-hidden="true" />
 
-        {!minimal && <ContextUsageRing />}
+        {!minimal && (!isDesktop() || preferences?.showContextWindowUsage) && <ContextUsageRing />}
 
         <div className="composer-model-controls" role="group" aria-label={tr("模型与推理强度")}>
         <div ref={dropdownRef} className="composer-model-picker relative" onBlur={(event) => {
@@ -510,6 +533,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             data-reasoning-supported={supportsReasoningEffort}
             aria-label={supportsReasoningEffort ? tr("模型与推理强度：{model}，{effort}", { model: modelLabel, effort: effortLabel }) : undefined}
             aria-expanded={modelOpen || effortOpen}
+            disabled={Boolean(pendingConversationSwitchId)}
             aria-haspopup={supportsReasoningEffort ? "dialog" : "listbox"}
             style={pill}
             title={supportsReasoningEffort ? effortTitle : currentModel || tr("选择模型")}

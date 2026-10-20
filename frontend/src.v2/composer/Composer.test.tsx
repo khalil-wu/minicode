@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     sendClientCommand: vi.fn(() => true),
+    sendClientCommandAwaitResult: vi.fn(),
     sendChatMessage: vi.fn((): boolean | Promise<boolean> => true),
     pushToast: vi.fn(),
     buildContextPayload: vi.fn(async () => "File: src/App.tsx\n```tsx\nexport const value = 1;\n```"),
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("../protocol/ws-outbox", () => ({
   registerWebSocketSender: vi.fn(),
   sendClientCommand: mocks.sendClientCommand,
+  sendClientCommandAwaitResult: mocks.sendClientCommandAwaitResult,
   commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed",
   sendPromptResponseCommand: mocks.promptResponse,
 }));
@@ -104,6 +106,10 @@ vi.mock("./uploads", () => ({
 }));
 
 import { useAppStore } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { Composer } from "./Composer";
 import { appendPromptHistory } from "./prompt-history";
 
@@ -132,6 +138,15 @@ describe("Composer goal bar", () => {
   beforeEach(() => {
     localStorage.clear();
     mocks.sendClientCommand.mockClear();
+    mocks.sendClientCommandAwaitResult.mockReset();
+    mocks.sendClientCommandAwaitResult.mockImplementation(async command => {
+      const previous = useAppStore.getState().activeGoal;
+      return { type: "command.result", command: "goal", level: "success", message: "Updated", data: {
+        conversation_id: command.conversation_id, revision: 999999,
+        goal: command.action === "clear" ? {} : { text: command.text || previous?.text || "Goal",
+          status: command.action === "pause" ? "paused" : "active" },
+      } };
+    });
     mocks.sendChatMessage.mockClear();
     mocks.pushToast.mockClear();
     mocks.buildContextPayload.mockClear();
@@ -146,6 +161,7 @@ describe("Composer goal bar", () => {
       pendingDiffReview: null,
       diffReviewQueue: [],
       quotedMessage: null,
+      goalMode: false,
     });
   });
 
@@ -184,6 +200,21 @@ describe("Composer goal bar", () => {
     expect(mocks.sendChatMessage).toHaveBeenCalledTimes(1);
     expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ displayContent: "first draft" }));
     expect(useAppStore.getState().draft).toBe("next draft");
+  });
+
+  it("captures the selected live turn before preparing composer context", async () => {
+    let finishContext!: (value: string) => void;
+    mocks.buildContextPayload.mockReturnValueOnce(new Promise(resolve => { finishContext = resolve; }));
+    useAppStore.setState({ conversationId: "steer-owner", workingDirectory: "C:/steer-owner", draft: "change this turn", currentModel: "gpt-5",
+      isConnected: true, isStreaming: true, followUpBehavior: "steer", attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false,
+      messages: [{ id: "old-answer", turnId: "original-live-turn", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true }] });
+    render(<Composer />);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "composer" }), { key: "Enter" });
+    await waitFor(() => expect(mocks.buildContextPayload).toHaveBeenCalled());
+    act(() => useAppStore.setState({ messages: [{ id: "new-answer", turnId: "later-live-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 2, isStreaming: true }] }));
+    await act(async () => finishContext(""));
+    expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ busyBehavior: "steer", expectedTurnId: "original-live-turn" }));
   });
 
   it.each([true, false])("clears only the original owner's unchanged composer after a delayed submission returns %s", async (accepted) => {
@@ -286,24 +317,25 @@ describe("Composer goal bar", () => {
     render(<Composer />);
     mocks.sendClientCommand.mockClear();
 
-    expect(screen.getByText("目标")).toBeTruthy();
+    expect(screen.getByText("追求目标")).toBeTruthy();
     expect(screen.getByText("Match MiniCode desktop goal mode")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "暂停目标" }));
-    expect(mocks.sendClientCommand).toHaveBeenCalledWith({
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "conversation.goal.set",
       conversation_id: "conv-1",
       action: "pause",
-      source: "frontend.goal_bar",
-    });
+      source: "frontend.goal",
+    }, "goal");
+    await waitFor(() => expect(useAppStore.getState().activeGoal?.status).toBe("paused"));
 
     fireEvent.click(screen.getByRole("button", { name: "清除目标" }));
-    expect(mocks.sendClientCommand).toHaveBeenCalledWith({
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "conversation.goal.set",
       conversation_id: "conv-1",
       action: "clear",
-      source: "frontend.goal_bar",
-    });
+      source: "frontend.goal",
+    }, "goal");
   });
 
   it("sends resume for a paused goal", async () => {
@@ -328,14 +360,30 @@ describe("Composer goal bar", () => {
     render(<Composer />);
     mocks.sendClientCommand.mockClear();
 
-    expect(screen.getByText("已暂停")).toBeTruthy();
+    expect(screen.getByText("已暂停目标")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "继续目标" }));
-    expect(mocks.sendClientCommand).toHaveBeenCalledWith({
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "conversation.goal.set",
       conversation_id: "conv-2",
       action: "resume",
-      source: "frontend.goal_bar",
-    });
+      source: "frontend.goal",
+    }, "goal");
+  });
+
+  it("submits the original composer text in goal mode while retaining attachments and quotes", async () => {
+    const attachment = { id: "goal-file", name: "notes.txt", type: "text/plain", size: 12, status: "ready" as const,
+      conversationId: "goal-mode-owner", attachment: { id: "uploaded-goal-file" } };
+    const quote = { id: "goal-quote", role: "assistant" as const, content: "Preserved quote" };
+    useAppStore.setState({ conversationId: "goal-mode-owner", workingDirectory: "C:/goal-mode", draft: "Pursue this actual goal",
+      goalMode: true, activeGoal: null, attachments: [attachment], quotedMessage: quote, selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false, currentModel: "fixture", isConnected: true, isStreaming: false });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(useAppStore.getState().goalMode).toBe(false));
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.goal.set",
+      conversation_id: "goal-mode-owner", text: "Pursue this actual goal", action: "set" }), "goal");
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    expect(useAppStore.getState()).toMatchObject({ draft: "", attachments: [attachment], quotedMessage: quote });
   });
 
   it("sends slash commands with inline file context in backend content", async () => {

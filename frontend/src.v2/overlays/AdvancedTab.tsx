@@ -9,7 +9,6 @@ import { inputStyle, preStyle } from "./settingsShared";
 import { openRightPanelFromSettings } from "../lib/settings-navigation";
 import { showConfirm } from "./DialogService";
 import { ProjectEnvironmentSettings } from "./ProjectEnvironmentSettings";
-import { MigrationSettings } from "./MigrationSettings";
 import { SandboxSettings } from "./SandboxSettings";
 
 const TOOLS: { key: keyof Pick<DesktopEnvInfo, "git" | "python" | "node" | "docker" | "ollama">; label: string; detail: TranslationKey }[] = [
@@ -158,7 +157,6 @@ export const AdvancedTab = ({ active = true }: { active?: boolean }) => {
   return (
     <>
       <ProjectEnvironmentSettings key={workingDirectory} workspaceRoot={workingDirectory} />
-      <MigrationSettings />
       <SandboxSettings active={active} />
       <section className="settings-group">
         <div className="settings-section-heading settings-section-heading-row">

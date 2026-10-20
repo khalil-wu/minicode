@@ -1,11 +1,11 @@
 import { useI18n, type Translate } from "../i18n";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Pause, Play, X } from "lucide-react";
 import { useAppStore } from "../stores";
 import { pendingPlanImplementation, PlanImplementationPrompt } from "../chat/PlanImplementationPrompt";
 import { promptDraftKey } from "../stores/prompt-drafts";
 import { deriveSendState } from "../lib/send-state";
 import { sendChatMessage } from "../chat/sendChatMessage";
+import { captureSteerTurnId } from "../lib/steer-command";
 import type { ComposerQuote, FollowUpBehavior, MessageAttachmentRef } from "../stores/types";
 import { ContextChipRegion } from "./ActionChipRegion";
 import { AttachmentStrip } from "./AttachmentStrip";
@@ -52,6 +52,9 @@ import { DiffCommentAttachments } from "./DiffCommentAttachments";
 import { claimSubmittedDraft } from "./submittedDraftClaim";
 import { emptyConversationWorkbenchState } from "../stores/ui-slice";
 import { emptyComposerDraft } from "../stores/composer-drafts";
+import { GoalBar } from "./GoalBar";
+import { submitComposerGoal } from "./goal-state";
+import { hasRichComposerContent, type RichComposerDocument } from "./rich-composer-document";
 
 let initialCatalogRequested = false;
 
@@ -141,6 +144,7 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const { t: tr } = useI18n();
   const draft = useAppStore((s) => s.draft);
+  const richDraft = useAppStore(s => s.richDraft);
   const setDraft = useAppStore((s) => s.setDraft);
   const quotedMessage = useAppStore((s) => s.quotedMessage);
   const clearQuotedMessage = useAppStore((s) => s.clearQuotedMessage);
@@ -173,6 +177,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   ], s.conversationId));
   const skillCatalog = useAppStore((s) => s.availableSkills);
   const activeGoal = useAppStore((s) => s.activeGoal);
+  const goalMode = useAppStore((s) => s.goalMode);
   const currentModel = useAppStore((s) => s.currentModel);
   const conversationId = useAppStore(state => state.conversationId);
   const messages = useAppStore(state => state.messages);
@@ -184,6 +189,16 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     return plan && !promptDrafts[promptDraftKey({ conversationId, requestId: `implement-plan:${plan.turnId || plan.messageId}` })]?.planImplementationSettled ? plan : null;
   }, [conversationId, pendingConversationSwitchId, messages, agentMode, isStreaming, promptDrafts]);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const editorOwner = useRef({ conversationId, workingDirectory, document: richDraft,
+    key: conversationId || composerWorkspaceKey(workingDirectory) });
+  let editorKey = editorOwner.current.key;
+  if (editorOwner.current.conversationId !== conversationId || editorOwner.current.workingDirectory !== workingDirectory) {
+    const adopted = !editorOwner.current.conversationId && conversationId
+      && editorOwner.current.workingDirectory === workingDirectory
+      && richDraft && richDraft === editorOwner.current.document;
+    if (!adopted) editorKey = conversationId || composerWorkspaceKey(workingDirectory);
+  }
+  editorOwner.current = { conversationId, workingDirectory, document: richDraft, key: editorKey };
   const commentScope = getDiffCommentScope(conversationId, workingDirectory);
   const commentState = useSyncExternalStore(subscribeDiffComments, () => readDiffCommentState(commentScope));
 
@@ -210,6 +225,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   // in-progress text so ArrowDown past the newest entry restores it.
   const historyCursorRef = useRef(-1);
   const historySavedDraftRef = useRef("");
+  const historySavedDocumentRef = useRef<RichComposerDocument>();
+  useEffect(() => {
+    historyCursorRef.current = -1;
+    historySavedDraftRef.current = "";
+    historySavedDocumentRef.current = undefined;
+    setHistoryOpen(false);
+    setSelectionRequest(undefined);
+  }, [editorKey]);
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
   const hasComposerAttachments = useAppStore((s) => s.attachments.length > 0);
   const reviewPermissionPending = useAppStore(s => Boolean(s.conversationId && s.pendingPermissionModeChanges[s.conversationId]));
@@ -293,7 +316,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
   const activeSlashCommand = selectedSlashCommand ?? getActiveRuntimeSlashCommand(draft);
   const sendState = submitting ? "sending" : deriveSendState({
-    hasContent: draft.trim().length > 0 || hasReadyAttachment || Boolean(selectedSlashCommand) || commentState.comments.length > 0,
+    hasContent: goalMode ? hasRichComposerContent(richDraft, draft) : hasRichComposerContent(richDraft, draft)
+      || selectedSkills.length > 0 || selectedMentions.length > 0 || hasReadyAttachment || Boolean(selectedSlashCommand) || commentState.comments.length > 0,
     isStreaming,
     isConnected,
     hasModel: activeSlashCommand === "/compact" || currentModel.trim().length > 0,
@@ -320,13 +344,16 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   }, [openPromptHistory]);
 
   const recallHistory = useCallback(
-    (direction: "up" | "down"): string | null => {
+    (direction: "up" | "down"): string | { value: string; document?: RichComposerDocument } | null => {
       const items = readPromptHistory(workingDirectory);
       if (items.length === 0) return null;
       const cursor = historyCursorRef.current;
       if (direction === "up") {
         // Entering history from the live draft: save it so ArrowDown can return.
-        if (cursor === -1) historySavedDraftRef.current = useAppStore.getState().draft;
+        if (cursor === -1) {
+          historySavedDraftRef.current = useAppStore.getState().draft;
+          historySavedDocumentRef.current = useAppStore.getState().richDraft;
+        }
         const next = Math.min(cursor + 1, items.length - 1);
         historyCursorRef.current = next;
         return items[next];
@@ -335,7 +362,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       if (cursor <= -1) return null; // already at live draft; let arrow move caret
       const next = cursor - 1;
       historyCursorRef.current = next;
-      return next === -1 ? historySavedDraftRef.current : items[next];
+      return next === -1 ? { value: historySavedDraftRef.current, document: historySavedDocumentRef.current } : items[next];
     },
     [workingDirectory],
   );
@@ -356,6 +383,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       conversationId?: string;
       allowWhileStreaming?: boolean;
       busyBehavior?: "queue" | "steer";
+      expectedTurnId?: string | null;
       quotedMessage?: ComposerQuote | null;
       skipLocalAppend?: boolean;
       userMessageId?: string;
@@ -365,6 +393,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       onRejected?: () => void;
     },
   ) => {
+    const expectedTurnId = options && Object.hasOwn(options, "expectedTurnId") ? options.expectedTurnId
+      : options?.allowWhileStreaming && options.busyBehavior === "steer"
+        ? captureSteerTurnId(useAppStore.getState(), options.conversationId) : undefined;
     const outgoing = await buildOutgoingContext(options?.conversationId || "", tr);
     if (!outgoing) return false;
     const mergedAttachments = [...readyAttachments, ...outgoing.attachments];
@@ -385,6 +416,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       quotedMessage: options?.quotedMessage ?? null,
       allowWhileStreaming: options?.allowWhileStreaming,
       busyBehavior: options?.busyBehavior,
+      expectedTurnId,
       skipLocalAppend: options?.skipLocalAppend,
       userMessageId: options?.userMessageId,
       awaitAdmission: options?.awaitAdmission,
@@ -428,6 +460,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     setDraft("");
     historyCursorRef.current = -1;
     historySavedDraftRef.current = "";
+    historySavedDocumentRef.current = undefined;
     clearAttachments();
     clearSelectedMentions();
     clearSelectedSkills();
@@ -458,6 +491,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       conversationId: String(state.conversationId || ""),
       workspaceRoot: state.workingDirectory,
       draft: state.draft,
+      richDraft: state.richDraft,
       attachments: state.attachments.map((item) => ({
         id: item.id,
         status: item.status,
@@ -488,7 +522,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         readDiffCommentState(getDiffCommentScope(admittedOwner, workspace)).comments) === fingerprint) {
         for (const attachment of saved.attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
         useAppStore.setState(current => ({ conversationWorkbenchStates: { ...current.conversationWorkbenchStates,
-          [admittedOwner]: { ...saved, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
+          [admittedOwner]: { ...saved, draft: "", richDraft: undefined, attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
         } }));
       }
     }
@@ -519,14 +553,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     } else if (originalOwner) {
       const saved = state.conversationWorkbenchStates[originalOwner];
       if (saved?.draft === input) useAppStore.setState(current => ({ conversationWorkbenchStates: {
-        ...current.conversationWorkbenchStates, [originalOwner]: { ...saved, draft: "" },
+        ...current.conversationWorkbenchStates, [originalOwner]: { ...saved, draft: "", richDraft: undefined },
       } }));
     }
     if (!originalOwner) {
       const key = composerWorkspaceKey(workspace);
       const saved = useAppStore.getState().workspaceComposerDrafts[key];
       if (saved?.draft === input) useAppStore.setState(current => ({ workspaceComposerDrafts: {
-        ...current.workspaceComposerDrafts, [key]: { ...saved, draft: "" },
+        ...current.workspaceComposerDrafts, [key]: { ...saved, draft: "", richDraft: undefined },
       } }));
     }
   };
@@ -563,11 +597,21 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     if (useAppStore.getState().pendingConversationSwitchId) return;
     if (sendState === "stop" && !draft.trim()) return;
     if (sendState !== "idle" && sendState !== "queue" && sendState !== "offline-queue") return;
+    if (useAppStore.getState().goalMode) {
+      await submitComposerGoal(tr);
+      return;
+    }
+    const text = hasRichComposerContent(richDraft, draft) ? draft.trim() : "";
     const content = selectedSlashCommand
-      ? [selectedSlashCommand, draft.trim()].filter(Boolean).join(" ")
-      : draft.trim();
+      ? [selectedSlashCommand, text].filter(Boolean).join(" ")
+      : text;
 
     const slashInput = parseRuntimeSlashInput(content);
+    if (slashInput?.commandLine.trim() === "/goal" && useAppStore.getState().slashCommands.some(command => command.name === "goal" && command.source === "builtin")) {
+      useAppStore.setState({ goalMode: true });
+      setDraft(""); setSelectedSlashCommand(null); closeSlashPanel();
+      return;
+    }
     if (slashInput?.commandLine === "/approve" && useAppStore.getState().slashCommands.find(command => command.name === "approve")?.source === "builtin") {
       openGuardianApproval();
       return;
@@ -704,7 +748,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         const { owner, active, scope } = draftClaim.location();
         const state = useAppStore.getState();
         if (owner && state.getVisibleMessages(owner).filter(message => message.role === "user").at(-1)?.id !== submittedUserMessageId) return;
-        const restored = { draft: capturedComposer.draft, attachments: capturedComposer.attachments.map(attachment => ({ ...attachment,
+        const restored = { draft: capturedComposer.draft, richDraft: capturedComposer.richDraft, attachments: capturedComposer.attachments.map(attachment => ({ ...attachment,
           ...(attachment.localFile && attachment.dataUrl?.startsWith("blob:") ? { dataUrl: URL.createObjectURL(attachment.localFile) } : {}),
         })), selectedMentions: capturedComposer.selectedMentions, selectedSkills: capturedComposer.selectedSkills, quotedMessage: capturedComposer.quotedMessage };
         if (active) useAppStore.setState(restored);
@@ -780,8 +824,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
   };
 
-  const handleChange = (v: string, selection: ComposerSelection = { start: v.length, end: v.length }) => {
+  const handleChange = (v: string, selection: ComposerSelection = { start: v.length, end: v.length }, rich?: RichComposerDocument) => {
     if (reviewOwner && v !== reviewOwner.input) setReviewOwner(undefined);
+    if (guardianApprovalOwner && v !== guardianApprovalOwner.input) setGuardianApprovalOwner(undefined);
     if (historyOpen) setHistoryOpen(false);
     // Reset the history-recall cursor whenever the draft changes for a reason
     // other than a recall fill, so the next ArrowUp starts from the live draft.
@@ -789,7 +834,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       const items = readPromptHistory(workingDirectory);
       if (v !== items[historyCursorRef.current]) historyCursorRef.current = -1;
     }
-    setDraft(v);
+    setDraft(v, rich);
     refreshInputMenus(v, selection);
   };
 
@@ -866,6 +911,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
 
     if (slashPanelOpen) {
+      if (value === "/goal" && useAppStore.getState().slashCommands.some(command => command.name === "goal" && command.source === "builtin")) {
+        useAppStore.setState({ goalMode: true });
+        setSelectedSlashCommand(null);
+        setDraft(draft.replace(/^\s*\/[\w-]+\s*/, ""));
+        if (useAppStore.getState().agentMode === "plan") void useAppStore.getState().setAgentMode("build");
+        closeSlashPanel(); setMenuFilter("");
+        return;
+      }
       if (value === "/approve" && useAppStore.getState().slashCommands.find(command => command.name === "approve")?.source === "builtin") {
         openGuardianApproval();
         return;
@@ -983,9 +1036,10 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         className="composer-container relative mx-auto flex flex-col transition-[background_140ms_ease,border-color_300ms_ease,box-shadow_140ms_ease]"
         data-approval-replacement={hasPendingApproval || planImplementation ? "true" : "false"}
         data-command-mode={commandModeActive ? "true" : "false"}
+        data-goal-mode={goalMode ? "true" : "false"}
         data-drag-over={dragOver ? "true" : "false"}
         data-empty={!draft.length && !hasComposerAttachments && !selectedSkills.length && !selectedMentions.length && !quotedMessage && !activeGoal && !activeSlashCommand && !commentState.comments.length
-          && !hasPendingPrompt ? "true" : "false"}
+          && !hasPendingPrompt && !goalMode ? "true" : "false"}
         data-layout-mode={codeLayout ? "code" : "cowork"}
         style={{
           position: "relative",
@@ -1012,6 +1066,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onRemoveAll={() => clearSubmittedDiffComments(commentScope, commentState.comments)} />
       {quotedMessage && <MessageQuote message={quotedMessage} onRemove={clearQuotedMessage} />}
       <ComposerTextarea
+        rich
+        richDocument={richDraft}
+        documentKey={editorKey}
         value={draft}
         onChange={handleChange}
         onSelectionChange={refreshInputMenus}
@@ -1075,55 +1132,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       </div>
       </div>
     </>
-  );
-};
-
-const GoalBar = () => {
-  const { t: tr } = useI18n();
-  const goal = useAppStore((s) => s.activeGoal);
-  const conversationId = useAppStore((s) => s.conversationId);
-  if (!goal) return null;
-  const paused = goal.status === "paused";
-  const sendGoalAction = (action: "pause" | "resume" | "clear") => {
-    sendClientCommand({
-      type: "conversation.goal.set",
-      conversation_id: conversationId || undefined,
-      action,
-      source: "frontend.goal_bar",
-    });
-  };
-  return (
-    <div className="min-h-[34px] flex items-center gap-2 px-3" style={{ borderBottom: "1px solid var(--border-subtle)", background: "color-mix(in oklch, var(--accent-primary) 8%, var(--surface-page))" }}>
-      <span
-        className="flex-none text-3xs font-bold uppercase"
-        style={{ color: paused ? "var(--text-muted)" : "var(--accent-primary)" }}
-      >
-        {paused ? tr("已暂停") : tr("目标")}
-      </span>
-      <span className="flex-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-sm" style={{ color: "var(--text-primary)" }} title={goal.text}>
-        {goal.text}
-      </span>
-      <button
-        type="button"
-        title={paused ? tr("继续目标") : tr("暂停目标")}
-        aria-label={paused ? tr("继续目标") : tr("暂停目标")}
-        className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
-        style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
-        onClick={() => sendGoalAction(paused ? "resume" : "pause")}
-      >
-        {paused ? <Play size={14} /> : <Pause size={14} />}
-      </button>
-      <button
-        type="button"
-        title={tr("清除目标")}
-        aria-label={tr("清除目标")}
-        className="w-6 h-6 inline-flex items-center justify-center rounded-sm cursor-pointer"
-        style={{ border: "1px solid var(--border-subtle)", background: "var(--surface-soft)", color: "var(--text-secondary)" }}
-        onClick={() => sendGoalAction("clear")}
-      >
-        <X size={14} />
-      </button>
-    </div>
   );
 };
 

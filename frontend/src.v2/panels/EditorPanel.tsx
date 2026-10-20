@@ -47,6 +47,7 @@ import { renameMonacoModel } from "./monacoModelRename";
 import { useWorkspaceModelIndex } from "./useWorkspaceModelIndex";
 import { registerWorkspaceEditorSurface, retainsWorkspaceBufferEditModel } from "./applyWorkspaceBufferEdits";
 import { miniCodeCodeEditingOptions } from "./monacoEditorFeatures";
+import { codeFontFamily, THEME_FONTS_READY } from "../lib/theme-fonts";
 import "./EditorChrome.css";
 import { EditorNavigation } from "./editorNavigation";
 import { formatEditorModel } from "./editorNativeServices";
@@ -563,6 +564,14 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
   useLayoutEffect(() => {
     if (monacoRef.current) defineMiniCodeMonacoTheme(monacoRef.current, resolvedTheme);
   }, [resolvedTheme, appearanceColors, appearanceThemes]);
+  useEffect(() => {
+    const update = () => {
+      if (!monacoRef.current) return;
+      monacoRef.current.editor.remeasureFonts();
+    };
+    window.addEventListener(THEME_FONTS_READY, update);
+    return () => window.removeEventListener(THEME_FONTS_READY, update);
+  }, []);
   useEffect(() => () => monacoOpenerRef.current?.dispose(), []);
   useLayoutEffect(() => {
     for (const tab of tabs) {
@@ -1223,13 +1232,22 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
     const handleCloseTabEvent = () => {
       if (activeTabPath) closeTabRef.current(activeTabPath);
     };
+    const find = () => { void editorRef.current?.getAction?.("actions.find")?.run(); };
+    const findNext = () => { void editorRef.current?.getAction?.("editor.action.nextMatchFindAction")?.run(); };
+    const findPrevious = () => { void editorRef.current?.getAction?.("editor.action.previousMatchFindAction")?.run(); };
     window.addEventListener("editor:save", handleSave);
     window.addEventListener("editor:save-all", handleSaveAll);
     window.addEventListener("editor:close-tab", handleCloseTabEvent);
+    window.addEventListener("editor:find", find);
+    window.addEventListener("editor:find-next", findNext);
+    window.addEventListener("editor:find-previous", findPrevious);
     return () => {
       window.removeEventListener("editor:save", handleSave);
       window.removeEventListener("editor:save-all", handleSaveAll);
       window.removeEventListener("editor:close-tab", handleCloseTabEvent);
+      window.removeEventListener("editor:find", find);
+      window.removeEventListener("editor:find-next", findNext);
+      window.removeEventListener("editor:find-previous", findPrevious);
     };
   }, [activeTabPath]);
 
@@ -1493,7 +1511,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
                   inlineSuggest: { enabled: preferences.aiEnabled, showToolbar: "onHover" },
                   automaticLayout: true,
                   readOnly: Boolean(activeTab.readOnly),
-                  fontFamily: "var(--editor-font-family)",
+                  fontFamily: codeFontFamily(),
                   fontSize: Math.round(14 * codeTextScale),
                   lineHeight: Math.round(22 * codeTextScale),
                   minimap: { enabled: minimap },

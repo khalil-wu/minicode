@@ -77,7 +77,7 @@ COMMAND_BACKLOG_BYPASS_TYPES = {
 
 _FORWARDED_CONVERSATION_COMMAND_TYPES = frozenset({
     "interrupt", "control_response", "control_cancel_request", "approval.file_diff",
-    "user_message.queue.cancel", "user_message.queue.steer", "send_message", "followup_task",
+    "user_message.queue.cancel", "user_message.queue.steer", "user_message.queue.start", "send_message", "followup_task",
     "thread/approveGuardianDeniedAction", "context.compact",
     "subagent.cancel", "subagent.plan_review",
 })
@@ -104,6 +104,7 @@ _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
     "thread/approveGuardianDeniedAction",
     "user_message.queue.cancel",
     "user_message.queue.steer",
+    "user_message.queue.start",
     "send_message", "followup_task", "subagent.cancel", "subagent.plan_review",
 }
 
@@ -1194,6 +1195,17 @@ class SessionCommandDispatcher:
                      "retry_from_message_id": command.data.get("retry_from_message_id", "")},
         }))
 
+    async def _reject_steer(self, command: UserCommand, rejection: dict[str, Any], *,
+                            message: str = "The requested turn is not available for steering; your input was retained.") -> None:
+        await self._session.send_event(AgentEvent(type="command.result", data={
+            "command": "user_message", "level": "error",
+            "message": message,
+            "client_command_id": self._client_command_id(command),
+            "conversation_id": rejection["conversation_id"],
+            "data": {**rejection, "user_message_id": command.data.get("user_message_id", ""),
+                     "assistant_message_id": command.data.get("assistant_message_id", "")},
+        }))
+
     async def _emit_native_user_message_completion(
         self, command: UserCommand, slash_command: str, results: list[dict[str, str]],
     ) -> None:
@@ -1241,7 +1253,9 @@ class SessionCommandDispatcher:
 
     async def _handle_command_inner(self, command: UserCommand) -> None:
         if command.type in _FORWARDED_CONVERSATION_COMMAND_TYPES:
-            conversation_id = str(command.data.get("conversation_id") or self._session.active_conversation_id or "")
+            conversation_id = str(command.data.get("conversation_id") or (
+                "" if command.type in {"user_message.queue.start", "user_message.queue.steer"}
+                else self._session.active_conversation_id) or "")
             if await self._forward_conversation_command(command, conversation_id):
                 return
         if self._session._extension_shutdown_requested and command.type not in {
@@ -1532,6 +1546,14 @@ class SessionCommandDispatcher:
                     if "submitted_content" in existing_user:
                         message_metadata["submitted_content"] = existing_user["submitted_content"]
 
+            steer_requested = str(command.data.get("streaming_behavior") or command.data.get("streamingBehavior") or "").strip().lower() == "steer" and not command.data.get("_queued_user_message_dispatch")
+            expected_turn_id = str(command.data.get("expected_turn_id") or "").strip()
+            if steer_requested:
+                rejection = self._session.run_manager.steer_target_rejection(target_conversation_id, expected_turn_id)
+                if rejection is not None:
+                    await self._reject_steer(command, rejection)
+                    return
+
             if "_submitted_content" in command.data:
                 message_metadata["submitted_content"] = command.data["_submitted_content"]
             message_metadata["_submitted_command"] = {
@@ -1692,6 +1714,11 @@ class SessionCommandDispatcher:
                         return
                     message_metadata["_retry_projection"] = prepared
                 running_for_target = self._session.running_agent_task_for(target_conversation_id)
+                if steer_requested:
+                    rejection = self._session.run_manager.steer_target_rejection(target_conversation_id, expected_turn_id)
+                    if rejection is not None:
+                        await self._reject_steer(command, rejection)
+                        return
                 pause_token = self._session.run_manager.user_queue_pause_token(target_conversation_id)
                 if not queued_dispatch and pause_token:
                     if (
@@ -1731,53 +1758,52 @@ class SessionCommandDispatcher:
                         or command.data.get("streamingBehavior")
                         or ""
                     ).strip().lower()
-                    if streaming_behavior == "steer" and requested_agent_mode is not None:
-                        stream_mode = (self._session._conversation_streams.get(target_conversation_id) or {}).get("agent_mode")
-                        if requested_agent_mode != stream_mode:
-                            # Steering cannot change the execution mode of an
-                            # already-running turn; the explicit mode owns a new turn.
-                            streaming_behavior = "follow_up"
-                    if streaming_behavior == "steer" and requested_permission_mode is not None:
-                        current = self._session.conversation_repo.get_conversation(target_conversation_id)
-                        if current is not None and requested_permission_mode != current.permission_mode:
-                            # Like turn/steer, live input changes the request text;
-                            # a new execution profile belongs to the next turn.
-                            streaming_behavior = "follow_up"
-                    if streaming_behavior == "steer" and requested_workspace_root:
-                        from backend.services.workspace_service import parse_user_message_workspace_request, workspace_path_needs_activation
+                    if streaming_behavior == "steer":
+                        stream_state = self._session._conversation_streams[target_conversation_id]
+                        changed_setting = ""
+                        if requested_agent_mode is not None and requested_agent_mode != stream_state.get("agent_mode"):
+                            changed_setting = "agent_mode"
+                        elif requested_permission_mode is not None and requested_permission_mode != accepted_conversation.permission_mode:
+                            changed_setting = "permission_mode"
+                        elif requested_workspace_root:
+                            from backend.services.workspace_service import parse_user_message_workspace_request, workspace_path_needs_activation
 
-                        workspace_request = parse_user_message_workspace_request(
-                            requested_workspace_root, conversation_id=target_conversation_id,
-                        )
-                        if workspace_request.error_event is not None:
-                            await self._session.send_event(workspace_request.error_event)
-                            await self._seal_unstarted_user_message(
-                                target_conversation_id, reason="workspace_activation_failed", message_id=assistant_message_id,
+                            workspace_request = parse_user_message_workspace_request(
+                                requested_workspace_root, conversation_id=target_conversation_id,
                             )
+                            current_workspace = self._session.session_lifecycle.workspace_root_for_conversation(accepted_conversation)
+                            if (workspace_request.error_event is not None or current_workspace is None
+                                    or workspace_path_needs_activation(workspace_request.project_path, current_workspace)):
+                                changed_setting = "workspace_root"
+                        if changed_setting:
+                            await self._reject_steer(command, {
+                                "conversation_id": target_conversation_id, "expected_turn_id": expected_turn_id,
+                                "active_turn_id": stream_state["turn_id"], "reason": "steer_configuration_mismatch",
+                                "error_code": "steer_configuration_mismatch", "field": changed_setting,
+                                "admitted": False, "queued": False,
+                            }, message="Steering cannot change the running turn's execution settings; your input was retained.")
                             return
-                        current_workspace = self._session.session_lifecycle.workspace_root_for_conversation(
-                            self._session.conversation_repo.get_conversation(target_conversation_id)
-                        )
-                        if current_workspace is None or workspace_path_needs_activation(workspace_request.project_path, current_workspace):
-                            # A running turn's tool context owns its cwd. Apply
-                            # a different cwd when this queued prompt starts.
-                            streaming_behavior = "follow_up"
                     if streaming_behavior == "steer" and running_for_target is not None:
                         stream_state = self._session._conversation_streams.get(target_conversation_id) or {}
                         target_message_id = str(stream_state.get("message_id") or "").strip()
                         steered = self._session.run_manager.enqueue_user_message_as_steer(
                             target_conversation_id,
                             queued_command,
+                            expected_turn_id=expected_turn_id,
                             target_message_id=target_message_id,
                         )
                         if steered is not None:
+                            replayed = steered.original_command is not queued_command
                             await self._session.send_event(AgentEvent(type="command.result", data={
                                 "command": "user_message", "level": "success", "message": "",
                                 "client_command_id": client_command_id, "conversation_id": target_conversation_id,
                                 "data": {"admitted": False, "queued": True, "turn_mode": "steer",
                                          "conversation_id": target_conversation_id, "user_message_id": user_message_id,
-                                         "assistant_message_id": assistant_message_id},
+                                         "assistant_message_id": assistant_message_id,
+                                         **({"replayed": True} if replayed else {})},
                             }))
+                            if replayed:
+                                return
                             await self._session.send_event(
                                 AgentEvent.user_message_queue_updated(
                                     status="dequeued",
@@ -1797,6 +1823,14 @@ class SessionCommandDispatcher:
                                 conversation_id=target_conversation_id,
                             )
                             return
+                        rejection = self._session.run_manager.steer_target_rejection(target_conversation_id, expected_turn_id)
+                        await self._reject_steer(command, rejection or {
+                            "conversation_id": target_conversation_id, "expected_turn_id": expected_turn_id,
+                            "active_turn_id": str(stream_state.get("turn_id") or ""),
+                            "reason": "steer_target_unavailable", "error_code": "steer_target_unavailable",
+                            "admitted": False, "queued": False,
+                        })
+                        return
                     position = self._session.run_manager.enqueue_user_message(target_conversation_id, queued_command)
                     if (requested_agent_mode is not None and not message_metadata.get("_turn_admission_restored")
                             and not str(message_metadata.get("agent_role") or "main").startswith("subagent:")):
@@ -1854,3 +1888,5 @@ class SessionCommandDispatcher:
         handled = await self._session.command_registry.dispatch(command.type, command.data)
         if not handled:
             await emit_command_error(self._session, command.type, f"Unsupported command '{command.type}'")
+        elif command.type == "interrupt":
+            await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))

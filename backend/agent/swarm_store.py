@@ -1296,6 +1296,20 @@ class FileSwarmStore:
         target_epoch = int(message.get("recipient_mailbox_epoch") or 0)
         return target_epoch == mailbox_epoch or (target_epoch == 0 and mailbox_epoch <= 1)
 
+    def has_unacknowledged_trigger_turn_mail(self, participant_id: str, mailbox_epoch: int) -> bool:
+        """Inspect the durable next-turn queue without claiming its messages."""
+        with closing(self._connect()) as connection:
+            rows = connection.execute("""
+                SELECT m.payload_json FROM messages m
+                LEFT JOIN mailbox_deliveries d
+                  ON d.message_id = m.message_id AND d.participant_id = ? AND d.mailbox_epoch = ?
+                WHERE (m.recipient_id = ? OR m.recipient_id IN ('all', '*'))
+                  AND COALESCE(d.status, '') != 'acked'
+                  AND COALESCE(json_extract(m.payload_json, '$.delivery_mode'), 'trigger_turn') = 'trigger_turn'
+            """, (participant_id, mailbox_epoch, participant_id))
+            return any(self._message_targets_incarnation(json.loads(row["payload_json"]),
+                participant_id=participant_id, mailbox_epoch=mailbox_epoch) for row in rows)
+
     def defer_subagent_mailbox(
         self, subagent_id: str, *, agent_path: str, mailbox_epoch: int,
         expected_owner_token: str,

@@ -19,12 +19,14 @@ from backend.permissions.patterns import normalize_tool_patterns as normalize_to
 # ── Constants ──────────────────────────────────────────────
 
 CONVERSATION_SUMMARY_MAX_CHARS = 320
-USER_INPUT_METADATA_KEYS = ("display_content", "context_refs", "quoted_message", "code_review")
+USER_INPUT_METADATA_KEYS = ("display_content", "context_refs", "quoted_message", "code_review", "async_request_id")
 
 
 def normalize_user_input_metadata(data: dict[str, Any]) -> dict[str, Any]:
     """Parse the renderer's user-input presentation at command admission."""
     result = {key: data[key] for key in USER_INPUT_METADATA_KEYS if key in data}
+    if "async_request_id" in result and not isinstance(result["async_request_id"], str):
+        raise ValueError("async_request_id must be a string")
     if "code_review" in result:
         from backend.services.code_review_service import normalize_code_review_scope
 

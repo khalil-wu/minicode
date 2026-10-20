@@ -840,6 +840,13 @@ class WebSearchTool(BaseTool):
         self, args: dict[str, Any], context: ToolExecutionContext | None = None
     ) -> ToolResult:
         query = str(args.get("query") or "").strip()
+        from backend.llm.model_request_policy import resolve_web_search_mode
+        snapshot = context.model_execution if context is not None else None
+        if snapshot is None and context is not None and context.run_context is not None:
+            snapshot = context.run_context.model_execution
+        search_mode = resolve_web_search_mode(snapshot.config, permission_mode=context.permission.mode) if snapshot is not None else "live"
+        if search_mode == "disabled":
+            return self._error_result("Web search is disabled by the active configuration.")
         allowed_domains = _normalize_domain_list(args.get("allowed_domains"))
         blocked_domains = _normalize_domain_list(args.get("blocked_domains"))
 
@@ -854,7 +861,7 @@ class WebSearchTool(BaseTool):
         # A configured dedicated search source owns search independently of
         # the conversation model. Select it before resolving hosted capability;
         # failures stay with the selected source and never switch providers.
-        if self._direct_source_available():
+        if search_mode == "live" and self._direct_source_available():
             return await self._direct_search(
                 query,
                 allowed_domains=allowed_domains,
@@ -865,7 +872,13 @@ class WebSearchTool(BaseTool):
         if llm is None:
             llm = self._llm_provider() if callable(self._llm_provider) else self._llm_provider
         supports_hosted_search = callable(getattr(llm, "supports_hosted_web_search", None)) and llm.supports_hosted_web_search()
+        if search_mode == "indexed" and (not supports_hosted_search or not llm.hosted_web_search_supports_indexed()):
+            return self._error_result("Indexed web search is unavailable for the active provider.")
+        if search_mode == "cached" and not (callable(getattr(llm, "hosted_web_search_supports_cached", None)) and llm.hosted_web_search_supports_cached()):
+            return self._error_result("Cached web search is unavailable for the active provider.")
         if not supports_hosted_search:
+            if search_mode == "cached":
+                return self._error_result("Cached web search requires a provider with declared hosted-search support.")
             return await self._direct_search(
                 query,
                 allowed_domains=allowed_domains,
@@ -896,6 +909,8 @@ class WebSearchTool(BaseTool):
                     disable_reasoning=True,
                     enable_prompt_cache=False,
                     hosted_web_search=True,
+                    web_search_external_web_access=search_mode in {"live", "indexed"},
+                    web_search_indexed_web_access=True if search_mode == "indexed" else None,
                     web_search_allowed_domains=tuple(allowed_domains),
                     web_search_blocked_domains=tuple(blocked_domains),
                 ),

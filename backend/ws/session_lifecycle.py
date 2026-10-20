@@ -549,14 +549,23 @@ class SessionLifecycle:
 
     async def create_isolated_conversation_worktree(self, conversation: Any) -> Any | None:
         from backend.services.conversation_payload_service import create_isolated_worktree_binding
+        from backend.workspace.worktree import WorktreeManager
+        from backend.workspace.local_environment_lifecycle import context_environment_runner
+        from backend.permissions.context import ToolExecutionContext
+        from backend.sandbox.policy import sandbox_policy_for_permission_context
 
         source_workspace_root = self.workspace_root_for_conversation(conversation)
+        permission = self._session.permission_context_for_conversation(conversation, source="local_environment.setup")
+        context = ToolExecutionContext(permission=permission, conversation_id=conversation.id, workspace_root=source_workspace_root,
+            sandbox_policy=sandbox_policy_for_permission_context(source_workspace_root, permission, config_stack=self._session.config.config_layer_stack)) if source_workspace_root is not None else None
+        environment_runner = context_environment_runner(context, asyncio.get_running_loop())
 
         def create_and_bind() -> tuple[Any, Any]:
             result = create_isolated_worktree_binding(
                 conversation,
                 current_workspace_root=source_workspace_root,
                 main_worktree_root=self._session.main_worktree_root,
+                worktree_manager_factory=lambda root: WorktreeManager(root, environment_runner=environment_runner),
             )
             updated = conversation
             if result.created:
@@ -1453,13 +1462,13 @@ class SessionLifecycle:
             stopped = await runtime.stop_subagent_tasks_for_conversation(conversation_id, reason=reason)
             if not stopped:
                 raise RuntimeError(f"Subagents for {conversation_id} have not stopped")
+        await session.conversation_runtime.close_code_store(conversation_id)
         await session.background_manager.destroy_for_conversation(conversation_id)
         await session.terminal_manager.destroy_sessions_for_conversation(conversation_id)
         await stop_preview_launches_for_conversation(conversation_id)
         guardian = session.__dict__.get("_conversation_guardian_hosts", {}).pop(conversation_id, None)
         if guardian is not None:
             await guardian.aclose()
-        session.conversation_runtime.forget_code_store(conversation_id)
 
     async def shutdown(self, *, reason: str = "session_shutdown") -> None:
         """Cancel and drain every resource owned by this websocket session."""
@@ -1491,6 +1500,7 @@ class SessionLifecycle:
             stopped = await runtime.stop_subagent_tasks_for_session(self._session.session_id, reason=reason)
             if not stopped:
                 raise RuntimeError(f"Session {self._session.session_id} still owns running subagents")
+        await self._session.conversation_runtime.close_code_stores()
         # A memory job can wake when its foreground turn ends. Cancel/drain
         # that exact lease owner before retiring its ModelRuntime/extensions
         # or closing the adapter it is about to use.

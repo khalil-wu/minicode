@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Literal, Mapping
 
 from backend.agent.runtime import AgentRuntime
-from backend.agent.agent_identity import coordination_agent_id
+from backend.agent.agent_identity import AgentPath, coordination_agent_id
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.subagent_context import resolve_agent_execution_profile
 from backend.tools.subagent_runtime import require_runtime_from_context
@@ -151,11 +151,19 @@ class AgentControlPlane:
         context: ToolExecutionContext | None,
         *,
         runtime: AgentRuntime | None = None,
+        source_v2: bool = False,
     ) -> None:
         self.context = context
         self.runtime = runtime if runtime is not None else require_runtime_from_context(context)
         metadata = context.metadata if context and isinstance(context.metadata, dict) else {}
         self.metadata = metadata
+        owner = context.run_context if context is not None else None
+        snapshot = context.model_execution if context is not None else None
+        from backend.agents.source_roles import source_spawn_version
+        version = owner.multi_agent_version if owner is not None else ""
+        if not version and snapshot is not None:
+            version = source_spawn_version(snapshot.config, model=snapshot.model, definition=snapshot.model_info)
+        self.source_v2 = source_v2 or version == "v2"
         raw_actor_id = str(
             coordination_agent_id(metadata)
             or (getattr(context, "task_id", "") if context is not None else "")
@@ -313,6 +321,9 @@ class AgentControlPlane:
     def tree_agents(self) -> list[dict[str, Any]]:
         """Return every subagent in the caller's concrete root tree."""
 
+        if self.source_v2 and self.conversation_id:
+            return self.conversation_agents()
+
         root_run_id = self.root_run_id()
         if not root_run_id:
             return []
@@ -340,6 +351,9 @@ class AgentControlPlane:
         return found
 
     def root_tree_record(self) -> dict[str, Any] | None:
+        if self.source_v2 and self.conversation_id:
+            roots = [item for item in self._snapshot().get("runs", []) if item.get("role") == "main" and not item.get("parent_run_id")]
+            return max(roots, key=lambda item: (item.get("status") == "running", item.get("started_at", 0))) if roots else None
         root_run_id = self.root_run_id()
         record = self.runtime.get_run(root_run_id) if root_run_id else None
         rendered = _mapping(record) if record is not None else {}
@@ -376,6 +390,8 @@ class AgentControlPlane:
 
         root_run_id = self.root_run_id()
         items = self.tree_agents()
+        if self.source_v2:
+            return {_agent_id(item): AgentPath.parse(item["agent_path"]).logical_name for item in items}
         by_id = {_agent_id(item): item for item in items if _agent_id(item)}
         cache: dict[str, str] = {}
 
@@ -539,6 +555,7 @@ class AgentControlPlane:
                 continue
             if prefix:
                 labels = (
+                    self.public_tree_path(item).casefold(),
                     str(item.get("agent_path") or "").casefold(),
                     str(item.get("task_name") or "").casefold(),
                     str(item.get("task_id") or "").casefold(),
@@ -583,6 +600,12 @@ class AgentControlPlane:
         direct = by_id.get(target)
         if direct is not None:
             return AgentTarget(target, direct)
+
+        public_target = self.normalize_public_tree_path(target)
+        if public_target and public_target != "/root":
+            for item in candidates:
+                if self.public_tree_path(item).casefold() == public_target.casefold():
+                    return AgentTarget(_agent_id(item), item)
 
         if scope == "tree":
             public_target = self.normalize_public_tree_path(target)

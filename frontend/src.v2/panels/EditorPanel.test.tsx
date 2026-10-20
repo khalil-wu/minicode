@@ -58,7 +58,7 @@ vi.mock("@monaco-editor/react", async () => {
       onChange?: (value: string) => void;
       onMount: (editor: unknown) => void;
       beforeMount?: (monaco: unknown) => void;
-      options?: { readOnly?: boolean };
+      options?: { readOnly?: boolean; fontFamily?: string; fontSize?: number };
     }) {
       const inputRef = ReactModule.useRef<HTMLTextAreaElement>(null);
       const propsRef = ReactModule.useRef({ value, path });
@@ -142,6 +142,8 @@ vi.mock("@monaco-editor/react", async () => {
         "data-testid": "monaco-editor",
         "data-model-path": path,
         "data-language": language,
+        "data-font-family": options?.fontFamily,
+        "data-font-size": options?.fontSize,
         value,
         readOnly: options?.readOnly,
         onChange: (event: React.ChangeEvent<HTMLTextAreaElement>) => onChange?.(event.currentTarget.value),
@@ -291,6 +293,25 @@ describe("EditorPanel", () => {
     expect(event.detail.handled).toBe(true);
   });
 
+  it("runs native Find actions through Monaco while preserving the unsaved buffer", async () => {
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "main.ts", content: "original needle", content_hash: "original" });
+    useAppStore.getState().openEditorFile("main.ts", "main.ts", { exact: true });
+    const view = render(<EditorPanel />);
+    const input = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    await waitFor(() => expect(input.value).toBe("original needle"));
+    fireEvent.change(input, { target: { value: "unsaved needle" } });
+    const actions = ["actions.find", "editor.action.nextMatchFindAction", "editor.action.previousMatchFindAction"].map(id => ({ id, run: vi.fn() }));
+    editorMocks.actions.push(...actions);
+    for (const event of ["editor:find", "editor:find-next", "editor:find-previous"]) fireEvent(window, new Event(event));
+    expect(actions.map(action => action.run.mock.calls.length)).toEqual([1, 1, 1]);
+    expect(input.value).toBe("unsaved needle");
+    expect(useAppStore.getState().editorTabs[0]).toMatchObject({ content: "unsaved needle", original: "original needle" });
+    expect(compareWriteWorkspaceFile).not.toHaveBeenCalled();
+    view.unmount();
+    for (const event of ["editor:find", "editor:find-next", "editor:find-previous"]) fireEvent(window, new Event(event));
+    expect(actions.map(action => action.run.mock.calls.length)).toEqual([1, 1, 1]);
+  });
+
   it("updates the mounted Monaco palette in the same mode without replacing or saving its dirty model", async () => {
     const removeTokens = installAppThemeTokens();
     useAppStore.setState({ appearanceColors: emptyAppearanceColors() });
@@ -314,6 +335,31 @@ describe("EditorPanel", () => {
       cleanup(); applyAppearanceColors("light", emptyAppearanceColors());
       useAppStore.setState({ appearanceColors: emptyAppearanceColors() });
       removeTokens();
+    }
+  });
+
+  it("applies the exact selected code face to Monaco while retaining Cursor size, model and unsaved text", async () => {
+    const removeTokens = installAppThemeTokens();
+    try {
+      useAppStore.setState({ codeTextScale: 1, codeFontBase: 12 });
+      useAppStore.getState().setThemeMode("dark");
+      vi.mocked(readWorkspaceFile).mockResolvedValue({ path: "font.ts", content: "original", content_hash: "original" });
+      useAppStore.getState().openEditorFile("font.ts", "font.ts", { exact: true });
+      render(<EditorPanel />);
+      const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+      fireEvent.change(editor, { target: { value: "unsaved face consumer" } });
+      editor.setSelectionRange(2, 5); fireEvent.select(editor);
+      await act(async () => useAppStore.getState().patchAppearanceTheme("dark", { fonts: { ui: null, content: null, code: '"Fixture Mono"',
+        codeFace: { family: "Fixture Mono", fullName: "Fixture Mono Medium Oblique", postscriptName: "FixtureMono-MediumOblique" } } }));
+      expect(screen.getByTestId("monaco-editor")).toBe(editor);
+      expect(editor.getAttribute("data-font-family")).toContain("MiniCode selected FixtureMono-MediumOblique");
+      expect(editor.getAttribute("data-font-family")).not.toContain("var(");
+      expect(editor.getAttribute("data-font-size")).toBe("14");
+      expect(editor.value).toBe("unsaved face consumer");
+      expect([editor.selectionStart, editor.selectionEnd]).toEqual([2, 5]);
+      expect(compareWriteWorkspaceFile).not.toHaveBeenCalled();
+    } finally {
+      cleanup(); applyAppearanceColors("dark", emptyAppearanceColors()); removeTokens();
     }
   });
 

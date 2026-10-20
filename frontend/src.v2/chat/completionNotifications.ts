@@ -2,11 +2,13 @@ import { desktop } from "../desktop/runtime";
 import type { CompletionNotification } from "../protocol/notification-types";
 import type { ScheduledTaskRunEntry } from "../stores/types";
 import { useAppStore } from "../stores";
+import { recordPetCompletionNotification } from "../pets/petNotificationReceipts";
 
 export const notifyCompletedTurn = (
   conversationId: string, notification: CompletionNotification | null | undefined,
   identity: { turnId?: string; messageId?: string },
 ) => {
+  recordPetCompletionNotification(conversationId, notification, identity);
   if (!notification?.eligible || notification.body === null) return;
   const conversation = useAppStore.getState().conversations.find(item => item.id === conversationId);
   void desktop()?.notify({ kind: "completion", title: conversation?.title || "回合完成",

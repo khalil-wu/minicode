@@ -1340,6 +1340,7 @@ const COMMAND_CATALOG_EVENT_TYPES = new Set<string>([
   "skills.list", "commands.list", "skills.marketplace.list",
 ]);
 const PERIPHERAL_EVENT_TYPES = new Set<string>([
+  "pet.published",
   "terminal.output", "terminal.resized", "workspace.imported", "file.changed",
   "workspace.project_index.invalidated",
   "terminal.created", "terminal.killed", "terminal.exit", "terminal.list",

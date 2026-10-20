@@ -44,6 +44,44 @@ export class AppFrameTransport implements Transport {
   async close() { window.removeEventListener("message", this.receive); this.onclose?.(); }
 }
 
+export interface McpAppWebview extends HTMLElement {
+  src: string;
+  send(channel: string, message: JSONRPCMessage): void;
+}
+
+/** Only the dedicated guest's preload can emit this channel. */
+export class AppWebviewTransport implements Transport {
+  onmessage?: (message: JSONRPCMessage) => void;
+  onclose?: () => void;
+  onerror?: (error: Error) => void;
+  private ready: Promise<void>;
+  private didLoad: () => void;
+  constructor(private frame: McpAppWebview) {
+    let resolveReady!: () => void;
+    this.ready = new Promise(resolve => { resolveReady = resolve; });
+    this.didLoad = resolveReady;
+  }
+  private receive = (event: Event) => {
+    const message = event as Event & { channel: string; args: unknown[] };
+    if (message.channel !== "minicode:mcpApp:message") return;
+    try { this.onmessage?.(parseJSONRPCMessage(message.args[0])); }
+    catch (error) { this.onerror?.(error as Error); }
+  };
+  async start() {
+    this.frame.addEventListener("ipc-message", this.receive);
+    this.frame.addEventListener("dom-ready", this.didLoad, { once: true });
+  }
+  async send(message: JSONRPCMessage) {
+    await this.ready;
+    this.frame.send("minicode:mcpApp:message", message);
+  }
+  async close() {
+    this.frame.removeEventListener("ipc-message", this.receive);
+    this.frame.removeEventListener("dom-ready", this.didLoad);
+    this.onclose?.();
+  }
+}
+
 export function appHostContext(view: McpAppView, container: HTMLElement, fullscreen: boolean): McpUiHostContext {
   const style = getComputedStyle(document.documentElement);
   return {

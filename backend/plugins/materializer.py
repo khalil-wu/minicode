@@ -78,6 +78,7 @@ class MarketplaceSource:
     ref: str = ""
     subpath: str = ""
     sha: str = ""
+    sparse_paths: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"source": self.kind}
@@ -95,6 +96,8 @@ class MarketplaceSource:
             payload["path"] = self.subpath
         if self.sha:
             payload["sha"] = self.sha
+        if self.sparse_paths:
+            payload["sparse_paths"] = list(self.sparse_paths)
         return payload
 
 
@@ -160,6 +163,7 @@ def parse_marketplace_source(
                 ref=ref,
                 subpath=str(source.get("path") or "").strip(),
                 sha=str(source.get("sha") or "").strip(),
+                sparse_paths=tuple(source.get("sparse_paths") or ()),
             )
         if kind in {"url", "http", "https"}:
             locator = str(source.get("url") or "").strip()
@@ -177,6 +181,7 @@ def parse_marketplace_source(
                 ref=ref,
                 subpath=str(source.get("path") or "").strip(),
                 sha=str(source.get("sha") or "").strip(),
+                sparse_paths=tuple(source.get("sparse_paths") or ()),
             )
         if kind == "npm":
             package = str(source.get("package") or source.get("name") or "").strip()
@@ -456,6 +461,8 @@ def _clone_git(source: MarketplaceSource, destination: Path, *, command_runner: 
     branch_ref = "" if ref_is_sha else source.ref
     destination.parent.mkdir(parents=True, exist_ok=True)
     clone_args = _git_args("clone", "--depth", "1", "--no-tags")
+    if source.sparse_paths:
+        clone_args.extend(["--filter=blob:none", "--no-checkout"])
     if branch_ref:
         # MiniCode asks clone to resolve the requested branch/tag directly,
         # avoiding a default-branch clone followed by a second network fetch.
@@ -466,6 +473,9 @@ def _clone_git(source: MarketplaceSource, destination: Path, *, command_runner: 
         clone_args,
         timeout_seconds=timeout_seconds,
     )
+    if source.sparse_paths:
+        _run_command(runner, _git_args("-C", str(destination), "sparse-checkout", "set", "--", *source.sparse_paths), timeout_seconds=timeout_seconds)
+        _run_command(runner, _git_args("-C", str(destination), "checkout", branch_ref or "HEAD"), timeout_seconds=timeout_seconds)
     actual = _git_head(destination, command_runner=runner, timeout_seconds=timeout_seconds)
     if pinned_sha and not branch_ref and actual.casefold() != pinned_sha.casefold():
         # MiniCode treats a full SHA as an already-resolved remote revision.  A

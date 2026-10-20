@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import httpx
 
@@ -79,6 +79,9 @@ def completion(events):
 
 @pytest.mark.asyncio
 async def test_goal_completion_follows_real_durable_mutation_without_a_model_admission(native_session):
+    # Native completion acknowledges the mutation independently of the
+    # automatic goal continuation dispatched by the existing turn scheduler.
+    native_session.schedule_next_queued_user_message = Mock()
     request = command(native_session, "/goal 原生持久目标 中文🙂")
     owner_workspace = native_session.session_lifecycle.workspace_root_for_conversation()
     owner_workspace_root = str(owner_workspace) if owner_workspace is not None else ""
@@ -101,7 +104,14 @@ async def test_goal_completion_follows_real_durable_mutation_without_a_model_adm
     recovered = ConversationRepository(native_session.conversation_repo.storage_root).get_conversation(request.data["conversation_id"])
     assert recovered.goal["text"] == "原生持久目标 中文🙂"
     assert recovered.transcript == []
+    goal_input = recovered.context_snapshot["history"][-1]
+    assert goal_input["accepted_input"]["kind"] == "user.goal"
+    assert not goal_input.get("is_user_input", False)
+    retained = recovered.context_snapshot["guardian_evidence"]["retained_context"]["user_messages"][-1]
+    assert retained["text"] == goal_input["content"] and retained["complete"]
+    assert "原生持久目标 中文🙂" in retained["text"]
     native_session.start_agent_run.assert_not_awaited()
+    native_session.schedule_next_queued_user_message.assert_called_with(request.data["conversation_id"])
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,50 @@
+.settings-browser-settings { display: grid; gap: 38px; }
+.settings-browser-settings .settings-browser-group { display: grid; gap: 14px; }
+.settings-browser-control-card .settings-row-copy { display: flex; align-items: center; gap: 16px; }
+.settings-browser-control-card .settings-row-copy > svg { flex-shrink: 0; color: var(--text-secondary); }
+.settings-browser-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-browser-import-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: color-mix(in oklch, black 20%, transparent); font-family: var(--font-ui); }
+.settings-browser-import-dialog { display: grid; gap: 20px; width: min(560px, calc(100vw - 48px)); box-sizing: border-box; max-height: calc(100dvh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--border-subtle); border-radius: 20px; background: var(--surface-raised); color: var(--text-primary); font-size: var(--mc-font-secondary); box-shadow: var(--shadow-strong-overlay); }
+.settings-browser-import-dialog header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px 16px; }
+.settings-browser-import-dialog h2 { margin: 0; font-size: var(--text-lg); font-weight: var(--fw-semibold); }
+.settings-browser-import-dialog header p { grid-column: 1 / -1; margin: 0; color: var(--text-secondary); }
+.settings-browser-import-dialog header button { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: var(--radius-md); background: transparent; color: var(--text-muted); cursor: pointer; }
+.settings-browser-import-dialog header button:hover { color: var(--text-primary); background: var(--surface-hover); }
+.settings-browser-import-source { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.settings-browser-import-note { margin: -8px 0 0; color: var(--text-secondary); font-size: var(--mc-font-caption); }
+.settings-browser-import-dialog footer { display: flex; justify-content: flex-end; gap: 8px; }
+.settings-browser-import-dialog footer button { min-width: 64px; min-height: 32px; padding: 6px 14px; border: 0; border-radius: 9px; background: var(--surface-hover); color: var(--text-primary); cursor: pointer; font: inherit; }
+.settings-browser-import-dialog footer button[data-primary="true"] { background: var(--text-primary); color: var(--surface-raised); }
+.settings-browser-import-dialog button:disabled { cursor: default; opacity: .5; }
+.settings-browser-import-dialog .settings-card { padding: 0 16px; border: 1px solid var(--border-subtle); border-radius: 16px; }
+.settings-browser-import-dialog .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 56px; }
+.settings-browser-breadcrumb { display: flex; align-items: center; gap: 10px; color: var(--text-muted); font-size: var(--mc-font-secondary); }
+.settings-browser-breadcrumb button { display: inline-flex; align-items: center; padding: 3px 0; border: 0; background: transparent; color: inherit; cursor: pointer; font: inherit; }
+.settings-browser-breadcrumb button:hover { color: var(--text-primary); }
+.settings-browser-breadcrumb > span { color: var(--text-primary); }
+.settings-browser-history .settings-browser-history-days { display: grid; gap: 8px; }
+.settings-browser-history .settings-browser-history-day-toggle { padding-block: 13px; }
+.settings-browser-history-day-toggle[aria-expanded="true"] { border-bottom: 1px solid var(--border-subtle); }
+.settings-browser-history .settings-browser-history-row { min-height: 44px; }
+.settings-browser-download-row.settings-row { min-height: 44px; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 12px; padding-block: 7px; }
+.settings-browser-download-actions { display: flex; align-items: center; gap: 12px; }
+.settings-browser-download-row > svg { color: var(--text-secondary); }
+.settings-browser-download-file { min-width: 0; display: grid; gap: 2px; padding: 0; border: 0; background: transparent; color: var(--text-primary); text-align: left; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.settings-browser-download-file:disabled { cursor: default; }
+.settings-browser-download-file > small, .settings-browser-download-row > time { color: var(--text-muted); font-size: var(--mc-font-caption); }
+.settings-browser-personal-data { display: grid; gap: 20px; }
+.settings-browser-personal-row.settings-row { display: flex; gap: 14px; min-height: 56px; }
+.settings-browser-personal-row > svg { flex-shrink: 0; color: var(--text-muted); }
+.settings-browser-personal-item { display: grid; flex: 1; min-width: 0; gap: 4px; padding: 0; border: 0; background: transparent; text-align: start; color: var(--text-primary); font: inherit; cursor: pointer; }
+.settings-browser-personal-item > span, .settings-browser-personal-item > small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-browser-personal-item > small { color: var(--text-muted); font-size: var(--mc-font-caption); }
+.settings-browser-site-row.settings-row { display: flex; width: 100%; gap: 14px; background: transparent; border: 0; color: var(--text-primary); text-align: start; font: inherit; cursor: pointer; }
+.settings-browser-site-row > span { flex: 1; }
+.settings-browser-site-row > .settings-browser-policy-summary { flex: 0 0 auto; color: var(--text-muted); }
+.settings-browser-site-row:hover { background: var(--surface-hover); }
+.settings-browser-site-back { display: flex; align-items: center; gap: 8px; padding: 0; border: 0; background: transparent; color: var(--text-secondary); font: inherit; text-align: start; cursor: pointer; }
+.settings-browser-personal-dialog fieldset { display: grid; gap: 14px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.settings-browser-personal-form { display: contents; }
+.settings-browser-personal-dialog label { display: grid; gap: 7px; color: var(--text-secondary); }
+.settings-browser-personal-dialog input { box-sizing: border-box; width: 100%; min-height: 36px; padding: 7px 11px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-input); color: var(--text-primary); font: inherit; }
+.settings-browser-personal-dialog input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }

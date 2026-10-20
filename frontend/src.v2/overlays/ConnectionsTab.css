@@ -40,4 +40,4 @@
 .remote-connection-add-manually:hover { color: var(--text-primary); }
 .remote-connection-refreshing { animation: remote-connection-refresh 1s linear infinite; }
 @keyframes remote-connection-refresh { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .remote-connection-refreshing { animation: none; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .remote-connection-refreshing { animation: none; } }

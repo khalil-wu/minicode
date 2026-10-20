@@ -22,6 +22,7 @@ import { getConnectionPresentation } from "./connectionPresentation";
 import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { pushToast } from "../overlays/ToastContainer";
+import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 
 interface HeaderBarProps {
   leftPanelControls?: string;
@@ -47,6 +48,7 @@ export const HeaderBar = ({
   onToggleRightPanel,
 }: HeaderBarProps) => {
   const { t: tr } = useI18n();
+  const { preferences } = useDesktopPreferences();
   const isConnected = useAppStore((s) => s.isConnected);
   const connectionPhase = useAppStore((s) => s.connectionPhase);
   const reconnectAttempt = useAppStore((s) => s.reconnectAttempt);
@@ -54,6 +56,7 @@ export const HeaderBar = ({
   const connectionError = useAppStore((s) => s.connectionError);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const appMode = useAppStore((state) => state.appMode);
+  const settingsOpen = useAppStore((state) => state.settingsOpen);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const dockCollapsed = useAppStore((s) => s.dockCollapsed);
   const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
@@ -96,6 +99,13 @@ export const HeaderBar = ({
     requestedHistory.current = { id, index };
     useAppStore.getState().requestConversationSwitch(id);
   };
+  useEffect(() => {
+    const back = () => { if (!pendingSwitch && history.index > 0) navigateHistory(history.index - 1); };
+    const forward = () => { if (!pendingSwitch && history.index + 1 < history.ids.length) navigateHistory(history.index + 1); };
+    window.addEventListener("navigate-back", back);
+    window.addEventListener("navigate-forward", forward);
+    return () => { window.removeEventListener("navigate-back", back); window.removeEventListener("navigate-forward", forward); };
+  }, [history, pendingSwitch]);
   const [menu, setMenu] = useState<{ key: DesktopMenuKey; x: number; y: number } | null>(null);
   const [windowMaximized, setWindowMaximized] = useState(false);
   useEffect(() => {
@@ -126,9 +136,9 @@ export const HeaderBar = ({
     if (key === "view") return [
       { label: leftPanelOpen ? tr("收起左侧栏") : tr("打开左侧栏"), onClick: onToggleLeftPanel },
       { label: rightPanelOpen ? tr("关闭右侧栏") : tr("打开右侧栏"), onClick: onToggleRightPanel },
-      { label: tr("打开终端"), onClick: () => state.openBottomTab("terminal") },
+      { label: tr("打开终端"), onClick: () => state.openTerminal() },
     ];
-    return [{ label: tr("键盘快捷键"), onClick: () => { state.setSettingsTab("shortcuts"); if (!state.settingsOpen) state.toggleSettings(); } }];
+    return [{ label: tr("键盘快捷键"), onClick: () => { if (!state.shortcutsHelpOpen) state.toggleShortcutsHelp(); } }];
   };
 
   return (
@@ -168,12 +178,13 @@ export const HeaderBar = ({
       </div>
 
       <div className="mc-header-end">
+        {appMode === "code" && !settingsOpen && <>
         <IconButton label={tr("命令面板")} onClick={() => toggleCommandPalette()} buttonRef={sideChatFallbackButtonRef}>
           <Search />
         </IconButton>
         {rightPanelAvailable && (
           <>
-            <IconButton
+            {preferences?.showBottomPanel !== false && <IconButton
               label={terminalVisible ? tr("关闭终端") : tr("打开终端")}
               onClick={() => {
                 if (terminalVisible) closeBottomDock();
@@ -183,7 +194,7 @@ export const HeaderBar = ({
               expanded={terminalVisible}
             >
               <SquareTerminal />
-            </IconButton>
+            </IconButton>}
             <IconButton
               label={rightPanelOpen ? tr("关闭右侧栏") : tr("打开右侧栏")}
               onClick={onToggleRightPanel}
@@ -209,6 +220,7 @@ export const HeaderBar = ({
           {(connection.kind === "warning" || connection.kind === "failed") && <WifiOff aria-hidden="true" />}
           {connection.shortLabel && <span className="mc-connection-label">{connection.shortLabel}</span>}
         </span>
+        </>}
 
         {isDesktop() && (
           <div className="mc-window-controls">

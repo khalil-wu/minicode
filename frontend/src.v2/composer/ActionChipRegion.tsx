@@ -12,7 +12,6 @@ export const ContextChipRegion = () => {
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const addSelectedMention = useAppStore((s) => s.addSelectedMention);
   const removeSelectedMention = useAppStore((s) => s.removeSelectedMention);
-  const clearSelectedMentions = useAppStore((s) => s.clearSelectedMentions);
   const openEditorFile = useAppStore((s) => s.openEditorFile);
   const visibleActionChip = actionChip && !actionChip.label.toLowerCase().startsWith("skill selected")
     ? actionChip
@@ -85,17 +84,6 @@ export const ContextChipRegion = () => {
             <X size={14} />
           </button>
         </>
-      )}
-      {selectedMentions.length > 1 && (
-        <button
-          type="button"
-          onClick={() => {
-            clearSelectedMentions();
-          }}
-          style={clearAllStyle}
-          aria-label={tr("清空上下文引用")}
-        >
-          {tr("清空")}</button>
       )}
     </div>
   );
@@ -211,14 +199,4 @@ const dismissStyle: React.CSSProperties = {
   cursor: "pointer",
   padding: "0 4px",
   display: "inline-flex",
-};
-
-const clearAllStyle: React.CSSProperties = {
-  height: 24,
-  padding: "0 7px",
-  border: 0,
-  background: "transparent",
-  color: "var(--text-muted)",
-  cursor: "pointer",
-  fontSize: "var(--text-xs)",
 };

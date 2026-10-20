@@ -385,7 +385,7 @@ export function projectTurn(
   const delegatedAgentIds = new Set<string>();
   for (const block of blocks) {
     if (block.type === "progress" && block.subagentId) delegatedAgentIds.add(block.subagentId);
-    if (block.type === "tool_call" && block.record.name === "task" && block.record.status === "success") {
+    if (block.type === "tool_call" && ["task", "spawn_agent"].includes(block.record.name) && block.record.status === "success") {
       taskResultAgentIds(block.record).forEach((id) => delegatedAgentIds.add(id));
     }
     if (block.type !== "tool_call" || block.record.callSource?.kind !== "code_mode") continue;
@@ -468,6 +468,8 @@ export function projectTurn(
     }
     if (block.type === "tool_call") {
       if (!isVisibleActivity(block, Boolean(options.includeHiddenActivity))) return;
+      if (!options.includeHiddenActivity && ["request_user_input_async", "send_message_to_user_async"].includes(block.record.name)
+        && ["pending", "running", "success"].includes(block.record.status)) return;
       if (!options.includeHiddenActivity && isPlanStateWrite(block.record)) return;
       if (!options.includeHiddenActivity && block.record.name === "task_status"
         && ["pending", "running", "success"].includes(block.record.status)
@@ -599,6 +601,7 @@ export function projectTurn(
       });
       return;
     }
+    if (block.type === "text" && block.delivery === "async") return;
     if (block.type === "text" && block.source === "retained") {
       if (block.content.trim()) {
         segment += 1;

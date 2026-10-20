@@ -242,6 +242,10 @@ def populate_prompt_context(
         )
         or metadata.get("turn_aborted")
     )
+    if run_context is not None and run_context.model_execution is not None:
+        from backend.agents.source_roles import source_agent_options
+        if not source_agent_options(run_context.model_execution.config)["interrupt_message"]:
+            prompt_context["previous_turn_aborted"] = False
     # Keep the query-source identity in the durable turn context so
     # ContextBuilder can apply Claude Code's main-thread-only time-based
     # microcompact rule without inspecting transport metadata at provider

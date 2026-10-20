@@ -3,6 +3,7 @@ import { projectSourceAssistantText } from "../lib/source-assistant-text";
 import { acknowledgeMessageUpdate, messageTopologyKey, streamingMessageUpdate } from "../lib/message-changes";
 import {
   getContentBlocks,
+  getPresentedContentBlocks,
   isFinalAnswerBlock,
   isLegacyTextBlock,
 } from "../lib/content-blocks";
@@ -38,7 +39,7 @@ import { getRecordOutputText, knownFilePathsForCell, recordInputTarget, recordOu
 import { readableToolLabel } from "./toolDisplayName";
 import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
-import { canonicalArtifactKind, recordHasImageArtifact } from "../lib/artifact-projection";
+import { canonicalArtifactKind, isExecutionResultArtifact, recordHasImageArtifact } from "../lib/artifact-projection";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 
 type CommittedCellState = Exclude<
@@ -523,9 +524,9 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
     // not a child identity or a successful start. ActivityCell retains its
     // original result in the same expandable action row.
     if (["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status)
-      && !(name === "task" && record.delegations?.some((delegation) => delegation.started_at > 0))) continue;
+      && !(["task", "spawn_agent"].includes(name) && record.delegations?.some((delegation) => delegation.started_at > 0))) continue;
     if (name === "send_message" || name === "followup_task") {
-      const requestedRecipient = stringArg(name === "followup_task" ? record.args?.target : record.args?.recipient);
+      const requestedRecipient = stringArg(name === "followup_task" ? record.args?.target : record.args?.target ?? record.args?.recipient);
       const parentMailbox = ["parent", "team-lead"].includes(requestedRecipient);
       const recipients = parentMailbox ? [requestedRecipient]
         : record.recipientIds ?? (record.recipientId ? [record.recipientId] : requestedRecipient ? [requestedRecipient] : []);
@@ -537,8 +538,8 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       }))));
       continue;
     }
-    if (name === "task_stop") {
-      const target = stringArg(record.args?.subagent_id) || "子智能体";
+    if (name === "task_stop" || name === "interrupt_agent") {
+      const target = stringArg(name === "interrupt_agent" ? record.args?.target : record.args?.subagent_id) || "子智能体";
       cells.push(collaborationCell(record, "closed", [{
         agentId: target,
         agentLabel: collaborationAgentLabel(target),
@@ -546,7 +547,7 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       }]));
       continue;
     }
-    if (name !== "task") continue;
+    if (name !== "task" && name !== "spawn_agent") continue;
     if (record.delegations) {
       const entries = record.delegations.filter(delegation => delegation.started_at > 0).map(delegation => ({
         agentId: delegation.agent_id, agentLabel: delegation.name,
@@ -688,11 +689,14 @@ function buildTurn(
     };
   }
 
-  const blocks = getContentBlocks(assistantMessage);
+  const rawBlocks = getContentBlocks(assistantMessage);
+  const blocks = getPresentedContentBlocks(assistantMessage, rawBlocks);
+  const presentedTerminalStatus = assistantMessage.terminalStatus
+    ?? (blocks.some((block, index) => block !== rawBlocks[index]) ? "partial" : undefined);
   const projection = projectTurn(blocks, {
     isStreaming: assistantMessage.isStreaming,
     isThinkingStreaming: assistantMessage.isThinkingStreaming,
-    terminalStatus: assistantMessage.terminalStatus,
+    terminalStatus: presentedTerminalStatus,
   });
   const hasTypedActivity = blocks.some((block) => block.type === "tool_call" || block.type === "progress");
   const finalBlock = [...blocks].reverse().find(
@@ -720,7 +724,8 @@ function buildTurn(
       callSource: owner?.callSource || artifact.callSource, operation: owner?.name || artifact.operation }];
   });
   const toolImageIds = new Set(toolImages.map((artifact) => artifact.artifactId));
-  const artifacts = (assistantMessage.artifacts ?? []).filter((artifact) => !toolImageIds.has(artifact.artifactId));
+  const artifacts = (assistantMessage.artifacts ?? []).filter((artifact) => !toolImageIds.has(artifact.artifactId)
+    && !(artifactOwners.has(artifact.artifactId) && isExecutionResultArtifact(artifactOwners.get(artifact.artifactId)!)));
   const imageTextSplit = splitAnswerAroundImageArtifact(
     blocks,
     projection.finalAnswer,
@@ -792,6 +797,7 @@ function buildTurn(
   }
 
   const turn: ChatTurnState = {
+    asyncMessages: blocks.filter((block): block is Extract<ContentBlock, { type: "text" }> => block.type === "text" && block.delivery === "async" && block.status === "completed"),
     id: assistantMessage.id,
     resourceKey: {},
     toolPage: assistantMessage.toolPage,
@@ -802,11 +808,11 @@ function buildTurn(
     finalAnswerCell,
     status: assistantMessage.isStreaming
       ? "streaming"
-      : assistantMessage.terminalStatus === "failed"
+      : presentedTerminalStatus === "failed"
         ? "failed"
-        : assistantMessage.terminalStatus === "partial"
+        : presentedTerminalStatus === "partial"
           ? "partial"
-          : assistantMessage.terminalStatus === "interrupted"
+          : presentedTerminalStatus === "interrupted"
             ? "interrupted"
             : "completed",
     startedAt: assistantMessage.runStartedAt,
@@ -991,6 +997,7 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
       replaceCell(index, projected.cells[0]);
       if (kind === "tool" && !shallow(knownFilePathsForCell(previous), knownFilePathsForCell(projected.cells[0]))) resourceKey = {};
     } else if (kind === "text" && block.type === "text") {
+      if (block.delivery === "async") return null;
       const index = positions.get(block.itemId || "");
       if (index === -1) return null;
       if (index !== undefined) {

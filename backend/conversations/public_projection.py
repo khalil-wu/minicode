@@ -380,6 +380,10 @@ def _project_block(value: Any) -> dict[str, Any] | None:
         )
         if safe_provider_raw:
             block["providerRaw"] = safe_provider_raw
+        if value.get("delivery") == "async":
+            block["delivery"] = "async"
+            if isinstance(value.get("questions"), list):
+                block["questions"] = _public_json(value["questions"])
         return block
     if block_type == "thinking":
         visibility = public_text(value.get("visibility"), max_chars=64, single_line=True).lower()
@@ -690,6 +694,7 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
         ("termination_reason", 256),
         ("failure_message", 12_000),
         ("steer_target_message_id", 1_024),
+        ("async_request_id", 1_024),
         ("turn_id", 1_024),
         ("api", 256),
         ("wire_api", 256),

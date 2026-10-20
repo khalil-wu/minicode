@@ -2,12 +2,13 @@ import { useI18n } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Bell, BookOpenText, Check, ChevronDown, Clock3, Moon, Puzzle, Search, Settings, SquarePen, Sun } from "../lib/icons";
+import { BookOpenText, Check, ChevronDown, Clock3, Puzzle, Search, Settings, SquarePen } from "../lib/icons";
 import { useAppStore } from "../stores";
-import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH } from "../stores/shared-helpers";
+import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, visibleLeftSidebarWidth } from "../stores/shared-helpers";
 import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
 import { ConversationsTab } from "./ConversationsTab";
-import { Tip } from "../components/Tooltip";
+import { ContextMenu } from "../components/ContextMenu";
+import { openPreferredWebLink } from "../lib/open-preferred-target";
 import { openAutomations } from "../lib/automations-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useComposerPlugins } from "../composer/useComposerPlugins";
@@ -24,13 +25,11 @@ export const SidebarLeft = ({
 }) => {
   const { t: tr } = useI18n();
   const appMode = useAppStore((s) => s.appMode);
-  const resolvedTheme = useAppStore((s) => s.resolvedTheme);
   const conversationId = useAppStore((s) => s.conversationId);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const leftSidebarExpandedWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const setThemeMode = useAppStore((s) => s.setThemeMode);
   const createConversation = useAppStore((s) => s.createConversation);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
@@ -39,14 +38,13 @@ export const SidebarLeft = ({
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
-  const [activityView, setActivityView] = useState(false);
+  const [profileMenu, setProfileMenu] = useState<{ x: number; y: number } | null>(null);
   const [modeMenu, setModeMenu] = useState<{ x: number; y: number } | null>(null);
   const modeTrigger = useRef<HTMLButtonElement>(null);
   const isOpen = embedded || leftSidebarWidth > 0;
   const sidebarRef = useRef<HTMLElement>(null);
   const [shellWidth, setShellWidth] = useState(window.innerWidth);
-  const visibleSidebarWidth = leftSidebarWidth === 0 ? 0 : Math.max(LEFT_SIDEBAR_MIN_WIDTH,
-    Math.min(leftSidebarWidth, LEFT_SIDEBAR_MAX_WIDTH, shellWidth - 240));
+  const visibleSidebarWidth = visibleLeftSidebarWidth(leftSidebarWidth, shellWidth);
   const resizeRef = useRef<{ x: number; width: number; didMove: boolean } | null>(null);
   useEffect(() => { sidebarRef.current!.inert = !isOpen; }, [isOpen]);
   useEffect(() => {
@@ -106,7 +104,7 @@ export const SidebarLeft = ({
     onNavigate?.();
   };
   const leaveMarketplace = () => {
-    useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
+    useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", projectsOpen: false });
   };
   const navigateToContent = () => {
     leaveMarketplace();
@@ -114,8 +112,6 @@ export const SidebarLeft = ({
   };
 
   const openAutomationsPanel = () => navigate(openAutomations);
-  const isDarkTheme = resolvedTheme === "dark";
-  const nextThemeLabel = isDarkTheme ? tr("切换到浅色模式") : tr("切换到深色模式");
 
   const sidebarWidth = embedded ? "100%" : `${visibleSidebarWidth}px`;
 
@@ -149,7 +145,6 @@ export const SidebarLeft = ({
         setModeMenu(modeMenu ? null : { x: bounds.left, y: bounds.bottom + 5 });
       }}>MiniCode<ChevronDown size={13} /></button>}</span>
       <div className="mc-sidebar-heading-actions">
-        {!skillsMarketplaceOpen && <button type="button" className="btn-ghost mc-icon-button" aria-label={activityView ? tr("返回项目与最近") : tr("查看任务状态")} title={activityView ? tr("返回项目与最近") : tr("查看任务状态")} aria-pressed={activityView} onClick={() => setActivityView((current) => !current)}><Bell size={16} /></button>}
         {globalSearchEnabled && <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("搜索")} title={skillsMarketplaceOpen ? tr("搜索插件与技能") : tr("搜索任务与命令")} onClick={() => {
           if (skillsMarketplaceOpen) document.querySelector<HTMLInputElement>('.skills-workspace [role="tabpanel"]:not([hidden]) input[placeholder]')?.focus();
           else navigate(() => toggleCommandPalette());
@@ -175,25 +170,23 @@ export const SidebarLeft = ({
             onNavigate={navigateToContent}
             onSetConfirmDialog={(dialog) => setConfirmDialog(dialog)}
             showRecent
-            activityView={activityView}
           />
       </div>
 
       {!withGlobalRail && <div className="mc-sidebar-footer">
-        <div className="mc-sidebar-footer-row">
-          <SidebarAction icon={<Settings />} label={tr("设置")} onClick={() => navigate(() => toggleSettings())} />
-          <Tip content={nextThemeLabel}>
-            <button
-              type="button"
-              className="btn-ghost mc-sidebar-theme-toggle"
-              aria-label={nextThemeLabel}
-              onClick={() => setThemeMode(isDarkTheme ? "light" : "dark")}
-            >
-              {isDarkTheme ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-            </button>
-          </Tip>
-        </div>
+        <button type="button" className="mc-sidebar-profile-button" aria-label={tr("打开个人资料菜单")} aria-haspopup="menu" aria-expanded={Boolean(profileMenu)} onClick={event => {
+          const bounds = event.currentTarget.getBoundingClientRect();
+          setProfileMenu(profileMenu ? null : { x: bounds.left, y: bounds.bottom - 154 });
+        }}><Settings size={17} /><span>MiniCode</span></button>
       </div>}
+      {profileMenu && <ContextMenu position={profileMenu} onClose={() => setProfileMenu(null)} items={[
+        { label: tr("设置"), icon: <Settings size={15} />, onClick: () => navigate(() => { useAppStore.getState().setSettingsTab("general"); toggleSettings(); }) },
+        { label: tr("帮助"), submenu: [
+          { label: tr("新增内容"), onClick: () => { void openPreferredWebLink("https://developers.openai.com/codex/changelog"); } },
+          { label: tr("键盘快捷键"), onClick: () => useAppStore.getState().toggleShortcutsHelp() },
+          { label: tr("使用指南"), onClick: () => { void openPreferredWebLink("https://learn.chatgpt.com/docs/quickstart"); } },
+        ] },
+      ]} />}
       </div>
       {modeMenu && <SidebarModeMenu position={modeMenu} mode={appMode === "code" ? "code" : "cowork"} onClose={() => setModeMenu(null)} onRestoreFocus={() => modeTrigger.current!.focus()} onSelect={mode => navigate(() => {
         leaveMarketplace(); const state = useAppStore.getState(); state.setAppMode(mode);

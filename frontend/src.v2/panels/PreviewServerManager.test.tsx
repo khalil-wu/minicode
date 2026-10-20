@@ -34,10 +34,14 @@ beforeEach(() => {
 afterEach(() => { cleanup(); resetPendingCommandResultsForTests(); registerWebSocketSender(null); vi.restoreAllMocks(); });
 
 describe("preview services menu", () => {
-  it("consumes a first-open request after the browser module mounts in Web mode", async () => {
+  it("retains a first-open request in the unavailable browser until the service manager mounts", async () => {
     act(() => openPreviewServiceManager());
-    render(<BrowserPanel />);
+    const browser = render(<BrowserPanel />);
     expect(screen.getByText("内置浏览器仅在桌面版可用")).toBeTruthy();
+    expect(screen.queryByRole("dialog", { name: "预览服务管理" })).toBeNull();
+    expect(useAppStore.getState().previewServiceManagerRequest).toEqual({ conversationId: scope.conversation_id, workspaceRoot: scope.workspace_root });
+    browser.unmount();
+    render(<PreviewServerManager />);
     expect(await screen.findByRole("dialog", { name: "预览服务管理" })).toBeTruthy();
     await waitFor(() => expect(commands[0]).toMatchObject({ type: "preview.launch.config", ...scope }));
     await waitFor(() => expect(screen.getByRole("button", { name: "启动", exact: true })).toHaveProperty("disabled", false));

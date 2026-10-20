@@ -61,3 +61,20 @@ it("imports contrast and semantic colors, restores them on startup and never wri
   expect(document.documentElement.dataset.codeTheme).toBe("github");
   expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe(selectedBackground);
 });
+
+it("lets content follow a chosen UI font, retains an explicit content face, and preserves the default typography on reset", async () => {
+  const { chromeSeed } = await loadCodeTheme("github", "dark");
+  const state = useAppStore.getState();
+  const draft = state.draft, tabs = state.editorTabs;
+  const theme = { ...chromeSeed, contrast: 60, opaqueWindows: false };
+  await state.importAppearanceTheme("dark", { codeThemeId: "github", theme: { ...theme, fonts: { ui: "Fixture UI", content: null, code: "Fixture Mono" } } });
+  expect(document.documentElement.style.getPropertyValue("--font-prose")).toBe("var(--font-ui)");
+  expect(document.documentElement.style.getPropertyValue("--font-ui")).toContain('"Fixture UI"');
+  await state.importAppearanceTheme("dark", { codeThemeId: "github", theme: { ...theme, fonts: { ui: "Fixture UI", content: "Fixture Content", code: "Fixture Mono" } } });
+  expect(document.documentElement.style.getPropertyValue("--font-prose")).toContain('"Fixture Content"');
+  state.setThemeMode("light");
+  expect(document.documentElement.style.getPropertyValue("--font-ui")).toBe("");
+  expect(document.documentElement.style.getPropertyValue("--font-prose")).toBe("");
+  expect(document.documentElement.style.getPropertyValue("--font-mono")).toBe("");
+  expect(useAppStore.getState()).toMatchObject({ draft, editorTabs: tabs });
+});

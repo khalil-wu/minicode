@@ -430,10 +430,10 @@ html[data-theme="light"] .mc-chat-context-card {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-pane-layout,
-  .mc-chat-context-card,
-  .mc-chat-context-agent,
-  .mc-chat-context-card button {
+  html:not([data-reduced-motion="false"]) .chat-pane-layout,
+  html:not([data-reduced-motion="false"]) .mc-chat-context-card,
+  html:not([data-reduced-motion="false"]) .mc-chat-context-agent,
+  html:not([data-reduced-motion="false"]) .mc-chat-context-card button {
     transition: none;
     animation: none;
   }

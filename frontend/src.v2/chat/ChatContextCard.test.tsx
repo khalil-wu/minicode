@@ -31,6 +31,20 @@ vi.hoisted(() => {
 });
 
 describe("ChatContextCard", () => {
+  it("does not present native guest navigation commands as newly discovered browser pages", async () => {
+    let publish!: (event: EmbeddedBrowserState) => void;
+    vi.spyOn(desktopRuntime, "isDesktop").mockReturnValue(true);
+    vi.spyOn(desktopRuntime, "embeddedBrowserList").mockResolvedValue([]);
+    vi.spyOn(desktopRuntime, "onEmbeddedBrowserEvent").mockImplementation(listener => { publish = listener; return () => {}; });
+    render(<ChatContextCard />);
+    await waitFor(() => expect(desktopRuntime.embeddedBrowserList).toHaveBeenCalledWith("conv-active"));
+    const command: EmbeddedBrowserState = { id: "command-native", conversationId: "conv-active", type: "numbered-shortcut", title: "Command is not a browser page", url: "https://source.example/", loading: false, canGoBack: false, canGoForward: false,
+      numberedShortcut: { target: "tabs", index: 1 } };
+    act(() => publish(command));
+    act(() => publish({ ...command, type: "external-link-request", requestedUrl: "https://destination.example/" }));
+    expect(screen.queryByText("Command is not a browser page")).toBeNull();
+  });
+
   it("rejects browser-list results from the previous context-card owner", async () => {
     let finishOld!: (targets: EmbeddedBrowserState[]) => void;
     const old = new Promise<EmbeddedBrowserState[]>((resolve) => { finishOld = resolve; });

@@ -25,7 +25,8 @@ beforeEach(() => {
     panelSlots: [{ id: "chat", kind: "chat", focused: false, size: 1 }, { id: "editor", kind: "editor", focused: true, size: 1 }],
     editorTabs: [{ id: "file", path: "main.ts", content: "dirty", original: "base", loading: false }],
     activeTabPath: "main.ts", messages: [], conversations: [], runtimeCapabilities: null,
-    currentModel: "model-A", availableModels: ["model-A"], permissionMode: "confirm", shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS },
+    currentModel: "model-A", availableModels: ["model-A"], permissionMode: "confirm", primaryNumberShortcutTarget: "tabs",
+    shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS, modelMenu: ["Mod+Shift+I"], permissionMenu: ["Mod+Shift+M"], clearComposer: ["Mod+L"] },
     settingsOpen: false, commandPaletteOpen: false, quickOpenVisible: false, shortcutsHelpOpen: false,
     skillsMarketplaceOpen: false, liveArtifactsOpen: false, agentEditorOpen: false, automationsOpen: false,
     rightPanelOpen: true, rightStackTab: "tasks", dockCollapsed: false, activeBottomTab: "budget",
@@ -137,10 +138,14 @@ describe("actual code-mode keyboard routes", () => {
     expect(screen.queryByRole("listbox", { name: "选择模型" })).toBeNull();
   });
 
-  it("leaves the marketplace when the user explicitly switches to Code mode", () => {
+  it("routes the alternate number shortcut to tasks without changing the application mode", () => {
     useAppStore.setState({ skillsMarketplaceOpen: true, appMode: "cowork", skillsMarketplaceReturnTarget: "settings" });
     render(<Harness />);
+    const navigate = vi.fn();
+    window.addEventListener("select-numbered-chat", navigate);
     fireEvent.keyDown(window, { key: "2", altKey: true });
-    expect(useAppStore.getState()).toMatchObject({ appMode: "code", skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
+    expect(navigate).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ detail: { index: 1, conversationId: "A" } }));
+    expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", skillsMarketplaceOpen: true, skillsMarketplaceReturnTarget: "settings" });
+    window.removeEventListener("select-numbered-chat", navigate);
   });
 });

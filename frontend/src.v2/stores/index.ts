@@ -11,11 +11,12 @@ import { createApprovalSlice } from "./approval-slice";
 import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
-import { applyWorkbenchPreferences } from "../lib/workbench-preferences";
-import { applyCodeTextScale, applyReducedMotion, applyTheme, applyTextScale, initialTheme, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
+import { applyWorkbenchPreferences, migrateWorkbenchPreferences, dictationPreferencesOf, usesDesktopDictationPreferences } from "../lib/workbench-preferences";
+import { applyCodeTextScale, applyReducedMotion, applyPointerCursors, applyDiffMarkerStyle, applyTheme, applyTextScale, initialTheme, readAppearancePreferences, reducedMotionFor, LS, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
 import { isAppearanceStorageKey, readAppearanceStorage } from "../lib/appearance-storage";
 import { flushEditorDrafts, hasPendingEditorDrafts, cachedEditorDrafts } from "./editor-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { dictationController } from "../composer/dictation-controller";
 import { pushToast } from "../overlays/ToastContainer";
 import { emptyConversationWorkbenchState } from "./ui-slice";
 import {
@@ -57,7 +58,7 @@ const composerRecovery = loadComposerDrafts().then(records => {
       else sideChats[record.owner.id] = {
         ...(sideChats[record.owner.id] ?? { id: record.owner.id, messages: [], isStreaming: false }),
         workspaceRoot: record.owner.workspaceRoot, ...record.side,
-        draft: record.draft.draft, attachments: record.draft.attachments,
+        draft: record.draft.draft, richDraft: record.draft.richDraft, attachments: record.draft.attachments,
       };
     }
     const active = state.conversationId ? conversationWorkbenchStates[state.conversationId]
@@ -65,7 +66,8 @@ const composerRecovery = loadComposerDrafts().then(records => {
     return { workspaceComposerDrafts, conversationWorkbenchStates, sideChats, composerDraftsReady: true,
       ...(!hasComposerDraft(state) && active ? {
         agentMode: active.agentMode ?? "build",
-        draft: active.draft, attachments: active.attachments, quotedMessage: active.quotedMessage,
+        goalMode: active.goalMode ?? false,
+        draft: active.draft, richDraft: active.richDraft, attachments: active.attachments, quotedMessage: active.quotedMessage,
         selectedMentions: active.selectedMentions, selectedSkills: active.selectedSkills,
         allowedRemoteImageDomains: active.allowedRemoteImageDomains,
       } : {}),
@@ -219,7 +221,20 @@ useAppStore.subscribe(
 
 if (typeof window !== "undefined") {
   window.addEventListener("storage", event => {
-    if (event.storageArea !== localStorage || !isAppearanceStorageKey(event.key)) return;
+    if (event.storageArea !== localStorage) return;
+    if (event.key === null || event.key === "minicode.workbench.preferences") {
+      const stored = migrateWorkbenchPreferences(JSON.parse(localStorage.getItem("minicode.workbench.preferences") ?? "{}"));
+      const workbenchPreferences = usesDesktopDictationPreferences() ? { ...stored, ...dictationPreferencesOf(useAppStore.getState().workbenchPreferences) } : stored;
+      useAppStore.setState({ workbenchPreferences });
+      applyWorkbenchPreferences(workbenchPreferences);
+    }
+    if (event.key === null || [LS.textScale, LS.codeTextScale, LS.codeFontBase, LS.reducedMotion, LS.pointerCursors, LS.diffMarkerStyle].includes(event.key)) {
+      const preferences = readAppearancePreferences();
+      applyTextScale(preferences.textScale); applyCodeTextScale(preferences.codeTextScale, preferences.codeFontBase);
+      applyReducedMotion(preferences.reducedMotion); applyPointerCursors(preferences.pointerCursors); applyDiffMarkerStyle(preferences.diffMarkerStyle);
+      useAppStore.setState(preferences);
+    }
+    if (!isAppearanceStorageKey(event.key)) return;
     // Read the complete latest snapshot rather than replaying an older event
     // payload after multiple windows have written their separate variants.
     const appearance = readAppearanceStorage();
@@ -228,12 +243,12 @@ if (typeof window !== "undefined") {
     useAppStore.setState({ ...appearance, themeMode, resolvedTheme });
   });
   window.addEventListener("beforeunload", event => {
-    if (!hasPendingEditorDrafts() && useAppStore.getState().composerDraftsReady && !hasPendingComposerDrafts()) return;
+    if (!hasPendingEditorDrafts() && useAppStore.getState().composerDraftsReady && !hasPendingComposerDrafts() && !dictationController.hasPendingAudio()) return;
     const desktop = window.__MINICODE_RUNTIME__?.desktop;
     const intent = desktop?.windowControls.captureUnloadIntent();
     event.preventDefault();
     event.returnValue = "";
-    if (desktop && intent) void Promise.all([composerRecovery, flushComposerDrafts(), flushEditorDrafts()])
+    if (desktop && intent) void Promise.all([composerRecovery, flushComposerDrafts(), flushEditorDrafts(), dictationController.settle()])
       .then(() => desktop.windowControls.resumeUnload(intent.id)).catch(error => {
       console.error("Window remains open because authored drafts did not commit", error);
     });
@@ -245,9 +260,16 @@ if (typeof window !== "undefined") {
     useAppStore.setState({ resolvedTheme: initialResolvedTheme });
   }
   applyTextScale(useAppStore.getState().textScale);
-  applyCodeTextScale(useAppStore.getState().codeTextScale);
+  applyCodeTextScale(useAppStore.getState().codeTextScale, useAppStore.getState().codeFontBase);
   applyWorkbenchPreferences(useAppStore.getState().workbenchPreferences);
   applyReducedMotion(useAppStore.getState().reducedMotion);
+  applyPointerCursors(useAppStore.getState().pointerCursors);
+  applyDiffMarkerStyle(useAppStore.getState().diffMarkerStyle);
+  const motionMedia = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+  motionMedia?.addEventListener("change", () => {
+    const reducedMotion = reducedMotionFor(useAppStore.getState().reducedMotionPreference);
+    applyReducedMotion(reducedMotion); useAppStore.setState({ reducedMotion });
+  });
   const colorSchemeMedia = typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-color-scheme: light)")
     : null;

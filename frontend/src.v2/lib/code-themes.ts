@@ -3,10 +3,22 @@ import { codeThemeChromeSeed, type CodeThemeChromeSeed } from "./code-themes-see
 
 export type CodeThemeVariant = "light" | "dark";
 
-// Source dba/HJ registrations, using the same MIT-licensed Shiki 3.23.0 data.
-// The 14 Codex-specific presets remain audit-only until redistribution terms
-// are established. Every exposed entry below loads its complete actual theme.
+// Source dba/HJ registrations. Desktop presets retain their own provenance.
 const registrations = {
+  "absolutely": { label: "Absolutely", variants: { dark: () => import("./codex-themes/absolutely-dark.json"), light: () => import("./codex-themes/absolutely-light.json") } },
+  "codex": { label: "ChatGPT", variants: { dark: () => import("./codex-themes/codex-dark.json"), light: () => import("./codex-themes/codex-light.json") } },
+  "linear": { label: "Linear", variants: { dark: () => import("./codex-themes/linear-dark.json"), light: () => import("./codex-themes/linear-light.json") } },
+  "lobster": { label: "Lobster", variants: { dark: () => import("./codex-themes/lobster-dark.json") } },
+  "matrix": { label: "Matrix", variants: { dark: () => import("./codex-themes/matrix-dark.json") } },
+  "notion": { label: "Notion", variants: { dark: () => import("./codex-themes/notion-dark.json"), light: () => import("./codex-themes/notion-light.json") } },
+  "og": { label: "OG", variants: { dark: () => import("./codex-themes/og-dark.json") } },
+  "oscurange": { label: "Oscurange", variants: { dark: () => import("./codex-themes/oscurange-dark.json") } },
+  "proof": { label: "Proof", variants: { light: () => import("./codex-themes/proof-light.json") } },
+  "raycast": { label: "Raycast", variants: { dark: () => import("./codex-themes/raycast-dark.json"), light: () => import("./codex-themes/raycast-light.json") } },
+  "sentry": { label: "Sentry", variants: { dark: () => import("./codex-themes/sentry-dark.json") } },
+  "temple": { label: "Temple", variants: { dark: () => import("./codex-themes/temple-dark.json") } },
+  "vercel": { label: "Vercel", variants: { dark: () => import("./codex-themes/vercel-dark.json"), light: () => import("./codex-themes/vercel-light.json") } },
+  "xcode": { label: "Xcode", variants: { dark: () => import("./codex-themes/xcode-dark.json"), light: () => import("./codex-themes/xcode-light.json") } },
   ayu: { label: "Ayu", variants: { dark: () => import("@shikijs/themes/ayu-dark") } },
   catppuccin: { label: "Catppuccin", variants: {
     dark: () => import("@shikijs/themes/catppuccin-mocha"), light: () => import("@shikijs/themes/catppuccin-latte"),
@@ -64,7 +76,7 @@ export type LoadedCodeTheme = {
   registrationName: string;
   theme: ThemeRegistrationRaw;
   chromeSeed: CodeThemeChromeSeed;
-  source: { package: "@shikijs/themes"; version: "3.23.0"; license: "MIT" };
+  source: { package: string; version: string; license?: string };
 };
 
 type ThemeLoader = () => Promise<{ default: ThemeRegistrationRaw }>;
@@ -77,7 +89,9 @@ export function loadCodeTheme(id: CodeThemeId, variant: CodeThemeVariant): Promi
     loadedThemes.set(key, load().then(({ default: theme }): LoadedCodeTheme => ({
       id, variant, registrationName: theme.name!, theme,
       chromeSeed: codeThemeChromeSeed(theme, variant),
-      source: { package: "@shikijs/themes", version: "3.23.0", license: "MIT" },
+      source: ["absolutely", "codex", "linear", "lobster", "matrix", "notion", "og", "oscurange", "proof", "raycast", "sentry", "temple", "vercel", "xcode"].includes(id)
+        ? { package: "Codex desktop reference", version: "app-initial-b8e1c8014bb4" }
+        : { package: "@shikijs/themes", version: "3.23.0", license: "MIT" },
     })));
   }
   return loadedThemes.get(key)!;

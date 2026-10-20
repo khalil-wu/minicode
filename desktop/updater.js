@@ -17,6 +17,7 @@ let currentVersion = "";
 let updateHealth = {};
 let lastStatus = { status: "idle", sequence: 0 };
 let getActivePtySessions = () => [];
+let getActiveDownloadIds = () => [];
 const windowActivities = new Map();
 const pendingActivityRequests = new Map();
 let installInFlight = false;
@@ -124,6 +125,7 @@ function updateCheck(code, severity, message, details = {}) {
 function buildUpdatePreflight({
   activity = null,
   activePtys = [],
+  activeDownloadIds = [],
   ptyError = "",
   updateReady = false,
   readyVersion = "",
@@ -189,6 +191,10 @@ function buildUpdatePreflight({
     }
   }
 
+  const downloads = [...activeDownloadIds].sort();
+  checks.push(downloads.length > 0
+    ? updateCheck("download.active", "blocking", "Browser downloads are still active.", { count: downloads.length, ids: downloads })
+    : updateCheck("download.clear", "pass", "No browser downloads are active."));
   const fingerprintPayload = {
     version,
     updateReady: Boolean(updateReady),
@@ -196,6 +202,7 @@ function buildUpdatePreflight({
       Object.entries(normalizedActivity).filter(([key]) => !["revision", "rendererInstanceId"].includes(key)),
     ) : null,
     activePtys: normalizedPtys,
+    activeDownloadIds: downloads,
     windowInstances: [...windowInstances].sort(),
   };
   const fingerprint = crypto
@@ -455,7 +462,7 @@ function beginBootHealthCheck(app) {
   return updateHealth;
 }
 
-async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: nextGetWindowRecord, logger, getActivePtySessions: nextGetActivePtySessions, prepareRollback: nextPrepareRollback, completeRollback: nextCompleteRollback } = {}) {
+async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: nextGetWindowRecord, logger, getActivePtySessions: nextGetActivePtySessions, getActiveDownloadIds: nextGetActiveDownloadIds, prepareRollback: nextPrepareRollback, completeRollback: nextCompleteRollback } = {}) {
   if (initialized) return false;
   initialized = true;
   appRef = app || null;
@@ -467,6 +474,7 @@ async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: 
   getActivePtySessions = typeof nextGetActivePtySessions === "function"
     ? nextGetActivePtySessions
     : getActivePtySessions;
+  if (typeof nextGetActiveDownloadIds === "function") getActiveDownloadIds = nextGetActiveDownloadIds;
   if (!app?.isPackaged) {
     emit("unavailable");
     return false;
@@ -721,6 +729,7 @@ function preflightForCurrentState({ ignoreInstallLock = false } = {}) {
   return buildUpdatePreflight({
     ...aggregateWindowActivity(),
     activePtys,
+    activeDownloadIds: getActiveDownloadIds(),
     ptyError,
     updateReady: Boolean(autoUpdater && appRef && downloadedUpdateVersion()),
     readyVersion: downloadedUpdateVersion(),
@@ -831,6 +840,7 @@ module.exports = {
   install,
   markHealthy,
   getStatus,
+  isAvailable: () => autoUpdater !== null,
   validatedFeedUrl,
   readHealthState,
   writeHealthState,

@@ -327,6 +327,10 @@ async def bootstrap_agent_loop(
         skill_manager = context.skill_manager
         run_context.skill_manager = skill_manager
     managed_requirements = turn_config_stack.requirements
+    if permission_context is None and not effective_permission_context.sandbox_mode:
+        configured_sandbox = turn_config_stack.effective_config().get("sandbox_mode", "")
+        effective_permission_context = replace(effective_permission_context,
+            sandbox_mode=configured_sandbox if effective_permission_context.mode not in {"plan", "bypass"} else "")
     configure_project_instructions = getattr(
         context,
         "configure_project_instructions",
@@ -804,4 +808,12 @@ async def bootstrap_agent_loop(
         ).strip(),
         agent_session=agent_session,
     )
+    if run_context.coordination_root_context is None:
+        run_context.coordination_root_context = tool_context
+    if not run_context.multi_agent_version and tool_context.model_execution is not None:
+        from backend.agents.source_roles import source_spawn_version
+        snapshot = tool_context.model_execution
+        run_context.multi_agent_version = source_spawn_version(snapshot.config, model=snapshot.model, definition=snapshot.model_info)
+    if turn_kernel.runtime is not None:
+        tool_context.metadata["_agent_wait_cursor"] = turn_kernel.runtime.agent_activity_cursor()
     yield bootstrap_result

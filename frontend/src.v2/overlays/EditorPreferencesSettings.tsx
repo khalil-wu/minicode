@@ -1,43 +1,24 @@
 import { useI18n } from "../i18n";
 import { useState } from "react";
 import type { ReactNode } from "react";
-import { ChevronDown, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { ChevronDown, Plus, RotateCcw, Trash2 } from "../lib/icons";
 import { useAppStore } from "../stores";
-import { NumberInput } from "../components/NumberInput";
 import { SelectMenu } from "../components/SelectMenu";
 import { defaultWorkbenchPreferences, type CodeSnippet } from "../lib/workbench-preferences";
 
-export function EditorPreferencesSettings({ children }: { children: ReactNode }) {
+export function EditorPreferencesSettings({ children, canReset = false, onReset }: { children: ReactNode; canReset?: boolean; onReset?: () => void }) {
   const { t } = useI18n();
   const preferences = useAppStore((state) => state.workbenchPreferences);
   const update = useAppStore((state) => state.setWorkbenchPreferences);
-  const textScale = useAppStore((state) => state.textScale);
-  const codeTextScale = useAppStore((state) => state.codeTextScale);
   const models = useAppStore((state) => state.availableModels);
   const usage = useAppStore((state) => state.inlineCompletionUsage);
   const [snippet, setSnippet] = useState<CodeSnippet>({ id: "", language: "typescript", prefix: "", body: "", description: "" });
   return <details className="settings-appearance-advanced">
-    <summary className="settings-appearance-advanced-trigger">{t("高级")}<ChevronDown size={15} aria-hidden="true" /></summary>
+    <summary className="settings-appearance-advanced-trigger"><span>{t("高级")}<ChevronDown size={15} aria-hidden="true" /></span>
+      {canReset && <button type="button" className="appearance-reset-advanced" onClick={event => { event.preventDefault(); event.stopPropagation(); onReset?.(); }}>{t("恢复默认")}</button>}
+    </summary>
     <div className="settings-appearance-advanced-body">
     {children}
-    <section className="settings-group">
-      <h3 className="settings-group-title">{t("字号")}</h3>
-      <p className="settings-section-description">{t("Ctrl + ＋ / － 缩放界面，Ctrl + 0 恢复实际大小。")}</p>
-      <div className="settings-card">
-        {[
-          { label: t("界面字号"), value: Math.round(textScale * 14), min: 11, max: 21, set: (value: number) => useAppStore.getState().setTextScale(value / 14) },
-          { label: t("正文字号"), value: preferences.proseSize, min: 12, max: 24, set: (value: number) => update({ proseSize: value }) },
-          { label: t("编辑器字号"), value: Math.round(codeTextScale * 14), min: 11, max: 24, set: (value: number) => useAppStore.getState().setCodeTextScale(value / 14) },
-        ].map((item) => <label className="settings-row" key={item.label}><span className="settings-row-title">{item.label}</span><span className="settings-row-control">
-          <NumberInput aria-label={item.label} min={item.min} max={item.max} value={item.value} onCommit={item.set} /> px</span></label>)}
-        <div className="settings-font-preview"><p>{t("从一个想法开始，把细节做好。 Make something thoughtful.")}</p><code>const greeting = "Hello, MiniCode";</code></div>
-      </div>
-      <div className="settings-preferences-actions"><button type="button" className="settings-action-button" onClick={() => {
-        update({ proseSize: defaultWorkbenchPreferences.proseSize });
-        useAppStore.getState().setTextScale(1);
-        useAppStore.getState().setCodeTextScale(1);
-      }}><RotateCcw size={14} />{t("恢复默认字号")}</button></div>
-    </section>
     <section className="settings-group">
       <h3 className="settings-group-title">{t("AI 代码预测")}</h3>
       <div className="settings-card">

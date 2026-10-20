@@ -224,6 +224,27 @@ def source_spawn_version(config: Any, *, model: str = "", definition: Any = None
     return model_version or "v1"
 
 
+def source_agent_options(config: Any, *, model: str = "", definition: Any = None, version: str = "") -> dict[str, Any]:
+    """Resolve the Source agent settings at the captured configuration boundary."""
+    effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    agents = effective.get("agents", {})
+    declared = effective.get("features", {}).get("multi_agent_v2")
+    options = declared if isinstance(declared, dict) else {}
+    version = version or source_spawn_version(config, model=model, definition=definition)
+    enabled = version != "disabled" and (config.feature_flags.enabled("multi_agent_v2") or agents.get("enabled", True))
+    total = options.get("max_concurrent_threads_per_session", agents.get("max_concurrent_threads_per_session", agents.get("max_threads", 4 if version == "v2" else 6)))
+    if isinstance(total, bool) or not isinstance(total, int) or total < 1:
+        raise ValueError("agents.max_concurrent_threads_per_session must be a positive integer")
+    limits = {name: options.get(name, default) for name, default in (
+        ("min_wait_timeout_ms", 10_000), ("max_wait_timeout_ms", 3_600_000), ("default_wait_timeout_ms", 30_000))}
+    if any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 3_600_000 for value in limits.values()):
+        raise ValueError("multi_agent_v2 wait timeouts must be integers between 0 and 3600000")
+    if not limits["min_wait_timeout_ms"] <= limits["default_wait_timeout_ms"] <= limits["max_wait_timeout_ms"]:
+        raise ValueError("multi_agent_v2 wait timeouts require min <= default <= max")
+    return {"version": version, "enabled": enabled, "max_children": total - 1 if version == "v2" else total,
+        "max_depth": agents.get("max_depth", 1), "interrupt_message": agents.get("interrupt_message", True), **limits}
+
+
 def is_legacy_read_only_role(name: str, workspace_root: str | Path | None = None, *, config: Any = None) -> bool:
     return name in {"explore", "plan"} and not isinstance(get_execution_agent(name, workspace_root, config=config), SourceAgentRole)
 

@@ -855,7 +855,7 @@ class BackgroundCommandManager:
         try:
             await command.startup_ready.wait()
         except asyncio.CancelledError:
-            await self.cancel(command_id, conversation_id=conversation_id)
+            await self.detach(command_id, conversation_id=conversation_id)
             raise
         return command
 
@@ -1087,8 +1087,12 @@ class BackgroundCommandManager:
 
     async def _cancel_unscoped(self, command_id: str) -> bool:
         task = self._tasks.get(command_id)
+        cmd = self._commands.get(command_id)
+        # The process can finish before its terminal notification is delivered.
+        # Cancelling that notifier must not reopen its proven terminal state.
+        if cmd is not None and cmd.status != "running" and not cmd.cleanup_pending:
+            return False
         if task and not task.done():
-            cmd = self._commands.get(command_id)
             if cmd:
                 cmd.cleanup_pending = True
                 cmd.cleanup_reason = "cancel_requested"
@@ -1144,7 +1148,6 @@ class BackgroundCommandManager:
                     await self._settle_cleanup(cmd)
                 await self._notify_completed_once(cmd)
             return True
-        cmd = self._commands.get(command_id)
         if cmd is not None and cmd.cleanup_pending:
             cmd.cleanup_requested_at = time.time()
             completed = await cmd.runner.cleanup() if cmd.runner is not None else True

@@ -1,5 +1,6 @@
 import { useI18n, type Translate } from "../i18n";
 import { useEffect, useRef, useState } from "react";
+import { formatHex8 } from "culori";
 import { Copy, ExternalLink, Globe, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
 import { getWebSocket } from "../hooks/useWebSocket";
@@ -8,6 +9,7 @@ import { desktop, isDesktop, ptyAckExit, ptyClear, ptyKill, ptyList, ptyResize, 
 import type { TerminalSessionInfo } from "../stores/types";
 import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { openWebInBrowser } from "../chat/openWebInBrowser";
+import { codeFontFamily, prepareThemeFonts } from "../lib/theme-fonts";
 
 type XtermLike = {
   cols: number;
@@ -39,6 +41,7 @@ type FitAddonLike = {
 type XtermWithOptions = XtermLike & {
   options: {
     theme?: Record<string, string>;
+    fontFamily?: string;
     fontSize?: number;
     convertEol?: boolean;
   };
@@ -115,37 +118,21 @@ export const terminalExitCodeLabel = (exitCode: unknown): string =>
 const terminalStatusLabel = (tr: Translate, status: TerminalSessionInfo["status"]): string =>
   status === "exited" ? tr("已退出") : tr("运行中");
 
-/**
- * xterm.js 走 canvas 渲染，读不到 CSS 变量，故此处必须是字面量 —— 但取值不是
- * 随手挑的：全部由 tokens.css 的 OKLCH 刻度换算而来，保证终端与它所嵌入的
- * 面板（容器为 --surface-base）同色相、同明度，不再出现"冷灰外壳 + 暖棕终端"
- * 的接缝。
- *   background/foreground = --surface-base / --text-secondary
- *   cursor                = --accent-primary
- *   ANSI 六色             = --state-* 同色相(28/142/78/240/305/195)，
- *                           暗色 L=0.74 C=0.13、亮档 L=0.845
- * 例外：dim 档（暗色 brightBlack、亮色 white）按刻度取值只有 ~2.6:1，读不清，
- * 故各提一档到 L=0.62 / L=0.56，使其 ≥4.5:1。全部 16 色均已验证达 AA。
- * 改动 tokens.css 的表面或状态色时，这里需要同步换算并重验对比度。
- */
 /* Font: resolve from the same tokens every other code surface uses so the
  * terminal follows --font-mono and the Appearance-tab code zoom setting. */
 const terminalFontFamily = (): string => {
-  const stack = getComputedStyle(document.documentElement).getPropertyValue("--font-mono").trim();
-  return stack || '"JetBrains Mono", Consolas, "Noto Sans SC", monospace';
+  return codeFontFamily();
 };
 
 const TERMINAL_BASE_FONT_SIZE = 13;
 
 const terminalFontSize = (): number => {
-  const codeFontPx = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--code-font-size"));
-  if (!Number.isFinite(codeFontPx) || codeFontPx <= 0) return TERMINAL_BASE_FONT_SIZE;
-  // Terminal base is 13px against the 15px code base; keep that ratio under zoom.
-  return Math.max(9, Math.round((TERMINAL_BASE_FONT_SIZE * codeFontPx) / 15));
+  return Math.max(9, Math.round(TERMINAL_BASE_FONT_SIZE * useAppStore.getState().codeTextScale));
 };
 
-const terminalTheme = (isLight: boolean): Record<string, string> => (
-  isLight
+const terminalTheme = (isLight: boolean): Record<string, string> => {
+  // Keep the default ANSI palette; selected chrome colors also reach xterm's canvas.
+  const palette = isLight
     ? {
         background: "#ffffff",
         foreground: "#191b1d",
@@ -189,8 +176,13 @@ const terminalTheme = (isLight: boolean): Record<string, string> => (
         brightMagenta: "#ddb9ff",
         brightCyan: "#60e4e3",
         brightWhite: "#fcfdff",
-      }
-);
+      };
+  if (useAppStore.getState().appearanceColors[isLight ? "light" : "dark"] === null) return palette;
+  const style = getComputedStyle(document.documentElement);
+  const color = (token: string) => formatHex8(style.getPropertyValue(token).trim())!;
+  return { ...palette, background: color("--surface-base"), foreground: color("--text-primary"),
+    cursor: color("--accent-primary"), selectionBackground: color("--editor-selection") };
+};
 
 export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) => {
   const { t: tr } = useI18n();
@@ -284,10 +276,19 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
     };
   }, []);
 
+  const appearanceColors = useAppStore((s) => s.appearanceColors);
+  const appearanceThemes = useAppStore((s) => s.appearanceThemes);
   useEffect(() => {
-    const theme = terminalTheme(resolvedTheme === "light");
-    for (const view of terminalViewsRef.current.values()) view.term.options.theme = theme;
-  }, [resolvedTheme]);
+    let current = true;
+    const apply = () => {
+      if (!current) return;
+      const theme = terminalTheme(resolvedTheme === "light");
+      for (const view of terminalViewsRef.current.values()) { view.term.options.theme = theme; view.term.options.fontFamily = terminalFontFamily(); }
+      void redrawActiveSession(); safeFit();
+    };
+    void prepareThemeFonts(appearanceThemes[resolvedTheme]?.fonts).then(apply);
+    return () => { current = false; };
+  }, [resolvedTheme, appearanceColors, appearanceThemes]);
 
   // Follow the Appearance-tab code zoom: xterm needs a numeric px, so re-read
   // the scaled token and re-fit the grid.
@@ -844,10 +845,15 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
     }
   };
 
-  const redrawActiveSession = () => {
+  const redrawActiveSession = async () => {
     const modules = terminalModulesRef.current;
     if (!modules || !containerRef.current) return;
+    const requested = useAppStore.getState();
+    const fonts = requested.appearanceThemes[requested.resolvedTheme]?.fonts;
+    await prepareThemeFonts(fonts);
+    if (!containerRef.current) return;
     const state = useAppStore.getState();
+    if (fonts !== state.appearanceThemes[state.resolvedTheme]?.fonts) return;
     const owner = state.conversationId || "";
     const sessionId = activeRef.current;
     const key = sessionId || `fallback:${owner}`;

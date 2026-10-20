@@ -97,6 +97,8 @@ def test_relative_hook_worktree_removal_uses_its_context_root(tmp_path, monkeypa
 def recorded_git(tmp_path, monkeypatch):
     repository = tmp_path / "repo"
     (repository / ".git").mkdir(parents=True)
+    from backend.services.worktree_settings_service import WorktreePreferences, update_worktree_preferences
+    update_worktree_preferences(WorktreePreferences(worktree_root=str(repository / ".minicode" / "worktrees")))
     captures = []
     class Runner:
         def __init__(self, policy, *, env_filter=None):
@@ -266,6 +268,8 @@ def test_worktree_cancellation_keeps_worker_until_git_cleanup_finishes(recorded_
 def test_public_worktree_create_snapshot_restore_in_a_private_repository(tmp_path, monkeypatch):
     repository = tmp_path / "repo"
     repository.mkdir()
+    from backend.services.worktree_settings_service import WorktreePreferences, update_worktree_preferences
+    update_worktree_preferences(WorktreePreferences(worktree_root=str(repository / ".minicode" / "worktrees")))
     def git(*args):
         return subprocess.run(["git", *args], cwd=repository, capture_output=True, check=True)
     git("init")

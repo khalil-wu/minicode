@@ -408,6 +408,7 @@ async def _resolve_subagent_llm(
     role_requested: bool = True,
     resume_source_role: bool = False,
     resumed_role_name: str | None = None,
+    multi_agent_version: str = "",
     _apply_source_role: bool = True,
 ) -> _SubagentLLMResolution:
     """Resolve one child using the live parent config and ModelRuntime.
@@ -453,7 +454,7 @@ async def _resolve_subagent_llm(
             or "off"
         ).strip().lower()
 
-    spawn_version = source_spawn_version(parent_config, model=parent_model, definition=snapshot.model_info if snapshot is not None else None)
+    spawn_version = multi_agent_version or (run_context.multi_agent_version if run_context is not None else "") or source_spawn_version(parent_config, model=parent_model, definition=snapshot.model_info if snapshot is not None else None)
     roles = load_source_agent_roles(parent_config.config_layer_stack)
     source_role_name = resumed_role_name if resume_source_role else (agent_type if role_requested else (
         "default" if spawn_version == "v2" and fork_turns != "all" and "default" in roles and roles["default"].config_file is not None else None))
@@ -865,6 +866,7 @@ def _subagent_metadata(raw: dict[str, Any] | None) -> dict[str, Any]:
         "teammate_name": teammate_name,
         "teammate_id": str(raw.get("teammate_id") or "").strip(),
         "plan_slug": str(raw.get("plan_slug") or "").strip(),
+        **{key: raw[key] for key in ("task_name", "fork_turns") if key in raw},
     }
 
 
@@ -970,11 +972,12 @@ def _normalize_fork_turns(raw: Any) -> str:
 def _fork_snapshot_for_child(
     parent_metadata: dict[str, Any],
     fork_turns: str,
+    *, parent_builder: Any = None,
 ) -> dict[str, Any] | None:
     mode = _normalize_fork_turns(fork_turns)
     if mode == "none":
         return None
-    parent_builder = parent_metadata.get("_context_builder")
+    parent_builder = parent_builder if parent_builder is not None else parent_metadata.get("_context_builder")
     export_snapshot = getattr(parent_builder, "export_snapshot", None)
     if not callable(export_snapshot):
         raise ValueError(

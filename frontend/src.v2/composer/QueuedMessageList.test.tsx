@@ -24,17 +24,20 @@ import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { QueuedMessageList } from "./QueuedMessageList";
 import type { DiffCommentContextRef } from "../stores/types";
+import { pushToast } from "../overlays/ToastContainer";
 
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true) }));
+vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 describe("QueuedMessageList", () => {
   beforeEach(() => {
     vi.mocked(sendClientCommand).mockClear();
+    vi.mocked(pushToast).mockClear();
     useAppStore.setState({
       conversationId: "conv-queue",
       isStreaming: true,
       messages: [
-        { id: "assistant-active", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true },
+        { id: "assistant-active", turnId: "turn-active", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true },
         { id: "user-three", role: "user", content: "third request", artifacts: [], timestamp: 3, queueState: "queued", queuePosition: 2, queueMessageId: "assistant-three" },
         { id: "assistant-three", role: "assistant", content: "", artifacts: [], timestamp: 3, queueState: "queued", queuePosition: 2, queueMessageId: "assistant-three" },
         { id: "user-two", role: "user", content: "second request", artifacts: [], timestamp: 2, queueState: "queued", queuePosition: 1, queueMessageId: "assistant-two" },
@@ -50,15 +53,15 @@ describe("QueuedMessageList", () => {
       kind: "diff_comment", name: path, path, comment: { type: "comment", position: { path, side: "right", line: 100 },
         content: [{ content_type: "text", text: "original scoped comment" }], localDiffHunk: "@@ -1 +100 @@\n-old\n+new" },
     }));
-    useAppStore.setState({ messages: [{ id: "comment-user", role: "user", content, artifacts: [], timestamp: 1,
-      contextRefs: refs, queueState: "queued", queuePosition: 1, queueMessageId: "comment-assistant" }] });
+    useAppStore.setState(state => ({ messages: [state.messages[0], { id: "comment-user", role: "user", content, artifacts: [], timestamp: 1,
+      contextRefs: refs, queueState: "queued", queuePosition: 1, queueMessageId: "comment-assistant" }] }));
     render(<QueuedMessageList />);
     expect(screen.getByText(content || "2 条评论")).toBeTruthy();
     expect(screen.queryByText("Attachment")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "引导" }));
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "user_message.queue.steer", conversation_id: "conv-queue",
-      message_id: "comment-assistant", user_message_id: "comment-user" });
-    expect(useAppStore.getState().messages[0].contextRefs).toEqual(refs);
+      message_id: "comment-assistant", user_message_id: "comment-user", expected_turn_id: "turn-active" });
+    expect(useAppStore.getState().messages.find(message => message.id === "comment-user")?.contextRefs).toEqual(refs);
   });
 
   it("keeps stopped inputs visible and offers explicit queue continuation", () => {
@@ -71,7 +74,7 @@ describe("QueuedMessageList", () => {
     expect(sendClientCommand).not.toHaveBeenCalled();
     fireEvent.click(screen.getAllByRole("button", { name: "发送" })[0]);
     expect(sendClientCommand).toHaveBeenCalledWith({
-      type: "user_message.queue.steer", conversation_id: "conv-queue",
+      type: "user_message.queue.start", conversation_id: "conv-queue",
       message_id: "assistant-two", user_message_id: "user-two",
     });
   });
@@ -94,6 +97,7 @@ describe("QueuedMessageList", () => {
       conversation_id: "conv-queue",
       message_id: "assistant-three",
       user_message_id: "user-three",
+      expected_turn_id: "turn-active",
     });
 
     fireEvent.click(screen.getByRole("button", { name: "删除排队消息 2" }));
@@ -103,5 +107,26 @@ describe("QueuedMessageList", () => {
       message_id: "assistant-two",
       user_message_id: "user-two",
     });
+  });
+
+  it("rejects steering before run-start supplied a real turn and preserves the queue", () => {
+    useAppStore.setState(state => ({ draft: "keep draft", messages: state.messages.map(message => message.id === "assistant-active"
+      ? { ...message, turnId: undefined } : message) }));
+    const messages = useAppStore.getState().messages;
+    render(<QueuedMessageList />);
+    fireEvent.click(screen.getAllByRole("button", { name: "引导" })[0]);
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("回合标识"), "warning");
+    expect(useAppStore.getState()).toMatchObject({ messages, draft: "keep draft" });
+  });
+
+  it("captures the actual current turn for a paused queue item without taking its message id as the turn", () => {
+    useAppStore.setState(state => ({ messages: state.messages.map(message => ({ ...message,
+      ...(message.id === "assistant-active" ? { turnId: "new-real-turn" } : {}), queuePaused: message.queueState === "queued" })) }));
+    render(<QueuedMessageList />);
+    fireEvent.click(screen.getAllByRole("button", { name: "引导" })[0]);
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "user_message.queue.steer", conversation_id: "conv-queue",
+      message_id: "assistant-two", user_message_id: "user-two", expected_turn_id: "new-real-turn" });
+    expect(useAppStore.getState().messages.find(message => message.id === "user-two")?.queueState).toBe("queued");
   });
 });

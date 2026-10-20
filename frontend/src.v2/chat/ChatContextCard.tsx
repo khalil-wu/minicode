@@ -385,7 +385,8 @@ export const ChatContextCard = () => {
         setBrowserTargets((current) => current.filter((target) => target.id !== event.id));
         return;
       }
-      if (!event.url || event.url === "about:blank" || event.type === "new-tab-request") return;
+      if (!event.url || event.url === "about:blank" || event.type === "new-tab-request"
+        || event.type === "numbered-shortcut" || event.type === "external-link-request") return;
       setBrowserTargets((current) => {
         const nextTarget = { ...event, active: true };
         const existing = current.some((target) => target.id === event.id);

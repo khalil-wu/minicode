@@ -241,13 +241,14 @@ describe("overlay transaction chains", () => {
     expect(screen.getByRole("button", { name: "重启并安装" })).toBeTruthy();
     expect(screen.queryByText(/old read failed/)).toBeNull();
   });
-  it("opens the actual Git workspace destination and leaves settings", async () => {
+  it("keeps Git preferences in settings without an extra workspace launcher", () => {
+    const before = useAppStore.getState().activeBottomTab;
     render(<WorkspaceGitTab />);
-    fireEvent.click(await screen.findByRole("button", { name: "打开 Git 工作区" }));
-    expect(useAppStore.getState().activeBottomTab).toBe("git");
-    expect(useAppStore.getState().dockCollapsed).toBe(false);
-    expect(useAppStore.getState().settingsOpen).toBe(false);
+    expect(screen.getByRole("textbox", { name: "分支前缀" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "打开 Git 工作区" })).toBeNull();
+    expect(useAppStore.getState().activeBottomTab).toBe(before);
   });
+
   it("opens automations through the actual settings scheduler destination", () => {
     useAppStore.setState({ settingsOpen: false });
     openAutomations();

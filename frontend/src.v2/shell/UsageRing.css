@@ -16,4 +16,4 @@
 .mc-usage-details-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--usage-segment-color); }
 .mc-usage-details-segment > span:last-child { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 @keyframes mc-usage-details-in { from { opacity: 0; } to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) { .mc-usage-details { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { html:not([data-reduced-motion="false"]) .mc-usage-details { animation: none !important; } }

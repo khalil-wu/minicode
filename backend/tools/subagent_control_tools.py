@@ -11,6 +11,7 @@ from backend.tools.agent_control_plane import (
     AgentTreeScope,
     canonical_agent_operation,
 )
+from backend.tools.collaboration_tools import wait_for_coordination
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.subagent_result import full_subagent_result
 from backend.tools.subagent_runtime import require_runtime_from_context
@@ -293,10 +294,7 @@ class TaskStatusTool(BaseTool):
                 except (TypeError, ValueError):
                     wait_seconds = 0.0
                 if wait_seconds:
-                    await control.wait_for_any(
-                        subagent_ids,
-                        timeout_seconds=wait_seconds,
-                    )
+                    await wait_for_coordination(context, agent_ids=subagent_ids, timeout_seconds=wait_seconds)
                 results = await asyncio.gather(*(
                     self.execute({**child_args, "subagent_id": subagent_id}, context=context)
                     for subagent_id in subagent_ids
@@ -364,10 +362,7 @@ class TaskStatusTool(BaseTool):
         except (TypeError, ValueError):
             wait_seconds = 0.0
         if wait_seconds:
-            await control.wait_for_one(
-                subagent_id,
-                timeout_seconds=wait_seconds,
-            )
+            await wait_for_coordination(context, agent_ids=[subagent_id], timeout_seconds=wait_seconds)
         snapshot = control.subagent_snapshot(
             subagent_id,
             include_result=include_result,

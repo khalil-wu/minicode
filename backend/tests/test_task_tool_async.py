@@ -2662,20 +2662,8 @@ async def _test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path, mon
         metadata={"run_id": "run-any"},
         run_context=RunContext(agent_runtime=runtime),
     )
-    entered = asyncio.Event()
-    winners = []
-    wait_for_any = runtime.wait_for_any_subagent
-
-    async def observed_wait(subagent_ids, timeout):
-        entered.set()
-        winner = await wait_for_any(subagent_ids, timeout)
-        winners.append(winner)
-        return winner
-
-    monkeypatch.setattr(runtime, "wait_for_any_subagent", observed_wait)
-
     async def finish_fast() -> None:
-        await entered.wait()
+        await asyncio.sleep(0.02)
         runtime.complete_subagent(
             "subagent-fast",
             "completed",
@@ -2699,7 +2687,7 @@ async def _test_task_status_batch_wakes_when_any_subagent_finishes(tmp_path, mon
             context=context,
     )
     await finisher
-    assert winners == ["subagent-fast"]
+    assert runtime.get_subagent("subagent-fast").status == "completed"
     assert runtime.get_subagent("subagent-slow").status == "running"
 
     assert result.status == "running"

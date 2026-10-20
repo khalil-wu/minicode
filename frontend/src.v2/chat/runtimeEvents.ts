@@ -34,10 +34,10 @@ import { addInspectorPayload } from "./inspectorEntries";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { normalizeContextLedger } from "./contextLedger";
 import { hydrateMessages, type BackendTranscriptMessage } from "./transcriptHydration";
-import { LS, writeLS, updateMessagesForConversation } from "../stores/shared-helpers";
+import { LS, writeLS, updateMessagesForConversation, isInFlightProjection } from "../stores/shared-helpers";
 import { isTerminalToolCallStatus, isToolDelegations } from "../lib/tool-call-reducer";
-import { getToolCallsFromMessage } from "../lib/content-blocks";
-import { applyToolDelegation, applySubagentTranscriptEvents } from "./subagentTranscript";
+import { getToolCallsFromMessage, isCodeCellToolFact } from "../lib/content-blocks";
+import { applyToolDelegation, applySubagentTranscriptEvents, isHistoricCodeCellProgress } from "./subagentTranscript";
 import { eventMessageId } from "../lib/identity";
 import { adoptGeneratedConversation } from "./conversationAdoption";
 import { capturePendingUserMessageStart } from "./sendChatMessage";
@@ -510,7 +510,7 @@ const canApplyLateTerminalEvent = (
   if (!targetId) return false;
   const messages = runtimeMessagesForConversation(targetId);
   const matchingAssistant = assistantForMessage(targetId, messageId);
-  if (!matchingAssistant?.terminalStatus) return false;
+  if (!matchingAssistant || (!matchingAssistant.terminalStatus && eventType !== "agent.run.completed")) return false;
   return !messages.some((message) =>
     message.role === "assistant"
     && message.id !== messageId
@@ -862,10 +862,12 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         event: "runtime.span",
       });
       if (ev.event === "tool.started" && ev.tool_call_id && ev.started_at != null) {
-        const record = runtimeMessagesForConversation(conversationId)
-          .filter(message => message.id === ev.message_id)
-          .flatMap(getToolCallsFromMessage)
+        const message = runtimeMessagesForConversation(conversationId).find(message => message.id === ev.message_id);
+        const record = (message ? getToolCallsFromMessage(message) : [])
           .find(candidate => candidate.id === ev.tool_call_id && candidate.commandPresentation);
+        if (message?.terminalStatus && !isCodeCellToolFact(message, {
+          id: ev.tool_call_id, turnId: ev.turn_id, callSource: ev.call_source,
+        }, "update")) return true;
         if (record && !isTerminalToolCallStatus(record.status)) s.updateToolCall(record.id, {
           executionStartedAt: record.executionStartedAt ?? ev.started_at,
           status: "running", transition: "running", waitingOn: undefined, blockingReason: undefined,
@@ -904,12 +906,18 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (ev.type === "agent.run.completed") {
         // The durable runtime completion is authoritative even when the
         // transport-level `done` envelope was lost during disconnect/replay.
-        // Only the active assistant is eligible; a late completion for an
-        // already sealed turn remains inspector metadata and cannot close a
-        // newer turn.
+        // An exact assistant may already be idle after a session snapshot.
+        // That ownership flag is not a terminal fence; this real outcome can
+        // still seal it, while mismatched/sealed/newer turns stay untouched.
         const owner = String(ev.conversation_id || conversationId || "").trim();
         const targetMessageId = runMessageId || undefined;
-        if (owner && targetMessageId && hasStreamingAssistantForMessage(owner, targetMessageId)) {
+        const target = targetMessageId ? assistantForMessage(owner, targetMessageId) : undefined;
+        const turnId = eventTurnIdentity(e);
+        if (owner && targetMessageId && target
+          && (!target.turnId || !turnId || target.turnId === turnId)
+          && (!target.terminalStatus || isInFlightProjection(target))
+          && !runtimeMessagesForConversation(owner).some(message => message.role === "assistant"
+            && message.id !== targetMessageId && (message.isStreaming || message.isThinkingStreaming))) {
           const rawStatus = String(ev.status || "completed").trim().toLowerCase();
           const terminalStatus = rawStatus === "partial"
             ? "partial" as const
@@ -1275,6 +1283,19 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         ? currentState.conversationAgentStates?.[conversationId]?.subagents ?? []
         : currentState.subagents;
       const existing = visibleSubagents.find((subagent) => subagent.id === subagentId);
+      // A session-owned cell can publish after this child has finished or
+      // started another turn. Its envelope still describes the old execution;
+      // only the canonical journal may change, never the current worker state.
+      if (existing && ev.call_source?.kind === "code_mode"
+        && (!existing.agentPath || existing.agentPath === ev.agent_path)
+        && (isHistoricCodeCellProgress(existing.transcriptMessages ?? [], ev)
+          || isTerminalSubagentStatus(existing.status)
+          || (typeof ev.mailbox_epoch === "number" && typeof existing.mailboxEpoch === "number"
+            && ev.mailbox_epoch < existing.mailboxEpoch))) {
+        const patch = ev.transcript_delta?.kind === "events" ? transcriptDeltaPatch(ev, existing) : {};
+        if ("transcriptSeq" in patch) s.updateSubagent(subagentId, patch, conversationId);
+        return true;
+      }
       if (isStaleSubagentIncarnation(
         existing,
         ev as unknown as Record<string, unknown>,

@@ -78,6 +78,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
         _conversation_projection_lock=lambda cid: projection_lock, conversation_repo=repo,
         _extension_shutdown_requested=False, active_conversation_id=conversation.id,
         session_id="admission-audit", send_event=send_event, start_agent_run=start,
+        _conversation_streams={conversation.id: stream_state},
         ws_manager=None,
         running_agent_task_for=lambda cid: None,
         session_lifecycle=SimpleNamespace(schedule_task_runtime_update=lambda: None),
@@ -92,7 +93,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
                      and node.name in {"_commit_turn_admission", "_report_turn_admission", "_publish_turn_admission", "_partial_turn_message", "_flush_pending_reasoning", "_write_partial_turn"}]
         namespace = dict(vars(agent_runner))
         namespace.update(
-            self=session, parent_notification_only=False, conversation=conversation,
+            self=session, parent_notification_only=False, internal_turn=False, conversation=conversation,
             run_metadata={"user_message_id": "user-main", "client_command_id": "command-main", "run_id": "run-main",
                 "_client_queue_key": "admission-audit", "assistant_message_id": "assistant-input"},
             user_message="accepted request", normalized_attachments=[], persisted_context_refs=[],
@@ -184,8 +185,9 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
         assert len(started) == 1
         assert started[0]["metadata"]["_turn_admission_restored"] is True
         if steered:
-            manager.turn_input_queue(conversation.id)
-            manager.enqueue_user_message_as_steer(conversation.id, original)
+            manager.turn_input_queue(conversation.id).begin_turn("run-main")
+            manager.run_tasks[conversation.id] = object()
+            manager.enqueue_user_message_as_steer(conversation.id, original, expected_turn_id="run-main")
             manager.turn_input_queue(conversation.id).pop_steer()
         await namespace["_report_turn_admission"](boundary_input=boundary)
         if steered:

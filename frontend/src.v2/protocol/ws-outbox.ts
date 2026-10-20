@@ -82,7 +82,7 @@ export const sendConversationDeleteCommand = async (
   );
   try {
     const result = await resultPromise;
-    if (commandResultSucceeded(result)) return true;
+    if (commandResultSucceeded(result) && result.data?.deleted !== false) return true;
     pushToast(result.message || "会话删除失败，请稍后重试。", "error", 6000);
     return false;
   } catch (error) {

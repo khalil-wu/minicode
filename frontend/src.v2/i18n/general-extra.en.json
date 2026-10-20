@@ -1,0 +1,21 @@
+{
+  "当前任务尚未提供回合标识，无法引导；请稍后重试。": "The current task has not supplied a turn ID yet. Try steering it again shortly.",
+  "开源许可证": "Open source licenses",
+  "已打包依赖的第三方声明。": "Third-party notices for bundled dependencies",
+  "正在读取许可证…": "Loading licenses…",
+  "底部面板": "Bottom panel",
+  "默认终端位置": "Default terminal location",
+  "底部": "Bottom",
+  "右侧": "Right",
+  "选择终端快捷键和环境动作打开终端标签页的位置。": "Choose where the terminal shortcut and environment actions open terminal tabs",
+  "纯文本输入": "Plain text composer",
+  "编写消息时，将代码、Markdown 和链接保留为字面文本。": "Keep code, Markdown, and links as literal text while writing messages",
+  "在应用顶部显示底部面板入口。": "Show the bottom panel control in the app header",
+  "登录时启动": "Launch at login",
+  "正在检查启动状态…": "Checking startup status…",
+  "启动状态不可用": "Startup status unavailable",
+  "已关闭": "Off",
+  "打开启动应用": "Open Startup Apps",
+  "允许 MiniCode 使用已安装的插件。": "Allow MiniCode to use installed plugins",
+  "重启 MiniCode 以完整应用此更改。": "Restart MiniCode to fully apply this change"
+}

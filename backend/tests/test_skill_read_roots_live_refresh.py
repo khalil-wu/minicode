@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from backend.agent.loop import run_agent_loop
+from backend.agent.loop_session import AgentLoopSessionContext
+from backend.agent.query_engine import AgentSession, QueryEngine, QuerySubmission
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings
+from backend.config import AgentSettings, PermissionSettings, TokenBudget
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
@@ -72,20 +73,27 @@ def test_skill_directory_stays_readable_after_a_live_permission_refresh(tmp_path
 
     async def run() -> list:
         events = []
-        async for event in run_agent_loop(
-            user_message="use the browser skill",
+        artifacts = ArtifactStore(storage_dir=str(root / "artifacts"))
+        session = AgentSession(
             llm=_ReadSkillThenAnswerLLM(skill_file),
-            tool_registry=build_tool_registry(
-                artifact_store=ArtifactStore(storage_dir=str(root / "artifacts")),
-            ),
-            artifact_store=ArtifactStore(storage_dir=str(root / "artifacts")),
+            tool_registry=build_tool_registry(artifact_store=artifacts),
+            artifact_store=artifacts,
             permission_checker=checker,
-                agent_settings=AgentSettings(max_iterations=3, code_mode_only=False),
-            permission_context=session_context,
-            skill_manager=skill_manager,
-            metadata={"permission_context_provider": lambda: session_context},
-        ):
-            events.append(event)
+            agent_settings=AgentSettings(max_iterations=3, code_mode_only=False),
+            token_budget=TokenBudget(),
+        )
+        try:
+            async for event in QueryEngine().submit(QuerySubmission(
+                user_message="use the browser skill", session=session,
+                runtime=AgentLoopSessionContext(
+                    permission_context=session_context, skill_manager=skill_manager,
+                    workspace_root=workspace,
+                    metadata={"permission_context_provider": lambda: session_context},
+                ),
+            )):
+                events.append(event)
+        finally:
+            await session.aclose()
         return events
 
     events = asyncio.run(run())

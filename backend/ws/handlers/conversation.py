@@ -1626,6 +1626,12 @@ async def _handle_conversation_delete_fenced(session: "WebSocketSession", data: 
         )
         return True
 
+    if request.storage_review is not None:
+        from backend.services.storage_settings_service import storage_review_changed
+        if await to_thread_cancel_safe(storage_review_changed, session.conversation_repo, request.conversation_id, request.storage_review):
+            await session.emit_command_result("conversation.delete", "Chat changed after storage review; it was kept.",
+                                              level="warning", data={"conversation_id": request.conversation_id, "deleted": False, "reason": "storage_review_changed"})
+            return True
     owner_sessions = _all_resource_sessions(session)
     stop_results = []
     for owner_session in owner_sessions:
@@ -2283,6 +2289,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                     manager.remove_worktree,
                     worktree_path,
                     force=True,
+                    run_environment=False,
                 ))
             except Exception as exc:
                 removed = False
@@ -2401,6 +2408,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                 source_path,
                 branch=branch,
                 new_branch=False,
+                run_environment=False,
             )
             if not recreated:
                 checkout_rollback_errors.append("create_worktree:failed")
@@ -2463,6 +2471,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                         source_path,
                         branch=branch,
                         new_branch=False,
+                        run_environment=False,
                     ))
                 except Exception as exc:
                     rollback_errors.append(f"recreate_worktree:{exc}")
@@ -3450,6 +3459,14 @@ async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[s
         return True
 
     current_goal = dict(getattr(target, "goal", {}) or {})
+    run_context = session.run_manager.context_for(conversation_id)
+    if run_context is not None:
+        from backend.services.goal_runtime import GoalTurnAccounting
+        if run_context.goal_accounting is None:
+            run_context.goal_accounting = GoalTurnAccounting(session.conversation_repo, conversation_id)
+        accounted = run_context.goal_accounting.account()
+        if accounted is not None:
+            current_goal = accounted
     action = prepare_goal_action(
         data,
         conversation_id=conversation_id,
@@ -3472,10 +3489,22 @@ async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[s
     updated = None
     projection_errors: list[str] = []
     if action.should_update:
-        updated = session.conversation_repo.update_goal(conversation_id, action.next_goal)
+        async with session._conversation_projection_lock(conversation_id):
+            kind = str(data.get("action") or "set").strip().lower()
+            clear = kind in {"clear", "delete", "reset"}
+            context_builder = run_context.context_builder if run_context is not None else None
+            recorded, instruction = session.conversation_repo.append_user_goal_update(conversation_id,
+                objective=action.next_goal["text"] if not clear and kind not in {"pause", "resume"} else None,
+                status="paused" if kind == "pause" else "active" if kind == "resume" else None,
+                clear=clear, context_builder=context_builder)
+            if recorded is not None and run_context is not None:
+                run_context.goal_accounting.pending_user_updates.append(instruction)
+            updated = session.conversation_repo.update_goal(conversation_id, action.next_goal) if recorded is not None else None
         if updated is None:
             await session.emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
             return True
+        if run_context is not None:
+            run_context.goal_accounting.apply_external_update(updated.goal, current_goal)
         if action.event_scope == "active":
             for owner_session in _all_live_sessions(session):
                 if conversation_id != owner_session.active_conversation_id:
@@ -3489,6 +3518,7 @@ async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[s
                     revision=int(getattr(updated, "revision", 0) or 0),
                 )
         projection_errors = await _broadcast_conversation_lists(session)
+        session.schedule_next_queued_user_message(conversation_id)
 
     outcome_data = dict(action.outcome.data or {})
     if updated is not None:

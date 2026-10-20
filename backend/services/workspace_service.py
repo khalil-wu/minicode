@@ -258,8 +258,11 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
         return authority.resolve_access(path).can_read and not any(path.is_relative_to(denied) for denied in denied_roots)
 
     readable = [root]
-    if root.parent.name == "worktrees" and root.parent.parent.name == ".minicode":
-        original = root.parents[2]
+    from backend.services.worktree_settings_service import managed_worktree_record
+    managed = managed_worktree_record(root)
+    legacy = root.parent.name == "worktrees" and root.parent.parent.name == ".minicode"
+    if managed is not None or legacy:
+        original = Path(managed["repo_root"]) if managed is not None else root.parents[2]
         metadata = (original / ".git").resolve()
         registry = metadata / "worktrees"
         if (is_workspace_trusted(original) and metadata.is_relative_to(original)
@@ -364,7 +367,7 @@ def main_worktree_root(path: Path) -> Path:
             # The original owner was admitted by its trusted worktree registry,
             # not inferred from an untrusted checkout's .git pointer or a
             # container alias for the metadata directory's parent.
-            return root.parents[2]
+            return policy.readable_roots[1].parent
         result = run_readonly_git(root, "worktree", "list", "--porcelain", sandbox_policy=policy)
         result.check_returncode()
     except Exception:

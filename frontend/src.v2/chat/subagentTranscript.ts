@@ -1,5 +1,6 @@
 import type { ChatMessage, ContentBlock } from "../stores/types";
-import type { SubagentTranscriptEventsDelta } from "../protocol/streaming-types";
+import type { SubagentProgressEvent, SubagentTranscriptEventsDelta } from "../protocol/streaming-types";
+import { getToolCallsFromMessage, isCodeCellToolFact } from "../lib/content-blocks";
 import { mergeToolDelegations, type ToolDelegation } from "../lib/tool-call-reducer";
 import { hydrateMessages, toToolCallRecord } from "./transcriptHydration";
 
@@ -14,6 +15,19 @@ export function applyToolDelegation(messages: ChatMessage[], messageId: string, 
   return updated;
 }
 
+/** Cell envelopes keep their original execution metadata, even in one mailbox epoch. */
+export function isHistoricCodeCellProgress(messages: ChatMessage[], event: SubagentProgressEvent): boolean {
+  const source = event.call_source;
+  if (source?.kind !== "code_mode") return false;
+  const delta = event.transcript_delta;
+  return messages.some(message => message.role === "assistant" && !message.isStreaming && !message.isThinkingStreaming
+    && (getToolCallsFromMessage(message).some(record => record.id === source.parent_call_id || record.id === event.tool_call_id)
+      || (delta?.kind === "events" && delta.events.some(fact => {
+        const record = toToolCallRecord(fact.event_type === "tool_use" ? fact.payload.tool_call : fact.payload.record);
+        return record?.callSource?.kind === "code_mode" && record.turnId === message.turnId;
+      }))));
+}
+
 /** Apply published journal facts only. Missing ownership/offset means read the
  * authoritative child transcript; it must never advance the local cursor. */
 export function applySubagentTranscriptEvents(messages: ChatMessage[], delta: SubagentTranscriptEventsDelta): ChatMessage[] | null {
@@ -23,12 +37,12 @@ export function applySubagentTranscriptEvents(messages: ChatMessage[], delta: Su
     if (next[index].role === "assistant" && next[index].isStreaming) { current = index; break; }
   }
   const setMessage = (message: ChatMessage) => { next[current] = message; };
-  const upsertBlock = (block: ContentBlock, matches: (previous: ContentBlock) => boolean) => {
-    const message = next[current];
+  const upsertBlock = (block: ContentBlock, matches: (previous: ContentBlock) => boolean, index = current) => {
+    const message = next[index];
     const blocks = [...(message.blocks ?? [])];
     const at = blocks.findIndex(matches);
     if (at >= 0) blocks[at] = block; else blocks.push(block);
-    setMessage({ ...message, blocks });
+    next[index] = { ...message, blocks };
   };
   for (const event of delta.events) {
     const payload = event.payload;
@@ -42,6 +56,9 @@ export function applySubagentTranscriptEvents(messages: ChatMessage[], delta: Su
     if (event.event_type === "system" && payload.lifecycle === "turn_started") {
       const turnId = payload.turn_id as string;
       const id = `subagent-turn-${turnId || event.event_id}`;
+      if (current >= 0 && next[current].id !== id) {
+        next[current] = { ...next[current], isStreaming: false, isThinkingStreaming: false };
+      }
       current = next.findIndex(message => message.id === id);
       if (current < 0) {
         current = next.length;
@@ -58,28 +75,39 @@ export function applySubagentTranscriptEvents(messages: ChatMessage[], delta: Su
       else next.push(user);
       continue;
     }
+    if (event.event_type === "tool_use" || event.event_type === "tool_result") {
+      const incoming = toToolCallRecord(event.event_type === "tool_use" ? payload.tool_call : payload.record);
+      const index = incoming?.callSource?.kind === "code_mode"
+        ? next.findIndex(message => message.role === "assistant" && message.turnId === incoming.turnId)
+        : current;
+      if (index < 0) return null;
+      const message = next[index];
+      if ((index !== current || !message.isStreaming) && (!incoming
+        || !isCodeCellToolFact(message, incoming, event.event_type === "tool_use" ? "start" : "update"))) return null;
+      if (event.event_type === "tool_use") {
+        if (!incoming) return null;
+        upsertBlock({ type: "tool_call", record: incoming }, block => block.type === "tool_call" && block.record.id === incoming.id, index);
+      } else {
+        const old = message.blocks?.find(block => block.type === "tool_call" && block.record.id === payload.tool_call_id);
+        if (!old || old.type !== "tool_call" || (incoming && incoming.id !== old.record.id)) return null;
+        const record = toToolCallRecord({ ...old.record, ...(payload.record as object), args: old.record.args });
+        if (!record) return null;
+        record.startedAt = old.record.startedAt ?? record.startedAt;
+        record.delegations = mergeToolDelegations(old.record.delegations, record.delegations);
+        if (record.durationMs === undefined && record.finishedAt !== undefined && record.startedAt !== undefined) {
+          record.durationMs = Math.max(0, record.finishedAt - record.startedAt);
+        }
+        upsertBlock({ type: "tool_call", record }, block => block.type === "tool_call" && block.record.id === record.id, index);
+        if (record.supersededToolCallIds?.length) {
+          next[index] = { ...next[index], blocks: next[index].blocks?.map(block => block.type === "tool_call" && record.supersededToolCallIds!.includes(block.record.id)
+            ? { ...block, record: { ...block.record, temporaryRemoved: true, diff: undefined } } : block) };
+        }
+      }
+      continue;
+    }
     if (current < 0) return null;
     const message = next[current];
-    if (event.event_type === "tool_use") {
-      const record = toToolCallRecord(payload.tool_call);
-      if (!record) return null;
-      upsertBlock({ type: "tool_call", record }, block => block.type === "tool_call" && block.record.id === record.id);
-    } else if (event.event_type === "tool_result") {
-      const old = message.blocks?.find(block => block.type === "tool_call" && block.record.id === payload.tool_call_id);
-      if (!old || old.type !== "tool_call") return null;
-      const record = toToolCallRecord({ ...old.record, ...(payload.record as object), args: old.record.args });
-      if (!record) return null;
-      record.startedAt = old.record.startedAt ?? record.startedAt;
-      record.delegations = mergeToolDelegations(old.record.delegations, record.delegations);
-      if (record.durationMs === undefined && record.finishedAt !== undefined && record.startedAt !== undefined) {
-        record.durationMs = Math.max(0, record.finishedAt - record.startedAt);
-      }
-      upsertBlock({ type: "tool_call", record }, block => block.type === "tool_call" && block.record.id === record.id);
-      if (record.supersededToolCallIds?.length) {
-        setMessage({ ...next[current], blocks: next[current].blocks?.map(block => block.type === "tool_call" && record.supersededToolCallIds!.includes(block.record.id)
-          ? { ...block, record: { ...block.record, temporaryRemoved: true, diff: undefined } } : block) });
-      }
-    } else if (event.event_type === "progress" || event.event_type === "assistant") {
+    if (event.event_type === "progress" || event.event_type === "assistant") {
       if (event.event_type === "assistant" && payload.message_only === true) {
         setMessage({ ...message, content: String(payload.content ?? "") });
         continue;

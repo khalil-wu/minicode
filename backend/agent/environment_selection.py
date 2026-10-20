@@ -575,6 +575,7 @@ class ThreadEnvironments:
         self.manager_lease = manager_lease
         self.selected_capability_roots = deepcopy(selected_capability_roots)
         self._bindings: tuple[_ThreadBinding, ...] = ()
+        self.project_source_cwd: str | None = None
         self._follow_tasks: set[asyncio.Task[None]] = set()
         self._resolution_tasks: set[asyncio.Task[_ResolvedEnvironment]] = set()
         self._retirement_tasks: list[asyncio.Task[None]] = []

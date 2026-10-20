@@ -156,10 +156,10 @@ export function readableTimelineTitle(cell: ActivityCellState, t: Translate = ke
 }
 
 export function readableRecordLabel(record: ActivityToolRecord, t: Translate = key => key): string {
-  if (record.name === "task") return t("启动子智能体");
+  if (record.name === "task" || record.name === "spawn_agent") return t("启动子智能体");
   if (record.name === "send_message") return t("发送消息");
   if (record.name === "followup_task") return t("发送后续任务");
-  if (record.name === "task_stop") return t("停止子智能体");
+  if (record.name === "task_stop" || record.name === "interrupt_agent") return t("停止子智能体");
   if (record.name === "update_plan") return t("更新计划");
   if (isBrowserRecord(record)) {
     const action = stringArg(record.args.action).toLowerCase();
@@ -211,10 +211,10 @@ export function recordInputTarget(record: ActivityToolRecord): string {
   // Code cells compose operations; their scripts, polling ids and generated
   // input summaries are runtime instructions, not a user's work target.
   if (isCodeModeRecord(record)) return "";
-  if (name === "task") {
+  if (name === "task" || name === "spawn_agent") {
     const tasks = Array.isArray(args.parallel_tasks) ? args.parallel_tasks : [args];
     return tasks.flatMap((task) => task && typeof task === "object"
-      ? [firstString([task.name, task.description])] : []).filter(Boolean).join("、");
+      ? [firstString([task.task_name, task.name, task.description])] : []).filter(Boolean).join("、");
   }
   if (["monitor", "task_status", "task_create", "task_get", "task_list", "task_update", "task_output"].includes(name)) return firstString([args.title, args.description]);
   if (name === "read_artifact") return firstString([args.name, args.path, record.sourceUrl]);

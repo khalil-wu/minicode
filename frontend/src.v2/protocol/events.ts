@@ -113,6 +113,7 @@ export type {
   UserMessageCommand,
   UserMessageQueueCancelCommand,
   UserMessageQueueSteerCommand,
+  UserMessageQueueStartCommand,
   InterruptCommand,
   PingCommand,
   ReadArtifactCommand,
@@ -486,6 +487,7 @@ export interface UntypedClientCommand {
     | "user_message"
     | "user_message.queue.cancel"
     | "user_message.queue.steer"
+    | "user_message.queue.start"
     | "interrupt"
     | "ping"
     | "control_response"
@@ -867,6 +869,7 @@ import type {
   UserMessageCommand,
   UserMessageQueueCancelCommand,
   UserMessageQueueSteerCommand,
+  UserMessageQueueStartCommand,
   InterruptCommand,
   PingCommand,
   ReadArtifactCommand,
@@ -980,6 +983,7 @@ type ClientCommandPayload =
   | UserMessageCommand
   | UserMessageQueueCancelCommand
   | UserMessageQueueSteerCommand
+  | UserMessageQueueStartCommand
   | InterruptCommand
   | PingCommand
   | ControlResponseCommand
@@ -1170,6 +1174,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "workspace.imported",
   "workspace.recent.list",
   "env.list",
+  "pet.published",
   "git.pr_status",
   "checkpoint.created",
   "checkpoint.list",
@@ -1218,6 +1223,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "user_message",
   "user_message.queue.cancel",
   "user_message.queue.steer",
+  "user_message.queue.start",
   "review.options",
   "review.prepare",
   "review.create",

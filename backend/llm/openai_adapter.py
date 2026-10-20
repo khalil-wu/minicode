@@ -2670,6 +2670,12 @@ class OpenAIAdapter(LLMAdapter):
             declared=self._settings.supports_hosted_web_search,
         )
 
+    def hosted_web_search_supports_cached(self) -> bool:
+        return self.supports_hosted_web_search()
+
+    def hosted_web_search_supports_indexed(self) -> bool:
+        return self.supports_hosted_web_search()
+
     def _apply_model_request_options(self, payload: dict[str, Any], *, model: str, responses: bool, disable_reasoning: bool = False) -> None:
         policy = self.model_request_policy()
         if policy.model != model:
@@ -2855,6 +2861,7 @@ class OpenAIAdapter(LLMAdapter):
         *,
         size: str | None = None,
         quality: str | None = None,
+        input_images: list[tuple[str, bytes, str]] | None = None,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
     ) -> Any:
@@ -2886,6 +2893,27 @@ class OpenAIAdapter(LLMAdapter):
         ).strip()
         if requested_quality:
             payload["quality"] = requested_quality
+        if input_images:
+            payload.pop("response_format")
+            sent_payload, headers = await self._prepare_http_request(
+                payload, metadata=metadata, base_headers=self._images_headers(),
+            )
+            if wire_payload_sink is not None:
+                wire_payload_sink.clear()
+                wire_payload_sink.update(sent_payload)
+                wire_payload_sink["input_images"] = [{"filename": name, "media_type": media_type}
+                    for name, _content, media_type in input_images]
+            headers = {key: value for key, value in headers.items() if key.lower() != "content-type"}
+            files = [("image[]", (name, content, media_type)) for name, content, media_type in input_images]
+            data = {key: str(value) for key, value in sent_payload.items()}
+            async with self._http_client.stream(
+                "POST", f"{_normalized_openai_base_url(self._settings.base_url)}/images/edits",
+                headers=headers, data=data, files=files, timeout=None,
+            ) as response:
+                await emit_provider_lifecycle_response(metadata, response.status_code, response.headers)
+                await self._responses_http_raise_for_status(response)
+                await response.aread()
+                return _json_to_namespace(response.json())
         try:
             return await self._create_images_generation(
                 payload, metadata=metadata, wire_payload_sink=wire_payload_sink,
@@ -2902,6 +2930,7 @@ class OpenAIAdapter(LLMAdapter):
 
     async def generate_images(
         self, prompt: str, *, size: str | None = None, quality: str | None = None,
+        input_images: list[tuple[str, bytes, str]] | None = None,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
         turn_context: LLMTurnContext | None = None,
@@ -2914,7 +2943,7 @@ class OpenAIAdapter(LLMAdapter):
         async def complete(_messages: list[LLMMessage], *, context: LLMSideCallContext) -> list[tuple[str, str]]:
             self.annotate_side_call(context, provider=provider, model_id=image_model)
             response = await self._generate_images_response(
-                prompt, size=size, quality=quality,
+                prompt, size=size, quality=quality, input_images=input_images,
                 metadata={**(metadata or {}), **context.request_metadata()},
                 wire_payload_sink=sent_payload,
             )
@@ -5297,8 +5326,10 @@ class OpenAIAdapter(LLMAdapter):
                 )
             hosted_tool: dict[str, Any] = {
                 "type": "web_search",
-                "external_web_access": True,
+                "external_web_access": side_options.web_search_external_web_access,
             }
+            if side_options.web_search_indexed_web_access is not None:
+                hosted_tool["indexed_web_access"] = side_options.web_search_indexed_web_access
             if side_options.web_search_allowed_domains:
                 hosted_tool["filters"] = {
                     "allowed_domains": list(side_options.web_search_allowed_domains)

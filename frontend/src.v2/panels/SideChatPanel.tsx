@@ -4,10 +4,12 @@ import { ArrowDown, ArrowUp, AtSign, LoaderCircle, MessageCirclePlus, Plus, Squa
 import { useAppStore } from "../stores";
 import type { CommandResultEvent } from "../protocol/events";
 import { attachmentRefFromPayload, sendChatMessage } from "../chat/sendChatMessage";
+import { captureSteerTurnId } from "../lib/steer-command";
 import type { CodeSelectionContext, FollowUpBehavior, MessageContextRef, PermissionMode } from "../stores/types";
 import { contextReferenceLabel, openContextReference } from "../chat/contextReferenceActions";
 import { AttachmentStrip } from "../composer/AttachmentStrip";
 import { ComposerTextarea } from "../composer/ComposerTextarea";
+import { hasRichComposerContent } from "../composer/rich-composer-document";
 import { appendComposerTokenAnchor, composerTokenAtSelection, removeComposerToken, type ComposerSelection } from "../composer/inputSelection";
 import { MenuOverlay } from "../composer/MenuOverlay";
 import { QueuedMessageList } from "../composer/QueuedMessageList";
@@ -212,10 +214,11 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   const submit = () => submitWithBehavior(useAppStore.getState().followUpBehavior);
   const submitAlternateFollowUp = () => submitWithBehavior(useAppStore.getState().followUpBehavior === "queue" ? "steer" : "queue");
   const submitWithBehavior = async (busyBehavior: FollowUpBehavior) => {
-    const content = (thread?.draft ?? "").trim();
+    const expectedTurnId = busyBehavior === "steer" ? captureSteerTurnId(useAppStore.getState(), id) : undefined;
+    const content = hasRichComposerContent(thread?.richDraft, thread?.draft) ? thread!.draft.trim() : "";
     if (!thread || submitting || waitingForInput || !isConnected || !serverReady) return;
     const attachments = thread.attachments ?? [];
-    if (!content && !attachments.length) return;
+    if (!content && !attachments.length && !thread.contextRefs?.length && !hasPendingContext) return;
     if (attachments.some((attachment) => attachment.status !== "ready")) {
       pushToast(tr("请等待附件上传完成，或重试 / 移除失败的附件。"), "warning");
       return;
@@ -240,6 +243,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
         contextRefs,
         allowWhileStreaming: thread.isStreaming,
         busyBehavior,
+        expectedTurnId,
         awaitAdmission: true,
         onAdmission: event => { accepted.result = event; },
       });
@@ -247,8 +251,8 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
         if (accepted.result?.data?.native_completion === "completed") {
           useAppStore.setState(state => {
             const current = state.sideChats[id];
-            return current?.draft === thread.draft ? { sideChats: { ...state.sideChats,
-              [id]: { ...current, draft: "" },
+            return current?.draft === thread.draft && current.richDraft === thread.richDraft ? { sideChats: { ...state.sideChats,
+              [id]: { ...current, draft: "", richDraft: undefined },
             } } : state;
           });
           return;
@@ -261,7 +265,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
           const current = state.sideChats[id];
           if (!current) return state;
           return { sideChats: { ...state.sideChats, [id]: { ...current,
-            draft: current.draft === thread.draft ? "" : current.draft,
+            ...(current.draft === thread.draft && current.richDraft === thread.richDraft ? { draft: "", richDraft: undefined } : {}),
             selectedContext: current.selectedContext === thread.selectedContext ? undefined : current.selectedContext,
             contextRefs: current.contextRefs?.filter((ref) => !contextRefs.includes(ref)),
             attachments: current.attachments?.filter((attachment) => !attachments.includes(attachment)),
@@ -278,8 +282,9 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   };
 
   const sendDisabled = useMemo(
-    () => !thread || submitting || waitingForInput || !isConnected || !serverReady || (!(thread?.draft ?? "").trim() && !(thread?.attachments?.length)),
-    [isConnected, serverReady, thread, waitingForInput, submitting],
+    () => !thread || submitting || waitingForInput || !isConnected || !serverReady
+      || (!hasRichComposerContent(thread.richDraft, thread.draft) && !thread.attachments?.length && !thread.contextRefs?.length && !hasPendingContext),
+    [isConnected, serverReady, thread, waitingForInput, submitting, hasPendingContext],
   );
 
   const updateContext = (refs: MessageContextRef[]) => useAppStore.setState((state) => ({ sideChats: {
@@ -360,7 +365,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
       <div className="side-chat-composer-region" data-approval-replacement={hasPendingApproval ? "true" : "false"}>
         <QueuedMessageList ownerId={id} minimal />
         <div className="side-chat-prompt-region"><InlineAgentPrompt conversationId={id} /></div>
-        <div ref={composerRef} className="side-chat-composer composer-container" data-command-mode="false" hidden={hasPendingApproval}>
+        <div ref={composerRef} className="side-chat-composer composer-container" data-dictation-side-chat={id} data-command-mode="false" hidden={hasPendingApproval}>
           {creationError && <div role="alert" className="side-chat-creation-error">
             <span>{creationError}</span>
             <button type="button" disabled={!isConnected} onClick={() => setCreationAttempt((attempt) => attempt + 1)}>{tr("重试创建")}</button>
@@ -378,8 +383,8 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
             <button type="button" aria-label={tr("移除 {v0}", { v0: ref.name })} onClick={() => updateContext(thread.contextRefs!.filter((item) => item !== ref))}><X size={12} /></button>
           </span>)}</div>
           <AttachmentStrip conversationId={id} />
-          <ComposerTextarea value={thread.draft} conversationId={id} ariaLabel={tr("侧边对话消息")}
-            onChange={(value, selection = { start: value.length, end: value.length }) => { setDraft(id, value); refreshMentionMenu(value, selection); }}
+          <ComposerTextarea rich richDocument={thread.richDraft} documentKey={id} value={thread.draft} conversationId={id} ariaLabel={tr("侧边对话消息")}
+            onChange={(value, selection = { start: value.length, end: value.length }, rich) => { setDraft(id, value, rich); refreshMentionMenu(value, selection); }}
             onSelectionChange={refreshMentionMenu}
             selectionRequest={selectionRequest}
             onSubmit={submit} onAlternateSubmit={submitAlternateFollowUp} isResponseInProgress={thread.isStreaming}

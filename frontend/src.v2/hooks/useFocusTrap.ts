@@ -171,7 +171,10 @@ export function useEscapeKey(callback: () => void, isActive = true, scopeRef?: R
     if (!isActive) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented && (!scopeRef || activeFocusTraps.at(-1) === scopeRef.current)) {
+      const trap = activeFocusTraps.at(-1);
+      const ownsEscape = !scopeRef || (trap ? trap === scopeRef.current
+        : Boolean(scopeRef.current?.contains(e.target as Node)) || e.target === document.body || e.target === document);
+      if (e.key === 'Escape' && !e.defaultPrevented && ownsEscape) {
         e.preventDefault();
         callback();
       }

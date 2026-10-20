@@ -158,7 +158,7 @@ export function AssistantMarkdownCell({
       const current = useAppStore.getState();
       if (current.conversationId !== conversationId
         || !workspaceRootsEqual(current.workingDirectory, workspaceRoot)) return;
-      const composerTextarea = document.querySelector("[data-composer-input]") as HTMLTextAreaElement | null;
+      const composerTextarea = document.querySelector<HTMLElement>("[data-composer-input]");
       if (composerTextarea) {
         composerTextarea.focus();
       }

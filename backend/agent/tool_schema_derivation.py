@@ -39,6 +39,7 @@ WORKSPACE_REQUIRED_TOOL_PATTERNS = (
     "enter_plan_mode",
     "exit_plan_mode",
     "task",
+    "spawn_agent",
 )
 
 
@@ -102,16 +103,60 @@ def effective_toolset_policy(
     permission_mode: str,
     tool_mode: str = "code_mode",
     hosted_web_search: bool = False,
+    hosted_cached_search: bool = False,
     supports_search_tool: bool = False,
+    model_execution: Any | None = None,
+    multi_agent_version: str = "",
+    config_snapshot: Any | None = None,
 ) -> ToolsetPolicy:
     """Build the one policy used by schema, discovery, and execution."""
 
     denied = set(disabled_tools)
+    if model_execution is not None:
+        from backend.agents.source_roles import source_agent_options
+        from backend.llm.model_request_policy import source_model_request_capabilities
+        from backend.tools.collaboration_tools import SpawnAgentTool, ListAgentsTool, WaitAgentTool, InterruptAgentTool
+        from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
+        from backend.tools.sleep_tool import CurrentTimeTool
+        from backend.tools.swarm_tools import SourceSendMessageTool
+        config = model_execution.config
+        coordination = source_agent_options(config, model=model_execution.model, definition=model_execution.model_info, version=multi_agent_version)
+        v2_names = {"spawn_agent", "list_agents", "wait_agent", "interrupt_agent"}
+        legacy_names = {"task", "task_status", "task_stop", "send_message", "followup_task", "message_list",
+            "task_create", "task_list", "task_get", "task_update", "task_output", "team_create", "team_list", "team_delete"}
+        if not coordination["enabled"]:
+            denied.update(v2_names | legacy_names)
+        elif coordination["version"] == "v2":
+            if not isinstance(tool_registry.get_tool("send_message"), SourceSendMessageTool):
+                tool_registry.register(SourceSendMessageTool())
+            task = tool_registry.get_tool("task")
+            if task is not None:
+                for tool in (SpawnAgentTool(task), ListAgentsTool(), WaitAgentTool(config), InterruptAgentTool()):
+                    if tool_registry.get_tool(tool.name) is None:
+                        tool_registry.register(tool)
+            denied.add("task")
+        else:
+            denied.update(v2_names)
+        supported = source_model_request_capabilities(model_execution.model, model_execution.model_info).get("experimental_supported_tools", [])
+        if "send_user_message_async" in supported or "request_user_input_async" in supported:
+            for tool in (RequestUserInputAsyncTool(), SendMessageToUserAsyncTool()):
+                if tool_registry.get_tool(tool.name) is None:
+                    tool_registry.register(tool)
+        else:
+            denied.update({"request_user_input_async", "send_message_to_user_async"})
+        if "clock" in supported and tool_registry.get_tool("curr_time") is None:
+            tool_registry.register(CurrentTimeTool())
+        elif "clock" not in supported:
+            denied.add("curr_time")
     from backend.tools.web_tools import WebSearchTool
 
     search_tool = tool_registry.get_tool("web_search")
-    if isinstance(search_tool, WebSearchTool) and not search_tool.source_available(hosted_search=hosted_web_search):
-        denied.add("web_search")
+    if isinstance(search_tool, WebSearchTool):
+        from backend.llm.model_request_policy import resolve_web_search_mode
+        search_config = model_execution.config if model_execution is not None else config_snapshot
+        search_mode = resolve_web_search_mode(search_config, permission_mode=permission_mode) if search_config is not None else "live"
+        if search_mode == "disabled" or (search_mode == "cached" and not hosted_cached_search) or not search_tool.source_available(hosted_search=hosted_web_search):
+            denied.add("web_search")
     if (
         requires_explicit_workspace
         and workspace_root is None

@@ -1,0 +1,16 @@
+.settings-pets-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.settings-pets-heading .settings-page-note { margin-top: 6px; }
+.settings-pets-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.settings-pet-row { grid-template-columns: 64px minmax(0, 1fr) auto; gap: 12px; height: 88px; padding-block: 12px; }
+.settings-pet-row .mc-pet-sprite { align-self: center; transform: scale(.75); }
+.settings-center-main .settings-pets-card { padding-inline: 16px; }
+.settings-pet-row .settings-row-copy { gap: 2px; }
+.settings-pets-group .settings-action-button { border-color: transparent; font-weight: var(--fw-regular); }
+#root .settings-pets-group .settings-action-button { min-height: 28px; padding-inline: 8px; }
+.settings-pets-actions .settings-icon-button { border-color: transparent; background: transparent; }
+.settings-pets-card .settings-pet-row .settings-row-title { font-weight: var(--fw-medium); }
+.settings-pets-open-folder { display: inline-flex; align-items: center; gap: 4px; border-color: transparent; background: transparent; color: var(--text-muted); }
+.settings-pets-error, .settings-pets-issue { margin: 0; color: var(--text-secondary); overflow-wrap: anywhere; font-size: var(--text-xs); }
+.settings-pets-issue { padding: 10px 16px; }
+.settings-pet-size { width: 160px; height: 3px; accent-color: #339cff; cursor: pointer; justify-self: end; }
+@media (max-width: 760px) { .settings-pets-heading { flex-wrap: wrap; } .settings-pet-row { gap: 10px; } }

@@ -54,6 +54,7 @@ def test_sync_keeps_the_page_cursor_and_does_not_read_full_history(tmp_path, mon
 
     class Session:
         session_id = "session"
+        ws_manager = None
         active_conversation_id = record.id
         conversation_repo = repo
         artifact_store = store

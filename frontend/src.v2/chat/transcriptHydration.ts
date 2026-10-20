@@ -26,6 +26,7 @@ import type {
 } from "../stores/types";
 
 export type BackendTranscriptMessage = {
+  async_request_id?: string;
   id?: unknown;
   turnId?: unknown;
   turn_id?: unknown;
@@ -581,6 +582,8 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
             ? item.provider_raw as Extract<ContentBlock, { type: "text" }>["providerRaw"]
             : undefined,
         finishReason: stringValue(item.finishReason ?? item.finish_reason),
+        delivery: item.delivery === "async" ? "async" : undefined,
+        questions: Array.isArray(item.questions) ? item.questions as import("../stores/types").AsyncUserQuestion[] : undefined,
       });
       continue;
     }
@@ -910,6 +913,7 @@ export const hydrateMessages = (
       turnDiff,
       role,
       content,
+      asyncRequestId: message.async_request_id,
       ...(hasDisplayContent ? { backendContent } : {}),
       ...(message.code_review ? { codeReview: message.code_review } : {}),
       ...(role === "user" ? { quotedMessage: normalizeQuotedMessage(message.quoted_message) } : {}),

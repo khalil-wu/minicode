@@ -1,5 +1,6 @@
 import { pushToast } from "../overlays/ToastContainer";
 import { workspaceHasConversation, workspaceRequestOwner, workspaceRequestPath, workspaceViewRoot } from "../protocol/workspace-owner";
+import type { DictationPreferences } from "../lib/workbench-preferences";
 
 export interface FsEntry {
   name: string;
@@ -74,6 +75,48 @@ export interface DesktopSandboxSetupResult {
   error?: string;
 }
 
+export interface DesktopPet {
+  id: string;
+  displayName: string;
+  description: string;
+  assetRef?: string;
+  spriteVersionNumber: number;
+  updatedAt: number;
+}
+
+export interface DesktopPetTask {
+  id: string;
+  title: string;
+  status: "running" | "waiting" | "failed" | "review";
+  detail?: string;
+  turnKey?: string;
+  updatedAt?: number;
+  sortAt?: number;
+  actions?: Array<{ id: string; label: string; openInMainWindow?: boolean }>;
+  followUpAllowed?: boolean;
+}
+
+export interface DesktopPetActivity {
+  running: boolean;
+  waiting: boolean;
+  failed: boolean;
+  review: boolean;
+  tasks: DesktopPetTask[];
+}
+
+export interface DesktopPetState {
+  pets: DesktopPet[];
+  selectedPetId: string;
+  size: number;
+  petVisible: boolean;
+  miniOpen: boolean;
+  petDirectory: string;
+  reducedMotion: boolean;
+  mutedConversationIds: string[];
+  activity: DesktopPetActivity;
+  issues: string[];
+}
+
 export type DesktopMenuKey = "file" | "edit" | "view" | "help";
 
 export interface BrowserTargetInfo {
@@ -85,6 +128,25 @@ export interface BrowserTargetInfo {
   faviconUrl?: string;
   devtoolsFrontendUrl?: string;
   webSocketDebuggerUrl?: string;
+}
+
+export interface SystemFontFace {
+  family: string;
+  fullName: string;
+  postscriptName: string;
+  styleName: string;
+  weight: number;
+  style: "normal" | "italic" | "oblique";
+  isMonospaced: boolean;
+}
+export interface SystemFontFamily { family: string; faces: SystemFontFace[]; }
+export type BrowserSiteCategory = "camera" | "microphone" | "geolocation" | "notifications" | "clipboard-read" | "mediaKeySystem" | "sound" | "images" | "usb" | "javascript";
+export type BrowserSiteDecision = "ask" | "allow" | "block";
+export interface BrowserSitePolicy {
+  categories: Array<{ id: BrowserSiteCategory; allowedSettings: BrowserSiteDecision[]; defaultSettings: BrowserSiteDecision[] }>;
+  defaults: Record<BrowserSiteCategory, BrowserSiteDecision>;
+  sites: Array<{ origin: string; settings: Partial<Record<BrowserSiteCategory, BrowserSiteDecision>> }>;
+  devices: Array<{ id: string; origin: string; name: string }>;
 }
 
 export interface BrowserDiscoveryResult {
@@ -123,7 +185,7 @@ export interface EmbeddedBrowserState {
   id: string;
   conversationId: string;
   conversation_id?: string;
-  type: "page" | "loading" | "updated" | "error" | "new-tab-request" | "closed" | "presentation-requested";
+  type: "page" | "loading" | "updated" | "error" | "new-tab-request" | "closed" | "presentation-requested" | "find-result" | "find-request" | "print-request" | "numbered-shortcut" | "external-link-request";
   url: string;
   title: string;
   faviconUrl?: string;
@@ -133,10 +195,14 @@ export interface EmbeddedBrowserState {
   active?: boolean;
   error?: string;
   requestedUrl?: string;
+  findResult?: { requestId: number; matches: number; activeMatchOrdinal: number; finalUpdate: boolean };
+  findDirection?: "next" | "previous";
+  numberedShortcut?: { target: "tabs" | "sidebar"; index: number };
+  zoomFactor?: number;
 }
 
 export interface EmbeddedBrowserBounds {
-  viewport?: { width: number; height: number; mobile: boolean } | null;
+  viewport?: { width: number; height: number; mobile: boolean; scale?: number } | null;
   id: string;
   conversationId: string;
   x: number;
@@ -152,13 +218,73 @@ export interface EmbeddedBrowserInspectionResult {
   error?: string;
 }
 
+export type BrowserDownload = { id: string; filename: string; url: string; path: string; state: string; receivedBytes: number; totalBytes: number; startedAt: number; canPause: boolean; canResume: boolean; canCancel: boolean; fileExists: boolean };
+export type BrowserPageCommand = { id: string; conversationId: string } & (
+  | { action: "find"; text: string; forward?: boolean; findNext?: boolean }
+  | { action: "zoom"; zoomFactor?: number }
+  | { action: "print" | "screenshot" | "site-info" }
+);
+export type BrowserDataType = "cookies" | "siteData" | "cache" | "downloads" | "history";
+export interface ImportableBrowserProfile {
+  source: "chrome";
+  appName: string;
+  profileName: string;
+  profileDirectoryName: string;
+  profilePath: string;
+  rootPath: string;
+  hasHistory: boolean;
+}
+export interface BrowserProfileImportRequest {
+  source: ImportableBrowserProfile["source"];
+  profilePath: string;
+  importHistory: true;
+  importCookies: false;
+  importPasswords: false;
+  importExtensions: false;
+}
+export interface BrowserProfileImportResult {
+  source: ImportableBrowserProfile["source"];
+  profilePath: string;
+  history: { status: "completed"; discovered: number; imported: number; skippedExisting: number; skippedInvalid: number; failed: number };
+}
+
 export interface EmbeddedBrowserSettings {
+  downloadDirectory?: string | null;
+  browserEnabled?: boolean;
+  deviceToolbarAlwaysOnNewTabs?: boolean;
   downloadPolicy: "block" | "ask" | "allow";
   origin: string;
   permissions: string[];
 }
 
+export interface BrowserSavedPassword { id: string; origin: string; username: string; password: string }
+export type BrowserPasswordSummary = Omit<BrowserSavedPassword, "password">;
+export interface BrowserPersonalDataState {
+  available: boolean;
+  passwordAutofillEnabled: boolean;
+  contactAutofillEnabled: boolean;
+  items: BrowserPasswordSummary[];
+}
+export interface BrowserContact {
+  id: string;
+  fullName: string;
+  organization: string;
+  addressLine1: string;
+  addressLine2: string;
+  city: string;
+  region: string;
+  postalCode: string;
+  country: string;
+  email: string;
+  phone: string;
+}
+export interface BrowserSitePermissions { origin: string; permissions: string[] }
+export type NotificationSound = "default" | "classic" | "none" | { fileName: string; name: string };
+
 export interface EmbeddedBrowserSettingsSnapshot {
+  downloadDirectory?: string | null;
+  browserEnabled: boolean;
+  deviceToolbarAlwaysOnNewTabs: boolean;
   downloadPolicy: EmbeddedBrowserSettings["downloadPolicy"];
   sitePermissions: Record<string, string[]>;
 }
@@ -220,10 +346,23 @@ export interface OpenPreferredPathOptions {
   persistPreferredTargetPath?: string;
   column?: number;
 }
-export interface DesktopPreferences {
+export type ManagedSettingsTarget = { kind: "config" | "data"; workspaceRoot?: string }
+  | { kind: "hook"; hookKey: string; workspaceRoot?: string };
+
+export interface DesktopPreferences extends DictationPreferences {
+  autoArchiveAfterDays: 0 | 1 | 7 | 14 | 30 | 90;
+  localHistoryCompression: boolean;
+  notificationSound: NotificationSound;
   defaultTaskDirectory: string;
+  readonly taskDirectoryOverride: string | null;
   defaultPermissionMode: "confirm" | "plan" | "auto" | "bypass";
   showFullAccess: boolean;
+  showContextWindowUsage: boolean;
+  showBottomPanel: boolean;
+  defaultTerminalLocation: "bottom" | "right";
+  composerPlainTextMode: boolean;
+  primaryNumberShortcutTarget: "tabs" | "sidebar";
+  externalBrowserLinkShortcut: "unassigned" | "primary" | "alt" | "primaryShift";
   localeOverride: "zh-CN" | "en-US" | null;
   systemLocale: string;
   fileOpenTarget: FileOpenTargetId;
@@ -240,6 +379,9 @@ export interface DesktopPreferences {
   showFullUrl: boolean;
   annotationScreenshotsMode: "always" | "necessary";
 }
+export type DesktopPreferencesPatch = Partial<Omit<DesktopPreferences,
+  "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale" | "taskDirectoryOverride" | "defaultTaskDirectory">
+  & { defaultTaskDirectory: string | null }>;
 export interface BrowserHistoryVisit { id: string; url: string; title: string; visitTime: number; source: "agent" | "other" }
 export interface BrowserCaptureRequest { id: string; conversationId: string; expectedUrl: string; rect?: { x: number; y: number; width: number; height: number }; viewport?: { width: number; height: number } }
 export interface BrowserCaptureImage { data: string; mimeType: "image/png"; width: number; height: number; url: string }
@@ -258,7 +400,51 @@ export interface WindowAppearanceState {
   theme: "light" | "dark";
 }
 
+export interface DictationHotkeyState { available: boolean; holdHotkey: string; toggleHotkey: string; error: string }
+export interface NativeDictationEvent { action: "start" | "stop" | "cancel"; token: string; targetKind: "composer" | "external" }
+
 interface MiniCodeDesktop {
+  dictation?: {
+    getLocalRuntime(): Promise<{ apiBaseUrl: string; runtimeToken: string; revision: number }>;
+    openProviderSettings(): Promise<true>;
+    consumeProviderSettings(): Promise<boolean>;
+    migratePreferences(legacy: DictationPreferences): Promise<DesktopPreferences>;
+    get(): Promise<DictationHotkeyState>;
+    configure(patch: Partial<Pick<DictationHotkeyState, "holdHotkey" | "toggleHotkey">>): Promise<DictationHotkeyState>;
+    suspend(value: boolean): Promise<void>;
+    insert(token: string, text: string): Promise<boolean>;
+    complete(token: string): Promise<void>;
+    onEvent(callback: (event: NativeDictationEvent) => void): () => void;
+    onState(callback: (state: DictationHotkeyState) => void): () => void;
+  };
+  mcpAppSandbox: {
+    prepare(frameUrl: string): Promise<{ id: string; src: string; partition: string }>;
+    release(id: string): Promise<void>;
+    clearData(): Promise<void>;
+  };
+  browserPersonalData: {
+    listPasswords(): Promise<BrowserPersonalDataState>;
+    getPassword(request: { id: string }): Promise<BrowserSavedPassword>;
+    savePassword(request: Omit<BrowserSavedPassword, "id"> & { id?: string }): Promise<void>;
+    removePassword(request: { id: string }): Promise<void>;
+    listContacts(): Promise<BrowserContact[]>;
+    saveContact(request: Omit<BrowserContact, "id"> & { id?: string }): Promise<void>;
+    removeContact(request: { id: string }): Promise<void>;
+    setAutofillSettings(patch: { passwordAutofillEnabled?: boolean; contactAutofillEnabled?: boolean }): Promise<BrowserPersonalDataState>;
+  };
+  pets: {
+    getState(): Promise<DesktopPetState>;
+    refresh(): Promise<DesktopPetState>;
+    update(patch: Partial<Pick<DesktopPetState, "selectedPetId" | "size" | "petVisible" | "reducedMotion">>): Promise<DesktopPetState>;
+    toggleMini(): Promise<DesktopPetState>;
+    setNotificationMuted(request: { conversationId: string; muted: boolean }): Promise<DesktopPetState>;
+    openFolder(): Promise<void>;
+    getSprite(id: string): Promise<string>;
+    publishActivity(activity: DesktopPetActivity): Promise<void>;
+    onActionRequested(callback: (request: { id: string; taskId: string } & ({ kind: "action"; actionId: string } | { kind: "followup"; prompt: string })) => void): () => void;
+    completeAction(result: { id: string; error?: string }): Promise<void>;
+    onStateChanged(callback: (state: DesktopPetState) => void): () => void;
+  };
   connections?: {
     list(): Promise<RemoteDesktopConnection[]>;
     discover(kind: "ssh" | "wsl"): Promise<{ sshAliases: string[]; wslDistributions: string[] }>;
@@ -271,15 +457,23 @@ interface MiniCodeDesktop {
     onChanged(callback: (connections: RemoteDesktopConnection[]) => void): () => void;
   };
   preferences: {
+    getStartupStatus(): Promise<boolean | null>;
+    openStartupSettings(): Promise<void>;
+    getOpenSourceLicenses(): Promise<string>;
+    pickNotificationSound(): Promise<{ name: string; bytes: number[] } | null>;
+    importNotificationSound(payload: { name: string; wav: number[] }): Promise<DesktopPreferences>;
+    previewNotificationSound(sound: NotificationSound): Promise<void>;
     chooseTaskDirectory(): Promise<DesktopPreferences | null>;
     get(): Promise<DesktopPreferences>;
-    set(patch: Partial<Omit<DesktopPreferences, "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale">>): Promise<DesktopPreferences>;
+    set(patch: DesktopPreferencesPatch): Promise<DesktopPreferences>;
     onChanged(callback: (preferences: DesktopPreferences) => void): () => void;
   };
   openPreferredPath(target: string, line?: number, options?: OpenPreferredPathOptions): Promise<{ openInEditor: boolean; path: string }>;
   saveFile(filename: string, bytes: Uint8Array): Promise<boolean>;
   platformInfo: { isDesktop: boolean; platform: string; arch: string };
   windowControls: {
+    listFontFamilies(): Promise<SystemFontFamily[] | null>;
+    listFonts(): Promise<string[]>;
     consumeInitialNavigation(): boolean;
     openConversation(conversationId: string): Promise<{ windowOwnerId: string; windowInstanceId: string }>;
     getState(): Promise<{ isMaximized: boolean; isFocused: boolean }>;
@@ -327,6 +521,10 @@ interface MiniCodeDesktop {
   openExternal(target: string): Promise<boolean>;
   openPath(target: string): Promise<boolean>;
   revealPath(target: string): Promise<void>;
+  settings: { openTarget(request: ManagedSettingsTarget): Promise<true> };
+  skills: {
+    reveal(request: { path: string; workspaceRoot: string }): Promise<boolean>;
+  };
   diagnostics: { export(): Promise<unknown> };
   fs: {
     listTree(path: string): Promise<FsEntry[] | {
@@ -363,6 +561,13 @@ interface MiniCodeDesktop {
   };
   menu: {
     popup(key: DesktopMenuKey): Promise<void>;
+    execute(action: string): Promise<boolean>;
+    setState(state: { terminalEnabled: boolean; bottomPanelToggleEnabled: boolean; newProjectEnabled: boolean; editorFocused: boolean;
+      accelerators: Record<string, string | null>; acceleratorBindings: Record<string, string[]>; shortcutOverrides: string[]; shortcutRecording: boolean }): Promise<void>;
+  };
+  browserProfileImport: {
+    listImportableBrowserProfiles(): Promise<ImportableBrowserProfile[]>;
+    importBrowserProfile(request: BrowserProfileImportRequest): Promise<BrowserProfileImportResult>;
   };
   browser: {
     history(query: { text?: string; source?: "all" | "agent" | "other" }): Promise<BrowserHistoryVisit[]>;
@@ -374,8 +579,17 @@ interface MiniCodeDesktop {
     type(endpoint: string | undefined, targetId: string, selector: string, text: string): Promise<BrowserActionResult>;
   };
   embeddedBrowser: {
+    getSitePolicy(): Promise<BrowserSitePolicy>;
+    setSitePolicy(request: { origin?: string; category: BrowserSiteCategory; setting: BrowserSiteDecision | "default" }): Promise<BrowserSitePolicy>;
+    removeSiteDevice(request: { id: string }): Promise<BrowserSitePolicy>;
+    listSitePermissions(): Promise<BrowserSitePermissions[]>;
+    removeSitePermissions(request: { origin: string }): Promise<void>;
+    pageCommand(payload: BrowserPageCommand): Promise<{ requestId?: number; matches?: number; activeMatchOrdinal?: number; zoomFactor?: number; saved?: boolean; success?: boolean; origin?: string; hostname?: string; secure?: boolean; cookieCount?: number }>;
+    downloads(): Promise<BrowserDownload[]>;
+    downloadAction(payload: { action: "open-folder" | "open" | "reveal" | "remove" | "pause" | "resume" | "cancel"; id?: string }): Promise<string>;
+    onDownloadsChanged(callback: (records: BrowserDownload[]) => void): () => void;
     capture(payload: BrowserCaptureRequest): Promise<BrowserCaptureImage>;
-    clearBrowsingData(): Promise<boolean>;
+    clearBrowsingData(dataTypes?: BrowserDataType[]): Promise<boolean>;
     create(payload: { id: string; url: string; conversationId: string }): Promise<EmbeddedBrowserState>;
     list(payload: { conversationId: string }): Promise<EmbeddedBrowserState[]>;
     activate(payload: { id: string; conversationId: string }): Promise<boolean>;
@@ -384,7 +598,7 @@ interface MiniCodeDesktop {
     runAction(payload: { id: string; conversationId: string; action: "back" | "forward" | "reload" | "stop" | "focus" }): Promise<boolean>;
     inspect(payload: { id: string; conversationId: string; kind: "console" | "network" | "element" | "region" }): Promise<EmbeddedBrowserInspectionResult>;
     getSettings(payload: { url: string }): Promise<EmbeddedBrowserSettings>;
-    setSettings(payload: { downloadPolicy?: "block" | "ask" | "allow"; origin?: string; permission?: string; allowed?: boolean }): Promise<EmbeddedBrowserSettings>;
+    setSettings(payload: { browserEnabled?: boolean; deviceToolbarAlwaysOnNewTabs?: boolean; downloadDirectory?: string | null; downloadPolicy?: "block" | "ask" | "allow"; origin?: string; permission?: string; allowed?: boolean }): Promise<EmbeddedBrowserSettings>;
     onSettingsChanged(callback: (settings: EmbeddedBrowserSettingsSnapshot) => void): () => void;
     clearSiteData(payload: { id: string; conversationId: string }): Promise<boolean>;
     close(payload: { id: string; conversationId: string }): Promise<boolean>;
@@ -414,7 +628,7 @@ export const runtime = () =>
 
 export const desktop = (): MiniCodeDesktop | undefined => runtime()?.desktop;
 export const getDesktopPreferences = () => desktop()!.preferences.get();
-export const setDesktopPreferences = (patch: Partial<Omit<DesktopPreferences, "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale">>) => desktop()!.preferences.set(patch);
+export const setDesktopPreferences = (patch: DesktopPreferencesPatch) => desktop()!.preferences.set(patch);
 
 export function desktopNotificationConversationVisible(conversationId: string, activeConversationId: string | null, settingsOpen: boolean, switchingConversationId: string | null): boolean {
   if (document.visibilityState !== "visible" || settingsOpen || switchingConversationId || conversationId !== activeConversationId) return false;
@@ -428,7 +642,7 @@ export function desktopNotificationConversationVisible(conversationId: string, a
 export const onDesktopPreferencesChanged = (callback: (preferences: DesktopPreferences) => void) => desktop()!.preferences.onChanged(callback);
 export const browserHistorySearch = (query: { text?: string; source?: "all" | "agent" | "other" }) => desktop()!.browser.history(query);
 export const browserHistoryRemove = (ids: string[]) => desktop()!.browser.removeHistory(ids);
-export const embeddedBrowserClearBrowsingData = () => desktop()!.embeddedBrowser.clearBrowsingData();
+export const embeddedBrowserClearBrowsingData = (dataTypes?: BrowserDataType[]) => desktop()!.embeddedBrowser.clearBrowsingData(dataTypes);
 export const embeddedBrowserCapture = (payload: BrowserCaptureRequest) => desktop()!.embeddedBrowser.capture(payload);
 
 export const isDesktop = (): boolean =>
@@ -742,6 +956,15 @@ export const revealPath = (target: string) => {
   if (!requireDesktopShell("在文件管理器中显示")) return undefined;
   return desktop()?.revealPath(target);
 };
+
+export const revealRegisteredSkill = (request: { path: string; workspaceRoot: string }) => {
+  if (!requireDesktopShell("在文件管理器中显示")) return undefined;
+  return desktop()!.skills.reveal(request);
+};
+export const openManagedSettingsTarget = (request: ManagedSettingsTarget) => {
+  if (!requireDesktopShell("打开配置和应用数据")) return undefined;
+  return desktop()!.settings.openTarget(request);
+};
 export const exportDiagnostics = () => desktop()?.diagnostics.export();
 export const browserDiscover = async (endpoint?: string): Promise<BrowserDiscoveryResult | null> => {
   try {
@@ -819,6 +1042,9 @@ export const embeddedBrowserGetSettings = (url: string) => desktop()?.embeddedBr
 export const onEmbeddedBrowserSettingsChanged = (callback: (settings: EmbeddedBrowserSettingsSnapshot) => void) =>
   desktop()?.embeddedBrowser.onSettingsChanged(callback);
 export const embeddedBrowserSetSettings = (payload: {
+  downloadDirectory?: string | null;
+  browserEnabled?: boolean;
+  deviceToolbarAlwaysOnNewTabs?: boolean;
   downloadPolicy?: "block" | "ask" | "allow";
   origin?: string;
   permission?: string;

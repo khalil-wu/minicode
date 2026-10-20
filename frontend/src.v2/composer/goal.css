@@ -1,0 +1,18 @@
+.composer-goal-row { display:flex; align-items:center; min-height:34px; padding:3px 8px; gap:6px; color:var(--text-primary); border-bottom:1px solid var(--border-subtle); }
+.composer-goal-summary { display:flex; align-items:center; gap:6px; flex:1; min-width:0; border:0; background:transparent; padding:3px 4px; font:inherit; font-size:var(--text-sm); text-align:start; color:inherit; cursor:pointer; }
+.composer-goal-summary > svg,.composer-goal-status { flex:none; }
+.composer-goal-objective { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--text-secondary); }
+.composer-goal-progress { flex:none; white-space:nowrap; color:var(--text-secondary); font-variant-numeric:tabular-nums; }
+.composer-goal-actions { display:flex; gap:1px; flex:none; }
+.composer-goal-actions button,.goal-panel-revert { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; padding:0; border:0; border-radius:6px; background:transparent; color:var(--text-secondary); cursor:pointer; }
+.composer-goal-actions button:hover,.goal-panel-revert:hover { background:var(--surface-hover); color:var(--text-primary); }
+.composer-goal-row button:disabled,.goal-panel button:disabled { opacity:.45; cursor:default; }
+.composer-goal-mode { display:inline-flex; align-items:center; gap:4px; border:0; border-radius:6px; background:var(--surface-soft); color:var(--text-secondary); font:inherit; font-size:var(--text-sm); padding:4px 6px; cursor:pointer; }
+.composer-goal-mode .goal-mode-clear { display:none; }
+.composer-goal-mode:hover .goal-mode-target { display:none; }
+.composer-goal-mode:hover .goal-mode-clear { display:block; }
+.goal-panel { display:flex; flex-direction:column; min-height:0; height:100%; background:var(--surface-page); }
+.goal-panel-toolbar { display:flex; align-items:center; gap:6px; min-height:36px; padding:4px 8px; border-bottom:1px solid var(--border-subtle); }
+.goal-panel-toolbar > span { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-secondary); font-size:var(--text-sm); }
+.goal-panel-save { border:0; border-radius:6px; min-height:26px; padding:3px 10px; background:var(--text-primary); color:var(--surface-page); font:inherit; font-size:var(--text-sm); cursor:pointer; }
+.goal-panel textarea { display:block; flex:1; width:100%; min-height:0; padding:16px; resize:none; border:0; outline:0; background:transparent; color:var(--text-primary); font:inherit; font-size:var(--text-base); line-height:1.6; }

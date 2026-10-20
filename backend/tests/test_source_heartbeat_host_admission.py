@@ -32,6 +32,7 @@ from backend.tools.registry import ToolRegistry
 from backend.ws.durable_user_queue import DurableUserMessageQueue
 from backend.ws.manager import WebSocketManager
 from backend.ws.payload_contracts import is_non_replayable_event_type
+from backend.ws.stream_state import apply_stream_event
 
 
 class BoundaryModel(LLMAdapter):
@@ -85,6 +86,13 @@ class FinalItemModel(BoundaryModel):
 async def real_ws_owner(case, monkeypatch, *, model=None):
     events = []
     session = _Session(case.workspace, events)
+    collect_event = session.send_event
+
+    async def project_event(event):
+        apply_stream_event(session._conversation_streams, str(event.data.get("conversation_id") or ""), event.type, event.data)
+        await collect_event(event)
+
+    session.send_event = project_event
     session.query_engine = QueryEngine()
     model = model or BoundaryModel()
     config = AppConfig(llm=LLMSettings(api_key="controlled", model="gpt-test"))
@@ -273,7 +281,10 @@ async def test_host_input_cold_queue_retains_origin_and_public_command_cannot_se
             turn_trigger="automation_heartbeat_scheduled", public_content="Public prompt.", task_id="schedule", scheduled_run_id="run")
         queue = owner.session.run_manager.turn_input_queue(owner.session.active_conversation_id)
         queue.begin_turn("actual-old-turn")
-        assert owner.session.run_manager.enqueue_scheduled_input(owner.session.active_conversation_id, command) is not None
+        owner.session._conversation_streams[owner.session.active_conversation_id] = {
+            "turn_id": "actual-old-turn", "message_id": "actual-old-answer"}
+        owner.session.run_manager.run_tasks[owner.session.active_conversation_id] = asyncio.create_task(asyncio.Event().wait())
+        assert owner.session.run_manager.enqueue_scheduled_input(owner.session.active_conversation_id, command, expected_turn_id="actual-old-turn") is not None
         path = owner.session.run_manager.durable_queue.path
         owner.session.run_manager.close_durable_queue()
         cold_store = DurableUserMessageQueue(session_id="shared", root_dir=path.parent, shared_inputs=True)
@@ -627,7 +638,7 @@ async def test_completed_item_only_defers_mail_and_explicit_input_reopens_same_r
                 item = owner.session.run_manager.enqueue_user_message_as_steer(owner.session.active_conversation_id,
                     UserCommand(type="user_message", data={"content": "New explicit human input.",
                         "user_message_id": "late-human-input", "assistant_message_id": "never-a-second-turn"}),
-                    target_message_id="actual-answer")
+                    expected_turn_id=turn_id, target_message_id="actual-answer")
                 assert item is not None
             assert queue.turn_id == turn_id and queue.turn_epoch == epoch
             assert queue.mailbox_phase is MailboxDeliveryPhase.CURRENT_TURN
@@ -640,7 +651,7 @@ async def test_completed_item_only_defers_mail_and_explicit_input_reopens_same_r
                 assert scheduler._runs[task.last_run_id].status == "completed"
             assert model.calls == 2 and owner.context.turn_terminal_receipt.result()["turn_id"] == turn_id
             assert owner.session.run_manager.enqueue_user_message_as_steer(owner.session.active_conversation_id,
-                UserCommand(type="user_message", data={"content": "After canonical terminal."})) is None
+                UserCommand(type="user_message", data={"content": "After canonical terminal."}), expected_turn_id=turn_id) is None
         finally:
             model.finish_response.set()
             submission.set()

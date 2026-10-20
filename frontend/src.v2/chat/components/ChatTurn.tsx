@@ -28,6 +28,7 @@ import { knownFilePathsForCell } from "../cells/activityCellHelpers";
 import { conversationReadingState, createConversationReadingState, TranscriptConversationReadingContext, TranscriptReadingContext, turnReadingState } from "../transcriptReadingState";
 import { McpAppInlineSlot } from "../mcp-apps/app-surfaces";
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
+import { AsyncUserMessage } from "./AsyncUserMessage";
 
 // ── ChatTurn ────────────────────────────────────────────────────────
 
@@ -104,7 +105,10 @@ export const ChatTurn = memo(function ChatTurn({
       defaultProcessExpanded={defaultProcessExpanded}
       hasMoreHistory={hasMoreHistory}
       onLoadHistory={hasMoreHistory ? loadHistory : undefined}
-      persistentContent={conversationId && mcpApps.length > 0 ? <div className="agent-loop-persistent-apps">
+      persistentContent={conversationId && turn.asyncMessages?.length ? <div className="agent-loop-persistent-apps">
+        {turn.asyncMessages?.map(message => <AsyncUserMessage key={message.itemId} message={message} conversationId={conversationId} turnId={turn.turnId} readOnly={isTranscriptMode} />)}
+      </div> : undefined}
+      collapsedContent={conversationId && mcpApps.length > 0 ? <div className="agent-loop-persistent-apps">
         {mcpApps.map(({ cell, record }) => <McpAppActivity key={record.mcpApp!.id} cell={cell} record={record}
           conversationId={conversationId} workspaceRoot={workspaceRoot} readOnly={isTranscriptMode} />)}
       </div> : undefined}

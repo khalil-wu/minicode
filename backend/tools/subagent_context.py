@@ -240,18 +240,23 @@ AGENT_HARD_DENIED_TOOLS = frozenset(
         "team_delete",
         "task_output",
         "request_user_input",
+        "request_user_input_async",
+        "send_message_to_user_async",
+        "create_goal",
+        "get_goal",
+        "update_goal",
         "update_plan",
         "enter_plan_mode",
         "exit_plan_mode",
     }
 )
 
-AGENT_DELEGATION_TOOLS = frozenset({"task"})
+AGENT_DELEGATION_TOOLS = frozenset({"task", "spawn_agent"})
 AGENT_TASK_COORDINATION_TOOLS = frozenset(
     {"task_create", "task_get", "task_list", "task_update"}
 )
 AGENT_MESSAGE_TOOLS = frozenset({"send_message", "message_list"})
-AGENT_LIFECYCLE_TOOLS = frozenset({"task_status", "task_stop", "followup_task"})
+AGENT_LIFECYCLE_TOOLS = frozenset({"task_status", "task_stop", "followup_task", "list_agents", "wait_agent", "interrupt_agent"})
 AGENT_SCHEDULE_TOOLS = frozenset(
     {"schedule_cron", "schedule_cron_list", "schedule_cron_delete"}
 )
@@ -322,7 +327,13 @@ def build_agent_execution_profile(
     team_mode: bool = False,
     background: bool = False,
     agent_triggers_enabled: bool = False,
+    multi_agent_v2: bool = False,
+    nested_delegation: bool = False,
 ) -> AgentExecutionProfile:
+    if multi_agent_v2 and not team_mode:
+        return AgentExecutionProfile(role="subagent", delivery="background" if background else "foreground",
+            delegation="any", task_coordination=True, message_coordination=True,
+            agent_lifecycle=True, scheduled_triggers=False, constrained_async_surface=False)
     if team_mode:
         return AgentExecutionProfile(
             role="teammate",
@@ -338,20 +349,20 @@ def build_agent_execution_profile(
         return AgentExecutionProfile(
             role="subagent",
             delivery="background",
-            delegation="none",
+            delegation="any" if nested_delegation else "none",
             task_coordination=False,
             message_coordination=True,
-            agent_lifecycle=False,
+            agent_lifecycle=nested_delegation,
             scheduled_triggers=False,
             constrained_async_surface=True,
         )
     return AgentExecutionProfile(
         role="subagent",
         delivery="foreground",
-        delegation="none",
+        delegation="any" if nested_delegation else "none",
         task_coordination=True,
         message_coordination=True,
-        agent_lifecycle=False,
+        agent_lifecycle=nested_delegation,
         scheduled_triggers=bool(agent_triggers_enabled),
         constrained_async_surface=False,
     )

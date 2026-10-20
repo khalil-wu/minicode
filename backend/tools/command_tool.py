@@ -652,7 +652,7 @@ class RunCommandTool(BaseTool):
                 )
                 await background_manager.detach(bg_cmd.command_id, conversation_id=conversation_id)
             except asyncio.CancelledError:
-                await background_manager.cancel(bg_cmd.command_id, conversation_id=conversation_id)
+                await background_manager.detach(bg_cmd.command_id, conversation_id=conversation_id)
                 raise
             result = MonitorTool()._command_snapshot(
                 background_manager, bg_cmd.command_id, {"output_mode": "head_tail", "max_chars": max_chars}, conversation_id=conversation_id,

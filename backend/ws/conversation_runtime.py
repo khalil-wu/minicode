@@ -62,7 +62,21 @@ class ConversationRuntime:
         return self._code_stores.setdefault(conversation_id, CodeExecutionStore())
 
     def forget_code_store(self, conversation_id: str) -> int:
+        store = self._code_stores.get(conversation_id)
+        if store is not None and (store.runtimes or store.retirements):
+            raise RuntimeError(f"Code cells for {conversation_id} have not finished shutting down")
         return int(self._code_stores.pop(conversation_id, None) is not None)
+
+    async def close_code_store(self, conversation_id: str) -> int:
+        store = self._code_stores.get(conversation_id)
+        if store is None:
+            return 0
+        await store.aclose()
+        return self.forget_code_store(conversation_id)
+
+    async def close_code_stores(self) -> None:
+        for conversation_id in tuple(self._code_stores):
+            await self.close_code_store(conversation_id)
 
     @property
     def active_conversation(self) -> Any | None:

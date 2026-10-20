@@ -31,11 +31,12 @@ from backend.tools.request_permissions import RequestPermissionsTool
 from backend.tools.notebook_tool import NotebookEditTool
 from backend.tools.registry import ToolRegistry
 from backend.tools.search_tools import GrepFilesTool, GlobFilesTool
-from backend.tools.sleep_tool import SleepTool
+from backend.tools.sleep_tool import CurrentTimeTool, SleepTool
 from backend.tools.swarm_tools import (
     FollowupTaskTool,
     MessageListTool,
     SendMessageTool,
+    SourceSendMessageTool,
     TaskCreateTool,
     TaskGetTool,
     TaskListTool,
@@ -121,6 +122,17 @@ def build_tool_registry(
         registry.register(NewContextTool(resolve_context_window_config(config_snapshot)))
         registry.register(GetContextRemainingTool())
     registry.register(BriefTool())
+    from backend.tools.goal_tools import GoalTool
+    for name in ("create_goal", "get_goal", "update_goal"):
+        registry.register(GoalTool(name, config_snapshot))
+    from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
+    from backend.llm.model_request_policy import source_model_request_capabilities
+    supported = source_model_request_capabilities(config_snapshot.llm.model).get("experimental_supported_tools", [])
+    if "clock" in supported:
+        registry.register(CurrentTimeTool())
+    if "send_user_message_async" in supported or "request_user_input_async" in supported:
+        registry.register(RequestUserInputAsyncTool())
+        registry.register(SendMessageToUserAsyncTool())
     registry.register(
         ReadArtifactTool(
             artifact_store,
@@ -142,20 +154,27 @@ def build_tool_registry(
         workspace_root=resolved_workspace_root,
     )
     registry.register(task_tool)
-    registry.register(TaskStopTool())
-    registry.register(TaskStatusTool())
-    send_message_tool = SendMessageTool()
-    registry.register(send_message_tool)
-    registry.register(FollowupTaskTool())
-    registry.register(MessageListTool())
-    registry.register(TaskCreateTool())
-    registry.register(TaskListTool())
-    registry.register(TaskGetTool())
-    registry.register(TaskUpdateTool())
-    registry.register(TaskOutputTool())
-    registry.register(TeamCreateTool())
-    registry.register(TeamListTool())
-    registry.register(TeamDeleteTool())
+    from backend.agents.source_roles import source_agent_options
+    from backend.tools.collaboration_tools import SpawnAgentTool, ListAgentsTool, WaitAgentTool, InterruptAgentTool
+    coordination = source_agent_options(config_snapshot)
+    if coordination["enabled"] and coordination["version"] == "v2":
+        for tool in (SpawnAgentTool(task_tool), ListAgentsTool(), WaitAgentTool(config_snapshot), InterruptAgentTool()):
+            registry.register(tool)
+    if coordination["enabled"]:
+        registry.register(TaskStopTool())
+        registry.register(TaskStatusTool())
+        send_message_tool = SourceSendMessageTool() if coordination["version"] == "v2" else SendMessageTool()
+        registry.register(send_message_tool)
+        registry.register(FollowupTaskTool())
+        registry.register(MessageListTool())
+        registry.register(TaskCreateTool())
+        registry.register(TaskListTool())
+        registry.register(TaskGetTool())
+        registry.register(TaskUpdateTool())
+        registry.register(TaskOutputTool())
+        registry.register(TeamCreateTool())
+        registry.register(TeamListTool())
+        registry.register(TeamDeleteTool())
     bootstrap = _current_bootstrap()
     file_memory = bootstrap.file_memory if bootstrap else None
     if file_memory:
@@ -174,6 +193,8 @@ def build_tool_registry(
     from backend.tools.web_tools import WebFetchTool, WebSearchTool
     registry.register(WebFetchTool(artifact_store))
     from backend.tools.image_generation_tool import GenerateImageTool
+    from backend.tools.hatch_pet_tool import HatchPetTool
+    registry.register(HatchPetTool())
     registry.register(GenerateImageTool(
         settings_snapshot=(config_snapshot.config_layer_stack.effective_config()
                            if config_snapshot.config_layer_stack is not None else None),

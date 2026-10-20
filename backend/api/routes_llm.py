@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Response
+from pydantic import BaseModel, Field
 
 from backend.agent.instruction_discovery import INSTRUCTIONS_MAX_BYTES, clear_guideline_cache
 from backend.agent.markdown_scopes import get_minicode_config_home_dir
@@ -49,6 +50,87 @@ from .models import (
 
 router = APIRouter()
 USER_INSTRUCTIONS_FILE = get_minicode_config_home_dir() / "INSTRUCTIONS.md"
+
+
+class HookStateUpdate(BaseModel):
+    key: str
+    enabled: bool | None = None
+    trusted_hash: str | None = None
+
+
+class HookSettingsUpdate(BaseModel):
+    workspace_root: str = ""
+    updates: list[HookStateUpdate] = Field(default_factory=list)
+
+
+@router.get("/api/settings/hooks")
+def get_hook_settings_api(response: Response, workspace_root: str = "") -> dict[str, Any]:
+    from backend.services.hook_settings_service import hook_settings
+    response.headers["Cache-Control"] = "no-store"
+    return hook_settings(workspace_root)
+
+
+@router.get("/api/settings/open-target")
+def get_settings_open_target_api(
+    response: Response,
+    kind: Literal["config", "hook", "data"],
+    workspace_root: str = "",
+    hook_key: str | None = None,
+) -> dict[str, str]:
+    """Resolve an application's registered settings action, never a caller path."""
+    from pathlib import Path
+    from backend.config import DATA_ROOT
+    from backend.services.hook_settings_service import hook_settings
+
+    response.headers["Cache-Control"] = "no-store"
+    if kind == "config":
+        target = SETTINGS_FILE
+    elif kind == "data":
+        target = DATA_ROOT
+    else:
+        hook = next((entry for entry in hook_settings(workspace_root)["hooks"] if entry["key"] == hook_key), None)
+        if hook is None:
+            raise HTTPException(404, detail="Hook is no longer registered; reload its configuration.")
+        target = Path(hook["source_path"])
+    return {"path": str(target.resolve())}
+
+
+@router.put("/api/settings/hooks")
+async def update_hook_settings_api(request: HookSettingsUpdate) -> dict[str, Any]:
+    from backend.hooks.runtime import ConfigChangeHookBlocked
+    from backend.services.hook_settings_service import update_hook_settings
+    try:
+        return await update_hook_settings([update.model_dump(exclude_none=True) for update in request.updates], request.workspace_root)
+    except (ValueError, ConfigChangeHookBlocked) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class AgentConfigUpdate(BaseModel):
+    workspace_root: str = ""
+    approval_policy: Literal["untrusted", "on-request", "never"] | None = None
+    sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] | None = None
+    web_search: Literal["disabled", "cached", "indexed", "live"] | None = None
+    network_access: bool | None = None
+    model_verbosity: Literal["low", "medium", "high"] | None = None
+    model_reasoning_summary: Literal["auto", "concise", "detailed", "none"] | None = None
+
+
+@router.get("/api/settings/agent-config")
+def get_agent_config_settings_api(response: Response, workspace_root: str = "") -> dict[str, Any]:
+    from backend.services.agent_config_settings_service import agent_config_settings
+    response.headers["Cache-Control"] = "no-store"
+    return agent_config_settings(workspace_root)
+
+
+@router.put("/api/settings/agent-config")
+async def update_agent_config_settings_api(request: AgentConfigUpdate) -> dict[str, Any]:
+    from backend.config_requirements import RequirementViolation
+    from backend.hooks.runtime import ConfigChangeHookBlocked
+    from backend.services.agent_config_settings_service import update_agent_config_settings
+    try:
+        return await update_agent_config_settings(request.model_dump(exclude_none=True, exclude={"workspace_root"}), request.workspace_root)
+    except (ValueError, RequirementViolation, ConfigChangeHookBlocked) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/api/settings/config-layers")

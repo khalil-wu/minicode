@@ -265,8 +265,10 @@ class PluginPackageRequest(BaseModel):
 
 
 class PluginMarketplaceRequest(BaseModel):
-    name: str = Field(min_length=1)
-    source: dict[str, Any]
+    name: str = ""
+    source: dict[str, Any] | str
+    ref_name: str | None = None
+    sparse_paths: list[str] | None = None
 
 
 class PluginMarketplaceRefreshRequest(BaseModel):

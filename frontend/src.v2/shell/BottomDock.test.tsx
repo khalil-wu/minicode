@@ -33,6 +33,7 @@ vi.mock("../panels/TerminalPanel", () => ({
 describe("BottomDock", () => {
   beforeEach(() => {
     useAppStore.setState({
+      appMode: "code",
       dockCollapsed: false,
       dockHeight: 220,
       activeBottomTab: "budget",
@@ -137,6 +138,21 @@ describe("BottomDock", () => {
     expect(screen.queryByRole("tab", { name: "终端" })).toBeNull();
     rerender(<BottomDock />);
     expect(screen.getByRole("textbox", { name: "终端阅读状态" })).toBe(surface);
+  });
+
+  it("retains the Code terminal while a chat terminal is opened in the hidden workspace", async () => {
+    useAppStore.setState({ dockCollapsed: false, activeBottomTab: "terminal", rightPanelOpen: false });
+    const { rerender } = render(<BottomDock />);
+    const surface = await screen.findByRole("textbox", { name: "终端阅读状态" });
+    fireEvent.change(surface, { target: { value: "preserved terminal scroll and selection" } });
+    rerender(<BottomDock visible={false} />);
+    act(() => useAppStore.setState({ rightPanelOpen: true, rightStackTab: "terminal" }));
+    expect(surface.isConnected).toBe(true);
+    expect(surface.closest("[hidden]")).toBeTruthy();
+    act(() => useAppStore.setState({ rightPanelOpen: false }));
+    rerender(<BottomDock />);
+    expect(screen.getByRole("textbox", { name: "终端阅读状态" })).toBe(surface);
+    expect((surface as HTMLTextAreaElement).value).toBe("preserved terminal scroll and selection");
   });
 
   it("keeps runtime activity out of the bottom drawer", () => {

@@ -1,16 +1,33 @@
-import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { HexColorPicker } from "react-colorful";
 import { ChevronDown } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
-import { colorInputDraft, completeColorInput, effectiveAppearanceColors, type AppearanceColorRole } from "../lib/appearance-colors";
+import { colorInputDraft, completeColorInput, defaultAppearanceColors, effectiveAppearanceColors, type AppearanceColorRole, type AppearanceVariant } from "../lib/appearance-colors";
 import { defaultThemePreferences } from "../lib/appearance-themes";
 import { desktop, isDesktop } from "../desktop/runtime";
 import { pushToast } from "./ToastContainer";
 import { AppearanceThemeSharing } from "./AppearanceThemeSharing";
 import { AppearanceCodeThemePicker } from "./AppearanceCodeThemePicker";
+import { AppearanceFonts } from "./AppearanceFonts";
 import "./AppearanceColors.css";
+
+const WindowCapabilities = createContext(false);
+export const useAppearanceTranslucency = () => useContext(WindowCapabilities);
+export function AppearanceWindowCapabilitiesProvider({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
+  const [supportsTranslucency, setSupportsTranslucency] = useState(false);
+  useEffect(() => {
+    if (!isDesktop()) return;
+    let current = true;
+    void desktop()!.windowControls.getAppearance().then(state => { if (current) setSupportsTranslucency(state.supportsTranslucency); })
+      .catch(error => { if (current) pushToast(t("窗口外观读取失败：{v0}", { v0: String(error) }), "error"); });
+    const unsubscribe = desktop()!.windowControls.onAppearanceChanged(state => setSupportsTranslucency(state.supportsTranslucency));
+    return () => { current = false; unsubscribe(); };
+  }, [t]);
+  return <WindowCapabilities.Provider value={supportsTranslucency}>{children}</WindowCapabilities.Provider>;
+}
 
 function ColorControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
   const { t } = useI18n();
@@ -94,48 +111,30 @@ const roles = [
   { role: "ink", label: "前景", input: "{variant}前景颜色" },
 ] as const satisfies readonly { role: AppearanceColorRole; label: string; input: string }[];
 
-export function AppearanceColors() {
+export function AppearanceColors({ advanced = false, variant: requestedVariant, separateModes = false }: { advanced?: boolean; variant?: AppearanceVariant; separateModes?: boolean } = {}) {
   const { t } = useI18n();
-  const variant = useAppStore(state => state.resolvedTheme);
+  const resolved = useAppStore(state => state.resolvedTheme);
+  const variant = requestedVariant || resolved;
   const colors = useAppStore(state => state.appearanceColors);
   const setColor = useAppStore(state => state.setAppearanceColor);
   const selection = useAppStore(state => state.appearanceThemes[variant]);
   const setCodeThemeId = useAppStore(state => state.setCodeThemeId);
   const importTheme = useAppStore(state => state.importAppearanceTheme);
-  const effective = colors[variant] ?? effectiveAppearanceColors();
+  const patchPreferences = useAppStore(state => state.patchAppearanceTheme);
+  const effective = colors[variant] ?? (variant === resolved ? effectiveAppearanceColors() : defaultAppearanceColors[variant]);
   const codeThemeId = selection?.codeThemeId ?? "vscode-plus";
   const { contrast, opaqueWindows, semanticColors } = selection ?? defaultThemePreferences(variant);
-  const snapshot = { codeThemeId, theme: { contrast, opaqueWindows, semanticColors, ...effective, accentSource: "custom" as const } };
+  const fonts = selection?.fonts;
+  const snapshot = { codeThemeId, theme: { contrast, opaqueWindows, semanticColors, fonts, ...effective, accentSource: "custom" as const } };
   const variantLabel = t(variant === "light" ? "浅色" : "深色");
-  const [supportsTranslucency, setSupportsTranslucency] = useState(false);
-  useEffect(() => {
-    if (!isDesktop()) return;
-    let current = true;
-    void desktop()!.windowControls.getAppearance().then(state => {
-      if (current) setSupportsTranslucency(state.supportsTranslucency);
-    }).catch(error => {
-      if (current) pushToast(t("窗口外观读取失败：{v0}", { v0: String(error) }), "error");
-    });
-    const unsubscribe = desktop()!.windowControls.onAppearanceChanged(state => setSupportsTranslucency(state.supportsTranslucency));
-    return () => { current = false; unsubscribe(); };
-  }, [t]);
+  const supportsTranslucency = useAppearanceTranslucency();
   const patchTheme = (patch: { contrast?: number; opaqueWindows?: boolean }) => {
-    void importTheme(variant, { ...snapshot, theme: { ...snapshot.theme, ...patch } }).catch(error => {
+    void patchPreferences(variant, patch).catch(error => {
       pushToast(t("主题更新失败：{v0}", { v0: String(error) }), "error");
     });
   };
-  return <section className="settings-card settings-appearance-colors" aria-label={t("主题")}>
-    <div className="settings-row appearance-theme-heading"><h4 className="settings-row-title">{t("主题")}</h4><div className="appearance-theme-heading-controls">
-      <AppearanceThemeSharing key={variant} variant={variant} snapshot={snapshot} onImport={importTheme} />
-      <AppearanceCodeThemePicker variant={variant} colors={effective} value={codeThemeId} onSelect={id => setCodeThemeId(variant, id)} />
-    </div></div>
-    {roles.map(({ role, label, input }) => <div className="settings-row" key={role}>
-      <div className="settings-row-copy"><div className="settings-row-title">{t(label)}</div></div>
-      <div className="settings-row-control"><ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}
-        value={effective[role]} onChange={value => setColor(variant, role, value)} /></div>
-    </div>)}
-    <details className="appearance-colors-advanced">
-      <summary><ChevronDown aria-hidden="true" />{t("高级")}</summary>
+  if (advanced) return <section className="settings-group">{separateModes && <h3 className="settings-group-title">{t("{variant}主题", { variant: variantLabel })}</h3>}<div className="settings-card">
+      <AppearanceFonts advanced variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} />
       {supportsTranslucency && <div className="settings-row">
         <div className="settings-row-copy"><div className="settings-row-title">{t("半透明侧栏")}</div></div>
         <div className="settings-row-control"><button type="button" className="settings-toggle" role="switch"
@@ -148,6 +147,18 @@ export function AppearanceColors() {
           aria-label={t("{variant}对比度", { variant: variantLabel })}
           onChange={event => patchTheme({ contrast: Number(event.target.value) })} /></div>
       </div>
-    </details>
+  </div></section>;
+  return <section className="settings-card settings-appearance-colors" aria-label={t("主题")}>
+    <div className="settings-row appearance-theme-heading"><h4 className="settings-row-title">{separateModes ? t("{variant}主题", { variant: variantLabel }) : t("主题")}</h4><div className="appearance-theme-heading-controls">
+      <AppearanceThemeSharing key={variant} variant={variant} snapshot={snapshot} onImport={importTheme} />
+      <AppearanceCodeThemePicker variant={variant} colors={effective} value={codeThemeId} onSelect={id => setCodeThemeId(variant, id)} />
+    </div></div>
+    {roles.map(({ role, label, input }) => <div className="settings-row" key={role}>
+      <div className="settings-row-copy"><div className="settings-row-title">{t(label)}</div></div>
+      <div className="settings-row-control"><ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}
+        value={effective[role]} onChange={value => setColor(variant, role, value)} /></div>
+    </div>)}
+    <AppearanceFonts variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} />
+
   </section>;
 }

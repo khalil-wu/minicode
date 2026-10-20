@@ -12,7 +12,7 @@ const { releaseEditorWindow } = require("./window-lifecycle");
 function load(file, overrides = {}, globals = {}) {
   const module = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, file), "utf8"), {
-    module, process, Buffer, URL, console, setTimeout, clearTimeout,
+    module, process, __dirname, Buffer, URL, console, setTimeout, clearTimeout,
     require: (name) => Object.hasOwn(overrides, name) ? overrides[name] : require(name),
     ...globals,
   }, { filename: file });
@@ -84,9 +84,16 @@ test("new windows own distinct instances, captured callbacks and reusable persis
   assert.equal(secondary.shows, 0);
   manager.focusMainWindow(secondary);
   assert.equal(manager.getFocusedMainWindow(), secondary);
+  const sentBeforeInput = primary.sent.length;
   let prevented = false;
   primary.webContents.emit("before-input-event", { preventDefault() { prevented = true; } }, { type: "keyDown", control: true, key: "`" });
-  assert.equal(prevented, true);
+  assert.equal(prevented, false);
+  assert.equal(primary.sent.length, sentBeforeInput);
+  // The configured menu owns accelerators. Its production dispatch helper
+  // still targets the captured owner instead of the other focused window.
+  const routeSource = fs.readFileSync(path.join(__dirname, "main.js"), "utf8").match(/function sendWorkbenchMenuEvent\([\s\S]*?\n\}/)[0];
+  const route = vm.runInNewContext(`${routeSource}\nsendWorkbenchMenuEvent;`, { windowManager: manager });
+  assert.equal(route("minicode:shortcut:terminal", primary), true);
   assert.equal(primary.sent.at(-1).channel, "minicode:shortcut:terminal");
   assert.equal(secondary.sent.length, 0);
   secondary.close();
@@ -309,7 +316,7 @@ test("same-conversation browser tabs remain independent across windows and late 
       this.bounds = { x: 0, y: 0, width: 0, height: 0 };
       this.webContents = Object.assign(new EventEmitter(), {
         id: ++sequence, dead: false, url: "", navigationHistory: {},
-        session: { on() {}, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, webRequest: {} },
+        session: { on() {}, setPermissionCheckHandler() {}, setPermissionRequestHandler() {}, setDevicePermissionHandler() {}, webRequest: { onHeadersReceived() {} } },
         setWindowOpenHandler() {}, isDestroyed() { return this.dead; }, close() { this.dead = true; },
         getURL() { return this.url; }, getTitle: () => "", isLoading: () => false, async loadURL(url) { this.url = url; },
       });

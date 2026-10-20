@@ -10,6 +10,35 @@ vi.mock("../desktop/runtime",async()=>({...await vi.importActual<typeof import("
 const originalCreate = useAppStore.getState().createConversation;
 beforeEach(()=>useAppStore.setState({workspaceGit:null,conversations:[],conversationId:"scope-owner",workingDirectory:"C:/first",draft:"Preserve this task",recentWorkspaces:[{path:"C:/first"},{path:"C:/selected"}]}));
 afterEach(()=>{cleanup();vi.clearAllMocks();useAppStore.setState({createConversation:originalCreate});});
+
+it("uses the named project's current source after its original identity folder was removed",()=>{
+  useAppStore.setState({workingDirectory:"C:/first",recentWorkspaces:[{path:"C:/first",name:"Named research",sourceFolders:["C:/replacement"],named:true}]});
+  render(<ProjectScopePicker />);
+  fireEvent.click(screen.getByRole("button",{name:"选择项目"}));
+  fireEvent.change(screen.getByRole("textbox",{name:"搜索项目"}),{target:{value:"Named research"}});
+  fireEvent.click(screen.getByRole("button",{name:"Named research"}));
+  expect(activateWorkspaceFolder).toHaveBeenCalledExactlyOnceWith("C:/replacement","cowork");
+  expect(useAppStore.getState()).toMatchObject({conversationId:"scope-owner",workingDirectory:"C:/first",draft:"Preserve this task"});
+});
+
+it("opens a zero-source project's managed root and keeps its actual source list empty",()=>{
+  useAppStore.setState({recentWorkspaces:[{path:"C:/stable-id",name:"Managed research",sourceFolders:[],managedWorkspaceRoot:"C:/app-data/projects/id/workspace",named:true}]});
+  render(<ProjectScopePicker />);
+  fireEvent.click(screen.getByRole("button",{name:"选择项目"}));
+  fireEvent.click(screen.getByRole("button",{name:"Managed research"}));
+  expect(activateWorkspaceFolder).toHaveBeenCalledExactlyOnceWith("C:/app-data/projects/id/workspace","cowork");
+  expect(useAppStore.getState().recentWorkspaces[0].sourceFolders).toEqual([]);
+});
+
+it("retains a selected secondary source instead of switching an already selected project to its first source",()=>{
+  useAppStore.setState({workingDirectory:"C:/second",recentWorkspaces:[{path:"C:/first",name:"Multi-source",sourceFolders:["C:/first","C:/second"],named:true}]});
+  render(<ProjectScopePicker />);
+  fireEvent.click(screen.getByRole("button",{name:"选择项目"}));
+  const selected=screen.getByRole("button",{name:"Multi-source"});
+  expect(selected.getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(selected);
+  expect(activateWorkspaceFolder).not.toHaveBeenCalled();
+});
 it("selects a registered project through workspace activation without editing the composer",()=>{
   useAppStore.setState({workingDirectory:"C:/first",draft:"Preserve this task",recentWorkspaces:[{path:"C:/first"},{path:"C:/selected"}]});
   render(<ProjectScopePicker />);
@@ -48,13 +77,14 @@ it("opens from the home project title and shows the selected project check",()=>
   expect(document.activeElement).toBe(screen.getByRole("button",{name:"选择项目"}));
 });
 
-it("offers actual folder registration and starts a projectless conversation without editing the original draft",()=>{
+it("opens named project creation and starts a projectless conversation without editing the original draft",()=>{
   const create = vi.fn(async()=>true);
   useAppStore.setState({createConversation:create});
   render(<ProjectScopePicker />);
   fireEvent.click(screen.getByRole("button",{name:"选择项目"}));
   fireEvent.click(screen.getByRole("button",{name:"新建项目"}));
-  expect(openWorkspaceFolder).toHaveBeenCalledWith("cowork");
+  expect(useAppStore.getState().projectEditTarget).toBe("create");
+  expect(openWorkspaceFolder).not.toHaveBeenCalled();
   fireEvent.click(screen.getByRole("button",{name:"选择项目"}));
   fireEvent.click(screen.getByRole("button",{name:"不在项目中工作"}));
   expect(create).toHaveBeenCalledWith({bindWorkspace:false,appMode:"cowork"});

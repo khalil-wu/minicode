@@ -31,7 +31,7 @@ def test_real_skill_selection_catalog_developer_and_verbatim_body_user(tmp_path:
     source = tmp_path / "skills" / "read-workflow" / "SKILL.md"
     source.parent.mkdir(parents=True)
     raw = "---\nname: read-workflow\ndescription: Read a source file and report findings.\n---\nRead the actual file. Keep the source unchanged.\n"
-    source.write_text(raw, encoding="utf-8")
+    source.write_text(raw, encoding="utf-8", newline="")
     loader = SkillLoader(tmp_path)
     monkeypatch.setattr(loader, "_search_dirs", lambda: [("workspace", tmp_path / "skills")])
     manager = SkillManager(loader)

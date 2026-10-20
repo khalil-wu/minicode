@@ -14,20 +14,19 @@ vi.hoisted(() => {
   });
 });
 
-vi.mock("../desktop/runtime", () => ({
+vi.mock("../desktop/runtime", async original => ({
+  ...await original<typeof import("../desktop/runtime")>(),
   desktop: () => nativeDesktop,
   isDesktop: () => nativeDesktop !== null,
   runtime: () => runtimeState,
+  getDesktopPreferences: async () => ({ showBottomPanel: true }),
+  onDesktopPreferencesChanged: () => () => {},
 }));
 
 const reconnect = vi.hoisted(() => vi.fn());
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ reconnect }) }));
 
-vi.mock("./SidebarLeft", () => ({
-  SidebarLeft: ({ onNavigate }: { onNavigate?: () => void }) => (
-    <button type="button" data-testid="left-sidebar" onClick={onNavigate}>Left sidebar</button>
-  ),
-}));
+vi.mock("../composer/useComposerPlugins", () => ({ useComposerPlugins: () => ({ plugins: [], loading: false, error: "", refresh: vi.fn() }) }));
 
 vi.mock("./SidebarRight", () => ({
   SidebarRight: ({ visible }: { visible?: boolean }) => <button type="button" data-testid="right-sidebar" data-visible={String(visible)} data-initial-tab={useAppStore.getState().rightStackTab}>Right sidebar</button>,
@@ -40,10 +39,21 @@ vi.mock("./MainSlots", () => ({
 }));
 vi.mock("../panels/SideChatPanel", () => ({ SideChatPanel: () => null }));
 vi.mock("../overlays/SkillsMarketplace", () => ({ SkillsMarketplace: () => <main>Extensions page</main> }));
+vi.mock("./ProjectsPage", () => ({ ProjectsPage: () => <main>Projects page</main> }));
 vi.mock("../chat/ChatPane", () => ({ ChatPane: () => <main>Chat</main> }));
+vi.mock("../overlays/GeneralTab", () => ({ GeneralTab: () => <div>General settings content</div> }));
+vi.mock("../protocol/api", async original => ({ ...await original<typeof import("../protocol/api")>(), fetchLLMSettings: vi.fn(async () => ({ provider: "custom", custom: {} })) }));
 
 import { useAppStore } from "../stores";
 import { WorkbenchShell } from "./WorkbenchShell";
+import { SettingsCenter } from "../overlays/SettingsCenter";
+
+const leftSidebar = () => document.querySelector<HTMLElement>(".mc-sidebar-left");
+const chooseMode = (name: "代码" | "协作") => {
+  if (!screen.queryByRole("button", { name: "切换工作模式" })) fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
+  fireEvent.click(screen.getByRole("button", { name: "切换工作模式" }));
+  fireEvent.click(screen.getByRole("menuitem", { name, exact: true }));
+};
 
 let runtimeState: { runtimeToken: string } | null = { runtimeToken: "test-token" };
 let nativeDesktop: { windowControls: { minimize: () => void; maximize: () => void; close: () => void;
@@ -53,9 +63,14 @@ describe("WorkbenchShell narrow navigation", () => {
   beforeEach(() => {
     runtimeState = { runtimeToken: "test-token" };
     nativeDesktop = null;
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
     useAppStore.setState({
       skillsMarketplaceOpen: false,
+      workingDirectory: "",
+      recentWorkspaces: [],
+      availableSkills: [],
+      projectsOpen: false,
       settingsOpen: false,
       settingsTab: "general",
       appMode: "code",
@@ -89,16 +104,17 @@ describe("WorkbenchShell narrow navigation", () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
-  it("keeps real header, navigation and native window controls visible while settings hides only the mounted workspace", () => {
+  it("keeps native window controls live while Settings hides the mounted workspace and sidebar", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
     const minimize = vi.fn();
     nativeDesktop = { windowControls: { minimize, maximize: vi.fn(), close: vi.fn(),
       getState: vi.fn(async () => ({ isMaximized: false })), onStateChanged: vi.fn(() => () => {}) } };
     const { container } = render(<WorkbenchShell />);
     const titlebar = screen.getByRole("banner");
-    const rail = screen.getByRole("navigation", { name: "应用导航" });
+    const left = leftSidebar()!;
     const input = screen.getByRole("textbox", { name: "主对话输入" }) as HTMLTextAreaElement;
     const sidebar = screen.getByTestId("right-sidebar");
     fireEvent.change(input, { target: { value: "unfinished workspace draft" } });
@@ -108,9 +124,9 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(workspace.style.display).toBe("none");
     expect(screen.queryByRole("textbox", { name: "主对话输入" })).toBeNull();
     expect(screen.getByRole("banner")).toBe(titlebar);
-    expect(screen.getByRole("navigation", { name: "应用导航" })).toBe(rail);
+    expect(leftSidebar()).toBe(left);
     expect(titlebar.closest("[hidden]")).toBeNull();
-    expect(rail.closest("[hidden]")).toBeNull();
+    expect(left.closest("[hidden]")).toBe(workspace);
     fireEvent.click(screen.getByRole("button", { name: "最小化" }));
     expect(minimize).toHaveBeenCalledOnce();
     expect(input.isConnected).toBe(true);
@@ -125,14 +141,14 @@ describe("WorkbenchShell narrow navigation", () => {
   it("keeps a compact sidebar instance hidden during settings and restores its drawer", () => {
     render(<WorkbenchShell />);
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
-    const sidebar = screen.getByTestId("left-sidebar");
+    const sidebar = leftSidebar()!;
     act(() => useAppStore.setState({ settingsOpen: true }));
     expect(sidebar.isConnected).toBe(true);
     expect(screen.queryByRole("dialog", { name: "左侧栏" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Left sidebar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "切换工作模式" })).toBeNull();
     act(() => useAppStore.setState({ settingsOpen: false }));
     expect(screen.getByRole("dialog", { name: "左侧栏" })).toBeTruthy();
-    expect(screen.getByTestId("left-sidebar")).toBe(sidebar);
+    expect(leftSidebar()!).toBe(sidebar);
   });
 
   it("uses the existing side panel as the primary workspace and releases it for composer focus", () => {
@@ -172,7 +188,7 @@ describe("WorkbenchShell narrow navigation", () => {
     const sidebar = screen.getByTestId("right-sidebar");
     act(() => useAppStore.setState({ skillsMarketplaceOpen: true }));
     await screen.findByText("Extensions page");
-    expect(screen.getByTestId("left-sidebar")).toBeTruthy();
+    expect(leftSidebar()!).toBeTruthy();
     expect(workspace.isConnected).toBe(true);
     expect(screen.getByTestId("right-sidebar")).toBe(sidebar);
     expect(sidebar.dataset.visible).toBe("false");
@@ -184,13 +200,13 @@ describe("WorkbenchShell narrow navigation", () => {
   it("opens the existing sidebars as drawers and closes them with Escape", () => {
     render(<WorkbenchShell />);
 
-    expect(screen.queryByTestId("left-sidebar")).toBeNull();
+    expect(leftSidebar()).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
     expect(screen.getByRole("dialog", { name: "左侧栏" })).toBeTruthy();
-    expect(screen.getByTestId("left-sidebar")).toBeTruthy();
+    expect(leftSidebar()!).toBeTruthy();
 
     fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByTestId("left-sidebar")).toBeNull();
+    expect(leftSidebar()).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "打开右侧栏" }));
     expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
@@ -233,13 +249,14 @@ describe("WorkbenchShell narrow navigation", () => {
   });
 
   it("uses semantic header icons and keeps the healthy connection status icon-only", () => {
-    render(<WorkbenchShell />);
+    const { container } = render(<WorkbenchShell />);
 
     expect(screen.getByRole("button", { name: "命令面板" }).querySelector("svg.lucide-search")).toBeTruthy();
     expect(within(screen.getByRole("banner")).queryByRole("button", { name: "设置" })).toBeNull();
-    expect(screen.getByRole("button", { name: "设置与帮助" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
+    expect(screen.getByRole("button", { name: "打开个人资料菜单" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "后端已连接" }).textContent).toBe("");
-    expect(screen.getByRole("status").textContent).toBe("后端已连接");
+    expect(container.querySelector('.mc-desktop-shell > span[role="status"]')!.textContent).toBe("后端已连接");
   });
 
   it("announces disconnect and recovery through one polite live region", () => {
@@ -293,7 +310,7 @@ describe("WorkbenchShell narrow navigation", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1023 });
     render(<WorkbenchShell />);
 
-    expect(screen.queryByTestId("left-sidebar")).toBeNull();
+    expect(leftSidebar()).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
     expect(screen.getByRole("dialog", { name: "左侧栏" })).toBeTruthy();
   });
@@ -302,7 +319,7 @@ describe("WorkbenchShell narrow navigation", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1199 });
     render(<WorkbenchShell />);
 
-    expect(screen.queryByTestId("left-sidebar")).toBeNull();
+    expect(leftSidebar()).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
     expect(screen.getByRole("dialog", { name: "左侧栏" })).toBeTruthy();
   });
@@ -311,7 +328,7 @@ describe("WorkbenchShell narrow navigation", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600 });
     render(<WorkbenchShell />);
 
-    expect(screen.getByTestId("left-sidebar")).toBeTruthy();
+    expect(leftSidebar()!).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "左侧栏" })).toBeNull();
   });
 
@@ -342,7 +359,7 @@ describe("WorkbenchShell narrow navigation", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 });
     render(<WorkbenchShell />);
 
-    expect(screen.queryByTestId("left-sidebar")).toBeNull();
+    expect(leftSidebar()).toBeNull();
     expect(screen.getByTestId("right-sidebar").getAttribute("data-visible")).toBe("false");
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "打开右侧栏" })).toBeTruthy();
@@ -351,14 +368,14 @@ describe("WorkbenchShell narrow navigation", () => {
   it("switches an already mounted workbench into compact drawers after resize", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600, writable: true });
     render(<WorkbenchShell />);
-    expect(screen.getByTestId("left-sidebar")).toBeTruthy();
+    expect(leftSidebar()!).toBeTruthy();
 
     act(() => {
       window.innerWidth = 1199;
       window.dispatchEvent(new Event("resize"));
     });
 
-    expect(screen.queryByTestId("left-sidebar")).toBeNull();
+    expect(leftSidebar()).toBeNull();
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
   });
 
@@ -400,32 +417,26 @@ describe("WorkbenchShell narrow navigation", () => {
     useAppStore.setState({ appMode: "cowork", conversations: [], messages: [] });
     render(<WorkbenchShell />);
 
-    const sidebar = screen.getByTestId("left-sidebar");
-    fireEvent.click(screen.getByRole("button", { name: "Code" }));
+    const sidebar = leftSidebar()!;
+    chooseMode("代码");
 
-    expect(screen.getByTestId("left-sidebar")).toBe(sidebar);
+    expect(leftSidebar()!).toBe(sidebar);
   });
 
-  it.each([390, 1199, 1600])("keeps one Code/chat-home rail through navigation and resizing from %s px", (width) => {
+  it.each([390, 1199, 1600])("keeps the workspace and unsaved content through sidebar mode navigation and resizing from %s px", (width) => {
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
     useAppStore.setState({ appMode: "cowork", editorTabs: [{ id: "retained-file", path: "src/main.ts", content: "unsaved", original: "disk", loading: false }], draft: "retained chat question" });
     render(<WorkbenchShell />);
-    const rail = screen.getByRole("navigation", { name: "应用导航" });
-    const code = within(rail).getByRole("button", { name: "Code" });
-    const home = within(rail).getByRole("button", { name: "聊天首页" });
     const composer = screen.getByRole("textbox", { name: "主对话输入" }) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "local input draft" } });
     const messages = useAppStore.getState().messages;
-    fireEvent.click(code);
+    chooseMode("代码");
     expect(useAppStore.getState().appMode).toBe("code");
-    expect(screen.getByRole("navigation", { name: "应用导航" })).toBe(rail);
+    expect(screen.getAllByRole("navigation", { name: "应用导航" })).toHaveLength(1);
     expect(screen.getByRole("textbox", { name: "主对话输入" })).toBe(composer);
     expect(useAppStore.getState().panelSlots.find((slot) => slot.focused)?.kind).toBe("editor");
     act(() => { window.innerWidth = width < 1200 ? 1600 : 390; window.dispatchEvent(new Event("resize")); });
-    expect(screen.getByRole("navigation", { name: "应用导航" })).toBe(rail);
-    expect(screen.getAllByRole("button", { name: "Code" })).toHaveLength(1);
-    expect(screen.getAllByRole("button", { name: "聊天首页" })).toHaveLength(1);
-    fireEvent.click(home);
+    chooseMode("协作");
     expect(useAppStore.getState().appMode).toBe("cowork");
     expect(screen.getByText("Chat")).toBeTruthy();
     expect(screen.queryByRole("tablist", { name: "工作模式" })).toBeNull();
@@ -438,19 +449,27 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(useAppStore.getState().editorTabs[0].content).toBe("unsaved");
   });
 
-  it("uses one wide global rail while retaining the conversation and main workspace", () => {
+  it("opens Settings through the persistent global rail profile while retaining the workspace", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600 });
-    render(<WorkbenchShell />);
+    render(<><WorkbenchShell /><SettingsCenter /></>);
     expect(screen.getAllByRole("navigation", { name: "应用导航" })).toHaveLength(1);
-    expect(screen.getByRole("button", { name: "设置与帮助", exact: true })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Git 与工作树" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "打开个人资料菜单", exact: true })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Git 与工作树" })).toBeNull();
     const workspace = screen.getByText("Code workspace");
-    const sidebar = screen.getByTestId("left-sidebar");
-    fireEvent.click(screen.getByRole("button", { name: "Git 与工作树" }));
-    expect(useAppStore.getState()).toMatchObject({ dockCollapsed: false, activeBottomTab: "git", conversationId: "conversation-1" });
+    const sidebar = leftSidebar()!;
+    const input = screen.getByRole("textbox", { name: "主对话输入" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "Unsent settings round-trip draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "打开个人资料菜单" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "general", conversationId: "conversation-1" });
     expect(useAppStore.getState().messages[0].id).toBe("message-1");
     expect(screen.getByText("Code workspace")).toBe(workspace);
-    expect(screen.getByTestId("left-sidebar")).toBe(sidebar);
+    expect(leftSidebar()!).toBe(sidebar);
+    expect(screen.queryByRole("textbox", { name: "主对话输入" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "首页" }));
+    expect(screen.getByRole("textbox", { name: "主对话输入" })).toBe(input);
+    expect(input.value).toBe("Unsent settings round-trip draft");
+    expect(leftSidebar()).toBe(sidebar);
   });
 
   it("keeps the collapsed sidebar mounted and restores its chosen width", () => {
@@ -458,11 +477,11 @@ describe("WorkbenchShell narrow navigation", () => {
     useAppStore.setState({ leftSidebarWidth: 0, leftSidebarExpandedWidth: 336 });
     render(<WorkbenchShell />);
 
-    const sidebar = screen.getByTestId("left-sidebar");
+    const sidebar = leftSidebar()!;
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
-    expect(screen.getByTestId("left-sidebar")).toBe(sidebar);
+    expect(leftSidebar()!).toBe(sidebar);
     expect(useAppStore.getState().leftSidebarWidth).toBe(336);
   });
 
@@ -470,7 +489,7 @@ describe("WorkbenchShell narrow navigation", () => {
     render(<WorkbenchShell />);
 
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
-    fireEvent.click(screen.getByTestId("left-sidebar"));
+    chooseMode("代码");
 
     expect(screen.queryByRole("dialog", { name: "左侧栏" })).toBeNull();
   });
@@ -511,20 +530,26 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(screen.getByTestId("right-sidebar")).toBe(panel);
   });
 
-  it("keeps the right sidebar available in Chat without a second left sidebar control", () => {
+  it("keeps the Chat titlebar free of editor controls while the real panel route remains available", () => {
     useAppStore.setState({ appMode: "chat" });
     render(<WorkbenchShell />);
 
     expect(screen.queryByRole("button", { name: /左侧栏/ })).toBeNull();
-    expect(screen.getByRole("button", { name: /右侧栏/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /右侧栏/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "命令面板" })).toBeNull();
+    act(() => useAppStore.getState().setRightStackTab("browser"));
+    expect(screen.getByTestId("right-sidebar").getAttribute("data-initial-tab")).toBe("browser");
   });
 
-  it("keeps workspace and tool controls available for an empty Cowork session", () => {
+  it("uses the Source Cowork titlebar without adding editor palette, terminal, panel or connection controls", () => {
     useAppStore.setState({ appMode: "cowork", conversations: [], messages: [] });
     render(<WorkbenchShell />);
 
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "打开右侧栏" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "打开右侧栏" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "打开终端" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "命令面板" })).toBeNull();
+    expect(document.querySelector(".mc-connection-status")).toBeNull();
     expect(screen.getByText("Chat")).toBeTruthy();
     expect(screen.queryByText("Cowork")).toBeNull();
   });
@@ -538,6 +563,24 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(screen.getByTestId("right-sidebar").getAttribute("data-visible")).toBe("false");
     expect(screen.getByText("Code workspace")).toBeTruthy();
     expect(screen.queryByText("Cowork")).toBeNull();
+  });
+
+  it("opens Projects without remounting the hidden chat or discarding its draft", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    render(<WorkbenchShell />);
+    const input = screen.getByRole("textbox", { name: "主对话输入" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "preserved project-switch draft" } });
+    const sidebar = leftSidebar()!;
+    act(() => useAppStore.setState({ projectsOpen: true }));
+    expect(await screen.findByText("Projects page")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "主对话输入" })).toBeNull();
+    expect(input.isConnected).toBe(true);
+    expect(sidebar.isConnected).toBe(true);
+    expect(sidebar.closest("[hidden]")).toBeTruthy();
+    expect(screen.getByTestId("right-sidebar").dataset.visible).toBe("false");
+    act(() => useAppStore.setState({ projectsOpen: false }));
+    expect(screen.getByRole("textbox", { name: "主对话输入" })).toBe(input);
+    expect(input.value).toBe("preserved project-switch draft");
   });
 
   it("hides sidebar controls while a Code panel is maximized", () => {

@@ -149,6 +149,17 @@ export function ChatSearch({ onClose, containerRef }: ChatSearchProps) {
     [query, matchCount, currentIndex, selectMatch],
   );
 
+  useEffect(() => {
+    const next = () => findNext();
+    const previous = () => findNext(true);
+    window.addEventListener("chat:find-next", next);
+    window.addEventListener("chat:find-previous", previous);
+    return () => {
+      window.removeEventListener("chat:find-next", next);
+      window.removeEventListener("chat:find-previous", previous);
+    };
+  }, [findNext]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
       e.preventDefault();

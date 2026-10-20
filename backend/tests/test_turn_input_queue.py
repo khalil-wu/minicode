@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
-from backend.agent.message import UserCommand
+from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.run_context import RunContext
 from backend.agent.turn_input import MailboxDeliveryPhase, TurnInputQueue
 from backend.artifact.store import ArtifactStore
@@ -420,18 +420,19 @@ def test_promoted_turn_inputs_are_replayed_in_fifo_order_after_crash(
         "backend.ws.run_manager.CONVERSATION_DATA_DIR",
         tmp_path / "conversations",
     )
-    base = SimpleNamespace(session_id="session-turn-inflight")
+    base = SimpleNamespace(session_id="session-turn-inflight", _conversation_streams={"conv-a": {"turn_id": "turn-a"}})
     first = SessionRunManager(base)
     first.enqueue_user_message("conv-a", _command("assistant-1", "first steer"))
     first.enqueue_user_message("conv-a", _command("assistant-2", "second steer"))
-    first.turn_input_queue("conv-a")
+    first.turn_input_queue("conv-a").begin_turn("turn-a")
+    first.run_tasks["conv-a"] = object()
 
     first_command = first.pop_queued_user_message("conv-a", "assistant-1")
     second_command = first.pop_queued_user_message("conv-a", "assistant-2")
     assert first_command is not None
     assert second_command is not None
-    assert first.enqueue_turn_steer("conv-a", first_command) is not None
-    assert first.enqueue_turn_steer("conv-a", second_command) is not None
+    assert first.enqueue_turn_steer("conv-a", first_command, expected_turn_id="turn-a") is not None
+    assert first.enqueue_turn_steer("conv-a", second_command, expected_turn_id="turn-a") is not None
 
     recovered = SessionRunManager(base)
     assert recovered.dequeue_user_message("conv-a") is None
@@ -525,6 +526,7 @@ def test_cleanup_immediately_restores_preaccepted_unacknowledged_steer(
         )
         session = SimpleNamespace(
             session_id="session-preaccepted-cancel",
+            _conversation_streams={"conv-a": {"turn_id": "turn-a"}},
             session_lifecycle=SimpleNamespace(
                 schedule_task_runtime_update=lambda: None,
             ),
@@ -536,14 +538,16 @@ def test_cleanup_immediately_restores_preaccepted_unacknowledged_steer(
             manager.enqueue_user_message("conv-a", command)
             manager.enqueue_user_message("conv-a", follow_up)
             turn_queue = manager.turn_input_queue("conv-a")
+            turn_queue.begin_turn("turn-a")
+            task = asyncio.create_task(asyncio.sleep(0))
+            manager.run_tasks["conv-a"] = task
             selected = manager.pop_queued_user_message("conv-a", "assistant-steer")
             assert selected is command
-            assert manager.enqueue_turn_steer("conv-a", selected) is not None
+            assert manager.enqueue_turn_steer("conv-a", selected, expected_turn_id="turn-a") is not None
             # Provider-chunk admission removes the item from the in-memory queue,
             # but ctx.start_turn has not acknowledged it yet.
             assert turn_queue.pop_steer() is not None
 
-            task = asyncio.create_task(asyncio.sleep(0))
             await task
             manager.cleanup(
                 conversation_id="conv-a",
@@ -579,15 +583,15 @@ def test_runtime_queue_snapshot_is_frontend_replayable() -> None:
     }]
 
 
-def test_direct_steer_rejects_closed_turn_without_losing_follow_up() -> None:
-    manager = SessionRunManager(SimpleNamespace())
+def test_direct_steer_rejects_closed_turn_without_mutating_existing_follow_up() -> None:
+    manager = SessionRunManager(SimpleNamespace(_conversation_streams={"conv-a": {"turn_id": "turn-a"}}))
     turn_queue = manager.turn_input_queue("conv-a")
     turn_queue.seal_and_drain_commands()
     command = _command("assistant-late", "late steer")
-
-    assert manager.enqueue_user_message_as_steer("conv-a", command) is None
-    manager.enqueue_user_message("conv-a", command)
-    assert manager.dequeue_user_message("conv-a") is command
+    follow_up = _command("already-queued", "existing follow up")
+    manager.enqueue_user_message("conv-a", follow_up)
+    assert manager.enqueue_user_message_as_steer("conv-a", command, expected_turn_id="turn-a") is None
+    assert manager.queued_user_messages("conv-a") == [follow_up]
 
 
 def test_queue_steer_targets_active_turn_without_cancelling_it() -> None:
@@ -599,15 +603,23 @@ def test_queue_steer_targets_active_turn_without_cancelling_it() -> None:
         async def send_event(event):
             events.append(event)
 
+        async def emit_result(command, message, **options):
+            events.append(AgentEvent.command_result(command, message, **options))
+
+        async def reject_pending(**_kwargs):
+            return []
+
         session = SimpleNamespace(
             active_conversation_id="conv-a",
             send_event=send_event,
-            _conversation_streams={"conv-a": {"message_id": "assistant-current"}},
+            emit_command_result=emit_result, _reject_pending_approvals=reject_pending,
+            _conversation_streams={"conv-a": {"message_id": "assistant-current", "turn_id": "turn-a"}},
         )
         async with _owned_run_manager(session) as manager:
             session.run_manager = manager
             manager.enqueue_user_message("conv-a", _command("assistant-1", "steer now"))
-            manager.turn_input_queue("conv-a")
+            manager.turn_input_queue("conv-a").begin_turn("turn-a")
+            manager.run_tasks["conv-a"] = active_task
             session.running_agent_task_for = lambda conversation_id: active_task
 
             async def cancel(**_kwargs):
@@ -618,7 +630,7 @@ def test_queue_steer_targets_active_turn_without_cancelling_it() -> None:
 
             await handle_user_message_queue_steer(
                 session,
-                {"conversation_id": "conv-a", "message_id": "assistant-1"},
+                {"conversation_id": "conv-a", "message_id": "assistant-1", "expected_turn_id": "turn-a"},
             )
 
             item = manager.turn_input_queue("conv-a").pop_steer()

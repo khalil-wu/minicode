@@ -186,6 +186,55 @@ def test_browser_control_prefers_authenticated_embedded_browser_bridge(monkeypat
     assert 0 < payload["operation_timeout_ms"] <= 30000
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+def test_embedded_discovery_reports_browser_control_capability_before_admitting_page_actions(monkeypatch, enabled) -> None:
+    requests = []
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+        def raise_for_status(self):
+            pass
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, url, *, headers):
+            requests.append(("GET", url, headers))
+            return Response({"ok": True, "browserEnabled": enabled})
+
+        async def post(self, url, *, headers, json):
+            requests.append(("POST", url, headers))
+            return Response({"ok": True, "targets": []})
+
+    monkeypatch.setenv("MINICODE_EMBEDDED_BROWSER_ENDPOINT", "http://127.0.0.1:43123")
+    monkeypatch.setenv("MINICODE_EMBEDDED_BROWSER_TOKEN", "fixture-token")
+    monkeypatch.setattr("backend.tools.browser_control_tool.httpx.AsyncClient", Client)
+    result = asyncio.run(BrowserControlTool().execute({"action": "discover"}, ToolExecutionContext(
+        permission=PermissionContext(), conversation_id="discovery-owner",
+        metadata={"window_instance_id": "fixture-window"}, window_binding_token="fixture-binding",
+    )))
+    assert not result.is_error
+    assert requests[0] == ("GET", "http://127.0.0.1:43123/v1/health", {"authorization": "Bearer fixture-token"})
+    assert len(requests) == (2 if enabled else 1)
+    assert ("control: enabled" if enabled else "control: disabled") in result.content
+    if not enabled:
+        assert "Targets:" not in result.content
+
+
 def test_browser_control_get_url_uses_page_target(monkeypatch) -> None:
     class _Response:
         def json(self):

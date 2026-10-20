@@ -262,6 +262,39 @@ test("update install transaction commits only after two matching preflights", as
   assert.deepEqual(events, ["preflight", "backup", "preflight", "commit"]);
 });
 
+test("native active downloads enter preflight through the injected producer and clear only when it settles", async (t) => {
+  const { updater, app } = updaterConfigurationFixture(t, { packaged: false });
+  let live = ["paused-original-download"];
+  await updater.init({ app, getActiveDownloadIds: () => live });
+  const blocked = await updater.preflight();
+  const check = blocked.checks.find(item => item.code === "download.active");
+  assert.equal(check.severity, "blocking");
+  assert.deepEqual(Array.from(check.details.ids), live);
+  live = [];
+  const clear = await updater.preflight();
+  assert.equal(clear.checks.some(item => item.code === "download.active"), false);
+  assert.equal(clear.checks.some(item => item.code === "download.clear"), true);
+  assert.notEqual(clear.fingerprint, blocked.fingerprint);
+});
+
+test("a native browser download beginning during update backup prevents installation", async () => {
+  let live = [];
+  const read = () => buildUpdatePreflight({ activity: emptyActivity(), activeDownloadIds: live, updateReady: true, readyVersion: "2.0.0" });
+  const idle = read();
+  assert.equal(idle.allowed, true);
+  let committed = false;
+  const result = await executeInstallTransaction({ fingerprint: idle.fingerprint, readPreflight: read,
+    createBackup: async () => { live = ["started-during-backup"]; return { backupDirectory: "backup", executableRelativePath: "MiniCode.exe" }; },
+    commitInstall: async () => { committed = true; } });
+  assert.equal(result.installed, false); assert.equal(result.reason, "preflight_changed"); assert.equal(committed, false);
+  assert.equal(result.preflight.checks.find(item => item.code === "download.active").severity, "blocking");
+  const paused = read();
+  live = ["a-different-active-download"];
+  assert.notEqual(read().fingerprint, paused.fingerprint);
+  live = [];
+  assert.equal(read().allowed, true);
+});
+
 test("update boot health requires recovery after a second unconfirmed launch", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-update-health-"));
   const app = { getPath: () => root, getVersion: () => "2.0.0" };

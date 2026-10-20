@@ -521,12 +521,12 @@
 /* ── Reduced motion ──────────────────────────────────────────────────── */
 
 @media (prefers-reduced-motion: reduce) {
-  .agent-loop-timeline-group-work[data-processing="true"] > .agent-loop-timeline-group-title .agent-loop-timeline-group-live-title,
-  .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
-  .agent-loop-process-cell .exec-cell-header-button[data-processing="true"],
-  .agent-loop-process-cell .status-notice-cell[data-processing="true"] .status-notice-title,
-  .agent-loop-process-cell .context-compaction-cell[data-processing="true"] > span,
-  .agent-loop-process-cell .thinking-cell[data-processing="true"] {
+  html:not([data-reduced-motion="false"]) .agent-loop-timeline-group-work[data-processing="true"] > .agent-loop-timeline-group-title .agent-loop-timeline-group-live-title,
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .exec-cell-header-button[data-processing="true"],
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .status-notice-cell[data-processing="true"] .status-notice-title,
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .context-compaction-cell[data-processing="true"] > span,
+  html:not([data-reduced-motion="false"]) .agent-loop-process-cell .thinking-cell[data-processing="true"] {
     color: var(--text-primary);
     background: none;
     -webkit-text-fill-color: currentColor;

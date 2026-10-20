@@ -39,11 +39,27 @@ afterEach(async () => {
 });
 
 describe("durable owned composer drafts", () => {
+  it("cold reopens structured drafts for the active conversation, hidden workspace and side chat without changing ownership", async () => {
+    const first = await renderer("rich-window");
+    const rich = { markdown: "**keep**", plainTextMode: false,
+      document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "keep", marks: [{ type: "strong" }] }] }] } };
+    const hidden = { ...state(), draft: "**hidden**", richDraft: { ...rich, markdown: "**hidden**",
+      document: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "hidden", marks: [{ type: "strong" }] }] }] } } };
+    await save(first, state({ conversationId: "rich-main", draft: rich.markdown, richDraft: rich,
+      workspaceComposerDrafts: { "c:/hidden": hidden }, sideChats: { side: { id: "side", draft: rich.markdown, richDraft: rich, messages: [], isStreaming: false } } }));
+    await first.resetComposerDraftStorageForTests(true);
+    const cold = await renderer("rich-window");
+    const records = await cold.loadComposerDrafts();
+    expect(records.find(record => record.owner.id === "rich-main")!.draft.richDraft).toEqual(rich);
+    expect(records.find(record => record.owner.id === "c:/hidden")!.draft.richDraft).toEqual(hidden.richDraft);
+    expect(records.find(record => record.owner.kind === "side")!.draft.richDraft).toEqual(rich);
+    expect(records.every(record => record.windowOwnerId === "rich-window")).toBe(true);
+  });
   it("cold reopens original file bytes, all draft metadata and an interrupted upload as retryable", async () => {
     const first = await renderer("primary");
     const bytes = new Uint8Array([0, 1, 127, 128, 255, 10]);
     const file = new File([bytes], "未完成.bin", { type: "application/octet-stream", lastModified: 123456 });
-    const snapshot = state({ draft: "未发送的正文", attachments: [attachment("binary-file", file)],
+    const snapshot = state({ draft: "未发送的正文", goalMode: true, attachments: [attachment("binary-file", file)],
       quotedMessage: { id: "quoted", content: "保留引用", role: "assistant" },
       selectedMentions: [{ kind: "file", name: "a.ts", path: "a.ts" }],
       selectedSkills: [{ kind: "skill", path: "SKILL.md", name: "retained" }],
@@ -52,7 +68,7 @@ describe("durable owned composer drafts", () => {
     await first.resetComposerDraftStorageForTests(true);
     const cold = await renderer("primary");
     const recovered = (await cold.loadComposerDrafts())[0].draft;
-    expect(recovered).toMatchObject({ draft: snapshot.draft, quotedMessage: snapshot.quotedMessage,
+    expect(recovered).toMatchObject({ draft: snapshot.draft, goalMode: true, quotedMessage: snapshot.quotedMessage,
       selectedMentions: snapshot.selectedMentions, selectedSkills: snapshot.selectedSkills, allowedRemoteImageDomains: ["example.test"] });
     expect(recovered.attachments[0]).toMatchObject({ status: "error", error: "上传已中断，可点击重试。" });
     const reopened = recovered.attachments[0].localFile!;

@@ -25,7 +25,7 @@ describe("editor workspace efficiency", () => {
     expect(loadPersistedEditorTabs("/editor-test").find((tab) => tab.path === "c.py")).toMatchObject({ pinned: true, preview: false });
     expect(loadPersistedEditorTabs("/editor-test").find((tab) => tab.path === "b.py")).toMatchObject({ content: "b = 2", original: "b = 1" });
   });
-  it("ignores legacy font choices while preserving sizes and unrelated editor preferences", () => {
+  it("leaves appearance-owned fonts intact while preserving sizes and unrelated editor preferences", () => {
     const legacy = { ...defaultWorkbenchPreferences, uiFont: "Georgia", proseFont: "Georgia", codeFont: "Fira Code", ligatures: true,
       proseSize: 17, tabSize: 2, formatOnSave: true, speechModel: "saved-speech-model", snippets: [{ id: "saved", language: "typescript", prefix: "log", body: "console.log($1)", description: "log" }] };
     const style = document.documentElement.style;
@@ -35,12 +35,12 @@ describe("editor workspace efficiency", () => {
 
     applyWorkbenchPreferences(useAppStore.getState().workbenchPreferences);
 
-    for (const property of fontProperties) expect(style.getPropertyValue(property)).toBe("");
+    for (const property of fontProperties) expect(style.getPropertyValue(property)).toBe("LegacyFont");
     expect(style.getPropertyValue("--mc-font-reading")).toBe("17px");
     expect(style.getPropertyValue("--prose-font-size")).toBe("17px");
     style.setProperty("--font-ui", "OldInlineOverride");
     useAppStore.getState().setWorkbenchPreferences({ proseSize: 18 });
-    expect(style.getPropertyValue("--font-ui")).toBe("");
+    expect(style.getPropertyValue("--font-ui")).toBe("OldInlineOverride");
     expect(style.getPropertyValue("--mc-font-reading")).toBe("18px");
     expect(JSON.parse(localStorage.getItem("minicode.workbench.preferences")!)).toMatchObject({ proseSize: 18, tabSize: 2, formatOnSave: true,
       speechModel: "saved-speech-model", snippets: legacy.snippets });

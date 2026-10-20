@@ -31,6 +31,7 @@ import {
 } from "./useWebSocket";
 import { LS } from "../stores/shared-helpers";
 import { useAppStore } from "../stores";
+import type { ChatMessage, ConversationAgentState } from "../stores/types";
 import {
   createClientCommandId,
   registerWebSocketSender,
@@ -279,18 +280,45 @@ describe("useWebSocket client command ids", () => {
     if (owner !== "side") expect(state.sideChats.side.messages[0].isStreaming).toBe(true);
   });
 
-  it("does not stop the running turn when admission rejects a queued follow-up", () => {
-    useAppStore.setState({ conversationId: "active", isStreaming: true, conversationStreaming: { active: true }, sideChats: {}, conversationMessages: {},
-      messages: [{ id: "running", role: "assistant", content: "Working", isStreaming: true, timestamp: 1 },
-        { id: "queued-user", role: "user", content: "next", queueState: "queued", timestamp: 2 },
-        { id: "queued-reply", role: "assistant", content: "", isStreaming: false, queueState: "queued", timestamp: 3 }] });
-    trackPendingClientCommandAck({ type: "user_message", client_command_id: "queued-rejected", content: "next", conversation_id: "active",
-      user_message_id: "queued-user", assistant_message_id: "queued-reply" });
+  it.each(["active", "background", "side"])("does not stop the running %s turn when admission rejects a queued follow-up", (owner) => {
+    const messages = (scope: string): ChatMessage[] => [
+      { id: `${scope}-running`, role: "assistant", content: "Working", isStreaming: true, timestamp: 1 },
+      { id: `${scope}-queued-user`, role: "user", content: "next", queueState: "queued", timestamp: 2 },
+      { id: `${scope}-queued-reply`, role: "assistant", content: "", isStreaming: false, queueState: "queued", timestamp: 3 },
+    ];
+    const work = Object.fromEntries(["active", "background", "side"].map(scope => [scope, {
+      plan: { threadId: scope, turnId: `${scope}-running`, plan: [{ step: "Continue original work", status: "in_progress" }] },
+      todos: [{ id: `${scope}-todo`, content: "Original work", activeForm: "Working", status: "in_progress" }],
+      subagents: [], agentProgress: [],
+    }])) as Record<string, ConversationAgentState>;
+    useAppStore.setState({ conversationId: "active", draft: "active unsent draft", isStreaming: true,
+      conversationStreaming: { active: true, background: true, side: true }, messages: messages("active"),
+      conversationMessages: { background: messages("background") },
+      sideChats: { side: { id: "side", messages: messages("side"), isStreaming: true, draft: "side unsent draft" } },
+      plan: work.active.plan, todos: work.active.todos, conversationAgentStates: work });
+    const before = useAppStore.getState();
+    trackPendingClientCommandAck({ type: "user_message", client_command_id: "queued-rejected", content: "next", conversation_id: owner,
+      user_message_id: `${owner}-queued-user`, assistant_message_id: `${owner}-queued-reply` });
     acknowledgeClientCommand({ type: "client.command.ack", client_command_id: "queued-rejected", accepted: false } as ServerEvent);
-    expect(useAppStore.getState().isStreaming).toBe(true);
-    expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
-    expect(useAppStore.getState().messages[1].queueState).toBe("cancelled");
-    expect(useAppStore.getState().messages[2].terminalStatus).toBe("failed");
+    const after = useAppStore.getState();
+    expect(after).toMatchObject({ isStreaming: true, conversationStreaming: { active: true, background: true, side: true },
+      draft: "active unsent draft", sideChats: { side: { isStreaming: true, draft: "side unsent draft" } } });
+    for (const scope of ["active", "background", "side"]) {
+      const scopedMessages = scope === "active" ? after.messages : scope === "side" ? after.sideChats.side.messages : after.conversationMessages.background;
+      expect(scopedMessages[0].isStreaming).toBe(true);
+      if (scope === owner) {
+        expect(scopedMessages[1].queueState).toBe("cancelled");
+        expect(scopedMessages[2]).toMatchObject({ isStreaming: false, terminalStatus: "failed", failureRecoverable: true });
+      } else {
+        expect(scopedMessages).toBe(scope === "active" ? before.messages : scope === "side" ? before.sideChats.side.messages : before.conversationMessages.background);
+        expect(scopedMessages[1].queueState).toBe("queued");
+      }
+    }
+    expect(after.plan).toBe(before.plan);
+    expect(after.todos).toBe(before.todos);
+    expect(after.conversationAgentStates).toBe(before.conversationAgentStates);
+    expect(after.plan?.plan[0].status).toBe("in_progress");
+    expect(after.todos[0].status).toBe("in_progress");
   });
   beforeEach(() => {
     resetPendingClientCommandAcksForTests();

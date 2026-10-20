@@ -1,11 +1,14 @@
 "use strict";
 
-const { WebContentsView, app, dialog, session } = require("electron");
+const { WebContentsView, app, dialog, session, shell, Menu } = require("electron");
 const net = require("node:net");
 const dns = require("node:dns").promises;
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
+const { platform } = require("node:process");
 const { atomicWriteTextSync } = require("./utils");
+const { attachGuestAutofill } = require("./browser-autofill");
 
 const DEFAULT_PARTITION = "persist:minicode-browser";
 const ID_PATTERN = /^[a-zA-Z0-9_-]{1,96}$/;
@@ -15,7 +18,10 @@ const API_IMAGE_MAX_BASE64_SIZE = 5 * 1024 * 1024;
 
 let getWindowByInstanceId = () => null;
 let getMainWindows = () => [];
+let getLocale = () => app.getLocale();
+let getShortcutPreferences = require("./preferences").getPreferences;
 let appendDesktopLog = () => {};
+let onMenuStateChanged = () => {};
 let assessBrowserNavigationPolicy = null;
 let isOwnedPreviewUrl = () => false;
 let lookupHostAddresses = (host) => dns.lookup(host, { all: true, verbatim: true });
@@ -26,16 +32,92 @@ const configuredSessions = new WeakSet();
 const entriesByWebContentsId = new Map();
 const DOWNLOAD_POLICIES = new Set(["block", "ask", "allow"]);
 const SITE_PERMISSIONS = new Set(["clipboard-read", "geolocation", "media", "notifications"]);
+const SITE_CATEGORIES = [
+  { id: "camera", defaultSetting: "ask", allowedSettings: ["ask", "allow", "block"] },
+  { id: "microphone", defaultSetting: "ask", allowedSettings: ["ask", "allow", "block"] },
+  { id: "geolocation", defaultSetting: "ask", allowedSettings: ["ask", "allow", "block"] },
+  { id: "notifications", defaultSetting: "ask", allowedSettings: ["ask", "allow", "block"] },
+  { id: "clipboard-read", defaultSetting: "ask", allowedSettings: ["ask", "allow", "block"] },
+  { id: "mediaKeySystem", defaultSetting: "allow", allowedSettings: ["allow", "block"] },
+  { id: "sound", defaultSetting: "allow", allowedSettings: ["allow", "block"] },
+  { id: "images", defaultSetting: "allow", allowedSettings: ["allow", "block"] },
+  { id: "javascript", defaultSetting: "allow", allowedSettings: ["allow", "block"] },
+  { id: "usb", defaultSetting: "ask", allowedSettings: ["ask", "block"] },
+];
+const LEGACY_SITE_CATEGORIES = { media: ["camera", "microphone"], geolocation: ["geolocation"], notifications: ["notifications"], "clipboard-read": ["clipboard-read"] };
+const sessionDeviceGrants = new Map();
 let browserSettingsPath = "";
 let browserSettingsLoaded = false;
-let browserSettings = { downloadPolicy: "block", sitePermissions: {} };
+const DEFAULT_BROWSER_SETTINGS = { downloadPolicy: "allow", downloadDirectory: null, browserEnabled: true, deviceToolbarAlwaysOnNewTabs: false, sitePermissions: {} };
+let browserSettings = { ...DEFAULT_BROWSER_SETTINGS };
 let browserHistory = null;
+let downloadRecords = null;
+const downloadItems = new Map();
+let browserPersonalData = null;
+
+const browserText = (english, chinese) => /^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(getLocale()) ? chinese : english;
+const getActiveDownloadIds = () => [...downloadItems.keys()];
+
+function downloadsPath() { return path.join(path.dirname(settingsPath()), "browser-downloads.json"); }
+function listDownloads() {
+  if (downloadRecords === null) {
+    downloadRecords = fs.existsSync(downloadsPath()) ? JSON.parse(fs.readFileSync(downloadsPath(), "utf8")) : [];
+    // Persisted entries have no DownloadItem after the owning app exited.
+    downloadRecords = downloadRecords.map(record => ["progressing", "paused"].includes(record.state)
+      ? { ...record, state: "interrupted" } : record);
+  }
+  return downloadRecords.map(record => {
+    const item = downloadItems.get(record.id);
+    const paused = item ? item.isPaused() : false;
+    return { ...record, canPause: Boolean(item && record.state === "progressing" && !paused),
+      canResume: Boolean(item && (paused || record.state === "interrupted") && item.canResume()), canCancel: Boolean(item),
+      fileExists: fs.existsSync(record.path) };
+  });
+}
+function saveDownloads() { atomicWriteTextSync(downloadsPath(), JSON.stringify(downloadRecords)); }
+function publishDownloads() {
+  for (const window of getMainWindows()) window.webContents.send("minicode:embeddedBrowser:downloadsChanged", listDownloads());
+}
+async function runDownloadAction({ action, id }) {
+  if (action === "open-folder") return shell.openPath(getBrowserSettings().downloadDirectory ?? app.getPath("downloads"));
+  listDownloads();
+  const record = downloadRecords.find(item => item.id === id);
+  if (!record) throw new Error("Download record no longer exists");
+  if (["pause", "resume", "cancel"].includes(action)) {
+    const item = downloadItems.get(id);
+    if (!item) throw new Error("Download is no longer active");
+    item[action]();
+    if (action !== "cancel") {
+      record.state = item.isPaused() ? "paused" : item.getState();
+      record.path = item.getSavePath();
+      record.filename = path.basename(record.path);
+      record.receivedBytes = item.getReceivedBytes();
+      saveDownloads();
+      publishDownloads();
+    }
+    return "";
+  }
+  if (action === "open") return shell.openPath(record.path);
+  if (action === "reveal") { shell.showItemInFolder(record.path); return ""; }
+  if (action === "remove") {
+    if (downloadItems.has(id)) throw new Error("Cancel the active download before removing its history");
+    downloadRecords = downloadRecords.filter(item => item.id !== id);
+    saveDownloads();
+    publishDownloads();
+    return "";
+  }
+  throw new Error(`Unsupported download action: ${action}`);
+}
 
 function init(deps = {}) {
+  if (deps.browserPersonalData) browserPersonalData = deps.browserPersonalData;
   if (deps.browserHistory) browserHistory = deps.browserHistory;
   if (typeof deps.getWindowByInstanceId === "function") getWindowByInstanceId = deps.getWindowByInstanceId;
   if (typeof deps.getMainWindows === "function") getMainWindows = deps.getMainWindows;
+  if (typeof deps.getLocale === "function") getLocale = deps.getLocale;
+  if (typeof deps.getShortcutPreferences === "function") getShortcutPreferences = deps.getShortcutPreferences;
   if (typeof deps.appendDesktopLog === "function") appendDesktopLog = deps.appendDesktopLog;
+  if (typeof deps.onMenuStateChanged === "function") onMenuStateChanged = deps.onMenuStateChanged;
   if (typeof deps.assessBrowserNavigationPolicy === "function") {
     assessBrowserNavigationPolicy = deps.assessBrowserNavigationPolicy;
   }
@@ -44,7 +126,9 @@ function init(deps = {}) {
   if (typeof deps.browserSettingsPath === "string" && deps.browserSettingsPath !== browserSettingsPath) {
     browserSettingsPath = deps.browserSettingsPath;
     browserSettingsLoaded = false;
-    browserSettings = { downloadPolicy: "block", sitePermissions: {} };
+    browserSettings = { ...DEFAULT_BROWSER_SETTINGS };
+    downloadRecords = null;
+    sessionDeviceGrants.clear();
   }
 }
 
@@ -61,7 +145,7 @@ function normalizeOrigin(value) {
 }
 
 function normalizeBrowserSettings(raw) {
-  const downloadPolicy = DOWNLOAD_POLICIES.has(raw?.downloadPolicy) ? raw.downloadPolicy : "block";
+  const downloadPolicy = DOWNLOAD_POLICIES.has(raw?.downloadPolicy) ? raw.downloadPolicy : DEFAULT_BROWSER_SETTINGS.downloadPolicy;
   const sitePermissions = {};
   if (raw?.sitePermissions && typeof raw.sitePermissions === "object") {
     for (const [rawOrigin, rawPermissions] of Object.entries(raw.sitePermissions)) {
@@ -71,7 +155,88 @@ function normalizeBrowserSettings(raw) {
       if (permissions.length) sitePermissions[origin] = permissions;
     }
   }
-  return { downloadPolicy, sitePermissions };
+  return { downloadPolicy, downloadDirectory: raw.downloadDirectory ?? null, browserEnabled: raw.browserEnabled ?? true,
+    deviceToolbarAlwaysOnNewTabs: raw.deviceToolbarAlwaysOnNewTabs ?? false, sitePermissions, ...(raw.sitePolicy ? { sitePolicy: raw.sitePolicy } : {}) };
+}
+
+function readSitePolicy() {
+  loadBrowserSettings();
+  const defaults = Object.fromEntries(SITE_CATEGORIES.map(category => [category.id, category.defaultSetting]));
+  const origins = {};
+  for (const [origin, permissions] of Object.entries(browserSettings.sitePermissions)) {
+    origins[origin] = {};
+    for (const permission of permissions) for (const category of LEGACY_SITE_CATEGORIES[permission]) origins[origin][category] = "allow";
+  }
+  const raw = browserSettings.sitePolicy;
+  if (raw) {
+    for (const [category, setting] of Object.entries(raw.defaults)) { validateSiteDecision(category, setting, true); defaults[category] = setting; }
+    for (const [origin, settings] of Object.entries(raw.origins)) {
+      if (normalizeOrigin(origin) !== origin) throw new Error("Saved browser site policy has an invalid origin.");
+      origins[origin] ??= {};
+      for (const [category, setting] of Object.entries(settings)) { validateSiteDecision(category, setting); origins[origin][category] = setting; }
+    }
+  }
+  const devices = raw?.devices ?? [];
+  if (!Array.isArray(devices) || devices.some(device => !device || typeof device.id !== "string" || normalizeOrigin(device.origin) !== device.origin
+    || typeof device.name !== "string" || typeof device.deviceKey !== "string")) throw new Error("Saved browser device permissions are invalid.");
+  return { defaults, origins, devices };
+}
+
+function validateSiteDecision(category, setting, defaultScope = false) {
+  const definition = SITE_CATEGORIES.find(item => item.id === category);
+  if (!definition || !definition.allowedSettings.includes(setting)) throw new Error("Unsupported browser site permission setting.");
+  if (defaultScope && setting === "allow" && definition.allowedSettings.includes("ask")) throw new Error("This browser permission can only be allowed for an individual website.");
+}
+
+function effectiveSiteSetting(origin, category, policy = readSitePolicy()) {
+  return policy.origins[origin]?.[category] ?? policy.defaults[category];
+}
+
+function getSitePolicy() {
+  const policy = readSitePolicy();
+  return { categories: SITE_CATEGORIES.map(({ id, allowedSettings }) => ({ id, allowedSettings, defaultSettings: allowedSettings.includes("ask") ? ["ask", "block"] : allowedSettings })), defaults: policy.defaults,
+    sites: Object.entries(policy.origins).filter(([, settings]) => Object.keys(settings).length).map(([origin, settings]) => ({ origin, settings })).sort((left, right) => left.origin.localeCompare(right.origin)),
+    devices: [...policy.devices, ...sessionDeviceGrants.values()].map(({ id, origin, name }) => ({ id, origin, name })) };
+}
+
+function setSitePolicy({ origin: rawOrigin, category, setting }) {
+  const definition = SITE_CATEGORIES.find(item => item.id === category);
+  if (!definition) throw new Error("Unsupported browser site permission category.");
+  const origin = rawOrigin === undefined ? undefined : normalizeOrigin(rawOrigin);
+  if (rawOrigin !== undefined && !origin) throw new Error("Browser site permissions require a valid HTTP or HTTPS origin.");
+  if (setting !== "default") validateSiteDecision(category, setting, origin === undefined);
+  const policy = readSitePolicy();
+  if (origin === undefined) policy.defaults[category] = setting === "default" ? definition.defaultSetting : setting;
+  else {
+    policy.origins[origin] ??= {};
+    if (setting === "default") delete policy.origins[origin][category]; else policy.origins[origin][category] = setting;
+    if (!Object.keys(policy.origins[origin]).length) delete policy.origins[origin];
+  }
+  const legacy = { ...browserSettings.sitePermissions };
+  if (origin) {
+    // Once an origin is represented by explicit policies, retaining its legacy
+    // media grant would re-enable a permission after Reset to default.
+    delete legacy[origin];
+  }
+  saveBrowserSettings({ ...browserSettings, sitePermissions: legacy, sitePolicy: policy });
+  for (const entry of views.values()) applyAudioPolicy(entry);
+  return getSitePolicy();
+}
+
+function removeSiteDevice({ id }) {
+  const policy = readSitePolicy();
+  policy.devices = policy.devices.filter(item => item.id !== id);
+  saveBrowserSettings({ ...browserSettings, sitePolicy: policy });
+  sessionDeviceGrants.delete(id);
+  return getSitePolicy();
+}
+
+function applyAudioPolicy(entry) {
+  const origin = normalizeOrigin(entry.view.webContents.getURL());
+  if (!origin) return;
+  const muted = effectiveSiteSetting(origin, "sound") === "block";
+  if (muted || entry.audioPolicyMuted) entry.view.webContents.setAudioMuted(muted);
+  entry.audioPolicyMuted = muted;
 }
 
 function loadBrowserSettings() {
@@ -97,10 +262,10 @@ function saveBrowserSettings(settings) {
 function getBrowserSettings(url = "") {
   loadBrowserSettings();
   const origin = normalizeOrigin(url);
-  const allowed = origin && Array.isArray(browserSettings.sitePermissions[origin])
-    ? browserSettings.sitePermissions[origin].filter((item) => SITE_PERMISSIONS.has(item))
-    : [];
-  return { downloadPolicy: browserSettings.downloadPolicy, origin, permissions: allowed };
+  const policy = readSitePolicy();
+  const allowed = origin ? Object.entries(LEGACY_SITE_CATEGORIES).filter(([, categories]) => categories.every(category => effectiveSiteSetting(origin, category, policy) === "allow")).map(([permission]) => permission).sort() : [];
+  return { downloadPolicy: browserSettings.downloadPolicy, downloadDirectory: browserSettings.downloadDirectory, browserEnabled: browserSettings.browserEnabled,
+    deviceToolbarAlwaysOnNewTabs: browserSettings.deviceToolbarAlwaysOnNewTabs, origin, permissions: allowed };
 }
 
 function setBrowserSettings(payload = {}) {
@@ -120,36 +285,192 @@ function setBrowserSettings(payload = {}) {
     if (!SITE_PERMISSIONS.has(permission)) throw new Error("Unsupported browser site permission.");
   }
   const next = { ...browserSettings, sitePermissions: { ...browserSettings.sitePermissions } };
+  for (const key of ["browserEnabled", "deviceToolbarAlwaysOnNewTabs"]) {
+    if (payload[key] !== undefined) {
+      if (typeof payload[key] !== "boolean") throw new Error(`${key} must be a boolean.`);
+      next[key] = payload[key];
+    }
+  }
   if (policy != null) next.downloadPolicy = policy;
+  if (payload.downloadDirectory !== undefined) next.downloadDirectory = payload.downloadDirectory;
   if (origin && permission) {
     const current = new Set(next.sitePermissions[origin] || []);
     if (payload.allowed) current.add(permission); else current.delete(permission);
     if (current.size) next.sitePermissions[origin] = Array.from(current).sort();
     else delete next.sitePermissions[origin];
+    const policy = readSitePolicy();
+    policy.origins[origin] ??= {};
+    for (const category of LEGACY_SITE_CATEGORIES[permission]) policy.origins[origin][category] = payload.allowed ? "allow" : "block";
+    next.sitePolicy = policy;
   }
   saveBrowserSettings(next);
   return getBrowserSettings(origin);
 }
 
 function sitePermissionAllowed(webContents, permission, requestingOrigin = "", details = {}) {
-  if (!SITE_PERMISSIONS.has(permission)) return false;
   const url = requestingOrigin || details.requestingUrl || webContents?.getURL?.() || "";
-  return getBrowserSettings(url).permissions.includes(permission);
+  const origin = normalizeOrigin(url);
+  if (!origin) return false;
+  const categories = permissionCategories(permission, details);
+  const entry = webContents && entriesByWebContentsId.get(webContents.id);
+  return categories.length > 0 && categories.every(category => effectiveSiteSetting(origin, category) !== "block" && (effectiveSiteSetting(origin, category) === "allow"
+    || entry?.documentGrants.get(origin)?.has(category) || category === "usb"));
 }
 
-function availableDownloadPathIn(downloads, filename) {
+function permissionCategories(permission, details) {
+  if (permission === "media") {
+    const types = details.mediaTypes ?? (details.mediaType && details.mediaType !== "unknown" ? [details.mediaType] : ["video", "audio"]);
+    return types.map(type => type === "video" ? "camera" : "microphone");
+  }
+  return SITE_CATEGORIES.some(item => item.id === permission && !["sound", "images", "javascript"].includes(permission)) ? [permission] : [];
+}
+
+async function requestGuestPermission(contents, permission, callback, details) {
+  const entry = entriesByWebContentsId.get(contents.id);
+  const origin = normalizeOrigin(details.requestingUrl || details.securityOrigin || contents.getURL());
+  const categories = permissionCategories(permission, details);
+  if (!entry || !origin || !categories.length) { callback(false); return; }
+  if (sitePermissionAllowed(contents, permission, origin, details)) { callback(true); return; }
+  if (categories.some(category => effectiveSiteSetting(origin, category) === "block")) { callback(false); return; }
+  if (!entry.presented) { callback(false); return; }
+  const navigation = entry.navigationVersion;
+  try {
+    const { response } = await dialog.showMessageBox(entry.window, { type: "question", message: `Allow ${new URL(origin).hostname} to access ${categories.join(", ")}?`,
+      buttons: ["Block", "Allow this time", "Allow"], defaultId: 0, cancelId: 0, noLink: true });
+    if (contents.isDestroyed() || entry.window.isDestroyed() || entry.navigationVersion !== navigation) { callback(false); return; }
+    if (response === 1) {
+      const granted = entry.documentGrants.get(origin) ?? new Set();
+      for (const category of categories) granted.add(category);
+      entry.documentGrants.set(origin, granted);
+    } else {
+      const policy = readSitePolicy();
+      policy.origins[origin] ??= {};
+      for (const category of categories) policy.origins[origin][category] = response === 2 ? "allow" : "block";
+      const legacy = { ...browserSettings.sitePermissions }; delete legacy[origin];
+      saveBrowserSettings({ ...browserSettings, sitePermissions: legacy, sitePolicy: policy });
+    }
+    callback(response !== 0);
+  } catch (error) {
+    callback(false);
+    emit(entry, "error", { error: error instanceof Error ? error.message : String(error) });
+  }
+}
+
+function usbIdentity(device) {
+  return JSON.stringify([device.vendorId, device.productId, device.serialNumber || device.deviceId]);
+}
+
+function usbPermissionAllowed({ deviceType, origin, device }) {
+  if (deviceType !== "usb" || effectiveSiteSetting(origin, "usb") === "block") return false;
+  return [...readSitePolicy().devices, ...sessionDeviceGrants.values()].some(item => item.origin === origin && item.deviceKey === usbIdentity(device));
+}
+
+async function selectUsbDevice(event, details, callback) {
+  event.preventDefault();
+  const entry = [...views.values()].find(item => item.view.webContents.mainFrame === details.frame?.top);
+  const origin = normalizeOrigin(details.frame?.url);
+  if (!entry || !entry.presented || !origin || effectiveSiteSetting(origin, "usb") === "block") { callback(""); return; }
+  const navigation = entry.navigationVersion;
+  try {
+    const { response } = await dialog.showMessageBox(entry.window, { type: "question", message: `${new URL(origin).hostname} wants to connect to a USB device`,
+      buttons: [...details.deviceList.map(device => device.productName || device.manufacturerName || "USB device"), "Cancel"], defaultId: details.deviceList.length, cancelId: details.deviceList.length, noLink: true });
+    const device = details.deviceList[response];
+    if (!device || entry.window.isDestroyed() || entry.view.webContents.isDestroyed() || navigation !== entry.navigationVersion) { callback(""); return; }
+    const grant = { id: randomUUID(), origin, name: device.productName || device.manufacturerName || "USB device", deviceKey: usbIdentity(device) };
+    if (device.serialNumber) {
+      const policy = readSitePolicy();
+      policy.devices = [...policy.devices.filter(item => item.origin !== origin || item.deviceKey !== grant.deviceKey), grant];
+      saveBrowserSettings({ ...browserSettings, sitePolicy: policy });
+    } else sessionDeviceGrants.set(grant.id, grant);
+    callback(device.deviceId);
+  } catch (error) { callback(""); emit(entry, "error", { error: error instanceof Error ? error.message : String(error) }); }
+}
+
+async function handlePasswordSubmission(event, payload) {
+  const entry = entriesByWebContentsId.get(event.sender.id);
+  const frame = event.senderFrame;
+  if (!entry || !browserPersonalData || !entry.presented || frame !== event.sender.mainFrame || !frame) return false;
+  const origin = normalizeOrigin(frame.url);
+  if (!origin || payload?.origin !== origin || payload.documentUrl !== frame.url
+    || typeof payload.username !== "string" || typeof payload.password !== "string" || !payload.password
+    || payload.oldPassword !== undefined && typeof payload.oldPassword !== "string" || entry.passwordSavePending) return false;
+  entry.passwordSavePending = true;
+  try {
+    const status = browserPersonalData.listPasswords();
+    if (!status.available) return false;
+    let username = payload.username.trim();
+    let previous = status.items.find(item => item.origin === origin && item.username === username);
+    if (!previous && !username && payload.oldPassword) {
+      const matches = status.items.filter(item => item.origin === origin && browserPersonalData.getPassword({ id: item.id }).password === payload.oldPassword);
+      if (matches.length === 1) { previous = matches[0]; username = previous.username; }
+    }
+    if (previous && browserPersonalData.getPassword({ id: previous.id }).password === payload.password) return false;
+    const { response } = await dialog.showMessageBox(entry.window, { type: "question", message: previous ? browserText("Update password?", "更新密码？") : browserText("Save password?", "保存密码？"),
+      detail: [new URL(origin).hostname, username].filter(Boolean).join("\n"), buttons: [browserText("Not now", "暂不"), previous ? browserText("Update", "更新") : browserText("Save", "保存")], defaultId: 0, cancelId: 0, noLink: true });
+    // A form normally navigates while this confirmation is open. Keep the
+    // captured origin, and require the same still-presented conversation view.
+    if (response !== 1 || entry.view.webContents.isDestroyed() || entry.window.isDestroyed() || !entry.presented || views.get(entry.key) !== entry) return false;
+    browserPersonalData.savePassword({ ...(previous ? { id: previous.id } : {}), origin, username, password: payload.password });
+    return true;
+  } catch (error) {
+    let message = (error instanceof Error ? error.message : String(error)).replaceAll(payload.password, "[redacted]");
+    if (payload.oldPassword) message = message.replaceAll(payload.oldPassword, "[redacted]");
+    emit(entry, "error", { error: message });
+    return false;
+  } finally { entry.passwordSavePending = false; }
+}
+
+function handleLinkClick(event, payload) {
+  const entry = entriesByWebContentsId.get(event.sender.id);
+  const frame = event.senderFrame;
+  if (!entry || !entry.presented || frame !== event.sender.mainFrame || !frame
+    || frame.detached || frame.isDestroyed()
+    || views.get(entry.key) !== entry || payload.documentUrl !== frame.url
+    || !normalizeOrigin(frame.url) || !normalizeOrigin(payload.url)) return false;
+  const { ctrlKey, metaKey, altKey, shiftKey } = payload.modifiers;
+  const primary = platform === "darwin" ? metaKey && !ctrlKey : ctrlKey && !metaKey;
+  const shortcut = getShortcutPreferences().externalBrowserLinkShortcut;
+  const matches = shortcut === "alt" ? altKey && !ctrlKey && !metaKey && !shiftKey
+    : (shortcut === "primary" || shortcut === "primaryShift") && primary && !altKey && shiftKey === (shortcut === "primaryShift");
+  if (!matches) return false;
+  emit(entry, "external-link-request", { requestedUrl: payload.url });
+  return true;
+}
+
+function listSitePermissions() {
+  return getSitePolicy().sites.map(({ origin }) => ({ origin, permissions: getBrowserSettings(origin).permissions }));
+}
+
+function removeSitePermissions({ origin: rawOrigin }) {
+  const origin = normalizeOrigin(rawOrigin);
+  if (!origin) throw new Error("Browser site permissions require a valid HTTP or HTTPS origin.");
+  loadBrowserSettings();
+  const next = { ...browserSettings, sitePermissions: { ...browserSettings.sitePermissions } };
+  delete next.sitePermissions[origin];
+  const policy = readSitePolicy();
+  delete policy.origins[origin];
+  policy.devices = policy.devices.filter(item => item.origin !== origin);
+  next.sitePolicy = policy;
+  saveBrowserSettings(next);
+  for (const [id, device] of sessionDeviceGrants) if (device.origin === origin) sessionDeviceGrants.delete(id);
+  for (const entry of views.values()) applyAudioPolicy(entry);
+}
+
+function availableDownloadPathIn(downloads, filename, activePaths = []) {
   const safeName = path.basename(String(filename || "download"));
   const extension = path.extname(safeName);
   const stem = path.basename(safeName, extension);
   let candidate = path.join(downloads, safeName);
-  for (let index = 1; fs.existsSync(candidate); index += 1) {
+  const reserved = new Set(activePaths.map(value => path.normalize(value)));
+  for (let index = 1; fs.existsSync(candidate) || reserved.has(candidate); index += 1) {
     candidate = path.join(downloads, `${stem} (${index})${extension}`);
   }
   return candidate;
 }
 
 function availableDownloadPath(filename) {
-  return availableDownloadPathIn(app.getPath("downloads"), filename);
+  return availableDownloadPathIn(browserSettings.downloadDirectory ?? app.getPath("downloads"), filename,
+    Array.from(downloadItems.values(), item => item.getSavePath()));
 }
 
 function assertViewId(value) {
@@ -447,8 +768,10 @@ function configureGuestSession(session) {
     sitePermissionAllowed(webContents, permission, requestingOrigin, details)
   ));
   session.setPermissionRequestHandler((webContents, permission, callback, details) => {
-    callback(sitePermissionAllowed(webContents, permission, details?.requestingUrl, details));
+    void requestGuestPermission(webContents, permission, callback, details);
   });
+  session.setDevicePermissionHandler(usbPermissionAllowed);
+  session.on("select-usb-device", (event, details, callback) => { void selectUsbDevice(event, details, callback); });
   session.on("will-download", (event, item, webContents) => {
     const policy = browserSettings.downloadPolicy;
     if (policy === "block") {
@@ -457,8 +780,8 @@ function configureGuestSession(session) {
     }
     if (policy === "ask") {
       const options = {
-        title: "保存下载文件",
-        defaultPath: path.join(app.getPath("downloads"), path.basename(item.getFilename() || "download")),
+        title: browserText("Save download file", "保存下载文件"),
+        defaultPath: availableDownloadPath(item.getFilename()),
       };
       const owner = entriesByWebContentsId.get(webContents.id)?.window;
       if (!owner || owner.isDestroyed()) { event.preventDefault(); return; }
@@ -468,15 +791,45 @@ function configureGuestSession(session) {
         return;
       }
       item.setSavePath(savePath);
-      return;
+    } else {
+      item.setSavePath(availableDownloadPath(item.getFilename()));
     }
-    item.setSavePath(availableDownloadPath(item.getFilename()));
+    listDownloads();
+    const record = { id: randomUUID(), filename: path.basename(item.getSavePath()), url: item.getURL(), path: item.getSavePath(),
+      state: "progressing", receivedBytes: 0, totalBytes: item.getTotalBytes(), startedAt: Date.now() };
+    downloadRecords.unshift(record);
+    downloadItems.set(record.id, item);
+    saveDownloads();
+    publishDownloads();
+    item.on("updated", (_event, state) => {
+      Object.assign(record, { state: state === "progressing" && item.isPaused() ? "paused" : state,
+        path: item.getSavePath(), filename: path.basename(item.getSavePath()),
+        receivedBytes: item.getReceivedBytes(), totalBytes: item.getTotalBytes() });
+      publishDownloads();
+    });
+    item.once("done", (_event, state) => {
+      Object.assign(record, { state, path: item.getSavePath(), filename: path.basename(item.getSavePath()), receivedBytes: item.getReceivedBytes() });
+      downloadItems.delete(record.id);
+      saveDownloads();
+      publishDownloads();
+    });
   });
   // Keep a compact, per-tab request history for page diagnostics.  The log is
   // intentionally metadata-only: request/response headers and bodies can
   // contain cookies, authorization values, or user data.
   const webRequest = session.webRequest;
   const navigationFilter = { urls: ["http://*/*", "https://*/*"] };
+  webRequest.onHeadersReceived(navigationFilter, (details, callback) => {
+    if (!["mainFrame", "subFrame"].includes(details.resourceType) || !entriesByWebContentsId.has(Number(details.webContentsId))) { callback({}); return; }
+    const origin = normalizeOrigin(details.url);
+    const directives = [];
+    if (effectiveSiteSetting(origin, "javascript") === "block") directives.push("script-src 'none'");
+    if (effectiveSiteSetting(origin, "images") === "block") directives.push("img-src 'none'");
+    if (!directives.length) { callback({}); return; }
+    const headers = details.responseHeaders ?? {};
+    const key = Object.keys(headers).find(name => name.toLowerCase() === "content-security-policy") ?? "Content-Security-Policy";
+    callback({ responseHeaders: { ...headers, [key]: [...(headers[key] ?? []), directives.join("; ")] } });
+  });
   if (webRequest?.onBeforeRequest) {
     webRequest.onBeforeRequest(navigationFilter, (details, callback) => {
       const owner = entriesByWebContentsId.get(Number(details.webContentsId));
@@ -485,7 +838,8 @@ function configureGuestSession(session) {
         owner.networkStarted.set(details.id, Date.now());
       }
       if (details.resourceType !== "mainFrame") {
-        callback({ cancel: false });
+        const blocked = details.resourceType === "image" && owner && effectiveSiteSetting(normalizeOrigin(owner.view.webContents.getURL() || owner.url), "images") === "block";
+        callback({ cancel: Boolean(blocked) });
         return;
       }
       const entry = entriesByWebContentsId.get(Number(details.webContentsId));
@@ -831,8 +1185,10 @@ function syncFrameCapture(entry) {
 
 function syncViewPresentation(entry) {
   const bounds = entry.view.getBounds();
+  const wasPresented = entry.presented;
   entry.presented = entry.layoutBound && activeViewIds.get(entry.windowInstanceId) === entry.id && bounds.width > 0 && bounds.height > 0;
   entry.view.setVisible(entry.presented);
+  if (wasPresented !== entry.presented) onMenuStateChanged(entry.window);
   syncFrameCapture(entry);
 }
 
@@ -854,6 +1210,7 @@ function capturePresentedPage(entry, control) {
 
 function attachViewEvents(entry) {
   const webContents = entry.view.webContents;
+  attachGuestAutofill(entry, () => browserPersonalData, { Menu, dialog, text: browserText, appendDesktopLog });
 
   webContents.setWindowOpenHandler(({ url }) => {
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
@@ -885,8 +1242,35 @@ function attachViewEvents(entry) {
     emit(entry, "error", { error: decision.reason || "已阻止不安全的重定向。" });
   });
   webContents.on("did-start-loading", () => emit(entry, "loading"));
+  webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown" || input.isComposing) return;
+    const mac = platform === "darwin";
+    const primary = mac ? input.meta && !input.control && !input.alt : input.control && !input.meta && !input.alt;
+    const secondary = mac ? input.control && !input.meta && !input.alt : input.alt && !input.control && !input.meta;
+    if (entry.presented && /^[1-9]$/.test(input.key) && !input.shift && (primary || secondary)) {
+      const accelerator = `${primary ? "CommandOrControl" : mac ? "Control" : "Alt"}+${input.key}`;
+      const aliases = primary ? [accelerator, `${mac ? "Command" : "Control"}+${input.key}`, `${mac ? "Cmd" : "Ctrl"}+${input.key}`]
+        : mac ? [accelerator, `Ctrl+${input.key}`] : [accelerator];
+      const hasBinding = (menu) => menu.items.some(item => item.enabled &&
+        (aliases.includes(item.accelerator) || item.submenu && hasBinding(item.submenu)));
+      const menu = Menu.getApplicationMenu();
+      if (menu && hasBinding(menu)) return;
+      const primaryTarget = getShortcutPreferences().primaryNumberShortcutTarget;
+      const target = primary ? primaryTarget : primaryTarget === "tabs" ? "sidebar" : "tabs";
+      event.preventDefault();
+      emit(entry, "numbered-shortcut", { numberedShortcut: { target, index: Number(input.key) - 1 } });
+      return;
+    }
+    if (!(input.control || input.meta)) return;
+    const key = input.key.toLowerCase();
+    if (key === "f") { event.preventDefault(); emit(entry, "find-request"); }
+    if (key === "p") { event.preventDefault(); emit(entry, "print-request"); }
+  });
+  webContents.on("found-in-page", (_event, result) => emit(entry, "find-result", { findResult: result }));
   webContents.on("did-stop-loading", () => emit(entry, "updated"));
   webContents.on("did-navigate", (_event, url) => {
+    entry.navigationVersion++;
+    entry.documentGrants.clear();
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
     if (!decision.allowed) {
       try { webContents.stop(); } catch { /* renderer may already be gone */ }
@@ -894,17 +1278,20 @@ function attachViewEvents(entry) {
       return;
     }
     entry.url = url;
+    applyAudioPolicy(entry);
     entry.faviconUrl = "";
     if (browserHistory) entry.historyId = browserHistory.recordVisit(url, entry.title || "", entry.visitSource);
     emit(entry, "updated");
   });
   webContents.on("did-navigate-in-page", (_event, url) => {
+    entry.navigationVersion++;
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
     if (!decision.allowed) {
       emit(entry, "error", { error: decision.reason || "已阻止不安全的页面跳转。" });
       return;
     }
     entry.url = url;
+    applyAudioPolicy(entry);
     if (browserHistory) entry.historyId = browserHistory.recordVisit(url, entry.title || "", entry.visitSource);
     emit(entry, "updated");
   });
@@ -971,6 +1358,7 @@ async function create(payload = {}, control = {}) {
       const view = new WebContentsView({
         webPreferences: {
           contextIsolation: true,
+          preload: path.join(__dirname, "browser-password-preload.js"),
           nodeIntegration: false,
           sandbox: true,
           partition: DEFAULT_PARTITION,
@@ -990,6 +1378,8 @@ async function create(payload = {}, control = {}) {
         faviconUrl: "",
         consoleLogs: [],
         networkLogs: [],
+        navigationVersion: 0,
+        documentGrants: new Map(),
         approvedPrivateOrigins,
         pendingNavigationApprovals: new Set(),
         layoutBound: false,
@@ -1025,7 +1415,11 @@ async function create(payload = {}, control = {}) {
 
 function setBounds(payload = {}) {
   const { id, x, y, width, height } = payload;
-  const entry = selectEntry(id, conversationIdFrom(payload), payload.window_instance_id);
+  const owner = conversationIdFrom(payload);
+  requireWindow(payload.window_instance_id);
+  // Layout messages can already be queued when the native Close command retires a page.
+  if (!views.has(viewKey(payload.window_instance_id, assertViewId(id)))) return false;
+  const entry = selectEntry(id, owner, payload.window_instance_id);
   const mainWindow = entry.window;
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   const content = mainWindow.getContentBounds();
@@ -1036,19 +1430,28 @@ function setBounds(payload = {}) {
   const bounds = normalizeViewBounds({ x, y, width, height }, content, zoomFactor);
   entry.view.setBounds(bounds);
   entry.layoutBound = bounds.width > 0 && bounds.height > 0;
-  if ("viewport" in payload && bounds.width > 0 && bounds.height > 0) {
+  if ("viewport" in payload) {
     const viewport = payload.viewport;
     if (viewport === null) {
       if (entry.deviceViewport) entry.view.webContents.disableDeviceEmulation();
       entry.deviceViewport = null;
     } else {
       if (!Number.isInteger(viewport?.width) || !Number.isInteger(viewport?.height)
-        || viewport.width < 240 || viewport.width > 3840 || viewport.height < 240 || viewport.height > 3840) {
-        throw new Error("预览视口宽高必须在 240–3840 px 之间。");
+        || viewport.width < 240 || viewport.width > 4096 || viewport.height < 160 || viewport.height > 4096) {
+        throw new Error("预览视口宽度必须在 240–4096 px、高度在 160–4096 px 之间。");
       }
-      const scale = Math.min(bounds.width / viewport.width, bounds.height / viewport.height, 1);
+      if (viewport.scale !== undefined && (!Number.isFinite(viewport.scale) || viewport.scale < 0 || viewport.scale > 1)) {
+        throw new Error("设备视口显示比例必须在 0–1 之间。");
+      }
+      // The renderer supplies the centred visual frame, not the whole stage.
+      // Host zoom scales that frame in DIP; it must scale emulation as well.
+      // Keep the logical viewport current while its pixels yield to an HTML
+      // menu/resize capture. A collapsed stage has no scale to present yet.
+      const scale = viewport.scale === undefined
+        ? Math.min(bounds.width / viewport.width, bounds.height / viewport.height)
+        : viewport.scale * zoomFactor;
       const key = JSON.stringify([viewport.width, viewport.height, viewport.mobile, scale]);
-      if (entry.deviceViewport !== key) {
+      if (scale > 0 && entry.deviceViewport !== key) {
         entry.view.webContents.enableDeviceEmulation({
           screenPosition: viewport.mobile ? "mobile" : "desktop",
           screenSize: { width: viewport.width, height: viewport.height },
@@ -1073,22 +1476,23 @@ async function clearSiteData(payload = {}) {
     origin,
     storages: ["cookies", "filesystem", "indexdb", "localstorage", "serviceworkers", "cachestorage"],
   });
-  loadBrowserSettings();
-  const next = { ...browserSettings, sitePermissions: { ...browserSettings.sitePermissions } };
-  delete next.sitePermissions[origin];
-  saveBrowserSettings(next);
+  removeSitePermissions({ origin });
   if (entry.approvedPrivateOrigins instanceof Set) entry.approvedPrivateOrigins.delete(origin);
   return true;
 }
 
-async function clearBrowsingData() {
+async function clearBrowsingData(dataTypes = ["cookies", "siteData", "cache", "downloads", "history"]) {
+  if (!Array.isArray(dataTypes) || dataTypes.some(type => !["cookies", "siteData", "cache", "downloads", "history"].includes(type))) {
+    throw new Error("Unsupported browser data type.");
+  }
   const browserSession = session.fromPartition(DEFAULT_PARTITION);
-  await browserSession.clearStorageData();
-  await browserSession.clearCache();
-  browserHistory.clear();
-  loadBrowserSettings();
-  saveBrowserSettings({ ...browserSettings, sitePermissions: {} });
-  for (const entry of views.values()) entry.approvedPrivateOrigins.clear();
+  const storages = [];
+  if (dataTypes.includes("cookies")) storages.push("cookies");
+  if (dataTypes.includes("siteData")) storages.push("filesystem", "indexdb", "localstorage", "serviceworkers", "cachestorage");
+  if (storages.length) await browserSession.clearStorageData({ storages });
+  if (dataTypes.includes("cache")) await browserSession.clearCache();
+  if (dataTypes.includes("history")) browserHistory.clear();
+  if (dataTypes.includes("downloads")) { listDownloads(); downloadRecords = downloadRecords.filter(record => downloadItems.has(record.id)); saveDownloads(); publishDownloads(); }
   return true;
 }
 
@@ -1112,6 +1516,8 @@ async function capture(payload) {
 }
 
 async function executeControlCommand(payload = {}, control = {}) {
+  loadBrowserSettings();
+  if (!browserSettings.browserEnabled) throw new Error("Browser control is disabled in Browser settings.");
   control.signal?.throwIfAborted();
   const submit = () => { control.signal?.throwIfAborted(); control.onSubmitted?.(); };
   const conversationId = conversationIdFrom(payload);
@@ -1237,6 +1643,81 @@ function runNavigationAction(payload = {}) {
   return true;
 }
 
+function menuTarget(window, focusedContents, activePage = false) {
+  const focused = focusedContents && entriesByWebContentsId.get(focusedContents.id);
+  if (focused?.window === window && focused.presented) return focused;
+  return activePage ? Array.from(views.values()).find(entry => entry.window === window && entry.presented) : undefined;
+}
+
+function canReloadVisiblePage(window, focusedContents) {
+  return Boolean(menuTarget(window, focusedContents, true));
+}
+
+function runMenuCommand(window, focusedContents, action) {
+  const entry = menuTarget(window, focusedContents, action === "reload" || action === "hard-reload");
+  if (!entry) return false;
+  const contents = entry.view.webContents;
+  if (action === "reload" || action === "hard-reload") {
+    entry.visitSource = "other";
+    if (action === "hard-reload") contents.reloadIgnoringCache(); else contents.reload();
+  } else if (action === "close") {
+    closeEntry(entry);
+  } else if (action === "open-find") {
+    emit(entry, "find-request");
+  } else if (action === "find-next" || action === "find-previous") {
+    emit(entry, "find-request", { findDirection: action === "find-next" ? "next" : "previous" });
+  } else if (action === "zoom-in" || action === "zoom-out" || action === "reset-zoom") {
+    // Installed Source Gr/Za steps through these percentages, including
+    // non-standard current values, rather than adding a fixed delta.
+    const levels = [25, 33, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300, 400, 500];
+    const current = Math.round(contents.getZoomFactor() * 100);
+    const percent = action === "reset-zoom" ? 100
+      : action === "zoom-in" ? levels.find(value => value > current) ?? 500
+        : levels.findLast(value => value < current) ?? 25;
+    contents.setZoomFactor(percent / 100);
+    emit(entry, "updated", { zoomFactor: percent / 100 });
+  } else if (action === "back" || action === "forward") {
+    const history = contents.navigationHistory;
+    if (action === "back" && history.canGoBack()) history.goBack();
+    if (action === "forward" && history.canGoForward()) history.goForward();
+  } else {
+    throw new Error(`Unsupported browser menu command: ${action}`);
+  }
+  return true;
+}
+
+async function runPageCommand(payload = {}) {
+  const entry = selectEntry(payload.id, conversationIdFrom(payload), payload.window_instance_id);
+  const contents = entry.view.webContents;
+  if (payload.action === "find") {
+    if (!payload.text) { contents.stopFindInPage("clearSelection"); return { matches: 0 }; }
+    return { requestId: contents.findInPage(payload.text, { forward: payload.forward !== false, findNext: Boolean(payload.findNext) }) };
+  }
+  if (payload.action === "zoom") {
+    if (payload.zoomFactor !== undefined) {
+      if (!Number.isFinite(payload.zoomFactor) || payload.zoomFactor < .25 || payload.zoomFactor > 5) throw new Error("zoomFactor must be between .25 and 5");
+      contents.setZoomFactor(payload.zoomFactor);
+      emit(entry, "updated", { zoomFactor: payload.zoomFactor });
+    }
+    return { zoomFactor: contents.getZoomFactor() };
+  }
+  if (payload.action === "site-info") {
+    const url = new URL(contents.getURL());
+    const cookies = await contents.session.cookies.get({ url: url.href });
+    return { origin: url.origin, hostname: url.hostname, secure: url.protocol === "https:", cookieCount: cookies.length };
+  }
+  if (payload.action === "print") {
+    return new Promise((resolve, reject) => contents.print({}, (success, reason) => success ? resolve({ success }) : reject(new Error(reason))));
+  }
+  if (payload.action === "screenshot") {
+    const image = await contents.capturePage();
+    const result = await dialog.showSaveDialog(entry.window, { defaultPath: path.join(app.getPath("downloads"), "screenshot.png"), filters: [{ name: "PNG", extensions: ["png"] }] });
+    if (!result.canceled) await fs.promises.writeFile(result.filePath, image.toPNG());
+    return { saved: !result.canceled };
+  }
+  throw new Error(`Unsupported browser page command: ${payload.action}`);
+}
+
 function closeEntry(entry) {
   const requestedId = entry.id;
   for (const complete of Array.from(entry.captureWaiters)) {
@@ -1251,6 +1732,7 @@ function closeEntry(entry) {
   entriesByWebContentsId.delete(entry.view.webContents.id);
   if (activeViewIds.get(entry.windowInstanceId) === requestedId) activeViewIds.delete(entry.windowInstanceId);
   if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
+  if (entry.presented) onMenuStateChanged(mainWindow);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("minicode:embeddedBrowser:event", {
       id: entry.id,
@@ -1320,6 +1802,12 @@ module.exports = {
   setBounds,
   navigate,
   runNavigationAction,
+  canReloadVisiblePage,
+  runMenuCommand,
+  runPageCommand,
+  listDownloads,
+  getActiveDownloadIds,
+  runDownloadAction,
   close,
   closeConversation,
   clearSiteData,
@@ -1337,6 +1825,13 @@ module.exports = {
   executeControlCommand,
   getBrowserSettings,
   setBrowserSettings,
+  getSitePolicy,
+  setSitePolicy,
+  removeSiteDevice,
+  handlePasswordSubmission,
+  handleLinkClick,
+  listSitePermissions,
+  removeSitePermissions,
   makeNetworkLogEntry,
   normalizeOrigin,
   normalizeBrowserSettings,

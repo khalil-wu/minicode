@@ -31,7 +31,6 @@ import {
   normalizeTranscriptAttachmentRefs,
   type BackendTranscriptMessage,
 } from "./transcriptHydration";
-import { clearStreamingState } from "./streamingState";
 import type {
   AgentProgressEntry,
   ChatMessage,
@@ -244,6 +243,7 @@ const toConversationMeta = (conversation: ConversationSummary) => ({
   id: conversation.id,
   title: maybeString(conversation.title) ?? "未命名",
   updatedAt: maybeString(conversation.updated_at) ?? new Date().toISOString(),
+  createdAt: maybeString(conversation.created_at),
   revision: Number.isSafeInteger(conversation.revision) && Number(conversation.revision) >= 0
     ? Number(conversation.revision)
     : undefined,
@@ -617,6 +617,7 @@ export const applyQueuedUserMessageSnapshot = (
       const backendContent = String(entry.content ?? "");
       const input = {
         content: entry.display_content ?? backendContent,
+        ...(entry.async_request_id !== undefined ? { asyncRequestId: entry.async_request_id } : {}),
         ...(entry.display_content !== undefined ? { backendContent } : {}),
         ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
         ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
@@ -713,6 +714,7 @@ export const applyPendingTurnInputSnapshot = (
       const backendContent = String(entry.content ?? "");
       const input = {
         content: entry.display_content ?? backendContent,
+        ...(entry.async_request_id !== undefined ? { asyncRequestId: entry.async_request_id } : {}),
         ...(entry.display_content !== undefined ? { backendContent } : {}),
         ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
         ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
@@ -749,9 +751,9 @@ export const applyPendingTurnInputSnapshot = (
 
 export const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
   // The backend always emits this field as the authoritative set of live
-  // conversation runs.  An empty array is therefore meaningful: it seals any
-  // stale renderer-side stream left behind when the socket disconnected near
-  // DONE.  Older snapshots that omit the field remain non-authoritative.
+  // conversation runs. An empty array stops stale running presentation after
+  // a disconnect; it does not supply the missing turn/tool outcome. Older
+  // snapshots that omit the field remain non-authoritative.
   if (!Array.isArray(session.active_stream_conversation_ids)) return;
   const activeStreamIds = session.active_stream_conversation_ids
     .map((id) => String(id || "").trim())
@@ -1269,20 +1271,11 @@ export const handleSessionEvent = (
           || (activeStreamIds.length === 0 && activeTaskId)
         )
       );
-      if (switchEventWillHydrate || hasActiveStream) {
-        buffers.textStreamBuffer.destroy();
-        buffers.thinkingStreamBuffer.destroy();
-      } else {
-        // The session snapshot reports no live stream, so any locally streaming
-        // turn was cut off while this client was away. Its real outcome is
-        // unknown, so it is sealed as partial: never a fabricated success, and
-        // never a fabricated failure for a turn that may have finished fine on
-        // the server.
-        clearStreamingState(buffers, {
-          conversationId: activeConversationId || s.conversationId,
-          terminalStatus: "partial",
-        });
-      }
+      // Flush pending text before projecting ownership. An idle session is not
+      // a turn outcome: only the durable transcript or a terminal event can
+      // seal its tools and reject late same-turn evidence.
+      buffers.textStreamBuffer.destroy();
+      buffers.thinkingStreamBuffer.destroy();
 
       if (model) s.setCurrentModel(model);
       const provider = maybeString(ev.provider);

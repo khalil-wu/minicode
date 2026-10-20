@@ -5,6 +5,7 @@ import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
+import { projectMessagesToTurns } from "./chatSurfaceState";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 
@@ -459,6 +460,7 @@ describe("handleSessionEvent", () => {
           message_id: "assistant-replayed",
           user_message_id: "user-replayed",
           content: "继续处理剩余问题",
+          async_request_id: "async:queued-question",
           position: 1,
         }],
       },
@@ -467,6 +469,7 @@ describe("handleSessionEvent", () => {
     expect(useAppStore.getState().messages).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: "user-replayed",
+        asyncRequestId: "async:queued-question",
         queueState: "queued",
         queuePosition: 1,
       }),
@@ -488,6 +491,7 @@ describe("handleSessionEvent", () => {
         { id: "assistant-next", role: "assistant", content: "", artifacts: [], timestamp: 2, isStreaming: false, queueState: "queued", queueMessageId: "assistant-next" },
       ],
       conversationMessages: {},
+      sideChats: {},
       conversationStreaming: { "conv-active": false },
       isStreaming: false,
     });
@@ -587,6 +591,7 @@ describe("handleSessionEvent", () => {
           user_message_id: "user-steer",
           target_message_id: "assistant-current",
           content: "change direction",
+          async_request_id: "async:steered-question",
           attachments: [{
             file_name: "notes.txt",
             artifact_id: "artifact-notes",
@@ -605,6 +610,7 @@ describe("handleSessionEvent", () => {
     ]);
     expect(state.messages[2]).toMatchObject({
       content: "change direction",
+      asyncRequestId: "async:steered-question",
       steeredIntoMessageId: "assistant-current",
       attachmentRefs: [expect.objectContaining({
         name: "notes.txt",
@@ -666,6 +672,7 @@ describe("handleSessionEvent", () => {
       working_directory: "C:/work/project",
       available_models: ["gpt-5"],
       active_conversation_id: "conv-active",
+      session: { active_conversation_id: "conv-active", active_stream_conversation_ids: ["conv-cached"] },
       active_conversation: {
         id: "conv-active",
         title: "Active",
@@ -695,11 +702,7 @@ describe("handleSessionEvent", () => {
     expect(state.workingDirectory).toBe("C:/work/project");
   });
 
-  // Regression: clearing the two message-level streaming flags is not enough to
-  // seal a turn. A tool_call record left at "running" keeps ExecCell spinning
-  // with a live Stop button on a turn the transcript already renders as over,
-  // so the restore path has to go through the canonical `finishStreaming`.
-  it("session restore terminalizes blocks, tool records and terminal status, not just message flags", () => {
+  it("projects an idle restore as unfinished without inventing terminal tool results", () => {
     const textStreamBuffer = makeBuffer();
     const thinkingStreamBuffer = makeBuffer();
     useAppStore.setState({
@@ -735,16 +738,20 @@ describe("handleSessionEvent", () => {
     expect(message).toMatchObject({
       isStreaming: false,
       isThinkingStreaming: false,
-      terminalStatus: "partial",
     });
-    expect(message.completedAt).toBeTypeOf("number");
-    expect(getToolCallsFromMessage(message)[0]).toMatchObject({ id: "tc-live", status: "partial" });
+    expect(message.terminalStatus).toBeUndefined();
+    expect(message.completedAt).toBeUndefined();
+    expect(getToolCallsFromMessage(message)[0]).toMatchObject({ id: "tc-live", status: "running" });
     const blocks = message.blocks ?? [];
-    expect(blocks.find((block) => block.type === "progress")).toMatchObject({ status: "partial" });
+    expect(blocks.find((block) => block.type === "progress")).toMatchObject({ status: "running" });
     expect(blocks.find((block) => block.type === "text")).toMatchObject({
-      isStreaming: false,
-      status: "partial",
+      isStreaming: true,
+      status: "in_progress",
     });
+    const turn = projectMessagesToTurns(useAppStore.getState().messages, false)[0];
+    expect(turn).toMatchObject({ status: "partial", activeCell: null });
+    expect(turn.committedCells.find(cell => cell.id === "tc-live")).toMatchObject({ status: "partial" });
+    expect(turn.finalAnswerCell?.markdownSource).toBe("half an answer");
   });
 
   it("session restore preserves streaming while the backend still owns an active task", () => {

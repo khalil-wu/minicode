@@ -1,3 +1,5 @@
+import { createPortal } from "react-dom";
+import { openNewSideChat } from "../chat/openSideChat";
 import { useI18n } from "../i18n";
 import {
   ArrowLeft,
@@ -26,24 +28,21 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { ContextMenu } from "../components/ContextMenu";
-import { NumberInput } from "../components/NumberInput";
 import {
   embeddedBrowserActivate,
-  embeddedBrowserClearSiteData,
+  embeddedBrowserCapture,
   embeddedBrowserClose,
   embeddedBrowserGetSettings,
   embeddedBrowserInspect,
   embeddedBrowserList,
   embeddedBrowserNavigate,
   embeddedBrowserRunAction,
-  embeddedBrowserSetSettings,
   embeddedBrowserSetBounds,
   isDesktop,
   onEmbeddedBrowserEvent,
   onEmbeddedBrowserSettingsChanged,
   openExternal,
   type EmbeddedBrowserState,
-  type EmbeddedBrowserSettings,
 } from "../desktop/runtime";
 import { parseHttpUrl } from "../lib/network-target";
 import { previewUrlsShareOrigin } from "../lib/preview-projection";
@@ -53,15 +52,20 @@ import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
 import { useTurnChanges } from "../chat/useTurnChanges";
 import { sendChatMessage } from "../chat/sendChatMessage";
-import { PreviewServerManager } from "./PreviewServerManager";
+import { captureSteerTurnId } from "../lib/steer-command";
 import {
   acknowledgeBrowserRequest,
   subscribeBrowserRequests,
 } from "../chat/openWebInBrowser";
 import "./BrowserPanel.css";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { BrowserDeviceToolbar, BrowserDeviceResizeHandles, browserDeviceLayout, BrowserDownloads, BrowserFindBar, BrowserPageActions, BrowserSiteInfo, DEFAULT_DEVICE_VIEWPORT, type BrowserDeviceLayout, type BrowserDeviceViewport } from "./BrowserPageActions";
 import { captureBrowserAnnotationAttachments } from "./browser-annotation-capture";
 import { liveConversationWorkbenchState } from "../stores/ui-slice";
+import { pushToast } from "../overlays/ToastContainer";
+import { matchesShortcut } from "../lib/keyboard-shortcuts";
+
+export type BrowserTabSummary = { id: string; title: string; active: boolean };
 
 interface BrowserTab {
   id: string;
@@ -124,19 +128,6 @@ interface AnnotationDraft {
 
 const EMPTY_ANNOTATION_DRAFT: AnnotationDraft = { open: false, note: "", selector: "", pickedElement: null };
 
-const DEFAULT_BROWSER_SETTINGS: EmbeddedBrowserSettings = {
-  downloadPolicy: "block",
-  origin: "",
-  permissions: [],
-};
-
-const sitePermissionOptions = [
-  ["clipboard-read", "读取剪贴板"],
-  ["media", "摄像头与麦克风"],
-  ["geolocation", "位置"],
-  ["notifications", "通知"],
-] as const;
-
 const diagnosticTimestamp = (timestamp?: number) => timestamp
   ? new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
   : "";
@@ -189,11 +180,19 @@ const updateTabFromEvent = (tab: BrowserTab, event: EmbeddedBrowserState): Brows
   error: event.type === "error" ? event.error || "页面加载失败。" : undefined,
 });
 
-export const BrowserPanel = () => {
+export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabClosed, onLastTabClosed }: {
+  tabHosts?: Record<string, HTMLElement>;
+  tabInteractions?: (id: string) => import("react").HTMLAttributes<HTMLDivElement>;
+  onTabsChanged?: (tabs: BrowserTabSummary[]) => void;
+  onTabClosed?: (id: string, active: boolean) => void;
+  onLastTabClosed?: () => void;
+}) => {
   const { t } = useI18n();
   const { preferences } = useDesktopPreferences();
   const [addressFocused, setAddressFocused] = useState(false);
   const conversationId = useAppStore((state) => state.conversationId) || "";
+  const rightStackTab = useAppStore((state) => state.rightStackTab);
+  const browserVisible = useAppStore((state) => state.rightPanelOpen && state.rightStackTab === "browser");
   const floatingComposerVisible = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
   const addBrowserAnnotation = useAppStore((state) => state.addBrowserAnnotation);
   const addSelectedMention = useAppStore((state) => state.addSelectedMention);
@@ -201,6 +200,8 @@ export const BrowserPanel = () => {
   const isConnected = useAppStore((state) => state.isConnected);
   const [tabs, setRenderedTabs] = useState<BrowserTab[]>(() => [blankTab()]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
+  useEffect(() => { onTabsChanged?.(tabs.map(({ id, title }) => ({ id, title, active: id === activeId }))); }, [onTabsChanged, tabs, activeId]);
+  const placeholderTab = useRef(tabs[0].id);
   const [hydratedConversationId, setHydratedConversationId] = useState<string | null>(null);
   const browserHydrated = hydratedConversationId === conversationId;
   const [annotationDrafts, setAnnotationDrafts] = useState<Record<string, AnnotationDraft>>({});
@@ -209,23 +210,49 @@ export const BrowserPanel = () => {
   const [feedbackBusyBehavior, setFeedbackBusyBehavior] = useState<"queue" | "steer">("queue");
   const [pickerMode, setPickerMode] = useState<"element" | "region" | null>(null);
   const [moreMenuPosition, setMoreMenuPosition] = useState<{ x: number; y: number } | null>(null);
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  useEffect(() => {
+    const openDownloads = () => setDownloadsOpen(true);
+    window.addEventListener("browser:downloads", openDownloads);
+    return () => window.removeEventListener("browser:downloads", openDownloads);
+  }, []);
   const [inspectorPage, setInspectorPage] = useState<string | null>(null);
   const [inspectorKind, setInspectorKind] = useState<InspectorKind>("console");
   const [diagnostics, setDiagnostics] = useState<BrowserDiagnosticItem[]>([]);
   const [diagnosticQuery, setDiagnosticQuery] = useState("");
   const [diagnosticFilter, setDiagnosticFilter] = useState("all");
-  const [viewport, setViewport] = useState<{ width: number; height: number; mobile: boolean } | null>(null);
+  const [viewports, setViewports] = useState<Record<string, BrowserDeviceViewport | null>>({});
+  const viewport = viewports[activeId] ?? null;
+  const setViewport = (next: BrowserDeviceViewport | null) => setViewports(current => ({ ...current, [activeId]: next }));
+  const alwaysShowDeviceToolbar = useRef(false);
+  const [devicePreferenceLoaded, setDevicePreferenceLoaded] = useState(false);
+  useEffect(() => {
+    if (!devicePreferenceLoaded) return;
+    setViewports(current => current[activeId] === undefined
+      ? { ...current, [activeId]: alwaysShowDeviceToolbar.current ? { ...DEFAULT_DEVICE_VIEWPORT } : null } : current);
+  }, [activeId, devicePreferenceLoaded]);
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
   const [inspectorLoading, setInspectorLoading] = useState(false);
   const [inspectorError, setInspectorError] = useState("");
   const [settingsPage, setSettingsPage] = useState<string | null>(null);
-  const [browserSettings, setBrowserSettings] = useState<EmbeddedBrowserSettings>(DEFAULT_BROWSER_SETTINGS);
-  const [settingsLoading, setSettingsLoading] = useState(false);
-  const [settingsSaving, setSettingsSaving] = useState(false);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const deviceResizeActive = useRef(false);
+  const [deviceFrame, setDeviceFrame] = useState<{ id: string; owner: string; layout: BrowserDeviceLayout } | null>(null);
+  const activeDeviceLayout = deviceFrame?.id === activeId && deviceFrame.owner === conversationId ? deviceFrame.layout : null;
+  const occlusion = useRef<{ id: string; owner: string; url: string; ready: boolean } | null>(null);
+  const [occludedSnapshot, setOccludedSnapshot] = useState<{ id: string; owner: string; url: string; src: string; height: number; token: { id: string; owner: string; url: string; ready: boolean } } | null>(null);
   const overlaysRef = useRef(new Set<HTMLElement>());
   const addressRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const focusAddress = () => {
+      if (!browserVisible) return;
+      addressRef.current?.focus();
+      addressRef.current?.select();
+    };
+    window.addEventListener("browser:focus-address", focusAddress);
+    return () => window.removeEventListener("browser:focus-address", focusAddress);
+  }, [browserVisible]);
   const annotationNoteRef = useRef<HTMLTextAreaElement>(null);
   const activeIdRef = useRef(activeId);
   const tabsRef = useRef(tabs);
@@ -240,7 +267,6 @@ export const BrowserPanel = () => {
   const ownerGenerationRef = useRef(0);
   const pageGenerationRef = useRef(0);
   const inspectorRequestRef = useRef(0);
-  const settingsRevisionRef = useRef(0);
   const navigationRequestsRef = useRef(new Map<string, number>());
   const activeTab = useMemo(
     () => tabs.find((tab) => tab.id === activeId) ?? tabs[0],
@@ -248,12 +274,12 @@ export const BrowserPanel = () => {
   );
   useEffect(() => {
     if (!isDesktop()) return;
-    return onEmbeddedBrowserSettingsChanged((settings) => {
-      const origin = parseHttpUrl(activeTab.url)?.origin ?? "";
-      settingsRevisionRef.current += 1;
-      setBrowserSettings({ downloadPolicy: settings.downloadPolicy, origin, permissions: settings.sitePermissions[origin] ?? [] });
+    void embeddedBrowserGetSettings("")!.then(settings => {
+      alwaysShowDeviceToolbar.current = settings!.deviceToolbarAlwaysOnNewTabs!;
+      setDevicePreferenceLoaded(true);
     });
-  }, [activeTab.url]);
+    return onEmbeddedBrowserSettingsChanged(settings => { alwaysShowDeviceToolbar.current = settings.deviceToolbarAlwaysOnNewTabs; });
+  }, []);
   const { summary: turnChanges, openReview } = useTurnChanges({
     conversationId, tab: "browser", url: activeTab.url, targetId: activeTab.id,
   });
@@ -278,6 +304,8 @@ export const BrowserPanel = () => {
   const settingsOpen = settingsPage === pageKey;
 
   useLayoutEffect(() => {
+    occlusion.current = null;
+    setOccludedSnapshot(null);
     pageGenerationRef.current += 1;
     inspectorRequestRef.current += 1;
     setPickerMode(null);
@@ -287,10 +315,6 @@ export const BrowserPanel = () => {
     setInspectorError("");
     setDiagnostics([]);
     setSettingsPage(null);
-    setBrowserSettings(DEFAULT_BROWSER_SETTINGS);
-    setSettingsLoading(false);
-    setSettingsSaving(false);
-    settingsRevisionRef.current += 1;
   }, [conversationId, activeId, activeTab.url]);
 
   useEffect(() => {
@@ -314,6 +338,7 @@ export const BrowserPanel = () => {
     ownerRef.current = conversationId;
     const generation = ++ownerGenerationRef.current;
     const initialTab = blankTab();
+    placeholderTab.current = initialTab.id;
     createdIdsRef.current.clear();
     visibleIdsRef.current.clear();
     navigationRequestsRef.current.clear();
@@ -389,27 +414,60 @@ export const BrowserPanel = () => {
     const bottom = composerRect && composerRect.width > 0
       && composerRect.left < rect.right && composerRect.right > rect.left
       ? Math.min(rect.bottom, composerRect.top - 8) : rect.bottom;
+    const stage = { x: rect.left, y: rect.top, width: rect.width, height: Math.max(0, bottom - rect.top) };
+    const device = viewportRef.current ? browserDeviceLayout(stage, viewportRef.current) : null;
+    const frame = device?.visualBounds || stage;
+    if (device) setDeviceFrame(current => current?.id === id && current.owner === owner
+      && current.layout.scale === device.scale && current.layout.stageBounds.x === stage.x && current.layout.stageBounds.y === stage.y
+      && current.layout.stageBounds.width === stage.width && current.layout.stageBounds.height === stage.height
+      && current.layout.visualBounds.width === frame.width && current.layout.visualBounds.height === frame.height ? current : { id, owner, layout: device });
+    else setDeviceFrame(current => current === null ? current : null);
     // WebContentsView sits above the renderer, regardless of CSS z-index.
     // Yield its surface to overlapping menus and modal backdrops; retain the
     // same tab and navigation state when the renderer overlay closes.
-    const obscured = trackedElements.some((overlay) => {
+    const obscured = deviceResizeActive.current || trackedElements.some((overlay) => {
       if (overlay.matches(COMPOSER_REGION) || overlay.contains(element)) return false;
       const bounds = overlay.getBoundingClientRect();
       return bounds.width > 0 && bounds.height > 0 && getComputedStyle(overlay).visibility !== "hidden"
         && (overlay.getAttribute("aria-modal") === "true"
-          || (bounds.left < rect.right && bounds.right > rect.left && bounds.top < rect.bottom && bounds.bottom > rect.top));
+          || (bounds.left < frame.x + frame.width && bounds.right > frame.x && bounds.top < frame.y + frame.height && bounds.bottom > frame.y));
     });
+    const url = tabsRef.current.find(tab => tab.id === id)!.url;
+    if (obscured && rect.width > 0 && bottom > rect.top) {
+      if (occlusion.current?.id !== id || occlusion.current.owner !== owner || occlusion.current.url !== url) {
+        const pending = { id, owner, url, ready: false };
+        occlusion.current = pending;
+        // Capture the same visible native owner before yielding it to the
+        // renderer. This image is only an in-memory composition surface.
+        void embeddedBrowserCapture({ id, conversationId: owner, expectedUrl: url }).then(capture => {
+          if (occlusion.current === pending) setOccludedSnapshot({ id, owner, url, src: `data:${capture.mimeType};base64,${capture.data}`,
+            height: stage.height, token: pending });
+        }).catch(error => {
+          if (occlusion.current !== pending) return;
+          pushToast(String(error), "error");
+          pending.ready = true;
+          syncBounds();
+        });
+      }
+      // The image load event yields the native surface only after its actual
+      // pixels can be painted. Closing the overlay invalidates this request.
+      if (!occlusion.current.ready) return;
+    } else if (occlusion.current) {
+      occlusion.current = null;
+      setOccludedSnapshot(null);
+    }
     void embeddedBrowserSetBounds({
       id,
       conversationId: owner,
-      x: rect.left,
-      y: rect.top,
-      width: obscured ? 0 : rect.width,
-      height: obscured ? 0 : Math.max(0, bottom - rect.top),
-      viewport: viewportRef.current,
+      x: frame.x,
+      y: frame.y,
+      width: obscured ? 0 : frame.width,
+      height: obscured ? 0 : frame.height,
+      viewport: viewportRef.current && device ? { ...viewportRef.current, scale: device.scale } : null,
     });
   }, []);
   useEffect(() => { syncBounds(); }, [viewport, floatingComposerVisible, syncBounds]);
+  const setDeviceResizeActive = useCallback((active: boolean) => { deviceResizeActive.current = active; syncBounds(); }, [syncBounds]);
 
   const reconcileNativeTab = useCallback(async (tabId: string): Promise<boolean> => {
     const owner = ownerRef.current;
@@ -565,6 +623,7 @@ export const BrowserPanel = () => {
       ? tabsRef.current.map((current) => current.id === tab.id ? tab : current)
       : [...tabsRef.current, tab];
     setTabs(nextTabs);
+    if (!reusableBlank) setViewports(current => ({ ...current, [tab.id]: alwaysShowDeviceToolbar.current ? { ...DEFAULT_DEVICE_VIEWPORT } : null }));
     activeIdRef.current = tab.id;
     setActiveId(tab.id);
     if (requestedUrl) {
@@ -586,15 +645,18 @@ export const BrowserPanel = () => {
       setTabs([replacement]);
       activeIdRef.current = replacement.id;
       setActiveId(replacement.id);
+      onLastTabClosed?.();
     } else {
       setTabs(liveTabs);
+      const wasActive = activeIdRef.current === tabId;
       if (activeIdRef.current === tabId) {
         const next = liveTabs[Math.min(index, liveTabs.length - 1)];
         activeIdRef.current = next.id;
         setActiveId(next.id);
       }
+      onTabClosed?.(tabId, wasActive);
     }
-  }, [setTabs]);
+  }, [setTabs, onLastTabClosed, onTabClosed]);
 
   useEffect(() => {
     if (!isDesktop()) return;
@@ -603,6 +665,22 @@ export const BrowserPanel = () => {
       // The global desktop listener owns automatic presentation, including
       // current-owner and user-dismissal checks while this panel is unmounted.
       if (event.type === "presentation-requested") return;
+      if (event.type === "find-result" || event.type === "find-request" || event.type === "print-request") return;
+      if (event.type === "numbered-shortcut" || event.type === "external-link-request") {
+        const state = useAppStore.getState();
+        if (state.conversationId !== event.conversationId || state.pendingConversationSwitchId
+          || event.id !== activeIdRef.current || !createdIdsRef.current.has(event.id)
+          || !state.rightPanelOpen || state.rightStackTab !== "browser") return;
+        if (event.type === "numbered-shortcut") {
+          const { target, index } = event.numberedShortcut!;
+          window.dispatchEvent(new CustomEvent(target === "tabs" ? "select-numbered-tab" : "select-numbered-chat", {
+            detail: { index, conversationId: event.conversationId, surface: "sidebar" },
+          }));
+        } else {
+          void openExternal(event.requestedUrl!);
+        }
+        return;
+      }
       if (event.type === "closed") {
         removeClosedTab(event.id);
         return;
@@ -702,7 +780,16 @@ export const BrowserPanel = () => {
     if (!isDesktop() || !browserHydrated) return;
     return subscribeBrowserRequests((request) => {
       if (request.conversationId !== ownerRef.current) return;
+      if (request.kind === "focus-address" && !browserVisible) return;
       acknowledgeBrowserRequest(request.id);
+      if (request.kind === "focus-address") {
+        window.requestAnimationFrame(() => {
+          if (request.conversationId !== ownerRef.current) return;
+          addressRef.current?.focus();
+          addressRef.current?.select();
+        });
+        return;
+      }
       if (request.kind === "present") {
         const target = request.target;
         createdIdsRef.current.add(target.id);
@@ -728,6 +815,12 @@ export const BrowserPanel = () => {
         } else openTab(request.url);
         return;
       }
+      if (request.kind === "new") {
+        const placeholder = tabsRef.current.find(tab => tab.id === placeholderTab.current && !tab.url);
+        if (placeholder) { setActiveId(placeholder.id); placeholderTab.current = ""; }
+        else openTab();
+        return;
+      }
       if (request.kind === "resume") {
         const tab = tabsRef.current.find((candidate) => candidate.id === request.targetId);
         if (tab) {
@@ -746,7 +839,7 @@ export const BrowserPanel = () => {
         }
       }
     });
-  }, [browserHydrated, conversationId, openTab, performNativeNavigation, runNavigationAction, setTabs, syncBounds]);
+  }, [browserHydrated, conversationId, openTab, performNativeNavigation, runNavigationAction, setTabs, syncBounds, browserVisible]);
 
   const closeTab = async (tabId: string) => {
     const index = tabs.findIndex((tab) => tab.id === tabId);
@@ -866,6 +959,7 @@ export const BrowserPanel = () => {
     const submittedPage = pageKey;
     const submittedDraft = annotationDraft;
     const owner = conversationId;
+    const expectedTurnId = feedbackBusyBehavior === "steer" ? captureSteerTurnId(useAppStore.getState(), owner) : undefined;
     const items = annotationItems();
     setFeedbackSubmittingPage(submittedPage);
     let captured;
@@ -880,6 +974,7 @@ export const BrowserPanel = () => {
     const accepted = await sendChatMessage({
       displayContent: annotationNote.trim(), backendContent: annotationNote.trim(), conversationId: owner,
       contextRefs: items.map((item) => item.reference), allowWhileStreaming: true, busyBehavior: feedbackBusyBehavior,
+      expectedTurnId,
       attachments: captured.attachments, attachmentRefs: captured.attachmentRefs,
       awaitAdmission: true,
       onAdmission: (event) => {
@@ -937,62 +1032,6 @@ export const BrowserPanel = () => {
     }
   };
 
-  const updateBrowserSettings = async (payload: Parameters<typeof embeddedBrowserSetSettings>[0]) => {
-    const generation = pageGenerationRef.current;
-    const tabId = activeTab.id;
-    const url = activeTab.url;
-    const revision = ++settingsRevisionRef.current;
-    setSettingsSaving(true);
-    try {
-      const next = await embeddedBrowserSetSettings(payload);
-      if (
-        pageGenerationRef.current !== generation
-        || activeIdRef.current !== tabId
-      ) return;
-      if (!next) throw new Error("桌面浏览器未确认站点设置更新。");
-      if (settingsRevisionRef.current !== revision) return;
-      settingsRevisionRef.current += 1;
-      setBrowserSettings(next);
-    } catch (error) {
-      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
-      setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
-        ? { ...tab, error: error instanceof Error ? error.message : "站点设置更新失败。" }
-        : tab));
-    } finally {
-      if (pageGenerationRef.current === generation && activeIdRef.current === tabId) setSettingsSaving(false);
-    }
-  };
-
-  const clearActiveSiteData = async () => {
-    const owner = ownerRef.current;
-    const generation = pageGenerationRef.current;
-    const tabId = activeTab.id;
-    const url = activeTab.url;
-    if (!owner || !url) return;
-    settingsRevisionRef.current += 1;
-    setSettingsSaving(true);
-    try {
-      const cleared = await embeddedBrowserClearSiteData(owner, tabId);
-      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
-      if (!cleared) throw new Error("桌面浏览器未确认清除站点数据。");
-      const revision = settingsRevisionRef.current;
-      const settings = await embeddedBrowserGetSettings(url);
-      if (
-        pageGenerationRef.current === generation
-        && activeIdRef.current === tabId
-        && settings
-        && settingsRevisionRef.current === revision
-      ) { settingsRevisionRef.current += 1; setBrowserSettings(settings); }
-    } catch (error) {
-      if (pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
-      setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
-        ? { ...tab, error: error instanceof Error ? error.message : "清除站点数据失败。" }
-        : tab));
-    } finally {
-      if (pageGenerationRef.current === generation && activeIdRef.current === tabId) setSettingsSaving(false);
-    }
-  };
-
   const refreshInspector = useCallback(async () => {
     if (!activeTab?.url) return;
     const owner = ownerRef.current;
@@ -1023,35 +1062,9 @@ export const BrowserPanel = () => {
     return () => { inspectorRequestRef.current += 1; };
   }, [inspectorOpen, inspectorKind, refreshInspector, syncBounds]);
 
-  useEffect(() => {
-    if (!settingsOpen || !activeTab?.url) return;
-    let cancelled = false;
-    const generation = pageGenerationRef.current;
-    const tabId = activeTab.id;
-    const url = activeTab.url;
-    const revision = settingsRevisionRef.current;
-    setSettingsLoading(true);
-    void Promise.resolve(embeddedBrowserGetSettings(url)).then((settings) => {
-      if (
-        !cancelled
-        && pageGenerationRef.current === generation
-        && activeIdRef.current === tabId
-        && settings
-        && settingsRevisionRef.current === revision
-      ) setBrowserSettings(settings);
-    }).catch((error) => {
-      if (cancelled || pageGenerationRef.current !== generation || activeIdRef.current !== tabId) return;
-      setTabs((current) => current.map((tab) => tab.id === tabId && tab.url === url
-        ? { ...tab, error: error instanceof Error ? error.message : "无法读取站点设置。" }
-        : tab));
-    }).finally(() => { if (!cancelled && pageGenerationRef.current === generation && activeIdRef.current === tabId) setSettingsLoading(false); });
-    window.requestAnimationFrame(syncBounds);
-    return () => { cancelled = true; };
-  }, [activeTab.id, activeTab.url, settingsOpen, syncBounds]);
-
   if (!isDesktop()) {
     return (
-      <div className="mc-browser-panel"><div className="mc-browser-toolbar"><PreviewServerManager /></div><div className="mc-browser-unavailable">
+      <div className="mc-browser-panel"><div className="mc-browser-unavailable">
         <Globe2 size={24} strokeWidth={1.8} />
         <strong>内置浏览器仅在桌面版可用</strong>
         <span>请在 MiniCode 桌面应用中打开网页。</span>
@@ -1062,7 +1075,7 @@ export const BrowserPanel = () => {
   if (!conversationId) {
     return (
       <div className="mc-browser-panel">
-        <div className="mc-browser-toolbar"><PreviewServerManager /></div>
+
         <div className="mc-browser-surface" data-empty="true">
           <div className="mc-browser-empty" role="status" tabIndex={0}>
             <Globe2 size={24} strokeWidth={1.8} aria-hidden="true" />
@@ -1077,7 +1090,7 @@ export const BrowserPanel = () => {
   if (!browserHydrated) {
     return (
       <div className="mc-browser-panel">
-        <div className="mc-browser-toolbar"><PreviewServerManager /></div>
+
         <div className="mc-browser-surface">
           <div className="mc-browser-empty" role="status">
             <LoaderCircle className="mc-browser-spin" size={24} />
@@ -1089,7 +1102,32 @@ export const BrowserPanel = () => {
   }
 
   return (
-    <div className="mc-browser-panel">
+    <div className="mc-browser-panel" onKeyDown={event => {
+      if (!(event.ctrlKey || event.metaKey) || !activeTab.url) return;
+        if (matchesShortcut(event.nativeEvent, useAppStore.getState().shortcutBindings.find)) { event.preventDefault(); event.stopPropagation(); window.dispatchEvent(new CustomEvent("browser:find", { detail: activeTab.id })); }
+    }}>
+      {tabHosts ? tabs.map((tab) => tabHosts[tab.id] ? createPortal(
+            <div className="mc-browser-tab" {...tabInteractions?.(tab.id)} data-sidebar-tab-frame="browser" data-active={tab.id === activeId && rightStackTab === "browser" ? "true" : "false"}>
+              <button
+                type="button"
+                role="tab"
+                id={`right-browser-tab-${tab.id}`}
+                aria-selected={tab.id === activeId && rightStackTab === "browser"}
+                tabIndex={tab.id === activeId && rightStackTab === "browser" ? 0 : -1}
+                aria-controls="right-panel-browser"
+                title={tab.title}
+                onClick={() => { useAppStore.getState().setRightStackTab("browser"); setActiveId(tab.id); }}
+              >
+                {tab.loading
+                  ? <LoaderCircle className="mc-browser-spin" size={14} />
+                  : <BrandIcon value={`${tab.title} ${tab.url}`} iconUrl={tab.faviconUrl} websiteUrl={tab.url} fallback="web" size={14} />}
+                <span>{tab.title || t("新标签页")}</span>
+              </button>
+              <button type="button" aria-label={`关闭 ${tab.title || "标签页"}`} onClick={() => void closeTab(tab.id)}>
+                <X size={14} />
+              </button>
+            </div>
+        , tabHosts[tab.id], tab.id) : null) : (
       <div className="mc-browser-tabs" role="tablist" aria-label="浏览器标签页" onKeyDown={navigateTabList}>
         <div className="mc-browser-tabs-scroll">
           {tabs.map((tab) => (
@@ -1116,8 +1154,8 @@ export const BrowserPanel = () => {
         <button type="button" className="mc-browser-new-tab" aria-label={t("新建标签页")} title={t("新建标签页")} onClick={() => openTab()}>
           <Plus size={16} />
         </button>
-        <PreviewServerManager />
       </div>
+      )}
 
       <div className="mc-browser-toolbar">
         <button
@@ -1154,7 +1192,7 @@ export const BrowserPanel = () => {
             void navigate(activeTab.id, activeTab.draftUrl);
           }}
         >
-          {activeTab.url ? <ShieldCheck size={15} /> : <Search size={15} />}
+          {activeTab.url && <button type="button" aria-label={t("站点信息")} onClick={() => setSettingsPage(settingsOpen ? null : pageKey)}><Settings2 size={15} /></button>}
           <input
             ref={addressRef}
             value={!addressFocused && preferences && !preferences.showFullUrl && activeTab.url && activeTab.draftUrl === activeTab.url ? new URL(activeTab.url).host : activeTab.draftUrl}
@@ -1164,115 +1202,28 @@ export const BrowserPanel = () => {
             }}
             onFocus={(event) => { setAddressFocused(true); event.currentTarget.value = activeTab.draftUrl; event.currentTarget.select(); }}
             onBlur={() => setAddressFocused(false)}
-            placeholder={t("输入网址或搜索内容")}
-            aria-label={t("地址栏")}
+            placeholder={t("搜索或输入网址")}
+            aria-label={t("搜索或输入网址")}
             onKeyDown={(event) => {
               if (event.key === "Enter" && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
             }}
             spellCheck={false}
           />
+          {activeTab.url && <button type="button" aria-label={t("在外部浏览器中打开")} onClick={() => void openExternal(activeTab.url)}><ExternalLink size={15} /></button>}
         </form>
-        <div className="mc-browser-device"><Smartphone size={15} aria-hidden="true" /><SelectMenu ariaLabel={t("预览设备")} align="end"
-          value={viewport ? (viewport.width === 390 ? "phone" : viewport.width === 768 ? "tablet" : viewport.width === 1440 ? "desktop" : "custom") : "auto"}
-          onValueChange={(value) => setViewport(value === "auto" ? null : {
-            phone: { width: 390, height: 844, mobile: true }, tablet: { width: 768, height: 1024, mobile: true },
-            desktop: { width: 1440, height: 900, mobile: false }, custom: { width: 1024, height: 768, mobile: false },
-          }[value]!)}>
-          <option value="auto">{t("自适应")}</option><option value="phone">{t("手机")}</option><option value="tablet">{t("平板")}</option><option value="desktop">{t("桌面")}</option><option value="custom">{t("自定义")}</option>
-        </SelectMenu></div>
-        <button
-          type="button"
-          className="mc-browser-select-target"
-          aria-label={t("选择元素")}
-          title={pickerMode === "element" ? "在页面中点击目标，按 Esc 退出" : "选择页面元素并描述修改"}
-          disabled={!activeTab.url || pickerMode != null}
-          onClick={() => void pickPageTarget("element")}
-        >
-          {pickerMode === "element" ? <LoaderCircle className="mc-browser-spin" size={15} /> : <Crosshair size={15} />}
-          <span className="mc-browser-select-label">{pickerMode === "element" ? "点击目标…" : t("选择元素")}</span>
-        </button>
-        <button
-          type="button"
-          aria-label={t("添加页面批注")}
-          title={t("添加页面批注")}
-          disabled={!activeTab.url}
-          onClick={() => {
-            updateAnnotationDraft({ open: !annotationOpen });
-            setInspectorPage(null);
-            setSettingsPage(null);
-          }}
-        >
-          <MessageSquarePlus size={16} />
-        </button>
-        {activeTab.url && turnChanges && (
-          <button
-            type="button"
-            aria-label={`审阅本轮 ${turnChanges.files.length} 个文件更改`}
-            title={`审阅本轮更改 · ${turnChanges.files.length} 个文件 · +${turnChanges.additions} -${turnChanges.deletions}`}
-            onClick={openReview}
-          >
-            <FileDiff size={16} />
-          </button>
-        )}
+        <button type="button" aria-label={t("下载")} title={t("下载")} onClick={() => setDownloadsOpen(!downloadsOpen)}><Download size={16} /></button>
         <button type="button" aria-label={t("更多浏览器操作")} title={t("更多浏览器操作")} aria-haspopup="menu" aria-expanded={moreMenuPosition != null} onClick={(event) => {
           const bounds = event.currentTarget.getBoundingClientRect();
           setMoreMenuPosition(moreMenuPosition ? null : { x: bounds.right - 190, y: bounds.bottom + 4 });
         }}><MoreHorizontal size={16} /></button>
       </div>
 
-      {moreMenuPosition && <ContextMenu position={moreMenuPosition} onClose={() => setMoreMenuPosition(null)} items={[
-        { label: "在系统浏览器中打开", icon: <ExternalLink size={14} />, disabled: !activeTab.url, onClick: () => void openExternal(activeTab.url) },
-        { label: t("打开页面诊断"), icon: <Bug size={14} />, disabled: !activeTab.url, onClick: () => { setInspectorPage(inspectorOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setSettingsPage(null); } },
-        { label: t("打开站点设置"), icon: <Settings2 size={14} />, disabled: !activeTab.url, onClick: () => { setSettingsPage(settingsOpen ? null : pageKey); updateAnnotationDraft({ open: false }); setInspectorPage(null); } },
-      ]} />}
+      {moreMenuPosition && <BrowserPageActions position={moreMenuPosition} onClose={() => setMoreMenuPosition(null)} conversationId={conversationId} tabId={activeTab.id} url={activeTab.url}
+        viewportEnabled={Boolean(viewport)} onViewportChange={enabled => setViewport(enabled ? { ...DEFAULT_DEVICE_VIEWPORT } : null)} />}
+      <BrowserFindBar key={pageKey} conversationId={conversationId} tabId={activeTab.id} />
+      {downloadsOpen && <BrowserDownloads onClose={() => setDownloadsOpen(false)} />}
 
-      {settingsOpen && activeTab.url && (
-        <section className="mc-browser-settings" aria-label={t("站点设置")}>
-          <div className="mc-browser-settings-heading">
-            <Settings2 size={14} />
-            <strong>{browserSettings.origin || activeTab.url}</strong>
-            <button
-              type="button"
-              aria-label={t("清除站点数据")}
-              title={t("清除站点数据")}
-              disabled={settingsLoading || settingsSaving}
-              onClick={() => void clearActiveSiteData()}
-            >
-              <Trash2 size={14} />
-            </button>
-          </div>
-          <div className="mc-browser-setting-row">
-            <span><Download size={14} />{t("下载")}</span>
-            <SelectMenu
-              ariaLabel={t("下载策略")}
-              value={browserSettings.downloadPolicy}
-              disabled={settingsLoading || settingsSaving}
-              onValueChange={(value) => void updateBrowserSettings({ downloadPolicy: value as EmbeddedBrowserSettings["downloadPolicy"] })}
-            >
-              <option value="block">{t("阻止")}</option>
-              <option value="ask">{t("每次询问")}</option>
-              <option value="allow">{t("保存到下载目录")}</option>
-            </SelectMenu>
-          </div>
-          <div className="mc-browser-permissions" aria-label="站点权限">
-            {sitePermissionOptions.map(([permission, label]) => (
-              <label className="mc-browser-setting-row" key={permission}>
-                <span>{label}</span>
-                <input
-                  type="checkbox"
-                  disabled={settingsLoading || settingsSaving}
-                  checked={browserSettings.permissions.includes(permission)}
-                  onChange={(event) => void updateBrowserSettings({
-                    origin: browserSettings.origin || activeTab.url,
-                    permission,
-                    allowed: event.target.checked,
-                  })}
-                />
-              </label>
-            ))}
-          </div>
-        </section>
-      )}
+      {settingsOpen && activeTab.url && <BrowserSiteInfo key={pageKey} conversationId={conversationId} tabId={activeTab.id} url={activeTab.url} onClose={() => setSettingsPage(null)} />}
 
       {inspectorOpen && activeTab.url && (
         <section className="mc-browser-inspector" aria-label={t("页面诊断")}>
@@ -1340,11 +1291,7 @@ export const BrowserPanel = () => {
         </section>
       )}
 
-      {viewport && <div className="mc-browser-viewport-controls" role="group" aria-label="设备视口">
-        {(["width", "height"] as const).map((axis) => <label key={axis}>{axis === "width" ? t("宽") : t("高")} <NumberInput aria-label={axis === "width" ? t("视口宽度") : t("视口高度")} min={240} max={3840} value={viewport[axis]} onCommit={(value) => setViewport({ ...viewport, [axis]: value })} /></label>)}
-        <span>px</span><button type="button" onClick={() => setViewport({ ...viewport, width: viewport.height, height: viewport.width })}>{t("旋转")}</button><small>按可用空间缩放显示，网页以设定尺寸布局</small>
-        <button type="button" aria-label="恢复自适应视口" onClick={() => setViewport(null)}><X size={14} /></button>
-      </div>}
+      {viewport && activeTab.url && <BrowserDeviceToolbar key={pageKey} conversationId={conversationId} tabId={activeTab.id} viewport={viewport} onChange={setViewport} />}
       {annotationOpen && activeTab.url && (
         <div className="mc-browser-annotation" role="region" aria-label={t("页面批注")}>
           <div className="mc-browser-annotation-heading">
@@ -1402,15 +1349,31 @@ export const BrowserPanel = () => {
         </div>
       )}
 
-      <div ref={surfaceRef} className="mc-browser-surface" data-empty={!activeTab.url ? "true" : "false"}>
+      <div ref={surfaceRef} className="mc-browser-surface" data-empty={!activeTab.url ? "true" : "false"} data-device={Boolean(viewport && activeTab.url)}>
+        {viewport && activeTab.url && activeDeviceLayout && (viewport.presetId || "responsive") === "responsive" && <BrowserDeviceResizeHandles key={pageKey}
+          viewport={viewport} layout={activeDeviceLayout} onChange={setViewport} onResizeActiveChange={setDeviceResizeActive} />}
+        {occludedSnapshot?.id === activeTab.id && occludedSnapshot.owner === conversationId && occludedSnapshot.url === activeTab.url && <img
+          className="mc-browser-occluded-snapshot" src={occludedSnapshot.src} alt="" aria-hidden="true" style={activeDeviceLayout && viewport
+            ? { left: activeDeviceLayout.visualBounds.x - activeDeviceLayout.stageBounds.x, top: activeDeviceLayout.visualBounds.y - activeDeviceLayout.stageBounds.y, width: activeDeviceLayout.visualBounds.width, height: activeDeviceLayout.visualBounds.height }
+            : { left: 0, top: 0, width: "100%", height: occludedSnapshot.height }}
+          onLoad={() => {
+            if (occlusion.current === occludedSnapshot.token) {
+              occlusion.current.ready = true;
+              syncBounds();
+            }
+          }} />}
         {!activeTab.url && (
           <div className="mc-browser-empty">
             <span className="mc-browser-empty-icon"><Globe2 size={28} strokeWidth={1.8} /></span>
-            <strong>开始浏览</strong>
-            <span>在地址栏输入网址或搜索内容</span>
-            <button type="button" onClick={() => addressRef.current?.focus()}>
-              <Search size={15} /> 输入地址
-            </button>
+            <div className="mc-browser-new-tools" aria-label={t("工具")}>
+              <span>{t("工具")}</span>
+              {([
+                ["变更", () => useAppStore.getState().setRightStackTab("diff")],
+                ["终端", () => useAppStore.getState().setRightStackTab("terminal")],
+                ["侧边聊天", () => { const state = useAppStore.getState(); openNewSideChat({ conversationId, workspaceRoot: state.workingDirectory, permissionMode: state.permissionMode }); }],
+                ["文件", () => useAppStore.getState().setRightStackTab("files")],
+              ] as const).map(([label, action]) => <button type="button" key={label} onClick={() => { action(); void closeTab(activeTab.id); }}>{t(label)}</button>)}
+            </div>
           </div>
         )}
       </div>

@@ -3,6 +3,10 @@ import { File as NativeFile } from "node:buffer";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore, waitComposerDraftRecovery } from "../stores";
+// These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
+
 import { emptyComposerDraft, flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "../stores/composer-drafts";
 import { registerWebSocketSender, resetPendingCommandResultsForTests } from "../protocol/ws-outbox";
 import { resetPendingUserMessagesForTests, sendChatMessage } from "../chat/sendChatMessage";
@@ -145,7 +149,7 @@ describe("actual composer durable admission boundary", () => {
 
   it.each(["idle", "queue", "steer"] as const)("sends comments-only through normal %s input and restores exact durable metadata", async mode => {
     useAppStore.setState({ draft: "", isStreaming: mode !== "idle", followUpBehavior: mode === "steer" ? "steer" : "queue",
-      messages: mode === "idle" ? [] : [{ id: "running", role: "assistant", content: "running", artifacts: [], timestamp: 1, isStreaming: true }] });
+      messages: mode === "idle" ? [] : [{ id: "running", turnId: "running-turn", role: "assistant", content: "running", artifacts: [], timestamp: 1, isStreaming: true }] });
     setDiffComments("main", [comment]);
     render(<Composer />); submit();
     await waitFor(() => expect(wire.commands).toHaveLength(1));
@@ -154,6 +158,7 @@ describe("actual composer durable admission boundary", () => {
     expect(command.display_content).toBe("");
     expect(command.context_refs).toEqual([{ kind: "diff_comment", name: "src/app.ts", path: "src/app.ts", comment }]);
     if (mode !== "idle") expect(command.streaming_behavior).toBe(mode === "steer" ? "steer" : "follow_up");
+    if (mode === "steer") expect(command.expected_turn_id).toBe("running-turn");
     expect(readDiffCommentState("main").comments).toEqual([comment]);
     act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
       command_type: "user_message" } as ServerEvent));
@@ -211,14 +216,14 @@ describe("actual composer durable admission boundary", () => {
   });
 
   it.each(["enter", "cmdIfMultiline", "mod-enter"] as const)("sends Source's opposite running follow-up from the actual main composer for %s without changing global preferences", async shortcut => {
-    const running = { id: "running-answer", role: "assistant" as const, content: "running", timestamp: 1, artifacts: [], isStreaming: true };
+    const running = { id: "running-answer", turnId: "running-answer-turn", role: "assistant" as const, content: "running", timestamp: 1, artifacts: [], isStreaming: true };
     useAppStore.setState({ messages: [running], isStreaming: true, draft: "authored follow-up\nsecond line", sendShortcut: shortcut, followUpBehavior: "queue" });
     render(<Composer />);
     const input = screen.getByRole("textbox", { name: "消息输入" });
     fireEvent.keyDown(input, { key: "Enter", ctrlKey: true, shiftKey: shortcut !== "enter" });
     await waitFor(() => expect(wire.commands).toHaveLength(1));
     const command = wire.commands[0];
-    expect(command).toMatchObject({ conversation_id: "main", content: "authored follow-up\nsecond line", streaming_behavior: "steer" });
+    expect(command).toMatchObject({ conversation_id: "main", content: "authored follow-up\nsecond line", streaming_behavior: "steer", expected_turn_id: running.turnId });
     expect(useAppStore.getState()).toMatchObject({ followUpBehavior: "queue", sendShortcut: shortcut, draft: "authored follow-up\nsecond line" });
     await act(async () => handleCommandResultEvent(receipt(command, { admitted: false, queued: true, turn_mode: "steer" })));
     await waitFor(() => expect(useAppStore.getState().draft).toBe(""));
@@ -248,7 +253,7 @@ describe("actual composer durable admission boundary", () => {
     await waitFor(() => expect(useAppStore.getState().slashPanelOpen).toBe(false));
     expect(screen.queryByText(description)).toBeNull();
     expect(useAppStore.getState().draft).toBe("/review");
-    fireEvent.keyDown(document, { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Escape" });
     await waitFor(() => expect(view.container.querySelector("[data-code-review-menu]")).toBeNull());
     expect(screen.queryByText(description)).toBeNull();
     expect(useAppStore.getState().draft).toBe("/review");
@@ -538,7 +543,7 @@ describe("actual composer durable admission boundary", () => {
   });
 
   it("a steer fact before a late receipt keeps one existing answer and its original user identity", async () => {
-    const running = { id: "running-answer", role: "assistant" as const, content: "running", timestamp: 1, artifacts: [], isStreaming: true };
+    const running = { id: "running-answer", turnId: "running-answer-turn", role: "assistant" as const, content: "running", timestamp: 1, artifacts: [], isStreaming: true };
     useAppStore.setState({ messages: [running], isStreaming: true });
     const submission = sendChatMessage({ displayContent: "steer input", conversationId: "main", allowWhileStreaming: true, busyBehavior: "steer", awaitAdmission: true });
     const command = wire.commands[0];

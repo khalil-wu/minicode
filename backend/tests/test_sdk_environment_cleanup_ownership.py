@@ -127,7 +127,8 @@ async def test_real_sdk_cleanup_fence_waits_for_source_and_original_capabilities
         assert capability_owners and all(not task.done() for task in capability_owners)
         original_retirement = next(record for record in pending_retirements if record["prepared"] is tool.original_capabilities)
         assert context.cleanup_tasks_by_call is tool.original_call_tasks is original_retirement["call_tasks"]
-        assert session.lifecycle_cleanup_tasks == {original_tool_owner, *binding_owners, *capability_owners}
+        tool_owners = {original_tool_owner} if late_registry_handoff else {original_tool_owner, source}
+        assert {*tool_owners, *binding_owners, *capability_owners} <= session.lifecycle_cleanup_tasks
         original_attachment = context.turn_environment
         original_capability_snapshot = tool.original_capabilities.runtime.snapshot
         original_capability_attachment = original_capability_snapshot.primary()

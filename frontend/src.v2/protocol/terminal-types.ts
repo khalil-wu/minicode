@@ -283,4 +283,5 @@ export interface TerminalExecCommand extends TerminalOwnedCommand {
   type: "terminal.exec";
   command: string;
   cwd?: string;
+  local_environment_action?: { config_path: string; revision: string; index: number };
 }

@@ -17,6 +17,9 @@ export function GuardianApprovalMenu({ conversationId, onClose, onApproved }: { 
   useEffect(() => {
     const pointer = (event: PointerEvent) => { if (!ref.current?.contains(event.target as Node)) onClose(); };
     const key = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      const owner = ref.current?.closest(".composer-container");
+      if (owner && !owner.contains(event.target as Node)) return;
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); return; }
       if (!["ArrowDown", "ArrowUp", "Home", "End", "Enter"].includes(event.key)) return;
       const buttons = [...(ref.current?.querySelectorAll<HTMLButtonElement>('button[role="menuitem"]:not(:disabled)') ?? [])];

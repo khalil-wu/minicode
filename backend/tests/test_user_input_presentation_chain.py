@@ -131,10 +131,15 @@ async def test_real_ws_turn_persists_original_input_without_changing_provider_co
         command = UserCommand("user_message", {**packet, "conversation_id": conversation.id})
         session.run_manager.enqueue_user_message(conversation.id, command)
         queued = session.run_manager.queued_user_message_snapshot(conversation.id)
+        await asyncio.gather(*list(session.execution_cleanup_tasks))
+        task = asyncio.create_task(asyncio.Event().wait())
+        session._register_agent_run(conversation_id=conversation.id, task=task,
+            task_id="steer-restoration-task", cancel_event=asyncio.Event())
+        session._conversation_streams[conversation.id] = {"turn_id": "steer-restoration-probe", "message_id": "active-answer"}
         session.run_manager.turn_input_queue(conversation.id).begin_turn("steer-restoration-probe")
         assert session.run_manager.enqueue_user_message_as_steer(conversation.id,
             UserCommand("user_message", {**command.data, "user_message_id": "user-steer-display",
-                "assistant_message_id": "assistant-steer-display"}), target_message_id="active-answer") is not None
+                "assistant_message_id": "assistant-steer-display"}), expected_turn_id="steer-restoration-probe", target_message_id="active-answer") is not None
         steered = session.run_manager.pending_turn_input_snapshot()
         for row in [queued[0], steered[0]]:
             assert row["display_content"] == display
@@ -205,6 +210,7 @@ async def test_consumed_steer_admission_uses_its_original_presentation(tmp_path,
     session.run_manager.run_tasks[conversation.id] = run
     try:
         await asyncio.wait_for(entered.wait(), 10)
+        packet["expected_turn_id"] = session._conversation_streams[conversation.id]["turn_id"]
         await session.command_dispatcher._handle_command_inner(UserCommand("user_message", packet))
         release.set()
         await asyncio.wait_for(run, 25)

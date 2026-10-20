@@ -23,7 +23,7 @@
    ════════════════════════════════════════════════════════ */
 
 :root {
-  --desktop-rail-width: 60px;
+  --desktop-rail-width: 56px;
   --sidebar-min-width: 240px;
   --sidebar-max-width: 520px;
   --context-panel-width: 292px;
@@ -137,8 +137,9 @@ html[data-theme="dark"] ::selection {
 
 .mc-workbench-title > svg { flex-shrink: 0; }
 .mc-workbench-task-actions { display: flex; align-items: center; gap: 5px; margin-left: 4px; }
-.mc-desktop-body { display: flex; flex: 1; min-height: 0; min-width: 0; padding: 8px 8px 8px 0; }
-.mc-desktop-workspace { border: 1px solid var(--desktop-frame-border); border-radius: 16px; background: var(--surface-base); }
+.mc-desktop-body { display: flex; flex: 1; min-height: 0; min-width: 0; padding: 0; }
+.mc-desktop-workspace { border: 0; background: var(--surface-base); }
+.workbench-stage { border-top-left-radius: 16px; }
 .mc-navigation-rail { display: flex; flex-direction: column; align-items: center; width: var(--desktop-rail-width); min-width: var(--desktop-rail-width); padding: 8px 0 10px; gap: 8px; }
 .mc-navigation-rail-main { display: flex; flex-direction: column; align-items: center; gap: 10px; flex: 1; }
 .mc-navigation-rail button { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 12px; color: var(--text-muted); }
@@ -762,6 +763,9 @@ html[data-theme="light"] .workbench-home {
   gap: 4px;
 }
 
+.mc-sidebar-profile-button { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted); font: inherit; text-align: left; cursor: pointer; }
+.mc-sidebar-profile-button:hover { background: var(--workbench-hover); color: var(--text-primary); }
+
 .mc-sidebar-theme-toggle {
   width: 34px;
   height: 34px;
@@ -1300,26 +1304,26 @@ html[data-theme="dark"] [aria-label="Agent is waiting for input"] section {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .mc-sidebar-left,
-  .mc-sidebar-right,
-  .mc-sidebar-right-tab-frame,
-  .mc-sidebar-right [role="tab"].mc-sidebar-right-tab,
-  .mc-sidebar-right-action,
-  .mc-process-disclosure,
-  .mc-workspace-actions,
-  .mc-workspace-menu,
-  .mc-workspace-new-session,
-  .mc-sidebar-action,
-  .mc-navigation-rail button {
+  html:not([data-reduced-motion="false"]) .mc-sidebar-left,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right-tab-frame,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right [role="tab"].mc-sidebar-right-tab,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-right-action,
+  html:not([data-reduced-motion="false"]) .mc-process-disclosure,
+  html:not([data-reduced-motion="false"]) .mc-workspace-actions,
+  html:not([data-reduced-motion="false"]) .mc-workspace-menu,
+  html:not([data-reduced-motion="false"]) .mc-workspace-new-session,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-action,
+  html:not([data-reduced-motion="false"]) .mc-navigation-rail button {
     transition: none;
   }
 
-  .mc-workspace-folder-glyph,
-  .mc-workspace-group-body,
-  .mc-sidebar-panel-view,
-  .mc-narrow-drawer-backdrop,
-  .mc-narrow-drawer-surface,
-  .session-status-spinner {
+  html:not([data-reduced-motion="false"]) .mc-workspace-folder-glyph,
+  html:not([data-reduced-motion="false"]) .mc-workspace-group-body,
+  html:not([data-reduced-motion="false"]) .mc-sidebar-panel-view,
+  html:not([data-reduced-motion="false"]) .mc-narrow-drawer-backdrop,
+  html:not([data-reduced-motion="false"]) .mc-narrow-drawer-surface,
+  html:not([data-reduced-motion="false"]) .session-status-spinner {
     animation: none;
   }
 }

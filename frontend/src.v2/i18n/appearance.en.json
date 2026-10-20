@@ -17,5 +17,18 @@
   "高级": "Advanced",
   "{variant}半透明侧栏": "{variant} translucent sidebar",
   "对比度": "Contrast",
-  "{variant}对比度": "{variant} contrast"
+  "{variant}对比度": "{variant} contrast",
+  "Codex 主题": "Codex themes",
+  "读取字体失败：{v0}": "Could not read fonts: {v0}",
+  "字体更新失败：{v0}": "Could not update font: {v0}",
+  "字体": "Font",
+  "内容字体": "Content font",
+  "跟随界面字体": "Same as UI font",
+  "代码字体": "Code font",
+  "目标": "Goal",
+  "已暂停": "Paused",
+  "已完成": "Complete",
+  "受阻": "Blocked",
+  "已达预算": "Budget limited",
+  "用量受限": "Usage limited"
 }
