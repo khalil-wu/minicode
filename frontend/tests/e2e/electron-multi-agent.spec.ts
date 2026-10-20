@@ -335,7 +335,8 @@ const originalLoad = Module._load;
 const visibilityCalls = [];
 const HiddenBrowserWindow = new Proxy(electron.BrowserWindow, {
   construct(Target, [options]) {
-    const window = new Target({ ...options, show: false,
+    // Exercise the wide summary route independently of the CI display bounds.
+    const window = new Target({ ...options, width: 1800, show: false,
       webPreferences: { ...options.webPreferences, backgroundThrottling: false } });
     for (const method of ['show', 'showInactive', 'focus', 'restore']) window[method] = () => visibilityCalls.push(method);
     window.flashFrame = () => {};
@@ -389,6 +390,8 @@ async function openAgentsPanel(window: Page) {
   }
   const closeRightPanel = window.getByRole("button", { name: "关闭右侧栏", exact: true });
   if (await closeRightPanel.isVisible()) await closeRightPanel.click();
+  const chatFrame = window.locator('.mc-main-slot-frame[data-panel-slot-kind="chat"]');
+  await expect.poll(() => chatFrame.evaluate((frame) => frame.clientWidth)).toBeGreaterThanOrEqual(900);
   const summaryToggle = window.getByRole("button", { name: "切换摘要", exact: true });
   if (await summaryToggle.getAttribute("aria-pressed") !== "true") await summaryToggle.click();
   const summary = window.getByRole("complementary", { name: "工作区上下文摘要", exact: true });
