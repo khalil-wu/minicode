@@ -15,4 +15,8 @@ _FALLBACK = {**_CATALOG["fallback"], "model_messages": {"instructions_template":
 def source_context_metadata(model_id: str) -> dict:
     # models-manager/model_info.rs::model_info_from_slug owns unknown models:
     # local prompt, Bytes(10_000), and no original-image/context capability.
-    return deepcopy(_MODELS.get(model_id, _FALLBACK))
+    from backend.llm.bedrock import MODEL_ALIASES
+    value = deepcopy(_MODELS.get(MODEL_ALIASES.get(model_id, model_id), _FALLBACK))
+    if model_id in MODEL_ALIASES and model_id.startswith(("global.", "us.")):
+        value["supports_search_tool"] = False
+    return value

@@ -12,6 +12,7 @@ import type { ComposerSelection } from "./inputSelection";
 import { documentPosition, literalComposerDocument, markdownOffset, parseComposerMarkdown, restoreComposerDocument,
   richComposerSchema as schema, richDocumentState, serializeComposerDocument, type RichComposerDocument } from "./rich-composer-document";
 import { openPreferredWebLink } from "../lib/open-preferred-target";
+import { registerComposerEditHistory } from "./composer-edit-history";
 import "./RichComposerEditor.css";
 
 export interface ComposerInputHandle {
@@ -306,12 +307,14 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
       },
     });
     viewRef.current = view;
+    const unregisterHistory = registerComposerEditHistory(view.dom, { hasText: () => !!view.state.doc.textContent,
+      undo: () => undo(view.state, view.dispatch), redo: () => redo(view.state, view.dispatch) });
     const initialState = richDocumentState(view.state.doc, plainTextMode.current);
     committed.current = initialState.markdown;
     committedDocument.current = initialState;
     if (props.value || props.document) latest.current.onChange(initialState.markdown, readSelection(), initialState);
     if (props.initialFocus && !view.dom.closest('[hidden], [aria-hidden="true"]')) view.focus();
-    return () => { clearTimeout(compositionEndTimer.current); view.destroy(); viewRef.current = undefined; };
+    return () => { unregisterHistory(); clearTimeout(compositionEndTimer.current); view.destroy(); viewRef.current = undefined; };
   }, []);
   useLayoutEffect(() => {
     synchronizeView();

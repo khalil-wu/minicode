@@ -25,6 +25,7 @@ type SelectMenuProps = {
   menuMaxHeight?: number;
   align?: "start" | "end";
   renderOptionIcon?: (value: string) => ReactNode;
+  optionDescriptions?: Readonly<Record<string, string>>;
 };
 
 const nodeText = (node: ReactNode): string => Children.toArray(node)
@@ -67,6 +68,7 @@ export const SelectMenu = ({
   menuMaxHeight = 280,
   align = "start",
   renderOptionIcon,
+  optionDescriptions,
 }: SelectMenuProps) => {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, width: 0, maxHeight: menuMaxHeight, above: false });
@@ -262,7 +264,9 @@ export const SelectMenu = ({
                   <span className="mc-select-check" data-visible={active ? "true" : "false"}><Check size={14} /></span>
                   <span className="mc-select-option-content">
                     {renderOptionIcon && <span className="mc-select-option-icon" aria-hidden="true">{renderOptionIcon(option.value)}</span>}
-                    <span className="mc-select-option-label">{option.label}</span>
+                    {optionDescriptions?.[option.value] ? <span className="mc-select-option-copy">
+                      <span className="mc-select-option-label">{option.label}</span><small>{optionDescriptions[option.value]}</small>
+                    </span> : <span className="mc-select-option-label">{option.label}</span>}
                   </span>
                 </button>
               </div>

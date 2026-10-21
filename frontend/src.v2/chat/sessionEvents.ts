@@ -149,7 +149,13 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
           message.id === event.user_message_id || message.queueMessageId === event.message_id
         ))?.queuePosition
       : undefined;
-    const updated = messages
+    const source = event.status === "queued" && event.input
+      && !messages.some(message => message.id === event.user_message_id || message.queueMessageId === event.message_id)
+      ? [...messages, { id: event.user_message_id || `user_${event.message_id}`, role: "user" as const,
+          content: event.input.display_content ?? event.input.content, artifacts: [], timestamp: Date.now() },
+        { id: event.message_id, role: "assistant" as const, content: "", artifacts: [], timestamp: Date.now() }]
+      : messages;
+    const updated = source
     .filter((message) => {
       if (steeredCurrentTurn && message.role === "assistant" && message.id === event.message_id) {
         // A steer continues the already-streaming assistant turn. The queued
@@ -176,6 +182,15 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
       if (event.status === "queued") {
         return {
           ...message,
+          ...(isUser && event.input ? {
+            content: event.input.display_content ?? event.input.content,
+            backendContent: event.input.content,
+            attachmentRefs: normalizeTranscriptAttachmentRefs(event.input.attachments),
+            contextRefs: normalizeMessageContextRefs(event.input.context_refs),
+            quotedMessage: normalizeQuotedMessage(event.input.quoted_message),
+            codeReview: event.input.code_review,
+            asyncRequestId: event.input.async_request_id,
+          } : {}),
           queueState: "queued" as const,
           queuePosition: event.position,
           queuePaused: event.paused ?? false,
@@ -254,6 +269,7 @@ const toConversationMeta = (conversation: ConversationSummary) => ({
   archived: conversation.archived,
   pinned: conversation.pinned,
   pinnedAt: conversation.pinned_at,
+  resourceReferences: conversation.resource_references,
   hasUnreadTurn: conversation.has_unread_turn,
   projectId: conversation.project_id,
   memoryMode: maybeString(conversation.memory_mode),
@@ -1356,6 +1372,7 @@ export const handleSessionEvent = (
           return true;
         }
         const existingById = new Map(storeState.conversations.map((conversation) => [conversation.id, conversation]));
+        if (ev.sidebar_sections) window.dispatchEvent(new CustomEvent("minicode-sidebar-sections", { detail: ev.sidebar_sections }));
         const snapshotAt = Date.parse(String(ev.snapshot_at || e.timestamp || ""));
         const mergedIncomingMetas = incomingConversationMetas.map((incoming) => {
           const existing = existingById.get(incoming.id);

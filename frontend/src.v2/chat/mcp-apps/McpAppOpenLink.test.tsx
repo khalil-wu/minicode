@@ -21,7 +21,7 @@ beforeEach(() => {
   mocks.prepare.mockResolvedValue({ id: "sandbox", src: "minicode-mcp-host://view/fixture", partition: "persist:minicode-mcp-apps" });
   mocks.release.mockResolvedValue(undefined);
   mocks.request.mockImplementation(async (_app, operation) => operation === "open" ? { viewId: "view", frameUrl: "http://mcp-app-fixture.localhost:8000/mcp-app/frame/fixture",
-    frameOrigin: "http://mcp-app-fixture.localhost:8000", readOnly: false, prefersBorder: false, toolInput: {}, toolResult: {}, toolDefinition: { name: "fixture" } } : {});
+    frameOrigin: "http://mcp-app-fixture.localhost:8000", readOnly: false, csp: {}, prefersBorder: false, toolInput: {}, toolResult: {}, toolDefinition: { name: "fixture" } } : {});
   mocks.bridge = { connect: vi.fn(async () => {}), teardownResource: vi.fn(async () => {}), close: vi.fn(async () => {}),
     setHostContext: vi.fn(), sendToolInput: vi.fn(async () => {}), sendToolResult: vi.fn(async () => {}) };
 });

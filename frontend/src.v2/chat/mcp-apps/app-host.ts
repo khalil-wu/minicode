@@ -1,4 +1,4 @@
-import { AppBridge, type McpUiHostContext, type McpUiStyles } from "@modelcontextprotocol/ext-apps/app-bridge";
+import { AppBridge, type McpUiHostContext, type McpUiResourceCsp, type McpUiStyles } from "@modelcontextprotocol/ext-apps/app-bridge";
 import { parseJSONRPCMessage, type JSONRPCMessage, type ListToolsResult, type Transport } from "@modelcontextprotocol/client";
 import { z } from "zod/v4";
 import { apiBase, authHeaders, fetchWithTimeout } from "../../protocol/api";
@@ -11,6 +11,7 @@ export interface McpAppView {
   mimeType: string;
   prefersBorder: boolean;
   readOnly: boolean;
+  csp: McpUiResourceCsp;
   toolInput: Record<string, unknown>;
   toolResult: Parameters<AppBridge["sendToolResult"]>[0];
   toolDefinition: NonNullable<McpUiHostContext["toolInfo"]>["tool"];
@@ -113,7 +114,7 @@ export function createAppBridge(app: McpAppReceipt, conversationId: string, view
   const bridge = new AppBridge(null, { name: "MiniCode", version: "0.2.0" }, {
     openLinks: {}, downloadFile: {}, serverTools: {}, serverResources: {}, logging: {},
     updateModelContext: view.readOnly ? undefined : { text: {}, image: {}, resource: {}, resourceLink: {}, structuredContent: {} },
-    message: view.readOnly ? undefined : { text: {} }, sandbox: { permissions: {} },
+    message: view.readOnly ? undefined : { text: {} }, sandbox: { permissions: {}, csp: view.csp },
   }, { hostContext: context });
   bridge.oncalltool = params => request("tools/call", params);
   bridge.setRequestHandler("tools/list", { params: z.object({ cursor: z.string().optional() }).optional() },

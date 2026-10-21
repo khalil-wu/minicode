@@ -173,6 +173,7 @@ class ConversationSummary:
     pinned_at: str = ""
     has_unread_turn: bool = False
     project_id: str | None = None
+    resource_references: list[dict[str, Any]] = field(default_factory=list)
     workspace_root: str = ""
     execution_cwd: str = ""
     projectless_output_dir: str = ""
@@ -233,6 +234,7 @@ class ConversationSummary:
             pinned_at=str(payload.get("pinned_at") or ""),
             has_unread_turn=bool(payload.get("has_unread_turn", False)),
             project_id=payload.get("project_id"),
+            resource_references=deepcopy(payload.get("resource_references", [])),
             workspace_root=str(payload.get("workspace_root") or ""),
             execution_cwd=inherited_execution_cwd(payload),
             projectless_output_dir=str(payload.get("projectless_output_dir") or ""),
@@ -283,6 +285,7 @@ class ConversationRecord:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     context_snapshot: dict[str, Any] = field(default_factory=dict)
     worktree_registrations: list[dict[str, str]] = field(default_factory=list)
+    resource_references: list[dict[str, Any]] = field(default_factory=list)
     archived: bool = False
     archived_at: str = ""
     pinned: bool = False
@@ -331,6 +334,7 @@ class ConversationRecord:
             pinned_at=self.pinned_at,
             has_unread_turn=self.has_unread_turn,
             project_id=self.project_id,
+            resource_references=deepcopy(self.resource_references),
             workspace_root=self.workspace_root,
             execution_cwd=self.execution_cwd,
             projectless_output_dir=self.projectless_output_dir,
@@ -410,6 +414,7 @@ class ConversationRecord:
             transcript=transcript,
             context_snapshot=dict(payload.get("context_snapshot") or {}),
             worktree_registrations=[dict(entry) for entry in payload.get("worktree_registrations", [])],
+            resource_references=deepcopy(payload.get("resource_references", [])),
             archived=bool(payload.get("archived") or False),
             archived_at=str(payload.get("archived_at") or ""),
             pinned=bool(payload.get("pinned", False)),

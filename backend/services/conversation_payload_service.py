@@ -36,6 +36,7 @@ class ConversationCreateRequest:
     execution_cwd: str = ""
     projectless_base: str = ""
     initial_prompt: str = ""
+    sidebar_section_id: str | None = None
     workspace_required_error: AgentEvent | None = None
     error_event: AgentEvent | None = None
 
@@ -306,6 +307,7 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
         execution_cwd=str(data.get("execution_cwd") or "").strip(),
         projectless_base=str(data.get("projectless_base") or "").strip(),
         initial_prompt=str(data.get("initial_prompt") or ""),
+        sidebar_section_id=data.get("sidebar_section_id"),
         git_isolated=git_isolated,
         activate=activate,
         workspace_required_error=workspace_required_error,

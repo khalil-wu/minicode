@@ -409,6 +409,9 @@ async def executor_worktree_tool(tool, args, context):
         async with ExecutorEditorService(context, application_config=context.model_execution.config) as service:
             if tool.name == "worktree_snapshot":
                 record = await executor_worktree_action(service, "snapshot", path=args.get("path"), label=str(args.get("label", "")))
+                repository = context.run_context.conversation_repository
+                if repository is not None and context.conversation_id:
+                    repository.thread_resources.add(context.conversation_id, "worktree_snapshot", record["id"], record)
                 return tool._success_result(
                     f"已保存 worktree 快照\n  快照 ID: {record['id']}\n  提交: {record['snapshot_sha'][:8]}\n"
                     f"  引用: {record['snapshot_ref']}\n  原路径: {record['original_path']}\n"
@@ -417,6 +420,10 @@ async def executor_worktree_tool(tool, args, context):
                 result = await executor_worktree_action(service, "restore", snapshot_id=args["snapshot_id"], dest=args.get("dest"))
                 if not result["restored"]:
                     return tool._error_result(f"恢复失败: {result['error']}")
+                repository = context.run_context.conversation_repository
+                if repository is not None and context.conversation_id:
+                    repository.register_worktree(context.conversation_id, path=result["path"], backend="executor",
+                        workspace_root=str(context.workspace_root))
                 return tool._success_result(f"已从快照 {result['snapshot_id']} 恢复 worktree\n  路径: {result['path']}\n"
                     "该 worktree 处于 detached HEAD,改动以快照提交的形式存在。")
             result = await executor_worktree_action(service, "snapshots", conversation_id=args.get("conversation_id"))

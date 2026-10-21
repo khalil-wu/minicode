@@ -46,6 +46,60 @@ test("authenticated health reports the actual browser control preference without
   } finally { await bridge.stop(); }
 });
 
+test("only the original token and window binding can release the captured agent browser control", async () => {
+  const controls = [], releases = [];
+  bridge.init({ token: "browser-owner-token", manager: {
+    async executeControlCommand(_payload, control) { controls.push(control.agentControl); return { ok: true }; },
+    releaseAgentControl(owner) { releases.push(owner); return 1; },
+  } });
+  const endpoint = await bridge.start();
+  const owner = { conversation_id: "original-conversation", window_instance_id: "fixture-window", window_binding_token: "fixture-binding",
+    agent_control_id: "captured-resource", agent_turn_id: "original-turn" };
+  const post = (route, payload, token = "browser-owner-token") => fetch(`${endpoint}/v1/${route}`, {
+    method: "POST", headers: { authorization: `Bearer ${token}` }, body: JSON.stringify(payload),
+  });
+  try {
+    assert.equal((await post("command", { ...owner, action: "get_url" })).status, 200);
+    assert.deepEqual(controls, [{ id: "captured-resource", turnId: "original-turn" }]);
+    assert.equal((await post("session-control", { ...owner, action: "release" }, "renderer-token")).status, 401);
+    assert.equal((await post("session-control", { ...owner, action: "release", window_binding_token: "other-window" })).status, 403);
+    assert.equal(releases.length, 0);
+    const released = await post("session-control", { ...owner, action: "release" });
+    assert.equal(released.status, 200); assert.deepEqual(await released.json(), { ok: true, released: 1 });
+    assert.deepEqual(releases, [{ conversation_id: "original-conversation", window_instance_id: "fixture-window",
+      control: { id: "captured-resource", turnId: "original-turn" } }]);
+  } finally { await bridge.stop(); }
+});
+
+test("agent control release waits for the original native operation and keeps its cleanup authority after window retirement", async () => {
+  let alive = true;
+  const started = deferred(), finished = deferred(), releases = [];
+  const record = { windowInstanceId: "fixture-window", windowOwnerId: "primary", windowBindingToken: "fixture-binding", window: { isDestroyed: () => !alive } };
+  bridge.init({ token: "browser-retirement-token", getWindowRecordByInstanceId: instance => alive && instance === "fixture-window" ? record : null,
+    manager: { async executeControlCommand() { started.resolve(); return finished.promise; },
+      releaseAgentControl(owner) { releases.push(owner); return 0; } } });
+  const endpoint = await bridge.start();
+  const owner = { operation_id: "native-original-operation", conversation_id: "original-owner", window_instance_id: "fixture-window", window_binding_token: "fixture-binding",
+    agent_control_id: "original-browser-control", agent_turn_id: "original-turn" };
+  const post = (route, payload) => fetch(`${endpoint}/v1/${route}`, { method: "POST", headers: { authorization: "Bearer browser-retirement-token" }, body: JSON.stringify(payload) });
+  try {
+    const operation = post("command", { ...owner, action: "evaluate", expression: "original native work" });
+    await started.promise;
+    alive = false;
+    const releasing = post("session-control", { ...owner, action: "release" });
+    await new Promise(setImmediate);
+    assert.equal(releases.length, 0);
+    finished.resolve({ ok: true });
+    assert.equal((await operation).status, 200);
+    const response = await releasing;
+    assert.equal(response.status, 200); assert.equal(releases.length, 1);
+    assert.equal(releases[0].control.id, "original-browser-control");
+  } finally {
+    finished.resolve({ ok: true }); await bridge.stop();
+    bridge.init({ getWindowRecordByInstanceId: instance => instance === "fixture-window" ? { ...record, window: { isDestroyed: () => false } } : null });
+  }
+});
+
 test("stop closes an authenticated request with an unfinished body", async () => {
   let calls = 0;
   bridge.init({

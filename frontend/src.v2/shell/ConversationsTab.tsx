@@ -11,12 +11,13 @@ import { useAppStore } from "../stores";
 import { EmptyState } from "../components/EmptyState";
 import type { ConversationMeta } from "../stores/types";
 import type { ClientCommand, CommandResultEvent } from "../protocol/events";
-import { showConfirm } from "../overlays/DialogService";
+import { showConfirm, showPrompt } from "../overlays/DialogService";
 import { copyText } from "../lib/clipboard";
 import * as wsOutbox from "../protocol/ws-outbox";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
 import { runtimePendingUserActionLabelForConversation } from "../lib/runtime-session";
 import { SessionRow } from "./SessionRow";
+import { useThreadPullRequestStatuses } from "./ThreadPullRequestBadge";
 import { PinnedConversationList } from "./PinnedConversationList";
 import { SidebarSortableList, type SidebarDragBinding } from "./SidebarSortableList";
 import { SidebarSortMenu } from "./SidebarSortMenu";
@@ -36,6 +37,8 @@ import { fromMarkdown, markdownNodeText } from "../lib/markdown";
 import { setConversationArchived } from "../chat/archiveConversation";
 import { loadConversationMarkdown } from "../chat/conversationMarkdown";
 import { getWebSocket } from "../hooks/useWebSocket";
+import { useSidebarSections, type SidebarSection } from "../protocol/thread-metadata";
+import { SidebarSections } from "./SidebarSections";
 
 // The menu invocation owns its reply even after the reader changes chats.
 const runMenuCommand = async (command: ClientCommand): Promise<CommandResultEvent | undefined> => {
@@ -239,6 +242,26 @@ export const ConversationsTab = ({
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const [selectedRow, setSelectedRow] = useState<{ conversationId: string; rowId: string } | null>(null);
   const [workspaceMenu, setWorkspaceMenu] = useState<{ path: string; x: number; y: number; anchor?: HTMLElement } | null>(null);
+  const { sections, mutate: mutateSections } = useSidebarSections();
+  const sectionByThread = useMemo(() => new Map(sections.flatMap(section => section.item_keys.filter(key => key.startsWith("thread:")).map(key => [key.slice(7), section.id] as const))), [sections]);
+  const sectionProjectKeys = useMemo(() => new Set(sections.flatMap(section => section.item_keys.filter(key => key.startsWith("project:")).map(key => workspaceGroupIdentity(key.slice(8))))), [sections]);
+  const sectionAction = async (path: string, body?: unknown, method?: string) => {
+    try { return await mutateSections(path, body, method); }
+    catch (error) { pushToast(String(error), "error"); return undefined; }
+  };
+  const editSection = async (section?: SidebarSection, threadId?: string) => {
+    const name = await showPrompt({ title: tr(section ? "编辑分组" : "新建分组"), message: tr("按你的方式组织聊天和项目"),
+      defaultValue: section?.name ?? "", placeholder: tr("分组名称"), allowEmpty: !section,
+      confirmLabel: tr(section ? "保存" : "创建分组") });
+    if (name === null) return;
+    try {
+      const result = await mutateSections<{ section: SidebarSection }>(section ? `/sections/${section.id}` : "/sections",
+        { name: name.trim() || tr("新建分组"), ...(!section && threadId && sectionByThread.has(threadId)
+          ? { after_section_id: sectionByThread.get(threadId) } : {}) }, section ? "PATCH" : "POST");
+      if (threadId) await mutateSections("/sections/move", { kind: "thread", id: threadId, section_id: result.section.id });
+    } catch (error) { pushToast(String(error), "error"); }
+  };
+  const moveToSection = (id: string, sectionId: string | null) => { void sectionAction("/sections/move", { kind: "thread", id, section_id: sectionId }); };
 
   useEffect(() => {
     if (isConnected) wsOutbox.sendClientCommand({ type: "workspace.recent" });
@@ -337,20 +360,22 @@ export const ConversationsTab = ({
       if (conversation.projectId !== undefined && conversation.projectId !== null) return conversation;
       const project = recentWorkspaces.find(project => project.named && projectOwnsWorkspace(project, conversation.workspaceRoot || conversation.worktreePath || ""));
       return project ? { ...conversation, projectId: project.path } : conversation;
-    }).filter((conversation) => !conversation.pinned && isWorkspaceConversation(conversation)
+    }).filter((conversation) => !conversation.pinned && !sectionByThread.has(conversation.id) && isWorkspaceConversation(conversation)
       && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
-  }, [filtered, recentWorkspaces]);
-  const projectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.filter(project => project.pinned !== false).map((workspace) => workspace.path),
+  }, [filtered, recentWorkspaces, sectionByThread]);
+  const allProjectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.filter(project => project.pinned !== false).map((workspace) => workspace.path),
     new Map(recentWorkspaces.filter(project => project.named).map(project => [workspaceGroupIdentity(project.path), project.name]))), [workspaceConversations, recentWorkspaces]);
-  const orderedProjectGroups = useMemo(() => (
-    orderSidebarItems(Array.from(projectGroups.entries(), ([projectKey, group]) => ({
+  const projectGroups = useMemo(() => new Map([...allProjectGroups].filter(([, group]) => !sectionProjectKeys.has(workspaceGroupIdentity(group.path)))), [allProjectGroups, sectionProjectKeys]);
+  const allOrderedProjectGroups = useMemo(() => (
+    orderSidebarItems(Array.from(allProjectGroups.entries(), ([projectKey, group]) => ({
       projectKey,
       group,
       conversations: sidebarSortMode === "manual"
         ? orderSidebarItems(orderConversationTree(group.items), sidebarOrder?.project_thread_orders[projectKey] ?? [], item => item.id)
         : orderConversationTree([...group.items].sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || ""))),
     })), sidebarOrder?.project_order ?? [], item => item.projectKey)
-  ), [projectGroups, sidebarOrder, sidebarSortMode]);
+  ), [allProjectGroups, sidebarOrder, sidebarSortMode]);
+  const orderedProjectGroups = useMemo(() => allOrderedProjectGroups.filter(({ projectKey }) => !sectionProjectKeys.has(projectKey)), [allOrderedProjectGroups, sectionProjectKeys]);
   const pinnedConversations = useMemo(() => {
     const positions = new Map(pinnedConversationIds.map((identifier, index) => [identifier, index]));
     return filtered.filter(conversation => conversation.pinned)
@@ -366,10 +391,10 @@ export const ConversationsTab = ({
       name: workspace.named ? workspace.name : groups.get(workspaceGroupIdentity(workspace.path))!.label }));
   }, [recentWorkspaces]);
   const recentConversations = useMemo(() => {
-    const recent = filtered.filter(conversation => !conversation.pinned).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
+    const recent = filtered.filter(conversation => !conversation.pinned && !sectionByThread.has(conversation.id)).sort((a, b) => (b.updatedAt || "").localeCompare(a.updatedAt || ""));
     return (sidebarSortMode === "manual" ? orderSidebarItems(recent, sidebarOrder?.recent_thread_ids ?? [], item => item.id) : recent)
       .slice(0, recentLimit).map((conversation) => ({ ...conversation, treeDepth: 0 }));
-  }, [filtered, recentLimit, sidebarOrder, sidebarSortMode]);
+  }, [filtered, recentLimit, sidebarOrder, sidebarSortMode, sectionByThread]);
   const activityGroups = useMemo(() => {
     if (!activityView) return [];
     const today = new Date();
@@ -396,6 +421,23 @@ export const ConversationsTab = ({
     () => new Map(conversations.map((conversation) => [conversation.id, conversation])),
     [conversations],
   );
+  const visibleRows = useMemo(() => activityView
+    ? activityGroups.flatMap(group => group.items.map(item => ({ id: item.id, rowId: `activity-${group.key}:${item.id}` })))
+    : [
+      ...sections.flatMap(section => collapsedGroups.has(`section:${section.id}`) ? [] : section.item_keys.flatMap(key => {
+        if (key.startsWith("thread:")) return filtered.some(item => item.id === key.slice(7)) ? [{ id: key.slice(7), rowId: `section-${section.id}:${key.slice(7)}` }] : [];
+        const project = allOrderedProjectGroups.find(group => group.projectKey === workspaceGroupIdentity(key.slice(8)));
+        return project && !collapsedGroups.has(project.projectKey)
+          ? (expandedProjects.has(project.projectKey) ? project.conversations : project.conversations.slice(0, 5))
+            .map(item => ({ id: item.id, rowId: `project:${item.id}` })) : [];
+      })),
+      ...pinnedConversations.map(item => ({ id: item.id, rowId: `pinned:${item.id}` })),
+      ...orderedProjectGroups.filter(group => !collapsedGroups.has(group.projectKey)).flatMap(group =>
+        (expandedProjects.has(group.projectKey) ? group.conversations : group.conversations.slice(0, 5)).map(item => ({ id: item.id, rowId: `project:${item.id}` }))),
+      ...(showRecent ? recentConversations.map(item => ({ id: item.id, rowId: `recent:${item.id}` })) : []),
+    ], [activityView, activityGroups, sections, collapsedGroups, filtered, allOrderedProjectGroups, expandedProjects,
+      pinnedConversations, orderedProjectGroups, showRecent, recentConversations]);
+  const pullRequestStatuses = useThreadPullRequestStatuses(visibleRows.map(row => conversationsById.get(row.id)!), isConnected);
   const conversationsRef = useRef(conversations);
   // Read the active id through a ref so switching chats does not recreate the
   // row renderer and force every session row to rerender.
@@ -409,19 +451,22 @@ export const ConversationsTab = ({
   // selection to the occurrence that opened it (sidebarThreadLocationId).
   // A new/restored thread starts in its visible project row, or in Recents.
   const selectedConversationId = conversationIdRef.current;
-  const visibleProject = !activityView && orderedProjectGroups.some(({ projectKey, conversations: projectConversations }) =>
-    !collapsedGroups.has(projectKey)
+  const visibleProject = !activityView && allOrderedProjectGroups.some(({ projectKey, conversations: projectConversations }) =>
+    !sections.some(section => collapsedGroups.has(`section:${section.id}`)
+      && section.item_keys.some(key => key.startsWith("project:") && workspaceGroupIdentity(key.slice(8)) === projectKey))
+    && !collapsedGroups.has(projectKey)
     && (expandedProjects.has(projectKey) ? projectConversations : projectConversations.slice(0, 5))
       .some((item) => item.id === selectedConversationId));
   const defaultSelectedRowId = activityView
     ? activityGroups.flatMap((group) => group.items.some((item) => item.id === selectedConversationId)
       ? [`activity-${group.key}:${selectedConversationId}`] : [])[0] ?? null
-    : pinnedConversations.some(item => item.id === selectedConversationId) ? `pinned:${selectedConversationId}`
+    : sectionByThread.has(selectedConversationId) ? `section-${sectionByThread.get(selectedConversationId)}:${selectedConversationId}`
+      : pinnedConversations.some(item => item.id === selectedConversationId) ? `pinned:${selectedConversationId}`
       : visibleProject ? `project:${selectedConversationId}`
       : showRecent && recentConversations.some((item) => item.id === selectedConversationId) ? `recent:${selectedConversationId}` : null;
   selectedRowIdRef.current = selectedRow?.conversationId === selectedConversationId && !activityView
     && (pinnedConversations.some(item => item.id === selectedConversationId) ? selectedRow.rowId.startsWith("pinned:")
-      : selectedRow.rowId.startsWith("project:") || selectedRow.rowId.startsWith("recent:"))
+      : selectedRow.rowId.startsWith("project:") || selectedRow.rowId.startsWith("recent:") || selectedRow.rowId.startsWith("section-"))
     ? selectedRow.rowId : defaultSelectedRowId;
   renameStateRef.current = { renaming, renameValue };
   onNavigateRef.current = onNavigate;
@@ -476,21 +521,13 @@ export const ConversationsTab = ({
     const select = (event: Event) => {
       const { index, conversationId: owner } = (event as CustomEvent<{ index: number; conversationId: string | null }>).detail;
       if (useAppStore.getState().conversationId !== owner) return;
-      const rows = activityView
-        ? activityGroups.flatMap(group => group.items.map(item => ({ id: item.id, rowId: `activity-${group.key}:${item.id}` })))
-        : [
-          ...pinnedConversations.map(item => ({ id: item.id, rowId: `pinned:${item.id}` })),
-          ...orderedProjectGroups.filter(group => !collapsedGroups.has(group.projectKey)).flatMap(group =>
-            (expandedProjects.has(group.projectKey) ? group.conversations : group.conversations.slice(0, 5)).map(item => ({ id: item.id, rowId: `project:${item.id}` }))),
-          ...(showRecent ? recentConversations.map(item => ({ id: item.id, rowId: `recent:${item.id}` })) : []),
-        ];
       const seen = new Set<string>();
-      const target = rows.filter(row => { if (seen.has(row.id)) return false; seen.add(row.id); return true; })[index];
+      const target = visibleRows.filter(row => { if (seen.has(row.id)) return false; seen.add(row.id); return true; })[index];
       if (target) handleSwitch(target.id, target.rowId);
     };
     window.addEventListener("select-numbered-chat", select);
     return () => window.removeEventListener("select-numbered-chat", select);
-  }, [activityView, activityGroups, pinnedConversations, orderedProjectGroups, collapsedGroups, expandedProjects, showRecent, recentConversations, handleSwitch]);
+  }, [visibleRows, handleSwitch]);
 
   const handoffWorktree = useCallback(async (id: string, target: "local" | "worktree") => {
     const taskName = conversationsRef.current.find(conversation => conversation.id === id)?.title || id;
@@ -644,6 +681,9 @@ export const ConversationsTab = ({
       onCopy={copyConversationPath}
       onPin={setPinned} onReadState={setReadState} onProjectChange={setProject}
       projectOptions={projectOptions}
+      sectionOptions={sections} currentSection={sectionByThread.get(conversation.id)} onSectionChange={moveToSection}
+      onNewSection={id => { void editSection(undefined, id); }}
+      pullRequest={pullRequestStatuses[conversation.id]?.pr}
       currentProject={conversationWorkspacePath(conversation) ? workspaceGroupIdentity(conversationWorkspacePath(conversation)) : ""}
       treeDepth={conversation.treeDepth}
     />
@@ -663,7 +703,7 @@ export const ConversationsTab = ({
     renaming,
     renamingRow,
     startRename,
-    setPinned, setReadState, setProject, projectOptions,
+    setPinned, setReadState, setProject, projectOptions, sections, sectionByThread, pullRequestStatuses,
   ]);
 
   const selectSortMode = async (mode: "manual" | "updated_at") => {
@@ -713,16 +753,32 @@ export const ConversationsTab = ({
       </div>}
     </div>
   );
+  const renderWorkspaceGroup = (projectKey: string, group: WorkspaceConversationGroup, orderedConversations: TreeConversation[], binding?: SidebarDragBinding) => (
+    <section aria-label={tr("工作区 {name}", { name: group.label })} style={taskSectionStyle}>
+      {renderWorkspaceHeader(projectKey, group, binding)}
+      {!collapsedGroups.has(projectKey) && <div className="mc-workspace-group-body">
+        <div className="mc-workspace-group-body-inner" style={taskSectionBodyStyle}>
+          {renderSortableThreads(expandedProjects.has(projectKey) ? orderedConversations : orderedConversations.slice(0, 5), "project", group.path)}
+          {orderedConversations.length > 5 && <button type="button" className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
+            aria-expanded={expandedProjects.has(projectKey)} onClick={() => toggleProjectExpansion(projectKey)}>
+            {expandedProjects.has(projectKey) ? tr("收起") : tr("展开显示")}</button>}
+        </div>
+      </div>}
+    </section>
+  );
+  const sectionThreadIds = (section: SidebarSection) => [...new Set(section.item_keys.flatMap(key => key.startsWith("thread:")
+    ? filtered.some(item => item.id === key.slice(7)) ? [key.slice(7)] : []
+    : allProjectGroups.get(workspaceGroupIdentity(key.slice(8)))?.items.map(item => item.id) ?? []))];
   const projectGroupsById = new Map(orderedProjectGroups.map(group => [group.projectKey, group]));
   const isEmpty = activityView ? filtered.length === 0
-    : pinnedConversations.length === 0 && projectGroups.size === 0 && (!showRecent || recentConversations.length === 0);
+    : pinnedConversations.length === 0 && projectGroups.size === 0 && sections.length === 0 && (!showRecent || recentConversations.length === 0);
 
   return (
     <>
       <div className="mc-sidebar-project-heading" style={{ ...sectionHeaderRowStyle, padding: "9px 10px 5px" }}>
         <span className="mc-sidebar-project-label">{activityView ? tr("活动") : tr("项目")}</span>
         {!activityView && <div style={{ display: "flex", alignItems: "center", gap: 2 }}>
-          <SidebarSortMenu section="projects" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} />
+          <SidebarSortMenu section="projects" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} onNewSection={() => { void editSection(); }} />
           <button
           type="button"
           className="btn-ghost mc-icon-button mc-sidebar-project-add"
@@ -737,6 +793,33 @@ export const ConversationsTab = ({
         style={sessionListWrapStyle}
         onScroll={handleConversationListScroll}
       >
+        {!activityView && <SidebarSections sections={sections} collapsed={collapsedGroups} onToggle={toggleGroup}
+          onNew={() => { void editSection(); }} onEdit={section => { void editSection(section); }}
+          onRemove={id => { void sectionAction(`/sections/${id}`, undefined, "DELETE"); }}
+          onRead={section => { for (const id of sectionThreadIds(section)) setReadState(id, false); }}
+          onArchive={section => { void (async () => {
+            if (!await showConfirm({ title: tr("归档分组中的聊天？"), message: section.name, confirmLabel: tr("归档") })) return;
+            for (const id of sectionThreadIds(section)) {
+              const result = await setConversationArchived(id, true);
+              if (!wsOutbox.commandResultSucceeded(result)) throw new Error(result.message);
+            }
+          })().catch(error => pushToast(String(error), "error")); }}
+          onNewChat={section => {
+            void createConversation({ bindWorkspace: false, appMode: "cowork", sidebarSectionId: section.id });
+          }}
+          visibleItemKeys={section => section.item_keys.filter(key => key.startsWith("thread:")
+            ? filtered.some(item => item.id === key.slice(7))
+            : [...allProjectGroups.values()].some(group => workspaceGroupIdentity(group.path) === workspaceGroupIdentity(key.slice(8))))}
+          renderItem={(section, key, binding) => {
+            if (key.startsWith("thread:")) {
+              const item = filtered.find(conversation => conversation.id === key.slice(7));
+              return item ? cloneElement(renderSessionRow({ ...item, treeDepth: 0 }, `section-${section.id}`), binding) : null;
+            }
+            const match = allOrderedProjectGroups.find(item => item.projectKey === workspaceGroupIdentity(key.slice(8)));
+            return match ? renderWorkspaceGroup(match.projectKey, match.group, match.conversations, binding) : null;
+          }} onReorder={async (section, moved, before, visible) => (await sectionAction("/sections/reorder", {
+            section_id: section?.id ?? null, moved_id: moved, before_id: before, visible_ids: visible,
+          })) !== undefined} />}
         {isEmpty && <EmptyState
           icon={<SquarePen size={22} />}
           title={activityView ? tr("暂无任务活动") : tr("开始你的第一个任务")}
@@ -765,17 +848,7 @@ export const ConversationsTab = ({
             return renderWorkspaceHeader(projectKey, group, undefined, true);
           }} renderRow={(identifier, binding) => {
             const { projectKey, group, conversations: orderedConversations } = projectGroupsById.get(identifier)!;
-            return <section aria-label={tr("工作区 {name}", { name: group.label })} style={taskSectionStyle}>
-              {renderWorkspaceHeader(projectKey, group, binding)}
-              {!collapsedGroups.has(projectKey) && <div className="mc-workspace-group-body">
-                <div className="mc-workspace-group-body-inner" style={taskSectionBodyStyle}>
-                  {renderSortableThreads(expandedProjects.has(projectKey) ? orderedConversations : orderedConversations.slice(0, 5), "project", group.path)}
-                  {orderedConversations.length > 5 && <button type="button" className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
-                    aria-expanded={expandedProjects.has(projectKey)} onClick={() => toggleProjectExpansion(projectKey)}>
-                    {expandedProjects.has(projectKey) ? tr("收起") : tr("展开显示")}</button>}
-                </div>
-              </div>}
-            </section>;
+            return renderWorkspaceGroup(projectKey, group, orderedConversations, binding);
           }} />}
 
 
@@ -792,7 +865,7 @@ export const ConversationsTab = ({
         {activityView && filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
         {!activityView && showRecent && recentConversations.length > 0 && <section aria-label={tr("最近")} className="mc-sidebar-recents">
           <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{tr("最近")}</span>
-            <SidebarSortMenu section="chats" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} /></div>
+            <SidebarSortMenu section="chats" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} onNewSection={() => { void editSection(); }} /></div>
           <div className="mc-sidebar-recent-list">{renderSortableThreads(recentConversations, "recent")}</div>
           {filtered.filter(conversation => !conversation.pinned).length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
         </section>}

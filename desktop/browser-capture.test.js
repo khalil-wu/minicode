@@ -13,7 +13,24 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
     const area = screen.getPrimaryDisplay().workArea;
     const window = new BrowserWindow({ width: 1000, height: 750, show: false,
       x: area.x + area.width - 24, y: area.y, skipTaskbar: true });
-    const server = http.createServer((_request, response) => {
+    let receiveNativePost;
+    const nativePost = new Promise(resolve => { receiveNativePost = resolve; });
+    const server = http.createServer((request, response) => {
+      if (request.url === "/agent-download") {
+        response.writeHead(200, { "content-type": "text/plain", "content-disposition": 'attachment; filename="original-download.txt"' });
+        response.end("original native download bytes");
+        return;
+      }
+      if (request.url === "/native-post") {
+        let body = "";
+        request.on("data", chunk => { body += chunk; });
+        request.on("end", () => {
+          response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          response.end("<!doctype html><h1>Native POST destination</h1>");
+          receiveNativePost({ method: request.method, body, contentType: request.headers["content-type"] });
+        });
+        return;
+      }
       response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       response.end('<!doctype html><style>html,body{margin:0;background:rgb(17,133,71);color:white;font:32px sans-serif}h1{margin:80px}</style><h1>Actual browser capture</h1>');
     });
@@ -65,6 +82,51 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(view.webContents.getURL(), url);
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 1);
       process.stdout.write(`Real same-page compositor capture ${result.width}x${result.height}, ${buffer.length} bytes; hidden wait cancellation and ownership passed.\n`);
+      await view.webContents.executeJavaScript(`{
+        const form = document.createElement('form'); form.action = '/native-post'; form.method = 'POST'; form.target = '_blank'; form.rel = 'opener';
+        const input = document.createElement('input'); input.name = 'original'; input.value = 'native value'; form.append(input);
+        document.body.append(form); form.submit();
+      }`, true);
+      assert.deepEqual(await nativePost, { method: "POST", body: "original=native+value", contentType: "application/x-www-form-urlencoded" });
+      const child = window.contentView.children.find(candidate => candidate !== view && candidate.webContents?.id !== window.webContents.id);
+      if (child.webContents.isLoading()) await new Promise(resolve => child.webContents.once("did-finish-load", resolve));
+      assert.equal(await child.webContents.executeJavaScript("window.opener !== null"), true);
+      assert.equal(child.webContents.getURL(), new URL("/native-post", url).href);
+      assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 2);
+      assert.equal(manager.listTargets("another-owner", "fixture-window").length, 0);
+      process.stdout.write("[capture] native child POST body, original opener and conversation owner preserved\n");
+      const downloadDirectory = path.join(app.getPath("userData"), "owned-downloads");
+      fs.mkdirSync(downloadDirectory);
+      manager.setBrowserSettings({ downloadDirectory, downloadPolicy: "ask" });
+      const agentControl = { id: "capture-native-agent-owner", turnId: "capture-native-turn" };
+      const downloadUrl = new URL("/agent-download", url).href;
+      await manager.executeControlCommand({ action: "allow_download", target_id: target.id, conversation_id: "capture-owner",
+        window_instance_id: "fixture-window", url: downloadUrl }, { agentControl });
+      const downloadDone = new Promise((resolve, reject) => view.webContents.session.once("will-download", (event, item, contents) => {
+        if (event.defaultPrevented) { reject(new Error("The exact native download URL was not admitted")); return; }
+        assert.equal(contents, view.webContents);
+        item.once("done", (_done, state) => resolve({ item, state }));
+      }));
+      const [, downloaded] = await Promise.all([manager.executeControlCommand({ action: "evaluate", target_id: target.id, conversation_id: "capture-owner", window_instance_id: "fixture-window",
+        expression: `(() => { const link=document.createElement('a'); link.href=${JSON.stringify(downloadUrl)}; link.download='original-download.txt'; document.body.append(link); link.click(); return true; })()` }, { agentControl }), downloadDone]);
+      assert.equal(downloaded.state, "completed");
+      assert.equal(fs.readFileSync(downloaded.item.getSavePath(), "utf8"), "original native download bytes");
+      const ownedDownloads = await manager.executeControlCommand({ action: "list_downloads", conversation_id: "capture-owner", window_instance_id: "fixture-window" });
+      assert.equal(ownedDownloads.value.length, 1); assert.equal(ownedDownloads.value[0].isUserInitiated, false);
+      assert.equal(ownedDownloads.value[0].path, downloaded.item.getSavePath());
+      await manager.executeControlCommand({ action: "set_blob_download_origin", target_id: target.id, conversation_id: "capture-owner",
+        window_instance_id: "fixture-window", origin: new URL(url).origin }, { agentControl });
+      const blobDone = new Promise((resolve, reject) => view.webContents.session.once("will-download", (event, item) => {
+        if (event.defaultPrevented) { reject(new Error("The original main-frame blob event did not admit the native download")); return; }
+        item.once("done", (_done, state) => resolve({ item, state }));
+      }));
+      const [, blob] = await Promise.all([manager.executeControlCommand({ action: "evaluate", target_id: target.id, conversation_id: "capture-owner", window_instance_id: "fixture-window",
+        expression: "(() => { const link=document.createElement('a'); link.href=URL.createObjectURL(new Blob(['original main-frame blob bytes'],{type:'text/plain'})); link.download='original-blob.txt'; document.body.append(link); link.click(); return true; })()" }, { agentControl }), blobDone]);
+      assert.equal(blob.state, "completed"); assert.equal(fs.readFileSync(blob.item.getSavePath(), "utf8"), "original main-frame blob bytes");
+      assert.equal(manager.releaseAgentControl({ conversation_id: "capture-owner", window_instance_id: "fixture-window", control: agentControl }), 1);
+      assert.equal(view.webContents.debugger.isAttached(), false);
+      process.stdout.write("[capture] original native DownloadItem completed with exact URL permission, bytes, save path and owner\n");
+      process.stdout.write("[capture] original main-frame Page.downloadWillBegin produced and consumed the dynamic blob permission\n");
       manager.disposeAll(); window.destroy(); server.close(); app.exit(0);
     } catch (error) {
       process.stderr.write(`${error.stack || error}\n`);

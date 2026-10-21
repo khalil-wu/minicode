@@ -68,6 +68,7 @@ const composerRecovery = loadComposerDrafts().then(records => {
         agentMode: active.agentMode ?? "build",
         goalMode: active.goalMode ?? false,
         draft: active.draft, richDraft: active.richDraft, attachments: active.attachments, quotedMessage: active.quotedMessage,
+        queuedEdit: active.queuedEdit,
         selectedMentions: active.selectedMentions, selectedSkills: active.selectedSkills,
         allowedRemoteImageDomains: active.allowedRemoteImageDomains,
       } : {}),

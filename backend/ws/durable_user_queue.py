@@ -1138,6 +1138,10 @@ class DurableUserMessageQueue:
     def same_user_command(cls, left: UserCommand, right: UserCommand) -> bool:
         return cls._user_command_identity(left) == cls._user_command_identity(right)
 
+    @classmethod
+    def same_pending_payload(cls, left: UserCommand, right: UserCommand) -> bool:
+        return cls.same_user_command(left, right) and cls._command_to_dict(left) == cls._command_to_dict(right)
+
     def _update_owner_queue_baseline_unlocked(self, conversation_id: str) -> None:
         commands = list(self._queues.get(conversation_id, []))
         if commands:
@@ -1155,6 +1159,58 @@ class DurableUserMessageQueue:
     def pending_user_message_snapshot(self) -> dict[str, list[UserCommand]]:
         self._refresh_from_disk_unlocked()
         return {owner: list(commands) for owner, commands in self._queues.items()}
+
+    @_queue_locked
+    def add_queued_user_message(self, conversation_id: str, command: UserCommand, validate_admission) -> int:
+        self._refresh_from_disk_unlocked()
+        message_id = command.data["assistant_message_id"]
+        user_id = command.data["user_message_id"]
+        owned = [*self._queues.get(conversation_id, []), *self._turn_inputs.get(conversation_id, []),
+            *([self._inflight[conversation_id]] if conversation_id in self._inflight else [])]
+        if any(item.data.get("assistant_message_id") == message_id or item.data.get("user_message_id") == user_id for item in owned):
+            raise ValueError("This queued input is already pending or has been claimed")
+        validate_admission()
+        self._queues.setdefault(conversation_id, []).append(command)
+        self._write_current_unlocked()
+        self._update_owner_queue_baseline_unlocked(conversation_id)
+        return len(self._queues[conversation_id])
+
+    @_queue_locked
+    def update_queued_user_message(self, conversation_id: str, message_id: str, payload: dict[str, Any]) -> UserCommand | None:
+        from dataclasses import replace
+        from backend.ws.utils import USER_INPUT_METADATA_KEYS
+
+        self._refresh_from_disk_unlocked()
+        queue = self._queues.get(conversation_id, [])
+        index = next((index for index, command in enumerate(queue)
+            if command.data.get("assistant_message_id") == message_id), -1)
+        if index < 0:
+            return None
+        data = dict(queue[index].data)
+        for key in (*USER_INPUT_METADATA_KEYS, "attachments", "skills", "plugins"):
+            data.pop(key, None)
+        data.update(payload)
+        data["_submitted_content"] = payload["content"]
+        command = replace(queue[index], data=data)
+        queue[index] = command
+        self._write_current_unlocked()
+        self._update_owner_queue_baseline_unlocked(conversation_id)
+        return command
+
+    @_queue_locked
+    def reorder_queued_user_messages(self, conversation_id: str, message_ids: list[str]) -> list[UserCommand]:
+        self._refresh_from_disk_unlocked()
+        queue = self._queues.get(conversation_id, [])
+        expected = [command.data["assistant_message_id"] for command in queue]
+        if sorted(message_ids) != sorted(expected):
+            raise ValueError("queue reorder must include every queued submission exactly once")
+        by_id = {command.data["assistant_message_id"]: command for command in queue}
+        ordered = [by_id[message_id] for message_id in message_ids]
+        if ordered:
+            self._queues[conversation_id] = ordered
+        self._write_current_unlocked()
+        self._update_owner_queue_baseline_unlocked(conversation_id)
+        return ordered
 
     @_queue_locked
     def set_user_queue_paused(self, conversation_id: str, stopped_message_id: str) -> None:

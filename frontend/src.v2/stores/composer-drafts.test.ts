@@ -39,6 +39,20 @@ afterEach(async () => {
 });
 
 describe("durable owned composer drafts", () => {
+  it("cold reopens an interrupted remote import without copying bytes or losing its original source", async () => {
+    const first = await renderer("remote-window");
+    await save(first, state({ conversationId: "remote-owner", workingDirectory: "/srv/project", draft: "keep remote draft",
+      attachments: [{ id: "remote-file", name: "报告.txt", type: "application/octet-stream", size: 0, status: "uploading",
+        remoteSourcePath: "/outside/报告.txt", workspaceRoot: "/srv/project", conversationId: "remote-owner" }] }));
+    await first.resetComposerDraftStorageForTests(true);
+    const cold = await renderer("remote-window");
+    const recovered = (await cold.loadComposerDrafts())[0];
+    expect(recovered.owner.id).toBe("remote-owner");
+    expect(recovered.draft).toMatchObject({ draft: "keep remote draft", attachments: [{ id: "remote-file", status: "error",
+      remoteSourcePath: "/outside/报告.txt", workspaceRoot: "/srv/project", conversationId: "remote-owner", error: "上传已中断，可点击重试。" }] });
+    expect(recovered.draft.attachments[0].localFile).toBeUndefined();
+    expect(recovered.draft.attachments[0].dataUrl).toBeUndefined();
+  });
   it("cold reopens structured drafts for the active conversation, hidden workspace and side chat without changing ownership", async () => {
     const first = await renderer("rich-window");
     const rich = { markdown: "**keep**", plainTextMode: false,

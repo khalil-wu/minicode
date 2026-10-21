@@ -1,6 +1,7 @@
 import { pushToast } from "../overlays/ToastContainer";
 import { workspaceHasConversation, workspaceRequestOwner, workspaceRequestPath, workspaceViewRoot } from "../protocol/workspace-owner";
 import type { DictationPreferences } from "../lib/workbench-preferences";
+import type { UploadResponse } from "../protocol/api";
 
 export interface FsEntry {
   name: string;
@@ -470,6 +471,9 @@ interface MiniCodeDesktop {
   };
   openPreferredPath(target: string, line?: number, options?: OpenPreferredPathOptions): Promise<{ openInEditor: boolean; path: string }>;
   saveFile(filename: string, bytes: Uint8Array): Promise<boolean>;
+  attachments: {
+    importRemoteFile(request: { path: string; sessionId: string; conversationId: string; workspaceRoot: string }): Promise<UploadResponse>;
+  };
   platformInfo: { isDesktop: boolean; platform: string; arch: string };
   windowControls: {
     listFontFamilies(): Promise<SystemFontFamily[] | null>;
@@ -659,8 +663,8 @@ export const pickDirectory = async (): Promise<string | null> => {
   return (await desktop()?.pickDirectory()) ?? null;
 };
 
-export const remoteDirectoryEntries = async (directoryPath: string | null): Promise<RemoteDirectoryEntries> => {
-  const result = await desktop()!.workspaceDirectoryEntries(directoryPath, true);
+export const remoteDirectoryEntries = async (directoryPath: string | null, directoriesOnly = true): Promise<RemoteDirectoryEntries> => {
+  const result = await desktop()!.workspaceDirectoryEntries(directoryPath, directoriesOnly);
   result.entries.sort((left, right) => left.type !== right.type ? (left.type === "directory" ? -1 : 1)
     : left.name.startsWith(".") !== right.name.startsWith(".") ? (left.name.startsWith(".") ? 1 : -1)
     : left.name.localeCompare(right.name));

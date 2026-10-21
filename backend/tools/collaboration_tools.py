@@ -10,6 +10,7 @@ from backend.agents.source_roles import source_agent_options
 from backend.tools.agent_control_plane import AgentControlPlane, normalize_agent_fork_turns, normalize_agent_task_name
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
+from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY
 
 
 def source_agent_status(record, control):
@@ -34,6 +35,8 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
     queue = context.run_context.turn_input_queue
     if queue is not None and queue.pending_count():
         return {"kind": "steer"}
+    if queue is not None and queue.has_message_board_notifications():
+        return {"kind": "message"}
     if agent_ids and any((control.subagent_snapshot(agent_id, include_result=False) or {}).get("status") not in {"pending", "running"} for agent_id in agent_ids):
         return {"kind": "completed"}
     async def incoming_activity():
@@ -117,7 +120,12 @@ class SpawnAgentTool(CollaborationTool):
             return result
         agent_id = result.runtime_metadata["subagent_id"]
         control = AgentControlPlane(context, source_v2=True)
-        return replace(result, content=json.dumps({"agent_id": agent_id, "task_name": control.public_tree_path(agent_id)}))
+        output = {"task_name": control.public_tree_path(agent_id)}
+        policy = context.metadata.get(ACTIVE_TOOLSET_POLICY_METADATA_KEY)
+        options = policy.coordination_options if policy is not None else None
+        if options is not None and not options["hide_spawn_agent_metadata"]:
+            output["nickname"] = None
+        return replace(result, content=json.dumps(output))
 
 
 class ListAgentsTool(CollaborationTool):

@@ -93,7 +93,8 @@ export function McpAppRenderer(props: McpAppRendererProps) {
         const iframe = frame as HTMLIFrameElement;
         iframe.sandbox.add("allow-scripts", "allow-same-origin");
         iframe.referrerPolicy = "no-referrer";
-        iframe.allow = "camera 'none'; microphone 'none'; geolocation 'none'";
+        iframe.allow = "fullscreen *; encrypted-media *; clipboard-write *; camera 'none'; microphone 'none'; geolocation 'none'";
+        iframe.allowFullscreen = true;
       }
       frame.style.height = "320px";
       host.appendChild(frame);

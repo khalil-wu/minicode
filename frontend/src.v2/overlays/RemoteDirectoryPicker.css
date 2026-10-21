@@ -10,11 +10,12 @@
 .remote-directory-current:hover:not(:disabled) { background: var(--surface-hover); }
 .remote-directory-contents { flex: 1; min-height: 0; display: flex; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-soft); }
 .remote-directory-contents > p { width: 100%; margin: auto; padding: 12px 16px; text-align: center; color: var(--text-secondary); }
-.remote-directory-contents > [role="listbox"] { width: 100%; padding: 4px 0; }
-.remote-directory-contents [role="option"] { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 0; background: transparent; text-align: start; color: var(--text-primary); font: inherit; cursor: pointer; }
-.remote-directory-contents [role="option"] > svg { flex-shrink: 0; color: var(--text-secondary); }
-.remote-directory-contents [role="option"] > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.remote-directory-contents [role="option"]:hover:not(:disabled), .remote-directory-contents [role="option"][data-active] { background: var(--surface-hover); }
+.remote-directory-contents > [role="listbox"], .remote-file-contents > div { width: 100%; padding: 4px 0; }
+.remote-directory-contents [role="option"], .remote-file-entry { width: 100%; display: flex; align-items: center; gap: 8px; padding: 6px 12px; border: 0; background: transparent; text-align: start; color: var(--text-primary); font: inherit; cursor: pointer; }
+.remote-directory-contents [role="option"] > svg, .remote-file-entry > svg { flex-shrink: 0; color: var(--text-secondary); }
+.remote-directory-contents [role="option"] > span, .remote-file-entry > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-file-entry > span { flex: 1; min-width: 0; }
+.remote-directory-contents [role="option"]:hover:not(:disabled), .remote-directory-contents [role="option"][data-active], .remote-file-entry:hover:not(:disabled), .remote-file-entry[aria-pressed="true"] { background: var(--surface-hover); }
 .remote-directory-dialog footer { justify-content: flex-end; }
 .remote-directory-dialog .mc-dialog-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 6px 12px; border: 0; border-radius: var(--mc-control-radius); background: transparent; color: var(--text-primary); font: inherit; cursor: pointer; }
 .remote-directory-dialog .mc-dialog-btn:hover:not(:disabled) { background: var(--surface-hover); }

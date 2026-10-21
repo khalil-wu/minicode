@@ -5,6 +5,7 @@ const { releaseEditorWindow } = require("./window-lifecycle");
 
 const NATIVE_CHANNELS = new Set([
   "minicode:workspace:trust", "minicode:workspace:directoryEntries", "minicode:openPreferredPath", "minicode:openPath", "minicode:revealPath",
+  "minicode:attachments:importRemoteFile",
   "minicode:fs:listTree", "minicode:fs:readFile", "minicode:fs:searchFiles", "minicode:fs:deletePath",
   "minicode:pty:spawn", "minicode:pty:write", "minicode:pty:resize", "minicode:pty:kill", "minicode:pty:restart",
   "minicode:pty:killConversation", "minicode:pty:list", "minicode:pty:snapshot", "minicode:pty:clear", "minicode:pty:ackExit",

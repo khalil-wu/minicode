@@ -212,6 +212,8 @@ class TurnIterationAdmission:
 
         if self.runtime is not None:
             self.tool_context.metadata["_agent_wait_cursor"] = self.runtime.agent_activity_cursor()
+        for notice in self.tool_context.run_context.turn_input_queue.take_message_board_notifications():
+            self.context.append_message_board_notification(notice)
         await inject_subagent_mailbox_updates(
             ctx=self.context,
             state=self.state,

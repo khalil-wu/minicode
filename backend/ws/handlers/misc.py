@@ -788,7 +788,7 @@ async def handle_user_message_queue_cancel(session: "WebSocketSession", data: di
         await session.emit_command_result(
             "user_message.queue.cancel",
             "Queued message cancelled.",
-            data={"conversation_id": conversation_id, "message_id": message_id},
+            data={"conversation_id": conversation_id, "message_id": message_id, "cancelled": True},
         )
     else:
         await session.emit_command_result(

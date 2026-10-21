@@ -65,6 +65,7 @@ class RunContext:
     environment_capabilities: PreparedEnvironmentCapabilities | None = None
     environment_retirement_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
     cua_repl_turn: Any | None = None
+    browser_execution: Any | None = None
     environment_host_mcp_manager: Any | None = None
     environment_host_skill_manager: Any | None = None
     environment_host_captured: bool = False
@@ -81,6 +82,7 @@ class RunContext:
     initial_turn_environments: TurnEnvironmentSnapshot | None = None
     turn_environments: TurnEnvironmentSnapshot | None = None
     context_builder: ContextBuilder | None = None
+    realtime_history_fragments: list[tuple[str, str]] = field(default_factory=list)
     extension_actions: ExtensionExecutionActions | None = None
     enqueue_extension_followup: Callable[[UserCommand], Any] | None = None
     extension_name_setter: Callable[[str], Any] | None = None
@@ -196,6 +198,11 @@ class RunContext:
             self.cua_repl_turn = None
             consumers = tuple(self.environment_retirement_tasks)
             self.environment_retirement_tasks.add(asyncio.create_task(original.finish_after(consumers), name="cua-turn-ended"))
+        if self.browser_execution is not None:
+            original = self.browser_execution
+            self.browser_execution = None
+            consumers = tuple(self.environment_retirement_tasks | self.lifecycle_cleanup_tasks)
+            self.environment_retirement_tasks.add(asyncio.create_task(original.finish_after(consumers), name="browser-turn-ended"))
         if self.environment_retirement_tasks:
             tasks = tuple(self.environment_retirement_tasks)
             pending_tools = any(not task.done() for task in self.lifecycle_cleanup_tasks)

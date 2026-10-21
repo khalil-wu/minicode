@@ -3,10 +3,18 @@ import type { CommandsListEvent, ServerEvent } from "../protocol/events";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { addInspectorPayload } from "./inspectorEntries";
 import { workspaceRootsEqual } from "../lib/workspace-path";
+import { sendClientCommand } from "../protocol/ws-outbox";
 
 export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
+    case "skills/changed": {
+      const owner = { conversation_id: s.conversationId || undefined, workspace_root: s.workingDirectory };
+      sendClientCommand({ type: "skills.list", ...owner }, { silent: true });
+      sendClientCommand({ type: "commands.list", ...owner }, { silent: true });
+      sendClientCommand({ type: "runtime.capabilities.inspect", ...owner, source: "skills.changed" }, { silent: true });
+      return true;
+    }
     case "skills.list": {
       if (e.conversation_id !== (s.conversationId || "") || typeof e.workspace_root !== "string"
         || !workspaceRootsEqual(e.workspace_root, s.workingDirectory)) return true;

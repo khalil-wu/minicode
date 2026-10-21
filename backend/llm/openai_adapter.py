@@ -2445,6 +2445,8 @@ class OpenAIAdapter(LLMAdapter):
         settings: LLMSettings,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
+        if settings.aws is not None and (settings.wire_api != "responses" or settings.responses_websocket):
+            raise ValueError("Amazon Bedrock uses Responses over HTTP; select wire_api=responses and disable Responses WebSocket")
         self._settings = settings
         self._content_item_kinds_enabled = True
         self._default_headers = {
@@ -2462,14 +2464,20 @@ class OpenAIAdapter(LLMAdapter):
         # rejection is paid once per adapter, not on every turn.
         self._chat_unsupported_fields: set[str] = set()
         if http_client is None:
+            request_auth = None
+            if settings.aws is not None:
+                from backend.llm.bedrock import BedrockRequestAuth
+                request_auth = BedrockRequestAuth(settings.aws, api_key=settings.api_key,
+                    proxy_mode=settings.proxy_mode, base_url=settings.base_url,
+                    explicit_authorization=any(key.lower() == "authorization" for key in self._default_headers))
             proxy_url = _proxy_url_for_base_url(
                 _normalized_openai_base_url(settings.base_url),
                 str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
             )
             if proxy_url:
-                http_client = httpx.AsyncClient(proxy=proxy_url, trust_env=False)
+                http_client = httpx.AsyncClient(proxy=proxy_url, trust_env=False, auth=request_auth)
             else:
-                http_client = httpx.AsyncClient(trust_env=False)
+                http_client = httpx.AsyncClient(trust_env=False, auth=request_auth)
             self._http_client = http_client
 
     def configure_content_item_kinds(self, enabled: bool) -> None:
@@ -3365,6 +3373,11 @@ class OpenAIAdapter(LLMAdapter):
         self, messages: list[LLMMessage], tools: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        runtime_tool_names = {
+            f"{namespace['name']}__{namespace['tool_name']}": tool["function"]["name"]
+            for tool in tools or ()
+            if (namespace := tool.get("_minicode_namespace")) is not None
+        }
         request = None
         if self._settings.responses_websocket:
             routing = metadata or {}
@@ -3376,6 +3389,12 @@ class OpenAIAdapter(LLMAdapter):
         stream = self._stream_responses_events(messages, tools, metadata=metadata, websocket_request=request)
         try:
             async for event in stream:
+                if event.tool_call_start is not None and event.tool_call_start.name in runtime_tool_names:
+                    event = replace(event, tool_call_start=replace(event.tool_call_start,
+                        name=runtime_tool_names[event.tool_call_start.name]))
+                if event.tool_calls:
+                    event = replace(event, tool_calls=[replace(call, name=runtime_tool_names[call.name])
+                        if call.name in runtime_tool_names else call for call in event.tool_calls])
                 if request is not None:
                     if event.type == StreamEventType.DONE:
                         request.accepted = event.finish_reason == "completed" and bool(request.info.get("response_items_complete"))

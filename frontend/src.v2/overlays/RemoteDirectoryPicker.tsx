@@ -16,7 +16,7 @@ function isAbsolutePath(path: string, platform: string): boolean {
   return platform === "win32" ? /^(?:[a-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/i.test(path) : path.startsWith("/");
 }
 
-function parentDirectory(path: string, platform: string): string | null {
+export function parentDirectory(path: string, platform: string): string | null {
   const windows = platform === "win32";
   const normalized = (windows ? path.replace(/\\/g, "/") : path).replace(/\/+$/, "");
   if (!normalized || windows && (/^[a-z]:$/i.test(normalized) || /^\/\/[^/]+\/[^/]+$/.test(normalized))) return null;

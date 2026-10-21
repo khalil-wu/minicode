@@ -16,6 +16,7 @@ import { FooterRow } from "./FooterRow";
 import { ProjectScopePicker } from "./ProjectScopePicker";
 import { PromptHistoryOverlay } from "./PromptHistoryOverlay";
 import { QueuedMessageList } from "./QueuedMessageList";
+import { cancelQueuedMessageEdit, installQueuedEditRecovery } from "./queued-message-edit";
 import { appendPromptHistory, clearPromptHistory, readPromptHistory } from "./prompt-history";
 import { acceptAttachmentConversationOwner, uploadComposerFiles } from "./uploads";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
@@ -142,6 +143,7 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
 };
 
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
+  useEffect(installQueuedEditRecovery, []);
   const { t: tr } = useI18n();
   const draft = useAppStore((s) => s.draft);
   const richDraft = useAppStore(s => s.richDraft);
@@ -368,6 +370,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   );
 
   const escapeInterrupt = useCallback((): boolean => {
+    if (useAppStore.getState().queuedEdit) { void cancelQueuedMessageEdit(); return true; }
     if (!useAppStore.getState().isStreaming) return false;
     stopRun();
     return true;
@@ -403,6 +406,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const effectiveContent = [outgoing.prefix, content].filter(Boolean).join("\n\n").trim();
     if (!effectiveContent && mergedAttachments.length === 0 && outgoing.comments.length === 0) return false;
     return sendChatMessage({
+      queuedEdit: outgoing.stateAtSend.queuedEdit,
       displayContent: options?.displayContent ?? content,
       backendContent: formatDiffCommentsPrompt([outgoing.prefix, options?.backendContent ?? content].filter(Boolean).join("\n\n").trim(), outgoing.comments),
       attachments: mergedAttachments,

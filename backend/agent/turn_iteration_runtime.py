@@ -22,6 +22,7 @@ from backend.llm.capabilities import (
 )
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 from backend.tools.registry import ToolRegistry
+from backend.tools.realtime_tools import active_realtime_service
 from backend.services.context_budget import build_context_compacted_event, context_ledger_snapshot
 
 
@@ -188,6 +189,7 @@ class TurnIterationRuntime:
             permission_context=self.tool_context.permission,
         )
         active_policy = effective_toolset_policy(
+            realtime_service=active_realtime_service(self.tool_context),
             model_execution=snapshot,
             multi_agent_version=run_context.multi_agent_version,
             base_policy=base_policy,
@@ -203,6 +205,7 @@ class TurnIterationRuntime:
             ),
             workspace_root=self.workspace_root,
             permission_mode=str(self.tool_context.permission.mode or ""),
+            is_subagent=run_context.is_subagent or run_context.session_source == "subagent",
             hosted_web_search=(
                 callable(getattr(self.llm, "supports_hosted_web_search", None))
                 and self.llm.supports_hosted_web_search()

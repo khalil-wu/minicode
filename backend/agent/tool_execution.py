@@ -1009,6 +1009,8 @@ def toolset_policy_guard_reason(
         from backend.tools.toolsets import (
             ACTIVE_TOOLSET_POLICY_METADATA_KEY,
             CODE_MODE_DIRECT_TOOLS,
+            SOURCE_V2_COORDINATION_TOOLS,
+            SOURCE_MESSAGE_BOARD_TOOLS,
             ToolsetPolicy,
         )
         from backend.tools.tool_search import _toolset_policy_for_context
@@ -1024,7 +1026,16 @@ def toolset_policy_guard_reason(
                 f"Tool '{tc.name}' was blocked because the active execution "
                 "capability policy is invalid."
             )
-        spec = tool_registry.get_tool_spec(tc.name)
+        if tc.name == "end_realtime_voice_call":
+            from backend.tools.realtime_tools import active_realtime_service
+            service = active_realtime_service(tool_ctx)
+            if service is None or policy.realtime_service is not service:
+                return "end_realtime_voice_call is unavailable outside the original task's active voice chat."
+        options = policy.coordination_options
+        if (options is not None and tc.name in SOURCE_V2_COORDINATION_TOOLS | SOURCE_MESSAGE_BOARD_TOOLS
+                and tc.native_name and tc.native_namespace != (options["tool_namespace"] or "functions")):
+            return f"Tool '{tc.name}' is unavailable in namespace '{tc.native_namespace or 'functions'}'."
+        spec = policy.project_tool_spec(tool_registry.get_tool_spec(tc.name))
         if policy.is_directly_visible(spec):
             return ""
         if policy.is_available(spec):

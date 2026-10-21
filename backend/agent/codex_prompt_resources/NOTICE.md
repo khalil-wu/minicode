@@ -13,6 +13,12 @@ Selection follows `codex-rs/prompts/src/model_instructions.rs::render_model_inst
 
 Copyright OpenAI. Licensed under the Apache License, Version 2.0; see LICENSE.txt.
 
+`realtime-backend.md` preserves
+`codex-rs/prompts/templates/realtime/backend_prompt.md` byte for byte at the same
+revision. Realtime startup/end contextual fragments follow the public
+`codex-rs/core/src/context/realtime_*instructions.rs` consumers; explicit
+configuration, a request prompt and an explicit null retain Source precedence.
+
 `collaboration-plan.md` and `collaboration-default.md` preserve the source files
 `codex-rs/collaboration-mode-templates/templates/plan.md` and `default.md` byte for byte.
 Their developer-role injection follows

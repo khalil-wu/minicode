@@ -116,6 +116,12 @@ def build_attachment_input_plan(
             or 0
         )
         source_metadata = stored_attachment or attachment
+        # Only the importing host can establish a selected file's original
+        # path. Client attachment refs cannot turn an uploaded copy into a
+        # filesystem reference, including after a history reload or fork.
+        source_path = str(stored_attachment.get("source_path") or "")
+        if source_path:
+            hints.append(f"- {file_name}: original file path: {source_path}")
         parse_error = str(source_metadata.get("parse_error") or "").strip()
         parse_warning = str(source_metadata.get("parse_warning") or "").strip()
         try:

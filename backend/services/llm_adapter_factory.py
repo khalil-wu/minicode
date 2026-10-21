@@ -44,6 +44,8 @@ def build_wire_adapter(
     """
 
     wire_api = str(settings.wire_api or "").strip().lower()
+    if settings.aws is not None and wire_api != "responses":
+        raise ValueError("Amazon Bedrock requires the Responses HTTP transport")
     if wire_api in {"chat", "responses"}:
         return OpenAIAdapter(settings=settings)
     if wire_api == "anthropic":
@@ -144,6 +146,7 @@ def _openai_compatible_settings(
     metadata = get_provider_model_metadata(section, selected_model)
     return LLMSettings(
         api_key=api_key,
+        aws=section.get("aws"),
         provider=provider,
         base_url=base_url,
         model=selected_model,
@@ -319,6 +322,8 @@ def build_provider_adapter(
 def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapter:
     """Map a registered provider contract onto MiniCode transport adapters."""
 
+    if spec.aws is not None and spec.api != "openai-responses":
+        raise ValueError("Amazon Bedrock requires the Responses HTTP transport")
     if spec.api == "anthropic-messages":
         from backend.llm.anthropic_adapter import AnthropicAdapter
 
@@ -354,6 +359,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
     if spec.api in {"openai-responses", "openai-completions"}:
         settings = LLMSettings(
             api_key=spec.api_key,
+            aws=spec.aws,
             provider=spec.provider_id,
             base_url=spec.base_url,
             model=spec.model_id,

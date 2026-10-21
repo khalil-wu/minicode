@@ -5,6 +5,7 @@ from copy import deepcopy
 from collections.abc import Mapping
 from typing import Any, Iterable
 import json
+import logging
 
 from backend.tools.contracts import ToolSpec
 
@@ -16,6 +17,13 @@ from backend.tools.contracts import ToolSpec
 ALL_TOOLSETS = "*"
 CODE_MODE_DIRECT_TOOLS = frozenset({
     "tool_exec", "tool_wait", "tool_search",
+})
+SOURCE_V2_COORDINATION_TOOLS = frozenset({
+    "spawn_agent", "send_message", "followup_task", "wait_agent", "list_agents", "interrupt_agent",
+})
+SOURCE_MESSAGE_BOARD_TOOLS = frozenset({
+    "create_channel", "get_channels", "list_threads", "search_posts", "read_thread", "read_post",
+    "subscribe", "unsubscribe", "post",
 })
 
 # Keep the immutable/session-owned selection separate from the per-iteration
@@ -129,9 +137,13 @@ class ToolsetPolicy:
     windows_shell_guidance: bool | None = None
     environment_login_parameter: bool | None = None
     model_messages: Mapping[str, Any] | None = field(default=None, repr=False)
+    coordination_options: Mapping[str, Any] | None = field(default=None, repr=False)
+    # Live host capability. It never enters durable policy mappings or model metadata.
+    realtime_service: Any | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         object.__setattr__(self, "model_messages", deepcopy(self.model_messages))
+        object.__setattr__(self, "coordination_options", deepcopy(self.coordination_options))
 
     @classmethod
     def default(cls) -> "ToolsetPolicy":
@@ -362,6 +374,8 @@ class ToolsetPolicy:
                 "search=1" if self.supports_search_tool else "search=0",
                 f"environments={self.environment_count}:{self.advertise_environment_tools}:{self.windows_shell_guidance}:{self.environment_login_parameter}",
                 "model_messages=" + json.dumps(self.model_messages, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+                "coordination=" + json.dumps(self.coordination_options, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+                f"realtime={bool(self.realtime_service is not None and self.realtime_service.active and self.realtime_service.started and not self.realtime_service.closing)}",
                 *(
                     f"availability[{index}]={clause.cache_key()}"
                     for index, clause in enumerate(self.availability_filters)
@@ -403,6 +417,9 @@ class ToolsetPolicy:
             )
 
     def is_available(self, spec: ToolSpec) -> bool:
+        if spec.name == "end_realtime_voice_call" and (self.realtime_service is None
+                or not self.realtime_service.active or not self.realtime_service.started or self.realtime_service.closing):
+            return False
         if spec.name == "tool_search" and not self.supports_search_tool:
             return False
         if any(name in self.disabled_tools for name in spec.restriction_policy_names) or spec.toolset in self.disabled_toolsets:
@@ -419,6 +436,7 @@ class ToolsetPolicy:
         return True
 
     def is_directly_visible(self, spec: ToolSpec) -> bool:
+        spec = self.project_tool_spec(spec)
         if not self.is_available(spec):
             return False
         if self.nested_surface:
@@ -444,6 +462,57 @@ class ToolsetPolicy:
         if spec.exposure in {"deferred", "deferred_model_only"}:
             return (self.nested_surface or not self.supports_search_tool or self.include_deferred_directly) and self._toolset_enabled(spec.toolset)
         return False
+
+    def project_tool_spec(self, spec: ToolSpec) -> ToolSpec:
+        options = self.coordination_options
+        if options is not None and spec.name in SOURCE_V2_COORDINATION_TOOLS:
+            return replace(spec, exposure="direct_model_only" if options["non_code_mode_only"] else spec.exposure)
+        return spec
+
+    def project_tool_schema(self, name: str, schema):
+        """Project captured V2 presentation without mutating the shared executor."""
+        options = self.coordination_options
+        if options is None or name not in SOURCE_V2_COORDINATION_TOOLS | SOURCE_MESSAGE_BOARD_TOOLS:
+            return schema
+        namespace = options["tool_namespace"]
+        schema = replace(schema, namespace=namespace or "", namespace_tool_name=name,
+            namespace_description="Tools for spawning and managing sub-agents.")
+        if name == "spawn_agent":
+            properties = dict(schema.parameters["properties"])
+            if not options["expose_agent_type"]:
+                properties.pop("agent_type", None)
+            if not options["expose_spawn_agent_model_overrides"]:
+                properties.pop("model", None)
+                properties.pop("reasoning_effort", None)
+            output = {"task_name": {"type": "string"}}
+            if not options["hide_spawn_agent_metadata"]:
+                output["nickname"] = {"type": ["string", "null"]}
+            schema = replace(schema, parameters={**schema.parameters, "properties": properties},
+                output_schema={"type": "object", "properties": output, "required": list(output), "additionalProperties": False})
+        tool_messages = ((self.model_messages or {}).get("tools") or {}).get("multi_agent") or {}
+        override = tool_messages.get(name) or {}
+        if override.get("description") is not None:
+            schema = replace(schema, description=override["description"])
+        if override.get("parameters") is not None:
+            from backend.tools.mcp_tools import _catalog_parameter_schema
+
+            if name in SOURCE_MESSAGE_BOARD_TOOLS:
+                logging.getLogger(__name__).warning("Channel tool parameters cannot be overridden for %s; using bundled parameters", name)
+            else:
+                try:
+                    parameters = json.loads(override["parameters"])
+                    if not isinstance(parameters, dict) or parameters.get("type") != "object":
+                        raise ValueError("schema must declare an object type")
+                    parameters = _catalog_parameter_schema(parameters)
+                except (ValueError, TypeError) as error:
+                    # multi_agent_tool.rs keeps the bundled declaration and reports
+                    # malformed model-owned schemas at this catalog boundary.
+                    logging.getLogger(__name__).warning("Invalid catalog tool parameters for %s; using bundled parameters: %s", name, error)
+                else:
+                    schema = replace(schema, parameters=parameters)
+        if name == "spawn_agent" and options["usage_hint_text"] is not None:
+            schema = replace(schema, description=schema.description + "\n\n" + options["usage_hint_text"])
+        return schema
 
 
 def _clean_set(values: Iterable[str] | None) -> frozenset[str]:

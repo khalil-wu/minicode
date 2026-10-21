@@ -13,8 +13,10 @@ import { parseRuntimeSlashInput } from "../lib/runtime-commands";
 import { commandResultSucceeded, notifyClientCommandReceived, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { adoptGeneratedConversation } from "./conversationAdoption";
 import { captureSteerTurnId } from "../lib/steer-command";
+import { submitQueuedMessageEdit } from "../composer/queued-message-edit";
 
-interface SendChatMessageOptions {
+export interface SendChatMessageOptions {
+  queuedEdit?: import("../stores/composer-drafts").QueuedMessageEdit;
   asyncRequestId?: string;
   displayContent?: string;
   backendContent?: string;
@@ -280,6 +282,7 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
 };
 
 export const sendChatMessage = (options: SendChatMessageOptions): boolean | Promise<boolean> => {
+  if (options.queuedEdit && !options.queuedEdit.completed) return submitQueuedMessageEdit(options);
   const switchReason = conversationSwitchBlockReason(options.conversationId);
   if (switchReason) {
     pushToast(switchReason, "warning");

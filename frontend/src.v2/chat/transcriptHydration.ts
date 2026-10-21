@@ -1,5 +1,6 @@
 import { isGuardianAssessment } from "../protocol/guardian-types";
 import { isMcpAppReceipt } from "../protocol/mcp-app-types";
+import { isRealtimeItem } from "../protocol/realtime-types";
 import { isTerminalToolCallStatus, normalizeToolDiff, isToolDelegations, type ToolCallRecord } from "../lib/tool-call-reducer";
 import { workspacePathComparisonKey } from "../lib/workspace-path";
 import {
@@ -860,7 +861,7 @@ export const normalizeLiveTranscriptMessages = (
   if (!live) return messages;
   let lastAssistantIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "assistant") {
+    if (messages[index]?.role === "assistant" && !messages[index].realtimeItem) {
       lastAssistantIndex = index;
       break;
     }
@@ -888,6 +889,9 @@ export const hydrateMessages = (
     const hasDisplayContent = role === "user" && typeof message.display_content === "string";
     const content = hasDisplayContent ? message.display_content as string : backendContent;
     const parsedBlocks = normalizeContentBlocks(message.blocks);
+    const realtimeBlock = toArray<unknown>(message.blocks).find((block) => !!block && typeof block === "object"
+      && (block as Record<string, unknown>).type === "realtime") as { item?: unknown } | undefined;
+    const realtimeItem = isRealtimeItem(realtimeBlock?.item) ? realtimeBlock.item : undefined;
     const rawPage = message.tool_page as Record<string, unknown> | undefined;
     const toolPage = rawPage && [rawPage.before, rawPage.remaining, rawPage.total].every((value) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
       ? { before: rawPage.before as number, remaining: rawPage.remaining as number, total: rawPage.total as number, revision: stringValue(rawPage.revision) }
@@ -913,6 +917,7 @@ export const hydrateMessages = (
       turnDiff,
       role,
       content,
+      ...(realtimeItem ? { realtimeItem, realtimeCompleted: true } : {}),
       asyncRequestId: message.async_request_id,
       ...(hasDisplayContent ? { backendContent } : {}),
       ...(message.code_review ? { codeReview: message.code_review } : {}),

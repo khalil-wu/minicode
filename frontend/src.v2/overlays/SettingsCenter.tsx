@@ -78,8 +78,6 @@ export const SettingsCenter = () => {
     return () => window.removeEventListener("resize", resize);
   }, []);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
-  const remoteImagePolicy = useAppStore((s) => s.remoteImagePolicy);
-  const setRemoteImagePolicy = useAppStore((s) => s.setRemoteImagePolicy);
   const pageRef = useRef<HTMLDivElement>(null);
   useEscapeKey(toggleSettings, settingsOpen, pageRef);
   useEffect(() => {
@@ -237,7 +235,7 @@ export const SettingsCenter = () => {
   }, [activeTab, settingsOpen]);
 
   const tabs = [
-    { id: "general" as const, group: tr("个人"), label: tr("常规"), description: tr("设置工作方式、消息跟进、过程展示与内容加载。"), keywords: tr("协作 代码 远程 Markdown 图片"), icon: <Settings /> },
+    { id: "general" as const, group: tr("个人"), label: tr("常规"), description: tr("设置工作方式、消息跟进、过程展示与内容加载。"), keywords: "permissions composer notifications terminal updates", icon: <Settings /> },
     { id: "import" as const, group: tr("个人"), label: tr("导入"), description: tr("将其他 AI 应用的配置、项目和聊天导入 MiniCode"), keywords: "Claude Code Cursor", icon: <Download /> },
     { id: "appearance" as const, group: tr("个人"), label: tr("外观"), description: tr("调整界面主题、字号与显示密度。"), keywords: tr("系统 浅色 深色 紧凑 字号"), icon: <Sun /> },
     { id: "archived" as const, group: tr("个人"), label: tr("已归档聊天"), description: tr("存放已归档任务及消息，并可恢复到任务列表。"), keywords: tr("会话 消息 恢复 隐藏"), icon: <Archive /> },
@@ -390,8 +388,6 @@ export const SettingsCenter = () => {
               {tab === "shortcuts" && <ShortcutsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "shortcuts" ? searchTarget.title : undefined} />}
               {tab === "general" && (
                 <><div hidden={licensesOpen}><GeneralTab
-                  remoteImagePolicy={remoteImagePolicy}
-                  setRemoteImagePolicy={setRemoteImagePolicy}
                   onOpenLicenses={() => { generalBeforeLicenses.current = contentRef.current?.scrollTop || 0; setLicensesOpen(true); }}
                 /></div>{licensesOpen && <OpenSourceLicenses onBack={() => setLicensesOpen(false)} />}</>
               )}

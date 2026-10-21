@@ -17,6 +17,7 @@ from backend.ws.stream_state import get_stream_content_blocks
 # These are the public thread timeline, never a session's runtime capabilities,
 # browser/terminal ownership, provider authentication or private Inspector data.
 THREAD_OBSERVATION_TYPES = frozenset({
+    "thread/realtime/item/started", "thread/realtime/item/transcript/delta", "thread/realtime/item/completed",
     "item.started", "agent_message.delta", "item.completed", "agent.run.started",
     "agent.run.completed", "agent.item", "agent.item.delta", "thinking_delta", "thinking",
     "tool_call", "tool_output_delta", "tool_result", "command_output_chunk", "runtime.span",

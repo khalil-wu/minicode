@@ -1,11 +1,15 @@
 import { useI18n } from "../i18n";
-import { CornerDownLeft, Copy, MoreHorizontal, Trash2 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { CornerDownLeft, Copy, MoreHorizontal, Pencil, Trash2 } from "../lib/icons";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
+import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import type { ChatMessage } from "../stores/types";
 import { captureSteerTurnId } from "../lib/steer-command";
 import { pushToast } from "../overlays/ToastContainer";
+import { beginQueuedMessageEdit, deleteQueuedMessage } from "./queued-message-edit";
 const NO_MESSAGES: ChatMessage[] = [];
 
 export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { wide?: boolean; minimal?: boolean; ownerId?: string }) => {
@@ -16,6 +20,15 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement>(null);
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
+  const dragging = useRef<{ ownerId: string; ids: string[] } | null>(null);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
+  useEffect(() => useAppStore.subscribe((state, previous) => {
+    if (!ownerId && (state.conversationId !== previous.conversationId || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId)) {
+      dragging.current = null;
+      setMenuFor(null);
+    }
+  }), [ownerId]);
   const queued = useMemo(
     () => messages
       .filter((message) => message.role === "user" && message.queueState === "queued")
@@ -74,7 +87,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
       message_id: message.queueMessageId,
       user_message_id: message.id,
     };
-    if (action === "cancel") sendClientCommand({ type: "user_message.queue.cancel", ...target });
+    if (action === "cancel") void deleteQueuedMessage(conversationId, message);
     else if (expectedTurnId === undefined) sendClientCommand({ type: "user_message.queue.start", ...target });
     else sendClientCommand({ type: "user_message.queue.steer", ...target, expected_turn_id: expectedTurnId });
   };
@@ -85,6 +98,20 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
       aria-label={tr("排队中的消息")}
       style={{ width: minimal ? "100%" : wide ? "var(--chat-code-composer-width)" : "var(--chat-composer-axis-width)" }}
     >
+      <DndContext sensors={sensors} onDragStart={() => { dragging.current = { ownerId: conversationId, ids: queued.map(message => message.queueMessageId!) }; }}
+        onDragCancel={() => { dragging.current = null; }} onDragEnd={({ active, over }) => {
+          const captured = dragging.current; dragging.current = null;
+          if (!captured || !over || active.id === over.id) return;
+          const ids = [...captured.ids];
+          const from = ids.indexOf(String(active.id)); const to = ids.indexOf(String(over.id));
+          if (from < 0 || to < 0) return;
+          ids.splice(to, 0, ids.splice(from, 1)[0]);
+          void sendClientCommandAwaitResult({ type: "user_message.queue.reorder", conversation_id: captured.ownerId,
+            message_ids: ids }, "user_message.queue.reorder", { silent: true }).then(result => {
+              if (!commandResultSucceeded(result)) pushToast(result.message, "error");
+            }, error => pushToast(error instanceof Error ? error.message : String(error), "error"));
+        }}>
+      <SortableContext items={queued.map(message => message.queueMessageId!)} strategy={verticalListSortingStrategy}>
       {queued.map((message, index) => {
         const attachmentNames = (message.attachmentRefs ?? []).map((attachment) => attachment.name).filter(Boolean);
         const commentCount = message.contextRefs?.filter(ref => ref.kind === "diff_comment").length ?? 0;
@@ -92,8 +119,8 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
         const label = message.content.trim() || attachmentNames.join(", ") || (commentCount ? commentLabel : "Attachment");
         const displayNumber = (message.queuePosition ?? index + 1) + 1;
         return (
-          <div className="queued-message-row" key={message.id}>
-            <span className="queued-message-number" aria-label={tr("队列第 {count} 项", { count: displayNumber })}>{displayNumber}</span>
+          <SortableQueuedRow key={message.id} id={message.queueMessageId!} number={displayNumber}
+            numberLabel={tr("队列第 {count} 项", { count: displayNumber })} dragLabel={tr("拖动以重新排序排队消息")}>
             <span className="queued-message-text" title={label}>{label}</span>
             {message.queuePaused ? <span>{tr("已暂停")}</span> : null}
             <button
@@ -128,6 +155,9 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
               </button>
               {menuFor === message.id ? (
                 <div className="queued-message-menu" role="menu">
+                  {!ownerId && <button type="button" role="menuitem" onClick={() => {
+                    setMenuFor(null); void beginQueuedMessageEdit(conversationId, message);
+                  }}><Pencil size={14} aria-hidden="true" />{tr("编辑")}</button>}
                   <button
                     type="button"
                     role="menuitem"
@@ -141,9 +171,22 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
                 </div>
               ) : null}
             </div>
-          </div>
+          </SortableQueuedRow>
         );
       })}
+      </SortableContext>
+      </DndContext>
     </div>
   );
 };
+
+function SortableQueuedRow({ id, number, numberLabel, dragLabel, children }: {
+  id: string; number: number; numberLabel: string; dragLabel: string; children: ReactNode;
+}) {
+  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({ id });
+  return <div className="queued-message-row" ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }}>
+    <span className="queued-message-number" ref={setActivatorNodeRef} {...attributes} {...listeners}
+      aria-label={numberLabel} title={dragLabel} style={{ cursor: "grab", touchAction: "none" }}>{number}</span>
+    {children}
+  </div>;
+}

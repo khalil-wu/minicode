@@ -35,6 +35,9 @@ import { handlePreviewEvent } from "../chat/previewEvents";
 import { handleDiffEvent } from "../chat/diffEvents";
 import { createHeartbeatRendererObserver } from "../chat/heartbeatRendererState";
 import { handleNoticeEvent } from "../chat/noticeEvents";
+import { handleRealtimeEvent } from "../chat/realtimeEvents";
+import { REALTIME_EVENT_TYPES, isRealtimeCommand } from "../protocol/realtime-types";
+import { realtimeController } from "../composer/realtime-controller";
 import { handleControlPlaneProjectionEvent } from "../chat/controlPlaneEvents";
 import { createStreamBuffer } from "../lib/stream-buffer";
 import { clearStreamingState } from "../chat/streamingState";
@@ -224,6 +227,10 @@ const MAX_RECOVERY_BUFFERED_EVENTS = 1000;
 // match and every later durable event would be dropped as a replay hole.
 // scripts/check-protocol-sync.py keeps the two sets identical.
 const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
+  "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+  "thread/realtime/item/transcript/delta", "thread/realtime/transcript/delta",
+  "thread/realtime/transcript/done", "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+  "thread/realtime/error", "thread/realtime/closed",
   "agent_message.delta",
   "agent.item.delta",
   "artifact_content",
@@ -279,6 +286,7 @@ export const shouldAdvanceReplayCursor = (event: ServerEvent): boolean => {
     // Process it as a legacy/transient event without moving the cursor.
     && Number.isSafeInteger(seq) && seq >= 0
     && !NON_REPLAYABLE_CURSOR_EVENT_TYPES.has(event.type)
+    && !(event.type === "command.result" && event.command.startsWith("thread/realtime/"))
     && !event.type.startsWith("session.")
     && !isTransientProviderReasoning(event);
 };
@@ -527,7 +535,7 @@ const hasPendingClientCommand = (clientCommandId: string): boolean =>
 export const getPendingClientCommandCountForTests = (): number => pendingClientCommands.size;
 
 export const shouldTrackClientCommandAck = (cmd: ClientCommand): boolean =>
-  cmd.type !== "ping" && cmd.type !== "scheduler.heartbeat.renderer_state";
+  cmd.type !== "ping" && cmd.type !== "scheduler.heartbeat.renderer_state" && !isRealtimeCommand(cmd);
 
 const clearPendingClientCommandAck = (clientCommandId: string) => {
   pendingClientCommands.delete(clientCommandId);
@@ -697,7 +705,7 @@ export const useWebSocketConnection = () => {
     const sendCommandNow = (cmd: ClientCommand): boolean => {
       const active = ref.current;
       if (!active || active.readyState !== WebSocket.OPEN) return false;
-      const command = commandWithClientCommandId(cmd);
+      const command = cmd.type === "thread/realtime/appendAudio" ? cmd : commandWithClientCommandId(cmd);
       const clientCommandId = String(command.client_command_id || "");
       if (
         shouldTrackClientCommandAck(command)
@@ -839,6 +847,7 @@ export const useWebSocketConnection = () => {
           maxAttempts: null,
           error: null,
         });
+        realtimeController.onTransportReady();
         const activeConversationId = useAppStore.getState().conversationId;
         if (activeConversationId) rendererObserver.observe(activeConversationId);
         else rendererObserver.refresh();
@@ -907,6 +916,7 @@ export const useWebSocketConnection = () => {
       });
 
       ws.addEventListener("close", (event) => {
+        if (ref.current === ws) realtimeController.onTransportClosed();
         if (!alive || ref.current !== ws) return;
         heartbeatCleanup();
         withdrawUnconfirmedPromptResponses();
@@ -1234,6 +1244,7 @@ export const useWebSocketConnection = () => {
         ref.current?.close();
       },
       reconnect: () => {
+        realtimeController.onTransportClosed();
         if (timer !== null) window.clearTimeout(timer);
         timer = null;
         heartbeatCleanup();
@@ -1265,6 +1276,7 @@ export const useWebSocketConnection = () => {
     );
 
     return () => {
+      realtimeController.onTransportClosed();
       alive = false;
       if (timer !== null) window.clearTimeout(timer);
       heartbeatCleanup();
@@ -1337,7 +1349,7 @@ const ARTIFACT_EVENT_TYPES = new Set<string>([
   "artifact_content", "artifact.preview", "citation.add", "inspector.update",
 ]);
 const COMMAND_CATALOG_EVENT_TYPES = new Set<string>([
-  "skills.list", "commands.list", "skills.marketplace.list",
+  "skills.list", "skills/changed", "commands.list", "skills.marketplace.list",
 ]);
 const PERIPHERAL_EVENT_TYPES = new Set<string>([
   "pet.published",
@@ -1376,6 +1388,7 @@ const EVENT_DISPATCHERS: ReadonlyArray<{
   types: ReadonlySet<string>;
   dispatch: ServerEventDispatcher;
 }> = [
+  { types: new Set(REALTIME_EVENT_TYPES), dispatch: (e) => handleRealtimeEvent(e) },
   { types: CHAT_STREAM_EVENT_TYPES, dispatch: (e, cid) => handleChatStreamEvent(e, cid, { textStreamBuffer, thinkingStreamBuffer }) },
   { types: GUARDIAN_EVENT_TYPES, dispatch: e => handleGuardianEvent(e as import("../protocol/guardian-types").GuardianAssessmentEvent | import("../protocol/guardian-types").GuardianWarningEvent) },
   { types: RUNTIME_EVENT_TYPES, dispatch: (e, cid) => handleRuntimeEvent(e, cid) },

@@ -7,77 +7,97 @@
       "node_repl_auto_review_required": true,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": "xhigh"
     },
     "gpt-6.1-sol": {
       "model_specialty": null,
       "node_repl_auto_review_required": true,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": "xhigh"
     },
     "gpt-6-sol": {
       "model_specialty": null,
       "node_repl_auto_review_required": true,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": null
     },
     "gpt-6-luna": {
       "model_specialty": null,
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": null
     },
     "gpt-5.6-sol": {
       "model_specialty": null,
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": null
     },
     "gpt-5.6-terra": {
       "model_specialty": null,
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2",
+      "multi_agent_reasoning_effort": null
     },
     "gpt-5.6-luna": {
       "model_specialty": null,
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v1",
+      "multi_agent_reasoning_effort": null
     },
     "gpt-daybreak-blue-latest": {
       "model_specialty": "cyber",
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2"
     },
     "gpt-daybreak-red-latest": {
       "model_specialty": "cyber",
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v2"
     },
     "gpt-5.5": {
       "model_specialty": null,
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": null,
+      "multi_agent_reasoning_effort": null
     },
     "codex-auto-review": {
       "model_specialty": null,
       "node_repl_auto_review_required": false,
       "node_repl_disabled": false,
       "guardian": null,
-      "auto_review_model_override": null
+      "auto_review_model_override": null,
+      "multi_agent_version": "v1",
+      "multi_agent_reasoning_effort": null
     }
   }
 }

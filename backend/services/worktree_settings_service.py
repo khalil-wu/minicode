@@ -235,6 +235,7 @@ def remove_managed_worktree(path: str, *, repository=None, ws_manager=None) -> d
         if not removal.removed:
             return {"removed": False, "snapshot_id": snapshot.id, "error": removal.error}
         for conversation_id in record["conversation_ids"]:
+            repository.thread_resources.add(conversation_id, "worktree_snapshot", snapshot.id, snapshot.to_dict())
             repository.update_workspace_binding(conversation_id, workspace_root=record["repo_root"],
                 git_branch="", worktree_path="", git_isolated=False)
         return {"removed": True, "snapshot_id": snapshot.id, "error": None}

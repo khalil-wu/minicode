@@ -108,9 +108,10 @@
     if (operation === "start") {
       storage = Object.assign(Object.create(null), payload.storage);
       const tools = Object.create(null);
-      for (const entry of payload.tools) tools[entry.name] = args => request(entry.name, args, entry.freeform);
+      for (const entry of payload.tools) tools[entry.public_name ?? entry.name] = args => request(entry.name, args, entry.freeform);
       Object.defineProperty(globalThis, "tools", { value: Object.freeze(tools) });
-      Object.defineProperty(globalThis, "ALL_TOOLS", { value: payload.tools });
+      Object.defineProperty(globalThis, "ALL_TOOLS", { value: payload.tools.map(({public_name, ...entry}) =>
+        ({...entry, name: public_name ?? entry.name})) });
       try {
         const promise = (0, eval)(`(async () => { "use strict";\n${payload.code}\n})()`);
         then(promise, () => { done = true; }, value => {

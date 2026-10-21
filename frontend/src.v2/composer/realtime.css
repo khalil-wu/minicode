@@ -1,0 +1,4 @@
+.composer-realtime-controls { display: inline-flex; align-items: center; gap: 6px; }
+.composer-realtime-start { width: 28px; height: 28px; }
+.composer-realtime-end { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 28px; padding: 0 10px; border: 0; border-radius: 999px; background: var(--accent-primary); color: var(--text-on-accent); cursor: pointer; font: inherit; font-size: var(--mc-font-secondary); }
+.composer-realtime-end:hover { filter: brightness(.95); }

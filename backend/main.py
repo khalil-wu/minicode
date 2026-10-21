@@ -63,6 +63,7 @@ from backend.api.routes_voice import router as voice_router
 from backend.api.routes_github import router as github_router
 from backend.api.routes_git_settings import router as git_settings_router
 from backend.api.routes_projects import router as projects_router
+from backend.api.routes_thread_metadata import router as thread_metadata_router
 from backend.api.routes_import import router as import_router, start_import_sync, stop_import_sync
 from backend.api.routes_worktree_settings import router as worktree_settings_router
 from backend.api.routes_local_environments import router as local_environments_router
@@ -378,6 +379,7 @@ app.include_router(voice_router)
 app.include_router(github_router)
 app.include_router(git_settings_router)
 app.include_router(projects_router)
+app.include_router(thread_metadata_router)
 app.include_router(import_router)
 app.include_router(worktree_settings_router)
 app.include_router(local_environments_router)
@@ -556,6 +558,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             permission_checker=permission_checker,
             config=config,
             skill_manager=_state.bootstrap.skill_manager,
+            runtime_skill_roots=_state.bootstrap.runtime_skill_roots,
             skill_executor=_state.bootstrap.skill_executor,
             memory_manager=_state.bootstrap.memory_manager,
             mcp_manager=_state.bootstrap.mcp_manager,

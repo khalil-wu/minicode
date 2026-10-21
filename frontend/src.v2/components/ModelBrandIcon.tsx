@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import "./ModelBrandIcon.css";
 import { BrandIcon } from "./BrandIcon";
 import anthropicIcon from "@lobehub/icons-static-svg/icons/anthropic.svg?url";
+import bedrockIcon from "@lobehub/icons-static-svg/icons/bedrock.svg?url";
 import claudeIcon from "@lobehub/icons-static-svg/icons/claude-color.svg?url";
 import cohereIcon from "@lobehub/icons-static-svg/icons/cohere-color.svg?url";
 import deepseekIcon from "@lobehub/icons-static-svg/icons/deepseek-color.svg?url";
@@ -31,6 +32,7 @@ type BrandDefinition = {
 };
 
 const BRAND_DEFINITIONS: BrandDefinition[] = [
+  { id: "bedrock", label: "Amazon Bedrock", icon: bedrockIcon, color: false },
   { id: "openrouter", label: "OpenRouter", icon: openrouterIcon, color: false },
   { id: "deepseek", label: "DeepSeek", icon: deepseekIcon, color: true },
   { id: "claude", label: "Claude", icon: claudeIcon, color: true },
@@ -54,6 +56,7 @@ const BRAND_DEFINITIONS: BrandDefinition[] = [
 ];
 
 const aliases: Array<[RegExp, string]> = [
+  [/bedrock/, "bedrock"],
   [/openrouter/, "openrouter"],
   [/deepseek/, "deepseek"],
   [/claude/, "claude"],

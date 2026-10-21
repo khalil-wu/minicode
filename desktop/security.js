@@ -330,7 +330,7 @@ const IPC_CAPABILITIES = new Set([
   "minicode:embeddedBrowser:clearBrowsingData", "minicode:embeddedBrowser:capture",
   "minicode:embeddedBrowser:pageCommand", "minicode:embeddedBrowser:downloads",
   "minicode:embeddedBrowser:downloadAction",
-  "minicode:workspace:pickDirectory", "minicode:workspace:trust", "minicode:workspace:directoryEntries",
+  "minicode:workspace:pickDirectory", "minicode:workspace:trust", "minicode:workspace:directoryEntries", "minicode:attachments:importRemoteFile",
 ]);
 
 function assertIpcCapability(channel, { logger } = {}) {

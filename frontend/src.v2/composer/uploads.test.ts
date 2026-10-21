@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   sessionId: "session-1" as string | null,
   uploadAttachment: vi.fn(),
+  importRemoteFile: vi.fn(),
   pushToast: vi.fn(),
 }));
 
@@ -34,6 +35,11 @@ vi.mock("../protocol/api", () => ({
   uploadAttachment: mocks.uploadAttachment,
 }));
 
+vi.mock("../desktop/runtime", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../desktop/runtime")>(),
+  desktop: () => ({ attachments: { importRemoteFile: mocks.importRemoteFile } }),
+}));
+
 vi.mock("../overlays/ToastContainer", () => ({
   pushToast: mocks.pushToast,
 }));
@@ -42,12 +48,13 @@ import { useAppStore } from "../stores";
 import { emptyComposerDraft, flushComposerDrafts, loadComposerDrafts } from "../stores/composer-drafts";
 import { handleCommandResultEvent } from "../chat/commandResultEvents";
 import { buildPastedTextFile } from "./pastedText";
-import { cancelComposerUpload, retryComposerAttachment, uploadComposerFiles } from "./uploads";
+import { cancelComposerUpload, retryComposerAttachment, uploadComposerFiles, uploadComposerRemoteFiles } from "./uploads";
 
 describe("composer uploads", () => {
   beforeEach(() => {
     mocks.sessionId = "session-1";
     mocks.uploadAttachment.mockReset();
+    mocks.importRemoteFile.mockReset();
     mocks.pushToast.mockReset();
     useAppStore.setState({
       ...emptyComposerDraft(), workspaceComposerDrafts: {},
@@ -58,6 +65,64 @@ describe("composer uploads", () => {
       conversationWorkbenchStates: {},
       sideChats: {},
     });
+  });
+
+  it("imports a remote batch on its original host and adopts only its original workspace", async () => {
+    let finish!: (value: unknown) => void;
+    const receipt = (path: string, type = "text/plain") => ({
+      conversation_id: "remote-owner", file_name: path.split("/").at(-1), artifact_id: `artifact:${path}`, doc_id: `doc:${path}`,
+      attachment: { artifact_id: `artifact:${path}`, file_name: path.split("/").at(-1), media_type: type, kind: type.startsWith("image/") ? "image" : "document", data: "original bytes" },
+      source: { path, name: path.split("/").at(-1), mediaType: type, sizeBytes: 17 },
+    });
+    mocks.importRemoteFile.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }))
+      .mockResolvedValueOnce(receipt("/srv/中文资料/second.txt"));
+    useAppStore.setState({ workingDirectory: "/srv/project", draft: "original remote draft" });
+    uploadComposerRemoteFiles(["/srv/中文资料/image.png", "/srv/中文资料/second.txt"]);
+    useAppStore.setState({ conversationId: "later-chat", workingDirectory: "/srv/later", draft: "later draft", attachments: [] });
+    finish(receipt("/srv/中文资料/image.png", "image/png"));
+    await waitFor(() => expect(useAppStore.getState().conversationWorkbenchStates["remote-owner"]?.attachments?.every(item => item.status === "ready")).toBe(true));
+    expect(mocks.importRemoteFile.mock.calls.map(([request]) => request)).toEqual([
+      { path: "/srv/中文资料/image.png", sessionId: "session-1", conversationId: "", workspaceRoot: "/srv/project" },
+      { path: "/srv/中文资料/second.txt", sessionId: "session-1", conversationId: "remote-owner", workspaceRoot: "/srv/project" },
+    ]);
+    const stored = useAppStore.getState().conversationWorkbenchStates["remote-owner"]!.attachments!;
+    expect(stored).toHaveLength(2);
+    expect(stored[0]).toMatchObject({ remoteSourcePath: "/srv/中文资料/image.png", type: "image/png", size: 17, conversationId: "remote-owner", workspaceRoot: "/srv/project" });
+    expect(stored[0].localFile).toBeUndefined();
+    expect(stored[0].dataUrl).toBeUndefined();
+    expect(stored[0].attachment).not.toHaveProperty("data");
+    expect(mocks.uploadAttachment).not.toHaveBeenCalled();
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "later-chat", draft: "later draft", attachments: [] });
+  });
+
+  it("retries a failed remote source in its retained owner after a chat switch", async () => {
+    mocks.importRemoteFile.mockRejectedValueOnce(new Error("remote file read denied"));
+    useAppStore.setState({ conversationId: "remote-owner", workingDirectory: "/srv/project", draft: "owner draft" });
+    uploadComposerRemoteFiles(["/outside/报告.txt"]);
+    await waitFor(() => expect(useAppStore.getState().attachments[0].status).toBe("error"));
+    const attachment = useAppStore.getState().attachments[0];
+    useAppStore.setState({ conversationId: "other", workingDirectory: "/srv/other", draft: "untouched", attachments: [] });
+    mocks.importRemoteFile.mockResolvedValueOnce({ conversation_id: "remote-owner", file_name: "报告.txt", artifact_id: "remote-artifact", doc_id: "remote-doc",
+      attachment: { artifact_id: "remote-artifact", kind: "document", media_type: "text/plain" },
+      source: { path: "/outside/报告.txt", name: "报告.txt", mediaType: "text/plain", sizeBytes: 25 } });
+    expect(retryComposerAttachment(attachment.id)).toBe(true);
+    await waitFor(() => expect(useAppStore.getState().conversationWorkbenchStates["remote-owner"]?.attachments?.[0].status).toBe("ready"));
+    expect(mocks.importRemoteFile).toHaveBeenLastCalledWith({ path: "/outside/报告.txt", sessionId: "session-1", conversationId: "remote-owner", workspaceRoot: "/srv/project" });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "other", draft: "untouched", attachments: [] });
+  });
+
+  it("does not restore a removed attachment when its actual remote import settles late", async () => {
+    let finish!: (value: unknown) => void;
+    mocks.importRemoteFile.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+    useAppStore.setState({ conversationId: "remote-owner", workingDirectory: "/srv/project" });
+    uploadComposerRemoteFiles(["/srv/file.txt"]);
+    const attachment = useAppStore.getState().attachments[0];
+    cancelComposerUpload(attachment.id);
+    useAppStore.getState().removeAttachment(attachment.id);
+    finish({ conversation_id: "remote-owner", artifact_id: "late", attachment: { kind: "document" } });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(useAppStore.getState().attachments).toEqual([]);
+    expect(useAppStore.getState().conversationWorkbenchStates["remote-owner"]?.attachments).toEqual([]);
   });
 
   it("uploads a side attachment to its owner without adopting that owner into the main composer", async () => {

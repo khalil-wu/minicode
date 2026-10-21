@@ -114,6 +114,9 @@ export type {
   UserMessageQueueCancelCommand,
   UserMessageQueueSteerCommand,
   UserMessageQueueStartCommand,
+  UserMessageQueueUpdateCommand,
+  UserMessageQueueAddCommand,
+  UserMessageQueueReorderCommand,
   InterruptCommand,
   PingCommand,
   ReadArtifactCommand,
@@ -312,11 +315,13 @@ import type { PreviewServerEventType } from "./preview-types";
 import type { TerminalServerEventType } from "./terminal-types";
 import type { WorkspaceServerEventType } from "./workspace-types";
 import type { CommonServerEventType } from "./common-types";
+import type { RealtimeCommand, RealtimeEvent } from "./realtime-types";
 
 export type { GuardianAssessment, GuardianAssessmentEvent, GuardianWarningEvent, GuardianAction, GuardianStatus } from "./guardian-types";
 import type { GuardianAssessmentEvent, GuardianWarningEvent, ApproveGuardianDeniedActionCommand } from "./guardian-types";
 
 export type ServerEventType =
+  | RealtimeEvent["type"]
   | StreamingServerEventType
   | ConversationServerEventType
   | PreviewServerEventType
@@ -339,6 +344,7 @@ import type { CommonClientCommandType } from "./common-types";
 import type { CodeReviewCommand } from "./code-review-types";
 
 export type ClientCommandType =
+  | RealtimeCommand["type"]
   | ApproveGuardianDeniedActionCommand["type"]
   | CodeReviewCommand["type"]
   | StreamingClientCommandType
@@ -355,6 +361,7 @@ export type ClientCommandType =
 export interface UntypedServerEvent {
   type: Exclude<
     ServerEventType,
+    | RealtimeEvent["type"]
     | "item.started"
     | "agent_message.delta"
     | "item.completed"
@@ -483,11 +490,15 @@ export interface UntypedServerEvent {
 export interface UntypedClientCommand {
   type: Exclude<
     ClientCommandType,
+    | RealtimeCommand["type"]
     | "thread/approveGuardianDeniedAction"
     | "user_message"
     | "user_message.queue.cancel"
     | "user_message.queue.steer"
     | "user_message.queue.start"
+    | "user_message.queue.update"
+    | "user_message.queue.add"
+    | "user_message.queue.reorder"
     | "interrupt"
     | "ping"
     | "control_response"
@@ -859,7 +870,7 @@ type ServerEventPayload =
   | StreamResumeEvent
   | UntypedServerEvent;
 
-export type ServerEvent = ServerEventPayload & ServerEventEnvelope;
+export type ServerEvent = (ServerEventPayload | RealtimeEvent) & ServerEventEnvelope;
 
 /** The backend stamps `replayed: true` on events delivered via session.replay. */
 export const isReplayedEvent = (event: ServerEvent): boolean =>
@@ -870,6 +881,9 @@ import type {
   UserMessageQueueCancelCommand,
   UserMessageQueueSteerCommand,
   UserMessageQueueStartCommand,
+  UserMessageQueueUpdateCommand,
+  UserMessageQueueAddCommand,
+  UserMessageQueueReorderCommand,
   InterruptCommand,
   PingCommand,
   ReadArtifactCommand,
@@ -984,6 +998,9 @@ type ClientCommandPayload =
   | UserMessageQueueCancelCommand
   | UserMessageQueueSteerCommand
   | UserMessageQueueStartCommand
+  | UserMessageQueueUpdateCommand
+  | UserMessageQueueAddCommand
+  | UserMessageQueueReorderCommand
   | InterruptCommand
   | PingCommand
   | ControlResponseCommand
@@ -1073,7 +1090,7 @@ type ClientCommandPayload =
   | PreviewVerifyCommand
   | UntypedClientCommand;
 
-export type ClientCommand = ClientCommandPayload & ClientCommandEnvelope;
+export type ClientCommand = (ClientCommandPayload | RealtimeCommand) & ClientCommandEnvelope;
 
 // ──────────────────────────────────────────────────────────────────
 // Frozen sets for runtime checks (mirror SERVER_EVENT_TYPES /
@@ -1081,6 +1098,10 @@ export type ClientCommand = ClientCommandPayload & ClientCommandEnvelope;
 // ──────────────────────────────────────────────────────────────────
 
 export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEventType>([
+  "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+  "thread/realtime/item/transcript/delta", "thread/realtime/item/completed", "thread/realtime/transcript/delta",
+  "thread/realtime/transcript/done", "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+  "thread/realtime/error", "thread/realtime/closed",
   // Streaming text + tool execution
   "item.started",
   "agent_message.delta",
@@ -1202,6 +1223,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "llm.provider.oauth.info",
   "llm.provider.oauth.progress",
   "skills.list",
+  "skills/changed",
   "skills.marketplace.list",
   "commands.list",
   "system_notice",
@@ -1217,6 +1239,8 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
 ]);
 
 export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<ClientCommandType>([
+  "thread/realtime/start", "thread/realtime/appendAudio", "thread/realtime/appendText",
+  "thread/realtime/appendSpeech", "thread/realtime/stop", "thread/realtime/listVoices",
   "diff.git_file_contents",
   "diff.git_review_options",
   // Chat
@@ -1224,6 +1248,10 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "user_message.queue.cancel",
   "user_message.queue.steer",
   "user_message.queue.start",
+  "user_message.queue.update",
+  "user_message.queue.add",
+  "user_message.queue.reorder",
+  "skills/extraRoots/set",
   "review.options",
   "review.prepare",
   "review.create",

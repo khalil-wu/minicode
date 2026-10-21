@@ -16,9 +16,25 @@ function createMcpAppSandbox({ session }) {
   const surfaces = new Map();
   const owners = new Set();
   const guestOwners = new Map();
+  const userActivations = new WeakMap();
   const preload = path.join(__dirname, "mcp-app-preload.js");
-  sandboxSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  sandboxSession.setPermissionCheckHandler(() => false);
+  const surfaceForGuest = contents => contents && [...surfaces.values()].find(surface =>
+    surface.ownerId === guestOwners.get(contents.id) && surface.src === contents.getURL());
+  const hasFrameOrigin = (surface, url) => Boolean(surface && url && new URL(url).origin === surface.frameOrigin);
+  sandboxSession.setPermissionCheckHandler((contents, permission, origin) =>
+    permission === "mediaKeySystem" && hasFrameOrigin(surfaceForGuest(contents), origin));
+  sandboxSession.setPermissionRequestHandler((contents, permission, callback, details) => {
+    const surface = surfaceForGuest(contents);
+    const sameFrame = hasFrameOrigin(surface, details.requestingUrl);
+    let allowed = sameFrame && permission === "mediaKeySystem";
+    if (sameFrame && permission === "clipboard-sanitized-write") {
+      const activation = userActivations.get(contents);
+      userActivations.delete(contents);
+      allowed = activation !== undefined && performance.now() - activation <= 5000;
+    }
+    callback(allowed);
+  });
+  sandboxSession.on("will-download", (event, item) => { event.preventDefault(); item.cancel(); });
   sandboxSession.webRequest.onBeforeRequest((request, callback) => {
     const url = new URL(request.url);
     const supported = ["http:", "https:", "ws:", "wss:", "data:", "blob:", "about:", `${MCP_APP_SCHEME}:`].includes(url.protocol);
@@ -30,7 +46,7 @@ function createMcpAppSandbox({ session }) {
     const url = new URL(request.url);
     const surface = surfaces.get(url.pathname.slice(1));
     if (url.hostname !== "view" || !surface) return new Response("MCP App has closed", { status: 410 });
-    const html = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" allow="camera 'none'; microphone 'none'; geolocation 'none'" src="${surface.frameUrl}"></iframe></body></html>`;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}iframe{width:100%;height:100%;border:0;display:block}</style></head><body><iframe sandbox="allow-scripts allow-same-origin" referrerpolicy="no-referrer" allow="fullscreen *; encrypted-media *; clipboard-write *; camera 'none'; microphone 'none'; geolocation 'none'" allowfullscreen src="${surface.frameUrl}"></iframe></body></html>`;
     return new Response(html, { headers: { "Content-Type": "text/html; charset=utf-8",
       "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; frame-src ${surface.frameOrigin}`,
       "Cache-Control": "no-store" } });
@@ -73,6 +89,14 @@ function createMcpAppSandbox({ session }) {
     owner.on("did-attach-webview", (_event, guest) => {
       guestOwners.set(guest.id, owner.id);
       guest.once("destroyed", () => guestOwners.delete(guest.id));
+      guest.on("before-mouse-event", (_event, input) => {
+        if (input.type === "mouseDown") userActivations.set(guest, performance.now());
+      });
+      guest.on("before-input-event", (_event, input) => {
+        if (input.type === "keyDown" && input.isAutoRepeat !== true && ["Enter", " "].includes(input.key)) {
+          userActivations.set(guest, performance.now());
+        }
+      });
       guest.setWindowOpenHandler(() => ({ action: "deny" }));
       guest.on("will-navigate", (event, target) => {
         if (![...surfaces.values()].some(entry => entry.ownerId === owner.id && entry.src === target)) event.preventDefault();

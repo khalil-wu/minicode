@@ -73,6 +73,7 @@ class AppBootstrap:
         self._mcp_start_tasks: dict[str, asyncio.Task[Any]] = {}
         self._mcp_manager_lock = asyncio.Lock()
         self.skill_manager: Any | None = None
+        self.runtime_skill_roots: Any | None = None
         self.skill_executor: Any | None = None
         self.file_memory: Any | None = None
         self.memory_manager: Any | None = None
@@ -134,10 +135,13 @@ class AppBootstrap:
             from backend.skills.executor import SkillExecutor
             from backend.skills.loader import SkillLoader
             from backend.skills.manager import SkillManager
+            from backend.skills.runtime_roots import RuntimeSkillRoots
 
             loader = SkillLoader()
+            self.runtime_skill_roots = RuntimeSkillRoots(self._skills_changed)
             self.skill_manager = SkillManager(
                 loader=loader,
+                runtime_roots=self.runtime_skill_roots,
             )
             self.skill_manager.discover()
             self.skill_executor = SkillExecutor(self.skill_manager)
@@ -213,6 +217,13 @@ class AppBootstrap:
 
         conversation_query_guards().begin_drain()
 
+    async def _skills_changed(self) -> None:
+        from backend.agent.message import AgentEvent
+        from backend.api._state import invalidate_status_cache
+
+        invalidate_status_cache()
+        await self.ws_manager.broadcast_event(AgentEvent("skills/changed", {}))
+
     async def _broadcast_scheduled_task_state(self) -> None:
         if self.task_scheduler is None:
             return
@@ -280,6 +291,8 @@ class AppBootstrap:
     async def shutdown(self) -> None:
         self.begin_drain()
         try:
+            if self.runtime_skill_roots is not None:
+                await self.runtime_skill_roots.aclose()
             await self.mcp_apps.aclose()
             if self._sandbox_probe_task is not None:
                 if not self._sandbox_probe_task.done():

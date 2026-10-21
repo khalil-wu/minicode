@@ -25,6 +25,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolCallSource, ToolExecutionContext
 from backend.tools.base import ToolResult
 from backend.tools.registry import ToolRegistry
+from backend.tools.schema import code_mode_tool_name
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 
 CODE_TOOLS = frozenset({"tool_exec", "tool_wait"})
@@ -99,9 +100,14 @@ class CodeExecutionRuntime:
                 toolset_policy=replace(policy, include_deferred_directly=True))
             catalog = [{"name": schema["function"]["name"], "description": schema["function"]["description"],
                         "parameters": schema["function"]["parameters"],
+                        "public_name": code_mode_tool_name(schema),
                         **({"output_schema": schema["_minicode_output_schema"]}
                            if "_minicode_output_schema" in schema else {}),
                         **({"freeform": schema["_minicode_freeform"]} if "_minicode_freeform" in schema else {})} for schema in schemas]
+            winners = {}
+            for entry in catalog:
+                winners.setdefault(entry["public_name"], entry)
+            catalog = list(winners.values())
             names = frozenset(entry["name"] for entry in catalog)
             cell_id = "cell_" + uuid4().hex
             cell = CodeCell(cell_id, parent, code, names, catalog, registry, base_policy)

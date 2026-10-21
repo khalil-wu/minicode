@@ -255,7 +255,8 @@ AGENT_DELEGATION_TOOLS = frozenset({"task", "spawn_agent"})
 AGENT_TASK_COORDINATION_TOOLS = frozenset(
     {"task_create", "task_get", "task_list", "task_update"}
 )
-AGENT_MESSAGE_TOOLS = frozenset({"send_message", "message_list"})
+AGENT_MESSAGE_TOOLS = frozenset({"send_message", "message_list", "create_channel", "get_channels", "list_threads",
+    "search_posts", "read_thread", "read_post", "subscribe", "unsubscribe", "post"})
 AGENT_LIFECYCLE_TOOLS = frozenset({"task_status", "task_stop", "followup_task", "list_agents", "wait_agent", "interrupt_agent"})
 AGENT_SCHEDULE_TOOLS = frozenset(
     {"schedule_cron", "schedule_cron_list", "schedule_cron_delete"}

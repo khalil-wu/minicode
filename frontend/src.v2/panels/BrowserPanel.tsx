@@ -701,6 +701,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
         return [...current, updateTabFromEvent(blankTab(event.id), event)];
       });
       if (!knownTab) {
+        setViewports(current => ({ ...current, [event.id]: alwaysShowDeviceToolbar.current ? { ...DEFAULT_DEVICE_VIEWPORT } : null }));
         activeIdRef.current = event.id;
         setActiveId(event.id);
       }

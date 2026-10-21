@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useState, useSyncExternalStore } from "react";
 import { useAppStore } from "../stores";
 import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -15,6 +15,7 @@ import { useFocusTrap } from "../hooks/useFocusTrap";
 import { openPreviewServiceManager } from "../lib/preview-server-actions";
 import { openNewBrowserTab } from "../chat/openWebInBrowser";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
+import { dispatchQueuedMessageHistory, queuedMessageHistorySnapshot, subscribeQueuedMessageHistory } from "../composer/queued-message-undo";
 
 interface PaletteAction {
   id: string;
@@ -71,6 +72,7 @@ export const CommandPalette = () => {
   const appMode = useAppStore((s) => s.appMode);
   const themeMode = useAppStore((s) => s.themeMode);
   const shortcuts = useAppStore((s) => s.shortcutBindings);
+  const queueHistory = useSyncExternalStore(subscribeQueuedMessageHistory, queuedMessageHistorySnapshot);
   const panelSlots = useAppStore((s) => s.panelSlots);
   const slashCommands = useAppStore((s) => s.slashCommands);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
@@ -163,6 +165,10 @@ export const CommandPalette = () => {
 
   const unsortedActions: PaletteAction[] = [
     ...recentConversationActions,
+    ...(queueHistory.undo ? [{ id: "undoAppAction", label: tr("撤销"), hint: formatShortcut(shortcuts.undoAppAction),
+      group: "命令" as const, run: () => { dispatchQueuedMessageHistory("undo"); } }] : []),
+    ...(queueHistory.redo ? [{ id: "redoAppAction", label: tr("重做"), hint: formatShortcut(shortcuts.redoAppAction),
+      group: "命令" as const, run: () => { dispatchQueuedMessageHistory("redo"); } }] : []),
     {
       id: "conversation.new",
       label: tr("新建会话"),

@@ -6,6 +6,7 @@ independent of the ModelRuntime class that orchestrates them.
 """
 
 from __future__ import annotations
+from copy import deepcopy
 
 import inspect
 import math
@@ -1102,6 +1103,7 @@ def _load_base_providers(
             models.insert(0, configured_model)
         max_tokens = int(settings.get("max_tokens") or 0)
         definitions[provider_id] = {
+            "aws": deepcopy(settings.get("aws")),
             "name": _clean_text(settings.get("display_name")) or provider_id,
             "api_key": str(settings.get("api_key") or ""),
             "base_url": _clean_text(settings.get("base_url")),

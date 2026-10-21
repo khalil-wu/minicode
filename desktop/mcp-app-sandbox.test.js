@@ -1,6 +1,6 @@
 "use strict";
 
-const { test } = require("node:test");
+const { test, mock } = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { readFileSync } = require("node:fs");
@@ -10,6 +10,7 @@ const { registerMcpAppScheme, createMcpAppSandbox, MCP_APP_PARTITION, MCP_APP_SC
 function fixture() {
   const calls = [];
   const sandboxSession = {
+    on(event, handler) { this[event] = handler; },
     protocol: { handle(scheme, handle) { this.scheme = scheme; this.handleRequest = handle; } },
     webRequest: { onBeforeRequest(handler) { this.checkRequest = handler; } },
     setPermissionRequestHandler(handler) { this.permission = handler; },
@@ -40,12 +41,60 @@ test("clears the persistent MCP session without clearing the renderer or browser
   assert.deepEqual(fresh.calls, ["sandbox.clearData"]);
 });
 
+test("admits encrypted media only for the bound resource and consumes one real gesture for clipboard writes", t => {
+  let now = 100;
+  mock.method(performance, "now", () => now);
+  t.after(() => mock.restoreAll());
+  const { sandbox, sandboxSession, owner, frameUrl } = fixture();
+  const surface = sandbox.prepare(owner.id, frameUrl, "http://127.0.0.1:8799");
+  const guest = new EventEmitter(); guest.id = 411; guest.getURL = () => surface.src; guest.setWindowOpenHandler = () => {};
+  owner.emit("did-attach-webview", {}, guest);
+  const origin = new URL(frameUrl).origin;
+  const request = (permission, requestingUrl = frameUrl, contents = guest) => {
+    let allowed;
+    sandboxSession.permission(contents, permission, value => { allowed = value; }, { requestingUrl });
+    return allowed;
+  };
+  assert.equal(sandboxSession.checkPermission(guest, "mediaKeySystem", origin), true);
+  assert.equal(request("mediaKeySystem"), true);
+  assert.equal(request("mediaKeySystem", "https://foreign.example"), false);
+  assert.equal(request("clipboard-sanitized-write"), false);
+  for (const permission of ["media", "geolocation", "clipboard-read", "clipboard-sanitized-write"]) {
+    assert.equal(sandboxSession.checkPermission(guest, permission, origin), false);
+  }
+  guest.emit("before-mouse-event", {}, { type: "mouseDown" });
+  assert.equal(request("clipboard-sanitized-write", "https://foreign.example"), false);
+  assert.equal(request("clipboard-sanitized-write"), true);
+  assert.equal(request("clipboard-sanitized-write"), false);
+  guest.emit("before-input-event", {}, { type: "keyDown", key: "Enter", isAutoRepeat: true });
+  assert.equal(request("clipboard-sanitized-write"), false);
+  for (const key of ["Enter", " "]) {
+    guest.emit("before-input-event", {}, { type: "keyDown", key });
+    assert.equal(request("clipboard-sanitized-write"), true);
+  }
+  guest.emit("before-mouse-event", {}, { type: "mouseDown" });
+  now += 5001;
+  assert.equal(request("clipboard-sanitized-write"), false);
+  sandbox.release(owner.id, surface.id);
+  assert.equal(request("mediaKeySystem"), false);
+});
+
+test("blocks guest downloads that bypass the host download request", () => {
+  const { sandboxSession } = fixture();
+  let prevented = false, cancelled = false;
+  sandboxSession["will-download"]({ preventDefault() { prevented = true; } }, { cancel() { cancelled = true; } });
+  assert.equal(prevented, true);
+  assert.equal(cancelled, true);
+});
+
 test("issues a bounded host document containing only the admitted MCP frame", async () => {
   const { sandbox, sandboxSession, frameUrl } = fixture();
   const surface = sandbox.prepare(71, frameUrl, "http://127.0.0.1:8799");
   const response = sandboxSession.protocol.handleRequest({ url: surface.src });
   const html = await response.text();
   assert.match(html, /sandbox="allow-scripts allow-same-origin"/);
+  assert.match(html, /encrypted-media \*/);
+  assert.match(html, /clipboard-write \*/);
   assert.ok(html.includes(`src="${frameUrl}"`));
   assert.equal(surface.partition, MCP_APP_PARTITION);
   assert.match(response.headers.get("Content-Security-Policy"), /^default-src 'none'; style-src 'unsafe-inline'; frame-src http:\/\/mcp-app-/);

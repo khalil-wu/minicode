@@ -29,13 +29,14 @@ function browserHarness(dialog = {}, options = {}) {
     webRequest: { onResponseStarted(_filter, callback) { responseStarted = callback; }, onBeforeRequest(_filter, callback) { beforeRequest = callback; }, onHeadersReceived(_filter, callback) { headersReceived = callback; } },
   };
   class View {
-    constructor() {
+    constructor({ webPreferences }) {
+      this.webPreferences = webPreferences;
       this.bounds = { x: 0, y: 0, width: 0, height: 0 };
       this.visible = false;
       this.webContents = Object.assign(new EventEmitter(), {
         id: ++id, session, url: "", dead: false, navigationHistory: {},
         pickerCalls: [], stopCalls: 0,
-        captureCalls: 0, zoomFactor: 1, findRequests: [], findStopped: false,
+        captureCalls: 0, zoomFactor: 1, findRequests: [], findStopped: false, loadCalls: [],
         findInPage(text, options) { this.findRequests.push({ text, options }); return this.findRequests.length; },
         stopFindInPage(action) { this.findStopped = action; },
         getZoomFactor() { return this.zoomFactor; }, setZoomFactor(value) { this.zoomFactor = value; },
@@ -52,8 +53,8 @@ function browserHarness(dialog = {}, options = {}) {
         stop() { this.stopCalls++; },
         focus() { this.pickerCalls.push("focus"); },
         async executeJavaScript(expression) { this.pickerCalls.push(expression); return null; },
-        setWindowOpenHandler() {}, getURL() { return this.url; }, getTitle: () => "", isLoading: () => false,
-        isDestroyed() { return this.dead; }, close() { this.dead = true; }, async loadURL(url) { this.url = url; this.mainFrame.url = url; },
+        setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }, getURL() { return this.url; }, getTitle: () => "", isLoading: () => false,
+        isDestroyed() { return this.dead; }, close() { this.dead = true; }, async loadURL(url) { this.loadCalls.push(url); this.url = url; this.mainFrame.url = url; },
       });
       this.webContents.mainFrame = { url: "", detached: false, isDestroyed: () => false }; this.webContents.mainFrame.top = this.webContents.mainFrame;
       views.push(this);
@@ -69,7 +70,7 @@ function browserHarness(dialog = {}, options = {}) {
   };
   const moduleValue = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "embedded-browser-manager.js"), "utf8"), {
-    module: moduleValue, exports: moduleValue.exports, __dirname, URL, Buffer, setTimeout, clearTimeout,
+    module: moduleValue, exports: moduleValue.exports, __dirname, URL, Buffer, AbortController, Date: options.Date ?? Date, setTimeout, clearTimeout,
     require(name) {
       if (name === "node:process") return { platform: options.platform ?? process.platform };
       return name === "electron" ? { WebContentsView: View, app: { getPath: () => require("node:os").tmpdir(), getLocale: () => "en-US" }, dialog,
@@ -120,9 +121,130 @@ test("site management persists permission edits and reset changes the native per
   assert.equal(session.permissionCheck(contents, "notifications", "https://example.com"), false);
   manager.removeSitePermissions({ origin: "https://example.com" });
   assert.deepEqual(structuredClone(manager.listSitePermissions()), []);
+  granted = undefined;
   session.permissionRequest(contents, "geolocation", value => { granted = value; }, { requestingUrl: "https://example.com/" });
+  assert.equal(granted, undefined);
+  manager.close({ id: "permissions", conversation_id: "permission-owner", window_instance_id: "fixture-window" });
   assert.equal(granted, false);
   assert.throws(() => manager.removeSitePermissions({ origin: "file:///local" }), /valid HTTP or HTTPS origin/);
+});
+
+function permissionDialog() {
+  const prompts = [];
+  return { prompts, showMessageBox(_window, options) {
+    return new Promise(resolve => {
+      prompts.push({ options, respond: resolve });
+      options.signal.addEventListener("abort", () => resolve({ response: 0 }), { once: true });
+    });
+  } };
+}
+
+test("hidden guest permission requests keep their callback and resume the original prompt when its page is presented", async () => {
+  const dialog = permissionDialog(); const h = browserHarness(dialog);
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "pending-permission", conversation_id: "owner", window_instance_id: "fixture-window" };
+  const other = { ...target, id: "other-page" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  await h.manager.create({ ...other, url: "https://other.example/" });
+  h.manager.setBounds({ ...target, x: 0, y: 0, width: 400, height: 400 });
+  h.manager.setBounds({ ...other, x: 0, y: 0, width: 400, height: 400 });
+  const contents = h.views[0].webContents; const results = [];
+  h.session.permissionRequest(contents, "geolocation", granted => results.push(granted), { requestingUrl: contents.url });
+  assert.deepEqual(results, []); assert.equal(dialog.prompts.length, 0);
+  h.manager.activate(target.id, "owner", "fixture-window");
+  assert.equal(dialog.prompts.length, 1);
+  h.manager.activate(other.id, "owner", "fixture-window");
+  assert.equal(dialog.prompts[0].options.signal.aborted, true);
+  await new Promise(setImmediate);
+  assert.deepEqual(results, []); assert.deepEqual(structuredClone(h.manager.getSitePolicy().sites), []);
+  h.manager.activate(target.id, "owner", "fixture-window");
+  assert.equal(dialog.prompts.length, 2);
+  dialog.prompts[1].respond({ response: 1 }); await new Promise(setImmediate);
+  assert.deepEqual(results, [true]);
+  assert.equal(h.session.permissionCheck(contents, "geolocation", "https://example.com", {}), true);
+  assert.equal(h.session.permissionCheck(h.views[1].webContents, "geolocation", "https://other.example", {}), false);
+  assert.deepEqual(structuredClone(h.manager.getSitePolicy().sites), []);
+  h.manager.disposeAll();
+});
+
+test("guest permission prompts serialize and preserve an explicit policy changed while the native dialog is open", async () => {
+  const dialog = permissionDialog(); const h = browserHarness(dialog);
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "serial-permissions", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  h.manager.setBounds({ ...target, x: 0, y: 0, width: 400, height: 400 }); h.manager.activate(target.id, "owner", "fixture-window");
+  const contents = h.views[0].webContents; const results = [];
+  h.session.permissionRequest(contents, "geolocation", granted => results.push(["location", granted]), { requestingUrl: contents.url });
+  h.session.permissionRequest(contents, "media", granted => results.push(["camera", granted]), { requestingUrl: contents.url, mediaTypes: ["video"] });
+  assert.equal(dialog.prompts.length, 1);
+  dialog.prompts[0].respond({ response: 1 }); await new Promise(setImmediate);
+  assert.equal(dialog.prompts.length, 2); assert.deepEqual(results, [["location", true]]);
+  h.manager.setSitePolicy({ origin: "https://example.com", category: "camera", setting: "block" });
+  dialog.prompts[1].respond({ response: 2 }); await new Promise(setImmediate);
+  assert.deepEqual(results, [["location", true], ["camera", false]]);
+  assert.equal(h.manager.getSitePolicy().sites[0].settings.camera, "block");
+  h.manager.disposeAll();
+});
+
+test("navigation, close and renderer exit settle only their original guest permission callbacks exactly once", async () => {
+  for (const lifecycle of ["navigation", "close", "renderer-exit"]) {
+    const dialog = permissionDialog(); const h = browserHarness(dialog);
+    h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+    const target = { id: "retired-permission", conversation_id: "owner", window_instance_id: "fixture-window" };
+    await h.manager.create({ ...target, url: "https://example.com/" });
+    const contents = h.views[0].webContents; const results = [];
+    h.session.permissionRequest(contents, "geolocation", granted => results.push(granted), { requestingUrl: contents.url });
+    if (lifecycle === "navigation") contents.emit("did-navigate", {}, "https://example.com/next");
+    else if (lifecycle === "close") h.manager.close(target);
+    else contents.emit("render-process-gone", {}, { reason: "crashed" });
+    assert.deepEqual(results, [false]); assert.equal(dialog.prompts.length, 0);
+    h.manager.disposeAll(); await new Promise(setImmediate);
+    assert.deepEqual(results, [false]); assert.deepEqual(structuredClone(h.manager.getSitePolicy().sites), []);
+  }
+});
+
+test("native child windows register the original Chromium destination without replaying it as a GET or crossing owners", async () => {
+  const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "opener", conversation_id: "original-owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents;
+  const postBody = { contentType: "application/x-www-form-urlencoded", data: [{ type: "rawData", bytes: Buffer.from("form=original") }] };
+  const result = contents.windowOpenHandler({ url: "https://destination.example/submit", postBody });
+  assert.equal(result.action, "allow"); assert.equal(typeof result.createWindow, "function");
+  const child = result.createWindow({ webPreferences: { openerId: contents.id, nodeIntegration: true, contextIsolation: false } });
+  assert.equal(child, h.views[1].webContents); assert.equal(child.loadCalls.length, 0);
+  assert.equal(h.views[1].webPreferences.openerId, contents.id);
+  assert.equal(h.views[1].webPreferences.nodeIntegration, false); assert.equal(h.views[1].webPreferences.contextIsolation, true);
+  assert.equal(h.views[1].webPreferences.sandbox, true);
+  assert.equal(h.manager.listTargets("original-owner", "fixture-window").length, 2);
+  assert.equal(h.manager.listTargets("another-owner", "fixture-window").length, 0);
+  const published = h.events.at(-1);
+  assert.equal(published.conversationId, "original-owner"); assert.equal(published.type, "page");
+  assert.equal(published.url, "https://destination.example/submit");
+  assert.equal(JSON.stringify(h.events).includes("form=original"), false);
+  assert.equal(contents.windowOpenHandler({ url: "file:///C:/private" }).action, "deny");
+  h.manager.disposeAll();
+});
+
+test("private-network approval continues the original main-frame transaction and rejects a closed owner", async () => {
+  for (const finish of ["allow", "cancel", "close"]) {
+    let respond; const h = browserHarness({ showMessageBox: () => new Promise(resolve => { respond = resolve; }) });
+    h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+    const target = { id: "private-form", conversation_id: "owner", window_instance_id: "fixture-window" };
+    await h.manager.create({ ...target, url: "https://example.com/" });
+    const contents = h.views[0].webContents;
+    let blocked = false;
+    contents.emit("will-navigate", { preventDefault() { blocked = true; } }, "http://127.0.0.1/submit");
+    assert.equal(blocked, false);
+    const results = [];
+    h.beforeRequest({ id: 19, webContentsId: contents.id, resourceType: "mainFrame", method: "POST", url: "http://127.0.0.1/submit" }, decision => results.push(decision));
+    await new Promise(setImmediate); assert.equal(typeof respond, "function"); assert.deepEqual(results, []);
+    if (finish === "close") h.manager.close(target);
+    respond({ response: finish === "cancel" ? 0 : 1 }); await new Promise(setImmediate);
+    assert.deepEqual(structuredClone(results), [{ cancel: finish !== "allow" }]);
+    assert.deepEqual(contents.loadCalls, ["https://example.com/"]);
+    h.manager.disposeAll();
+  }
 });
 
 test("legacy media grants migrate to independent camera and microphone consumers without losing the user's grant", async () => {
@@ -298,6 +420,23 @@ test("application-menu page commands require the presented owner and use Source 
   assert.equal(changed.length, 4);
 });
 
+test("native text history stays on the presented browser document and rejects another window", async () => {
+  const { manager, views, ownerWindow } = browserHarness();
+  manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "menu-undo", conversation_id: "menu-undo-owner", window_instance_id: "fixture-window" };
+  await manager.create({ ...target, url: "https://example.com/" });
+  const contents = views[0].webContents;
+  const calls = [];
+  contents.undo = () => calls.push("undo"); contents.redo = () => calls.push("redo");
+  manager.activate(target.id, target.conversation_id, target.window_instance_id);
+  assert.equal(manager.runMenuCommand(ownerWindow, contents, "undo"), false);
+  manager.setBounds({ ...target, x: 50, y: 100, width: 800, height: 600 });
+  assert.equal(manager.runMenuCommand({}, contents, "undo"), false);
+  assert.equal(manager.runMenuCommand(ownerWindow, contents, "undo"), true);
+  assert.equal(manager.runMenuCommand(ownerWindow, contents, "redo"), true);
+  assert.deepEqual(calls, ["undo", "redo"]);
+});
+
 test("queued layout after native close retires without accepting a different conversation owner", async () => {
   const { manager, views } = browserHarness();
   manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
@@ -346,6 +485,190 @@ test("native download lifecycle publishes the admitted file and removes only its
   await manager.runDownloadAction({ action: "remove", id: record.id });
   assert.equal(manager.listDownloads().length, 0); assert.equal(fs.readFileSync(savePath, "utf8"), "download");
   fs.unlinkSync(savePath);
+});
+
+function attemptDownload(harness, contents, url) {
+  let saved = "", cancelled = 0, prevented = false;
+  const item = Object.assign(new EventEmitter(), { getFilename: () => "actor-owned.txt", getURL: () => url,
+    getTotalBytes: () => 12, getReceivedBytes: () => 0, getSavePath: () => saved, setSavePath(value) { saved = value; },
+    getState: () => "progressing", isPaused: () => false, canResume: () => false,
+    hasUserGesture() { assert.fail("download admission cannot guess its actor from a gesture"); },
+    cancel() { cancelled++; },
+  });
+  harness.session.listeners.get("will-download")({ preventDefault() { prevented = true; } }, item, contents);
+  return { item, prevented, cancelled, saved };
+}
+
+test("authenticated agent downloads consume only an exact one-time URL and expose only the original owner's actual download", async () => {
+  const h = browserHarness({ showSaveDialogSync() { assert.fail("an explicitly allowed agent download must not invoke the manual save-location prompt"); } });
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "download-actor", conversation_id: "download-owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents;
+  const manual = attemptDownload(h, contents, "https://example.com/manual.txt");
+  assert.equal(manual.prevented, false); assert.equal(h.manager.listDownloads()[0].isUserInitiated, true);
+  h.manager.setBrowserSettings({ downloadPolicy: "ask" });
+  bridge.init({ token: "download-backend-token", manager: h.manager });
+  const endpoint = await bridge.start();
+  const owner = { target_id: target.id, conversation_id: target.conversation_id, window_instance_id: "fixture-window",
+    window_binding_token: "fixture-binding", agent_control_id: "actual-browser-turn", agent_turn_id: "original-turn" };
+  const command = async payload => {
+    const response = await fetch(`${endpoint}/v1/command`, { method: "POST", headers: { authorization: "Bearer download-backend-token" }, body: JSON.stringify({ ...owner, ...payload }) });
+    const body = await response.json(); assert.equal(response.status, 200, JSON.stringify(body)); return body;
+  };
+  try {
+    await command({ action: "get_url" });
+    const unapproved = attemptDownload(h, contents, "https://example.com/requested.txt");
+    assert.equal(unapproved.prevented, true); assert.equal(unapproved.cancelled, 1);
+    const originalUrl = "https://example.com/requested.txt?literal=1";
+    assert.equal((await command({ action: "allow_download", url: originalUrl })).value, originalUrl);
+    assert.equal(attemptDownload(h, contents, "https://example.com/requested.txt?literal=2").prevented, true);
+    const admitted = attemptDownload(h, contents, originalUrl);
+    assert.equal(admitted.prevented, false); assert.equal(admitted.cancelled, 0);
+    assert.equal(attemptDownload(h, contents, originalUrl).prevented, true);
+    const record = (await command({ action: "list_downloads" })).value[0];
+    assert.equal(record.url, originalUrl); assert.equal(record.path, admitted.saved);
+    assert.equal(record.conversationId, "download-owner"); assert.equal(record.tabId, target.id); assert.equal(record.isUserInitiated, false);
+    assert.equal((await command({ action: "list_downloads", conversation_id: "another-owner" })).value.length, 0);
+    const unowned = attemptDownload(h, { id: 99999 }, originalUrl);
+    assert.equal(unowned.prevented, true); assert.equal(unowned.cancelled, 1);
+  } finally { await bridge.stop(); h.manager.disposeAll(); }
+});
+
+test("agent download grants expire at the Source boundary and an old release cannot clear another live owner", async () => {
+  let now = 1000;
+  class Clock extends Date { static now() { return now; } }
+  const h = browserHarness({}, { Date: Clock }); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "download-ttl", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents;
+  const first = { agentControl: { id: "first-resource-owner", turnId: "turn-first" } }, second = { agentControl: { id: "second-resource-owner", turnId: "turn-second" } };
+  const grant = (url, control = first) => h.manager.executeControlCommand({ ...target, target_id: target.id, action: "allow_download", url }, control);
+  const url = "https://example.com/exact.txt";
+  await grant(url); now += 10000;
+  assert.equal(attemptDownload(h, contents, url).prevented, false);
+  await grant(url); now += 10001;
+  assert.equal(attemptDownload(h, contents, url).prevented, true);
+  await grant(url, second);
+  assert.equal(h.manager.releaseAgentControl({ ...target, control: { ...first.agentControl, turnId: "forged-turn" } }), 0);
+  assert.equal(h.manager.releaseAgentControl({ ...target, control: first.agentControl }), 1);
+  assert.equal(h.manager.releaseAgentControl({ ...target, control: first.agentControl }), 0);
+  assert.equal(attemptDownload(h, contents, "https://example.com/not-granted.txt").prevented, true);
+  assert.equal(attemptDownload(h, contents, url).prevented, false);
+  assert.equal(h.manager.releaseAgentControl({ ...target, control: second.agentControl }), 1);
+  assert.equal(attemptDownload(h, contents, "https://example.com/manual-again.txt").prevented, false);
+  h.manager.disposeAll();
+});
+
+test("known blob download grants stay exact and native child pages inherit control without borrowing a parent's allowance", async () => {
+  const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "blob-owner", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const control = { agentControl: { id: "blob-resource-owner", turnId: "blob-turn" } };
+  const url = "blob:https://example.com/exact-object-url";
+  await h.manager.executeControlCommand({ ...target, target_id: target.id, action: "allow_download", url }, control);
+  const parent = h.views[0].webContents;
+  const child = parent.windowOpenHandler({ url: "https://example.com/child" }).createWindow({ webPreferences: {} });
+  assert.equal(attemptDownload(h, child, url).prevented, true);
+  assert.equal(attemptDownload(h, parent, "blob:https://example.com/another-object").prevented, true);
+  assert.equal(attemptDownload(h, parent, url).prevented, false);
+  await assert.rejects(h.manager.executeControlCommand({ ...target, target_id: target.id, action: "allow_download", url: "blob:https://other.example/object" }, control), /original page origin/);
+  await assert.rejects(h.manager.executeControlCommand({ ...target, target_id: target.id, action: "allow_download", url }, {}), /authenticated agent control/);
+  h.manager.disposeAll();
+});
+
+function blobDebugger(contents) {
+  const debuggerApi = Object.assign(new EventEmitter(), { attached: false, attachCalls: 0, detachCalls: 0, methods: [],
+    isAttached() { return this.attached; }, attach() { this.attached = true; this.attachCalls++; },
+    detach() { this.attached = false; this.detachCalls++; this.emit("detach", {}, "detached"); },
+    async sendCommand(method) { this.methods.push(method); return method === "Page.getFrameTree" ? { frameTree: { frame: { id: "actual-main-frame", url: contents.getURL() } } } : {}; },
+  });
+  contents.debugger = debuggerApi;
+  contents.isDevToolsOpened = () => false;
+  return debuggerApi;
+}
+
+test("unknown blob downloads require the actual original main-frame event before one exact allowance is produced", async () => {
+  const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "unknown-blob", target_id: "unknown-blob", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents, debuggerApi = blobDebugger(contents);
+  const control = { agentControl: { id: "blob-main-frame-owner", turnId: "blob-turn" } };
+  const register = extra => h.manager.executeControlCommand({ ...target, action: "set_blob_download_origin", origin: "https://example.com", ...extra }, control);
+  const event = (url, frameId = "actual-main-frame", sessionId) => debuggerApi.emit("message", {}, "Page.downloadWillBegin", { url, frameId }, sessionId);
+  await register({});
+  assert.deepEqual(debuggerApi.methods, ["Page.enable", "Page.getFrameTree"]);
+  const url = "blob:https://example.com/dynamic-object-url";
+  event(url, "iframe"); assert.equal(attemptDownload(h, contents, url).prevented, true);
+  event("blob:https://other.example/object"); assert.equal(attemptDownload(h, contents, "blob:https://other.example/object").prevented, true);
+  event(url, "actual-main-frame", "nested-session"); assert.equal(attemptDownload(h, contents, url).prevented, true);
+  event(url, "actual-main-frame", ""); assert.equal(attemptDownload(h, contents, url).prevented, false);
+  assert.equal(attemptDownload(h, contents, url).prevented, true);
+  const exact = "blob:https://example.com/expected-object";
+  await register({ url: exact });
+  event(url); assert.equal(attemptDownload(h, contents, url).prevented, true);
+  event(exact); assert.equal(attemptDownload(h, contents, exact).prevented, false);
+  assert.equal(debuggerApi.attachCalls, 1, "the second request uses the existing entry-owned debugger");
+  await register({});
+  await h.manager.executeControlCommand({ ...target, action: "allow_download", url: "https://example.com/exact.txt" }, control);
+  event(url); assert.equal(attemptDownload(h, contents, url).prevented, true);
+  assert.equal(attemptDownload(h, contents, "https://example.com/exact.txt").prevented, false);
+  assert.equal(h.manager.releaseAgentControl({ ...target, control: control.agentControl }), 1);
+  assert.equal(debuggerApi.detachCalls, 1); assert.equal(debuggerApi.listenerCount("message"), 0);
+  h.manager.disposeAll();
+});
+
+test("blob origin authorization never takes another debugger and follows only its current entry owner through navigation and close", async () => {
+  const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "blob-lifecycle", target_id: "blob-lifecycle", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents, debuggerApi = blobDebugger(contents);
+  const first = { agentControl: { id: "first-blob-owner", turnId: "first-turn" } }, second = { agentControl: { id: "second-blob-owner", turnId: "second-turn" } };
+  const command = (control, origin = "https://example.com") => h.manager.executeControlCommand({ ...target, action: "set_blob_download_origin", origin }, control);
+  contents.isDevToolsOpened = () => true;
+  await assert.rejects(command(first), /owned by another consumer/);
+  contents.isDevToolsOpened = () => false; debuggerApi.attached = true;
+  await assert.rejects(command(first), /owned by another consumer/);
+  assert.equal(debuggerApi.attachCalls, 0); assert.equal(debuggerApi.detachCalls, 0);
+  debuggerApi.attached = false;
+  await command(first);
+  await command(second);
+  assert.equal(h.manager.releaseAgentControl({ ...target, control: first.agentControl }), 1);
+  assert.equal(debuggerApi.detachCalls, 0);
+  const url = "blob:https://example.com/second";
+  debuggerApi.emit("message", {}, "Page.downloadWillBegin", { frameId: "actual-main-frame", url });
+  assert.equal(attemptDownload(h, contents, url).prevented, false);
+  await command(second);
+  contents.url = "https://other.example/"; contents.mainFrame.url = contents.url;
+  contents.emit("did-navigate", {}, "https://other.example/");
+  debuggerApi.emit("message", {}, "Page.downloadWillBegin", { frameId: "actual-main-frame", url });
+  assert.equal(attemptDownload(h, contents, url).prevented, true);
+  await command(second, "https://other.example");
+  await command(second, null);
+  const clearedUrl = "blob:https://other.example/after-clear";
+  debuggerApi.emit("message", {}, "Page.downloadWillBegin", { frameId: "actual-main-frame", url: clearedUrl });
+  assert.equal(attemptDownload(h, contents, clearedUrl).prevented, true);
+  h.manager.close(target);
+  assert.equal(debuggerApi.detachCalls, 1); assert.equal(debuggerApi.listenerCount("message"), 0); assert.equal(debuggerApi.listenerCount("detach"), 0);
+});
+
+test("missing original frame facts cannot authorize a blob and a late debugger reply cannot attach permission to a changed document", async () => {
+  const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "blob-frame-facts", target_id: "blob-frame-facts", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents, debuggerApi = blobDebugger(contents);
+  const control = { agentControl: { id: "original-blob-owner", turnId: "original-turn" } };
+  debuggerApi.sendCommand = async () => ({});
+  await assert.rejects(h.manager.executeControlCommand({ ...target, action: "set_blob_download_origin", origin: "https://example.com" }, control), /original browser main frame/);
+  let respond;
+  debuggerApi.sendCommand = async method => method === "Page.getFrameTree" ? new Promise(resolve => { respond = resolve; }) : {};
+  const pending = h.manager.executeControlCommand({ ...target, action: "set_blob_download_origin", origin: "https://example.com" }, control);
+  await new Promise(setImmediate);
+  contents.emit("did-navigate", {}, "https://example.com/later");
+  respond({ frameTree: { frame: { id: "actual-main-frame", url: "https://example.com/" } } });
+  await assert.rejects(pending, /original browser main frame/);
+  assert.equal(attemptDownload(h, contents, "blob:https://example.com/no-facts").prevented, true);
+  h.manager.disposeAll(); assert.equal(debuggerApi.detachCalls, 1);
 });
 
 test("download location persists and drives automatic saves, save prompts, folder opening, and reset", async () => {
@@ -558,7 +881,7 @@ test("a failed browser settings commit cannot emit a new selection to another wi
 
 test("authenticated backend owned-preview navigation skips host approval while manual payload claims do not", async () => {
   let prompts = 0;
-  const { manager, views, events, responseStarted } = browserHarness({
+  const { manager, views, events, responseStarted, beforeRequest } = browserHarness({
     async showMessageBox() { prompts++; return { response: 0 }; },
   });
   const owner = "preview-owner";
@@ -596,8 +919,11 @@ test("authenticated backend owned-preview navigation skips host approval while m
     assert.equal(contents.stopCalls, 0);
     const other = "http://127.0.0.1:8000/admin";
     contents.emit("will-redirect", event, other, false, true);
+    assert.equal(event.prevented, false);
+    let redirectDecision;
+    beforeRequest({ id: 73, webContentsId: contents.id, resourceType: "mainFrame", url: other }, value => { redirectDecision = value; });
     await new Promise(setImmediate);
-    assert.equal(event.prevented, true);
+    assert.deepEqual(structuredClone(redirectDecision), { cancel: true });
     assert.equal(prompts, 1);
     assert.equal(contents.getURL(), url);
     responseStarted({ webContentsId: contents.id, resourceType: "mainFrame", url: other, ip: "127.0.0.1" });
@@ -650,13 +976,15 @@ for (const terminal of ["cancelled", "load-failed"]) test(`late redirect confirm
   let finishLoad;
   const started = new Promise((resolve) => { dialogStarted = resolve; });
   const dialog = new Promise((resolve) => { confirm = resolve; });
-  const { manager, views, events } = browserHarness({ showMessageBox() { dialogStarted(); return dialog; } });
+  const { manager, views, events, beforeRequest } = browserHarness({ showMessageBox() { dialogStarted(); return dialog; } });
   await manager.create({ id: "redirect", conversation_id: "owner", url: "about:blank", window_instance_id: "fixture-window" });
   const contents = views[0].webContents;
   const loads = [];
+  const redirectDecisions = [];
   contents.loadURL = (url) => {
     loads.push(url);
     contents.emit("will-redirect", { preventDefault() {} }, "http://127.0.0.1:8000/admin", false, true);
+    beforeRequest({ id: 81, webContentsId: contents.id, resourceType: "mainFrame", url: "http://127.0.0.1:8000/admin" }, value => redirectDecisions.push(value));
     return new Promise((_resolve, reject) => { finishLoad = reject; });
   };
   const controller = new AbortController();
@@ -671,6 +999,7 @@ for (const terminal of ["cancelled", "load-failed"]) test(`late redirect confirm
     confirm({ response: 1 });
     await new Promise(setImmediate);
     assert.deepEqual(loads, ["https://93.184.216.34/"]);
+    assert.deepEqual(structuredClone(redirectDecisions), [{ cancel: true }]);
     assert.match(events.at(-1).error, /cancelled/);
   } finally { confirm({ response: 0 }); manager.disposeAll(); }
 });

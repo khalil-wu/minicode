@@ -136,12 +136,12 @@ async def target_programs(service):
     if shell is None:
         raise HTTPException(503, "The selected executor does not report a shell for target tool discovery.")
     if shell["name"] == "powershell":
-        script = "$ErrorActionPreference='Stop'; $tools=@{}; foreach($n in @('python3','python','py','node','npm','pnpm','yarn','gh','git','cmd')) { " \
+        script = "$ErrorActionPreference='Stop'; $tools=@{}; foreach($n in @('python3','python','py','node','npm','pnpm','yarn','gh','glab','git','cmd')) { " \
             "$c=Get-Command -Name $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; " \
             "if($null -ne $c){$tools[$n]=$c.Source} }; " \
             "$tools['__temp__']=$env:TEMP; $tools['__github_host__']=$env:GH_HOST; $tools | ConvertTo-Json -Compress"
     elif shell["name"] in {"sh", "bash", "zsh"}:
-        script = 'for n in python3 python node npm pnpm yarn gh git; do p=$(command -v "$n") || continue; ' \
+        script = 'for n in python3 python node npm pnpm yarn gh glab git; do p=$(command -v "$n") || continue; ' \
             'printf "%s\\000%s\\000" "$n" "$p"; done; printf "__temp__\\000%s\\000__github_host__\\000%s\\000" "${TMPDIR:-/tmp}" "${GH_HOST-}"'
     else:
         raise HTTPException(503, f"Target tool discovery requires a POSIX or PowerShell shell; received {shell['name']}")

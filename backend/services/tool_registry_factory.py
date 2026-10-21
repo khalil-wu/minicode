@@ -140,6 +140,11 @@ def build_tool_registry(
         )
     )
     registry.register(PresentFileTool())
+    from backend.tools.realtime_tools import EndRealtimeVoiceCallTool
+    registry.register(EndRealtimeVoiceCallTool())
+    from backend.tools.thread_resource_tools import ThreadResourceTool
+    for name in ("list_artifacts", "attach_artifact", "remove_artifact"):
+        registry.register(ThreadResourceTool(name))
     task_tool = TaskTool(
         config_snapshot=config_snapshot,
         llm_provider=llm_provider,
@@ -160,6 +165,12 @@ def build_tool_registry(
     if coordination["enabled"] and coordination["version"] == "v2":
         for tool in (SpawnAgentTool(task_tool), ListAgentsTool(), WaitAgentTool(config_snapshot), InterruptAgentTool()):
             registry.register(tool)
+        if coordination["message_board_enabled"]:
+            from backend.tools.agent_message_board_tools import SUPPORTED_BOARD_BACKENDS, message_board_tools
+
+            if coordination["message_board_backend"] in SUPPORTED_BOARD_BACKENDS:
+                for tool in message_board_tools():
+                    registry.register(tool)
     if coordination["enabled"]:
         registry.register(TaskStopTool())
         registry.register(TaskStatusTool())

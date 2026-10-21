@@ -1073,7 +1073,19 @@ const isQuietSystemNotice = (message: ChatMessage): boolean =>
   message.role === "system" && message.id === "system-guidelines-updated";
 
 const isHiddenTimelineMessage = (message: ChatMessage): boolean =>
-  message.queueState === "queued" || isQuietSystemNotice(message);
+  message.queueState === "queued" || isQuietSystemNotice(message)
+  || (message.realtimeItem != null && message.realtimeItem.type !== "transcriptSegment");
+
+const realtimeTranscriptTurn = (message: ChatMessage, workspaceRoot: string): ChatTurnState => {
+  if (message.role === "user") return buildTurnMemoized(message, null, false, workspaceRoot);
+  return {
+    id: message.id, userCell: null, committedCells: [], activeCell: null,
+    finalAnswerCell: { kind: "assistant_markdown", id: message.id, messageId: message.id,
+      markdownSource: message.content, phase: "final", copyable: true,
+      isStreaming: !message.realtimeCompleted, createdAt: message.timestamp },
+    status: message.realtimeCompleted ? "completed" : "streaming", startedAt: message.timestamp,
+  };
+};
 
 export function projectMessagesToTurns(
   messages: ChatMessage[],
@@ -1092,9 +1104,14 @@ export function projectMessagesToTurns(
       index += 1;
       continue;
     }
+    if (message.realtimeItem?.type === "transcriptSegment") {
+      turns.push(realtimeTranscriptTurn(message, workspaceRoot));
+      index += 1;
+      continue;
+    }
     if (message.role === "user") {
       const nextMessage = rows[index + 1];
-      const assistant = nextMessage?.role === "assistant" && !isHiddenTimelineMessage(nextMessage)
+      const assistant = nextMessage?.role === "assistant" && !nextMessage.realtimeItem && !isHiddenTimelineMessage(nextMessage)
         ? nextMessage
         : null;
       const turnOwnsLiveStream = Boolean(
@@ -1144,10 +1161,15 @@ const projectedTurnStarts = (messages: ChatMessage[]): number[] => {
       index += 1;
       continue;
     }
+    if (message.realtimeItem?.type === "transcriptSegment") {
+      starts.push(rows[index].index);
+      index += 1;
+      continue;
+    }
     if (message.role === "user") {
       starts.push(rows[index].index);
       const nextMessage = rows[index + 1]?.message;
-      index += nextMessage?.role === "assistant" && !isHiddenTimelineMessage(nextMessage) ? 2 : 1;
+      index += nextMessage?.role === "assistant" && !nextMessage.realtimeItem && !isHiddenTimelineMessage(nextMessage) ? 2 : 1;
       continue;
     }
     if (message.role === "assistant" || message.role === "system") starts.push(rows[index].index);

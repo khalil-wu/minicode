@@ -1,7 +1,7 @@
 import { useI18n, type TranslationKey } from "../i18n";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import type { FollowUpBehavior, RemoteImagePolicy, SendShortcut } from "../stores/types";
+import type { FollowUpBehavior, SendShortcut } from "../stores/types";
 import { desktop, isDesktop, type UpdatePreflightResult, type UpdateStatus } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
@@ -13,12 +13,6 @@ import { ChevronDown, ShieldAlert } from "lucide-react";
 import { notificationSoundWav } from "./notificationSoundImport";
 import "./GeneralTab.css";
 import { setPluginsFeatureEnabled, usePluginsFeature } from "../hooks/usePluginsFeature";
-
-const REMOTE_IMAGE_CHOICES = [
-  { id: "ask", label: "询问", title: "加载远程图片前询问" },
-  { id: "allow", label: "允许", title: "自动加载 Markdown 中的远程图片" },
-  { id: "block", label: "阻止", title: "不加载任何远程图片" },
-] as const;
 
 const SEND_SHORTCUT_CHOICES = [
   { id: "enter", label: "按 Enter 键", title: "按 Enter 发送，Shift + Enter 换行" },
@@ -32,12 +26,8 @@ const FOLLOW_UP_CHOICES = [
  ] as const satisfies readonly { id: FollowUpBehavior; label: TranslationKey; title: TranslationKey }[];
 
 export const GeneralTab = ({
-  remoteImagePolicy,
-  setRemoteImagePolicy,
   onOpenLicenses,
 }: {
-  remoteImagePolicy: RemoteImagePolicy;
-  setRemoteImagePolicy: (policy: RemoteImagePolicy) => void;
   onOpenLicenses?: () => void;
 }) => {
   const { t } = useI18n();
@@ -45,8 +35,6 @@ export const GeneralTab = ({
   const setSendShortcut = useAppStore((s) => s.setSendShortcut);
   const followUpBehavior = useAppStore((s) => s.followUpBehavior);
   const setFollowUpBehavior = useAppStore((s) => s.setFollowUpBehavior);
-  const allowedRemoteImageDomains = useAppStore((s) => s.allowedRemoteImageDomains);
-  const clearAllowedRemoteImageDomains = useAppStore((s) => s.clearAllowedRemoteImageDomains);
   const modifierSymbol = navigator.platform.startsWith("Mac") ? "⌘" : "^";
   return (
     <>
@@ -80,20 +68,6 @@ export const GeneralTab = ({
 
       <details className="settings-appearance-advanced"><summary className="settings-appearance-advanced-trigger">{t("高级")}<ChevronDown size={15} aria-hidden="true" /></summary><div className="settings-appearance-advanced-body">
       {isDesktop() && <DefaultPermissionSettings />}
-      <SettingsGroup title={t("内容")}>
-        <SettingsRow title={t("远程 Markdown 图片")} description={t("控制外部图片加载。")}>
-          <SelectMenu ariaLabel={t("远程 Markdown 图片")} className="settings-select settings-select-regular" align="end" value={remoteImagePolicy}
-            onValueChange={(value) => setRemoteImagePolicy(value as RemoteImagePolicy)}>
-            {REMOTE_IMAGE_CHOICES.map(choice => <option key={choice.id} value={choice.id} title={t(choice.title)}>{t(choice.label)}</option>)}
-          </SelectMenu>
-        </SettingsRow>
-        {allowedRemoteImageDomains.length > 0 && (
-          <SettingsRow title={t("已允许的网站")} description={t("{count} 个网站已允许。", { count: allowedRemoteImageDomains.length })}>
-            <button type="button" className="settings-action-button" onClick={clearAllowedRemoteImageDomains}>{t("清除列表")}</button>
-          </SettingsRow>
-        )}
-      </SettingsGroup>
-
       {isDesktop() && <DesktopUpdates />}
       </div></details>
     </>

@@ -10,6 +10,7 @@ import { nativeMenuAccelerators, nativeMenuBindings, nativeShortcutOverrides } f
 import { toggleChangesPanel } from "../lib/changes-panel";
 import { consumeDictationProviderSettings } from "../lib/dictation-preferences";
 import { pushToast } from "../overlays/ToastContainer";
+import { routeQueuedMessageHistory } from "../composer/queued-message-undo";
 
 const markViewedConversationRead = (isWindowFocused: boolean) => {
   const state = useAppStore.getState();
@@ -67,6 +68,12 @@ export const useDesktopEvents = () => {
       window.dispatchEvent(new Event(editor ? `editor:${action}` : action === "find" ? "chat:request-search" : `chat:${action}`));
     };
     const handlers: Record<string, (event: Event) => void> = {
+      "undo-app-action": () => {
+        if (routeQueuedMessageHistory("undo") === "native") void window.__MINICODE_RUNTIME__!.desktop!.menu.execute("nativeTextUndo");
+      },
+      "redo-app-action": () => {
+        if (routeQueuedMessageHistory("redo") === "native") void window.__MINICODE_RUNTIME__!.desktop!.menu.execute("nativeTextRedo");
+      },
       "new-conversation": () => {
         const store = useAppStore.getState();
         store.createConversation({ appMode: "cowork", bindWorkspace: store.appMode === "code" && Boolean(store.workingDirectory) });

@@ -232,7 +232,12 @@ def source_agent_options(config: Any, *, model: str = "", definition: Any = None
     options = declared if isinstance(declared, dict) else {}
     version = version or source_spawn_version(config, model=model, definition=definition)
     enabled = version != "disabled" and (config.feature_flags.enabled("multi_agent_v2") or agents.get("enabled", True))
-    total = options.get("max_concurrent_threads_per_session", agents.get("max_concurrent_threads_per_session", agents.get("max_threads", 4 if version == "v2" else 6)))
+    if version == "v2" and "max_concurrent_threads_per_session" in agents and (
+            type(agents["max_concurrent_threads_per_session"]) is not int or agents["max_concurrent_threads_per_session"] < 1):
+        raise ValueError("agents.max_concurrent_threads_per_session must be a positive integer")
+    total = (options.get("max_concurrent_threads_per_session",
+        agents["max_concurrent_threads_per_session"] + 1 if "max_concurrent_threads_per_session" in agents else 4)
+        if version == "v2" else agents.get("max_concurrent_threads_per_session", agents.get("max_threads", 6)))
     if isinstance(total, bool) or not isinstance(total, int) or total < 1:
         raise ValueError("agents.max_concurrent_threads_per_session must be a positive integer")
     limits = {name: options.get(name, default) for name, default in (
@@ -241,8 +246,43 @@ def source_agent_options(config: Any, *, model: str = "", definition: Any = None
         raise ValueError("multi_agent_v2 wait timeouts must be integers between 0 and 3600000")
     if not limits["min_wait_timeout_ms"] <= limits["default_wait_timeout_ms"] <= limits["max_wait_timeout_ms"]:
         raise ValueError("multi_agent_v2 wait timeouts require min <= default <= max")
+    presentation = {name: options.get(name, default) for name, default in (
+        ("hide_spawn_agent_metadata", True), ("expose_spawn_agent_model_overrides", True),
+        ("wait_agent_enabled", True), ("disable_direct_message", False), ("non_code_mode_only", True),
+        ("message_board_in_memory", False))}
+    if any(not isinstance(value, bool) for value in presentation.values()):
+        raise ValueError("multi_agent_v2 presentation settings must be booleans")
+    text_options = {name: options.get(name, default) for name, default in (
+        ("tool_namespace", "collaboration"), ("usage_hint_text", None),
+        ("root_agent_usage_hint_text", None), ("subagent_usage_hint_text", None),
+        ("subagent_developer_instructions", None), ("multi_agent_mode_hint_text", None))}
+    if any(value is not None and not isinstance(value, str) for value in text_options.values()):
+        raise ValueError("multi_agent_v2 namespace and usage hint must be strings")
+    if text_options["tool_namespace"] is None:
+        text_options["tool_namespace"] = "collaboration"
+    namespace = text_options["tool_namespace"]
+    if not namespace:
+        raise ValueError("features.multi_agent_v2.tool_namespace must not be empty")
+    if namespace.strip() != namespace:
+        raise ValueError("features.multi_agent_v2.tool_namespace must not have leading or trailing whitespace")
+    if re.fullmatch(r"[a-zA-Z0-9_-]+", namespace) is None:
+        raise ValueError("features.multi_agent_v2.tool_namespace must match ^[a-zA-Z0-9_-]+$")
+    if len(namespace) > 64:
+        raise ValueError("features.multi_agent_v2.tool_namespace must be at most 64 characters")
+    if namespace == "mcp" or namespace.startswith("mcp__") or namespace in {
+            "api_tool", "browser", "computer", "container", "file_search", "functions", "image_gen", "multi_tool_use",
+            "python", "python_user_visible", "submodel_delegator", "terminal", "tool_search", "web"}:
+        raise ValueError(f"features.multi_agent_v2.tool_namespace uses a reserved namespace: {namespace}")
     return {"version": version, "enabled": enabled, "max_children": total - 1 if version == "v2" else total,
-        "max_depth": agents.get("max_depth", 1), "interrupt_message": agents.get("interrupt_message", True), **limits}
+        "max_depth": agents.get("max_depth", 1), "interrupt_message": agents.get("interrupt_message", True),
+        "expose_agent_type": version == "v2" and bool(load_source_agent_roles(config.config_layer_stack)),
+        "message_board_backend": "remote" if options.get("message_board_remote") is not None
+            else "in_memory" if presentation["message_board_in_memory"] else "local",
+        "message_board_enabled": version == "v2" and enabled
+            and config.feature_flags.enabled("multi_agent_v2") and config.feature_flags.enabled("agent_message_board"),
+        "omit_update_plan_instructions": not effective.get("tools", {}).get("update_plan", {}).get("enabled", False)
+            and effective.get("model_catalog") is None,
+        **limits, **presentation, **text_options}
 
 
 def is_legacy_read_only_role(name: str, workspace_root: str | Path | None = None, *, config: Any = None) -> bool:

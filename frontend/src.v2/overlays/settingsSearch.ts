@@ -12,8 +12,6 @@ export const SETTINGS_OPTIONS: SettingsOption[] = [
     ["纯文本输入", "编写消息时，将代码、Markdown 和链接保留为字面文本。", "plain text rich composer 富文本 输入 代码 列表 链接"],
     ["默认终端位置", "选择终端快捷键和环境动作打开终端标签页的位置。", "terminal bottom right 底部 右侧 环境"],
     ["跟进行为", "选择运行中的消息排队或引导方式。", "队列 补充 消息"],
-    ["远程 Markdown 图片", "决定外部图片的加载策略。", "远程 md 图像"],
-    ["已允许的网站", "管理外部图片加载的站点许可。", "域名 图片"],
     ["更新通道", "检查桌面应用更新。", "版本 桌面 更新"],
   ]),
   ...options("appearance", [

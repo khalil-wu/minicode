@@ -215,7 +215,7 @@ class ToolSearchTool(BaseTool):
         nested = context is not None and context.source_for_call(context.tool_call_id).kind == "code_mode"
         entries = self._catalog.search(query, limit, nested=nested)
         if nested:
-            from backend.tools.schema import code_mode_parameters
+            from backend.tools.schema import code_mode_parameters, code_mode_tool_name
             tools = []
             for entry in entries:
                 schema = registry.get_tool_schema(entry.name, toolset_policy=policy,
@@ -224,8 +224,9 @@ class ToolSearchTool(BaseTool):
                 parameters = code_mode_parameters(function["parameters"])
                 output_schema = schema.get("_minicode_output_schema")
                 output = f" -> Promise<{code_mode_parameters(output_schema)}>" if output_schema is not None else ""
-                description = function["description"] + f"\n\nDeclaration: tools.{entry.name}({parameters}){output}"
-                tools.append({"name": entry.name, "description": description})
+                public_name = code_mode_tool_name(schema)
+                description = function["description"] + f"\n\nDeclaration: tools.{public_name}({parameters}){output}"
+                tools.append({"name": public_name, "description": description})
             payload = {"tools": tools}
             return ToolResult(json.dumps(payload, ensure_ascii=False), runtime_metadata={"code_mode_result": payload})
         tools = _loadable_tools(registry, entries, policy=policy, checker=checker, permission=permission)

@@ -25,8 +25,17 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import { QueuedMessageList } from "./QueuedMessageList";
 import type { DiffCommentContextRef } from "../stores/types";
 import { pushToast } from "../overlays/ToastContainer";
+import type { ClientCommand } from "../protocol/events";
+import { resetQueuedMessageHistoryForTests } from "./queued-message-undo";
 
-vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true) }));
+vi.mock("../protocol/ws-outbox", async load => {
+  const original = await load<typeof import("../protocol/ws-outbox")>();
+  const send = vi.fn((_command: ClientCommand) => true);
+  return { ...original, sendClientCommand: send, sendClientCommandAwaitResult: vi.fn(async (command: ClientCommand) => {
+    send(command);
+    return { type: "command.result", command: command.type, message: "", level: "success", data: { cancelled: true } };
+  }) };
+});
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 describe("QueuedMessageList", () => {
@@ -46,7 +55,7 @@ describe("QueuedMessageList", () => {
     });
   });
 
-  afterEach(() => cleanup());
+  afterEach(async () => { cleanup(); await Promise.resolve(); await Promise.resolve(); resetQueuedMessageHistoryForTests(); });
 
   it.each(["", "original authored request"])("summarizes real comments for queued input %j without replacing its normal steer identity", content => {
     const refs: DiffCommentContextRef[] = ["src/one.ts", "src/two.ts"].map(path => ({

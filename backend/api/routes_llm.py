@@ -30,6 +30,7 @@ from backend.services.llm_settings_service import (
     update_llm_settings,
     update_mcp_config,
 )
+from backend.services.bedrock_service import BedrockSetupRequest
 
 from . import _state
 from .routes_health import get_mcp_status
@@ -50,6 +51,38 @@ from .models import (
 
 router = APIRouter()
 USER_INSTRUCTIONS_FILE = get_minicode_config_home_dir() / "INSTRUCTIONS.md"
+
+
+@router.get("/api/llm/bedrock/discover")
+def discover_bedrock_api(response: Response):
+    from backend.llm.bedrock import discover_bedrock
+    response.headers["Cache-Control"] = "no-store"
+    return discover_bedrock()
+
+
+@router.get("/api/llm/bedrock/gov-cloud-check")
+def bedrock_gov_cloud_check_api(response: Response):
+    from backend.services.bedrock_service import bedrock_gov_cloud_check
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return bedrock_gov_cloud_check()
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+
+
+@router.post("/api/llm/bedrock/setup")
+async def setup_bedrock_api(request: BedrockSetupRequest):
+    from backend.services.bedrock_service import setup_bedrock
+    from botocore.exceptions import BotoCoreError
+    from backend.hooks.runtime import ConfigChangeHookBlocked
+    try:
+        payload, config = await setup_bedrock(request)
+    except (ValueError, SettingsError, BotoCoreError, ConfigChangeHookBlocked) as error:
+        raise HTTPException(400, str(error)) from error
+    if _state.bootstrap is not None:
+        _state.bootstrap.config = config
+    _state.invalidate_status_cache()
+    return payload
 
 
 class HookStateUpdate(BaseModel):

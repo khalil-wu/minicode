@@ -139,6 +139,15 @@ function backendNavigationAuthorization(payload) {
   return { ...authorization };
 }
 
+function backendAgentControl(payload, operationId) {
+  const id = payload.agent_control_id ?? operationId;
+  const turnId = payload.agent_turn_id ?? "";
+  if (typeof id !== "string" || !id || typeof turnId !== "string") {
+    throw new Error("Browser control requires its original agent control and turn identity.");
+  }
+  return { id, turnId };
+}
+
 async function executeOwnedCommand(payload, response) {
   const id = payload.operation_id || crypto.randomUUID();
   const existing = ownedOperation({ ...payload, operation_id: id });
@@ -148,7 +157,9 @@ async function executeOwnedCommand(payload, response) {
   // Only the token-authenticated backend bridge may supply this execution
   // option. Renderer/manual navigation payloads never become authority.
   const navigationAuthorization = backendNavigationAuthorization(payload);
+  const agentControl = backendAgentControl(payload, id);
   const operation = createOperation(id, payload.conversation_id, payload.window_instance_id, payload.window_binding_token);
+  operation.agentControl = agentControl;
   operation.promise = Promise.resolve().then(async () => {
     operation.controller.signal.throwIfAborted();
     operation.started = true;
@@ -156,6 +167,7 @@ async function executeOwnedCommand(payload, response) {
     return manager.executeControlCommand(payload, {
       signal: operation.controller.signal,
       navigationAuthorization,
+      agentControl,
       requestPresentation: true,
       onSubmitted() { operation.submitted = true; },
     });
@@ -209,12 +221,12 @@ async function handleRequest(request, response) {
   if (request.method === "GET" && request.url === "/v1/health") {
     return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser", browserEnabled: manager.getBrowserSettings("").browserEnabled });
   }
-  if (request.method !== "POST" || !["/v1/command", "/v1/operation", "/v1/window-binding"].includes(request.url)) {
+  if (request.method !== "POST" || !["/v1/command", "/v1/operation", "/v1/window-binding", "/v1/session-control"].includes(request.url)) {
     return sendJson(response, 404, { ok: false, error: "Not found" });
   }
   try {
     let payload = await readJsonBody(request);
-    const binding = request.url === "/v1/operation" ? null : assertWindowBinding(payload);
+    const binding = ["/v1/operation", "/v1/session-control"].includes(request.url) ? null : assertWindowBinding(payload);
     const owner = binding || ownedOperation(payload) || assertWindowBinding(payload);
     if ((owner.remoteHostId || null) !== remoteHostId) {
       const error = new Error("Desktop bridge token belongs to a different host");
@@ -224,6 +236,17 @@ async function handleRequest(request, response) {
     if (request.url === "/v1/window-binding") {
       if (payload.window_owner_id !== binding.windowOwnerId) throw new Error("Desktop window owner does not match its binding.");
       return sendJson(response, 200, { ok: true, window_instance_id: binding.windowInstanceId, window_owner_id: binding.windowOwnerId });
+    }
+    if (request.url === "/v1/session-control") {
+      if (payload.action !== "release") throw new Error("Unsupported browser session control.");
+      const control = backendAgentControl(payload);
+      const pending = [...operations.values()].filter(operation => !operation.settled
+        && operation.owner === payload.conversation_id && operation.windowInstanceId === payload.window_instance_id
+        && operation.agentControl?.id === control.id && operation.agentControl.turnId === control.turnId);
+      await Promise.all(pending.map(operation => operation.promise));
+      const released = manager.releaseAgentControl({ conversation_id: payload.conversation_id,
+        window_instance_id: payload.window_instance_id, control });
+      return sendJson(response, 200, { ok: true, released });
     }
     if (!manager?.executeControlCommand) throw new Error("Embedded browser manager is unavailable.");
     if (typeof payload.window_instance_id !== "string" || !payload.window_instance_id
@@ -253,7 +276,7 @@ async function handleRequest(request, response) {
       }
       return sendJson(response, 200, { ok: true, cleanup_receipt: operationReceipt(operation) });
     }
-    if (remote && payload.action === "navigate" && payload.url) {
+    if (remote && ["navigate", "allow_download"].includes(payload.action) && /^https?:/i.test(payload.url || "")) {
       const host = remote[1];
       const authorization = payload.navigation_authorization;
       payload = { ...payload, url: await host.mapUrl(payload.url),

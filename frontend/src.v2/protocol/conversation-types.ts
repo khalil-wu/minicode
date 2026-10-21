@@ -46,6 +46,9 @@ export type ConversationClientCommandType =
   | "user_message.queue.cancel"
   | "user_message.queue.steer"
   | "user_message.queue.start"
+  | "user_message.queue.update"
+  | "user_message.queue.add"
+  | "user_message.queue.reorder"
   | "interrupt"
   | "ping"
   // Approval flow
@@ -280,6 +283,7 @@ export interface ConversationSummaryPayload {
   pinned_at?: string;
   has_unread_turn?: boolean;
   project_id?: string | null;
+  resource_references?: import("./thread-metadata").ThreadResourceReference[];
   archived_at?: string | null;
   workspace_root?: string | null;
   execution_cwd?: string | null;
@@ -322,6 +326,7 @@ export interface ConversationListEvent {
   pinned_conversation_ids?: string[];
   pinned_sort_mode?: "manual" | "updated_at";
   sidebar_order?: SidebarOrderPayload;
+  sidebar_sections?: import("./thread-metadata").SidebarSection[];
   conversation_id?: string | null;
   active_conversation_id?: string | null;
   conversations?: ConversationSummaryPayload[];
@@ -384,6 +389,32 @@ export interface UserMessageQueueUpdatedEvent {
   reason?: string;
   target_message_id?: string;
   turn_mode?: "follow_up" | "steer";
+  input?: { content: string; attachments?: Record<string, unknown>[]; display_content?: string;
+    context_refs?: MessageContextRef[]; quoted_message?: ComposerQuote | null; code_review?: import("./code-review-types").CodeReviewScope; async_request_id?: string };
+}
+
+export interface UserMessageQueueUpdateCommand {
+  type: "user_message.queue.update";
+  conversation_id: string;
+  message_id: string;
+  content: string;
+  attachments?: Record<string, unknown>[];
+  display_content?: string;
+  context_refs?: MessageContextRef[];
+  quoted_message?: ComposerQuote | null;
+  code_review?: import("./code-review-types").CodeReviewScope;
+  async_request_id?: string;
+}
+
+export type UserMessageQueueAddCommand = Omit<UserMessageQueueUpdateCommand, "type"> & {
+  type: "user_message.queue.add";
+  user_message_id: string;
+};
+
+export interface UserMessageQueueReorderCommand {
+  type: "user_message.queue.reorder";
+  conversation_id: string;
+  message_ids: string[];
 }
 
 export interface UserMessageCommand {
@@ -455,6 +486,7 @@ export interface ReadArtifactCommand {
 
 export interface ConversationCreateCommand {
   activate?: boolean;
+  sidebar_section_id?: string;
   type: "conversation.create";
   conversation_id?: string;
   title?: string;

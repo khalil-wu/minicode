@@ -73,13 +73,16 @@ COMMAND_BACKLOG_BYPASS_TYPES = {
     "control_cancel_request",
     "interrupt",
     "mcp.inventory.cancel",
+    "thread/realtime/appendAudio", "thread/realtime/stop",
 }
 
 _FORWARDED_CONVERSATION_COMMAND_TYPES = frozenset({
     "interrupt", "control_response", "control_cancel_request", "approval.file_diff",
-    "user_message.queue.cancel", "user_message.queue.steer", "user_message.queue.start", "send_message", "followup_task",
+    "user_message.queue.cancel", "user_message.queue.steer", "user_message.queue.start", "user_message.queue.update", "user_message.queue.add", "user_message.queue.reorder", "send_message", "followup_task",
     "thread/approveGuardianDeniedAction", "context.compact",
     "subagent.cancel", "subagent.plan_review",
+    "thread/realtime/start", "thread/realtime/appendAudio", "thread/realtime/appendText",
+    "thread/realtime/appendSpeech", "thread/realtime/stop", "thread/realtime/listVoices",
 })
 
 
@@ -89,6 +92,8 @@ def _normalize_command_owner(command: UserCommand) -> None:
     owner = command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
     if owner:
         command.data["conversation_id"] = str(owner).strip()
+    if command.type.startswith("thread/realtime/") and "conversation_id" not in command.data:
+        command.data["conversation_id"] = command.data.get("threadId", "")
 
 _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
     "llm.model.set",
@@ -101,10 +106,14 @@ _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
     "workspace.switch",
     "context.compact",
     "context.fork",
+    "thread/realtime/start", "thread/realtime/stop",
     "thread/approveGuardianDeniedAction",
     "user_message.queue.cancel",
     "user_message.queue.steer",
     "user_message.queue.start",
+    "user_message.queue.update",
+    "user_message.queue.add",
+    "user_message.queue.reorder",
     "send_message", "followup_task", "subagent.cancel", "subagent.plan_review",
 }
 
@@ -395,6 +404,11 @@ class SessionCommandDispatcher:
                 self._session.ws_manager.record_heartbeat_renderer_state(
                     self._session, connection_generation, command.data,
                 )
+                continue
+            if command.type.startswith("thread/realtime/"):
+                # Voice control and PCM belong to the current live transport.
+                # A cold replay must never restart a microphone or replay audio.
+                self._schedule_transient_client_command(command, connection_generation)
                 continue
 
             if command.type == "user_message":

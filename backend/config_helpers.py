@@ -137,6 +137,7 @@ class LLMSettings:
     truncation_policy: Mapping[str, Any] | None = None
     supports_image_detail_original: bool = False
     supports_search_tool: bool = False
+    aws: Mapping[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -986,6 +987,7 @@ def _llm_history(
         entry = {
             "provider": provider,
             "provider_id": _provider_id_for_history(provider, base_url, wire_api),
+            "aws": request_material["aws"],
             "display_name": _provider_display_name(raw),
             "base_url": base_url,
             "model": model,
@@ -1160,6 +1162,7 @@ def _provider_request_material(provider_data: Mapping[str, Any]) -> dict[str, An
             raise SettingsError(f"provider header contains a control separator: {name}")
         headers.append((name, value))
     return {
+        "aws": dict(provider_data["aws"]) if provider_data.get("aws") is not None else None,
         "default_headers": tuple(headers),
         "auth_header": coerce_feature_bool(
             provider_data.get("auth_header", provider_data.get("authHeader")),
@@ -1368,6 +1371,12 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None, *, resolve_
     provider_data = raw if isinstance(raw, dict) else {}
 
     base_url = str(provider_data.get("base_url") or os.getenv("CUSTOM_BASE_URL", "")).strip()
+    aws = provider_data.get("aws")
+    if aws is not None:
+        from backend.llm.bedrock import aws_settings, bedrock_base_url
+        aws = aws_settings(aws)
+        if not base_url:
+            base_url = bedrock_base_url(aws)
     api_key = _custom_provider_api_key(base_url) if resolve_credentials else ""
     model = str(provider_data.get("model") or os.getenv("CUSTOM_MODEL", "")).strip()
     small_fast_model = str(
@@ -1380,7 +1389,7 @@ def get_custom_settings(settings_data: dict[str, Any] | None = None, *, resolve_
     ).strip()
     wire_api = normalize_custom_wire_api(
         base_url,
-        str(provider_data.get("wire_api") or os.getenv("CUSTOM_WIRE_API", "chat")),
+        str(provider_data.get("wire_api") or os.getenv("CUSTOM_WIRE_API", "responses" if aws is not None else "chat")),
         "chat",
     )
     responses_reasoning_summary = str(
@@ -1873,6 +1882,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_cr
             )
         return LLMSettings(
             api_key=anthropic["api_key"],
+            aws=anthropic["aws"],
             provider="anthropic",
             base_url=anthropic["base_url"],
             model=anthropic["model"],
@@ -1932,6 +1942,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_cr
             raise SettingsError(str(image_config["reason"]))
         return LLMSettings(
             api_key=str(image_config["api_key"] if image_config else custom["api_key"]),
+            aws=custom["aws"],
             provider="custom",
             base_url=str(image_config["base_url"] if image_config else custom["base_url"]),
             model=str(custom["model"]),
@@ -1993,6 +2004,7 @@ def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_cr
         raise SettingsError(str(image_config["reason"]))
     return LLMSettings(
         api_key=str(image_config["api_key"] if image_config else openai["api_key"]),
+        aws=openai["aws"],
         provider="openai",
         base_url=str(image_config["base_url"] if image_config else openai["base_url"]),
         model=str(openai["model"]),

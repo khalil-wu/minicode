@@ -55,6 +55,7 @@ function localeValue(locale: Locale) {
 // provides the user's explicit preference or the detected desktop/browser locale.
 const LanguageContext = createContext(localeValue("zh-CN"));
 let applicationLocale: Locale = "zh-CN";
+export const translateApp = (key: TranslationKey, values?: TranslationValues) => translate(applicationLocale, key, values);
 const languageListeners = new Set<() => void>();
 const subscribeLanguage = (listener: () => void) => { languageListeners.add(listener); return () => { languageListeners.delete(listener); }; };
 

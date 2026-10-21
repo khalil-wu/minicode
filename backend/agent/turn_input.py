@@ -133,6 +133,7 @@ class TurnInputQueue:
 
     def __init__(self) -> None:
         self._steering: deque[TurnInput] = deque()
+        self._message_board_notifications: deque[str] = deque()
         self._phase = MailboxDeliveryPhase.CURRENT_TURN
         self._turn_id = ""
         self._turn_epoch = 0
@@ -220,6 +221,7 @@ class TurnInputQueue:
         """
         normalized = str(turn_id or "").strip()
         with self._lock:
+            self._message_board_notifications.clear()
             same_run = (
                 bool(normalized)
                 and normalized == self._turn_id
@@ -264,6 +266,29 @@ class TurnInputQueue:
                 self._phase is MailboxDeliveryPhase.CURRENT_TURN
                 and (not normalized or not self._turn_id or normalized == self._turn_id)
             )
+
+    def deliver_message_board_notification(self, content: str, *, expected_turn_id: str) -> bool:
+        """Source contextual fragment: never reopen a phase or queue for a later turn."""
+        with self._lock:
+            if self._phase is not MailboxDeliveryPhase.CURRENT_TURN or self._turn_id != expected_turn_id:
+                return False
+            self._message_board_notifications.append(content)
+            self._activity_seq += 1
+            waiters = tuple(self._activity_waiters)
+        self._notify_activity_waiters(waiters)
+        return True
+
+    def has_message_board_notifications(self) -> bool:
+        with self._lock:
+            return bool(self._message_board_notifications)
+
+    def take_message_board_notifications(self) -> tuple[str, ...]:
+        with self._lock:
+            if self._phase is not MailboxDeliveryPhase.CURRENT_TURN:
+                return ()
+            notices = tuple(self._message_board_notifications)
+            self._message_board_notifications.clear()
+            return notices
 
     def phase_snapshot(self) -> dict[str, Any]:
         with self._lock:
@@ -331,6 +356,7 @@ class TurnInputQueue:
         """Close the epoch and return unconsumed commands in FIFO order."""
         with self._lock:
             self._phase = MailboxDeliveryPhase.SEALED
+            self._message_board_notifications.clear()
             commands = [item.original_command for item in self._steering]
             self._steering.clear()
             return commands

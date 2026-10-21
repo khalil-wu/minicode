@@ -1,5 +1,5 @@
 import { useI18n, type Translate, type TranslationKey } from "../i18n";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, Trash2 } from "../lib/icons";
 import { pushToast } from "./ToastContainer";
@@ -8,6 +8,7 @@ import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protoco
 import type { ProviderOAuthCommand } from "../protocol/events";
 import { ModelBrandIcon } from "../components/ModelBrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
+import type { BedrockGuidance, BedrockSignIn } from "./BedrockSetup";
 import { showConfirm } from "./DialogService";
 import type { EffortLevel } from "../stores/types";
 import { useAppStore } from "../stores";
@@ -62,6 +63,7 @@ const isDedicatedImageModel = (value: string): boolean =>
   String(value || "").trim().toLowerCase().split("/").pop()?.startsWith("gpt-image-") === true;
 
 const DRAFT_MODEL_PREFIX = "__draft_model_";
+const BedrockSetup = lazy(() => import("./BedrockSetup").then(module => ({ default: module.BedrockSetup })));
 
 const isDraftModelId = (value: string): boolean =>
   String(value || "").startsWith(DRAFT_MODEL_PREFIX);
@@ -84,6 +86,8 @@ const normalizeEffortLevels = (value: unknown): EffortLevel[] => {
 };
 
 type ProviderDraft = {
+  aws: ProviderSection["aws"];
+  awsEndpoint: string;
   provider: ProviderId;
   displayName: string;
   apiKey: string;
@@ -123,7 +127,7 @@ type ProviderCard = {
   source: "saved" | "history" | "preset";
 };
 
-type ProviderOperation = "" | "save" | "models" | "delete" | "oauth" | "check";
+type ProviderOperation = "" | "save" | "models" | "delete" | "oauth" | "check" | "bedrock";
 
 export const ProviderTab = ({
   selectedProvider,
@@ -155,6 +159,8 @@ export const ProviderTab = ({
   const [displayName, setDisplayName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [providerHeaders, setProviderHeaders] = useState<Record<string, string>>({});
+  const [providerAws, setProviderAws] = useState<ProviderSection["aws"]>(null);
+  const [awsEndpoint, setAwsEndpoint] = useState("");
   const [providerAuthHeader, setProviderAuthHeader] = useState(false);
   const [oauthSupported, setOauthSupported] = useState(false);
   const [oauthConfigured, setOauthConfigured] = useState(false);
@@ -184,7 +190,9 @@ export const ProviderTab = ({
   const [modelsSource, setModelsSource] = useState("");
   const [deletingHistoryKey, setDeletingHistoryKey] = useState("");
   const [activeOperation, setActiveOperation] = useState<ProviderOperation>("");
-  const [providerView, setProviderView] = useState<"list" | "detail">("list");
+  const [providerView, setProviderView] = useState<"list" | "detail" | "bedrock">("list");
+  const bedrockEntryRef = useRef<HTMLButtonElement>(null);
+  const bedrockReturnFocus = useRef(false);
   const [activeIdentityOverride, setActiveIdentityOverride] = useState("");
   const detailDraftPinnedRef = useRef(false);
   const draftModelCounterRef = useRef(0);
@@ -210,13 +218,14 @@ export const ProviderTab = ({
 
   const providerConfig = PROVIDERS.find((p) => p.id === provider)!;
   const effectiveWireApi = effectiveCustomWireApi(provider, baseUrl, customWireApi);
+  const isBedrockProvider = provider === "custom" && !!providerAws && credentialEndpointIdentity(baseUrl) === awsEndpoint;
 
   useEffect(() => {
     setModelAuthState({});
   }, [provider, baseUrl, apiKey, effectiveWireApi, proxyMode, providerHeaders, providerAuthHeader]);
 
   const responsesCachingEnabled = effectiveWireApi === "responses";
-  const showApiFormat = canChooseApiFormat(provider, baseUrl);
+  const showApiFormat = !isBedrockProvider && canChooseApiFormat(provider, baseUrl);
   const showFixedAnthropicFormat = backendProvider(provider) === "anthropic";
   const configuredModelList = availableModelList.filter((item) => item.trim() && !isDraftModelId(item));
   const hasIncompleteModelMapping = availableModelList.some(isDraftModelId);
@@ -226,6 +235,7 @@ export const ProviderTab = ({
   const canSaveProvider = !busy && hasRequiredBaseUrl && hasRequiredModel && !hasIncompleteModelMapping;
 
   const draftFromState = (): ProviderDraft => ({
+    aws: providerAws, awsEndpoint,
     provider,
     displayName,
     apiKey,
@@ -253,6 +263,7 @@ export const ProviderTab = ({
   });
 
   const restoreDetailDraft = (draft: ProviderDraft) => {
+    setProviderAws(draft.aws); setAwsEndpoint(draft.awsEndpoint);
     setProvider(draft.provider); setDisplayName(draft.displayName); setApiKey(draft.apiKey);
     setProviderHeaders(draft.headers); setProviderAuthHeader(draft.authHeader);
     setBaseUrl(draft.baseUrl); setModelName(draft.modelName); setSmallFastModel(draft.smallFastModel);
@@ -306,6 +317,8 @@ export const ProviderTab = ({
     setDisplayName(providerDisplayName(section));
     setApiKey(section?.api_key ?? "");
     setProviderHeaders(section?.headers ?? {});
+    setProviderAws(section?.aws ?? null);
+    setAwsEndpoint(credentialEndpointIdentity(section?.base_url || ""));
     setProviderAuthHeader(Boolean(section?.auth_header));
     setBaseUrl(section?.base_url ?? fallback.base_url ?? "");
     const selectedModel = section?.model ?? fallback.model ?? "";
@@ -351,6 +364,66 @@ export const ProviderTab = ({
     if (operationRef.current) return;
     rememberDetail();
     setProviderView("list");
+  };
+  useEffect(() => {
+    if (providerView === "detail" && bedrockReturnFocus.current) {
+      bedrockReturnFocus.current = false;
+      bedrockEntryRef.current?.focus();
+    }
+  }, [providerView]);
+  const openBedrockSetup = () => {
+    if (operationRef.current) return;
+    rememberDetail(); pinDetailDraft(); setProviderView("bedrock");
+  };
+  const checkBedrockGovCloud = async (): Promise<BedrockGuidance> => {
+    try {
+      const response = await fetchWithTimeout(`${apiBase()}/api/llm/bedrock/gov-cloud-check`, { headers: authHeaders() });
+      if (!response.ok) return "unverified";
+      const result = await response.json() as { isGovCloud: boolean; shouldWarn: boolean };
+      return result.shouldWarn ? "warning" : null;
+    } catch { return "unverified"; }
+  };
+  const configureBedrock = async (input: BedrockSignIn): Promise<BedrockGuidance> => {
+    if (!beginOperation("bedrock")) throw new Error(tr("正在保存…"));
+    const owner = useAppStore.getState();
+    const conversationId = owner.conversationId || "";
+    const workspaceRoot = owner.workingDirectory;
+    const isCurrentOwner = () => {
+      const current = useAppStore.getState();
+      return (current.conversationId || "") === conversationId && workspaceRootsEqual(current.workingDirectory, workspaceRoot);
+    };
+    let profileSaved = false;
+    try {
+      const { method, ...credentials } = input;
+      const type = { profile: "profile", environment: "environment", accessKeys: "amazonBedrockAccessKeys", apiKey: "amazonBedrock" }[method];
+      const response = await fetchWithTimeout(`${apiBase()}/api/llm/bedrock/setup`, {
+        method: "POST", headers: authHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ type, ...credentials, confirm_sensitive_change: true,
+          ...(isBedrockProvider && providerAws?.endpoint ? { endpoint: providerAws.endpoint } : {}) }),
+      }, { timeoutMessage: tr("保存提供商配置超时，请重试。") });
+      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
+      const savedPayload = await response.json() as LLMSettingsPayload;
+      profileSaved = true;
+      settingsPayloadRef.current = savedPayload;
+      onSettingsPayloadChange?.(savedPayload);
+      const section = savedPayload.custom!;
+      const active = section.model!;
+      if (conversationId || isCurrentOwner()) {
+        const result = await sendClientCommandAwaitResult({ type: "llm.config.set", provider: "custom", model: active,
+          conversation_id: conversationId, workspace_root: workspaceRoot, source: "settings.provider.bedrock" }, "llm.config.set", { silent: true });
+        if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法应用到发起会话"));
+      }
+      setProvider("custom"); onProviderChange("custom"); applyProviderSection("custom", section);
+      setActiveIdentityOverride(cardIdentityForDraft("custom", section));
+      if (isCurrentOwner()) useAppStore.setState({ currentProvider: "custom", currentProviderId: "custom", currentModel: active,
+        currentProviderBaseUrl: section.base_url ?? "", currentWireApi: "responses",
+        availableModels: selectableModelsForProvider(section.available_models ?? [], active, "custom", section.models_source),
+        availableModelLabels: section.model_labels ?? {}, modelsSource: section.models_source ?? "" });
+      return await checkBedrockGovCloud();
+    } catch (failure) {
+      if (profileSaved) throw new Error(`${tr("提供商已保存，但应用失败")}：${formatProviderError(failure)}`);
+      throw failure;
+    } finally { endOperation("bedrock"); }
   };
 
   useEffect(() => {
@@ -589,6 +662,7 @@ export const ProviderTab = ({
     );
     const section = {
       display_name: draft.displayName.trim(),
+      aws: draft.aws && draft.awsEndpoint === credentialEndpointIdentity(draft.baseUrl) ? draft.aws : null,
       ...(draft.apiKey.trim() ? { api_key: draft.apiKey.trim() } : {}),
       headers: draft.headers,
       auth_header: draft.authHeader,
@@ -768,6 +842,8 @@ export const ProviderTab = ({
       );
     return {
       provider: nextProvider,
+      aws: section?.aws ?? null,
+      awsEndpoint: credentialEndpointIdentity(nextBaseUrl),
       displayName: providerDisplayName(section),
       apiKey: section?.api_key ?? "",
       headers: section?.headers ?? {},
@@ -1053,7 +1129,7 @@ export const ProviderTab = ({
         key: cardKeyFor(entryProvider, section, `history-${index}`),
         provider: entryProvider,
         title: historyLabel(entry),
-        subtitle: providerTypeLabel(entryProvider),
+        subtitle: section.aws ? "Amazon Bedrock" : providerTypeLabel(entryProvider),
         model: section.model || tr("选择模型"),
         wireApi: effectiveCustomWireApi(
           entryProvider,
@@ -1075,7 +1151,7 @@ export const ProviderTab = ({
           key: cardKeyFor(activeProvider, activeSection, "saved"),
           provider: activeProvider,
           title: cardTitle(activeProvider, activeSection),
-          subtitle: providerTypeLabel(activeProvider),
+          subtitle: activeSection.aws ? "Amazon Bedrock" : providerTypeLabel(activeProvider),
           model: activeSection.model,
           wireApi: effectiveCustomWireApi(activeProvider, activeSection.base_url || "",
             activeSection.wire_api === "responses" || activeSection.wire_api === "anthropic" ? activeSection.wire_api : "chat"),
@@ -1242,16 +1318,19 @@ export const ProviderTab = ({
               type="button"
               onClick={() => selectProviderPreset(item.id)}
               disabled={busy}
-              style={presetButtonStyle(provider === item.id)}
+              style={presetButtonStyle(provider === item.id && !isBedrockProvider)}
             >
               <ModelBrandIcon entity="provider" provider={item.id} size={19} />
               <span style={presetTitleStyle}>{item.label}</span>
             </button>
           ))}
+          <button ref={bedrockEntryRef} type="button" onClick={openBedrockSetup} disabled={busy} style={presetButtonStyle(isBedrockProvider)}>
+            <ModelBrandIcon entity="provider" provider="Amazon Bedrock" size={19} /><span style={presetTitleStyle}>{tr("使用 Amazon Bedrock")}</span>
+          </button>
         </div>
       </Section>
 
-      {providerConfig.hasBaseUrl && (
+      {providerConfig.hasBaseUrl && !isBedrockProvider && (
         <Section title={tr("接口地址")}>
           <input
             type="text"
@@ -1269,7 +1348,7 @@ export const ProviderTab = ({
         </Section>
       )}
 
-      <Section title={tr("API 密钥")}>
+      {!isBedrockProvider && <Section title={tr("API 密钥")}>
         <input
           type="text"
           aria-label={tr("API 密钥")}
@@ -1284,7 +1363,7 @@ export const ProviderTab = ({
           spellCheck={false}
           style={inputStyle}
         />
-      </Section>
+      </Section>}
 
       {showApiFormat && (
         <Section title={tr("API 格式")}>
@@ -1663,7 +1742,10 @@ export const ProviderTab = ({
     </div>
   );
 
-  return providerView === "list" ? providerList : providerDetails;
+  return providerView === "bedrock" ? <Suspense fallback={<p role="status">{tr("正在加载…")}</p>}><BedrockSetup onSubmit={configureBedrock} onCheckGovCloud={checkBedrockGovCloud}
+    onBack={() => { bedrockReturnFocus.current = true; setProviderView("detail"); }}
+    onComplete={() => { detailKey.current = ""; clearDetailDraftPin(); setProviderView("list"); }} /></Suspense>
+    : providerView === "list" ? providerList : providerDetails;
 };
 
 const toActiveUiProvider = (payload: LLMSettingsPayload | null): ProviderId | "" => {

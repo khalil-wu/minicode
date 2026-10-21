@@ -490,8 +490,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/existing-project", draft: "Unsaved workspace draft" });
   });
 
-  it("keeps unsupported workspace mode and process-density selectors out of General", () => {
-    useAppStore.setState({ allowedRemoteImageDomains: ["images.example.com"] });
+  it("keeps unsupported selectors out of General and preserves stored media preferences", () => {
+    useAppStore.setState({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });
     render(<SettingsCenter />);
 
     expect(screen.queryByRole("button", { name: "对话" })).toBeNull();
@@ -500,11 +500,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("button", { name: "详细" })).toBeNull();
 
     fireEvent.click(screen.getByText("高级"));
-    fireEvent.click(screen.getByRole("button", { name: /^远程 Markdown 图片，当前：/ }));
-    fireEvent.click(screen.getByRole("option", { name: "允许" }));
-    expect(useAppStore.getState().remoteImagePolicy).toBe("allow");
-    fireEvent.click(screen.getByRole("button", { name: "清除列表" }));
-    expect(useAppStore.getState().allowedRemoteImageDomains).toEqual([]);
+    expect(screen.queryByRole("button", { name: /远程 Markdown 图片/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "清除列表" })).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });
   });
 
   it("filters the existing shortcut list", () => {

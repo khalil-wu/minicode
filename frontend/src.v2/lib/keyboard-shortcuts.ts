@@ -1,4 +1,6 @@
 export const SHORTCUT_DEFINITIONS = [
+  { id: "undoAppAction", label: "撤销", description: "撤销最近的应用操作", action: "Undo", defaultBinding: "Mod+Z" },
+  { id: "redoAppAction", label: "重做", description: "重做最近的应用操作", action: "Redo", defaultBinding: "Mod+Y" },
   { id: "commandPalette", label: "命令面板", description: "查找并运行应用命令。", action: "Command Palette", defaultBinding: "Mod+K" },
   { id: "settings", label: "设置", description: "打开或关闭设置页面。", action: "Settings", defaultBinding: "Mod+Comma" },
   { id: "shortcutHelp", label: "快捷键", description: "查看当前快捷键与消息发送方式。", action: "Keyboard Shortcuts", defaultBinding: "Mod+Slash" },
@@ -62,7 +64,9 @@ const SECONDARY_SHORTCUTS: Partial<Record<ShortcutActionId, string[]>> = {
 
 export const DEFAULT_SHORTCUT_BINDINGS = Object.fromEntries(
   SHORTCUT_DEFINITIONS.map((definition) => [definition.id,
-    [...(definition.defaultBinding ? [definition.defaultBinding] : []), ...(SECONDARY_SHORTCUTS[definition.id] || [])]]),
+    definition.id === "redoAppAction"
+      ? typeof navigator !== "undefined" && navigator.platform.startsWith("Mac") ? ["Mod+Shift+Z"] : ["Mod+Y", "Mod+Shift+Z"]
+      : [...(definition.defaultBinding ? [definition.defaultBinding] : []), ...(SECONDARY_SHORTCUTS[definition.id] || [])]]),
 ) as ShortcutBindings;
 
 export const isCodeShortcut = (action: ShortcutActionId): boolean => {
@@ -91,6 +95,7 @@ export const nativeShortcutOverrides = (bindings: ShortcutBindings): ShortcutAct
   SHORTCUT_DEFINITIONS.filter(definition => JSON.stringify(bindings[definition.id]) !== JSON.stringify(DEFAULT_SHORTCUT_BINDINGS[definition.id])).map(definition => definition.id);
 
 export const NATIVE_MENU_SHORTCUT_ACTIONS: readonly ShortcutActionId[] = [
+  "undoAppAction", "redoAppAction",
   "commandPalette", "settings", "shortcutHelp", "newConversation", "globalSearch", "terminal", "leftSidebar",
   "newWindow", "newProject", "openFolder", "closeTab", "quit", "bottomPanel", "pinnedSummary", "fileTree", "sidePanel",
   "browserTab", "browserAddress", "browserReload", "browserHardReload", "browserBack", "browserForward", "find", "findNext", "findPrevious",

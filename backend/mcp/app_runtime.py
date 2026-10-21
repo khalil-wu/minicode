@@ -140,6 +140,7 @@ class MCPAppRuntime:
         return {"viewId": view_id, "frameToken": token,
             "hostname": f"mcp-app-{invocation.origin_key}.localhost", "mimeType": invocation.resource.mime_type,
             "prefersBorder": invocation.resource.prefers_border, "readOnly": invocation.receipt.read_only,
+            "csp": deepcopy(invocation.resource.csp),
             "toolInput": deepcopy(invocation.tool_input), "toolResult": deepcopy(invocation.tool_result),
             "toolDefinition": deepcopy(invocation.tool_definition), "widgetState": deepcopy(invocation.widget_state)}
 

@@ -178,6 +178,7 @@ class AnthropicSettingsPayload(BaseModel):
 
 
 class CustomSettingsPayload(BaseModel):
+    aws: dict[str, Any] | None = None
     display_name: str = ""
     api_key: str = ""
     headers: dict[str, str] = Field(default_factory=dict)

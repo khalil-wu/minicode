@@ -13,6 +13,7 @@ import { getPastedTextMetadata, PASTED_TEXT_INPUT_SOURCE } from "./pastedText";
 import { prepareNativeImageFile } from "./imagePreparation";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { composerWorkspaceKey } from "../stores/composer-drafts";
+import { desktop } from "../desktop/runtime";
 
 const activeUploads = new Map<string, AbortController>();
 const cancelledUploads = new Set<string>();
@@ -249,10 +250,10 @@ export const acceptAttachmentConversationOwner = (ownerConversationId: string): 
 };
 
 const normalizedTransportAttachment = (
-  file: File,
+  file: File | undefined,
   result: UploadResponse,
 ): Record<string, unknown> => {
-  const pastedText = getPastedTextMetadata(file);
+  const pastedText = file ? getPastedTextMetadata(file) : undefined;
   const transportAttachment = { ...result.attachment };
   delete transportAttachment.data;
   return {
@@ -270,7 +271,7 @@ const performUpload = async (
   ownerConversationId: string,
   workspaceRoot: string,
 ): Promise<UploadResponse | null> => {
-  if (!attachment.localFile || cancelledUploads.has(attachment.id)) return null;
+  if ((!attachment.localFile && !attachment.remoteSourcePath) || cancelledUploads.has(attachment.id)) return null;
   const controller = new AbortController();
   activeUploads.get(attachment.id)?.abort();
   activeUploads.set(attachment.id, controller);
@@ -283,10 +284,15 @@ const performUpload = async (
   }, ownerConversationId, attachment);
 
   try {
-    const uploadFile = attachment.localFile.type.startsWith("image/")
-      ? await prepareNativeImageFile(attachment.localFile)
-      : attachment.localFile;
-    const result = await uploadAttachment(
+    let result: UploadResponse;
+    if (attachment.remoteSourcePath) {
+      result = await desktop()!.attachments.importRemoteFile({
+        path: attachment.remoteSourcePath, sessionId, conversationId: ownerConversationId, workspaceRoot,
+      });
+    } else {
+      const localFile = attachment.localFile!;
+      const uploadFile = localFile.type.startsWith("image/") ? await prepareNativeImageFile(localFile) : localFile;
+      result = await uploadAttachment(
       sessionId,
       ownerConversationId,
       uploadFile,
@@ -303,7 +309,8 @@ const performUpload = async (
           );
         },
       },
-    );
+      );
+    }
     if (activeUploads.get(attachment.id) !== controller) return null;
     const actualOwner = String(result.conversation_id || "").trim();
     if (!actualOwner) {
@@ -344,12 +351,16 @@ const completeUpload = (
     conversationId: ownerConversationId,
     artifactId: result.artifact_id,
     docId: result.doc_id,
-    attachment: normalizedTransportAttachment(attachment.localFile as File, result),
+    attachment: normalizedTransportAttachment(attachment.localFile, result),
+    ...(result.source ? { remoteSourcePath: result.source.path, name: result.source.name,
+      type: result.source.mediaType, size: result.source.sizeBytes } : {}),
     error: uploadWarning(result),
   }, ownerConversationId, attachment);
 };
 
-export const uploadComposerFiles = (files: File[], sideConversationId?: string) => {
+type ComposerUploadInput = { file: File } | { remotePath: string; name: string };
+
+const uploadComposerInputs = (inputs: ComposerUploadInput[], sideConversationId?: string) => {
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   const initialState = useAppStore.getState();
   if (!initialState.composerDraftsReady) {
@@ -358,23 +369,25 @@ export const uploadComposerFiles = (files: File[], sideConversationId?: string) 
   }
   const initialConversationId = sideConversationId ?? String(initialState.conversationId || "").trim();
   const initialWorkspaceRoot = sideConversationId ? initialState.sideChats[sideConversationId].workspaceRoot ?? "" : initialState.workingDirectory;
-  const created: ComposerAttachment[] = files.map((file) => {
-    const isImage = file.type.startsWith("image/");
-    const pastedText = getPastedTextMetadata(file);
+  const created: ComposerAttachment[] = inputs.map((input) => {
+    const file = "file" in input ? input.file : undefined;
+    const isImage = Boolean(file?.type.startsWith("image/"));
+    const pastedText = file ? getPastedTextMetadata(file) : undefined;
     return {
       id: attachmentId(),
-      name: file.name || (isImage ? "粘贴的图片.png" : "附件"),
-      type: file.type || "application/octet-stream",
-      size: file.size,
+      name: "file" in input ? input.file.name || (isImage ? "粘贴的图片.png" : "附件") : input.name,
+      type: file?.type || "application/octet-stream",
+      size: file?.size ?? 0,
       status: sessionId ? "uploading" : "error",
       progress: sessionId ? 0 : undefined,
       uploadPhase: sessionId ? "uploading" : undefined,
       conversationId: initialConversationId || undefined,
       workspaceRoot: initialWorkspaceRoot,
-      dataUrl: isImage ? URL.createObjectURL(file) : undefined,
+      dataUrl: isImage ? URL.createObjectURL(file!) : undefined,
       inputSource: pastedText?.inputSource ?? "upload",
       sourceCharCount: pastedText?.charCount,
       localFile: file,
+      ...("remotePath" in input ? { remoteSourcePath: input.remotePath } : {}),
       ...(!sessionId ? { error: "连接已断开，请在重连后上传。" } : {}),
     };
   });
@@ -432,6 +445,13 @@ export const uploadComposerFiles = (files: File[], sideConversationId?: string) 
   };
 };
 
+export const uploadComposerFiles = (files: File[], sideConversationId?: string) =>
+  uploadComposerInputs(files.map(file => ({ file })), sideConversationId);
+
+export const uploadComposerRemoteFiles = (paths: string[]) => uploadComposerInputs(paths.map(remotePath => ({
+  remotePath, name: remotePath.split(/[\\/]/).at(-1)!,
+})));
+
 export const retryComposerAttachment = (id: string): boolean => {
   const state = useAppStore.getState();
   const attachment = state.attachments.find((item) => item.id === id)
@@ -440,7 +460,7 @@ export const retryComposerAttachment = (id: string): boolean => {
       .flatMap((workbench) => workbench.attachments ?? [])
       .find((item) => item.id === id)
     ?? Object.values(state.workspaceComposerDrafts).flatMap(draft => draft.attachments).find(item => item.id === id);
-  if (!attachment?.localFile) return false;
+  if (!attachment || (!attachment.localFile && !attachment.remoteSourcePath)) return false;
   const sessionId = getWebSocket()?.sessionId?.trim() || "";
   if (!sessionId) {
     patchAttachment(id, {

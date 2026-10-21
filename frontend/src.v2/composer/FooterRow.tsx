@@ -3,9 +3,9 @@ import { ArrowUp, Check, ChevronDown, ChevronRight, Folder, Globe, Hand, ListChe
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
-import { VoiceInput } from "./VoiceInput";
+import { RealtimeComposerActions } from "./RealtimeComposerActions";
 import { sendClientCommand } from "../protocol/ws-outbox";
-import { uploadComposerFiles } from "./uploads";
+import { uploadComposerFiles, uploadComposerRemoteFiles } from "./uploads";
 import type { EffortLevel, PermissionMode } from "../stores/types";
 import { formatModelLabel } from "../lib/model-label";
 import { UsageRing } from "../shell/UsageRing";
@@ -91,8 +91,14 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   useEffect(() => useAppStore.subscribe((state, previous) => {
     if (state.conversationId !== previous.conversationId || state.workingDirectory !== previous.workingDirectory
       || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
-      || state.pendingConversationCreateId !== previous.pendingConversationCreateId) filePickerActive.current = false;
+      || state.pendingConversationCreateId !== previous.pendingConversationCreateId) {
+      filePickerActive.current = false;
+      remotePickerController.current?.abort();
+    }
   }), []);
+  const remotePickerController = useRef<AbortController | null>(null);
+  useEffect(() => () => { filePickerActive.current = false; remotePickerController.current?.abort(); }, []);
+  const remoteHost = window.__MINICODE_RUNTIME__?.remoteHost;
   const [modelOpen, setModelOpen] = useState(false);
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
@@ -218,8 +224,30 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   const openFilePicker = (event?: React.MouseEvent | React.KeyboardEvent) => {
     event?.preventDefault();
     event?.stopPropagation();
+    remotePickerController.current?.abort();
+    remotePickerController.current = null;
     filePickerActive.current = true;
     fileRef.current?.click();
+  };
+
+  const openRemoteFilePicker = async () => {
+    remotePickerController.current?.abort();
+    const controller = new AbortController();
+    remotePickerController.current = controller;
+    filePickerActive.current = true;
+    try {
+      const [{ showRemoteFilePicker }, { remoteDirectoryEntries }] = await Promise.all([
+        import("../overlays/RemoteFilePicker"), import("../desktop/runtime"),
+      ]);
+      if (controller.signal.aborted) return;
+      const paths = await showRemoteFilePicker({ initialDirectoryPath: workingDirectory || remoteHost!.home,
+        platform: remoteHost!.platform, listDirectory: path => remoteDirectoryEntries(path, false), signal: controller.signal });
+      if (!controller.signal.aborted && filePickerActive.current && paths?.length) uploadComposerRemoteFiles(paths);
+    } catch (error) {
+      if (!controller.signal.aborted) pushToast(error instanceof Error ? error.message : String(error), "error");
+    } finally {
+      if (remotePickerController.current === controller) { remotePickerController.current = null; filePickerActive.current = false; }
+    }
   };
 
   const editGoal = () => {
@@ -397,6 +425,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
     <div ref={footerRef} className="flex flex-col gap-0">
       {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} goalAvailable={!pendingConversationSwitchId}
         onFiles={openFilePicker}
+        onRemoteFiles={remoteHost ? () => void openRemoteFilePicker() : undefined}
         onGoal={() => void editGoal()} onPlan={() => setAgentMode(agentMode === "plan" ? "build" : "plan")}
         onPlugin={(id, name) => useAppStore.getState().addSelectedMention({ kind: "plugin", name, configName: id, path: `plugin://${id}` })}
         onClose={() => { setAddOpen(false); addTrigger.current!.focus(); }} />}
@@ -602,8 +631,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
             <Square size={14} fill="currentColor" className="anim-icon-swap" />
           </button>
         ) : null}
-         <VoiceInput />
-         <SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />
+         <RealtimeComposerActions sendButton={<SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />} />
       </div>
     </div>
   );

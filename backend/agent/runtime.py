@@ -333,6 +333,8 @@ class AgentRuntime:
             if metrics_file is not None or swarm_store_dir is not None
             else agent_runtime_root()
         )
+        from backend.agent.message_board import MessageBoards
+        self.message_boards = MessageBoards(self._runtime_state_root)
         lease = self._swarm_store.claim_runtime_lease(
             runtime_instance_id=self._runtime_instance_id,
             requested_owner_token=runtime_owner_token or uuid4().hex,
@@ -597,6 +599,7 @@ class AgentRuntime:
             self._subagent_mailbox_shutdown = True
             for task, _ in tuple(self._subagent_mailbox_turns.values()):
                 task.get_loop().call_soon_threadsafe(task.cancel)
+        self.message_boards.close()
         stop_event = self._lease_stop_event
         thread = self._lease_thread
         if stop_event is not None:
@@ -4017,6 +4020,7 @@ class AgentRuntime:
                 {"conversation_id": owner, "cleanup_errors": removed["cleanup_errors"]},
             )
             return removed
+        self.message_boards.delete_tree(owner)
         run_ids = memory_run_ids | {str(value) for value in removed.get("run_ids", [])}
         subagent_ids = memory_subagent_ids | {str(value) for value in removed.get("subagent_ids", [])}
         task_ids = memory_task_ids | {str(value) for value in removed.get("task_ids", [])}

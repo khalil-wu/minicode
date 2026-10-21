@@ -816,4 +816,7 @@ async def bootstrap_agent_loop(
         run_context.multi_agent_version = source_spawn_version(snapshot.config, model=snapshot.model, definition=snapshot.model_info)
     if turn_kernel.runtime is not None:
         tool_context.metadata["_agent_wait_cursor"] = turn_kernel.runtime.agent_activity_cursor()
+    from backend.agent.message_board_remote import start_remote_board_notifications
+
+    await start_remote_board_notifications(tool_context)
     yield bootstrap_result

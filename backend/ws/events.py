@@ -55,6 +55,10 @@ class ApproveGuardianDeniedActionCommand(TypedDict):
 
 
 ServerEventType = Literal[
+    "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+    "thread/realtime/item/transcript/delta", "thread/realtime/item/completed", "thread/realtime/transcript/delta",
+    "thread/realtime/transcript/done", "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+    "thread/realtime/error", "thread/realtime/closed",
     # Streaming text + tool execution
     "item.started",
     "agent_message.delta",
@@ -176,6 +180,7 @@ ServerEventType = Literal[
     "inspector.update",
     # UI catalogs / notices
     "skills.list",
+    "skills/changed",
     "skills.marketplace.list",
     "commands.list",
     "system_notice",
@@ -210,11 +215,17 @@ ServerEventType = Literal[
 # ──────────────────────────────────────────────────────────────────
 
 ClientCommandType = Literal[
+    "thread/realtime/start", "thread/realtime/appendAudio", "thread/realtime/appendText",
+    "thread/realtime/appendSpeech", "thread/realtime/stop", "thread/realtime/listVoices",
     # Chat
     "user_message",
     "user_message.queue.cancel",
     "user_message.queue.steer",
     "user_message.queue.start",
+    "user_message.queue.update",
+    "user_message.queue.add",
+    "user_message.queue.reorder",
+    "skills/extraRoots/set",
     "review.options",
     "review.prepare",
     "review.create",

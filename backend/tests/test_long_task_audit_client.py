@@ -2,10 +2,29 @@ import asyncio
 import io
 import json
 import time
+import subprocess
+import sys
 
 import pytest
 
-from scripts.audit_long_task_session import Client
+from scripts.audit_long_task_session import CHILD_PROBE, Client, successful_file_reads
+
+
+def test_source_snapshot_includes_actual_runtime_resources_and_excludes_python_cache(tmp_path, monkeypatch):
+    import scripts.audit_long_task_session as audit
+    runtime = tmp_path / "backend"
+    (runtime / "resources").mkdir(parents=True)
+    (runtime / "__pycache__").mkdir()
+    (runtime / "tests").mkdir()
+    for path in (runtime / "runtime.py", runtime / "vm.js", runtime / "resources" / "models.json", runtime / "resources" / "native.exe"):
+        path.write_bytes(b"frozen runtime input")
+    (runtime / "__pycache__" / "runtime.pyc").write_bytes(b"generated cache")
+    (runtime / "tests" / "test_fixture.py").write_bytes(b"test only")
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    before = audit.backend_source_snapshot()
+    assert set(before) == {"backend/runtime.py", "backend/vm.js", "backend/resources/models.json", "backend/resources/native.exe"}
+    (runtime / "resources" / "models.json").write_bytes(b"changed model capability")
+    assert audit.backend_source_snapshot() != before
 
 
 class QueueSocket:
@@ -101,6 +120,54 @@ async def test_terminal_keeps_the_owner_fence_and_accepts_a_real_completed_snaps
     await client.ws.incoming.put(snapshot)
     assert await asyncio.wait_for(task, 1) == snapshot
     await client.close()
+
+
+@pytest.mark.asyncio
+async def test_terminal_uses_the_explicit_endurance_observation_budget(monkeypatch):
+    client = Client("unused", io.StringIO(), "audit-test-secret")
+    received = {}
+    async def observe(predicate, label, *, timeout):
+        received.update(label=label, timeout=timeout)
+        return {"type": "done", "conversation_id": "owner", "message_id": "answer", "status": "completed"}
+    monkeypatch.setattr(client, "until", observe)
+    await client.terminal("owner", "answer", timeout=4800)
+    assert received == {"label": "terminal answer", "timeout": 4800}
+
+
+@pytest.mark.parametrize("correct", [True, False])
+def test_child_endurance_probe_checks_actual_business_rows_and_preserves_its_pid(tmp_path, correct):
+    solution = ("from decimal import Decimal\n"
+        "def reconcile(rows):\n"
+        "    unique = {}\n"
+        "    for row in rows: unique.setdefault(row['id'], row)\n"
+        "    totals = {}\n"
+        "    for row in unique.values(): totals[row['account']] = totals.get(row['account'], Decimal(0)) + Decimal(row['amount'])\n"
+        "    return {key:format(value,'.2f') for key,value in totals.items()}\n")
+    (tmp_path / "solution.py").write_text(solution if correct else "def reconcile(rows): return {}\n", encoding="utf-8")
+    (tmp_path / "child_probe.py").write_text(CHILD_PROBE, encoding="utf-8")
+    process = subprocess.run([sys.executable, "-X", "utf8", "child_probe.py", "--seconds", "1"], cwd=tmp_path, capture_output=True, text=True)
+    if correct:
+        assert process.returncode == 0, process.stderr
+        result = json.loads((tmp_path / "child-result.json").read_text(encoding="utf-8"))
+        rows = [json.loads(line) for line in (tmp_path / "child-progress.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert result["passed"] and result["elapsed"] >= 1 and result["checked_rows"] >= 300
+        assert {row["pid"] for row in rows} == {result["pid"]}
+        assert "CHILD_PROBE_OK" in process.stdout
+    else:
+        assert process.returncode != 0 and "AssertionError" in process.stderr
+        assert not (tmp_path / "child-result.json").exists()
+
+
+def test_endurance_read_evidence_requires_success_and_the_actual_message_owner():
+    def call(identity, message, path):
+        return {"type": "tool_call", "name": "read_file", "id": identity, "conversation_id": "b", "message_id": message, "args": {"file_path": path}}
+    def result(identity, message, failed=False):
+        return {"type": "tool_result", "id": identity, "conversation_id": "b", "message_id": message, "is_error": failed}
+    events = [call("old", "old", "B_NOTE.txt"), result("old", "old"), call("failed", "new", "progress.jsonl"), result("failed", "new", True)]
+    with pytest.raises(AssertionError):
+        successful_file_reads(events, conversation_id="b", message_id="new", required_files=("B_NOTE.txt", "progress.jsonl"))
+    events += [call("note", "new", "B_NOTE.txt"), result("note", "new"), call("tail", "new", "progress.jsonl"), result("tail", "new")]
+    assert successful_file_reads(events, conversation_id="b", message_id="new", required_files=("B_NOTE.txt", "progress.jsonl")) == {"B_NOTE.txt": "note", "progress.jsonl": "tail"}
 
 
 @pytest.mark.asyncio

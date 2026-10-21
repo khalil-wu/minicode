@@ -23,6 +23,7 @@ from backend.agents.source_roles import (
     load_source_agent_roles,
     project_role_config,
     source_child_role,
+    source_agent_options,
     source_spawn_version,
 )
 from backend.artifact.store import ArtifactStore
@@ -493,6 +494,10 @@ async def _resolve_subagent_llm(
             requested_effort = prepared.effort
         requested_model = source_overrides.get("model", requested_model)
         requested_effort = source_overrides.get("model_reasoning_effort", requested_effort)
+    if spawn_version == "v2":
+        child_instructions = source_agent_options(parent_config, version=spawn_version)["subagent_developer_instructions"]
+        if child_instructions is not None:
+            source_overrides = {"developer_instructions": child_instructions.strip(), **source_overrides}
     has_role_layer = bool(source_overrides)
     source_overrides = inherit_role_restrictions(parent_config, source_overrides)
     if has_role_layer:

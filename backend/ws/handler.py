@@ -102,6 +102,10 @@ _NOTIFICATION_HOOK_EVENT_TYPES = frozenset(
 )
 
 CONVERSATION_SCOPED_EVENT_TYPES = {
+    "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+    "thread/realtime/item/transcript/delta", "thread/realtime/item/completed", "thread/realtime/transcript/delta",
+    "thread/realtime/transcript/done", "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+    "thread/realtime/error", "thread/realtime/closed",
     "artifact_content",
     "item.started",
     "agent_message.delta",
@@ -264,6 +268,7 @@ class WebSocketSession(
         permission_checker: PermissionChecker,
         config: AppConfig,
         skill_manager: Any | None = None,
+        runtime_skill_roots: Any | None = None,
         skill_executor: Any | None = None,
         memory_manager: Any | None = None,
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
@@ -377,6 +382,7 @@ class WebSocketSession(
 
             self.skill_manager = SkillManager(
                 loader=SkillLoader(project_root=None),
+                runtime_roots=runtime_skill_roots,
             )
             self.skill_manager.discover()
         else:
@@ -907,6 +913,8 @@ class WebSocketSession(
         snapshot["permission"] = self._runtime_permission_payload()
         snapshot["mcp_registry_version"] = self._mcp_registry_version_snapshot
         snapshot["provider_capabilities"] = self._provider_capabilities_payload()
+        from backend.realtime.session import capture_config
+        snapshot["realtime"] = capture_config(self, str(self.active_conversation_id or ""), credentials=False).capabilities()
         return snapshot
 
     def runtime_capabilities_payload(
@@ -1692,6 +1700,7 @@ class WebSocketSession(
             "snapshot_at": snapshot_at,
             **await asyncio.to_thread(self.conversation_repo.get_pinned_order, summaries),
             **await asyncio.to_thread(self.conversation_repo.get_sidebar_order, summaries),
+            "sidebar_sections": await asyncio.to_thread(self.conversation_repo.thread_sections.list),
         }
         if inventory_instance_id is not None and inventory_revision is not None:
             payload["inventory_instance_id"] = inventory_instance_id
@@ -1867,6 +1876,15 @@ class WebSocketSession(
         # reduced as its source event type while its wire shape is
         # ``control_request``.
         await self._publish_stream_projection(event, payload, target_conversation_id)
+        if self.ws_manager is not None and target_conversation_id:
+            runtime = self.ws_manager.execution_contexts.thread_runtime_for(
+                self.conversation_repo.store_instance_id(), target_conversation_id)
+            if runtime is not None and runtime.realtime_runtime is not None:
+                from websockets.exceptions import ConnectionClosed
+                try:
+                    await runtime.realtime_runtime.observe_backend_event(event.type, payload)
+                except ConnectionClosed as exc:
+                    await runtime.realtime_runtime._send("error", message=str(exc))
         if event.type not in _NOTIFICATION_HOOK_EVENT_TYPES:
             return
         from backend.hooks.manager import get_hook_manager_for_session

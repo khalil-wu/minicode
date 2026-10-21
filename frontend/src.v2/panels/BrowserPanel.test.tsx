@@ -120,6 +120,22 @@ const openBrowserAction = (name: string) => {
 };
 
 describe("BrowserPanel", () => {
+  it("adopts a native child page without replaying its POST navigation and applies the saved new-tab device preference", async () => {
+    useAppStore.setState({ rightPanelOpen: true, rightStackTab: "browser", draft: "Keep source draft" });
+    runtimeMocks.list.mockResolvedValueOnce([page("original-opener", "Original opener", "https://source.example/", true)]);
+    runtimeMocks.getSettings.mockResolvedValueOnce({ browserEnabled: true, deviceToolbarAlwaysOnNewTabs: true,
+      downloadPolicy: "block", origin: "https://example.com", permissions: [] });
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Original opener" });
+    await act(async () => { await Promise.resolve(); });
+    act(() => emitNative({ ...page("native-child", "Original POST destination", "https://source.example/submitted"), type: "page" }));
+    await screen.findByRole("tab", { name: "Original POST destination" });
+    expect(screen.getByRole("group", { name: "设备工具栏" })).toBeTruthy();
+    expect((screen.getByRole("spinbutton", { name: "视口宽度" }) as HTMLInputElement).value).toBe("390");
+    expect(runtimeMocks.create).not.toHaveBeenCalled(); expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(useAppStore.getState().draft).toBe("Keep source draft");
+  });
+
   it("routes native guest number shortcuts through the existing tab and chat consumers with the original owner", async () => {
     useAppStore.setState({ rightPanelOpen: true, rightStackTab: "browser", draft: "Keep source draft" });
     runtimeMocks.list.mockResolvedValueOnce([page("active-native", "Active native page", "https://source.example/", true)]);

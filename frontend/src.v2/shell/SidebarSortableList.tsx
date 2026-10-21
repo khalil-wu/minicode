@@ -12,7 +12,7 @@ export const moveSidebarBefore = (identifiers: string[], movedId: string, before
   return position === -1 ? identifiers : [...remaining.slice(0, position), movedId, ...remaining.slice(position)];
 };
 export type SidebarDragBinding = { dragActivatorRef: Ref<HTMLButtonElement>; dragAttributes?: DraggableAttributes };
-type Scope = "pinned" | "project" | "recent" | "projects";
+type Scope = "pinned" | "project" | "recent" | "projects" | "section" | "sections";
 type Props = {
   identifiers: string[]; scope: Scope; ariaLabel: string;
   renderRow: (identifier: string, binding: SidebarDragBinding) => ReactNode;
@@ -31,7 +31,8 @@ const SortableSidebarRow = ({ identifier, dragging, disabled, scope, renderRow, 
     style={{ transform: dragging ? undefined : CSS.Translate.toString(transform), transition: dragging ? undefined : transition }}
     {...listeners} onKeyDown={undefined} onPointerDown={event => {
       const target = event.target as HTMLElement;
-      if (scope === "projects" && target.closest(".mc-workspace-group-toggle") !== event.currentTarget.querySelector("button")) return;
+      if ((scope === "projects" || scope === "sections" || scope === "section" && identifier.startsWith("project:"))
+        && target.closest(".mc-workspace-group-toggle") !== event.currentTarget.querySelector("button")) return;
       if (!target.closest(".session-row-actions, .session-row-pin, .mc-workspace-new-session, input")) listeners?.onPointerDown?.(event);
     }} onKeyDownCapture={event => {
       if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.target !== event.currentTarget.querySelector("button") || disabled) return;

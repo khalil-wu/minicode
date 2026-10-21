@@ -195,6 +195,9 @@ const runtimeConfig = {
     pickDirectory: () => ipcRenderer.invoke("minicode:pickDirectory"),
     pickWorkspaceDirectory: () => ipcRenderer.invoke("minicode:workspace:pickDirectory"),
     workspaceDirectoryEntries: (directoryPath, directoriesOnly) => ipcRenderer.invoke("minicode:workspace:directoryEntries", directoryPath, directoriesOnly),
+    attachments: {
+      importRemoteFile: request => ipcRenderer.invoke("minicode:attachments:importRemoteFile", request),
+    },
     trustWorkspace: (path) => ipcRenderer.invoke("minicode:workspace:trust", path),
     openExternal: (target) => ipcRenderer.invoke("minicode:openExternal", target),
     openPath: (target) => ipcRenderer.invoke("minicode:openPath", target),
@@ -346,6 +349,8 @@ if (process.contextIsolated) {
   ipcRenderer.on("minicode:menu:settings", (_event, detail) => window.dispatchEvent(new CustomEvent("open-settings", { detail })));
   ipcRenderer.on("minicode:menu:open-pets-settings", () => window.dispatchEvent(new Event("open-pets-settings")));
   ipcRenderer.on("minicode:menu:focus-composer", () => window.dispatchEvent(new Event("composer:focus")));
+  ipcRenderer.on("minicode:menu:undo-app-action", () => window.dispatchEvent(new Event("undo-app-action")));
+  ipcRenderer.on("minicode:menu:redo-app-action", () => window.dispatchEvent(new Event("redo-app-action")));
   ipcRenderer.on("minicode:pets:refreshed", () => window.dispatchEvent(new Event("pets:refreshed")));
   for (const event of ["new-project", "open-browser-tab", "focus-browser-address-bar", "toggle-file-tree", "toggle-bottom-panel", "toggle-pinned-summary", "toggle-side-panel", "find-in-thread", "find-next-in-thread", "find-previous-in-thread", "navigate-back", "navigate-forward", "previous-thread", "next-thread", "previous-tab", "next-tab", "close-tab", "open-shortcuts", "open-command-menu", "search-files", "search-chats"]) {
     ipcRenderer.on(`minicode:menu:${event}`, () => window.dispatchEvent(new Event(event)));

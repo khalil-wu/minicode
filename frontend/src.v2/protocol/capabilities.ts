@@ -24,6 +24,7 @@ export interface DoctorPayload {
 }
 
 export interface AgentCapabilitiesPayload {
+  realtime?: import("./realtime-types").RealtimeCapability;
   summary?: AgentCapabilitySummary;
   tools?: AgentCapabilityTool[];
   tool_views?: AgentCapabilityToolView[];

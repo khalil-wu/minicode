@@ -13,6 +13,7 @@ from backend.permissions.context import PermissionContext
 from backend.tools.registry import ToolRegistry
 from backend.tools.catalog import canonicalize_tool_schemas
 from backend.tools.toolsets import ToolsetPolicy
+from backend.tools.toolsets import SOURCE_MESSAGE_BOARD_TOOLS, SOURCE_V2_COORDINATION_TOOLS
 from backend.llm.provider_contracts import normalize_tool_mode
 
 
@@ -108,17 +109,20 @@ def effective_toolset_policy(
     model_execution: Any | None = None,
     multi_agent_version: str = "",
     config_snapshot: Any | None = None,
+    is_subagent: bool = False,
+    realtime_service: Any | None = None,
 ) -> ToolsetPolicy:
     """Build the one policy used by schema, discovery, and execution."""
 
     denied = set(disabled_tools)
+    coordination_options = None
     if model_execution is not None:
         from backend.agents.source_roles import source_agent_options
         from backend.llm.model_request_policy import source_model_request_capabilities
         from backend.tools.collaboration_tools import SpawnAgentTool, ListAgentsTool, WaitAgentTool, InterruptAgentTool
         from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
         from backend.tools.sleep_tool import CurrentTimeTool
-        from backend.tools.swarm_tools import SourceSendMessageTool
+        from backend.tools.swarm_tools import FollowupTaskTool, SourceSendMessageTool
         config = model_execution.config
         coordination = source_agent_options(config, model=model_execution.model, definition=model_execution.model_info, version=multi_agent_version)
         v2_names = {"spawn_agent", "list_agents", "wait_agent", "interrupt_agent"}
@@ -126,17 +130,40 @@ def effective_toolset_policy(
             "task_create", "task_list", "task_get", "task_update", "task_output", "team_create", "team_list", "team_delete"}
         if not coordination["enabled"]:
             denied.update(v2_names | legacy_names)
+            denied.update(SOURCE_MESSAGE_BOARD_TOOLS)
         elif coordination["version"] == "v2":
+            coordination_options = coordination
             if not isinstance(tool_registry.get_tool("send_message"), SourceSendMessageTool):
-                tool_registry.register(SourceSendMessageTool())
+                tool_registry.register(SourceSendMessageTool(), replace=True)
+            if tool_registry.get_tool("followup_task") is None:
+                tool_registry.register(FollowupTaskTool())
             task = tool_registry.get_tool("task")
             if task is not None:
                 for tool in (SpawnAgentTool(task), ListAgentsTool(), WaitAgentTool(config), InterruptAgentTool()):
                     if tool_registry.get_tool(tool.name) is None:
                         tool_registry.register(tool)
-            denied.add("task")
+            denied.update(legacy_names - {"send_message", "followup_task"})
+            if is_subagent and source_model_request_capabilities(model_execution.model,
+                    model_execution.model_info).get("multi_agent_version") != "v2":
+                denied.update(SOURCE_V2_COORDINATION_TOOLS)
+            if not coordination["wait_agent_enabled"]:
+                denied.add("wait_agent")
+            if coordination["disable_direct_message"]:
+                denied.update({"send_message", "followup_task"})
+            if coordination["message_board_enabled"]:
+                from backend.tools.agent_message_board_tools import SUPPORTED_BOARD_BACKENDS, message_board_tools
+
+                if coordination["message_board_backend"] in SUPPORTED_BOARD_BACKENDS:
+                    for tool in message_board_tools():
+                        if tool_registry.get_tool(tool.name) is None:
+                            tool_registry.register(tool)
+                else:
+                    denied.update(SOURCE_MESSAGE_BOARD_TOOLS)
+            else:
+                denied.update(SOURCE_MESSAGE_BOARD_TOOLS)
         else:
             denied.update(v2_names)
+            denied.update(SOURCE_MESSAGE_BOARD_TOOLS)
         supported = source_model_request_capabilities(model_execution.model, model_execution.model_info).get("experimental_supported_tools", [])
         if "send_user_message_async" in supported or "request_user_input_async" in supported:
             for tool in (RequestUserInputAsyncTool(), SendMessageToUserAsyncTool()):
@@ -163,7 +190,10 @@ def effective_toolset_policy(
         and permission_mode != "bypass"
     ):
         denied.update(workspace_bound_tool_names(tool_registry))
-    policy = (base_policy or ToolsetPolicy.default()).with_disabled_tools(denied)
+    policy = replace(
+        (base_policy or ToolsetPolicy.default()).with_disabled_tools(denied),
+        realtime_service=realtime_service if not is_subagent else None,
+    )
     if supports_search_tool and not any((spec := tool_registry.get_tool_spec(tool.name)).exposure in {"deferred", "deferred_model_only"}
             and policy.is_available(spec) for tool in tool_registry.get_tools()):
         policy = policy.with_disabled_tools({"tool_search"})
@@ -173,6 +203,7 @@ def effective_toolset_policy(
         code_mode_only=mode == "code_mode_only",
         code_mode_enabled=mode != "direct",
         supports_search_tool=supports_search_tool,
+        coordination_options=coordination_options,
     )
 
 

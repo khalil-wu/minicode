@@ -42,6 +42,7 @@ from backend.agent.turn_kernel import _set_terminal_reason
 from backend.llm.base import UsageInfo
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
+from backend.tools.realtime_tools import active_realtime_service
 from backend.tools.toolsets import (
     ACTIVE_TOOLSET_POLICY_METADATA_KEY,
     SESSION_TOOLSET_POLICY_METADATA_KEY,
@@ -145,8 +146,10 @@ def build_agent_loop_components(
     )
     issuing_snapshot = bootstrap.run_context.model_execution
     active_toolset_policy = effective_toolset_policy(
+        realtime_service=active_realtime_service(tool_context),
         model_execution=issuing_snapshot,
         multi_agent_version=bootstrap.run_context.multi_agent_version,
+        is_subagent=bootstrap.run_context.is_subagent or bootstrap.run_context.session_source == "subagent",
         base_policy=base_toolset_policy,
         tool_registry=tool_registry,
         disabled_tools=state.disabled_tools,

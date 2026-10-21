@@ -105,6 +105,7 @@ class ConversationThreadRuntime:
     mcp_app_runtime: Any | None = None
     node_repl_companions: Any | None = None
     cua_repl_companions: Any | None = None
+    realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
 
     def retain_turn(self, task: asyncio.Task[Any], cleanup_tasks: set[asyncio.Task[Any]]) -> None:
@@ -123,6 +124,8 @@ class ConversationThreadRuntime:
         return frozenset(pending)
 
     async def close_environments(self) -> None:
+        if self.realtime_runtime is not None:
+            await self.realtime_runtime.aclose()
         while pending := self.pending_tasks():
             await asyncio.wait(pending)
         if self.mcp_app_runtime is not None:
@@ -174,7 +177,9 @@ class ConversationExecutionContext:
         task.add_done_callback(self._lifecycle_tasks.discard)
 
     def has_active_execution(self) -> bool:
-        return self.conversation_id in self.host.run_manager.run_tasks or bool(self.pending_tasks())
+        realtime = self.thread_runtime.realtime_runtime
+        return (self.conversation_id in self.host.run_manager.run_tasks or bool(self.pending_tasks())
+            or (realtime is not None and (realtime.active or (realtime.task is not None and not realtime.task.done()))))
 
     def pending_tasks(self) -> frozenset[asyncio.Task[Any]]:
         # SessionRunManager remains the sole owner of the concrete run handles

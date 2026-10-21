@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
+    "realtime_conversation": True,
     "stable_environment_tools": False,
     "content_item_kinds": True,
     "skill_mcp_dependency_install": True,

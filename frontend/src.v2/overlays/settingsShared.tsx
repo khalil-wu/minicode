@@ -25,6 +25,7 @@ export type ProviderModelMetadata = {
 };
 
 export type ProviderSection = {
+  aws?: { endpoint?: "mantle" | "runtime"; region?: string; profile?: string | null; credential_id?: string } | null;
   display_name?: string;
   name?: string;
   label?: string;
@@ -219,6 +220,7 @@ export const historyForUiProvider = (
 export const sectionFromHistoryEntry = (entry?: ProviderHistoryEntry): ProviderSection | undefined => {
   if (!entry) return undefined;
     return {
+    aws: entry.aws,
     display_name: entry.display_name,
     name: entry.name,
     label: entry.label,

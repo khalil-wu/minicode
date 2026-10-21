@@ -40,7 +40,7 @@ describe("desktop update install preflight", () => {
       version: "2.0.0",
       checks: [{ code: "editor.dirty", severity: "blocking", message: "Unsaved editor." }],
     });
-    render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={() => {}} />);
+    render(<GeneralTab />);
 
     const installButton = await screen.findByRole("button", { name: "重启并安装" });
     fireEvent.click(installButton);
@@ -58,7 +58,7 @@ describe("desktop update install preflight", () => {
       version: "2.0.0",
       checks: [],
     });
-    render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={() => {}} />);
+    render(<GeneralTab />);
 
     fireEvent.click(await screen.findByRole("button", { name: "重启并安装" }));
 
@@ -69,7 +69,7 @@ describe("desktop update install preflight", () => {
 
   it("shows build update availability instead of offering a missing release feed", async () => {
     updateMocks.getStatus.mockResolvedValue({ status: "unavailable", sequence: 1 });
-    render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={() => {}} />);
+    render(<GeneralTab />);
     await screen.findByText("此构建未启用自动更新。");
     const check = screen.getByRole("button", { name: "检查更新" });
     expect((check as HTMLButtonElement).disabled).toBe(true);

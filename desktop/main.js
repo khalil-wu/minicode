@@ -691,6 +691,10 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
   const find = (action, event) => {
     if (!browserCommand(action)) send(event);
   };
+  const editHistory = (action) => {
+    if (browserCommand(action)) return;
+    send(`minicode:menu:${action}-app-action`);
+  };
   const stepZoom = (delta) => {
     if (browserCommand(delta === 0 ? "reset-zoom" : delta > 0 ? "zoom-in" : "zoom-out")) return;
     const window = targetWindow();
@@ -752,8 +756,8 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
       label: label("编辑", "Edit"),
       role: "editMenu",
       submenu: [
-        { role: "undo", label: label("撤销", "Undo") },
-        { role: "redo", label: label("重做", "Redo") },
+        { label: label("撤销", "Undo"), accelerator: "CmdOrCtrl+Z", click: () => editHistory("undo") },
+        { label: label("重做", "Redo"), accelerator: process.platform === "darwin" ? "Command+Shift+Z" : "Ctrl+Y", click: () => editHistory("redo") },
         { type: "separator" },
         { role: "cut", label: label("剪切", "Cut") },
         { role: "copy", label: label("复制", "Copy") },
@@ -891,6 +895,7 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
     },
   ];
   const commands = [
+    ["undoAppAction", ["撤销", "Undo"]], ["redoAppAction", ["重做", "Redo"]],
     ["newWindow", ["新建窗口", "New Window"]], ["newConversation", ["新聊天", "New Chat"]], ["newProject", ["新建项目…", "New Project…"]],
     ["openFolder", ["打开文件夹…", "Open Folder…"]], ["closeTab", ["关闭", "Close"]], ["quit", ["退出 " + app.getName(), "Quit " + app.getName()]],
     ["settings", ["设置…", "Settings…"]], ["leftSidebar", ["显示/隐藏侧边栏", "Toggle Sidebar"]], ["bottomPanel", ["显示/隐藏底部面板", "Toggle Bottom Panel"]],
@@ -941,6 +946,10 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
 }
 
 function executeApplicationMenuAction(window, action) {
+  if (action === "nativeTextUndo" || action === "nativeTextRedo") {
+    window.webContents[action === "nativeTextUndo" ? "undo" : "redo"]();
+    return true;
+  }
   buildApplicationMenu(window);
   const item = Menu.getApplicationMenu().getMenuItemById("minicode-shortcut-" + action);
   if (!item) throw new TypeError("Unknown native menu command: " + action);

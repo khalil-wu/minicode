@@ -3,7 +3,8 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const src = path.join(root, "src.v2");
-const distAssets = path.join(path.resolve(root, process.env.MINICODE_BUILD_OUTPUT || "dist"), "assets");
+const dist = path.resolve(root, process.env.MINICODE_BUILD_OUTPUT || "dist");
+const distAssets = path.join(dist, "assets");
 const limits = {
   // Frozen after the 2026-07-17 workbench visual consolidation. New changes
   // must reduce or preserve this count; they must not silently raise it.
@@ -74,7 +75,8 @@ for (const file of tsFiles) {
 
 const assets = await readdir(distAssets);
 const tsWorker = assets.find((name) => name.startsWith("ts.worker-") && name.endsWith(".js"));
-const mainJs = assets.find((name) => name.startsWith("index-") && name.endsWith(".js"));
+const html = await readFile(path.join(dist, "index.html"), "utf8");
+const mainJs = html.match(/<script[^>]+src=["']\.\/assets\/(index-[^"']+\.js)["']/i)?.[1];
 if (!mainJs) throw new Error("Run npm run build before checking UI debt budgets.");
 
 const measurements = {
@@ -90,7 +92,7 @@ const failures = Object.entries(limits)
   .filter(([key, limit]) => measurements[key] > limit)
   .map(([key, limit]) => `${key}: ${measurements[key]} > ${limit}`);
 
-console.log(JSON.stringify({ measurements, limits }, null, 2));
+console.log(JSON.stringify({ entry: mainJs, measurements, limits }, null, 2));
 if (failures.length) {
   console.error(`UI debt budget exceeded:\n${failures.join("\n")}`);
   process.exitCode = 1;

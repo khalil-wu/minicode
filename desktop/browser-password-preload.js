@@ -6,11 +6,15 @@ const editedPasswords = new WeakSet();
 document.addEventListener("click", event => {
   if (!event.isTrusted || event.defaultPrevented || event.button !== 0
     || !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)) return;
-  const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement);
-  if (!anchor?.hasAttribute("href") || !/^https?:/i.test(anchor.href)) return;
+  const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement || node instanceof SVGAnchorElement);
+  if (!anchor) return;
+  const svg = anchor instanceof SVGAnchorElement;
+  if (svg ? !anchor.hasAttribute("href") && !anchor.hasAttributeNS("http://www.w3.org/1999/xlink", "href") : !anchor.hasAttribute("href")) return;
+  const url = svg ? URL.parse(anchor.href.baseVal, anchor.baseURI)?.href : anchor.href;
+  if (!url || !/^https?:/i.test(url)) return;
   const accepted = ipcRenderer.sendSync("minicode:browserLink:click", {
     documentUrl: location.href,
-    url: anchor.href,
+    url,
     modifiers: { ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey },
   });
   if (accepted) {

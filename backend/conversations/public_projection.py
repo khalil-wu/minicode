@@ -342,6 +342,8 @@ def _project_block(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         return None
     block_type = public_text(value.get("type"), max_chars=64, single_line=True)
+    if block_type == "realtime":
+        return {"type": "realtime", "item": _public_json(value["item"])}
     if block_type == "user_input":
         user_message_id = public_text(value["userMessageId"], max_chars=1_024, single_line=True)
         return {"type": "user_input", "userMessageId": user_message_id}
@@ -976,6 +978,7 @@ def project_public_conversation(
         if count is not None:
             projected[key] = count
     projected["project_id"] = public_text(source["project_id"], max_chars=4_096) if source.get("project_id") is not None else None
+    projected["resource_references"] = source.get("resource_references", [])
     for key in ("memory_polluted", "archived", "git_isolated", "pinned", "has_unread_turn"):
         if isinstance(source.get(key), bool):
             projected[key] = bool(source.get(key))

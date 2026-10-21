@@ -9,6 +9,7 @@ import {
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { isToolDelegations } from "../lib/tool-call-reducer";
 import { isMcpAppReceipt } from "./mcp-app-types";
+import { REALTIME_EVENT_TYPES, isRealtimeItem } from "./realtime-types";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -247,6 +248,7 @@ const REQUIRED_ROUTING_FIELDS: Partial<
 };
 
 const CONVERSATION_OWNED_EVENT_TYPES = new Set<ServerEventType>([
+  ...REALTIME_EVENT_TYPES,
   "scheduler.heartbeat.renderer_state.request",
   "item.started",
   "agent_message.delta",
@@ -2212,7 +2214,12 @@ const hasValidSemanticPayload = (
         : !("position" in value))
       && (turnMode === undefined || dequeued)
       && (turnMode !== "steer" || value.reason === "steered_current_turn")
-      && (value.reason !== "steered_current_turn" || dequeued);
+      && (value.reason !== "steered_current_turn" || dequeued)
+      && (!("input" in value) || (queued && isRecord(value.input)
+        && typeof value.input.content === "string"
+        && (!("display_content" in value.input) || typeof value.input.display_content === "string")
+        && (!("attachments" in value.input) || Array.isArray(value.input.attachments))
+        && (!("context_refs" in value.input) || Array.isArray(value.input.context_refs))));
   }
   if (!valid) {
     // Name the shape, not the content: a payload can carry user text, but the
@@ -2258,6 +2265,34 @@ export const normalizeInboundServerEvent = (value: unknown): ServerEvent | null 
   }
 
   const knownType = type as ServerEventType;
+  if ((REALTIME_EVENT_TYPES as readonly string[]).includes(type)) {
+    if (typeof value.threadId !== "string" || !value.threadId || value.threadId !== value.conversation_id) return null;
+    switch (type) {
+      case "thread/realtime/started":
+        if (!["v1", "v2", "v3"].includes(String(value.version)) || !(value.realtimeSessionId === null || typeof value.realtimeSessionId === "string")) return null;
+        break;
+      case "thread/realtime/item/started":
+      case "thread/realtime/item/completed": if (!isRealtimeItem(value.item)) return null; break;
+      case "thread/realtime/itemAdded": if (!isRecord(value.item)) return null; break;
+      case "thread/realtime/item/transcript/delta":
+        if (typeof value.itemId !== "string" || typeof value.delta !== "string") return null;
+        break;
+      case "thread/realtime/transcript/delta":
+        if (typeof value.role !== "string" || typeof value.delta !== "string") return null;
+        break;
+      case "thread/realtime/transcript/done":
+        if (typeof value.role !== "string" || typeof value.text !== "string") return null;
+        break;
+      case "thread/realtime/outputAudio/delta":
+        if (!isRecord(value.audio) || typeof value.audio.data !== "string"
+          || !Number.isSafeInteger(value.audio.sampleRate) || Number(value.audio.sampleRate) <= 0
+          || !Number.isSafeInteger(value.audio.numChannels) || Number(value.audio.numChannels) <= 0) return null;
+        break;
+      case "thread/realtime/sdp": if (typeof value.sdp !== "string") return null; break;
+      case "thread/realtime/error": if (typeof value.message !== "string") return null; break;
+      case "thread/realtime/closed": if (!(value.reason === null || typeof value.reason === "string")) return null; break;
+    }
+  }
   if (!hasValidEnvelope(value, type) || !hasRequiredRoutingFields(value, knownType)) return null;
   if (CONVERSATION_OWNED_EVENT_TYPES.has(knownType) && !isNonEmptyString(value.conversation_id)) {
     console.warn("[ws] Dropping server event without conversation owner", type);

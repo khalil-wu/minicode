@@ -283,6 +283,7 @@ export interface DiffLineComment {
 }
 
 export interface ConversationWorkbenchState {
+  queuedEdit?: import("./composer-drafts").QueuedMessageEdit;
   agentMode?: AgentMode;
   goalMode?: boolean;
   diffReview: DiffReviewState | null;
@@ -1305,6 +1306,8 @@ export type ContentBlock = (GuardianAssessmentContentBlock | GuardianWarningCont
 export interface ToolHistoryPage { before: number; remaining: number; total: number; revision?: string }
 
 export interface ChatMessage {
+  realtimeItem?: import("../protocol/realtime-types").RealtimeItem;
+  realtimeCompleted?: boolean;
   asyncRequestId?: string;
   id: string;
   turnId?: string;
@@ -1374,6 +1377,7 @@ export interface ConversationMeta {
   archived?: boolean;
   pinned?: boolean;
   pinnedAt?: string;
+  resourceReferences?: import("../protocol/thread-metadata").ThreadResourceReference[];
   hasUnreadTurn?: boolean;
   projectId?: string | null;
   memoryMode?: "enabled" | "disabled" | "polluted" | string;
@@ -1509,7 +1513,7 @@ export interface ChatSlice {
   switchConversation: (id: string) => void;
   pendingComposerConversationAdoption: { conversationId: string; workspaceRoot: string } | null;
   ensureComposerConversation: () => Promise<string | null>;
-  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode; adoptDraft?: boolean }) => Promise<boolean>;
+  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode; adoptDraft?: boolean; sidebarSectionId?: string }) => Promise<boolean>;
   removeConversation: (id: string) => Promise<boolean>;
   getVisibleMessages: (conversationId?: string | null) => ChatMessage[];
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string, revision?: number) => void;
@@ -1674,6 +1678,7 @@ export interface ComposerAttachment {
   inputSource?: "pasted_text" | "upload";
   sourceCharCount?: number;
   localFile?: File;
+  remoteSourcePath?: string;
 }
 
 export interface ComposerQuote {
@@ -1683,6 +1688,7 @@ export interface ComposerQuote {
 }
 
 export interface ComposerSlice {
+  queuedEdit?: import("./composer-drafts").QueuedMessageEdit;
   goalMode: boolean;
   workspaceComposerDrafts: Record<string, import("./composer-drafts").ComposerDraft>;
   composerDraftsReady: boolean;

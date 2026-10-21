@@ -94,6 +94,15 @@ class SkillLoader:
         self._direct_skill_roots: set[str] = set()
         self._disabled_plugin_roots: set[str] = set()
         self._config_stack = None
+        self._extra_roots: tuple[Path, ...] = ()
+
+    def set_extra_roots(self, roots: tuple[Path, ...]) -> None:
+        self._extra_roots = roots
+        self._discovered = False
+        self._catalog.clear()
+        self._settings_catalog.clear()
+        self._path_cache.clear()
+        self._full_cache.clear()
 
     @property
     def skills_configuration(self) -> SkillsConfiguration:
@@ -143,6 +152,7 @@ class SkillLoader:
         dirs.append(("managed", _get_managed_minicode_dir() / "skills"))
         dirs.extend(self._plugin_search_dirs())
         dirs.append(("user", get_minicode_config_home_dir() / "skills"))
+        dirs.extend(("user", path) for path in self._extra_roots)
         dirs.extend(("workspace", path / ".minicode" / "skills") for path in workspace_ancestors)
         dirs.append(("builtin", PROJECT_ROOT / "skills"))
 

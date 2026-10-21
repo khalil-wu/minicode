@@ -15,6 +15,10 @@
  * lucide icons here first, then import from this module.
  */
 export {
+  AudioLines,
+  MicOff,
+  Volume2,
+  VolumeX,
   AppWindow,
   BarChart3,
   Book,
@@ -94,6 +98,10 @@ export {
   FlaskConical,
   Gauge,
   GitBranch,
+  GitMerge,
+  GitPullRequest,
+  GitPullRequestClosed,
+  GitPullRequestDraft,
   GitCompare,
   Globe,
   Globe2,

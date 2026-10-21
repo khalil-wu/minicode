@@ -47,7 +47,7 @@ beforeEach(() => {
 afterEach(cleanup);
 
 it("renders the real discovered app icon and full label and changes only the global preference", () => {
-  const view = render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  const view = render(<GeneralTab />);
   const trigger = screen.getByRole("button", { name: "默认文件打开位置，当前：VS Code" });
   expect(trigger.closest(".mc-select-menu")?.classList.contains("settings-select")).toBe(true);
   const selectedIcon = trigger.querySelector("img")!.getAttribute("src");
@@ -59,13 +59,13 @@ it("renders the real discovered app icon and full label and changes only the glo
   expect(native.update).toHaveBeenCalledExactlyOnceWith({ fileOpenTarget: "visualStudio" });
   expect(native.preferences!.fileOpenTargetPerPath).toEqual({ "C:/original-owner": "cursor" });
   native.preferences = { ...native.preferences!, fileOpenTarget: "visualStudio" };
-  view.rerender(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  view.rerender(<GeneralTab />);
   expect(screen.getByRole("button", { name: "默认文件打开位置，当前：Visual Studio" }).querySelector("img")).toBeTruthy();
   expect(useAppStore.getState().draft).toBe("ORIGINAL UNSENT DRAFT");
 });
 
 it("publishes the actual available shell id and retains complete preference labels", () => {
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   fireEvent.click(screen.getByRole("button", { name: "集成终端 Shell，当前：PowerShell" }));
   fireEvent.click(screen.getByRole("option", { name: "Command Prompt" }));
   expect(native.update).toHaveBeenCalledExactlyOnceWith({ terminalShell: "cmd" });
@@ -78,8 +78,8 @@ it("publishes the actual available shell id and retains complete preference labe
 });
 
 it("keeps every General preference on the shared menu and preserves the real task path title", () => {
-  const view = render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
-  expect(view.container.querySelectorAll(".settings-row-control > .mc-select-menu.settings-select")).toHaveLength(10);
+  const view = render(<GeneralTab />);
+  expect(view.container.querySelectorAll(".settings-row-control > .mc-select-menu.settings-select")).toHaveLength(9);
   expect(view.container.querySelectorAll(".settings-row-control > select:not(.mc-select-native-proxy)")).toHaveLength(0);
   const taskPath = view.container.querySelector(".settings-general-task-path")!;
   expect(taskPath.textContent).toBe(native.preferences!.defaultTaskDirectory);
@@ -87,23 +87,23 @@ it("keeps every General preference on the shared menu and preserves the real tas
   expect(screen.queryByRole("button", { name: /智能体环境/ })).toBeNull();
 });
 
-it("changes the actual composer and content choices through the same menu without clearing the draft", () => {
-  const remotePolicy = vi.fn();
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={remotePolicy} />);
+it("changes the actual composer choices and keeps unrelated stored media preferences", () => {
+  useAppStore.setState({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });
+  render(<GeneralTab />);
   fireEvent.click(screen.getByRole("button", { name: "发送快捷键，当前：按 Enter 键" }));
   fireEvent.click(screen.getByRole("option", { name: "总是使用 ^ + Enter" }));
   expect(useAppStore.getState().sendShortcut).toBe("mod-enter");
   fireEvent.click(screen.getByRole("radio", { name: "引导" }));
   expect(useAppStore.getState().followUpBehavior).toBe("steer");
   fireEvent.click(screen.getByText("高级", { selector: "summary" }));
-  fireEvent.click(screen.getByRole("button", { name: "远程 Markdown 图片，当前：询问" }));
-  fireEvent.click(screen.getByRole("option", { name: "阻止" }));
-  expect(remotePolicy).toHaveBeenCalledExactlyOnceWith("block");
+  expect(screen.queryByRole("button", { name: /远程 Markdown 图片/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "清除列表" })).toBeNull();
+  expect(useAppStore.getState()).toMatchObject({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });
   expect(useAppStore.getState().draft).toBe("ORIGINAL UNSENT DRAFT");
 });
 
 it("keeps Queue and Steer as one keyboard-accessible segmented preference", () => {
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   const queue = screen.getByRole("radio", { name: "排队" });
   const steer = screen.getByRole("radio", { name: "引导" });
   expect(queue.getAttribute("aria-checked")).toBe("true");
@@ -118,7 +118,7 @@ it("keeps Queue and Steer as one keyboard-accessible segmented preference", () =
 
 it("persists real maintenance choices and a native sound selection while retaining the original draft", async () => {
   native.previewNotificationSound.mockResolvedValue(undefined);
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   fireEvent.click(screen.getByRole("button", { name: "自动归档闲置聊天，当前：从不" }));
   expect(screen.getAllByRole("option").map(option => option.textContent)).toEqual(["从不", "1 天", "7 天", "14 天", "30 天", "90 天"]);
   fireEvent.click(screen.getByRole("option", { name: "14 天" }));
@@ -135,7 +135,7 @@ it("persists real maintenance choices and a native sound selection while retaini
 
 it("canceling the native custom sound picker retains the saved sound", async () => {
   native.pickNotificationSound.mockResolvedValue(null);
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   fireEvent.click(screen.getByRole("button", { name: "通知声音，当前：默认" }));
   fireEvent.click(screen.getByRole("option", { name: "选择自定义声音…" }));
   await vi.waitFor(() => expect(native.pickNotificationSound).toHaveBeenCalledOnce());
@@ -146,7 +146,7 @@ it("canceling the native custom sound picker retains the saved sound", async () 
 
 it("uses the real Startup Apps and license detail consumers and changes only bottom-panel launcher visibility", async () => {
   const onOpenLicenses = vi.fn();
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} onOpenLicenses={onOpenLicenses} />);
+  render(<GeneralTab onOpenLicenses={onOpenLicenses} />);
   await vi.waitFor(() => expect(native.getStartupStatus).toHaveBeenCalledOnce());
   fireEvent.click(screen.getByRole("button", { name: "打开启动应用" }));
   await vi.waitFor(() => expect(native.openStartupSettings).toHaveBeenCalledOnce());
@@ -160,7 +160,7 @@ it("uses the real Startup Apps and license detail consumers and changes only bot
 it("the global plugins switch uses the true feature mutation and preserves per-chat state", async () => {
   let complete: () => void;
   pluginsFeature.set.mockReturnValueOnce(new Promise<void>(resolve => { complete = resolve; }));
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   fireEvent.click(screen.getByRole("switch", { name: "启用插件" }));
   await vi.waitFor(() => expect(pluginsFeature.set).toHaveBeenCalledExactlyOnceWith(false));
   expect(screen.queryByText("重启 MiniCode 以完整应用此更改。")).toBeNull();
@@ -171,7 +171,7 @@ it("the global plugins switch uses the true feature mutation and preserves per-c
 });
 
 it("selects Source's multiline Enter mode and restores that exact preference without changing the current draft", () => {
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   fireEvent.click(screen.getByRole("button", { name: "发送快捷键，当前：按 Enter 键" }));
   expect(screen.getAllByRole("option").map(option => option.textContent)).toEqual([
     "按 Enter 键", "^ + Enter 用于多行提示", "总是使用 ^ + Enter",
@@ -184,7 +184,7 @@ it("selects Source's multiline Enter mode and restores that exact preference wit
 
 it("confirms only Full access visibility and leaves cancellation, the active permission mode, and drafts intact", () => {
   native.preferences = { ...native.preferences!, showFullAccess: false, urlOpenTarget: "in-app-browser" };
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   const toggle = screen.getByRole("switch", { name: "完整访问权限" });
   fireEvent.click(toggle);
   let dialog = screen.getByRole("dialog", { name: "要启用完整访问权限吗？" });
@@ -211,7 +211,7 @@ it("confirms only Full access visibility and leaves cancellation, the active per
 });
 
 it("hides Full access immediately without a confirmation or changing the mandatory default option", () => {
-  render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+  render(<GeneralTab />);
   const mandatory = screen.getByRole("switch", { name: "始终显示默认权限" }) as HTMLButtonElement;
   expect(mandatory.disabled).toBe(true);
   expect(mandatory.getAttribute("aria-checked")).toBe("true");

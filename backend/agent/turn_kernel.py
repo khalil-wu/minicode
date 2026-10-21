@@ -140,6 +140,7 @@ class TurnKernel:
             self.run_context.turn_input_queue = turn_input_queue
         self._turn_input_queue = turn_input_queue
         self._turn_input_queue.begin_turn(run_record.run_id)
+        self.runtime.message_boards.bind_turn(run_record, metadata, self._turn_input_queue)
         self.run_context.publish_turn_started(str(metadata.get("turn_id") or run_record.run_id))
         self._next_user_message = initial_user_message
         self._next_user_attachments: tuple[dict[str, Any], ...] | None = None
@@ -294,6 +295,7 @@ class TurnKernel:
         )
         self.state.terminal_status = normalized_status
         self.defer_mailbox_to_next_turn()
+        self.runtime.message_boards.unbind_turn(self.run_record)
         if self._run_completed_emitted:
             return None
         try:

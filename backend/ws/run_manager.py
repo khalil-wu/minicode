@@ -240,6 +240,30 @@ class SessionRunManager:
         self._persist_user_queues(queues={**self._user_message_queues, conversation_id: queue})
         return len(queue)
 
+    def add_queued_user_message(self, conversation_id: str, command: UserCommand) -> int:
+        def validate_admission():
+            record = self._session.conversation_repo.get_conversation(conversation_id)
+            if record is None:
+                raise ValueError("The queued conversation no longer exists")
+            ids = {command.data["assistant_message_id"], command.data["user_message_id"]}
+            if any(item.get("id") in ids for item in record.transcript) or command.data["user_message_id"] in record.context_snapshot.get("turn_admissions", {}):
+                raise ValueError("This queued input has already been admitted")
+            stream = self._session._conversation_streams.get(conversation_id)
+            if stream is not None and stream.get("message_id") == command.data["assistant_message_id"]:
+                raise ValueError("This queued input already belongs to an active turn")
+
+        if self._durable_queue is not None:
+            count = self._durable_queue.add_queued_user_message(conversation_id, command, validate_admission)
+            self.queued_user_messages(conversation_id)
+            return count
+        owned = [*self.queued_user_messages(conversation_id), *self._durable_turn_inputs.get(conversation_id, []),
+            *([self._inflight_user_messages[conversation_id]] if conversation_id in self._inflight_user_messages else [])]
+        if any(item.data.get("assistant_message_id") == command.data["assistant_message_id"]
+            or item.data.get("user_message_id") == command.data["user_message_id"] for item in owned):
+            raise ValueError("This queued input is already pending or has been claimed")
+        validate_admission()
+        return self.enqueue_user_message(conversation_id, command)
+
     def set_user_queue_paused(self, conversation_id: str, stopped_message_id: str) -> None:
         if self._durable_queue is not None:
             self._durable_queue.set_user_queue_paused(conversation_id, stopped_message_id)
@@ -261,12 +285,12 @@ class SessionRunManager:
             claimed = self._durable_queue.claim_user_message(conversation_id)
             remaining = self._durable_queue.pending_user_messages(conversation_id)
             command = next(
-                (candidate for candidate in local_commands if claimed is not None and self._durable_queue.same_user_command(candidate, claimed)),
+                (candidate for candidate in local_commands if claimed is not None and self._durable_queue.same_pending_payload(candidate, claimed)),
                 claimed,
             )
             remaining = [
                 next(
-                    (candidate for candidate in local_commands if self._durable_queue.same_user_command(candidate, persisted)),
+                    (candidate for candidate in local_commands if self._durable_queue.same_pending_payload(candidate, persisted)),
                     persisted,
                 )
                 for persisted in remaining
@@ -313,7 +337,7 @@ class SessionRunManager:
             remaining = self._durable_queue.pending_user_messages(conversation_id)
             remaining = [
                 next(
-                    (candidate for candidate in local_commands if self._durable_queue.same_user_command(candidate, persisted)),
+                    (candidate for candidate in local_commands if self._durable_queue.same_pending_payload(candidate, persisted)),
                     persisted,
                 )
                 for persisted in remaining
@@ -383,7 +407,7 @@ class SessionRunManager:
             local = list(self._user_message_queues.get(conversation_id) or ())
             pending = self._durable_queue.pending_user_messages(conversation_id)
             commands = [
-                next((command for command in local if self._durable_queue.same_user_command(command, persisted)), persisted)
+                next((command for command in local if self._durable_queue.same_pending_payload(command, persisted)), persisted)
                 for persisted in pending
             ]
             if commands:
@@ -424,6 +448,40 @@ class SessionRunManager:
         else:
             queues.pop(conversation_id, None)
         self._persist_user_queues(queues=queues)
+
+    def update_queued_user_message(self, conversation_id: str, message_id: str, payload: dict[str, Any]) -> Any | None:
+        if self._durable_queue is not None:
+            command = self._durable_queue.update_queued_user_message(conversation_id, message_id, payload)
+            self.queued_user_messages(conversation_id)
+            return command
+        from dataclasses import replace
+        from backend.ws.utils import USER_INPUT_METADATA_KEYS
+
+        queue = self.queued_user_messages(conversation_id)
+        index = next((index for index, command in enumerate(queue)
+            if command.data.get("assistant_message_id") == message_id), -1)
+        if index < 0:
+            return None
+        data = dict(queue[index].data)
+        for key in (*USER_INPUT_METADATA_KEYS, "attachments", "skills", "plugins"):
+            data.pop(key, None)
+        data.update(payload)
+        data["_submitted_content"] = payload["content"]
+        queue[index] = replace(queue[index], data=data)
+        self.replace_user_message_queue(conversation_id, queue)
+        return queue[index]
+
+    def reorder_queued_user_messages(self, conversation_id: str, message_ids: list[str]) -> list[Any]:
+        if self._durable_queue is not None:
+            self._durable_queue.reorder_queued_user_messages(conversation_id, message_ids)
+            return self.queued_user_messages(conversation_id)
+        queue = self.queued_user_messages(conversation_id)
+        if sorted(message_ids) != sorted(command.data["assistant_message_id"] for command in queue):
+            raise ValueError("queue reorder must include every queued submission exactly once")
+        by_id = {command.data["assistant_message_id"]: command for command in queue}
+        ordered = [by_id[message_id] for message_id in message_ids]
+        self.replace_user_message_queue(conversation_id, ordered)
+        return ordered
 
     def _without_durable_turn_input(self, conversation_id: str, command: Any) -> tuple[dict[str, list[Any]], bool]:
         turn_inputs = dict(self._durable_turn_inputs)

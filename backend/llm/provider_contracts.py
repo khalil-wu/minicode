@@ -302,6 +302,7 @@ class ProviderAdapterSpec:
     tool_mode: str = ""
     supports_hosted_web_search: bool | None = None
     supports_search_tool: bool = False
+    aws: Mapping[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)

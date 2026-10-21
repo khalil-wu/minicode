@@ -45,6 +45,7 @@ export type CommonServerEventType =
   | "llm.provider.oauth.progress"
   // UI catalogs / notices
   | "skills.list"
+  | "skills/changed"
   | "skills.marketplace.list"
   | "commands.list"
   | "system_notice";
@@ -63,6 +64,7 @@ export type CommonClientCommandType =
   // Skills
   | "skills.list"
   | "skills.install"
+  | "skills/extraRoots/set"
   | "skills.marketplace.list"
   // Commands catalog
   | "commands.list"

@@ -330,11 +330,30 @@ def create_workspace_router() -> APIRouter:
 
     @router.post("/git/delivery")
     async def workspace_git_delivery_action(request: GitDeliveryRequest, http_request: Request, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):
+        from backend.api import _state
+        session_id = http_request.query_params.get("session_id")
+        conversation_id = http_request.query_params.get("conversation_id")
+        repository = _state.ws_manager.get_session(session_id).conversation_repo if session_id else None
+
+        async def deliver():
+            if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+                from .executor_delivery import executor_delivery_action
+                result = await executor_delivery_action(service, request)
+            else:
+                result = await git_delivery_action(_local_service(service).workspace_root_path(), request)
+            if repository is not None and request.action in {"draft_pr", "create_pr"}:
+                from backend.conversations.thread_resources import pull_request_resource
+                from backend.services.thread_metadata_service import publish_thread_metadata
+                identity, payload = pull_request_resource(result["url"], root=workspace_root, head_branch=request.expected_branch)
+                await to_thread_cancel_safe(repository.thread_resources.add, conversation_id, "pull_request",
+                    identity, payload)
+                await publish_thread_metadata(repository)
+            return result
+
         if isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
-            from .executor_delivery import executor_delivery_action
             from .executor_commands import workbench_http_request
-            return await workbench_http_request(http_request, executor_delivery_action(service, request))
-        return await git_delivery_action(_local_service(service).workspace_root_path(), request)
+            return await workbench_http_request(http_request, deliver())
+        return await deliver()
 
     @router.post("/git/generate-message")
     async def workspace_git_generate_message(request: GitMessageRequest, http_request: Request, workspace_root: str = Query(..., min_length=1), service=Depends(_request_service)):

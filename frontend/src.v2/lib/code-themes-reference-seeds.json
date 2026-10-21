@@ -1,11 +1,21 @@
 {
   "sourceSha256": "799331dde54905c4df5e360f23a9621141759e2c0acb230aeab909f9904b646f",
+  "method": "Original retained Source registry parsed without invoking loaders; reviewed pure Mya then Nya computes seeds from independently statically decoded exact theme assets. Fonts excluded by the existing MiniCode user preference. Full-theme SHA256 sorts object keys lexically and preserves every array entry and rule order. No MiniCode implementation generates expectations.",
   "cases": [
     {
+      "id": "ayu",
       "registrationName": "ayu-dark",
       "variant": "dark",
+      "sourceAsset": "ayu-dark-caa06d477d0a.js",
+      "sourceAssetSha256": "07d8b2a72c2e7d0f1d67c539b6f22a49c33421b9ef1d2daa9f582fde2d58ea5b",
+      "completeThemeSha256": "4199f367b4e2045a3c91c4c5be19ebc745d9571215b0aad7bc8a77cdd0e5672b",
       "tokenRuleCount": 66,
       "semanticTokenCount": 21,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#e6b450",
         "ink": "#bfbdb6",
@@ -19,10 +29,19 @@
       }
     },
     {
+      "id": "catppuccin",
       "registrationName": "catppuccin-latte",
       "variant": "light",
+      "sourceAsset": "catppuccin-latte-943235df260d.js",
+      "sourceAssetSha256": "0a174a37a148d67c0534ba9de8aee7811698ec78bbe09901cff6c15b1b6dcfd3",
+      "completeThemeSha256": "90cb362de5c3432f3df2c8a8051905d2ffacb9bb1014d4268f06895caa06068c",
       "tokenRuleCount": 179,
       "semanticTokenCount": 30,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#8839ef",
         "ink": "#4c4f69",
@@ -36,10 +55,19 @@
       }
     },
     {
+      "id": "catppuccin",
       "registrationName": "catppuccin-mocha",
       "variant": "dark",
+      "sourceAsset": "catppuccin-mocha-1eac89cf4105.js",
+      "sourceAssetSha256": "d6f665dd25550db56a686c4b8a997e8c3d887fbf8fe709030fadcf0a5af9c56e",
+      "completeThemeSha256": "3b3525064b6e3e8c6fb5a6fc508cfa7d5b7dc0747a94344433bb1e6249196878",
       "tokenRuleCount": 179,
       "semanticTokenCount": 30,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#cba6f7",
         "ink": "#cdd6f4",
@@ -53,10 +81,19 @@
       }
     },
     {
+      "id": "vscode-plus",
       "registrationName": "dark-plus",
       "variant": "dark",
+      "sourceAsset": "dark-plus-32c27043a3c2.js",
+      "sourceAssetSha256": "48ad68f8251a1c56cc17f1e128ab487b7153ced2c5a28cdd4b0f6569683f0e3e",
+      "completeThemeSha256": "03ee72d7ed7259a69f38fc96a637b1f08a9f9cd41ad281f268295b67f7a0ae7c",
       "tokenRuleCount": 65,
       "semanticTokenCount": 4,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#007acc",
         "ink": "#d4d4d4",
@@ -70,10 +107,19 @@
       }
     },
     {
+      "id": "dracula",
       "registrationName": "dracula",
       "variant": "dark",
+      "sourceAsset": "dracula-8ebb6e65aee6.js",
+      "sourceAssetSha256": "d9ad912f75fb3660e6144bcf57a370aa498a58ccbbe68c073c943f31913905bb",
+      "completeThemeSha256": "4231c79ec34e2aabd544fe5c55b00e25adf3d0ca06121c2dbf7dc801acd3458a",
       "tokenRuleCount": 85,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#ff79c6",
         "ink": "#f8f8f2",
@@ -87,10 +133,19 @@
       }
     },
     {
+      "id": "everforest",
       "registrationName": "everforest-dark",
       "variant": "dark",
+      "sourceAsset": "everforest-dark-6f013163b553.js",
+      "sourceAssetSha256": "3fd473a8aa65313b725d1055a30af5729dd331dadb3fc591475884bb94b80b5b",
+      "completeThemeSha256": "6a60653606febf22a3bf7f24a053b8ac22cd1b6c9c7aa4845733603387e32384",
       "tokenRuleCount": 276,
       "semanticTokenCount": 26,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#a7c080",
         "ink": "#d3c6aa",
@@ -104,10 +159,19 @@
       }
     },
     {
+      "id": "everforest",
       "registrationName": "everforest-light",
       "variant": "light",
+      "sourceAsset": "everforest-light-fa3b6116afe0.js",
+      "sourceAssetSha256": "8e89074af8f2a8280c4b24487f288f8a14e968a6cbd5222389ee77f1d7c771f2",
+      "completeThemeSha256": "41c6a63aefad7c750cfe7c21baa70f30db1dac6b84d9d103637dfb54aeabcee3",
       "tokenRuleCount": 276,
       "semanticTokenCount": 26,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#93b259",
         "ink": "#5c6a72",
@@ -121,10 +185,19 @@
       }
     },
     {
+      "id": "github",
       "registrationName": "github-dark-default",
       "variant": "dark",
+      "sourceAsset": "github-dark-default-b8e70e64710b.js",
+      "sourceAssetSha256": "e88ad9d1a832ef0ec9443c54534734435d795e8694a0df9154ed16ffc27d43e1",
+      "completeThemeSha256": "f44884588ea9b759a6ac4d2c911a3f48b12797e4f9a8d12e58ee6b6629436c06",
       "tokenRuleCount": 49,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#1f6feb",
         "ink": "#e6edf3",
@@ -138,10 +211,19 @@
       }
     },
     {
+      "id": "github",
       "registrationName": "github-light-default",
       "variant": "light",
+      "sourceAsset": "github-light-default-17c4595cade8.js",
+      "sourceAssetSha256": "7f548e2d77e1e83bbe0b4a33d211864248295dea9ec768da1f1ea7326f0d4517",
+      "completeThemeSha256": "f0cb5e4a67a8a6df08db66e16f904aa75756e856341850343384494feecceb36",
       "tokenRuleCount": 49,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#0969da",
         "ink": "#1f2328",
@@ -155,10 +237,19 @@
       }
     },
     {
+      "id": "gruvbox",
       "registrationName": "gruvbox-dark-medium",
       "variant": "dark",
+      "sourceAsset": "gruvbox-dark-medium-8ca3a11da780.js",
+      "sourceAssetSha256": "8d52f952fa70dfe671589d115c00da14df61677a3462f2d985a4b37d1a5a775d",
+      "completeThemeSha256": "2c383e10f10ed6a895b1e2c23620f576319df752eaeaf81ec9e491c7973127bf",
       "tokenRuleCount": 127,
       "semanticTokenCount": 9,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#458588",
         "ink": "#ebdbb2",
@@ -172,10 +263,19 @@
       }
     },
     {
+      "id": "gruvbox",
       "registrationName": "gruvbox-light-medium",
       "variant": "light",
+      "sourceAsset": "gruvbox-light-medium-a0d95c5132f1.js",
+      "sourceAssetSha256": "1608a6b39bf326d2e1e242721689e8954e5bffe3b2c38ad7376b14ca74cc4cb5",
+      "completeThemeSha256": "79390748afa49f7c0099b910d16d369d25b3eec65aa5cf5cfae59b0fa3fe5350",
       "tokenRuleCount": 127,
       "semanticTokenCount": 9,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#458588",
         "ink": "#3c3836",
@@ -189,10 +289,19 @@
       }
     },
     {
+      "id": "vscode-plus",
       "registrationName": "light-plus",
       "variant": "light",
+      "sourceAsset": "light-plus-3813864be474.js",
+      "sourceAssetSha256": "5b101738273e26ea13e9749e3188d94d91089ebf5e0cf1ec17686a2c3fe9f113",
+      "completeThemeSha256": "9242a1f31727cf79647868df33aa5c5cf1943fbbb14206389c9009af61de16a3",
       "tokenRuleCount": 64,
       "semanticTokenCount": 4,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#007acc",
         "ink": "#000000",
@@ -206,10 +315,19 @@
       }
     },
     {
+      "id": "material",
       "registrationName": "material-theme-darker",
       "variant": "dark",
+      "sourceAsset": "material-theme-darker-d928f5e53ef3.js",
+      "sourceAssetSha256": "5f975f99e1ea36b683dbf9c613519fad6dc9e49bc95144bfb81360e3ea13d56f",
+      "completeThemeSha256": "23fca5e8499d0be45876540489b8a0d791a4edd9a7bde268d04adda726e52492",
       "tokenRuleCount": 82,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#80cbc4",
         "ink": "#eeffff",
@@ -223,10 +341,19 @@
       }
     },
     {
+      "id": "monokai",
       "registrationName": "monokai",
       "variant": "dark",
+      "sourceAsset": "monokai-34b7c8264728.js",
+      "sourceAssetSha256": "7fa223d4360c3820a48256652acb6c2c13f70fdfbcfc5a51822dfcb580c2247e",
+      "completeThemeSha256": "58466581a8d094ce7ebec95bf920f1a903eb744301f75a3b16699fbdbecc78a7",
       "tokenRuleCount": 52,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#99947c",
         "ink": "#f8f8f2",
@@ -240,10 +367,19 @@
       }
     },
     {
+      "id": "night-owl",
       "registrationName": "night-owl",
       "variant": "dark",
+      "sourceAsset": "night-owl-bc28b7f0d7a4.js",
+      "sourceAssetSha256": "3ecb8e072a54061360f91d6975fe678b7085417440238978022751461e93c4a0",
+      "completeThemeSha256": "dffcd88da888879a52a64165ca49330dfbb2c39f2a82171d7c76747ed32b61a1",
       "tokenRuleCount": 196,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#44596b",
         "ink": "#d6deeb",
@@ -257,10 +393,19 @@
       }
     },
     {
+      "id": "nord",
       "registrationName": "nord",
       "variant": "dark",
+      "sourceAsset": "nord-19655567d568.js",
+      "sourceAssetSha256": "3e95aa50935baf21eb78a0cce473f457d449ac438e61da7fe4c1b34409deb4e8",
+      "completeThemeSha256": "00a651ffd2571d053bc101fda76d80fac0198ce87dd8e4cf982d6e4bb68de637",
       "tokenRuleCount": 140,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#88c0d0",
         "ink": "#d8dee9",
@@ -274,10 +419,19 @@
       }
     },
     {
+      "id": "one",
       "registrationName": "one-dark-pro",
       "variant": "dark",
+      "sourceAsset": "one-dark-pro-a86e56242366.js",
+      "sourceAssetSha256": "0385edb0d705e393ae2449827351c717ef887586c84e92d2d59bc879c5fc0041",
+      "completeThemeSha256": "1c36d6b2cb9feb7d73fe53d55abd7e3ef178c67d8a3dc3ac4885e6ab0c8a0fe6",
       "tokenRuleCount": 275,
       "semanticTokenCount": 10,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#4d78cc",
         "ink": "#abb2bf",
@@ -291,10 +445,19 @@
       }
     },
     {
+      "id": "one",
       "registrationName": "one-light",
       "variant": "light",
+      "sourceAsset": "one-light-8f2ffddf3adc.js",
+      "sourceAssetSha256": "da0deace54442e28f7589207dc1d181bbec318f88f201cf990b49f5f99c6e659",
+      "completeThemeSha256": "212e5e5123490bf415852537dde61e63df00986b82b4362e4ed905832de4c228",
       "tokenRuleCount": 211,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#526fff",
         "ink": "#383a42",
@@ -308,10 +471,19 @@
       }
     },
     {
+      "id": "rose-pine",
       "registrationName": "rose-pine-dawn",
       "variant": "light",
+      "sourceAsset": "rose-pine-dawn-107da88ae0d9.js",
+      "sourceAssetSha256": "a0531c949c3ab564b4f07afe7e292a6e7068aea8e56e1d47dd90325c49c985c7",
+      "completeThemeSha256": "114d4193d39769a44b178d15eecf23579d07eac852890ff6b843a1ee7a86eee6",
       "tokenRuleCount": 33,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#d7827e",
         "ink": "#575279",
@@ -325,10 +497,19 @@
       }
     },
     {
+      "id": "rose-pine",
       "registrationName": "rose-pine-moon",
       "variant": "dark",
+      "sourceAsset": "rose-pine-moon-fc3e86b295eb.js",
+      "sourceAssetSha256": "4abcf406c39f5064b99dc4e0f47516549283830f351e02341a31c978870b98c8",
+      "completeThemeSha256": "0813247fb9dfb8f8fe5039c341f7c854fe5e180e39f1aa1ed102dc5d12cd32f2",
       "tokenRuleCount": 33,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#ea9a97",
         "ink": "#e0def4",
@@ -342,10 +523,19 @@
       }
     },
     {
+      "id": "solarized",
       "registrationName": "solarized-dark",
       "variant": "dark",
+      "sourceAsset": "solarized-dark-b35bc77018b4.js",
+      "sourceAssetSha256": "51d0026c003456be456b2e84476d92a666c184041d566d80f3b9266d899a3247",
+      "completeThemeSha256": "887c958d176ae117d5d7d3e85d037290153bb7a5c4e1a688e56f97a598d4e3cc",
       "tokenRuleCount": 41,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#d30102",
         "ink": "#839496",
@@ -359,10 +549,19 @@
       }
     },
     {
+      "id": "solarized",
       "registrationName": "solarized-light",
       "variant": "light",
+      "sourceAsset": "solarized-light-de3cb543368f.js",
+      "sourceAssetSha256": "54c924ac6c2897c51947b012e305b9db76bcea9bf74b91043b8ab2117b9cce9c",
+      "completeThemeSha256": "438a5f39a6407f88ea0b0cbf6c7d5ddcdb39698faddce3d1d9cffcaa7a1844d2",
       "tokenRuleCount": 41,
       "semanticTokenCount": 0,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#b58900",
         "ink": "#657b83",
@@ -376,10 +575,19 @@
       }
     },
     {
+      "id": "tokyo-night",
       "registrationName": "tokyo-night",
       "variant": "dark",
+      "sourceAsset": "tokyo-night-5c1ab4ec610d.js",
+      "sourceAssetSha256": "0a51ef036bffa14816801cf6ac02865b573ae0dda6b5248007106c11de8b4395",
+      "completeThemeSha256": "9aa5cc174df1963e5d11b12956790320b162aec7ac27a87beba8b8a55fcc16ee",
       "tokenRuleCount": 114,
       "semanticTokenCount": 8,
+      "source": {
+        "package": "@shikijs/themes",
+        "version": "3.23.0",
+        "license": "MIT"
+      },
       "seed": {
         "accent": "#3d59a1",
         "ink": "#a9b1d6",
@@ -389,6 +597,544 @@
           "skill": "#9d7cd8"
         },
         "surface": "#1a1b26",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "absolutely",
+      "registrationName": "Absolutely Dark",
+      "variant": "dark",
+      "sourceAsset": "absolutely-dark-f50f351ee0a4.js",
+      "sourceAssetSha256": "31b8e06ce040074e63a23d92c8776f5e46daf15e34baf6a05fc46b431bcfcdbc",
+      "completeThemeSha256": "4fac97912bc473d19329cba091b592fbedc63af9073e5e823b74e8745a8bcd97",
+      "tokenRuleCount": 6,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#cc7d5e",
+        "ink": "#f9f9f7",
+        "semanticColors": {
+          "diffAdded": "#00c853",
+          "diffRemoved": "#ff5f38",
+          "skill": "#cc7d5e"
+        },
+        "surface": "#2d2d2b",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "absolutely",
+      "registrationName": "Absolutely Light",
+      "variant": "light",
+      "sourceAsset": "absolutely-light-79eaa93587de.js",
+      "sourceAssetSha256": "c2a6cf113ec10c8db8003a89abe6412fc6bab7b09d6d0b7fe21a0aa7a246026f",
+      "completeThemeSha256": "ccaab1e485a6a1d4cd2b790683095bd82e27aab99db32f2f0542f21edf125a8c",
+      "tokenRuleCount": 6,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#cc7d5e",
+        "ink": "#2d2d2b",
+        "semanticColors": {
+          "diffAdded": "#00c853",
+          "diffRemoved": "#ff5f38",
+          "skill": "#cc7d5e"
+        },
+        "surface": "#f9f9f7",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "codex",
+      "registrationName": "Codex Dark",
+      "variant": "dark",
+      "sourceAsset": "codex-dark-5fb95d1c65ca.js",
+      "sourceAssetSha256": "2c7daf07edc321bfb076e53fc9390cc90f54632a2ce53fb57874f63e55cb79bd",
+      "completeThemeSha256": "50c4e670d76548dc340b388f2d7b100100617491a478586c23eabc588be1886d",
+      "tokenRuleCount": 245,
+      "semanticTokenCount": 16,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#0169cc",
+        "ink": "#fcfcfc",
+        "semanticColors": {
+          "diffAdded": "#00a240",
+          "diffRemoved": "#e02e2a",
+          "skill": "#b06dff"
+        },
+        "surface": "#111111",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "codex",
+      "registrationName": "Codex Light",
+      "variant": "light",
+      "sourceAsset": "codex-light-53d4e35e1869.js",
+      "sourceAssetSha256": "13c67c2ede5acc0bd035ba769fafb5030849e6a7affe49d75dcd78e87d2fca82",
+      "completeThemeSha256": "3eea841f38f35ecfb50b170c47218d32ae720ca5d430b300150ef51bf6ee5c18",
+      "tokenRuleCount": 245,
+      "semanticTokenCount": 16,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#0169cc",
+        "ink": "#0d0d0d",
+        "semanticColors": {
+          "diffAdded": "#00a240",
+          "diffRemoved": "#e02e2a",
+          "skill": "#751ed9"
+        },
+        "surface": "#ffffff",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "linear",
+      "registrationName": "Linear Dark",
+      "variant": "dark",
+      "sourceAsset": "linear-dark-f292b3b1106f.js",
+      "sourceAssetSha256": "c72c11353c5d7980914c1bcf3de2eb00476f18d13314d25be081e3662846fc92",
+      "completeThemeSha256": "037b03c040ca52b457cbb0710cfedbc35a931d08631a59d7a76ba20c9e15b7c1",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#606acc",
+        "ink": "#e3e4e6",
+        "semanticColors": {
+          "diffAdded": "#69c967",
+          "diffRemoved": "#ff7e78",
+          "skill": "#c2a1ff"
+        },
+        "surface": "#0f0f11",
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "linear",
+      "registrationName": "Linear Light",
+      "variant": "light",
+      "sourceAsset": "linear-light-68b2f60d891c.js",
+      "sourceAssetSha256": "4c6520c335c50d5fe2494a8f3a00aa73813c7077e1c6f88f822a89e8331515ac",
+      "completeThemeSha256": "03daec6daf77b3e483fc5c0504ad4c0c273b7752a71a40f3e1a07d914a571a69",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#5e6ad2",
+        "ink": "#1b1b1b",
+        "semanticColors": {
+          "diffAdded": "#52a450",
+          "diffRemoved": "#c94446",
+          "skill": "#8160d8"
+        },
+        "surface": "#fcfcfd",
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "lobster",
+      "registrationName": "Lobster Dark",
+      "variant": "dark",
+      "sourceAsset": "lobster-dark-3c7e0b666bb2.js",
+      "sourceAssetSha256": "a0d2879b3094b68e6fe874b7eabd88a8de0e40d3d4832fabab0f17a735b86eaf",
+      "completeThemeSha256": "436c6a5b4e672c94eebeb0d1611345a86bd8899de4ddb6a4f57b2427c5622021",
+      "tokenRuleCount": 11,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#ff5c5c",
+        "ink": "#e4e4e7",
+        "semanticColors": {
+          "diffAdded": "#22c55e",
+          "diffRemoved": "#ff5c5c",
+          "skill": "#3b82f6"
+        },
+        "surface": "#111827",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "matrix",
+      "registrationName": "Matrix Dark",
+      "variant": "dark",
+      "sourceAsset": "matrix-dark-fa9710869ce4.js",
+      "sourceAssetSha256": "22d513235f160ae576693770420543dd9a11b9ae1066ec09941a327334d14a21",
+      "completeThemeSha256": "3e9eba1a7b8e725677ac51617203cc200c18b4c63ce8b715f381c7904de3158c",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#1eff5a",
+        "ink": "#b8ffca",
+        "semanticColors": {
+          "diffAdded": "#1eff5a",
+          "diffRemoved": "#fa423e",
+          "skill": "#1eff5a"
+        },
+        "surface": "#040805",
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "notion",
+      "registrationName": "Notion Dark",
+      "variant": "dark",
+      "sourceAsset": "notion-dark-53bed5670fb6.js",
+      "sourceAssetSha256": "e6a2dba77928b399edeab13726291ce23d37592b5b46526f99b0ac6c7bad6e7b",
+      "completeThemeSha256": "9ef12100ff077edf79411fb3cfd1da3644630d03f1f699e3186298a2fac5dcf1",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#3183d8",
+        "ink": "#d9d9d8",
+        "semanticColors": {
+          "diffAdded": "#4ec9b0",
+          "diffRemoved": "#fa423e",
+          "skill": "#3183d8"
+        },
+        "surface": "#191919",
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "notion",
+      "registrationName": "Notion Light",
+      "variant": "light",
+      "sourceAsset": "notion-light-616fcde10962.js",
+      "sourceAssetSha256": "b05ab42d39464aaf13da4cfee9d1af227d6b67e31c6f30fa1d3fb54c2b23f120",
+      "completeThemeSha256": "75d31912f100e0a66946985f50b5eb9df61ef70d7fc726276088bc989e883622",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#3183d8",
+        "ink": "#37352f",
+        "semanticColors": {
+          "diffAdded": "#008000",
+          "diffRemoved": "#a31515",
+          "skill": "#0000ff"
+        },
+        "surface": "#ffffff",
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "og",
+      "registrationName": "OG Dark",
+      "variant": "dark",
+      "sourceAsset": "og-dark-c4ffd9f0861f.js",
+      "sourceAssetSha256": "c02090a11f8b8acc933541df76e25474a6286214496a0138788ac5c77005c6f8",
+      "completeThemeSha256": "02c63658d79d2108ab3a33196960eb713243d573ffd1c1756b2c4ff7f5171c3b",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#10a37f",
+        "ink": "#d1d5db",
+        "semanticColors": {
+          "diffAdded": "#65c99a",
+          "diffRemoved": "#f28b82",
+          "skill": "#b4a1e5"
+        },
+        "surface": "#343541",
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "oscurange",
+      "registrationName": "Oscurange",
+      "variant": "dark",
+      "sourceAsset": "oscurange-8a344130cdcd.js",
+      "sourceAssetSha256": "c9c6ab674650e1521f4267218467e4b48a649afdaa23107180336f38f322714c",
+      "completeThemeSha256": "ce1805071ee5a7f68614dcfdf8583dc24698167bc0173aa0c67fb19e59175e60",
+      "tokenRuleCount": 21,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#f9b98c",
+        "ink": "#e6e6e6",
+        "semanticColors": {
+          "diffAdded": "#40c977",
+          "diffRemoved": "#fa423e",
+          "skill": "#479ffa"
+        },
+        "surface": "#0b0b0f",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "proof",
+      "registrationName": "Proof Light",
+      "variant": "light",
+      "sourceAsset": "proof-light-818ee16fd59b.js",
+      "sourceAssetSha256": "50120679bd010d0fb1cce4993c524863fb8b20ce3641f512f6597f9a4668b206",
+      "completeThemeSha256": "2b5bbc923d07bf4b2d91ff01d1034b8a5b2d0c413df2094253919dcabff4e00b",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#3d755d",
+        "ink": "#2f312d",
+        "semanticColors": {
+          "diffAdded": "#3d755d",
+          "diffRemoved": "#ba2623",
+          "skill": "#5f6ac2"
+        },
+        "surface": "#f5f3ed",
+        "opaqueWindows": false,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "raycast",
+      "registrationName": "Raycast Dark",
+      "variant": "dark",
+      "sourceAsset": "raycast-dark-d8918c2e5e09.js",
+      "sourceAssetSha256": "b1e7bb8c9160dfff85a383903c7543d320e2dfeecea7140bf5dd9a3ac5e8f184",
+      "completeThemeSha256": "0c5ca65a4f1531c66ef9e44052d62cbc7a810a5c0fc2326babdf37b728ad3107",
+      "tokenRuleCount": 21,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#ff6363",
+        "ink": "#fefefe",
+        "semanticColors": {
+          "diffAdded": "#59d499",
+          "diffRemoved": "#ff6363",
+          "skill": "#cf2f98"
+        },
+        "surface": "#101010",
+        "opaqueWindows": false,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "raycast",
+      "registrationName": "Raycast Light",
+      "variant": "light",
+      "sourceAsset": "raycast-light-b4a56c15bc92.js",
+      "sourceAssetSha256": "23c6c7c3c19ec0ca860631e5fdff14ac15b84fb6f6fdbb3a22b67245aa5cdb50",
+      "completeThemeSha256": "fc84b7934e6868ae92ffb55e0841813b00e5c77e79b281ea41babc83bb352b34",
+      "tokenRuleCount": 22,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#ff6363",
+        "ink": "#030303",
+        "semanticColors": {
+          "diffAdded": "#006b4f",
+          "diffRemoved": "#b12424",
+          "skill": "#9a1b6e"
+        },
+        "surface": "#ffffff",
+        "opaqueWindows": false,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "sentry",
+      "registrationName": "Sentry Dark",
+      "variant": "dark",
+      "sourceAsset": "sentry-dark-3f32975f372b.js",
+      "sourceAssetSha256": "a417297d47a33d4247ae5e45168dee2dd484e9e48bba4392490fef151571b205",
+      "completeThemeSha256": "68ca363ba74e80b70b12748cb55e909b6872eb354ca94cd4a23da67845bfc9b2",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#7055f6",
+        "ink": "#e6dff9",
+        "semanticColors": {
+          "diffAdded": "#8ee6d7",
+          "diffRemoved": "#fa423e",
+          "skill": "#7055f6"
+        },
+        "surface": "#2d2935",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "temple",
+      "registrationName": "Temple Dark",
+      "variant": "dark",
+      "sourceAsset": "temple-dark-9eae56d88ac5.js",
+      "sourceAssetSha256": "c461f87e8bc99937852d16a2563736f93597c943fe5c6588e16e96d0c13f940c",
+      "completeThemeSha256": "121e3e0d3e8e9db8d57af4eeeee697b2a1dd48ee93dab8f97f2d3419ade20c67",
+      "tokenRuleCount": 7,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#e4f222",
+        "ink": "#c7e6da",
+        "semanticColors": {
+          "diffAdded": "#40c977",
+          "diffRemoved": "#fa423e",
+          "skill": "#e4f222"
+        },
+        "surface": "#02120c",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "vercel",
+      "registrationName": "Vercel Dark",
+      "variant": "dark",
+      "sourceAsset": "vercel-dark-fe3b20ba4c28.js",
+      "sourceAssetSha256": "6a0192d45868aebe416f2e3063e1cd77581f03503a12504cb33047ddf1b0a7cd",
+      "completeThemeSha256": "63bc7c40fffed65803dc58f0e3cf0f0c716f76aeb02e5a43e26d89ddafdba0b9",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#006efe",
+        "ink": "#ededed",
+        "semanticColors": {
+          "diffAdded": "#00AD3A",
+          "diffRemoved": "#F13342",
+          "skill": "#9540D5"
+        },
+        "surface": "#000000",
+        "contrast": 50,
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "vercel",
+      "registrationName": "Vercel Light",
+      "variant": "light",
+      "sourceAsset": "vercel-light-91ea99803eaa.js",
+      "sourceAssetSha256": "5fb78f099b2169c62e16eaea5def38d41bf4b62a4b928b6ca18d3af4f5d414c6",
+      "completeThemeSha256": "d2aa78740220caba38e8b3810d38c3fd7ec17c1468274ca10023a7398b3b5389",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#006aff",
+        "ink": "#171717",
+        "semanticColors": {
+          "diffAdded": "#28A948",
+          "diffRemoved": "#EB001D",
+          "skill": "#A100F8"
+        },
+        "surface": "#ffffff",
+        "contrast": 40,
+        "opaqueWindows": true,
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "xcode",
+      "registrationName": "Xcode Dark",
+      "variant": "dark",
+      "sourceAsset": "xcode-dark-70031158a53b.js",
+      "sourceAssetSha256": "4dbbfadd584df98a00c8e5877011ab8f3cf8e6c5b58d43d717767b15796683b7",
+      "completeThemeSha256": "e102dce3a3d8180c3fce80c54b883db4a356541328e2778a46e620ea511981a7",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#5482ff",
+        "ink": "#ffffff",
+        "semanticColors": {
+          "diffAdded": "#67b7a4",
+          "diffRemoved": "#fc6a5d",
+          "skill": "#5482ff"
+        },
+        "surface": "#1f1f24",
+        "accentSource": "custom"
+      }
+    },
+    {
+      "id": "xcode",
+      "registrationName": "Xcode Light",
+      "variant": "light",
+      "sourceAsset": "xcode-light-ad6a361cdfec.js",
+      "sourceAssetSha256": "433cfc20c5650976669ae7b97f4f602708d5ef780dd9e4942a922db46cd2d735",
+      "completeThemeSha256": "4bdd2df0daaade1c7b801cef4f189e8f5062cb0c963664815986d4396e8bb2cb",
+      "tokenRuleCount": 8,
+      "semanticTokenCount": 0,
+      "source": {
+        "package": "Codex desktop reference",
+        "version": "app-initial-b8e1c8014bb4"
+      },
+      "seed": {
+        "accent": "#0e0eff",
+        "ink": "#000000",
+        "semanticColors": {
+          "diffAdded": "#00a240",
+          "diffRemoved": "#c41a16",
+          "skill": "#0e0eff"
+        },
+        "surface": "#ffffff",
         "accentSource": "custom"
       }
     }

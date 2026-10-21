@@ -108,6 +108,7 @@ export const threadMenuIcon = (name: "copy" | "local" | "worktree" | "rename" | 
 export const ConversationMenu = ({
   anchor, menuId, conversationId, workspaceRoot, conversationType, environment, archived, isIsolated, canCopy, canHandoff,
   pinned = false, hasUnreadTurn = false, currentProject = "", projectOptions = [], onPin, onReadState, onProjectChange,
+  sectionOptions = [], currentSection, onSectionChange, onNewSection,
   onRename, onCopy, onCopyLink, onCopyMarkdown, onHandoff, onArchive, onClose,
 }: {
   anchor: HTMLElement | null;
@@ -124,6 +125,10 @@ export const ConversationMenu = ({
   hasUnreadTurn?: boolean;
   currentProject?: string;
   projectOptions?: { id: string; name: string }[];
+  sectionOptions?: { id: string; name: string }[];
+  currentSection?: string;
+  onSectionChange?: (sectionId: string | null) => void;
+  onNewSection?: () => void;
   onPin: () => void;
   onReadState: () => void;
   onProjectChange: (projectId: string) => void;
@@ -162,6 +167,12 @@ export const ConversationMenu = ({
         { label: tr("重命名"), icon: threadMenuIcon("rename"), onClick: onRename },
         { label: tr(pinned ? "取消固定" : "固定"), icon: threadMenuIcon(pinned ? "unpin" : "pin"), onClick: onPin },
         { label: tr(hasUnreadTurn ? "标记为已读" : "标记为未读"), icon: threadMenuIcon("read"), onClick: onReadState },
+        ...(onNewSection ? [{ label: tr("移动到分组"), submenu: [
+          ...sectionOptions.map(section => ({ label: section.name, checked: section.id === currentSection, checkType: "checkbox" as const,
+            onClick: () => onSectionChange!(section.id === currentSection ? null : section.id) })),
+          ...(sectionOptions.length ? [{ label: "", separator: true }] : []),
+          { label: tr("新建分组…"), onClick: onNewSection },
+        ] }] : []),
         ...(projectOptions.some(project => project.id !== currentProject) || currentProject ? [{ label: tr("项目"), icon: threadMenuIcon("project"), submenu: [
           ...projectOptions.filter(project => project.id !== currentProject).map(project => ({ label: project.name, icon: threadMenuIcon("project"), onClick: () => onProjectChange(project.id) })),
           ...(currentProject ? [{ label: tr("移出项目"), icon: threadMenuIcon("project"), onClick: () => onProjectChange("") }] : []),

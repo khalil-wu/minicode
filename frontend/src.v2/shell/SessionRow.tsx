@@ -4,6 +4,7 @@ import type { Ref } from "react";
 import type { DraggableAttributes } from "@dnd-kit/core";
 import { Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
 import type { ConversationMeta } from "../stores/types";
+import { ThreadPullRequestBadge, type LinkedPullRequest } from "./ThreadPullRequestBadge";
 import { IconAction, ConversationMenu, threadMenuIcon } from "./sidebarComponents";
 import { canOpenThreadWindow, openThreadWindow, threadWindowModifier } from "./threadWindowActions";
 import {
@@ -39,6 +40,11 @@ export type SessionRowProps = {
   onProjectChange: (id: string, projectId: string) => void;
   currentProject: string;
   projectOptions: { id: string; name: string }[];
+  sectionOptions?: { id: string; name: string }[];
+  currentSection?: string;
+  onSectionChange?: (id: string, sectionId: string | null) => void;
+  onNewSection?: (id: string) => void;
+  pullRequest?: LinkedPullRequest | null;
   treeDepth?: number;
   dragActivatorRef?: Ref<HTMLButtonElement>;
   dragAttributes?: DraggableAttributes;
@@ -66,6 +72,7 @@ const SessionRowComponent = ({
   onHandoff,
   onCopy,
   onPin, onReadState, onProjectChange, currentProject, projectOptions,
+  sectionOptions, currentSection, onSectionChange, onNewSection, pullRequest,
   treeDepth = 0,
   dragActivatorRef, dragAttributes,
 }: SessionRowProps) => {
@@ -156,6 +163,7 @@ const SessionRowComponent = ({
         </button>
       )}
 
+      {!deleting && pullRequest && <ThreadPullRequestBadge pr={pullRequest} />}
       {!deleting && sessionStatus === "running" && (
         <LoaderCircle
           size={14}
@@ -204,6 +212,8 @@ const SessionRowComponent = ({
           onPin={() => onPin(c.id, !c.pinned)}
           onReadState={() => onReadState(c.id, !c.hasUnreadTurn)}
           onProjectChange={projectId => onProjectChange(c.id, projectId)}
+          sectionOptions={sectionOptions} currentSection={currentSection}
+          onSectionChange={sectionId => onSectionChange?.(c.id, sectionId)} onNewSection={onNewSection ? () => onNewSection(c.id) : undefined}
           onRename={() => { onSetMenuFor(null); onStartRename(c.id, c.title, presentationId); }}
           onCopyLink={() => onCopyLink(c.id)}
           onCopyMarkdown={() => onCopyMarkdown(c.id)}

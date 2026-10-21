@@ -388,6 +388,10 @@ LIVE_ONLY_EVENT_TYPES = frozenset({
 # replay filter on its bridge; a single definition here prevents the three
 # hand-maintained lists from drifting apart.
 NON_REPLAYABLE_EVENT_TYPES = frozenset({
+    "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
+    "thread/realtime/item/transcript/delta", "thread/realtime/transcript/delta",
+    "thread/realtime/transcript/done", "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
+    "thread/realtime/error", "thread/realtime/closed",
     "scheduler.heartbeat.renderer_state.request",
     "artifact_content",
     "conversation.list",

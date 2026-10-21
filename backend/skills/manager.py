@@ -31,17 +31,27 @@ class SkillManager:
     def __init__(
         self,
         loader: SkillLoader | None = None,
+        runtime_roots=None,
     ) -> None:
         self._loader = loader or SkillLoader()
         self._discovered = False
         self.executor_catalog = None
         self._implicit_invocations: set[tuple[str, str, str, str]] = set()
         self._implicit_invocation_turn_id = None
+        self.runtime_roots = runtime_roots
+        self._runtime_roots_revision = -1
+
+    def _ensure_discovered(self) -> None:
+        if self.runtime_roots is not None and self._runtime_roots_revision != self.runtime_roots.revision:
+            self._discovered = False
+        if not self._discovered:
+            self.discover()
 
     def attach_executor_catalog(self, catalog) -> None:
         self.executor_catalog = catalog
 
     def clone_host_catalog(self) -> SkillManager:
+        self._ensure_discovered()
         clone = SkillManager(deepcopy(self._loader))
         clone._discovered = self._discovered
         clone._implicit_invocations = set(self._implicit_invocations)
@@ -74,6 +84,9 @@ class SkillManager:
         Returns:
             所有 Skill 的元数据列表
         """
+        if self.runtime_roots is not None:
+            self._loader.set_extra_roots(self.runtime_roots.roots)
+            self._runtime_roots_revision = self.runtime_roots.revision
         skills = self._loader.discover()
         self._discovered = True
         return skills
@@ -86,6 +99,7 @@ class SkillManager:
 
     def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT, *, role_config: dict[str, Any] | None = None, role_features: dict[str, bool] | None = None, config_stack: Any = None) -> SkillManager:
         """Capture discovery for a task without rebinding the window's loader."""
+        self._ensure_discovered()
         if self.executor_catalog is not None:
             snapshot = self.clone_host_catalog()
             snapshot.attach_executor_catalog(self.executor_catalog)
@@ -124,8 +138,7 @@ class SkillManager:
         Returns:
             应该激活的 Skill 名称列表
         """
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
 
         mentioned_names, mentioned_paths = _extract_skill_mentions(user_message)
         candidates: list[SkillDetection] = []
@@ -213,8 +226,7 @@ class SkillManager:
         source_path: str | Path | None = None,
     ) -> dict[str, Any] | None:
         """Load one exact SKILL.md as a turn-owned contextual payload."""
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
 
         meta = self._loader.get_meta_by_path(source_path) if source_path else self._loader.get_invocation_meta(skill_name)
         if meta is None:
@@ -261,29 +273,26 @@ class SkillManager:
 
         让 LLM 知道有哪些 Skill 可用。
         """
+        self._ensure_discovered()
         return self._loader.get_all_layer1()
 
     @property
     def include_instructions(self) -> bool:
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         return self._loader.skills_configuration.include_instructions
 
     @property
     def max_context_tokens(self) -> int | None:
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         return self._loader.skills_configuration.max_context_tokens
 
     def list_metas(self) -> list[SkillMeta]:
         """Expose the discovered catalog for budget-aware prompt rendering."""
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         return self._loader.list_metas()
 
     def get_meta_by_path(self, source_path: str | Path) -> SkillMeta | None:
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         return self._loader.get_meta_by_path(source_path)
 
     def readable_roots(self) -> list[Path]:
@@ -294,8 +303,7 @@ class SkillManager:
         to directories already admitted by discovery; disabled or malformed
         plugins therefore never become readable roots.
         """
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         roots: list[Path] = []
         seen: set[Path] = set()
         for meta in self._loader.list_metas():
@@ -311,14 +319,12 @@ class SkillManager:
 
     def get_meta(self, skill_name: str) -> SkillMeta | None:
         """获取 Skill 元数据。"""
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         return self._loader.get_meta(skill_name)
 
     def resolve_asset(self, source_path: str | Path, variant: str) -> Path | None:
         """Resolve an icon only from an exact Skill discovered by this manager."""
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         meta = self._loader.get_meta_by_path(source_path)
         if meta is None:
             key = self._loader._path_key(Path(source_path))
@@ -339,20 +345,17 @@ class SkillManager:
 
     def list_all(self) -> list[dict[str, Any]]:
         """列出所有 Skill 及其状态（供前端展示）。"""
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
 
         return [self._public_meta(meta) for meta in self._loader.list_metas()]
 
     def list_settings(self, *, source_level: str = "user") -> list[dict[str, Any]]:
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         return [{**self._public_meta(meta), "enabled": enabled}
             for meta, enabled in self._loader.list_settings_metas() if meta.source_level == source_level]
 
     def read_skill_detail(self, source_path: str | Path) -> dict[str, Any] | None:
-        if not self._discovered:
-            self.discover()
+        self._ensure_discovered()
         loaded = self._loader.load_settings_full(source_path)
         if loaded is None:
             return None

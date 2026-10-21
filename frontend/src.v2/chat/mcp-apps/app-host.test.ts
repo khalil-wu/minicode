@@ -1,10 +1,34 @@
 /* @vitest-environment jsdom */
 import { expect, it, vi } from "vitest";
-import { AppFrameTransport, AppWebviewTransport, type McpAppWebview } from "./app-host";
+import { AppFrameTransport, AppWebviewTransport, createAppBridge, type McpAppView, type McpAppWebview } from "./app-host";
+import { App } from "@modelcontextprotocol/ext-apps";
+import { InMemoryTransport } from "@modelcontextprotocol/client";
 import { reduceToolCallResult, reduceToolCallStart } from "../../lib/tool-call-reducer";
 import { toToolCallRecord } from "../transcriptHydration";
 import { mergeResumeToolCalls } from "../../stores/shared-helpers";
 import type { McpAppReceipt } from "../../protocol/mcp-app-types";
+
+it.each([false, true])("publishes the resource's enforced CSP in the actual SDK handshake (readOnly=%s)", async readOnly => {
+  const receipt: McpAppReceipt = { id: "owned", server: "owned", tool: "counter", title: "Counter",
+    resourceUri: "ui://owned/counter", displayMode: "inline", readOnly };
+  const csp = { connectDomains: ["https://api.owned.example"], resourceDomains: ["https://cdn.owned.example"],
+    frameDomains: ["https://frame.owned.example"], baseUriDomains: ["https://base.owned.example"] };
+  const view: McpAppView = { viewId: "view", frameUrl: "http://mcp-app-owned.localhost/frame", frameOrigin: "http://mcp-app-owned.localhost",
+    mimeType: "text/html;profile=mcp-app", prefersBorder: false, readOnly, csp, toolInput: {}, toolResult: { content: [] },
+    toolDefinition: { name: "counter", inputSchema: { type: "object" } }, widgetState: null };
+  const bridge = createAppBridge(receipt, "original-conversation", view, {});
+  const app = new App({ name: "Owned counter", version: "1" }, {}, { autoResize: false });
+  const [hostTransport, appTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await bridge.connect(hostTransport);
+    await app.connect(appTransport);
+    expect(app.getHostCapabilities()?.sandbox).toEqual({ permissions: {}, csp });
+    expect(app.getHostCapabilities()?.message).toEqual(readOnly ? undefined : { text: {} });
+  } finally {
+    await app.close();
+    await bridge.close();
+  }
+});
 
 it("binds App RPC to the actual iframe Window and exact sandbox origin", async () => {
   const frame = document.createElement("iframe");

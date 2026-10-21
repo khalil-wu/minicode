@@ -102,6 +102,10 @@ class ConversationRepository:
         self._store_instance_path = self._base_dir / ".conversation-store.instance"
         self._pinned_order_path = self._base_dir / ".pinned-thread-order.json"
         self._sidebar_order_path = self._base_dir / ".sidebar-occurrence-order.json"
+        from backend.conversations.thread_sections import ThreadSectionStore
+        from backend.conversations.thread_resources import ThreadResourceReferences
+        self.thread_sections = ThreadSectionStore(self)
+        self.thread_resources = ThreadResourceReferences(self)
         self._store_file_lock = FileLock(self._store_lock_path, timeout=60)
         self._summary_index: dict[str, ConversationSummary] | None = None
         self._summary_index_stamps: dict[str, tuple[tuple[int, int], ...]] = {}
@@ -193,6 +197,7 @@ class ConversationRepository:
         model_selection: dict[str, str] | None = None,
         reuse_existing: bool = False,
         creation_command_id: str = "",
+        sidebar_section_id: str | None = None,
     ) -> ConversationRecord:
         requested_id = str(conversation_id or "").strip()
         initial_transcript = project_public_transcript(transcript or [])
@@ -225,7 +230,9 @@ class ConversationRepository:
         if creation_command_id and candidate_id != requested_id:
             candidate_id = command_conversation_id
         # Creation owns ID allocation, including replacement of an occupied ID.
-        with self._store_lock():
+        with self._store_lock(), file_mutation_locks([self.thread_sections.path]):
+            if sidebar_section_id is not None and not any(section["id"] == sidebar_section_id for section in self.thread_sections.list()):
+                raise ValueError("The requested sidebar section no longer exists")
             if creation_command_id:
                 for owned_id in dict.fromkeys((candidate_id, command_conversation_id)):
                     existing = self._load_record(owned_id)
@@ -305,7 +312,12 @@ class ConversationRepository:
                 model_selection=dict(model_selection or {}),
                 creation_command_id=creation_command_id,
             )
+            if worktree_path:
+                from backend.conversations.thread_resources import set_worktree_reference
+                set_worktree_reference(record, worktree_path, workspace_root)
             self._commit_record(record)
+            if sidebar_section_id is not None:
+                self.thread_sections.move("thread:" + record.id, sidebar_section_id)
             self._cache_record(record)
             self._prepend_sidebar_occurrence(record)
             return record
@@ -478,6 +490,9 @@ class ConversationRepository:
             clone.merged_into_conversation_id = ""
             clone.merged_at = ""
             clone.worktree_registrations = []
+            from backend.conversations.thread_resources import resource_reference
+            clone.resource_references = [resource_reference(item["attachment_type"], item["identity_key"], item["payload"])
+                for item in source.resource_references]
 
             # A branch may inspect the same checkout, but it must not become a
             # second owner of an isolated worktree. Preserve the effective path
@@ -504,6 +519,7 @@ class ConversationRepository:
                 cleanup_plan_file(copied_plan_path)
                 raise
             self._cache_record(clone)
+            self.thread_sections.copy_thread_placement(source.id, clone.id)
             return clone
 
     @staticmethod
@@ -768,6 +784,7 @@ class ConversationRepository:
                     raise
 
             manifest_stat = manifest_path.stat()
+            self.thread_sections.remove_thread(conversation_id)
             self._manifest_cache[conversation_id] = (
                 (manifest_stat.st_mtime_ns, manifest_stat.st_size),
                 tombstone,
@@ -911,8 +928,10 @@ class ConversationRepository:
             )
             current_revision = max(0, int(getattr(record, "revision", 0) or 0))
             if source_user_message_ids is not None:
-                user_ids = [str(item.get("id") or "") for item in record.transcript if item.get("role") == "user"]
                 admissions = record.context_snapshot.get("turn_admissions", {})
+                user_ids = [str(item.get("id") or "") for item in record.transcript if item.get("role") == "user"
+                    and (str(item.get("id") or "") in admissions
+                        or not any(block.get("type") == "realtime" for block in item.get("blocks", [])))]
                 if (
                     not source_user_message_ids
                     or not set(source_user_message_ids).issubset(user_ids)
@@ -1124,6 +1143,10 @@ class ConversationRepository:
                 -1,
             )
             if replace_index >= 0:
+                realtime_blocks = [block for block in record.transcript[replace_index].get("blocks", [])
+                    if block.get("type") == "realtime"]
+                if realtime_blocks and not next_message.get("blocks"):
+                    next_message["blocks"] = realtime_blocks
                 record.transcript[replace_index] = next_message
             else:
                 record.transcript.append(next_message)
@@ -1398,6 +1421,11 @@ class ConversationRepository:
 
             previous_project = conversation_project_key(record)
             previous_directory = record.worktree_path or record.workspace_root
+            if record.worktree_path and record.worktree_path != worktree_path:
+                from backend.conversations.thread_resources import worktree_identity
+                previous_identity = worktree_identity(record.worktree_path)
+                record.resource_references = [item for item in record.resource_references
+                    if item["attachment_type"] != "worktree" or item["identity_key"] != previous_identity]
             if execution_cwd is not None:
                 record.execution_cwd = str(Path(execution_cwd).expanduser().resolve())
             elif not record.execution_cwd:
@@ -1410,6 +1438,9 @@ class ConversationRepository:
             record.workspace_root = workspace_root
             record.git_branch = git_branch
             record.worktree_path = worktree_path
+            if worktree_path:
+                from backend.conversations.thread_resources import set_worktree_reference
+                set_worktree_reference(record, worktree_path, workspace_root)
             if git_isolated is not None:
                 record.git_isolated = bool(git_isolated)
             if conversation_project_key(record) != previous_project:
@@ -1439,6 +1470,8 @@ class ConversationRepository:
             record.worktree_registrations.append({
                 "path": path, "backend": backend, "workspace_root": workspace_root,
             })
+            from backend.conversations.thread_resources import set_worktree_reference
+            set_worktree_reference(record, path, workspace_root, backend=backend)
 
         return self._mutate_meta(conversation_id, mutate)
 
@@ -1451,6 +1484,8 @@ class ConversationRepository:
                 entry for entry in record.worktree_registrations
                 if canonical_file_path_key(entry["path"]) != path_key
             ]
+            record.resource_references = [item for item in record.resource_references
+                if item["attachment_type"] != "worktree" or item["identity_key"] != path_key]
 
         return self._mutate_meta(conversation_id, mutate)
 
@@ -1489,6 +1524,8 @@ class ConversationRepository:
 
     def set_conversation_pinned(self, conversation_id: str, pinned: bool) -> ConversationRecord | None:
         def mutate(record: ConversationRecord) -> bool:
+            if pinned:
+                self.thread_sections.remove_thread(record.id)
             if record.pinned == pinned:
                 return False
             self._update_pinned_order_membership(record.id, pinned)
@@ -2597,6 +2634,10 @@ class ConversationRepository:
                     )
                     reconstructed: list[dict[str, Any]] = []
                     for idx, msg in enumerate(snapshot["history"]):
+                        if str(msg.get("content_kind") or "").startswith("realtime_conversation."):
+                            continue
+                        if msg.get("role") == "assistant" and msg.get("content_kind") == "agent_message_board.notification":
+                            continue
                         role = msg.get("role", "user")
                         rec_msg: dict[str, Any] = {
                             "id": f"restored_{role}_{idx}_{uuid.uuid4().hex[:6]}",

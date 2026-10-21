@@ -6,6 +6,19 @@ from copy import deepcopy
 from typing import Any, Iterable
 
 
+def code_mode_tool_name(schema: dict[str, Any]) -> str:
+    """Source tool-name composition and normalize_code_mode_identifier."""
+    namespace = schema.get("_minicode_namespace")
+    if namespace is not None:
+        prefix, leaf = namespace["name"], namespace["tool_name"]
+        raw = prefix + ("" if prefix.endswith("_") or leaf.startswith("_") else "__") + leaf
+    else:
+        raw = schema["function"]["name"]
+    return "".join(character if character in "_$" or character.isascii() and (
+        character.isalpha() or index > 0 and character.isdigit()) else "_"
+        for index, character in enumerate(raw)) or "_"
+
+
 def code_mode_parameters(parameters: dict[str, Any] | bool) -> str:
     """Render the object actually accepted by tools.name(args), including unions.
 

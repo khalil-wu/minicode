@@ -742,6 +742,8 @@ class LLMMessage:
     # deterministic fallback for such legacy messages.
     timestamp_ms: int | None = None
     native_tool_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
+    # Source ContextualUserFragment identity, independent of provider phase.
+    content_kind: str = ""
 
     def user_text_parts(self) -> list[str]:
         """Keep admitted runtime context and the user's text in separate wire blocks.

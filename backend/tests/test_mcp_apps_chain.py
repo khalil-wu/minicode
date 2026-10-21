@@ -20,7 +20,7 @@ from backend.mcp.manager import MCPServerConfig, MCPServerManager
 from backend.mcp.registry import MCPToolRegistry
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.sandbox.policy import SandboxPolicy
-from backend.tests.fixtures.mcp_apps_peer import URI
+from backend.tests.fixtures.mcp_apps_peer import CSP, URI
 from backend.tools.registry import ToolRegistry
 
 PEER = Path(__file__).parent / "fixtures/mcp_apps_peer.py"
@@ -56,6 +56,9 @@ async def test_real_stdio_app_outlives_turn_catalog_and_preserves_private_ui_bou
         view = await runtime.open(receipt.invocation_id, "conversation")
         second = await runtime.open(receipt.invocation_id, "conversation")
         assert view["toolInput"] == {"value": 7}
+        assert view["csp"] == CSP
+        view["csp"]["connectDomains"].append("https://unadmitted.example")
+        assert second["csp"] == CSP
         assert view["toolResult"]["_meta"]["privateUi"] == "UI_ONLY_SECRET"
         assert second["viewId"] != view["viewId"]
         request = lambda method, params: runtime.request(receipt.invocation_id, "conversation", view["viewId"], method, params)
@@ -114,10 +117,13 @@ async def test_child_receipt_is_read_only_and_resource_capabilities_are_exact(tm
             assert opened.status_code == 200, opened.text
             view = opened.json()
             assert view["readOnly"]
+            assert view["csp"] == CSP
             assert view["frameOrigin"].endswith(".localhost:8787")
             frame = await client.get(view["frameUrl"])
             assert frame.status_code == 200 and "Owned MCP counter" in frame.text
-            assert "connect-src 'none'" in frame.headers["content-security-policy"]
+            for directive, key in (("connect-src", "connectDomains"), ("frame-src", "frameDomains"), ("base-uri", "baseUriDomains")):
+                assert f"{directive} {' '.join(view['csp'][key])}" in frame.headers["content-security-policy"]
+            assert "https://cdn.owned.example" in frame.headers["content-security-policy"]
             wrong = await client.get(view["frameUrl"].replace("mcp-app-", "mcp-app-wrong"))
             assert wrong.status_code == 403
             for method in ("tools/call", "ui/update-model-context", "ui/legacy/set-widget-state"):

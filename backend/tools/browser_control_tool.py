@@ -24,6 +24,7 @@ from backend.tools.base import (
     truncate_tool_result,
 )
 from backend.tools.contracts import ToolSpec
+from backend.tools.browser_execution import EmbeddedBrowserExecution
 
 from backend.tools.browser_support import (
     _DOM_SNAPSHOT_JS,
@@ -132,6 +133,9 @@ class BrowserControlTool(BaseTool):
         "local Chrome/Edge DevTools Protocol session. Supports discovery, navigation, "
         "screenshots, DOM/text/html inspection, selector waits, console/network logs, "
         "clicking, typing, scrolling, key presses, and page JavaScript evaluation. "
+        "Embedded downloads require allow_download for the exact URL before the initiating action; "
+        "when a blob URL is created during the action, set_blob_download_origin binds the current main frame's origin first. "
+        "list_downloads reads the original conversation's admitted download results. "
         "Navigate to public HTTP(S) URLs without embedded credentials and resolving to "
         "public addresses, subject to network policy, or pass an existing "
         "workspace .html/.htm path directly: the tool starts an owned static preview "
@@ -178,6 +182,7 @@ class BrowserControlTool(BaseTool):
         "wait_for_element",
         "get_console_logs",
         "get_network_logs",
+        "list_downloads",
     }
     _PRIVATE_READ_ACTIONS = {
         "screenshot",
@@ -187,8 +192,9 @@ class BrowserControlTool(BaseTool):
         "wait_for_element",
         "get_console_logs",
         "get_network_logs",
+        "list_downloads",
     }
-    _WRITE_ACTIONS = {"navigate", "click", "type", "press_key", "scroll", "evaluate"}
+    _WRITE_ACTIONS = {"navigate", "click", "type", "press_key", "scroll", "evaluate", "allow_download", "set_blob_download_origin"}
     _ACTIONS = _READ_ACTIONS | _WRITE_ACTIONS
     _MAX_TARGETS = 30
     _MAX_RESULT_CHARS = 20_000
@@ -217,6 +223,11 @@ class BrowserControlTool(BaseTool):
                             "navigation. Inspect get_url/get_dom/get_text/screenshot for actual page state. "
                             "Navigation, interaction, evaluation and page-content reads declare confirmation; "
                             "the runtime applies the current permission policy."
+                            " Embedded-only allow_download grants the exact url once for 10 seconds; "
+                            "call it before the click/navigation which starts a download. "
+                            "list_downloads returns actual admitted downloads for this conversation."
+                            " set_blob_download_origin permits one real main-frame blob download from origin, "
+                            "optionally narrowed to url; pass origin:null to clear that permission."
                         ),
                     },
                     "cdp_endpoint": {
@@ -251,6 +262,10 @@ class BrowserControlTool(BaseTool):
                             "A detected port or user-provided localhost URL alone does not establish "
                             "runtime preview ownership; navigation remains subject to policy."
                         ),
+                    },
+                    "origin": {
+                        "type": ["string", "null"],
+                        "description": "For set_blob_download_origin: the current embedded page's exact HTTP(S) origin; null clears this turn's pending blob permission.",
                     },
                     "selector": {
                         "type": "string",
@@ -342,6 +357,17 @@ class BrowserControlTool(BaseTool):
                     "navigate url must use http or https, or name a workspace HTML file "
                     "(that file is served over loopback automatically)."
                 )
+        elif action == "allow_download":
+            if not str(payload.get("target_id") or "").strip():
+                return "allow_download requires the original embedded target_id"
+            url = str(payload.get("url") or "")
+            if not url or urlparse(url).scheme not in {"http", "https", "blob"}:
+                return "allow_download requires an exact HTTP, HTTPS or blob URL"
+        elif action == "set_blob_download_origin":
+            if not str(payload.get("target_id") or "").strip():
+                return "set_blob_download_origin requires the original embedded target_id"
+            if payload.get("origin") is not None and (not isinstance(payload["origin"], str) or urlparse(payload["origin"]).scheme not in {"http", "https"}):
+                return "set_blob_download_origin requires the original HTTP or HTTPS origin"
         elif action == "click":
             selector = str(payload.get("selector") or "").strip()
             has_xy = payload.get("x") not in (None, "") and payload.get("y") not in (None, "")
@@ -541,6 +567,18 @@ class BrowserControlTool(BaseTool):
         args: dict[str, Any],
         context: ToolExecutionContext | None,
     ) -> ToolResult:
+        run_context = context.run_context if context is not None else None
+        execution = None
+        if run_context is not None:
+            if run_context.browser_execution is None:
+                run_context.browser_execution = EmbeddedBrowserExecution(context.turn_id)
+            execution = run_context.browser_execution
+        if action in {"allow_download", "set_blob_download_origin"} and execution is None:
+            return self._error_result("Embedded download authorization requires its original agent turn owner")
+        operation = self._execute_embedded_request(endpoint, action, args, context, execution)
+        return await execution.run(operation) if execution is not None else await operation
+
+    async def _execute_embedded_request(self, endpoint, action, args, context, execution) -> ToolResult:
         token = str(os.environ.get("MINICODE_EMBEDDED_BROWSER_TOKEN") or "")
         conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
         if not conversation_id:
@@ -551,7 +589,7 @@ class BrowserControlTool(BaseTool):
         if not window_instance_id or not window_binding_token:
             return self._error_result("Embedded browser commands require an originating desktop window")
         payload = {key: value for key, value in args.items() if key not in {
-            "cdp_endpoint", "navigation_authorization", "window_owner_id", "window_instance_id", "window_binding_token",
+            "cdp_endpoint", "navigation_authorization", "window_owner_id", "window_instance_id", "window_binding_token", "agent_control_id", "agent_turn_id",
         }}
         payload["action"] = action
         payload["conversation_id"] = conversation_id
@@ -561,12 +599,18 @@ class BrowserControlTool(BaseTool):
             payload["window_owner_id"] = metadata["window_owner_id"]
         operation_id = "browser_" + uuid4().hex
         payload["operation_id"] = operation_id
+        if execution is not None:
+            payload["agent_control_id"] = execution.control_id
+            payload["agent_turn_id"] = execution.turn_id
         if action == "navigate":
             authorization = _owned_preview_navigation_authorization(str(args["url"]), context)
             if authorization is not None:
                 payload["navigation_authorization"] = {**authorization, "operation_id": operation_id}
         payload["operation_timeout_ms"] = max(1, int(browser_remaining_seconds() * 1000))
         headers = {"authorization": f"Bearer {token}"}
+        if execution is not None:
+            execution.bind(endpoint, headers, {"conversation_id": conversation_id, "window_instance_id": window_instance_id,
+                "window_binding_token": window_binding_token, "operation_id": operation_id})
         async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:
             if action == "discover":
                 health = await client.get(f"{endpoint.rstrip('/')}/v1/health", headers=headers)
@@ -582,7 +626,7 @@ class BrowserControlTool(BaseTool):
                 response = await client.post(f"{endpoint.rstrip('/')}/v1/command", headers=headers, json=payload)
             except (asyncio.CancelledError, httpx.TimeoutException) as exc:
                 reason = "timeout" if asyncio.get_running_loop().time() >= browser_deadline.get() else "cancelled"
-                receipt = await self._cancel_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, context, reason)
+                receipt = await self._cancel_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, context, reason, execution)
                 if isinstance(exc, asyncio.CancelledError):
                     exc.cleanup_receipt = receipt
                     raise
@@ -594,7 +638,7 @@ class BrowserControlTool(BaseTool):
         if response.status_code >= 400 or result.get("ok") is False:
             receipt = result.get("cleanup_receipt") or {}
             if receipt.get("pending"):
-                self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context)
+                self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context, execution)
             return ToolResult(
                 content=str(result.get("error") or f"Embedded browser command failed: HTTP {response.status_code}"),
                 is_error=True, status=result.get("status") or "failed", result_kind=self.result_kind,
@@ -656,6 +700,12 @@ class BrowserControlTool(BaseTool):
             )
         if action == "navigate":
             return ToolResult(content=f"Navigation requested.\nTarget: {target.get('id') or ''} {target.get('title') or ''}\nURL: {target.get('url') or args.get('url') or ''}", result_kind=self.result_kind, display_summary="浏览器已导航")
+        if action == "allow_download":
+            return ToolResult(content=f"One download allowed for the exact URL for 10 seconds.\nTarget: {target.get('id') or ''}\nURL: {result['value']}", result_kind=self.result_kind, display_summary="已允许本次下载")
+        if action == "set_blob_download_origin":
+            return ToolResult(content=f"Blob download origin {'cleared' if result['value'] is None else 'registered: ' + result['value']}.\nTarget: {target.get('id') or ''}", result_kind=self.result_kind, display_summary="已更新本页 Blob 下载许可")
+        if action == "list_downloads":
+            return ToolResult(content=truncate_tool_result(json.dumps(result["value"], ensure_ascii=False, indent=2), self._MAX_RESULT_CHARS), result_kind=self.result_kind, display_summary="浏览器下载")
         if action == "get_url":
             return ToolResult(content=f"Target: {target.get('id') or ''}\nTitle: {target.get('title') or ''}\nURL: {target.get('url') or ''}", result_kind=self.result_kind, display_summary="浏览器地址")
         if action == "wait_for_element":
@@ -685,7 +735,7 @@ class BrowserControlTool(BaseTool):
             display_summary=labels.get(action, "浏览器操作完成"),
         )
 
-    async def _cancel_embedded_operation(self, endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, context, reason):
+    async def _cancel_embedded_operation(self, endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, context, reason, execution=None):
         receipt = self._uncertain_receipt(operation_id, reason)
         try:
             async with asyncio.timeout(1), httpx.AsyncClient(timeout=1, follow_redirects=False, trust_env=False) as client:
@@ -699,10 +749,10 @@ class BrowserControlTool(BaseTool):
             # exchange cannot establish that the browser stopped executing it.
             pass
         if receipt.get("pending"):
-            self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context)
+            self._retain_embedded_operation(endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context, execution)
         return receipt
 
-    def _retain_embedded_operation(self, endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context):
+    def _retain_embedded_operation(self, endpoint, headers, operation_id, conversation_id, window_instance_id, window_binding_token, receipt, context, execution=None):
         if context is None:
             return
         call_id = context.tool_call_id or self.name
@@ -718,7 +768,9 @@ class BrowserControlTool(BaseTool):
                               "window_instance_id": window_instance_id, "window_binding_token": window_binding_token})
                     response.raise_for_status()
                     observed = response.json()["cleanup_receipt"]
-            except httpx.HTTPError:
+            except httpx.HTTPError as exc:
+                receipt["observation_error"] = str(exc)
+                context.cleanup_receipts[call_id]["resource_cleanup"] = receipt
                 return
             receipt.update(observed)
             context.cleanup_receipts[call_id].update(
@@ -726,7 +778,10 @@ class BrowserControlTool(BaseTool):
                 resource_cleanup=receipt, cleanup_completed_after_deadline=receipt["completed"],
             )
 
-        retain_cleanup_task(asyncio.create_task(settle()), context.pending_cleanup_tasks)
+        task = asyncio.create_task(settle())
+        retain_cleanup_task(task, context.pending_cleanup_tasks)
+        if execution is not None:
+            execution.retain(task, operation_id, receipt)
 
     async def _discover(self, endpoint: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         async with httpx.AsyncClient(timeout=browser_remaining_seconds(), follow_redirects=False, trust_env=False) as client:

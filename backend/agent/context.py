@@ -71,7 +71,7 @@ from backend.agent.tool_result_persistence import (
 )
 from backend.tools.base import ToolResult
 from backend.tools.untrusted import wrap_untrusted_content
-from backend.agent.codex_prompts import codex_collaboration_mode, codex_multi_agent_mode, codex_side_chat_instructions
+from backend.agent.codex_prompts import codex_collaboration_mode, codex_multi_agent_mode, codex_multi_agent_role, codex_side_chat_instructions
 from backend.llm.reasoning_effort import reasoning_effort_wire_map
 
 if TYPE_CHECKING:
@@ -1231,6 +1231,7 @@ class ContextBuilder:
     async def start_turn(self, user_message: str, state: AgentState, *, input_role: str = "user") -> LLMMessage:
         """Render and store one model-visible user turn."""
         user_message = str(user_message or "")
+        self._sync_realtime_world_state()
         if not user_message.strip() and not state.attachments:
             return
         invoked_paths = []
@@ -1389,11 +1390,41 @@ class ContextBuilder:
         # by the cleanup pass.
         self._compact_old_user_runtime_context_for_cache()
         self._refresh_active_user_runtime_context(active_state)
+        self._sync_realtime_world_state()
 
         messages = self._render_prompt_messages(active_state, workspace_root, prompt_parts)
         # Freeze the transcript used by this request; subsequent runtime updates append.
         self._history_frozen_count = max(self._history_frozen_count, len(self._history))
         return messages
+
+    def _sync_realtime_world_state(self) -> None:
+        context = self._tool_execution_context
+        if context is not None:
+            pending = context.run_context.realtime_history_fragments
+            for identity, text in pending:
+                self.append_realtime_transcript_tail(text, identity)
+            pending.clear()
+        owner = context.run_context.environment_thread_runtime if context is not None else None
+        service = owner.realtime_runtime if owner is not None else None
+        active = service is not None and service.context_active
+        previous = next((message for message in reversed(self._history)
+            if message.content_kind in {"realtime_conversation.start_instructions",
+                "realtime_conversation.custom_start_instructions", "realtime_conversation.end_instructions"}), None)
+        was_active = previous is not None and previous.content_kind != "realtime_conversation.end_instructions"
+        if active == was_active:
+            return
+        from backend.realtime.prompts import contextual_fragment
+        body, kind = contextual_fragment(active, service)
+        content = "<realtime_conversation>\n" + body + "\n</realtime_conversation>"
+        self._history_store.append(LLMMessage(role="developer", content=content, content_kind=kind), raw_content=content)
+
+    def append_realtime_transcript_tail(self, content: str, identity: str) -> None:
+        source = "rt-tail:" + identity.replace("-", "")
+        if any(message.answer_source == source for message in self._history):
+            return
+        self._history_store.append(LLMMessage(role="user", content=content,
+            content_kind="realtime_conversation.delegation", answer_source=source,
+            private_model_only=True, is_user_input=False), raw_content=content)
 
     def _render_prompt_messages(
         self, state: AgentState, workspace_root: Path | None,
@@ -1447,8 +1478,20 @@ class ContextBuilder:
         messages.append(LLMMessage(role="developer", content=self._build_collaboration_mode_block(state)))
         if state.prompt_context.get("conversation_type") == "side_chat":
             messages.append(LLMMessage(role="developer", content=codex_side_chat_instructions()))
-        if isinstance(self._llm, LLMAdapter) and reasoning_effort_wire_map(self._llm.model_id()):
-            multi_agent_mode = codex_multi_agent_mode(self._llm.model_id(), self._llm.current_reasoning_effort() == "ultra")
+        context = self._tool_execution_context
+        policy = context.metadata.get("_toolset_policy") if context is not None else None
+        coordination = policy.coordination_options if policy is not None else None
+        model_messages, _ = self._captured_prompt_model_messages()
+        if coordination is not None:
+            from backend.tools.agent_control_plane import AgentControlPlane
+
+            role = codex_multi_agent_role(coordination, model_messages,
+                subagent=AgentControlPlane(context, source_v2=True).actor_is_subagent)
+            if role:
+                messages.append(LLMMessage(role="developer", content=role))
+        if isinstance(self._llm, LLMAdapter) and (coordination is not None or reasoning_effort_wire_map(self._llm.model_id())):
+            multi_agent_mode = codex_multi_agent_mode(self._llm.model_id(), self._llm.current_reasoning_effort() == "ultra",
+                model_messages=model_messages, options=coordination)
             if multi_agent_mode:
                 messages.append(LLMMessage(role="developer", content=multi_agent_mode))
         if plugin_instructions.strip():
@@ -2518,6 +2561,10 @@ class ContextBuilder:
         if answer_source in {"model_final", "model_commentary", "retained"}:
             self._record_guardian_assistant(content, phase=phase, provider_items=provider_items)
 
+    def append_message_board_notification(self, content: str) -> None:
+        self._history_store.append(LLMMessage(role="assistant", content=content,
+            content_kind="agent_message_board.notification", answer_source="agent_message_board.notification"), raw_content=content)
+
     def _record_guardian_assistant(self, content: str, *, phase: str,
         provider_items: list[dict[str, Any]] | None, fallback_id: str | None = None) -> None:
         turn_id = self._tool_execution_context.turn_id if self._tool_execution_context is not None else ""
@@ -2794,6 +2841,13 @@ class ContextBuilder:
             ),
             raw_content=content,
         )
+        # Thread context can arrive while the tool runs (for example the
+        # terminal Realtime tail). Keep its real result next to the call,
+        # before that context, as the streamed-tool consumer already does.
+        call_index = next((index for index in range(len(self._history) - 2, -1, -1)
+            if any(call.id == tool_call_id for call in self._history[index].tool_calls or [])), None)
+        if call_index is not None and any(message.role != "tool" for message in self._history[call_index + 1:-1]):
+            self.settle_streamed_tool_message(self._history[call_index])
         self._enforce_per_message_tool_budget(
             conversation_id=owner_conversation_id,
             workspace_root=owner_workspace_root,
@@ -2944,6 +2998,7 @@ class ContextBuilder:
                 documents=list(message.documents),
                 phase=message.phase,
                 answer_source=message.answer_source,
+                content_kind=message.content_kind,
                 provider_items=list(message.provider_items),
                 attachment_refs=list(message.attachment_refs),
                 runtime_context=message.runtime_context,
@@ -3290,6 +3345,7 @@ class ContextBuilder:
                 tool_calls=message.tool_calls,
                 phase=message.phase,
                 answer_source=message.answer_source,
+                content_kind=message.content_kind,
                 provider_items=list(message.provider_items),
                 images=list(message.images),
                 documents=list(message.documents),
@@ -4147,7 +4203,8 @@ class ContextBuilder:
             self._history[index]
             for index in self._get_history_within_budget_indices()
             if self._history[index].role != "system"
-            and not (self._history[index].role == "developer" and index < prefix_end)
+            and not (self._history[index].role == "developer" and index < prefix_end
+                and not self._history[index].content_kind)
         ]
         return repair_tool_messages(selected)[0]
 
@@ -4253,6 +4310,7 @@ class ContextBuilder:
                 "phase": message.phase,
                 "input_origin": message.input_origin,
                 "answer_source": message.answer_source,
+                **({"content_kind": message.content_kind} if message.content_kind else {}),
                 "provider_items": _sanitize_provider_items(message.provider_items),
                 **({"mcp_output": deepcopy(message.mcp_output)} if message.mcp_output is not None else {}),
                 **({"code_mode_output": deepcopy(message.code_mode_output)} if message.code_mode_output is not None else {}),
@@ -4645,6 +4703,7 @@ class ContextBuilder:
                     phase=str(raw.get("phase") or "")[:40],
                     input_origin=raw["input_origin"],
                     answer_source=str(raw.get("answer_source") or "")[:40],
+                    content_kind=str(raw.get("content_kind") or ""),
                     provider_items=_sanitize_provider_items(raw.get("provider_items")),
                     mcp_output=deepcopy(raw.get("mcp_output")),
                     code_mode_output=deepcopy(raw.get("code_mode_output")),

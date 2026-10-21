@@ -520,6 +520,7 @@ def upload_document_payload(
     context: AttachmentUploadContext,
     file_name: str | None,
     raw_content: bytes,
+    source_path: str = "",
 ) -> dict[str, Any]:
     conversation_id = context.conversation_id
     workspace_root = context.workspace_root
@@ -539,6 +540,8 @@ def upload_document_payload(
         raise ChatApiServiceError(500, "Failed to ingest uploaded document.") from exc
 
     attachment = result.attachment.to_dict()
+    if source_path:
+        attachment["source_path"] = source_path
     if conversation_id:
         native_data = str(attachment.get("data") or "")
         persisted_attachment = dict(attachment)

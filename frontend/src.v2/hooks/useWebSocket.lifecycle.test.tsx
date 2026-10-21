@@ -38,6 +38,7 @@ import {
   resetRecentInboundEventIdsForTests,
   commitProcessedInboundEvent,
   getLastReceivedServerSeqForTests,
+  getPendingClientCommandAckIdsForTests,
   skipUndeliverableInboundEvent,
   useWebSocketConnection,
 } from "./useWebSocket";
@@ -150,6 +151,47 @@ describe("useWebSocketConnection socket ownership", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("keeps realtime audio and RPC results out of replay while preserving the actual speech commit chain", async () => {
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const first = MockWebSocket.instances[0];
+    act(() => first.emit("open"));
+    const owner = { threadId: "voice-A", conversation_id: "voice-A" };
+    const audio = { type: "thread/realtime/appendAudio" as const, ...owner,
+      audio: { data: "AAAA", sampleRate: 24000, numChannels: 1 } };
+    expect(getWebSocket()!.send(audio)).toBe(true);
+    expect(getWebSocket()!.send({ type: "thread/realtime/start", ...owner, outputModality: "audio" })).toBe(true);
+    const liveAudio = sentCommands(first).find(command => command.type === audio.type)!;
+    expect(liveAudio.client_command_id).toBeUndefined();
+    const startId = sentCommands(first).find(command => command.type === "thread/realtime/start")!.client_command_id!;
+    expect(getPendingClientCommandAckIdsForTests()).not.toContain(startId);
+    act(() => first.emitMessage({ type: "command.result", ...owner, command: "conversation.rename", level: "success", message: "", data: {},
+      seq: 1, previous_replay_seq: 0 }));
+    act(() => first.emitMessage({ type: "thread/realtime/outputAudio/delta", ...owner, audio: audio.audio, seq: 2 }));
+    act(() => first.emitMessage({ type: "command.result", ...owner, command: "thread/realtime/start", level: "success", message: "", data: {}, seq: 3 }));
+    await flushQueuedCommands();
+    expect(getLastReceivedServerSeqForTests()).toBe(1);
+    act(() => first.emitMessage({ type: "thread/realtime/item/completed", ...owner, seq: 4, previous_replay_seq: 1,
+      item: { id: "spoken", realtimeSessionId: "voice-session", type: "transcriptSegment", role: "assistant", text: "Spoken result" } }));
+    await flushQueuedCommands();
+    expect(getLastReceivedServerSeqForTests()).toBe(4);
+    expect(first.close).not.toHaveBeenCalled();
+    act(() => first.emit("close", 1006));
+    expect(getWebSocket()!.send(audio)).toBe(false);
+    act(() => vi.advanceTimersByTime(2000));
+    const resumed = MockWebSocket.instances[1];
+    act(() => resumed.emit("open"));
+    await flushQueuedCommands();
+    expect(sentCommands(resumed).find(command => command.type === "session.restore")).toMatchObject({ last_seq: 4 });
+    expect(getWebSocket()!.send(audio)).toBe(false);
+    act(() => resumed.emitMessage({ type: "session.restored", active_conversation_id: null, conversation_switched_follows: false,
+      current_seq: 4, last_seq: 4, replayed_events: 0, session: { active_conversation_id: null } }));
+    await flushQueuedCommands();
+    expect(sentCommandTypes(resumed).filter(type => type.startsWith("thread/realtime/"))).toEqual([]);
+    expect(getWebSocket()!.send(audio)).toBe(true);
+    expect(sentCommands(resumed).find(command => command.type === audio.type)!.client_command_id).toBeUndefined();
   });
 
   it("ignores a close event from a socket owned by an old effect", () => {

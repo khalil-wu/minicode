@@ -82,6 +82,25 @@ test("Windows native menu follows the installed production groups without MiniCo
   assert.equal(submenu(h, "view").some(item => ["Reload", "Force Reload", "Toggle Developer Tools", "Toggle Context Panel"].includes(item.label)), false);
 });
 
+test("queue history uses the existing Edit actions and keeps native text history on its original window", () => {
+  const h = applicationMenuHarness();
+  const calls = [];
+  h.owner.webContents.undo = () => calls.push("owner-undo");
+  h.owner.webContents.redo = () => calls.push("owner-redo");
+  h.executeApplicationMenuAction(h.owner, "undoAppAction");
+  assert.equal(h.events.at(-1).channel, "minicode:menu:undo-app-action");
+  h.executeApplicationMenuAction(h.owner, "redoAppAction");
+  assert.equal(h.events.at(-1).channel, "minicode:menu:redo-app-action");
+  h.setBrowser(true);
+  const count = h.events.length;
+  h.executeApplicationMenuAction(h.owner, "undoAppAction");
+  assert.equal(h.events.length, count);
+  assert.equal(h.native.at(-1).action, "undo");
+  h.executeApplicationMenuAction(h.owner, "nativeTextUndo");
+  h.executeApplicationMenuAction(h.owner, "nativeTextRedo");
+  assert.deepEqual(calls, ["owner-undo", "owner-redo"]);
+});
+
 test("editor menu extensions stay in the Code workspace while hidden native consumers keep their keyboard paths", () => {
   const h = applicationMenuHarness();
   const state = { terminalEnabled: true, bottomPanelToggleEnabled: false, newProjectEnabled: true, editorFocused: false };

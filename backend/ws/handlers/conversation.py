@@ -693,6 +693,7 @@ async def handle_conversation_create(
             execution_cwd=execution_cwd,
             projectless_base=request.projectless_base,
             initial_prompt=request.initial_prompt,
+            sidebar_section_id=request.sidebar_section_id,
             git_branch=git_branch,
             git_isolated=request.git_isolated,
             model_selection=(

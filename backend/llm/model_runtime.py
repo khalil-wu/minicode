@@ -335,7 +335,8 @@ class ModelRuntime:
     def token_budget_auth_context(self, model: ModelDefinition | str) -> TokenBudgetAuthContext:
         """Capture Source experimental-context facts without inferring an account."""
         provider_id = model.provider if isinstance(model, ModelDefinition) else str(model)
-        provider = {**self._extension_providers.get(provider_id, {}), **self._model_configs.get(provider_id, {})}
+        provider = {**self._base_providers.get(provider_id, {}), **self._model_configs.get(provider_id, {}),
+            **self._extension_providers.get(provider_id, {})}
         credential = self._stored_credential(provider_id)
         auth_mode = None
         plan = None
@@ -351,7 +352,7 @@ class ModelRuntime:
             has_env_key=provider.get("env_key") is not None,
             has_experimental_bearer_token=provider.get("experimental_bearer_token") is not None,
             has_auth=provider.get("auth") is not None,
-            has_aws=provider.get("aws") is not None)
+            has_aws=self._provider_aws_config(provider_id) is not None)
 
     def history_notes_backend_enabled(self, model: ModelDefinition) -> bool:
         """Source HistoryNotesExtension's provider and actual-auth gate.
@@ -2766,6 +2767,16 @@ class ModelRuntime:
             return "environment", env_name
         return "stored", None
 
+    def _provider_aws_config(self, provider_id: str) -> dict | None:
+        for definitions in (self._extension_providers, self._model_configs, self._base_providers):
+            provider = definitions.get(provider_id, {})
+            if "aws" in provider:
+                if provider["aws"] is None:
+                    return None
+                from backend.llm.bedrock import aws_settings
+                return aws_settings(provider["aws"])
+        return None
+
     def has_configured_auth(self, provider_or_model: str | ModelDefinition) -> bool:
         from backend.llm.provider_auth import ProviderCredentialCorruptError
         from backend.vault.store import VaultReadError
@@ -2774,6 +2785,10 @@ class ModelRuntime:
             if isinstance(provider_or_model, ModelDefinition)
             else _clean_text(provider_or_model)
         )
+        if self._provider_aws_config(provider_id) is not None:
+            # This selects the real SDK credential chain. Its credentials are
+            # resolved at execution; it is not a successful connection claim.
+            return True
         try:
             credentials = self._stored_credential(provider_id)
         except (ProviderCredentialCorruptError, VaultReadError):
@@ -3322,6 +3337,7 @@ class ModelRuntime:
         )
         return ProviderAdapterSpec(
             provider_id=clean_provider,
+            aws=self._provider_aws_config(clean_provider),
             model_id=model.id,
             api=model.api,
             api_key=api_key,

@@ -598,6 +598,10 @@ function registerIpcHandlers() {
     throw new Error("Directory browsing requires a connected remote host");
   }));
 
+  ipcMain.handle("minicode:attachments:importRemoteFile", withMainSender("minicode:attachments:importRemoteFile", () => {
+    throw new Error("Remote attachments require a connected remote host");
+  }));
+
   ipcMain.handle("minicode:workspace:trust", withMainSender("minicode:workspace:trust", (_event, targetPath) => {
     if (typeof targetPath !== "string" || !targetPath.trim()) {
       return "";

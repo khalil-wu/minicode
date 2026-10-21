@@ -296,6 +296,10 @@ class CreateWorktreeTool(BaseTool):
         )
 
         if success:
+            repository = _worktree_repository(context)
+            if repository is not None and context.conversation_id:
+                await to_thread_cancel_safe(repository.register_worktree, context.conversation_id,
+                    path=str(path), backend="git", workspace_root=str(manager.repo_root))
             branch_info = f"分支 {branch}" if branch else f"提交 {commit or 'HEAD'}"
             return self._success_result(
                 f"已创建 worktree: {path}\n基于: {branch_info}"
@@ -399,6 +403,9 @@ class RemoveWorktreeTool(BaseTool):
         success = await to_thread_cancel_safe(manager.remove_worktree, path=path, force=force)
 
         if success:
+            repository = _worktree_repository(context)
+            if repository is not None and context.conversation_id:
+                await to_thread_cancel_safe(repository.unregister_worktree, context.conversation_id, path=str(path))
             return self._success_result(f"已删除 worktree: {path}")
         else:
             return self._error_result(
@@ -549,7 +556,9 @@ class SnapshotWorktreeTool(BaseTool):
         )
         if record is None:
             return self._error_result(f"快照失败: {path_str}")
-
+        repository = _worktree_repository(context)
+        if repository is not None and context.conversation_id:
+            repository.thread_resources.add(context.conversation_id, "worktree_snapshot", record.id, record.to_dict())
         return self._success_result(
             f"已保存 worktree 快照\n"
             f"  快照 ID: {record.id}\n"
@@ -625,7 +634,9 @@ class RestoreWorktreeTool(BaseTool):
         )
         if not result.restored:
             return self._error_result(f"恢复失败: {result.error or snapshot_id}")
-
+        repository = _worktree_repository(context)
+        if repository is not None and context.conversation_id:
+            repository.register_worktree(context.conversation_id, path=str(result.path), backend="git", workspace_root=str(manager.repo_root))
         return self._success_result(
             f"已从快照 {snapshot_id} 恢复 worktree\n"
             f"  路径: {result.path}\n"

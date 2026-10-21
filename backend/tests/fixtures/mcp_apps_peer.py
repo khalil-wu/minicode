@@ -6,6 +6,8 @@ import os
 from uuid import uuid4
 
 URI = "ui://owned/counter.html"
+CSP = {"connectDomains": ["https://api.owned.example"], "resourceDomains": ["https://cdn.owned.example"],
+       "frameDomains": ["https://frame.owned.example"], "baseUriDomains": ["https://base.owned.example"]}
 HTML = r'''<!doctype html><html><head><meta charset="utf-8"><title>Owned MCP counter</title></head>
 <body><h3>Owned MCP counter</h3><button id="increment">Increment</button><output id="count">0</output>
 <button id="tool">Call app-only tool</button><output id="tool-result"></output><output id="received"></output>
@@ -52,7 +54,7 @@ def main():
             if elicitation is not None:
                 result["structuredContent"]["elicitationResponse"] = elicitation
         elif method == "resources/read":
-            result = {"contents": [{"uri": URI, "mimeType": "text/html;profile=mcp-app", "text": HTML, "_meta": {"ui": {"prefersBorder": True, "csp": {"connectDomains": []}}}}]}
+            result = {"contents": [{"uri": URI, "mimeType": "text/html;profile=mcp-app", "text": HTML, "_meta": {"ui": {"prefersBorder": True, "csp": CSP}}}]}
         elif method == "resources/list":
             result = {"resources": [{"uri": URI, "name": "Counter"}]}
         elif method == "resources/templates/list":

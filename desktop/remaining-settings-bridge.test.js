@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const vm = require("node:vm");
 const { createBrowserPersonalData } = require("./browser-personal-data");
+const { RemoteDesktop } = require("./remote-desktop");
 
 test("settings preload reaches native ownership and isolated data consumers", async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-settings-bridge-"));
@@ -20,6 +21,8 @@ test("settings preload reaches native ownership and isolated data consumers", as
   const mainFrame = {};
   const contents = { id: 37, mainFrame };
   const window = { webContents: contents, isDestroyed: () => false };
+  const record = { windowInstanceId: "settings-owner", windowOwnerId: "primary", windowBindingToken: "original-window-binding" };
+  const remote = new RemoteDesktop({ userData: directory, windowManager: { getMainWindows: () => [window] } });
   const event = { sender: contents, senderFrame: mainFrame };
   const calls = [];
   const fonts = [{ family: "Fixture Sans", faces: [{ family: "Fixture Sans", fullName: "Fixture Sans Regular", postscriptName: "FixtureSans-Regular", styleName: "Regular", weight: 400, style: "normal", isMonospaced: false }] }];
@@ -39,7 +42,7 @@ test("settings preload reaches native ownership and isolated data consumers", as
       : name === "./system-fonts" ? { listFontFamilies: async () => { calls.push(["fontFamilies"]); return fonts; } } : require(name),
   });
   moduleBox.exports.init({ getWindowForSender: sender => sender === contents ? window : null,
-    getWindowRecord: () => ({ windowInstanceId: "settings-owner" }),
+    getWindowRecord: () => record, getRemoteDesktop: () => remote,
     getRuntimeConfig: () => ({ apiBaseUrl: "http://127.0.0.1:8123", wsBaseUrl: "ws://127.0.0.1:8123" }),
     browserPersonalData: personal, getMcpAppSandbox: () => sandbox,
     getPetManager: async () => ({ setNotificationMuted: request => { petState.mutedConversationIds = request.muted ? [request.conversationId] : []; return petState; } }),
@@ -97,4 +100,20 @@ test("settings preload reaches native ownership and isolated data consumers", as
   assert.throws(() => handlers.get("minicode:pets:setNotificationMuted")({ sender: contents, senderFrame: {} }, { conversationId: "fixture-chat", muted: false }), { code: "ERR_UNTRUSTED_IPC_SENDER" });
   assert.deepEqual(calls, [["resetSite", "https://fixture.test"], ["getSitePolicy"], ["setSitePolicy", "https://fixture.test", "camera", "allow"], ["removeSiteDevice", "fixture-device"], ["fontFamilies"], ["guestSubmitted", 91, "https://fixture.test"],
     ["prepare", 37, "http://fixture-frame", "http://127.0.0.1:8123"], ["release", 37, "owned-view"], ["clearData"], ["startupSettings"]]);
+  const importRequest = { path: "/remote/selected.txt", sessionId: "original-session", conversationId: "original-owner", workspaceRoot: "/remote/workspace" };
+  await assert.rejects(runtime.desktop.attachments.importRemoteFile(importRequest), /require a connected remote host/);
+  const imports = [];
+  record.remoteHostId = "original-remote-host";
+  const imported = { conversation_id: "original-owner", artifact_id: "actual-import", attachment: { media_type: "text/plain" },
+    source: { path: "/remote/selected.txt", name: "selected.txt", mediaType: "text/plain", sizeBytes: 25 } };
+  remote.hosts.hosts.set(record.remoteHostId, { closed: false, native(owner, channel, args) {
+    imports.push({ owner, channel, args }); return Promise.resolve(imported);
+  } });
+  assert.deepEqual(await runtime.desktop.attachments.importRemoteFile(importRequest), imported);
+  assert.equal(imports.length, 1);
+  assert.equal(imports[0].owner, record);
+  assert.equal(imports[0].channel, "minicode:attachments:importRemoteFile");
+  assert.equal(imports[0].args[0], importRequest);
+  assert.throws(() => handlers.get("minicode:attachments:importRemoteFile")({ sender: contents, senderFrame: {} }, importRequest), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+  assert.equal(imports.length, 1);
 });

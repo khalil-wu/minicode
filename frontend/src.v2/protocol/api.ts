@@ -439,6 +439,7 @@ export interface UploadResponse {
   doc_id: string;
   artifact_id: string;
   attachment: Record<string, unknown>;
+  source?: { path: string; name: string; mediaType: string; sizeBytes: number };
 }
 
 export interface AttachmentPreviewResponse {

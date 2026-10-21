@@ -56,6 +56,8 @@ const downloadItems = new Map();
 let browserPersonalData = null;
 
 const browserText = (english, chinese) => /^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(getLocale()) ? chinese : english;
+const PERMISSION_LABELS = { camera: ["camera", "摄像头"], microphone: ["microphone", "麦克风"], geolocation: ["location", "位置"],
+  notifications: ["notifications", "通知"], "clipboard-read": ["clipboard", "剪贴板"], mediaKeySystem: ["protected content IDs", "受保护内容 ID"], usb: ["USB devices", "USB 设备"] };
 const getActiveDownloadIds = () => [...downloadItems.keys()];
 
 function downloadsPath() { return path.join(path.dirname(settingsPath()), "browser-downloads.json"); }
@@ -78,6 +80,70 @@ function saveDownloads() { atomicWriteTextSync(downloadsPath(), JSON.stringify(d
 function publishDownloads() {
   for (const window of getMainWindows()) window.webContents.send("minicode:embeddedBrowser:downloadsChanged", listDownloads());
 }
+function claimAgentControl(entry, control) {
+  if (control.agentControl) entry.agentControls.set(control.agentControl.id, control.agentControl);
+}
+
+function consumeAllowedDownload(entry, url) {
+  const grant = entry.allowedDownload;
+  if (grant && grant.grantedAtMs < Date.now() - 10000) entry.allowedDownload = null;
+  if (!entry.allowedDownload || grant.url !== url || entry.agentControls.get(grant.control.id)?.turnId !== grant.control.turnId) return null;
+  entry.allowedDownload = null;
+  entry.blobDownload = null;
+  return grant;
+}
+
+function closeDownloadDebugger(entry) {
+  const owner = entry.downloadDebugger;
+  if (!owner) return;
+  entry.downloadDebugger = null;
+  entry.blobDownload = null;
+  owner.debugger.removeListener("message", owner.onMessage);
+  owner.debugger.removeListener("detach", owner.onDetach);
+  if (!entry.view.webContents.isDestroyed() && owner.debugger.isAttached()) owner.debugger.detach();
+}
+
+function downloadDebugger(entry) {
+  if (entry.downloadDebugger) return entry.downloadDebugger.debugger;
+  const debuggerApi = entry.view.webContents.debugger;
+  if (entry.view.webContents.isDevToolsOpened() || debuggerApi.isAttached()) throw new Error("The original browser page debugger is owned by another consumer.");
+  debuggerApi.attach("1.3");
+  const owner = { debugger: debuggerApi, onMessage: (_event, method, params, sessionId) => {
+    if (method !== "Page.downloadWillBegin" || typeof sessionId === "string" && sessionId.length > 0) return;
+    const pending = entry.blobDownload;
+    const parsed = typeof params?.url === "string" ? URL.parse(params.url) : null;
+    if (!pending || parsed?.protocol !== "blob:" || parsed.origin !== pending.origin || params.frameId !== pending.frameId
+      || pending.url !== null && params.url !== pending.url) return;
+    entry.blobDownload = null;
+    entry.allowedDownload = { url: params.url, grantedAtMs: Date.now(), control: pending.control };
+  }, onDetach: () => {
+    if (entry.downloadDebugger !== owner) return;
+    entry.downloadDebugger = null;
+    entry.blobDownload = null;
+    debuggerApi.removeListener("message", owner.onMessage);
+    debuggerApi.removeListener("detach", owner.onDetach);
+  } };
+  entry.downloadDebugger = owner;
+  debuggerApi.on("message", owner.onMessage);
+  debuggerApi.on("detach", owner.onDetach);
+  return debuggerApi;
+}
+
+function releaseAgentControl({ conversation_id, window_instance_id, control }) {
+  const conversationId = conversationIdFrom({ conversation_id });
+  let released = 0;
+  for (const entry of views.values()) {
+    if (entry.windowInstanceId !== window_instance_id || entry.conversationId !== conversationId
+      || entry.agentControls.get(control.id)?.turnId !== control.turnId) continue;
+    entry.agentControls.delete(control.id);
+    if (entry.allowedDownload?.control.id === control.id) entry.allowedDownload = null;
+    if (entry.blobDownload?.control.id === control.id) entry.blobDownload = null;
+    if (entry.agentControls.size === 0) closeDownloadDebugger(entry);
+    released++;
+  }
+  return released;
+}
+
 async function runDownloadAction({ action, id }) {
   if (action === "open-folder") return shell.openPath(getBrowserSettings().downloadDirectory ?? app.getPath("downloads"));
   listDownloads();
@@ -325,19 +391,43 @@ function permissionCategories(permission, details) {
   return SITE_CATEGORIES.some(item => item.id === permission && !["sound", "images", "javascript"].includes(permission)) ? [permission] : [];
 }
 
-async function requestGuestPermission(contents, permission, callback, details) {
+function requestGuestPermission(contents, permission, callback, details) {
   const entry = entriesByWebContentsId.get(contents.id);
   const origin = normalizeOrigin(details.requestingUrl || details.securityOrigin || contents.getURL());
   const categories = permissionCategories(permission, details);
   if (!entry || !origin || !categories.length) { callback(false); return; }
   if (sitePermissionAllowed(contents, permission, origin, details)) { callback(true); return; }
   if (categories.some(category => effectiveSiteSetting(origin, category) === "block")) { callback(false); return; }
-  if (!entry.presented) { callback(false); return; }
-  const navigation = entry.navigationVersion;
+  entry.permissionRequests.add({ origin, categories, callback, controller: null });
+  void presentGuestPermission(entry);
+}
+
+function dismissGuestPermissions(entry) {
+  for (const request of entry.permissionRequests) {
+    entry.permissionRequests.delete(request);
+    request.controller?.abort();
+    request.callback(false);
+  }
+}
+
+async function presentGuestPermission(entry) {
+  if (!entry.presented || entry.permissionPrompt) return;
+  const request = entry.permissionRequests.values().next().value;
+  if (!request) return;
+  const { origin, categories } = request;
+  const description = categories.map(category => browserText(...PERMISSION_LABELS[category])).join(browserText(", ", "、"));
+  // The callback remains owned by this page while its tab is hidden. Native
+  // presentation can be cancelled independently of the permission decision.
+  const controller = new AbortController();
+  request.controller = controller;
+  entry.permissionPrompt = request;
   try {
-    const { response } = await dialog.showMessageBox(entry.window, { type: "question", message: `Allow ${new URL(origin).hostname} to access ${categories.join(", ")}?`,
-      buttons: ["Block", "Allow this time", "Allow"], defaultId: 0, cancelId: 0, noLink: true });
-    if (contents.isDestroyed() || entry.window.isDestroyed() || entry.navigationVersion !== navigation) { callback(false); return; }
+    const { response } = await dialog.showMessageBox(entry.window, { type: "question", message: browserText(`Allow ${new URL(origin).hostname} to access ${description}?`, `允许 ${new URL(origin).hostname} 访问${description}吗？`),
+      buttons: [browserText("Block", "阻止"), browserText("Allow this time", "本次允许"), browserText("Allow", "允许")], defaultId: 0, cancelId: 0, noLink: true,
+      signal: controller.signal });
+    if (controller.signal.aborted || !entry.permissionRequests.has(request)) return;
+    const setting = categories.map(category => effectiveSiteSetting(origin, category));
+    if (setting.includes("block")) { entry.permissionRequests.delete(request); request.callback(false); return; }
     if (response === 1) {
       const granted = entry.documentGrants.get(origin) ?? new Set();
       for (const category of categories) granted.add(category);
@@ -349,10 +439,16 @@ async function requestGuestPermission(contents, permission, callback, details) {
       const legacy = { ...browserSettings.sitePermissions }; delete legacy[origin];
       saveBrowserSettings({ ...browserSettings, sitePermissions: legacy, sitePolicy: policy });
     }
-    callback(response !== 0);
+    entry.permissionRequests.delete(request);
+    request.callback(response !== 0);
   } catch (error) {
-    callback(false);
-    emit(entry, "error", { error: error instanceof Error ? error.message : String(error) });
+    if (entry.permissionRequests.delete(request)) {
+      request.callback(false);
+      emit(entry, "error", { error: error instanceof Error ? error.message : String(error) });
+    }
+  } finally {
+    entry.permissionPrompt = null;
+    void presentGuestPermission(entry);
   }
 }
 
@@ -645,30 +741,6 @@ async function assessNavigationTargetForRequest(value, conversationId = "", entr
   };
 }
 
-function requestApprovedNavigation(entry, url) {
-  const origin = normalizeOrigin(url) || url;
-  if (entry.pendingNavigationApprovals.has(origin)) return;
-  const request = pendingNavigations.get(entry.key);
-  const control = request?.control || {};
-  entry.pendingNavigationApprovals.add(origin);
-  void confirmNavigationUrl(url, entry.conversationId, entry, control)
-    .then((navigation) => {
-      control.signal?.throwIfAborted();
-      if (views.get(entry.key) !== entry || entry.view.webContents.isDestroyed()
-        || (request && pendingNavigations.get(entry.key) !== request)) {
-        throw new Error("Browser navigation was cancelled.");
-      }
-      if (navigation.privateNetworkApproved) entry.approvedPrivateOrigins.add(origin);
-      return entry.view.webContents.loadURL(navigation.url);
-    })
-    .catch((error) => {
-      emit(entry, "error", {
-        error: error instanceof Error ? error.message : "Local or private navigation was cancelled.",
-      });
-    })
-    .finally(() => entry.pendingNavigationApprovals.delete(origin));
-}
-
 function actualPeerNavigationError(entry, url, peerIp, proxyResolution = "DIRECT") {
   const peer = String(peerIp || "").trim().replace(/^\[|\]$/g, "");
   if (!peer || (!isLoopbackHost(peer) && !isPrivateOrLinkLocalHost(peer))) return "";
@@ -778,12 +850,17 @@ function configureGuestSession(session) {
       event.preventDefault();
       return;
     }
-    if (policy === "ask") {
+    const entry = webContents && entriesByWebContentsId.get(webContents.id);
+    const grant = entry ? consumeAllowedDownload(entry, item.getURL()) : null;
+    if (!entry || (entry.agentControls.size > 0 && !grant)) {
+      event.preventDefault(); item.cancel(); return;
+    }
+    if (policy === "ask" && !grant) {
       const options = {
         title: browserText("Save download file", "保存下载文件"),
         defaultPath: availableDownloadPath(item.getFilename()),
       };
-      const owner = entriesByWebContentsId.get(webContents.id)?.window;
+      const owner = entry.window;
       if (!owner || owner.isDestroyed()) { event.preventDefault(); return; }
       const savePath = dialog.showSaveDialogSync(owner, options);
       if (!savePath) {
@@ -796,6 +873,7 @@ function configureGuestSession(session) {
     }
     listDownloads();
     const record = { id: randomUUID(), filename: path.basename(item.getSavePath()), url: item.getURL(), path: item.getSavePath(),
+      conversationId: entry.conversationId, windowInstanceId: entry.windowInstanceId, tabId: entry.id, isUserInitiated: grant === null,
       state: "progressing", receivedBytes: 0, totalBytes: item.getTotalBytes(), startedAt: Date.now() };
     downloadRecords.unshift(record);
     downloadItems.set(record.id, item);
@@ -847,20 +925,24 @@ function configureGuestSession(session) {
         callback({ cancel: true });
         return;
       }
-      void assessNavigationTargetForRequest(details.url, entry.conversationId, entry)
-        .then((decision) => {
-          callback({ cancel: !decision.allowed });
-          if (decision.allowed) return;
-          if (decision.requiresPrivateNetworkApproval) {
-            requestApprovedNavigation(entry, details.url);
-            return;
+      const request = pendingNavigations.get(entry.key);
+      const control = request?.control || {};
+      void confirmNavigationUrl(details.url, entry.conversationId, entry, control)
+        .then((navigation) => {
+          control.signal?.throwIfAborted();
+          if (views.get(entry.key) !== entry || entry.view.webContents.isDestroyed()
+            || (request && pendingNavigations.get(entry.key) !== request)) {
+            throw new Error("Browser navigation was cancelled.");
           }
-          emit(entry, "error", { error: decision.reason || "已阻止不安全的页面跳转。" });
+          if (navigation.privateNetworkApproved) entry.approvedPrivateOrigins.add(normalizeOrigin(navigation.url));
+          // Continue the original Chromium request after approval. Replacing it
+          // with loadURL would drop POST bodies, referrers and redirect methods.
+          callback({ cancel: false });
         })
         .catch((error) => {
           callback({ cancel: true });
           emit(entry, "error", {
-            error: error instanceof Error ? error.message : "Navigation policy check failed.",
+            error: error instanceof Error ? error.message : String(error),
           });
         });
     });
@@ -1188,6 +1270,8 @@ function syncViewPresentation(entry) {
   const wasPresented = entry.presented;
   entry.presented = entry.layoutBound && activeViewIds.get(entry.windowInstanceId) === entry.id && bounds.width > 0 && bounds.height > 0;
   entry.view.setVisible(entry.presented);
+  if (entry.presented) void presentGuestPermission(entry);
+  else entry.permissionPrompt?.controller.abort();
   if (wasPresented !== entry.presented) onMenuStateChanged(entry.window);
   syncFrameCapture(entry);
 }
@@ -1215,30 +1299,29 @@ function attachViewEvents(entry) {
   webContents.setWindowOpenHandler(({ url }) => {
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
     if (decision.allowed || decision.requiresPrivateNetworkApproval) {
-      emit(entry, "new-tab-request", { requestedUrl: url });
+      return { action: "allow", createWindow: options => {
+        const child = createViewEntry({ id: randomUUID(), conversationId: entry.conversationId,
+          windowInstanceId: entry.windowInstanceId, mainWindow: entry.window, url }, options.webPreferences);
+        child.agentControls = new Map(entry.agentControls);
+        if (approvedPrivateOrigin(entry, url)) child.approvedPrivateOrigins.add(normalizeOrigin(url));
+        emit(child, "page");
+        return child.view.webContents;
+      } };
     }
     return { action: "deny" };
   });
 
   webContents.on("will-navigate", (event, url) => {
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
-    if (decision.allowed) return;
+    if (decision.allowed || decision.requiresPrivateNetworkApproval) return;
     event.preventDefault();
-    if (decision.requiresPrivateNetworkApproval) {
-      requestApprovedNavigation(entry, url);
-      return;
-    }
     emit(entry, "error", { error: decision.reason || "已阻止不安全的页面跳转。" });
   });
   webContents.on("will-redirect", (event, url, _isInPlace, isMainFrame) => {
     if (!isMainFrame) return;
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
-    if (decision.allowed) return;
+    if (decision.allowed || decision.requiresPrivateNetworkApproval) return;
     event.preventDefault();
-    if (decision.requiresPrivateNetworkApproval) {
-      requestApprovedNavigation(entry, url);
-      return;
-    }
     emit(entry, "error", { error: decision.reason || "已阻止不安全的重定向。" });
   });
   webContents.on("did-start-loading", () => emit(entry, "loading"));
@@ -1269,6 +1352,8 @@ function attachViewEvents(entry) {
   webContents.on("found-in-page", (_event, result) => emit(entry, "find-result", { findResult: result }));
   webContents.on("did-stop-loading", () => emit(entry, "updated"));
   webContents.on("did-navigate", (_event, url) => {
+    dismissGuestPermissions(entry);
+    if (entry.blobDownload && normalizeOrigin(url) !== entry.blobDownload.origin) entry.blobDownload = null;
     entry.navigationVersion++;
     entry.documentGrants.clear();
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
@@ -1284,6 +1369,8 @@ function attachViewEvents(entry) {
     emit(entry, "updated");
   });
   webContents.on("did-navigate-in-page", (_event, url) => {
+    dismissGuestPermissions(entry);
+    if (entry.blobDownload && normalizeOrigin(url) !== entry.blobDownload.origin) entry.blobDownload = null;
     entry.navigationVersion++;
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
     if (!decision.allowed) {
@@ -1313,9 +1400,12 @@ function attachViewEvents(entry) {
     emit(entry, "error", { error: errorDescription || "页面加载失败。" });
   });
   webContents.on("render-process-gone", (_event, details) => {
+    dismissGuestPermissions(entry);
+    entry.blobDownload = null;
     appendDesktopLog(`[desktop] embedded browser renderer exited: ${details?.reason || "unknown"}`);
     emit(entry, "error", { error: "页面进程已退出，请刷新后重试。" });
   });
+  webContents.on("destroyed", () => { dismissGuestPermissions(entry); closeDownloadDebugger(entry); });
   webContents.on("console-message", ({ level, message, lineNumber: line, sourceId }) => {
     entry.consoleLogs.push({
       level,
@@ -1326,6 +1416,33 @@ function attachViewEvents(entry) {
     });
     if (entry.consoleLogs.length > 200) entry.consoleLogs.splice(0, entry.consoleLogs.length - 200);
   });
+}
+
+function createViewEntry({ id, conversationId, windowInstanceId, mainWindow, url }, webPreferences = {}) {
+  const view = new WebContentsView({ webPreferences: { ...webPreferences,
+    contextIsolation: true, preload: path.join(__dirname, "browser-password-preload.js"),
+    nodeIntegration: false, sandbox: true, partition: DEFAULT_PARTITION, spellcheck: true,
+  } });
+  const entry = {
+    id, key: viewKey(windowInstanceId, id), windowInstanceId, window: mainWindow,
+    conversationId, view, url, title: "新标签页", faviconUrl: "", visitSource: "other",
+    consoleLogs: [], networkLogs: [], navigationVersion: 0, documentGrants: new Map(),
+    permissionRequests: new Set(), permissionPrompt: null, agentControls: new Map(), allowedDownload: null,
+    blobDownload: null, downloadDebugger: null,
+    approvedPrivateOrigins: new Set(),
+    layoutBound: false, presented: false, captureWaiters: new Set(), captureInFlight: false,
+  };
+  views.set(entry.key, entry);
+  entriesByWebContentsId.set(view.webContents.id, entry);
+  configureGuestSession(view.webContents.session);
+  attachViewEvents(entry);
+  mainWindow.contentView.addChildView(view);
+  // Attaching initializes native bounds. Keep a layout viewport for an agent
+  // or a native child while its panel has not yet provided presented bounds.
+  const { width, height } = mainWindow.getContentBounds();
+  view.setBounds({ x: 0, y: 0, width, height });
+  view.setVisible(false);
+  return entry;
 }
 
 async function create(payload = {}, control = {}) {
@@ -1355,53 +1472,12 @@ async function create(payload = {}, control = {}) {
     // Approval/DNS can yield; only this still-owned request may publish a view.
     entry = views.get(key);
     if (!entry) {
-      const view = new WebContentsView({
-        webPreferences: {
-          contextIsolation: true,
-          preload: path.join(__dirname, "browser-password-preload.js"),
-          nodeIntegration: false,
-          sandbox: true,
-          partition: DEFAULT_PARTITION,
-          spellcheck: true,
-        },
-      });
-      const approvedPrivateOrigins = new Set();
-      entry = {
-        id: requestedId,
-        key,
-        windowInstanceId,
-        window: mainWindow,
-        conversationId,
-        view,
-        url: requestedUrl,
-        title: "新标签页",
-        faviconUrl: "",
-        consoleLogs: [],
-        networkLogs: [],
-        navigationVersion: 0,
-        documentGrants: new Map(),
-        approvedPrivateOrigins,
-        pendingNavigationApprovals: new Set(),
-        layoutBound: false,
-        presented: false,
-        captureWaiters: new Set(),
-        captureInFlight: false,
-      };
-      views.set(key, entry);
-      entriesByWebContentsId.set(view.webContents.id, entry);
-      configureGuestSession(view.webContents.session);
-      attachViewEvents(entry);
-      mainWindow.contentView.addChildView(view);
-      // Attaching a native view initializes its bounds. Set the agent's
-      // layout viewport afterwards, before navigation; the panel takes over
-      // the bounds only when this owner is actually presented.
-      const { width, height } = mainWindow.getContentBounds();
-      view.setBounds({ x: 0, y: 0, width, height });
-      view.setVisible(false);
+      entry = createViewEntry({ id: requestedId, conversationId, windowInstanceId, mainWindow, url: requestedUrl });
     }
     if (navigation.privateNetworkApproved) {
       entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
     }
+    claimAgentControl(entry, control);
     control.signal?.throwIfAborted();
     control.onSubmitted?.();
     entry.visitSource = control.onSubmitted ? "agent" : "other";
@@ -1527,6 +1603,10 @@ async function executeControlCommand(payload = {}, control = {}) {
   if (action === "discover" || action === "list_targets") {
     return { ok: true, action, browser: "MiniCode Embedded Browser", targets: listTargets(conversationId, windowInstanceId) };
   }
+  if (action === "list_downloads") {
+    return { ok: true, action, value: listDownloads().filter(record => record.conversationId === conversationId
+      && record.windowInstanceId === windowInstanceId && record.isUserInitiated === false) };
+  }
 
   if (action === "navigate") {
     const url = typeof payload.url === "string" ? payload.url.trim() : "";
@@ -1549,7 +1629,56 @@ async function executeControlCommand(payload = {}, control = {}) {
     return { ok: true, action, target: targetState(entry) };
   }
   const entry = selectEntry(payload.target_id, conversationId, windowInstanceId);
+  claimAgentControl(entry, control);
   const webContents = entry.view.webContents;
+  if (action === "allow_download") {
+    if (!control.agentControl) throw new Error("Download authorization requires the original authenticated agent control.");
+    const url = payload.url;
+    const parsed = typeof url === "string" ? URL.parse(url) : null;
+    if (!parsed || !["http:", "https:", "blob:"].includes(parsed.protocol)) throw new Error("Download authorization requires an exact HTTP, HTTPS or blob URL.");
+    const frame = webContents.mainFrame;
+    const navigationVersion = entry.navigationVersion;
+    if (parsed.protocol === "blob:") {
+      if (parsed.origin !== normalizeOrigin(frame.url)) throw new Error("Blob download authorization must belong to the original page origin.");
+    } else await confirmNavigationUrl(url, conversationId, entry, control);
+    control.signal?.throwIfAborted();
+    if (views.get(entry.key) !== entry || entry.navigationVersion !== navigationVersion || webContents.mainFrame !== frame) {
+      throw new Error("The original download page changed before authorization completed.");
+    }
+    submit();
+    entry.blobDownload = null;
+    entry.allowedDownload = { url, grantedAtMs: Date.now(), control: control.agentControl };
+    return { ok: true, action, target: targetState(entry), value: url };
+  }
+  if (action === "set_blob_download_origin") {
+    if (!control.agentControl) throw new Error("Blob download authorization requires the original authenticated agent control.");
+    const origin = payload.origin;
+    if (origin == null) {
+      submit();
+      if (entry.blobDownload?.control.id === control.agentControl.id) entry.blobDownload = null;
+      return { ok: true, action, target: targetState(entry), value: null };
+    }
+    const url = payload.url ?? null;
+    const parsed = url === null ? null : URL.parse(url);
+    if (normalizeOrigin(origin) !== origin || url !== null && (parsed?.protocol !== "blob:" || parsed.origin !== origin)) {
+      throw new Error("Blob download origin and optional exact URL must describe the original HTTP or HTTPS page.");
+    }
+    const frame = webContents.mainFrame;
+    const navigationVersion = entry.navigationVersion;
+    const debuggerApi = downloadDebugger(entry);
+    await debuggerApi.sendCommand("Page.enable", {});
+    const { frameTree } = await debuggerApi.sendCommand("Page.getFrameTree", {});
+    control.signal?.throwIfAborted();
+    if (views.get(entry.key) !== entry || entry.navigationVersion !== navigationVersion || webContents.mainFrame !== frame
+      || typeof frameTree?.frame?.id !== "string" || !frameTree.frame.id
+      || normalizeOrigin(frameTree.frame.url) !== origin || normalizeOrigin(frame.url) !== origin) {
+      throw new Error("The original browser main frame or blob origin changed before authorization completed.");
+    }
+    submit();
+    entry.allowedDownload = null;
+    entry.blobDownload = { origin, url, frameId: frameTree.frame.id, control: control.agentControl };
+    return { ok: true, action, target: targetState(entry), value: origin };
+  }
   if (action === "screenshot") {
     submit();
     if (control.requestPresentation) emit(entry, "presentation-requested");
@@ -1662,6 +1791,8 @@ function runMenuCommand(window, focusedContents, action) {
     if (action === "hard-reload") contents.reloadIgnoringCache(); else contents.reload();
   } else if (action === "close") {
     closeEntry(entry);
+  } else if (action === "undo" || action === "redo") {
+    contents[action]();
   } else if (action === "open-find") {
     emit(entry, "find-request");
   } else if (action === "find-next" || action === "find-previous") {
@@ -1720,6 +1851,10 @@ async function runPageCommand(payload = {}) {
 
 function closeEntry(entry) {
   const requestedId = entry.id;
+  dismissGuestPermissions(entry);
+  entry.agentControls.clear();
+  entry.allowedDownload = null;
+  closeDownloadDebugger(entry);
   for (const complete of Array.from(entry.captureWaiters)) {
     complete(null, new Error("Browser tab closed before screenshot presentation completed."));
   }
@@ -1808,6 +1943,7 @@ module.exports = {
   listDownloads,
   getActiveDownloadIds,
   runDownloadAction,
+  releaseAgentControl,
   close,
   closeConversation,
   clearSiteData,

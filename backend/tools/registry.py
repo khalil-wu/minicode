@@ -267,7 +267,7 @@ class CapabilityRegistry:
     ) -> Any:
         from backend.tools.contracts import ToolSchemaView
 
-        spec = self.get_tool_spec(name)
+        spec = active_policy.project_tool_spec(self.get_tool_spec(name))
         policy_available = active_policy.is_available(spec)
         if tool.requires_execution_environment and not active_policy.advertise_environment_tools:
             policy_available = False
@@ -328,6 +328,7 @@ class CapabilityRegistry:
             )
             if model_description and model_description != str(tool_schema.description or "").strip():
                 tool_schema = tool_schema.with_description(model_description)
+            tool_schema = active_policy.project_tool_schema(name, tool_schema)
             schema = tool_schema.to_openai_tool()
         meta = tool.to_runtime_metadata()
         if level is not None:
@@ -578,6 +579,7 @@ class CapabilityRegistry:
         ).strip()
         if model_description and model_description != str(tool_schema.description or "").strip():
             tool_schema = tool_schema.with_description(model_description)
+        tool_schema = (toolset_policy or ToolsetPolicy.default()).project_tool_schema(name, tool_schema)
         return tool_schema.to_openai_tool()
 
     def get_schemas(

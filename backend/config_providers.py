@@ -283,6 +283,7 @@ def _upsert_llm_history(
     next_entry = {
         "provider": provider,
         "provider_id": provider_id,
+        "aws": section.get("aws"),
         "display_name": _provider_display_name(section),
         "base_url": base_url,
         "model": model,
@@ -621,6 +622,9 @@ def save_llm_settings(payload: dict[str, Any], *, after_publish: Callable[[], No
         custom_max_tokens = MINICODE_CAPPED_DEFAULT_MAX_TOKENS
 
     next_custom = {
+        "aws": custom_updates.get("aws", current_custom.get("aws"))
+            if _normalize_openai_base_url(custom_base_url) == current_custom["base_url"]
+                and custom_wire_api == current_custom["wire_api"] else custom_updates.get("aws"),
         "display_name": str(custom_updates.get("display_name", current_custom["display_name"])).strip(),
         "api_key": "",
         "base_url": (

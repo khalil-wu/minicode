@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 MODEL_CONTEXT_WINDOW_DEFAULT = 1_000_000
@@ -123,7 +123,13 @@ def terminal_model_id(model: str) -> str:
 def responses_model_catalog_entry(
     model: str,
 ) -> ResponsesModelCatalogEntry | None:
-    return _RESPONSES_MODEL_CATALOG.get(terminal_model_id(model))
+    from backend.llm.bedrock import MODEL_ALIASES
+    model_id = terminal_model_id(model)
+    source_id = MODEL_ALIASES.get(model_id, model_id)
+    entry = _RESPONSES_MODEL_CATALOG.get(source_id)
+    if model_id in MODEL_ALIASES and source_id == "gpt-5.5" and entry is not None:
+        return replace(entry, context_window=272000, max_context_window=272000)
+    return entry
 
 
 __all__ = [

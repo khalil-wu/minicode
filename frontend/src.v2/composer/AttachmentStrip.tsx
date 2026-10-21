@@ -5,6 +5,8 @@ import { useAppStore } from "../stores";
 import type { ComposerAttachment } from "../stores/types";
 import { cancelComposerUpload, retryComposerAttachment } from "./uploads";
 import { openAttachmentPreview, openLocalFilePreview } from "../chat/openAttachmentPreview";
+import { attachmentRawResourceUrlWithToken } from "../protocol/api";
+import { getWebSocket } from "../hooks/useWebSocket";
 
 const NO_ATTACHMENTS: ComposerAttachment[] = [];
 export const AttachmentStrip = ({ conversationId }: { conversationId?: string } = {}) => {
@@ -23,7 +25,7 @@ export const AttachmentStrip = ({ conversationId }: { conversationId?: string } 
   return (
     <div className="composer-attachment-strip">
       {attachments.map((a) =>
-        a.dataUrl && a.type.startsWith("image/") ? (
+        (a.dataUrl || a.artifactId) && a.type.startsWith("image/") ? (
           <ImageChip key={a.id} attachment={a} onRemove={() => remove(a)} />
         ) : (
           <FileChip key={a.id} attachment={a} onRemove={() => remove(a)} />
@@ -35,6 +37,9 @@ export const AttachmentStrip = ({ conversationId }: { conversationId?: string } 
 
 const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment; onRemove: () => void }) => {
   const { t: tr } = useI18n();
+  const sessionId = useAppStore(state => state.isConnected ? getWebSocket()?.sessionId ?? "" : "");
+  const imageUrl = a.dataUrl ?? (sessionId && a.artifactId && a.conversationId
+    ? attachmentRawResourceUrlWithToken(a.artifactId, sessionId, a.conversationId) : undefined);
   const openPreview = () => openComposerAttachment(a);
 
   return (
@@ -50,7 +55,7 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
         className="composer-attachment-image-preview"
       >
         <img
-          src={a.dataUrl}
+          src={imageUrl}
           alt={a.name}
         />
       </button>
@@ -81,12 +86,12 @@ const ImageChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment
           title={a.error || (a.status === "error" ? tr("上传失败") : tr("上传警告"))}
           onClick={(event) => {
             event.stopPropagation();
-            if (a.status === "error" && a.localFile) retryComposerAttachment(a.id);
+            if (a.status === "error" && (a.localFile || a.remoteSourcePath)) retryComposerAttachment(a.id);
           }}
           className="composer-attachment-image-problem"
-          data-retry={a.status === "error" && Boolean(a.localFile)}
+          data-retry={a.status === "error" && Boolean(a.localFile || a.remoteSourcePath)}
         >
-          {a.status === "error" && a.localFile
+          {a.status === "error" && (a.localFile || a.remoteSourcePath)
             ? <RotateCcw size={12} aria-hidden="true" />
             : <TriangleAlert size={12} aria-hidden="true" />}
           <span>{a.status === "error" ? tr("重试") : tr("警告")}</span>
@@ -154,7 +159,7 @@ const FileChip = ({ attachment: a, onRemove }: { attachment: ComposerAttachment;
         </span>
       )}
       </button>
-      {a.status === "error" && a.localFile ? (
+      {a.status === "error" && (a.localFile || a.remoteSourcePath) ? (
         <button
           type="button"
           onClick={(event) => {

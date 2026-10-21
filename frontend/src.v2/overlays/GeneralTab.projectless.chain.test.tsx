@@ -44,7 +44,7 @@ function bindNative(initialOverride: string | null = null) {
   return { get, set, chooseTaskDirectory, publish };
 }
 const taskRow = () => within(screen.getByText("无项目任务文件夹").closest<HTMLElement>(".settings-row")!);
-const renderGeneral = () => render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={vi.fn()} />);
+const renderGeneral = () => render(<GeneralTab />);
 
 beforeEach(() => {
   vi.clearAllMocks();

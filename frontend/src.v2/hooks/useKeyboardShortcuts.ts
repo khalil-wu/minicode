@@ -10,6 +10,7 @@ import { isCodeShortcut, matchesShortcut, matchesShiftedShortcutVariant, nativeS
 import { buildInterruptCommand } from "../lib/interrupt-command";
 import { numberedShortcut } from "../lib/shortcut-navigation";
 import { SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
+import { queueHistoryShortcutIsStandard, routeQueuedMessageHistory } from "../composer/queued-message-undo";
 
 const announceViewMode = (mode: string) => {
   pushToast(`View mode: ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`, "info", 1200);
@@ -51,6 +52,13 @@ export const useKeyboardShortcuts = () => {
       if (editorFocused && (match("saveFile") || match("saveAllFiles"))) {
         e.preventDefault();
         window.dispatchEvent(new Event(match("saveAllFiles") ? "editor:save-all" : "editor:save"));
+        return;
+      }
+      if (match("undoAppAction") || match("redoAppAction")) {
+        const direction = match("undoAppAction") ? "undo" : "redo";
+        if (routeQueuedMessageHistory(direction, queueHistoryShortcutIsStandard(e, direction)) === "handled") {
+          e.preventDefault(); e.stopPropagation();
+        }
         return;
       }
       // Frameless renderer input uses the same owned command as a native menu click.

@@ -13,7 +13,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from backend.api import _state
+from backend.async_cleanup import _consume_task_result
+from backend.attachments.store import MAX_ATTACHMENT_CONTENT_BYTES
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.services.chat_api_service import ChatApiServiceError, reserve_attachment_upload_context, upload_document_payload
+from backend.services.tool_registry_factory import get_attachment_store
 from backend.services.workspace_api_service import workspace_search_payload
 from backend.workspace.service import WorkspaceService
 from backend.workspace.trust import TRUSTED_WORKSPACES_FILE, trusted_workspace_roots
@@ -101,6 +106,8 @@ class RemoteNative:
             return await asyncio.to_thread(_directory_entries, args[0], args[1])
         if channel == "workspace:trust":
             return await asyncio.to_thread(_trust, args[0])
+        if channel == "attachments:importRemoteFile":
+            return await self._import_attachment(request, args[0])
         if channel.startswith("pty:"):
             if channel == "pty:spawn":
                 if not args[1]:
@@ -118,6 +125,48 @@ class RemoteNative:
         if channel.startswith("fs:"):
             return await asyncio.to_thread(self._filesystem, channel, args)
         raise HTTPException(404, f"unknown remote desktop operation: {channel}")
+
+    async def _import_attachment(self, request: NativeRequest, source: dict) -> dict:
+        session = _state.ws_manager.get_session(source["sessionId"])
+        if session is None or (session.window_instance_id, session.window_owner_id) != (request.window_instance_id, request.window_owner_id):
+            raise HTTPException(403, "remote attachment session belongs to another window")
+        try:
+            context = reserve_attachment_upload_context(session_id=source["sessionId"],
+                conversation_id=source["conversationId"], workspace_root=source["workspaceRoot"],
+                ws_manager=_state.ws_manager, attachment_store=get_attachment_store())
+        except ChatApiServiceError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
+
+        def persist_import() -> dict:
+            try:
+                target = Path(source["path"]).expanduser().resolve(strict=True)
+                if not stat.S_ISREG(target.stat().st_mode):
+                    raise HTTPException(409, "remote attachment path is not a regular file")
+                with target.open("rb") as stream:
+                    content = stream.read(MAX_ATTACHMENT_CONTENT_BYTES + 1)
+                if len(content) > MAX_ATTACHMENT_CONTENT_BYTES:
+                    raise HTTPException(413, "Upload exceeds the 50 MB limit.")
+                payload = upload_document_payload(context=context, file_name=target.name, raw_content=content,
+                    source_path=str(target))
+                return {**payload, "source": {"path": str(target), "name": target.name,
+                    "mediaType": payload["attachment"]["media_type"], "sizeBytes": len(content)}}
+            except FileNotFoundError as exc:
+                raise HTTPException(404, str(exc)) from exc
+            except PermissionError as exc:
+                raise HTTPException(403, str(exc)) from exc
+            except OSError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            finally:
+                context.release()
+
+        # The parsing thread owns its reservation until its actual final write,
+        # even if the renderer closes or the native HTTP request is cancelled.
+        task = asyncio.create_task(asyncio.to_thread(persist_import))
+        task.add_done_callback(_consume_task_result)
+        try:
+            return await asyncio.shield(task)
+        except ChatApiServiceError as exc:
+            raise HTTPException(exc.status_code, exc.detail) from exc
 
     def _filesystem(self, channel: str, args: list):
         service, target = _service(args[0])
