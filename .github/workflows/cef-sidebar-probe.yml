@@ -1,0 +1,56 @@
+name: CEF sidebar prototype (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - prototypes/cef-sidebar/**
+      - .github/workflows/cef-sidebar-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  native-probe:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare isolated evidence directory and pinned SDK
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'cef-sidebar-evidence'
+          New-Item -ItemType Directory -Path $evidence | Out-Null
+          "CEF_PROBE_OUTPUT=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          python prototypes/cef-sidebar/prepare-cef.py $evidence
+          if ($LASTEXITCODE -ne 0) { throw 'CEF SDK preparation failed' }
+      - name: Build the sandboxed CEF bootstrap DLL
+        run: |
+          $build = Join-Path $env:RUNNER_TEMP 'cef-sidebar-build'
+          cmake -S prototypes/cef-sidebar -B $build -G 'Visual Studio 17 2022' -A x64 "-DCEF_ROOT=$env:CEF_SDK_ROOT" 2>&1 | Tee-Object "$env:CEF_PROBE_OUTPUT/configure.log"
+          if ($LASTEXITCODE -ne 0) { throw 'CEF configure failed' }
+          cmake --build $build --config Release --target cef_sidebar_probe --parallel 2 2>&1 | Tee-Object "$env:CEF_PROBE_OUTPUT/build.log"
+          if ($LASTEXITCODE -ne 0) { throw 'CEF build failed' }
+          "CEF_PROBE_EXE=$build/Release/cef_sidebar_probe.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Install isolated Electron host
+        working-directory: prototypes/cef-sidebar
+        run: npm ci --no-audit --no-fund
+      - name: Run the original-HWND child probe at 1x and 1.5x
+        working-directory: prototypes/cef-sidebar
+        run: npm run probe:ci
+      - name: Upload build and runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cef-sidebar-windows-evidence
+          path: ${{ runner.temp }}/cef-sidebar-evidence
+          if-no-files-found: error
+          retention-days: 7

@@ -1,0 +1,8 @@
+{
+  "version": "150.0.22+gc1a097e+chromium-150.0.7871.256",
+  "cefCommit": "c1a097eaa7738483abe2ea9d6297a937d6a884c0",
+  "chromiumCommit": "d3091a1912a6669eb7bf4afac17352c9c314b04d",
+  "archive": "cef_binary_150.0.22+gc1a097e+chromium-150.0.7871.256_windows64.tar.bz2",
+  "bytes": 347007937,
+  "sha1": "598bf2224d04ffd07f1e430ccaf33e5f44766ae6"
+}

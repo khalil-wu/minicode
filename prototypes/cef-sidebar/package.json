@@ -1,0 +1,13 @@
+{
+  "name": "minicode-cef-sidebar-probe",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Isolated Windows CI proof; not a production browser",
+  "main": "host.cjs",
+  "scripts": {
+    "probe:ci": "node run-probe.cjs"
+  },
+  "devDependencies": {
+    "electron": "43.4.0"
+  }
+}
