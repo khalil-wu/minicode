@@ -111,6 +111,9 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         contents.on("preload-error", (_event, preloadPath, error) => {
           process.stderr.write(`[capture] original child ${contents.id} preload ${preloadPath}: ${error.stack || error}\n`);
         });
+        contents.on("console-message", ({ message }) => {
+          process.stdout.write(`[capture] original child ${contents.id} console ${message}\n`);
+        });
         contents.on("before-mouse-event", (_event, input) => {
           process.stdout.write(`[capture] original child ${contents.id} native ${input.type} ${input.button} ${input.x},${input.y}\n`);
         });
@@ -130,6 +133,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       const childPreferences = child.webContents.getLastWebPreferences();
       assert.equal(childPreferences.nodeIntegration, false); assert.equal(childPreferences.contextIsolation, true);
       assert.equal(childPreferences.sandbox, true);
+      process.stdout.write(`[capture] original child configured native preload ${JSON.stringify(child.webContents._getPreloadScript())}\n`);
       assert.equal(child.webContents.getURL(), new URL("/native-post", url).href);
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 2);
       assert.equal(manager.listTargets("another-owner", "fixture-window").length, 0);
@@ -145,7 +149,18 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       const preloadLink = await child.webContents.executeJavaScript(`(() => {
         const link = document.createElement('a'); link.href = ${JSON.stringify(preloadLinkUrl)}; link.textContent = 'Original preload link';
         link.style = 'position:fixed;left:12px;top:12px;width:240px;height:36px;display:block'; document.body.append(link);
-        const rect = link.getBoundingClientRect(); return { x: Math.round(rect.x + 30), y: Math.round(rect.y + 15) };
+        for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'auxclick']) {
+          document.addEventListener(type, event => {
+            const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement);
+            console.info('original native DOM input ' + JSON.stringify({ type: event.type, trusted: event.isTrusted,
+              button: event.button, buttons: event.buttons, ctrlKey: event.ctrlKey, metaKey: event.metaKey,
+              target: event.target.nodeName, anchor: anchor?.href }));
+          }, true);
+        }
+        const rect = link.getBoundingClientRect();
+        const point = { x: Math.round(rect.x + 30), y: Math.round(rect.y + 15) };
+        console.info('original native DOM hit ' + JSON.stringify({ point, href: document.elementFromPoint(point.x, point.y)?.closest('a')?.href }));
+        return point;
       })()`);
       process.stdout.write(`[capture] original child link prepared at ${preloadLink.x},${preloadLink.y}\n`);
       await manager.executeControlCommand({ action: "screenshot", target_id: childTarget.id,
