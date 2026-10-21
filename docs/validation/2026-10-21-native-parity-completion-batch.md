@@ -22,7 +22,7 @@
 
 既有云端 `browser-capture.test.js` 新增受控 HTTP 流，保留原 DownloadItem 和保存路径，使用真实 `runDownloadAction` 暂停/恢复。传入 updater 原生产 `buildUpdatePreflight` 的是 manager 的实时下载ID；暂停时必须阻断更新重启，原下载完成且字节一致后必须解除下载阻断。服务器支持真实 range 重续，没有重新创建下载记录或模拟 DownloadItem。
 
-这项目前只完成语法检查，未在本机执行。原20秒fixture截止与25秒case上限保持不变；实际通过与否由新提交的云端 Desktop job 决定，未获得收据前保留 BR-A1 待验收。
+`caccdeff` 的云端 Desktop job已success，新增原DownloadItem暂停/恢复、精确字节及更新下载阻断/解除均经过原fixture的实际断言；未在本机执行，原20秒fixture截止与25秒case上限保持不变。整轮随后由仅修测试facade的新候选替换并主动取消，因此不能把该轮算完整CI通过；原Desktop job的实际成功范围独立保留。最新整轮CI另以最终HEAD收据为准。
 
 ## 自有 Windows CUA 接收端
 
@@ -35,6 +35,8 @@
 当前普通构建已通过，入口为 `index-D96xHrJW.js`；原 `index-DGnB5Tq5.js` 及旧hashed assets保留，未重载或重启用户窗口。bundle与UI debt检查通过，原门槛未放宽。
 
 另确认 **UI-CUA1** 设置消费者缺失，详见 `2026-10-22-computer-use-settings-source-gap.md`；当前明确未完成组为12，不能继续把11作为穷尽清单。
+
+完整生产体SDK测试在Linux CI中还需将receiving platform作为受控OS facade的一部分；现仅给该生产代码namespace提供win32视图，宿主sys/Pillow/psutil仍保留真实平台。测试不改变生产端非Windows拒绝，也不调用真实Win32。该目标1/1通过；先前Windows SDK/Windows harness成功不被扩大为Linux原生接收端实现。
 
 ## 仍需原生引擎的范围
 

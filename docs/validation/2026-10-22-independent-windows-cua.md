@@ -47,6 +47,8 @@ MiniCode 新增显式 `minicode-win32` provider，使用公开 Win32 API、Pillo
 
 Windows harness已加入独立provider测试，并显式使用Node22，以持续覆盖完整生产启动体的真实Windows进程创建，而非只在Linux或短fixture下运行。
 
+后续跨平台测试修正仅将生产代码namespace的receiving platform一并替换为OS facade；没有全局修改宿主sys.platform，Pillow/psutil仍按真实平台导入。原生产main/session及全部源码体继续参与SDK启动，目标1/1通过。`caccdeff`云端Windows harness实际success；该轮后来被测试修正版替换并主动取消，整轮不算通过。
+
 ## 尚未交付的范围
 
 实际设备/窗口验收、accessibility tree、应用启动、音频、高级 signer、永久 always 授权管理、部分 UWP 真实窗口身份，以及 macOS/Linux adapter尚未完成。Source Sky 包确有三平台 adapter，但这不自动证明桌面每种 remote/Linux组合均开放；桌面门控与底层能力分开记录。

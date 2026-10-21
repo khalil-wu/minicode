@@ -387,7 +387,7 @@ async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_
     # Carry every production byte through the real SDK/executor command. Only
     # its OS facade changes; the original main loop and dispatch remain real.
     source = ("import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[2])) + ")\n"
-        "import json,os\nfrom pathlib import Path\n"
+        "import json,os\nfrom pathlib import Path\nfrom types import SimpleNamespace\n"
         "from backend.tests.fixtures.native_cua_receiving import FixtureDesktop\n"
         "core={'__name__':'minicode_native_protocol_fixture'}\n"
         "exec(compile(" + repr(production_source) + ",'native_cua_windows.py','exec'),core)\n"
@@ -400,7 +400,8 @@ async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_
         " def close(self):\n"
         "  super().close()\n"
         "  with log.open('a',encoding='utf-8') as stream: stream.write(json.dumps({'closed':True,'remaining_pins':len(self.desktop.pins)})+'\\n')\n"
-        "core['WindowsDesktop']=FixtureDesktop\ncore['NativeCuaSession']=RecordedSession\ncore['main']()\n")
+        "core['WindowsDesktop']=FixtureDesktop\ncore['NativeCuaSession']=RecordedSession\n"
+        "core['sys']=SimpleNamespace(argv=sys.argv,stdin=sys.stdin,platform='win32')\ncore['main']()\n")
     build, native_config = module.build_native_bootstrap, module.native_cua_config
     payloads = []
     def full_production_payload(**kwargs):
