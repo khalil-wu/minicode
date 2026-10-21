@@ -7,7 +7,37 @@ import sys
 
 import pytest
 
-from scripts.audit_long_task_session import CHILD_PROBE, Client, observed_turn_outcomes, successful_file_reads
+from scripts.audit_long_task_session import (
+    CHILD_PROBE, Client, observed_turn_outcomes, successful_file_reads,
+    validate_live_roundtrip_reply, validate_queued_batch_reply,
+)
+
+
+@pytest.mark.parametrize("batch,accepted", [(630, False), (708, True), (721, True), (731, True), (732, False)])
+def test_live_roundtrip_rejects_a_truncated_head_before_waiting_for_the_hour(batch, accepted):
+    check = {"marker": "B_LIVE_OK_1", "before_batches": 708, "progress_batches": 731}
+    content = f"B_LIVE_OK_1\noriginal-side-identity\nCURRENT_BATCH={batch}"
+    if accepted:
+        assert validate_live_roundtrip_reply(content, check, "original-side-identity") == batch
+    else:
+        with pytest.raises(AssertionError, match=f"reported batch {batch}; actual live interval was 708..731"):
+            validate_live_roundtrip_reply(content, check, "original-side-identity")
+
+
+@pytest.mark.parametrize("reply,accepted", [
+    ("A_QUEUE_OK — 3,575 batches.", True),
+    ("A_QUEUE_OK — 3575 batches.", True),
+    ("A_QUEUE_OK — 13,575 batches.", False),
+    ("A_QUEUE_OK — 13575 batches.", False),
+    ("A_QUEUE_OK — 3.575 batches.", False),
+    ("A_QUEUE_OK — 35,75 batches.", False),
+])
+def test_queued_reply_compares_actual_count_including_thousands_grouping(reply, accepted):
+    if accepted:
+        assert validate_queued_batch_reply(reply, 3575) == 3575
+    else:
+        with pytest.raises(AssertionError, match="did not report the verified batch count 3575"):
+            validate_queued_batch_reply(reply, 3575)
 
 
 def test_failure_receipt_keeps_actual_terminal_and_attempts_without_borrowing_another_owner_or_turn():

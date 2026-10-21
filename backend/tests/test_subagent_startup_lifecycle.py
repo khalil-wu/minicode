@@ -148,8 +148,8 @@ async def test_continuation_metrics_sum_query_turns_once(startup_case, monkeypat
     assert stored.usage["cost_usd"] == pytest.approx(0.3)
 
 
-@pytest.fixture
-def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+@pytest_asyncio.fixture
+async def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runtime = AgentRuntime(
@@ -219,7 +219,7 @@ def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         runtime=runtime, tool=tool, context=context, hooks=hooks,
         model=model, events=events, workers=workers, workspace=workspace,
     )
-    runtime.close(release_lease=True)
+    await runtime.aclose(release_lease=True)
 
 
 async def _launch(case, delivery: str, **arguments):
@@ -602,8 +602,11 @@ async def test_failed_resident_eviction_keeps_ownership_and_does_not_admit_anoth
 
 
 @pytest.mark.asyncio
-async def test_resumed_receipt_waits_for_actual_start_after_resume_hook(mailbox_handoff_case):
+@pytest.mark.parametrize("version", ["v1", "v2"])
+async def test_resumed_receipt_waits_for_actual_start_after_resume_hook(mailbox_handoff_case, version):
     case = mailbox_handoff_case
+    case.context.run_context.multi_agent_version = version
+    case.context.metadata.update(turn_id="parent", assistant_message_id="assistant-parent")
     child_id, _ = await _launch(case, "foreground")
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -625,7 +628,11 @@ async def test_resumed_receipt_waits_for_actual_start_after_resume_hook(mailbox_
         release.set()
         resumed = await followup
         assert not resumed.is_error and resumed.status == "running"
+        assert resumed.content == ("" if version == "v2" else
+            f"Agent {child_id} was stopped (completed); resumed it in the background with the message and preserved transcript.")
         assert resumed.runtime_metadata["delivery"] == "resumed"
+        assert resumed.runtime_metadata["recipient"] == child_id
+        assert resumed.runtime_metadata["prior_status"] == "completed"
         assert len([kind for kind, _ in case.events if kind == "subagent.start"]) == 2
         assert case.runtime.get_subagent(child_id).execution_started_at > 0
     finally:
@@ -634,10 +641,13 @@ async def test_resumed_receipt_waits_for_actual_start_after_resume_hook(mailbox_
 
 
 @pytest.mark.asyncio
-async def test_followup_startup_failure_retains_mail_without_automatic_retry(mailbox_handoff_case, monkeypatch):
+@pytest.mark.parametrize("version", ["v1", "v2"])
+async def test_followup_startup_failure_retains_mail_without_automatic_retry(mailbox_handoff_case, monkeypatch, version):
     from backend.agent.context import ContextBuilder
 
     case = mailbox_handoff_case
+    case.context.run_context.multi_agent_version = version
+    case.context.metadata.update(turn_id="parent", assistant_message_id="assistant-parent")
     child_id, _ = await _launch(case, "foreground")
     original = ContextBuilder.load_snapshot
     monkeypatch.setattr(ContextBuilder, "load_snapshot", Mock(side_effect=RuntimeError("resume snapshot fault")))
@@ -655,6 +665,9 @@ async def test_followup_startup_failure_retains_mail_without_automatic_retry(mai
         {"target": child_id, "message": "explicit new trigger after startup fault"}, context=case.context,
     )
     assert not resumed.is_error and resumed.status == "running"
+    assert (resumed.content == "") is (version == "v2")
+    assert resumed.runtime_metadata["delivery"] == "resumed"
+    assert resumed.runtime_metadata["recipient"] == child_id
     scheduler = case.runtime._subagent_mailbox_turns[child_id][0]
     await scheduler
     await asyncio.gather(*case.workers)

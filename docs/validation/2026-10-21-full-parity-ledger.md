@@ -4,7 +4,7 @@
 
 以独立行为组为单位。测试数、工具数及静态节点不作产品覆盖分母，不给没有全量验收依据的百分比。功能实现、集成验证、上游/设备/外机与视觉验收分别记录；官方账号排除仅适用于真正依赖账号的官方服务。
 
-当前已确认的待实现行为为 **11 组**：浏览器 BR-G1–G10、独立 CUA 分发 DIST-CUA1。语音页面上下文与转移、应用级网络要求已补齐并完成本地集中验证（见下表）；不将设备/上游尚未运行的验收伪作通过。队列 Undo/Redo 与 Bedrock 本地链路已实现；主题 DATA-THEME1 已由当前代码与完整数据验证撤回。真实上游、小时任务、CI、设备和视觉的待验收项不重复算成缺功能；这不是全产品覆盖率分母。
+当前已确认的待实现行为为 **11 组**：浏览器 BR-G1–G10、独立 CUA 分发 DIST-CUA1。语音页面上下文与转移、应用级网络要求已补齐并完成本地集中验证（见下表）；不将设备/上游尚未运行的验收伪作通过。队列 Undo/Redo 与 Bedrock 本地链路已实现；主题 DATA-THEME1 已由当前代码与完整数据验证撤回。真实上游、小时任务、设备和视觉的待验收项不重复算成缺功能；323c整合CI已通过，后续新候选另验；这不是全产品覆盖率分母。
 
 ## 主要功能族
 
@@ -19,7 +19,7 @@
 | Git、Changes、Diff、review与编辑器 | Git元数据/提交/交付、独立review、完整文件/富预览/空白与导入过滤/评论/行词高亮、Monaco脏buffer及local/独立executor LSP已有实际消费者。29主题44变体已有完整数据；编辑器按用户约定继续参考Cursor。 证据：`docs/validation/2026-10-18-git-review-settings-native-delivery.md`、`docs/validation/2026-10-16-executor-editor-lsp.md`、`docs/validation/2026-10-21-code-themes-current-catalog.md` | UI-A1、NR-A1 |
 | projects、worktree、会话/草稿、storage与import | 稳定项目/会话身份、无源码项目受管目录、worktree真实创建分支与冷清理、归档/永久删除区别、导入/存储、活动与隐藏草稿/附件/未保存buffer的owner链存在。本轮已补Source自定义sections、PR/worktree持久资源、原队列编辑排序和Undo/Redo。 证据：`docs/validation/2026-10-21-thread-sections-resource-references.md`、`docs/validation/2026-10-21-runtime-catalog-and-queue.md` | UI-A1、NR-A1 |
 | 本地/远端附件与媒体 | G3远端附件仅一组：条件菜单→原picker多选→原host/window/session导入→同一上传/owner/adopt/retry/草稿/缩略图消费。Windows默认文件与目录混选已撤回为误报。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/remote-file-picker.md`、`output/full-parity-20261021/native-remote-audit.md` | UI-A1、NR-A1 |
-| 内嵌browser、下载、内容设置、密码与多级菜单 | 已有导航/标签/设备/历史/基础权限与清理/管理/原表单autofill/live下载；F1–F5已补原请求归属、单次下载准入和unknown-blob，真实 Electron POST/HTTP/blob smoke 待当前CI。G1–G10仍为不同引擎/原生边界。 证据：`output/full-parity-20261021/browser-audit.md`、`output/full-parity-20261021/browser-download-admission.md` | BR-G1、BR-G2、BR-G3、BR-G4、BR-G5、BR-G6、BR-G7、BR-G8、BR-G9、BR-G10、BR-A1、BR-A2、BR-A3、UI-A1 |
+| 内嵌browser、下载、内容设置、密码与多级菜单 | 已有导航/标签/设备/历史/基础权限与清理/管理/原表单autofill/live下载；F1–F5已补原请求归属、单次下载准入和unknown-blob，真实 Electron POST/HTTP/blob smoke 已在323c完整CI通过。G1–G10仍为不同引擎/原生边界。 证据：`output/full-parity-20261021/browser-audit.md`、`output/full-parity-20261021/browser-download-admission.md` | BR-G1、BR-G2、BR-G3、BR-G4、BR-G5、BR-G6、BR-G7、BR-G8、BR-G9、BR-G10、BR-A1、BR-A2、BR-A3、UI-A1 |
 | 听写与双向Realtime | 听写原链存在；Source公开六Realtime命令/11通知、V1/V2/V3、WebRTC/existing-call、原provider/owner、真实query/steer、已提交final回传、durable speech和不推理的私有结束tail已经闭环；模型结束工具及异步tail/真实工具结果成对已修。页面摘要、原窗口/host/thread claim、媒体stop回执→目标start及return已补齐；最终本批native63/frontend27/backend30通过。 证据：`docs/validation/2026-10-21-realtime-source-chain.md`、`docs/validation/2026-10-21-voice-session-tools-source-gates.md` | VO-A1、VO-RT-API1 |
 | SSH、WSL、独立executor与native sandbox | persistent host、真实alias/login shell、原窗口binding、PTY/流控、远端fs/git/LSP/worktree已有实现；Windows restricted readiness旧缺口已闭。当前26.1016已移除旧显式remote安装RPC/方法，连接行仍过滤安装action；该历史内部API差异不计当前缺功能。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-18-real-ssh-source-harness-delivery.md` | NR-A1、NR-A2 |
 | Computer Use | 显式安装Source runtime的本机Windows消费与SDK/AgentSession/ThreadRuntime关闭链已实现；独立随Mini分发及remote/non-Windows receiving尚不在已交付覆盖。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-17-installed-cua-source-consumer.md` | DIST-CUA1、CUA-A1 |
@@ -70,21 +70,21 @@ Realtime 协议与结束工具上一冻结批为 **57/57**：13 个协议/原 ow
 | BR-G9 | partial_missing | Source私有save bubble、成功登录分类、suggestion/generation UI未复现；现有加密管理/原表单填充并非缺失 证据：`output/full-parity-20261021/browser-audit.md` |
 | BR-G10 | partial_missing | 任意iframe/script navigation仍缺相同trusted modifier事实；主frame HTML/SVG已补 证据：`output/full-parity-20261021/browser-audit.md` |
 | DIST-CUA1 | private_dependency | 独立随MiniCode分发的可再分发native runtime/完整替代，以及remote/non-Windows receiving覆盖尚未交付；已安装Source原runtime本机消费不是缺失。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-17-installed-cua-source-consumer.md` |
-| RT11 | pending_acceptance | 短校准232.406秒通过；上一正式长跑因真实网关TLS/API错误失败。新生产冻结后hour-live-final-02正执行3600/3660秒业务、原PID/handle、90秒断线、周期B实际provider/read_file、board/followup/冷读与关闭；无最终通过收据前不记通过。证据：`2026-10-21-real-hour-acceptance.md` |
+| RT11 | hour_failed_continuation_verified | 03主/child实际跑满3600/3660秒并退出0；同actor原句柄、board、冷读及B2–5通过，B1误读截断头630使整轮仍失败。131.516秒独立冷续跑已恢复原A/B、同child epoch2→3及正确尾读3575；不重算小时或回写原failed结果。证据：`2026-10-21-real-hour-acceptance.md`、`2026-10-21-source-long-task-chain-review.md` |
 | BR-A1 | pending_physical_acceptance | pause/resume/completion与updater restart blocker真实实例验收。 证据：`output/full-parity-20261021/browser-audit.md` |
 | BR-A2 | pending_physical_acceptance | 真实device/native permission及OS secure storage，不由fixture推断。 证据：`output/full-parity-20261021/browser-audit.md` |
-| BR-A3 | native_passed_head_796ecae5_pending_final_integration | 原POST/对象/opener、preload实际IPC、后台首次导航、HTTP/blob及关闭来源后存活已在796ecae5实际6/6通过；本机未用GUI，最新整合HEAD CI待确认。 证据：`output/full-parity-20261021/browser-audit.md` |
+| BR-A3 | native_passed_head_323c3027 | 原POST/对象/opener、preload实际IPC、后台首次导航、HTTP/blob及关闭来源后存活已在323c完整CI实际6/6通过；本机未用GUI。 证据：`output/full-parity-20261021/browser-audit.md` |
 | UI-A1 | pending_physical_acceptance | 当前构建、同尺寸/缩放逐区域普通/hover/focus/disabled/多层菜单/拖动/滚动/动效；保留特色字体；未核状态不是已证实像素缺陷。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/browser-audit.md`、`docs/validation/2026-10-21-desktop-agent-alignment.md` |
 | VO-A1 | pending_physical_acceptance | mic、键盘capture/SendInput、focus/clipboard原目标、录音/转录/重试/设置导航真实验收。 证据：`output/full-parity-20261021/general-audit.md`、`docs/validation/2026-10-21-desktop-agent-alignment.md` |
 | NR-A1 | pending_external_environment_acceptance | 实际host上的fs/PTY/Git/LSP/worktree/断线/窗口与voice本地服务归属；既有外机证据按其旧冻结身份引用。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-18-real-ssh-source-harness-delivery.md` |
 | NR-A2 | pending_physical_acceptance | selected restricted/elevated/managed networking、ACL/private desktop/进程清理、IPv4/IPv6/proxy等真实策略矩阵；不改用户机器政策来伪造通过。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/windows-native-sandbox.md` |
 | CUA-A1 | pending_physical_acceptance | 实际截图/输入/app approval与原pipe/helper关闭；历史仅bootstrap/list_apps不能替代。 证据：`output/full-parity-20261021/native-remote-audit.md` |
 | OS-A1 | pending_physical_acceptance | 原生clipboard/default app/focus/Mica及MCP encrypted-media/手势clipboard；macOS路径仅相应平台验收。 证据：`output/full-parity-20261021/native-remote-audit.md`、`output/full-parity-20261021/general-audit.md` |
-| INTEG-A1 | pending_integration_acceptance | 本轮所有生产编辑冻结后构建/包/冷装/CI；baseline九个green jobs只证明baseline。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/runtime-audit.md` |
+| INTEG-A1 | verified_head_323c_new_candidate_pending | 323c完整9/9 job成功，含原生smoke及wheel冷安装；后续Source followup/审计修正的新候选需其自身CI。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/runtime-audit.md` |
 | PROV-BEDROCK-A1 | pending_external_provider_acceptance | 本批独立签名、真实loopback HTTP/SSE和前端验证证明本地实现；没有真实AWS/GovCloud凭据或上游推理回执。证据：`docs/validation/2026-10-21-bedrock-provider-chain.md`、`docs/validation/2026-10-21-bedrock-setup-ui.md` |
 | VO-RT-API1 | pending_external_provider_and_physical_acceptance | 本轮loopback真实HTTP/WS与ScriptModel证明本地协议和harness链；未使用真实麦克风/扬声器和外部Realtime服务，不把配置可用等同上游兼容或设备已验收。 证据：`output/full-parity-20261021/realtime-source-expanded-repair.xml` |
 
-浏览器 G1–G10 是十个真实引擎/原生行为组，现有 stock Electron 没有对应的完整 producer；不是十个可用开关。BR-F5 的 agent 单次下载准入已实现，与 G2 的网页 origin 多次下载 limiter 分开；真实POST/preload/background/HTTP/blob完整smoke已在796ecae5实际通过，最新整合HEAD CI另列。
+浏览器 G1–G10 是十个真实引擎/原生行为组，现有 stock Electron 没有对应的完整 producer；不是十个可用开关。BR-F5 的 agent 单次下载准入已实现，与 G2 的网页 origin 多次下载 limiter 分开；真实POST/preload/background/HTTP/blob完整smoke已在323c最新整合CI通过，后续新候选另验。
 
 ## 已撤回或被后续覆盖的旧说法
 
@@ -105,4 +105,4 @@ Realtime 协议与结束工具上一冻结批为 **57/57**：13 个协议/原 ow
 - 真实上游账号/API Key、麦克风/扬声器、WFP/OS secure storage、外机 SSH/WSL、CUA 输入及系统窗口状态的验收单列，不以 fixture 推断实机通过。
 - `thread/inject_items` 的接口名不同暂不计作独立产品缺失：需与 MiniCode 已有受控 history、side-chat 和跨 host 恢复的实际 consumer 对照；公开 Source 的 prediction 方法自身未实现也不算 MiniCode 缺功能。
 
-机器可读版本：`output/full-parity-20261021/full-parity-ledger.json`。当前新生产代码已冻结；safe前端构建、bundle/UI debt门槛通过，运行中app旧hashed assets保留。root正在执行hour-live-final-02并推进最新整合HEAD的CI；小时任务未得到最终成功收据前继续列RT11待验收。
+机器可读版本：`output/full-parity-20261021/full-parity-ledger.json`。safe前端构建、bundle/UI debt门槛通过，运行中app旧hashed assets保留。323c完整CI为9/9成功；03小时任务已结束并保留B1失败，原A/B和同child的独立冷续跑已通过。当前无小时验收在运行，3600/3660秒是自选压力窗口而非Source要求；后续新候选CI另行记录。

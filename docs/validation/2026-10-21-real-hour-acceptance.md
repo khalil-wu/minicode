@@ -33,4 +33,14 @@
 
 该轮随后因CI确定性复现的真实host关闭竞态被主agent主动中止，1287.437秒、`passed=false`，不计小时通过。只关闭经原auditor父子关系核实的隔离backend，backend退出0，原主/child进程均已退出；中止前独立比较后端字节仍与开始snapshot一致。`intentional-stop.json`单独保留中止原因，原失败result未改。新一轮只在关闭准入根因修复并重新冻结后启动。
 
-`e3b4cce9` 修复原host关闭准入，并将正式WebSocket依赖统一为sidecar已锁定、已实际验证的16.0后，已启动 `hour-live-final-03/`。当前生产冻结输入767项与开始snapshot相同；原主PID26080/handle bg_90255425、child PID13756/handle bg_6a38b69e已持续观测，90秒断线后恢复，child初始final实际完成而原进程继续。首个B新provider/read_file往返在827.922秒完成。以上仍是中间事实，不能替代最终3600/3660秒、同child followup、原句柄退出、board与冷读/关闭完整通过收据。
+`e3b4cce9` 修复原host关闭准入，并将正式WebSocket依赖统一为sidecar已锁定、已实际验证的16.0后，启动了 `hour-live-final-03/`。该轮现已结束：总3901.75秒、backend退出0、767项生产输入在运行期间未改变。主原PID26080/handle bg_90255425独立观测3600.609秒并退出0，业务3575批、2,152,150行；child原PID13756/handle bg_6a38b69e独立观测3660.297秒并退出0，校验1,094,700行。同child初次final后继续原进程、epoch[1,2]的真实followup、原句柄轮询、90秒断线后恢复均有实际收据。
+
+该轮整体仍为 `passed=false`：首次B请求未指定行范围，模型读取 `progress.jsonl` 的截断头部1–630行后未分页，错答 `CURRENT_BATCH=630`；当次独立实际区间为708–731。原工具已明确提示截断及 `read_artifact` 指针；这不是丢失后台进程或读取旧会话。其余四次B新provider/read_file往返均落在各自实际进度区间。原失败结果不改成通过。
+
+失败后的只读后置核对 `output/full-parity-20261021/hour03-postconditions.json` 已实际执行原handle、board、业务、child、冷读及五次B数值条件：9项通过，只有B1失败。另发现审计本身的格式误判：队列真实读取3575并答 `A_QUEUE_OK — 3,575 batches.`，原字符串包含检查拒绝了相同数值。现改为比较完整整数，接受3575/3,575，同时拒绝13575、13,575、3.575和错误分组。该修正没有放宽B进度区间。集中client审计35项通过、0 skip；原失败收据哈希保持不变。
+
+## Source契约与续跑范围
+
+3600/3660秒是本地自选压力窗口，不是Source的功能契约。Source交互exec由原process manager保留句柄，yield仅结束本次等待；`followup_task` 对同一actor触发新的turn，`send_message`不唤醒idle actor；连接断开、一次turn final和显式shutdown是不同生命周期。源码与MiniCode对应链路见 `2026-10-21-source-long-task-chain-review.md`。
+
+已有小时业务证据不需要重新计算。补验 `hour03-cold-resume-01/result.json` 已通过，131.516秒：从03持久state副本恢复原A/B，用新的provider/read_file正确读取原文件尾3575；通过canonical `/root/reviewer` 找回原child `subagent-8c7c2dd8`，同actor epoch2→3，真实followup读取child-result.json并完成；A重新读取verification.json，主/侧新final均持久化，关闭退出0。运行期间backend输入、原workspace和原03 result均未改变。这是独立续跑成功收据，不能用已结束的原进程声称仍在运行，也不能追溯成03整轮通过。

@@ -629,6 +629,27 @@ def v2_board_evidence(events, state, *, conversation_id, message_id, channel, no
         "source_call_ids": {name: [event["id"] for event in completed if event["name"] == name] for name in sorted(required)}}
 
 
+def validate_live_roundtrip_reply(content, check, side_identity):
+    assert check["marker"] in content, (check["marker"], content)
+    assert side_identity in content, content
+    actual_batch = re.search(r"CURRENT_BATCH\s*=\s*(\d+)", content)
+    assert actual_batch is not None, content
+    reported = int(actual_batch.group(1))
+    assert check["before_batches"] <= reported <= check["progress_batches"], (
+        f"{check['marker']} reported batch {reported}; actual live interval was "
+        f"{check['before_batches']}..{check['progress_batches']}")
+    return reported
+
+
+def validate_queued_batch_reply(content, expected_batches):
+    assert "A_QUEUE_OK" in content, content
+    counts = {int(value.replace(",", "")) for value in re.findall(
+        r"(?<![\w.,])(?:\d{1,3}(?:,\d{3})+|\d+)(?![\w,]|\.\d)", content)}
+    assert expected_batches in counts, (
+        f"Queued reply did not report the verified batch count {expected_batches}: {content}")
+    return expected_batches
+
+
 def observed_turn_outcomes(events, owners):
     """Keep canonical turn results and their actual provider attempts on failure."""
     outcomes = {}
@@ -1013,6 +1034,7 @@ async def exercise(args, config):
             for identity in (a, b, a, b):
                 await client.command("conversation.switch", conversation_id=identity)
             live_checks = []
+            result["live_roundtrips"] = live_checks
             next_check = time.monotonic() + args.roundtrip_interval
             while args.roundtrip_interval > 0 and not (workspace / "verification.json").exists():
                 await asyncio.sleep(min(30, max(0, next_check - time.monotonic())))
@@ -1029,20 +1051,25 @@ async def exercise(args, config):
                 before_batches = len((workspace / "progress.jsonl").read_text(encoding="utf-8").splitlines())
                 await client.command("conversation.switch", conversation_id=b)
                 await client.command("user_message", conversation_id=b,
-                    content=f"Make new successful dedicated read_file calls for BOTH B_NOTE.txt and the current tail of progress.jsonl. Prior chat memory is not accepted for this check. Reply {marker} with the exact B_NOTE.txt contents and CURRENT_BATCH=<the actual integer batch from the current progress tail>. Do not modify files.",
+                    content=f"Make new successful dedicated read_file calls for BOTH B_NOTE.txt and the current tail of progress.jsonl. For progress.jsonl use start_line={before_batches}: that was its last line when this request was sent. Read the actual newest available row; if the result is truncated, continue pagination instead of treating the last visible head row as the file tail. Prior chat memory is not accepted for this check. Reply {marker} with the exact B_NOTE.txt contents and CURRENT_BATCH=<the actual integer batch from the current progress tail>. Do not modify files.",
                     permission_mode="bypass", user_message_id="user_live_" + uuid4().hex,
                     assistant_message_id=message_id)
                 await client.terminal(b, message_id)
                 read_calls = successful_file_reads(client.events[event_start:], conversation_id=b,
                     message_id=message_id, required_files=("B_NOTE.txt", "progress.jsonl"))
-                live_checks.append({"message_id": message_id, "marker": marker,
+                check = {"message_id": message_id, "marker": marker,
                     "elapsed": round(time.monotonic() - started, 3),
                     "successful_read_calls": read_calls, "before_batches": before_batches,
-                    "progress_batches": len((workspace / "progress.jsonl").read_text(encoding="utf-8").splitlines())})
+                    "progress_batches": len((workspace / "progress.jsonl").read_text(encoding="utf-8").splitlines())}
+                live_checks.append(check)
+                finals = [event["item"]["text"] for event in client.events[event_start:]
+                    if event.get("type") == "item.completed" and event.get("conversation_id") == b
+                    and event.get("message_id") == message_id and event.get("item", {}).get("source") == "model_final"]
+                assert finals, "No original side-conversation final answer arrived"
+                check["reported_batch"] = validate_live_roundtrip_reply(finals[-1], check, side_identity)
                 await client.command("conversation.switch", conversation_id=a)
                 print("Live model round-trip completed", json.dumps(live_checks[-1]), flush=True)
                 next_check = time.monotonic() + args.roundtrip_interval
-            result["live_roundtrips"] = live_checks
             observation_timeout = max(420, args.seconds + args.child_seconds + 600)
             for label, message_id in messages.items():
                 terminal = await client.terminal(b if label == "b" else a, message_id, timeout=observation_timeout)
@@ -1091,12 +1118,8 @@ async def exercise(args, config):
                 assert marker in by_id[messages[label]]["content"], (label, by_id[messages[label]])
             assert side_identity in by_id[messages["b"]]["content"]
             for check in live_checks:
-                assert check["marker"] in by_id[check["message_id"]]["content"]
-                assert side_identity in by_id[check["message_id"]]["content"]
-                actual_batch = re.search(r"CURRENT_BATCH\s*=\s*(\d+)", by_id[check["message_id"]]["content"])
-                assert actual_batch is not None, by_id[check["message_id"]]["content"]
-                assert check["before_batches"] <= int(actual_batch.group(1)) <= check["progress_batches"]
-            assert str(verified["batches"]) in by_id[messages["queue"]]["content"]
+                validate_live_roundtrip_reply(by_id[check["message_id"]]["content"], check, side_identity)
+            validate_queued_batch_reply(by_id[messages["queue"]]["content"], verified["batches"])
             assert all(message["id"] != messages["b"] for message in records["a"].transcript)
             assert all(message["id"] not in {messages["a"], messages["queue"]} for message in records["b"].transcript)
             reviewers = {event["subagent_id"] for event in client.events if event.get("type") == "subagent.start"}

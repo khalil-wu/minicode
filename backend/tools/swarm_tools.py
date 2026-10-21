@@ -404,7 +404,7 @@ class SendMessageTool(_AgentCoordinationTool):
                 return self._error_result(f"Recipient {recipient} could not be resumed: {start_error}")
             if start_error is not None:
                 return ToolResult(
-                    content=(f"Agent {recipient} was stopped ({recipient_record.status}); "
+                    content="" if control.source_v2 else (f"Agent {recipient} was stopped ({recipient_record.status}); "
                         "resumed it in the background with the message and preserved transcript."),
                     display_summary=summary or f"Resumed {recipient}",
                     result_kind="subagent", status="running",

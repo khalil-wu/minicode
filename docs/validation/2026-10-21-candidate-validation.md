@@ -25,7 +25,7 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 
 实际试运行发现的 URI、流式参数预览、公开结果无内部command ID，以及child actor ID与真实query turn的区别均已按现有producer修正。审计器保留原PID/create-time、独立OS退出/时长、原durable owner、实际启动/完成通知、真实monitor结果、同child epoch和SQL/工作记录关联；不解析summary补证，不新增public内部状态，不放松重启/换handle/跨owner拒绝。另修正CLI选择state root之前导入backend配置的初始化顺序，原用户配置未改变。
 
-进程、V2 board和现有client定向146个用例通过；最新board修正75/75，另CLI import单例通过。它们不是一小时收据。真实短任务校准和正式3600秒验收单列于 `2026-10-21-real-hour-acceptance.md`。最终GitHub HEAD及全部九个job结果待最终收据补充。
+进程、V2 board和现有client定向146个用例通过；最新board修正75/75，另CLI import单例通过。它们不是一小时收据。真实短任务校准和正式3600秒验收单列于 `2026-10-21-real-hour-acceptance.md`。`323c3027` 完整九项CI最终通过，精确结果见下文；之后的变更需由其自身HEAD的CI验证。
 
 ## 原生 POST 的产品根因修复
 
@@ -53,7 +53,7 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 
 后续应用级network requirements与HTTP/WS/AWS消费者完成本地验证，11文件222个不同用例有通过证据，最终新增42/42统一通过；语音原窗口claim/页面摘要/transfer/return最终native63、frontend27、backend30通过、0 skip，分别见对应消费者报告。它们没有运行真实AWS、物理音频、外部双向Realtime或外机验收。
 
-新前端safe构建为 `index-DGnB5Tq5.js`，保留运行中app仍需的旧hashed assets；bundle与UI debt原门槛通过，未增限额。工具注册81个名字无重复；文件体积检查仅报告现有warning、exit 0。整合后完整最新HEAD的九项CI及hour-live-final-02最终结果仍待各自完整收据，旧候选成功不能替代。
+新前端safe构建为 `index-DGnB5Tq5.js`，保留运行中app仍需的旧hashed assets；bundle与UI debt原门槛通过，未增限额。工具注册81个名字无重复；文件体积检查仅报告现有warning、exit 0。完整整合CI已在 `323c3027` 通过；hour-live-final-02已主动中止，03现已结束并保留真实B1失败，具体范围见小时报告。
 
 ## 整合 CI 暴露的关闭与依赖契约
 
@@ -62,3 +62,9 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 backend suite发现SDK17.3与本地/sidecar16.0合同不同，正式依赖已统一至实际支持的16.0。另一真实产品竞态由原 `track_execution_cleanup` 完成回调确定性复现：host关闭等待原watcher期间仍可重新准入watcher。修复在首次关闭await前设置已有host lifecycle标记，活动通知继续唤醒原event，但不再创建新watcher；未在fixture增加sleep、重试或删除空watcher断言。真实回调回归及网络/重连/语音/adapter八文件一次集中143/143通过、0 skip，收据为 `ci-final-contract-repairs.xml`。随后继续等待修复后完整CI与重新计时的小时验收。
 
 `e3b4cce9` 完整CI为8成功/1失败：backend7754通过、162真实skip，只有语音链用例把同一provider接到的独立全局Memory请求误计为第三次语音请求。fixture现按实际metadata.session_id绑定原voice线程，只由该线程占用语音gate/inputs；所有请求仍记录，原精确两次请求、cold transcript及关闭断言保留。独立Memory的实际生产请求未被屏蔽。相关三个文件47/47通过；这次只改测试，运行中的hour-live-final-03生产输入保持不变。
+
+## 已完成的整合 CI
+
+精确HEAD `323c302710eab7da5f87de2853c0646e315c3504` 的 [run 39602527964](https://github.com/khalil-wu/minicode/actions/runs/39602527964) 九项job全部success。Backend7755 passed/162 skipped，Root1788/52，Frontend5198/0（460文件），Windows harness363/15，Desktop unit394/9，Electron smoke6/0；其余native execution/network、Electron前端integration及Linux wheel冷安装成功。各套测试不简单相加为不同用例总数，skip不计passed。正式安装和wheel冷安装均确认 `websockets==16.0`。收据为 `output/full-parity-20261021/ci-323c-receipt.json` 与 `ci-323c-summary.json`。
+
+之后的Source followup返回值、尾读审计和文档修正属于新候选，不借323c的CI结论。
