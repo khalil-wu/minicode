@@ -15,6 +15,7 @@ from backend.agent.execution_journal import execution_journal_owner
 from backend.agent.query_journal import QueryJournalRecorder
 from backend.agent.query_terminal import QueryTerminalTransaction
 from backend.agent.query_engine import QueryEngine, QuerySetupError
+from backend.agent.code_execution_store import CodeExecutionStore
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.runtime_records import _agent_run_from_dict
@@ -41,7 +42,7 @@ def clock_owner(tmp_path, monkeypatch):
 def callbacks(namespace):
     source = ast.parse(Path(agent_runner.__file__).read_text(encoding="utf-8"))
     functions = [node for node in ast.walk(source) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"_partial_turn_message", "_send_done_once"}]
+        and node.name in {"_live_code_call_ids", "_partial_turn_message", "_send_done_once"}]
     assignment = next(node for node in ast.walk(source) if isinstance(node, ast.Assign)
         and any(isinstance(target, ast.Name) and target.id == "terminal_duration_ms" for target in node.targets))
     factory = ast.parse("def make_callbacks():\n    done_event_sent = False\n").body[0]
@@ -168,7 +169,8 @@ def test_actual_startup_failure_uses_the_original_clock_and_same_durable_receipt
     error = QuerySetupError(ValueError("actual setup failure"), completion_event=completed,
         metadata={"run_id": original.run_id}, state=AgentState(user_message="original request"),
         conversation_id=original.conversation_id, run_context=run)
-    events = QueryEngine()._setup_failure_events(SimpleNamespace(runtime=SimpleNamespace(task_id="clock-task")), error)
+    events = QueryEngine()._setup_failure_events(SimpleNamespace(runtime=SimpleNamespace(task_id="clock-task"),
+        session=SimpleNamespace(code_store=CodeExecutionStore())), error)
     assert events[-1].type == "done"
     assert events[-1].data["duration_ms"] == completed.data["duration_ms"] == 5500
     receipt = next(event for event in journal.read_events() if event.payload.get("lifecycle") == "runtime_terminal_committed")

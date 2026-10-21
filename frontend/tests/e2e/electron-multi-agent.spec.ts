@@ -20,6 +20,7 @@ const { externalPeerEnvironment } = desktopRequire("./test-peer-env.js") as {
   externalPeerEnvironment: () => Promise<ExternalPeer>;
 };
 const frontendPort = Number(process.env.MINICODE_E2E_PORT ?? "43173");
+const desktopViewport = { width: 1800, height: 920 };
 const ownerId = "conv-electron";
 const runningResult = "Desktop restart verification completed.";
 const lazyResult = "Recovered result body from lazy status lookup.";
@@ -333,10 +334,11 @@ const desktopRequire = Module.createRequire(${JSON.stringify(path.join(desktopEn
 const electron = desktopRequire('electron');
 const originalLoad = Module._load;
 const visibilityCalls = [];
+const desktopViewport = ${JSON.stringify(desktopViewport)};
 const HiddenBrowserWindow = new Proxy(electron.BrowserWindow, {
   construct(Target, [options]) {
     // Exercise the wide summary route independently of the CI display bounds.
-    const window = new Target({ ...options, width: 1800, show: false,
+    const window = new Target({ ...options, ...desktopViewport, show: false,
       webPreferences: { ...options.webPreferences, backgroundThrottling: false } });
     for (const method of ['show', 'showInactive', 'focus', 'restore']) window[method] = () => visibilityCalls.push(method);
     window.flashFrame = () => {};
@@ -365,10 +367,22 @@ async function launchDesktop(backend: MultiAgentBackend, userDataDir: string, en
 }
 
 async function nativeWindowState(app: ElectronApplication) {
-  return app.evaluate(({ BrowserWindow }) => ({
-    windows: BrowserWindow.getAllWindows().map((window) => ({ id: window.id, visible: window.isVisible(), focused: window.isFocused() })),
+  const native = await app.evaluate(({ BrowserWindow }) => ({
+    windows: BrowserWindow.getAllWindows().map((window) => ({
+      id: window.id, visible: window.isVisible(), focused: window.isFocused(),
+      bounds: window.getBounds(), contentBounds: window.getContentBounds(),
+    })),
     visibilityCalls: (globalThis as typeof globalThis & { __offscreenQa: { visibilityCalls: string[] } }).__offscreenQa.visibilityCalls,
   }));
+  const renderers = await Promise.all(app.windows().map(async (window) => ({
+    viewportSize: window.viewportSize(),
+    ...await window.evaluate(() => ({
+      innerWidth, innerHeight, devicePixelRatio,
+      chatFrameWidths: Array.from(document.querySelectorAll<HTMLElement>('.mc-main-slot-frame[data-panel-slot-kind="chat"]'))
+        .map((frame) => frame.clientWidth),
+    })),
+  })));
+  return { ...native, renderers };
 }
 
 async function captureDesktop(app: ElectronApplication, filePath: string) {
@@ -423,6 +437,7 @@ test("real Electron workbench supports read-only child transcripts, lazy results
     const app = await launchDesktop(backend, userDataDir, entry);
     ownedApps.add(app);
     const window = await app.firstWindow();
+    await window.setViewportSize(desktopViewport);
     await expect.poll(() => backend.commands.some((command) =>
       ["session.restore", "conversation.list"].includes(String(command.type))), { timeout: 30_000 }).toBe(true);
     await expect(window.getByText("Continue with the recovered verification path.", { exact: true })).toBeVisible();
@@ -486,6 +501,7 @@ test("real Electron workbench supports read-only child transcripts, lazy results
     const restarted = await launchDesktop(backend, userDataDir, entry);
     ownedApps.add(restarted);
     const restartedWindow = await restarted.firstWindow();
+    await restartedWindow.setViewportSize(desktopViewport);
     await expect.poll(() => backend.wire.some((record) => record.connection === 2 && record.direction === "client"
       && record.message.type === "session.restore" && record.message.last_conversation_id === ownerId
       && Number(record.message.last_seq ?? 0) === 0), { timeout: 30_000 }).toBe(true);

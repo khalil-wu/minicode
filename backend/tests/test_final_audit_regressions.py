@@ -40,7 +40,7 @@ def test_read_only_child_reports_through_normal_tool_pipeline_but_cannot_write(t
         )
         try:
             events = [event async for event in execute_tool_batch(
-                [ToolCallEvent(id="report", name="send_message", arguments={"recipient": "parent", "message": "Found the bug"}),
+                [ToolCallEvent(id="report", name="send_message", arguments={"target": "parent", "message": "Found the bug"}),
                  ToolCallEvent(id="write", name="write_file", arguments={"file_path": "forbidden.txt", "content": "bad"})],
                 ctx=ContextBuilder(TokenBudget()), state=AgentState(user_message="inspect"),
                 tool_registry=registry, permission_checker=PermissionChecker(PermissionSettings(), workspace_root=tmp_path),

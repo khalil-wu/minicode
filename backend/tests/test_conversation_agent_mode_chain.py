@@ -19,6 +19,7 @@ from backend.tests.test_agent_runner_done_fallback import _Session, _NoopLLM, _a
 from backend.tests.test_ws_cold_connection import _connection, _release_session
 from backend.ws.manager import WebSocketManager
 from backend.ws.run_manager import SessionRunManager
+from backend.ws.stream_state import create_stream_state
 
 
 def test_mode_survives_repository_reopen_inventory_and_public_switch_without_changing_permissions(tmp_path):
@@ -177,13 +178,24 @@ def test_accepted_queued_build_keeps_its_turn_mode_after_new_plan_selection_and_
         running = asyncio.create_task(asyncio.Event().wait())
         session.run_manager.register(conversation_id=owner, task=running, task_id="busy-plan-turn",
                                      cancel_event=asyncio.Event(), active_conversation_id=owner)
-        session._conversation_streams[owner] = {"message_id": "running-plan", "agent_mode": "plan"}
+        session._conversation_streams[owner] = {**create_stream_state(owner, "running-plan", "busy-plan-turn"), "agent_mode": "plan"}
+        session.run_manager.turn_input_queue(owner).begin_turn("busy-plan-turn")
         try:
             command = UserCommand("user_message", {"content": "Implement approved plan", "conversation_id": owner,
                 "agent_mode": "build", "streaming_behavior": requested_behavior,
-                "user_message_id": "queued-build-user", "assistant_message_id": "queued-build-answer", "client_command_id": "queued-build-command"})
+                "user_message_id": "queued-build-user", "assistant_message_id": "queued-build-answer", "client_command_id": "queued-build-command",
+                **({"expected_turn_id": "busy-plan-turn"} if requested_behavior == "steer" else {})})
             await session.command_dispatcher._handle_command_inner(command)
             accepted = next(event for event in events if event.get("type") == "command.result" and event.get("command") == "user_message")
+            if requested_behavior == "steer":
+                assert accepted["level"] == "error"
+                assert accepted["data"]["error_code"] == "steer_configuration_mismatch"
+                assert accepted["data"]["field"] == "agent_mode"
+                assert session.conversation_repo.get_conversation(owner).agent_mode == "plan"
+                assert session.run_manager.queued_user_messages(owner) == []
+                assert session.run_manager.turn_input_queue(owner).pending_count() == 0
+                assert session.run_manager.running_task_for(owner) is running
+                return
             assert accepted["data"]["queued"] is True
             assert session.conversation_repo.get_conversation(owner).agent_mode == "build"
             session.conversation_repo.update_agent_mode(owner, "plan")

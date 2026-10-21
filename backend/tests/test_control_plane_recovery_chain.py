@@ -152,7 +152,7 @@ def test_permission_projection_keeps_the_requirement_source_and_violation(monkey
     violation = ValueError("managed policy disallows requested mode")
     requirements = SimpleNamespace(resolve_permission_mode=lambda mode, **kwargs: (mode, None),
         source_for=lambda key: "managed" if key == "allowed_approval_policies" else "",
-        approval_policy_for_mode=lambda _mode: "on-request", sandbox_mode_for_permission_mode=lambda _mode: "workspace-write")
+        approval_policy_for_mode=lambda _mode: "on-request", sandbox_mode_for_permission_mode=lambda _mode, *, sandbox_mode="": "workspace-write")
     monkeypatch.setattr("backend.config.get_config_requirements", lambda: requirements)
     assert _managed_permission_projection("default") == ("default", "on-request", "workspace-write", "managed")
     requirements.resolve_permission_mode = lambda mode, **kwargs: (mode, violation)

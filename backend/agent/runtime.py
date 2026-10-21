@@ -1277,10 +1277,21 @@ class AgentRuntime:
 
     async def _close_subagent_session_resources(self, subagent_id: str) -> None:
         session = self._subagent_sessions[subagent_id]
+        manager = session._owned_commands
+        commands = tuple(manager._commands.values()) if manager is not None else ()
         async def close_resources() -> None:
             await session.aclose()
             if session._command_shutdown_task is not None:
                 await session._command_shutdown_task
+            # Idle child threads retain commands between turns. Capture their
+            # actual settlement at thread close, after process cleanup.
+            for command in commands:
+                self.execution_journal(subagent_id).append_cleanup({
+                    "resource_kind": "background_command", "resource_id": command.command_id,
+                    "reason": "child_session_closed", "status": command.status,
+                    "completed": not command.cleanup_pending, "pending": int(command.cleanup_pending),
+                    "pid": command.pid, "cleanup_reason": command.cleanup_reason,
+                })
         await await_task_despite_cancellation(asyncio.create_task(close_resources(), name=f"subagent-service-close:{subagent_id}"))
         self._subagent_sessions.pop(subagent_id)
         worker = self._subagent_tasks.get(subagent_id)

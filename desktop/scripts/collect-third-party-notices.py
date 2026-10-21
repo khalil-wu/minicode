@@ -8,6 +8,9 @@ from pathlib import Path
 import subprocess
 
 
+NON_NOTICE_SUFFIXES = {".py", ".pyc", ".pyo", ".js", ".cjs", ".mjs"}
+
+
 class LicenseHtmlText(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -30,15 +33,28 @@ class LicenseHtmlText(HTMLParser):
 
 
 def notice_file(path: Path) -> bool:
-    return path.name.casefold().startswith(("license", "licence", "notice", "copying", "copyright", "third_party_notice", "thirdpartynotice"))
+    return path.suffix.casefold() not in NON_NOTICE_SUFFIXES and path.name.casefold().startswith(
+        ("license", "licence", "notice", "copying", "copyright", "third_party_notice", "thirdpartynotice")
+    )
 
 
 def notice_text(path: Path) -> str:
-    text = path.read_text(encoding="utf-8-sig", errors="replace").strip()
+    text = path.read_text(encoding="utf-8-sig").strip()
     if path.suffix.casefold() == ".html":
         parser = LicenseHtmlText()
         parser.feed(text)
-        return "".join(parser.parts).strip()
+        text = "".join(parser.parts).strip()
+        if path.name == "LICENSES.chromium.html":
+            # Electron's bundled Chromium notices contain three damaged canonical
+            # lines. Restore their original punctuation from SPDX MPL-1.1,
+            # NPL-1.1 and FTL; remove when the upstream notice fixes these lines.
+            # https://github.com/spdx/license-list-data/tree/main/text
+            for damaged, original in (
+                ('the \ufffd[___] License\ufffd', 'the "[___] License"'),
+                ('\ufffdMultiple-Licensed\ufffd.  \ufffdMultiple-Licensed\ufffd', '"Multiple-Licensed".  "Multiple-Licensed"'),
+                ("Portions of this software are copyright \ufffd <year> The FreeType", "Portions of this software are copyright © <year> The FreeType"),
+            ):
+                text = text.replace(damaged, original)
     return text
 
 
@@ -46,7 +62,8 @@ def package_notices(directory: Path) -> list[Path]:
     files = [file for file in directory.iterdir() if file.is_file() and notice_file(file)]
     for folder in (directory / "licenses", directory / "LICENSES"):
         if folder.is_dir():
-            files.extend(file for file in folder.rglob("*") if file.is_file())
+            files.extend(file for file in folder.rglob("*") if file.is_file()
+                and "__pycache__" not in file.parts and file.suffix.casefold() not in NON_NOTICE_SUFFIXES)
     return sorted(set(files), key=lambda file: str(file).casefold())
 
 

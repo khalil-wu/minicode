@@ -16,6 +16,7 @@ from backend.llm.base import LLMAdapter
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
 from backend.ws.handler import WebSocketSession
+from backend.ws.stream_state import create_stream_state
 
 
 class Provider(LLMAdapter):
@@ -64,12 +65,14 @@ async def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(sessio
     async def scenario():
         running = asyncio.create_task(asyncio.Event().wait())
         session.run_manager.run_tasks[conversation_id] = running
-        session.run_manager.turn_input_queue(conversation_id)
+        session._conversation_streams[conversation_id] = create_stream_state(conversation_id, "current-answer", "current-turn")
+        session.run_manager.turn_input_queue(conversation_id).begin_turn("current-turn")
         try:
             await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message", data={
                 "content": "next request", "conversation_id": conversation_id, "permission_mode": "bypass",
                 "workspace_root": str(next_workspace), "streaming_behavior": behavior,
                 "assistant_message_id": "next-answer", "user_message_id": "next-user",
+                **({"expected_turn_id": "current-turn"} if behavior == "steer" else {}),
             }))
             current = session.conversation_repo.get_conversation(conversation_id)
             assert current.permission_mode == "confirm"
@@ -78,6 +81,15 @@ async def test_queued_prompt_settings_do_not_reconfigure_the_current_turn(sessio
             session.activate_workspace_path.assert_not_awaited()
             session.auto_approve_pending_tool_approvals.assert_not_awaited()
             session.start_agent_run.assert_not_awaited()
+            if behavior == "steer":
+                rejection = next(call.args[0] for call in session.send_event.await_args_list
+                    if call.args[0].type == "command.result" and call.args[0].data.get("level") == "error")
+                assert rejection.data["data"]["error_code"] == "steer_configuration_mismatch"
+                assert rejection.data["data"]["field"] == "permission_mode"
+                assert session.run_manager.queued_user_messages(conversation_id) == []
+                assert session.run_manager.turn_input_queue(conversation_id).pending_count() == 0
+                assert session.run_manager.running_task_for(conversation_id) is running
+                return
             queued = session.run_manager.dequeue_user_message(conversation_id)
             assert queued is not None
             assert queued.data["workspace_root"] == str(next_workspace)
@@ -118,10 +130,13 @@ async def test_same_profile_steer_reaches_current_turn_without_changing_permissi
         running = asyncio.create_task(asyncio.Event().wait())
         session.run_manager.run_tasks[conversation_id] = running
         turn_inputs = session.run_manager.turn_input_queue(conversation_id)
+        session._conversation_streams[conversation_id] = create_stream_state(conversation_id, "current-answer", "current-turn")
+        turn_inputs.begin_turn("current-turn")
         try:
             await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message", data={
                 "content": "redirect this turn", "conversation_id": conversation_id,
                 "permission_mode": "confirm", "workspace_root": str(tmp_path), "streaming_behavior": "steer",
+                "expected_turn_id": "current-turn",
             }))
             assert turn_inputs.pending_count() == 1
             assert session.run_manager.queued_user_messages(conversation_id) == []

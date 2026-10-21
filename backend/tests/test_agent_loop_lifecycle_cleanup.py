@@ -569,7 +569,7 @@ def test_real_registry_timeout_late_mutation_keeps_shared_owner_and_other_sessio
             assert conversation_query_guards().active_claim("conv-real-registry") is not None
             other = await _collect(sdk.query("competing", metadata={"conversation_id": "conv-real-registry"}))
             assert other[-1].data["reason"] == "conversation_busy"
-            with pytest.raises(RuntimeError, match="pending lifecycle cleanup"):
+            with pytest.raises(RuntimeError, match="agent thread session is closed"):
                 await anext(QueryEngine().submit(QuerySubmission(
                     user_message="new query", session=submissions[0].session,
                     runtime=AgentLoopSessionContext(run_context=RunContext()),

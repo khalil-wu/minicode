@@ -591,7 +591,7 @@ def test_registration_failure_cancels_unpublished_worker_and_closes_child(
     asyncio.run(run())
 
 
-def test_successful_foreground_child_closes_only_its_fresh_adapter(
+def test_successful_foreground_child_retains_its_fresh_adapter_until_thread_close(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -646,10 +646,18 @@ def test_successful_foreground_child_closes_only_its_fresh_adapter(
         assert result.status == "completed"
         assert "child completed" in result.content
         assert len(children) == 1
-        assert children[0].close_calls == 1
-        assert parent.close_calls == 0
         subagents = runtime.list_runs(include_subagents=True)["subagents"]
         assert len(subagents) == 1
+        child_id = str(subagents[0]["subagent_id"])
+        thread = runtime.subagent_session(child_id)
+        assert thread is not None and not thread.closed
+        assert thread.llm is children[0]
+        assert children[0].close_calls == 0
+        assert parent.close_calls == 0
+        assert await runtime.close_subagent_session(child_id, reason="fixture_thread_closed")
+        assert runtime.subagent_session(child_id) is None
+        assert children[0].close_calls == 1
+        assert parent.close_calls == 0
         transcript = runtime.load_agent_transcript(str(subagents[0]["subagent_id"]))
         user_prompt = next(
             event for event in transcript["events"]
@@ -658,6 +666,7 @@ def test_successful_foreground_child_closes_only_its_fresh_adapter(
         assert user_prompt["payload"]["provider"] == "custom"
         assert user_prompt["payload"]["model"] == "claude-opus-4-6"
         assert user_prompt["payload"]["reasoning_effort"] == "high"
+        runtime.close(release_lease=True)
 
     asyncio.run(run())
 

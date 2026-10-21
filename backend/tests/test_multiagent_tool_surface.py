@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import re
 
 from backend.artifact.store import ArtifactStore
 from backend.tools.agent_tools import TaskTool
@@ -74,6 +75,8 @@ def test_model_facing_task_schema_keeps_runtime_single_and_parallel_fields(tmp_p
     assert properties == {
         "description",
         "prompt",
+        "task_name",
+        "fork_turns",
         "agent_type",
         "model",
         "provider",
@@ -108,6 +111,8 @@ def test_model_facing_task_schema_keeps_runtime_single_and_parallel_fields(tmp_p
     assert parallel_properties == {
         "description",
         "prompt",
+        "task_name",
+        "fork_turns",
         "agent_type",
         "model",
         "provider",
@@ -158,7 +163,7 @@ def test_code_mode_task_signature_presents_distinct_single_teammate_and_batch_in
     batch_signature = code_mode_parameters(batch)
     assert code_mode_parameters(parameters).endswith(batch_signature)
     assert "parallel_tasks:" in batch_signature
-    assert "name?:" not in batch_signature
+    assert re.search(r"^\s*name\??:", batch_signature, re.MULTILINE) is None
     assert "team_name?:" not in batch_signature
     assert "mode?:" not in batch_signature
     assert "description:" in batch_signature and "prompt:" in batch_signature

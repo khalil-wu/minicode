@@ -90,7 +90,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
         # and workspace services. Its implementation is never copied into this test.
         module = ast.parse(Path(agent_runner.__file__).read_text(encoding="utf-8"))
         callbacks = [node for node in ast.walk(module) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-                     and node.name in {"_commit_turn_admission", "_report_turn_admission", "_publish_turn_admission", "_partial_turn_message", "_flush_pending_reasoning", "_write_partial_turn"}]
+                     and node.name in {"_commit_turn_admission", "_report_turn_admission", "_publish_turn_admission", "_live_code_call_ids", "_partial_turn_message", "_flush_pending_reasoning", "_write_partial_turn"}]
         namespace = dict(vars(agent_runner))
         namespace.update(
             self=session, parent_notification_only=False, internal_turn=False, conversation=conversation,

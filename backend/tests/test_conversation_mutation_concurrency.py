@@ -965,9 +965,10 @@ def test_local_to_worktree_binding_failure_restores_source_and_removes_created_g
         def __init__(self, root):
             assert root == source
 
-        def remove_worktree(self, path, *, force: bool):
+        def remove_worktree(self, path, *, force: bool, run_environment: bool):
             assert path == worktree
             assert force is True
+            assert run_environment is False
             order.append("remove-created-worktree")
             return True
 
@@ -1142,10 +1143,11 @@ def test_worktree_to_local_binding_failure_recreates_worktree_before_restoring_s
             order.append("remove-worktree")
             return True
 
-        def create_worktree(self, path, *, branch: str, new_branch: bool):
+        def create_worktree(self, path, *, branch: str, new_branch: bool, run_environment: bool):
             assert path == source
             assert branch == conversation.git_branch
             assert new_branch is False
+            assert run_environment is False
             order.append("recreate-worktree")
             return True
 

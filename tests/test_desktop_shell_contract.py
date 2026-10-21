@@ -12,16 +12,21 @@ def test_desktop_main_supports_single_instance_and_runtime_handlers() -> None:
     assert "ipcMain.handle(\"minicode:openExternal\"" in ipc_source
     assert "ipcMain.handle(\"minicode:revealPath\"" in ipc_source
     assert "ipcMain.handle(\"minicode:deepLink:open\"" in ipc_source
-    # Menu is in main.js
+    # The native menu follows the workbench commands and current shortcut map.
     assert "setApplicationMenu" in main_source
     assert "minicode:menu:new-chat" in main_source
-    assert "minicode:menu:quick-chat" in main_source
+    assert "minicode:menu:new-project" in main_source
     assert "minicode:menu:open-folder" in main_source
-    assert "扩展市场" in main_source
-    assert "minicode:menu:extensions-marketplace" in main_source
     assert "minicode:menu:settings" in main_source
     assert "minicode:menu:toggle-sidebar" in main_source
-    assert "minicode:menu:toggle-context" in main_source
+    assert "minicode:menu:toggle-pinned-summary" in main_source
+    assert "minicode:menu:toggle-side-panel" in main_source
+    assert 'item.id = "minicode-shortcut-" + action' in main_source
+    assert 'getMenuItemById("minicode-shortcut-" + action)' in main_source
+    assert 'if (!item.enabled) return false' in main_source
+    assert "minicode:menu:quick-chat" not in main_source
+    assert "minicode:menu:extensions-marketplace" not in main_source
+    assert "minicode:menu:toggle-context" not in main_source
 
 
 def test_desktop_main_uses_frameless_workbench_chrome() -> None:
@@ -185,10 +190,17 @@ def test_desktop_shell_can_export_diagnostics() -> None:
     main_source = Path("desktop/main.js").read_text(encoding="utf-8")
     ipc_source = Path("desktop/ipc-handlers.js").read_text(encoding="utf-8")
     preload_source = Path("desktop/preload.js").read_text(encoding="utf-8")
+    runtime_source = Path("frontend/src.v2/desktop/runtime.ts").read_text(encoding="utf-8")
+    settings_source = Path("frontend/src.v2/overlays/AdvancedTab.tsx").read_text(encoding="utf-8")
 
     assert "buildDiagnosticsPayload" in (main_source + ipc_source)
+    assert "function exportDesktopDiagnostics()" in main_source
+    assert "  exportDesktopDiagnostics," in main_source
     assert 'ipcMain.handle("minicode:diagnostics:export"' in ipc_source
-    assert "导出诊断信息" in (main_source + ipc_source)
+    assert "exportDesktopDiagnostics()" in ipc_source
+    assert "导出诊断信息" in settings_source
+    assert "await exportDiagnostics()" in settings_source
+    assert "export const exportDiagnostics = () => desktop()?.diagnostics.export()" in runtime_source
     assert "desktop.diagnostics.json" in (main_source + ipc_source)
     assert "desktop: {" in preload_source
     assert "diagnostics:" in preload_source

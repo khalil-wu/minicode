@@ -28,6 +28,8 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
       const hasPendingEditorDrafts = () => false;
       const hasPendingComposerDrafts = () => pending;
       const useAppStore = { getState: () => ({ composerDraftsReady: true }) };
+      // This oracle has editor/composer drafts and no active recording.
+      const dictationController = { hasPendingAudio: () => false, settle: async () => {} };
       const flushEditorDrafts = async () => {};
       const flushComposerDrafts = async () => {
         if (!pending) return;
@@ -85,6 +87,8 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
     vm.runInNewContext(`${drain}\n${quit}\n${allClosed}`, {
       app, windowManager: windows, process, quitCleanupComplete: false, quitCleanupStarted: false, appQuitRequested: false,
       rollbackPreparationInProgress: false, desktopCleanupFailed: false,
+      dictationHotkeys: { async dispose() {} },
+      generalMaintenance: null, petManager: null, petInitialization: null,
       windowCleanupTasks: new Map(), ptyManager: { async killAllSessions() {} },
       remoteDesktop: { async close() { assert.equal(backendStopped, false); } },
       backendSidecar: { requestBackendStop() {}, async stopBackendSidecar() {

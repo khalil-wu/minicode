@@ -940,6 +940,7 @@ def test_websocket_steer_promotes_followup_into_active_turn(monkeypatch) -> None
                 "type": "user_message.queue.steer",
                 "conversation_id": conversation_id,
                 "message_id": "assistant-steer",
+                "expected_turn_id": started["turn_id"],
             })
             promoted = _receive_next_type(ws, "user_message.queue.updated")
             steered_chunk = _receive_next_type(ws, "item.completed")

@@ -148,6 +148,7 @@ async def test_managed_timeout_retains_cancellation_resistant_source_until_real_
     monkeypatch.setattr("backend.agent.tool_execution.asyncio.wait", wait_after_source_entry)
     try:
         result = await run_tool_with_timeout(ToolCallEvent("resistant", tool.name, {}), registry, context)
+        await asyncio.wait_for(cancelled.wait(), 1)
         assert cancelled.is_set()
         assert result.status == "timeout" and result.cleanup_receipt["pending"] > 0
         assert not result.cleanup_receipt["completed"]
@@ -393,7 +394,7 @@ async def test_extension_error_patch_normalizes_model_state_and_public_status(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_child", [False, True])
-async def test_child_private_commands_exit_before_child_terminal(tmp_path, monkeypatch, cancel_child):
+async def test_child_private_commands_remain_owned_until_child_thread_closes(tmp_path, monkeypatch, cancel_child):
     captures = []
     class Manager(BackgroundCommandManager):
         async def shutdown(self):
@@ -439,11 +440,18 @@ async def test_child_private_commands_exit_before_child_terminal(tmp_path, monke
         if cancel_child:
             job.cancel()
         await asyncio.gather(job, return_exceptions=True)
+        child = next(iter(runtime._subagents))
+        thread = runtime.subagent_session(child)
+        assert thread is not None and not thread.closed
+        commands = list(thread.command_manager(child)._commands.values())
+        assert commands and not captures
+        assert all(process_identity_matches(command.pid, command.process_start_time) for command in commands)
+        assert await runtime.close_subagent_session(child, reason="fixture_thread_closed")
+        assert runtime.subagent_session(child) is None
         assert captures
         assert all(command.pid is not None for command in captures)
         assert all(command.status == "cancelled" and not command.cleanup_pending for command in captures)
         assert all(process_identity_matches(command.pid, command.process_start_time) is False for command in captures)
-        child = next(iter(runtime._subagents))
         facts = [event.payload for event in runtime.execution_journal(child).read_events() if event.event_type == "cleanup"]
         assert any(fact.get("reason") == "child_session_closed" and fact.get("status") == "cancelled" for fact in facts)
     finally:

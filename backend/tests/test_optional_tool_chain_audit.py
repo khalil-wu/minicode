@@ -17,8 +17,8 @@ from backend.tools import ast_tools, tree_sitter_parser
 from backend.tools.ast_tools import FindReferencesTool, GoToDefinitionTool
 from backend.tools.mcp_tools import GetMcpPromptTool
 from backend.tools.monitor_tool import MonitorTool
+from backend.tools.preview_tool import PreviewServerTool
 from backend.tools.registry import ToolRegistry
-from backend.tools.sleep_tool import SleepTool
 from backend.tools.tool_search import ToolSearchTool
 from backend.tools.toolsets import ToolsetPolicy
 
@@ -196,25 +196,25 @@ def test_monitor_schema_and_semantics_reject_before_execution(args):
     assert result.error_kind == "validation_error"
 
 
-def test_tool_search_registry_and_permission_changes_refresh_activation():
+def test_tool_search_registry_and_permission_changes_refresh_activation(tmp_path):
     async def run():
         registry = ToolRegistry()
-        registry.register(SleepTool())
+        registry.register(PreviewServerTool())
         search = ToolSearchTool(registry)
         registry.register(search)
         state = AgentState(user_message="audit")
         checker = PermissionChecker(PermissionSettings())
-        context = ToolExecutionContext(permission=PermissionContext(), tool_registry=registry, permission_checker=checker,
+        context = ToolExecutionContext(permission=PermissionContext(), tool_registry=registry, permission_checker=checker, workspace_root=tmp_path,
             metadata={"_agent_state": state, "_toolset_policy": ToolsetPolicy(supports_search_tool=True)})
-        result = await search.execute({"query": "sleep"}, context)
-        assert [tool["name"] for namespace in result.tool_search_output for tool in namespace["tools"]] == ["sleep"]
-        assert state.loaded_deferred_tools == {"sleep"}
-        context.permission = replace(context.permission, tool_deny_rules=["sleep"])
-        result = await search.execute({"query": "sleep"}, context)
+        result = await search.execute({"query": "preview_server"}, context)
+        assert [tool["name"] for namespace in result.tool_search_output for tool in namespace["tools"]] == ["preview_server"]
+        assert state.loaded_deferred_tools == {"preview_server"}
+        context.permission = replace(context.permission, tool_deny_rules=["preview_server"])
+        result = await search.execute({"query": "preview_server"}, context)
         assert result.tool_search_output == []
         context.permission = replace(context.permission, tool_deny_rules=[])
-        registry.unregister("sleep")
-        result = await search.execute({"query": "sleep"}, context)
+        registry.unregister("preview_server")
+        result = await search.execute({"query": "preview_server"}, context)
         assert result.tool_search_output == []
     asyncio.run(run())
 

@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
-  const { app, Menu, screen } = require("electron");
+  const { app, Menu, screen, webContents, dialog, shell } = require("electron");
   const http = require("node:http"), vm = require("node:vm");
   const manager = require("./window-manager"), browser = require("./embedded-browser-manager");
   const bridge = require("./embedded-browser-bridge"), terminal = require("./pty-manager"), ipc = require("./ipc-handlers");
@@ -47,26 +47,38 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
     browser.init({ getWindowByInstanceId: manager.getWindowByInstanceId });
     terminal.init({ pty: require("node-pty"), getWindowByInstanceId: manager.getWindowByInstanceId,
       sanitizedPtyEnv: require("./utils").sanitizedPtyEnv, assertTrustedPath: (value) => value });
-    ipc.init({ getWindowForSender: manager.getWindowForSender, getWindowRecord: manager.getWindowRecord,
-      getRuntimeConfig: (window) => ({ ...runtime, windowOwnerId: manager.getWindowRecord(window).windowOwnerId,
-        windowInstanceId: manager.getWindowRecord(window).windowInstanceId, windowBindingToken: manager.getWindowRecord(window).windowBindingToken }), embeddedBrowserManager: browser, ptyManager: terminal,
-    });
-    ipc.registerIpcHandlers();
-    bridge.init({ manager: browser, getWindowRecordByInstanceId: manager.getWindowRecordByInstanceId, token: "oracle-backend-only" });
-    const endpoint = await bridge.start();
-    const capabilities = new Map();
-    const command = (instance, payload) => fetch(`${endpoint}/v1/command`, { method: "POST", headers: { authorization: "Bearer oracle-backend-only" },
-      body: JSON.stringify({ ...payload, conversation_id: "same-conversation", window_instance_id: instance, window_binding_token: capabilities.get(instance) }),
-    }).then((response) => response.json());
+    const dictationHotkeys = require("./dictation-hotkeys").createDictationHotkeys({ app,
+      getMainWindows: manager.getMainWindows, getFocusedMainWindow: manager.getFocusedMainWindow,
+      getFocusedWebContents: () => webContents.getFocusedWebContents() });
     try {
+      const mainSource = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+      const sendMenuSource = mainSource.match(/function sendWorkbenchMenuEvent\([\s\S]*?\n\}/)[0];
+      const menuSource = mainSource.slice(mainSource.indexOf("const applicationMenuStates = new WeakMap();"), mainSource.indexOf("// Startup failure window"));
+      const menuModule = { exports: {} };
+      vm.runInNewContext(`${sendMenuSource}\n${menuSource}\nmodule.exports = { buildApplicationMenu, setApplicationMenuState, executeApplicationMenuAction };`, {
+        module: menuModule, app, desktopPreferences, Menu, windowManager: manager, process, dialog, shell, webContents,
+        embeddedBrowserManager: browser, updater: require("./updater"), dictationHotkeys,
+        appendDesktopLog: message => process.stdout.write(message + "\n"),
+      });
+      const menu = menuModule.exports;
+      ipc.init({ getWindowForSender: manager.getWindowForSender, getWindowRecord: manager.getWindowRecord,
+        getRuntimeConfig: (window) => ({ ...runtime, windowOwnerId: manager.getWindowRecord(window).windowOwnerId,
+          windowInstanceId: manager.getWindowRecord(window).windowInstanceId, windowBindingToken: manager.getWindowRecord(window).windowBindingToken }), embeddedBrowserManager: browser, ptyManager: terminal,
+        setApplicationMenuState: menu.setApplicationMenuState, executeApplicationMenuAction: menu.executeApplicationMenuAction,
+      });
+      ipc.registerIpcHandlers();
+      bridge.init({ manager: browser, getWindowRecordByInstanceId: manager.getWindowRecordByInstanceId, token: "oracle-backend-only" });
+      const endpoint = await bridge.start();
+      const capabilities = new Map();
+      const command = (instance, payload) => fetch(`${endpoint}/v1/command`, { method: "POST", headers: { authorization: "Bearer oracle-backend-only" },
+        body: JSON.stringify({ ...payload, conversation_id: "same-conversation", window_instance_id: instance, window_binding_token: capabilities.get(instance) }),
+      }).then((response) => response.json());
       process.stdout.write("[multiwindow] creating production menu windows\n");
       const primary = await manager.createMainWindow();
-      const menuSource = fs.readFileSync(path.join(__dirname, "main.js"), "utf8")
-        .match(/function buildApplicationMenu\(\) \{[\s\S]*?\n\}/)[0];
-      vm.runInNewContext(`${menuSource}\nbuildApplicationMenu();`, {
-        app, desktopPreferences, Menu, windowManager: manager, FIGMA_CAPTURE_ENABLED: false, process, dialog: { showErrorBox() {} }, appendDesktopLog() {},
-      });
-      const newWindow = Menu.getApplicationMenu().getMenuItemById("minicode-menu-file").submenu.items.find((item) => item.label === "新建窗口");
+      menu.buildApplicationMenu(primary);
+      const newWindow = Menu.getApplicationMenu().getMenuItemById("minicode-shortcut-newWindow");
+      const locale = desktopPreferences.getPreferences().localeOverride ?? app.getLocale();
+      assert.equal(newWindow.label, /^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(locale) ? "新建窗口" : "New Window");
       newWindow.click(newWindow, primary);
       const secondary = await secondReady;
       primary.hide(); secondary.hide();
@@ -87,6 +99,14 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
         body: JSON.stringify({ window_instance_id: b.windowInstanceId, window_owner_id: b.windowOwnerId, window_binding_token: b.windowBindingToken }) });
       assert.equal(valid.status, 200);
       process.stdout.write("[multiwindow] two renderer instances and binding proofs verified\n");
+      for (const window of [primary, secondary]) {
+        await window.webContents.executeJavaScript("window.menuEvents = []; window.addEventListener('open-command-menu', () => window.menuEvents.push('open-command-menu'))");
+      }
+      secondary.focus();
+      assert.equal(await primary.webContents.executeJavaScript("window.__MINICODE_RUNTIME__.desktop.menu.execute('commandPalette')"), true);
+      assert.deepEqual(await primary.webContents.executeJavaScript("window.menuEvents"), ["open-command-menu"]);
+      assert.deepEqual(await secondary.webContents.executeJavaScript("window.menuEvents"), []);
+      process.stdout.write("[multiwindow] native menu IPC and renderer event retained their originating window\n");
       const openTab = (window) => window.webContents.executeJavaScript("window.__MINICODE_RUNTIME__.desktop.embeddedBrowser.create({ id: 'same-tab', conversation_id: 'same-conversation', url: 'about:blank' })");
       await openTab(primary); await openTab(secondary);
       const guest = (window) => window.contentView.children.find((view) => view.webContents && view.webContents.id !== window.webContents.id);
@@ -122,6 +142,7 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
       process.stdout.write("[multiwindow] all native windows closed\n");
       await Promise.all(Array.from(closes.values()));
       process.stdout.write("[multiwindow] all owned PTY exits acknowledged\n");
+      await dictationHotkeys.dispose();
       await bridge.stop();
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       process.stdout.write("[multiwindow] bridge and HTTP server closed; requesting normal app.quit\n");
@@ -132,6 +153,7 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
       process.stderr.write(`${error.stack || error}\n`);
       await Promise.all(manager.getMainWindows().map((window) => new Promise((resolve) => { window.once("closed", resolve); window.close(); })));
       await Promise.allSettled(Array.from(closes.values()));
+      await dictationHotkeys.dispose();
       await bridge.stop(); server.close(); app.exit(1);
     }
   });

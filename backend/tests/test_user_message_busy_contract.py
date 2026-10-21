@@ -15,6 +15,7 @@ from backend.tasks.manager import TaskManager
 from backend.tools.registry import ToolRegistry
 from backend.ws.handler import WebSocketSession
 from backend.ws.run_manager import SessionRunManager
+from backend.ws.stream_state import create_stream_state
 
 
 @pytest.fixture(autouse=True)
@@ -334,8 +335,8 @@ def test_busy_user_message_can_atomically_steer_current_turn(tmp_path: Path, mon
     )
     session.conversation_repo = repo
     session.active_conversation_id = conversation.id
-    session._conversation_streams[conversation.id] = {"message_id": "assistant-current"}
-    session.run_manager.turn_input_queue(conversation.id)
+    session._conversation_streams[conversation.id] = create_stream_state(conversation.id, "assistant-current", "turn-current")
+    session.run_manager.turn_input_queue(conversation.id).begin_turn("turn-current")
 
     async def capture_event(event):
         events.append(event.to_ws_message())
@@ -362,6 +363,7 @@ def test_busy_user_message_can_atomically_steer_current_turn(tmp_path: Path, mon
                     "assistant_message_id": "assistant-steer",
                     "user_message_id": "user-steer",
                     "streaming_behavior": "steer",
+                    "expected_turn_id": "turn-current",
                     "client_command_id": "cmd-steer-owned",
                 },
             ))
@@ -508,6 +510,9 @@ def test_steered_message_promotes_into_current_turn_without_interrupting(tmp_pat
         events.append(event.to_ws_message())
 
     async def fake_run_agent(content, *, attachments=None, **_kwargs):
+        if content == "first":
+            session._conversation_streams[conversation.id] = create_stream_state(conversation.id, "assistant-1", "turn-first")
+            session.run_manager.turn_input_queue(conversation.id).begin_turn("turn-first")
         _admit_fake_turn(_kwargs["metadata"])
         runs.append((content, list(attachments or [])))
         if content == "first":
@@ -545,6 +550,7 @@ def test_steered_message_promotes_into_current_turn_without_interrupting(tmp_pat
                 "conversation_id": conversation.id,
                 "message_id": "assistant-3",
                 "user_message_id": "user-3",
+                "expected_turn_id": "turn-first",
             },
         ))
         release_first.set()
@@ -602,8 +608,8 @@ def test_steer_supersedes_pending_approval_without_cancelling_run(tmp_path: Path
         running_task = asyncio.create_task(_never_finishes())
         session.run_manager.run_tasks[conversation.id] = running_task
         session.run_manager.run_task_ids[conversation.id] = "task-current"
-        session._conversation_streams[conversation.id] = {"message_id": "assistant-current"}
-        session.run_manager.turn_input_queue(conversation.id)
+        session._conversation_streams[conversation.id] = create_stream_state(conversation.id, "assistant-current", "turn-current")
+        session.run_manager.turn_input_queue(conversation.id).begin_turn("turn-current")
         session.run_manager.enqueue_user_message(
             conversation.id,
             UserCommand(
@@ -630,6 +636,7 @@ def test_steer_supersedes_pending_approval_without_cancelling_run(tmp_path: Path
             data={
                 "conversation_id": conversation.id,
                 "message_id": "assistant-steer",
+                "expected_turn_id": "turn-current",
             },
         ))
 
@@ -819,7 +826,7 @@ def test_message_sent_while_stop_is_finishing_preserves_paused_work_and_consents
         session.run_manager.run_task_ids.clear()
         session.run_manager.cancel_events.clear()
         assert started == []
-        await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message.queue.steer", data={
+        await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message.queue.start", data={
             "conversation_id": conversation.id, "message_id": "assistant-second",
         }))
         await asyncio.wait_for(resumed.wait(), 5)
@@ -839,7 +846,7 @@ def test_message_sent_while_stop_is_finishing_preserves_paused_work_and_consents
     ]
 
 
-def test_stopping_current_run_preserves_next_input_until_explicit_queue_steer(tmp_path: Path, monkeypatch):
+def test_stopping_current_run_preserves_next_input_until_explicit_queue_start(tmp_path: Path, monkeypatch):
     events: list[dict] = []
     runs: list[str] = []
     session = WebSocketSession(
@@ -908,7 +915,7 @@ def test_stopping_current_run_preserves_next_input_until_explicit_queue_steer(tm
         await asyncio.sleep(0)
         assert runs == ["first"]
         assert session.run_manager.dequeue_user_message(conversation.id) is None
-        await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message.queue.steer", data={
+        await session.command_dispatcher._handle_command_inner(UserCommand(type="user_message.queue.start", data={
             "conversation_id": conversation.id, "message_id": "assistant-second",
         }))
         await asyncio.wait_for(resumed.wait(), 5)

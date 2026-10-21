@@ -66,7 +66,8 @@ def test_parallel_task_preserves_child_completion_and_result_identity(
         )
 
     monkeypatch.setattr(tool, "_run_single_subtask", child)
-    context = SimpleNamespace(cancel_event=None, metadata={}, task_id="parent", session_id="session", tool_call_id="parallel-call")
+    context = SimpleNamespace(cancel_event=None, metadata={}, task_id="parent", session_id="session", tool_call_id="parallel-call",
+                              conversation_id="parent-conversation")
     result = asyncio.run(tool._run_parallel_subtasks(
         [{"description": "First", "prompt": "First", "_source_role_requested": False},
          {"description": "Second", "prompt": "Second", "_source_role_requested": False}],

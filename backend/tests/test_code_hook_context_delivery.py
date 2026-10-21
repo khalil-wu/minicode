@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import asyncio
 import json
-from types import SimpleNamespace
 
 import pytest
 
 from backend.agent.code_execution import CodeExecutionRuntime
+from backend.agent.code_execution_store import CodeCellReceipt, CodeExecutionStore
 from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import store_result
@@ -21,12 +20,11 @@ from backend.tools.code_execution import _present_result
 @pytest.mark.asyncio
 async def test_nested_hook_context_reaches_model_once_independent_of_selected_output_budget(tmp_path, output):
     runtime = object.__new__(CodeExecutionRuntime)
-    runtime.cells = {"cell": SimpleNamespace(
+    runtime.store = CodeExecutionStore()
+    runtime.store.receipts["cell"] = CodeCellReceipt(
         id="cell", status="completed", error="", discarded_calls=0,
         output=[{"kind": "text", "text": output}], hook_context=["NESTED_HOOK_FIXTURE"],
-        changed=asyncio.Event(),
-    )}
-    runtime.store = SimpleNamespace(receipts={})
+    )
     runtime.state = AgentState(user_message="fixture")
     context = ToolExecutionContext(
         permission=PermissionContext(), conversation_id="owner", workspace_root=tmp_path,

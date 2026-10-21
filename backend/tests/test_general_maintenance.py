@@ -9,9 +9,11 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from backend.agent.conversation_query_guard import conversation_query_guards
+from backend.agent.context import ContextBuilder
 from backend.conversations.repository import ConversationRepository
 from backend.conversations.compression import compressed_history_path, read_history_bytes
 from backend.services import general_maintenance as maintenance
+from backend.ws.conversation_runtime import ConversationRuntime
 
 
 NOW = datetime(2026, 10, 20, tzinfo=UTC)
@@ -183,7 +185,13 @@ def test_auto_archive_unloads_the_real_idle_core_and_notification_listener_witho
         session.cancel_pending_approvals = AsyncMock()
         session.background_manager = SimpleNamespace(destroy_for_conversation=AsyncMock())
         session.terminal_manager = SimpleNamespace(destroy_sessions_for_conversation=AsyncMock())
-        session.conversation_runtime = SimpleNamespace(forget_code_store=Mock())
+        session.conversation_runtime = ConversationRuntime(conversation_repo=repository,
+            context_builder=ContextBuilder(), build_summary_from_transcript=lambda *_args: "")
+        session.conversation_runtime.code_store_for(eligible.id)
+        other_code_store = session.conversation_runtime.code_store_for(other.id)
+        other_code_store.put("owner", "Other conversation's retained code value")
+        close_code_store = AsyncMock(wraps=session.conversation_runtime.close_code_store)
+        monkeypatch.setattr(session.conversation_runtime, "close_code_store", close_code_store)
         manager = WebSocketManager()
         session.ws_manager = manager
         session.session_lifecycle = SessionLifecycle(session)
@@ -209,7 +217,10 @@ def test_auto_archive_unloads_the_real_idle_core_and_notification_listener_witho
             assert result["archived_conversation_ids"] == [eligible.id]
             assert manager.execution_contexts.context_for(eligible.id) is None
             environment.aclose.assert_awaited_once()
-            session.conversation_runtime.forget_code_store.assert_called_once_with(eligible.id)
+            session.conversation_runtime.close_code_store.assert_awaited_once_with(eligible.id)
+            assert eligible.id not in session.conversation_runtime._code_stores
+            assert session.conversation_runtime.code_store_for(other.id) is other_code_store
+            assert other_code_store.values == {"owner": "Other conversation's retained code value"}
             assert eligible.id not in session.run_manager._watched_notification_conversations
             assert claim_parent_notification_wake(eligible.id, "fixture-next-owner")
             assert session.run_manager.queued_user_message_snapshot(other.id) == original_queue
