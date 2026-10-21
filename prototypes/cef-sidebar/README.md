@@ -23,8 +23,10 @@ and local HTTP origin. The first process writes content settings and a random
 localStorage token; the second only reads them. Both processes check:
 
 - Actual Chrome runtime style, cross-process parent/root HWND, and WS_CHILD.
-- Original owner client pixels converted through CEF Display into DIP bounds;
-  actual child pixels and renderer viewport checked before/after host resize.
+- CEF initial size converted from owner pixels through CEF Display into DIP;
+  after Chrome widget creation, the host positions the original child HWND
+  with native pixel SetWindowPos. The same native placement runs on resize;
+  actual child pixels and renderer viewport are checked in both states.
 - Native DPI values, forced renderer scale, native focus and document focus.
 - No visible additional top-level window belonging to the CEF helper.
 - Real `CloseBrowser(false)`/`OnBeforeClose`, followed by helper exit; the

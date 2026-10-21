@@ -80,6 +80,8 @@ function runPhase(owner, origin, token, phase) {
       record({ event: 'helper-exit', phase, code, signal });
       // Observe asynchronous WM_CLOSE delivery after the helper has exited.
       await delay(500);
+      record({ event: 'owner-after-helper-exit', phase,
+        ownerAlive: !ownerClosed && !owner.isDestroyed() });
       try {
         assert.equal(code, 0, `CEF helper failed in ${phase}`);
         assert(seen.includes('before-close'), 'Native OnBeforeClose was never received');

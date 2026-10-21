@@ -17,9 +17,7 @@
 #include "include/cef_request_context.h"
 #include "include/cef_sandbox_win.h"
 #include "include/cef_task.h"
-#include "include/views/cef_browser_view.h"
 #include "include/views/cef_display.h"
-#include "include/views/cef_window.h"
 
 namespace {
 
@@ -101,6 +99,10 @@ class ProbeClient final : public CefClient,
   void OnAfterCreated(CefRefPtr<CefBrowser> browser) override {
     browser_ = browser;
     Emit(Event("browser-created"));
+    // ChildWindowDelegate finishes creating/showing the Chrome widget after
+    // this callback. Position its HWND on the next UI task, after that work.
+    CefRefPtr<ProbeClient> self = this;
+    CefPostTask(TID_UI, new Task([self]() { self->PlaceWindow("created"); }));
   }
 
   void OnLoadEnd(CefRefPtr<CefBrowser> browser,
@@ -170,9 +172,7 @@ class ProbeClient final : public CefClient,
 
   void Command(const std::string& command) {
     if (command == "resize") {
-      CefBrowserView::GetForBrowser(browser_)->GetWindow()->SetBounds(
-          SidebarBounds(config_.owner));
-      browser_->GetHost()->NotifyMoveOrResizeStarted();
+      PlaceWindow("resize");
       browser_->GetHost()->SetFocus(true);
       EvaluateLater("resized");
     } else if (command == "close") {
@@ -204,6 +204,29 @@ class ProbeClient final : public CefClient,
       self->browser_->GetMainFrame()->ExecuteJavaScript(
           "window.probeReport('" + stage + "')", self->config_.url, 0);
     }), 250);
+  }
+
+  void PlaceWindow(const std::string& stage) {
+    RECT parent{};
+    Check(stage + ":placement-owner-rect", GetClientRect(config_.owner, &parent) != FALSE);
+    const int left = parent.right * 2 / 5;
+    HWND child = browser_->GetHost()->GetWindowHandle();
+    // SetWindowPos takes native pixels in the bootstrap's DPI-aware context.
+    // CEF's Chrome widget initializes/clamps its own screen bounds; ownership
+    // by an external HWND requires the host to position the actual child.
+    const BOOL positioned = SetWindowPos(
+        child, nullptr, left, 0, parent.right - left, parent.bottom,
+        SWP_NOZORDER | SWP_NOACTIVATE);
+    const DWORD error = positioned ? ERROR_SUCCESS : GetLastError();
+    auto event = Event("native-placement");
+    event->SetString("stage", stage);
+    event->SetInt("x", left);
+    event->SetInt("width", parent.right - left);
+    event->SetInt("height", parent.bottom);
+    event->SetInt("win32Error", static_cast<int>(error));
+    Emit(event);
+    Check(stage + ":set-window-pos", positioned != FALSE);
+    browser_->GetHost()->NotifyMoveOrResizeStarted();
   }
 
   void InspectWindow(const std::string& stage,
