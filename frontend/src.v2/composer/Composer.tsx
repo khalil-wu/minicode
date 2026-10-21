@@ -54,7 +54,7 @@ import { claimSubmittedDraft } from "./submittedDraftClaim";
 import { emptyConversationWorkbenchState } from "../stores/ui-slice";
 import { emptyComposerDraft } from "../stores/composer-drafts";
 import { GoalBar } from "./GoalBar";
-import { submitComposerGoal } from "./goal-state";
+import { enterComposerGoalMode, submitComposerGoal } from "./goal-state";
 import { hasRichComposerContent, type RichComposerDocument } from "./rich-composer-document";
 
 let initialCatalogRequested = false;
@@ -612,7 +612,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     const slashInput = parseRuntimeSlashInput(content);
     if (slashInput?.commandLine.trim() === "/goal" && useAppStore.getState().slashCommands.some(command => command.name === "goal" && command.source === "builtin")) {
-      useAppStore.setState({ goalMode: true });
+      enterComposerGoalMode();
       setDraft(""); setSelectedSlashCommand(null); closeSlashPanel();
       return;
     }
@@ -916,10 +916,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     if (slashPanelOpen) {
       if (value === "/goal" && useAppStore.getState().slashCommands.some(command => command.name === "goal" && command.source === "builtin")) {
-        useAppStore.setState({ goalMode: true });
+        enterComposerGoalMode();
         setSelectedSlashCommand(null);
         setDraft(draft.replace(/^\s*\/[\w-]+\s*/, ""));
-        if (useAppStore.getState().agentMode === "plan") void useAppStore.getState().setAgentMode("build");
         closeSlashPanel(); setMenuFilter("");
         return;
       }

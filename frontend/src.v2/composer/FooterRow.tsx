@@ -18,7 +18,7 @@ import { ComposerAddMenu } from "./ComposerAddMenu";
 import { isDesktop, openExternal } from "../desktop/runtime";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 import { Target } from "../lib/icons";
-import { updateThreadGoal } from "./goal-state";
+import { enterComposerGoalMode, updateThreadGoal } from "./goal-state";
 import "./goal.css";
 
 interface Props {
@@ -251,9 +251,19 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
   };
 
   const editGoal = () => {
+    enterComposerGoalMode();
+    window.dispatchEvent(new Event("composer:focus"));
+  };
+
+  const togglePlanMode = () => {
     const owner = useAppStore.getState();
-    useAppStore.setState({ goalMode: true });
-    if (owner.agentMode === "plan") void owner.setAgentMode("build");
+    if (owner.agentMode === "plan") { void owner.setAgentMode("build"); return; }
+    useAppStore.setState({ goalMode: false });
+    if (owner.activeGoal && owner.conversationId) {
+      void updateThreadGoal(owner.conversationId, "clear")
+        .catch(error => pushToast(error instanceof Error ? error.message : tr("目标操作失败"), "error"));
+    }
+    void owner.setAgentMode("plan");
     window.dispatchEvent(new Event("composer:focus"));
   };
 
@@ -426,7 +436,7 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
       {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} goalAvailable={!pendingConversationSwitchId}
         onFiles={openFilePicker}
         onRemoteFiles={remoteHost ? () => void openRemoteFilePicker() : undefined}
-        onGoal={() => void editGoal()} onPlan={() => setAgentMode(agentMode === "plan" ? "build" : "plan")}
+        onGoal={() => void editGoal()} onPlan={togglePlanMode}
         onPlugin={(id, name) => useAppStore.getState().addSelectedMention({ kind: "plugin", name, configName: id, path: `plugin://${id}` })}
         onClose={() => { setAddOpen(false); addTrigger.current!.focus(); }} />}
       {prMonitor && (

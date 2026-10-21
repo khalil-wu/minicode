@@ -289,7 +289,11 @@ function setSitePolicy({ origin: rawOrigin, category, setting }) {
     delete legacy[origin];
   }
   saveBrowserSettings({ ...browserSettings, sitePermissions: legacy, sitePolicy: policy });
-  for (const entry of views.values()) applyAudioPolicy(entry);
+  for (const entry of views.values()) {
+    if (origin && setting === "default") entry.documentGrants.get(origin)?.delete(category);
+    applyAudioPolicy(entry);
+    void presentGuestPermission(entry);
+  }
   return getSitePolicy();
 }
 
@@ -374,6 +378,7 @@ function setBrowserSettings(payload = {}) {
     next.sitePolicy = policy;
   }
   saveBrowserSettings(next);
+  if (origin && permission) for (const entry of views.values()) void presentGuestPermission(entry);
   return getBrowserSettings(origin);
 }
 
@@ -406,6 +411,20 @@ function requestGuestPermission(contents, permission, callback, details) {
   void presentGuestPermission(entry);
 }
 
+function settleGuestPermissions(entry) {
+  const policy = readSitePolicy();
+  for (const request of entry.permissionRequests) {
+    const settings = request.categories.map(category => effectiveSiteSetting(request.origin, category, policy));
+    const blocked = settings.includes("block");
+    const allowed = request.categories.every((category, index) => settings[index] === "allow"
+      || entry.documentGrants.get(request.origin)?.has(category));
+    if (!blocked && !allowed) continue;
+    entry.permissionRequests.delete(request);
+    request.controller?.abort();
+    request.callback(!blocked);
+  }
+}
+
 function dismissGuestPermissions(entry) {
   for (const request of entry.permissionRequests) {
     entry.permissionRequests.delete(request);
@@ -415,6 +434,7 @@ function dismissGuestPermissions(entry) {
 }
 
 async function presentGuestPermission(entry) {
+  settleGuestPermissions(entry);
   if (!entry.presented || entry.permissionPrompt) return;
   const request = entry.permissionRequests.values().next().value;
   if (!request) return;
@@ -553,7 +573,11 @@ function removeSitePermissions({ origin: rawOrigin }) {
   next.sitePolicy = policy;
   saveBrowserSettings(next);
   for (const [id, device] of sessionDeviceGrants) if (device.origin === origin) sessionDeviceGrants.delete(id);
-  for (const entry of views.values()) applyAudioPolicy(entry);
+  for (const entry of views.values()) {
+    entry.documentGrants.delete(origin);
+    applyAudioPolicy(entry);
+    void presentGuestPermission(entry);
+  }
 }
 
 function availableDownloadPathIn(downloads, filename, activePaths = []) {

@@ -105,6 +105,7 @@ async def test_official_companion_uses_only_owned_home_and_original_source_host(
     monkeypatch.setattr(module, '_release_host', release)
     client = object.__new__(CuaReplMCPClient)
     client.runtime, client.home, client.host = runtime, tmp_path / 'minicode-owned-home', None
+    client.native = False
     client._env = {'CODEX_HOME': 'foreign-account-home', 'NODE_REPL_TRUSTED_SERVICES': '{"foreign":"unowned"}'}
 
     @asynccontextmanager

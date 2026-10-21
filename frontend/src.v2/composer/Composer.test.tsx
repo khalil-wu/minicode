@@ -386,6 +386,26 @@ describe("Composer goal bar", () => {
     expect(useAppStore.getState()).toMatchObject({ draft: "", attachments: [attachment], quotedMessage: quote });
   });
 
+  it.each(["literal", "menu"])("enters goal mode from %s input by leaving plan without submitting or dropping attachments", async entry => {
+    const attachment = { id: "goal-transition-file", name: "notes.txt", type: "text/plain", size: 12, status: "ready" as const };
+    const quote = { id: "goal-transition-quote", role: "assistant" as const, content: "Preserved quote" };
+    mocks.menuSelection = "/goal";
+    useAppStore.setState({ conversationId: "goal-transition-owner", workingDirectory: "C:/goal-transition", draft: entry === "literal" ? "/goal" : "/go Keep next text",
+      goalMode: false, activeGoal: null, agentMode: "plan", pendingAgentModeChanges: {}, latestAgentModeCommandIds: {},
+      permissionMode: "auto", attachments: [attachment], quotedMessage: quote, selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: entry === "menu", mentionPanelOpen: false, currentModel: "fixture", isConnected: true, isStreaming: false,
+      slashCommands: [{ name: "goal", command: "goal", label: "/goal", description: "Set goal", source: "builtin", type: "local" }] });
+    render(<Composer />);
+    if (entry === "literal") fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    else fireEvent.click(screen.getByText("Mock slash option"));
+    await waitFor(() => expect(useAppStore.getState().pendingAgentModeChanges).toEqual({}));
+    expect(useAppStore.getState()).toMatchObject({ goalMode: true, agentMode: "build", permissionMode: "auto", attachments: [attachment], quotedMessage: quote,
+      draft: entry === "literal" ? "" : "Keep next text" });
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.agent_mode.set", conversation_id: "goal-transition-owner", agent_mode: "build" }), "conversation.agent_mode.set");
+    expect(mocks.sendClientCommandAwaitResult).not.toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.goal.set" }), "goal");
+  });
+
   it("sends slash commands with inline file context in backend content", async () => {
     const { useAppStore } = await import("../stores");
     const { Composer } = await import("./Composer");

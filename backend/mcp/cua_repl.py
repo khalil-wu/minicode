@@ -1,7 +1,8 @@
-"""Explicit installed-runtime CUA companion and Source Windows host contract.
+"""Explicit installed Source or independently implemented MiniCode CUA runtime.
 
-No desktop package or native binary is redistributed. A configured cua_repl MCP
-server selects exactly one installed runtime. The Source package owns native
+The configured cua_repl MCP server explicitly selects the installed Source
+runtime or MiniCode's independent receiving helper. No Source package or native
+binary is redistributed. In installed mode the Source package owns native
 helper protocol/launch; MiniCode owns its pipe, real turn and approval lifecycle.
 """
 from __future__ import annotations
@@ -25,8 +26,11 @@ _HOST_SCRIPT = Path(__file__).with_name("computer_use_host.mjs")
 
 
 def is_configured_cua(config) -> bool:
-    return config.name == "cua_repl" and (
+    configured = config.name == "cua_repl" and (
         "computer" in config.env.get("CUA_REPL_ENABLED_SURFACES", "").split(","))
+    if configured and config.env.get("MINICODE_CUA_PROVIDER", "installed-source") not in {"installed-source", "minicode-win32"}:
+        raise ValueError("Unknown MINICODE_CUA_PROVIDER; select installed-source or minicode-win32 explicitly")
+    return configured
 
 
 @dataclass(frozen=True)
@@ -163,7 +167,9 @@ async def _release_host(host):
 
 class CuaReplMCPClient(NodeReplMCPClient):
     def __init__(self, config, attachment, network, *, on_disconnect, on_tools_changed):
-        self.runtime = CuaRuntime.selected(config)
+        from backend.mcp.native_cua_runtime import is_native_cua
+        self.native = is_native_cua(config)
+        self.runtime = None if self.native else CuaRuntime.selected(config)
         self.home = agent_runtime_root() / "computer-use"
         self.host = None
         super().__init__(config, attachment, network, on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
@@ -172,8 +178,24 @@ class CuaReplMCPClient(NodeReplMCPClient):
     def _tool_request_timeout_seconds(self, params):
         return super()._tool_request_timeout_seconds(params) + 300
 
+    async def close_thread(self):
+        try:
+            if self.native and self.host is not None:
+                await self.host.request("closeThread", {})
+        finally:
+            await super().close_thread()
+
     @asynccontextmanager
     async def _executor_transport(self):
+        if self.native:
+            from backend.mcp.native_cua_runtime import NativeCuaTurnControl
+            self.host = NativeCuaTurnControl(self)
+            try:
+                async with super()._executor_transport() as streams:
+                    yield streams
+            finally:
+                self.host = None
+            return
         host = await _acquire_host(self.runtime, self.home)
         self.host = host
         self._env = {**self._env, "CUA_REPL_NODE_REPL_PATH": str(self.runtime.node_repl),
@@ -204,14 +226,19 @@ class CuaReplCompanions(NodeReplCompanions):
     source_prefix = SOURCE_PREFIX
     client_type = CuaReplMCPClient
 
-    async def admit(self, attachment, network, selected):
-        if attachment.is_remote or os.name != "nt":
+    async def admit(self, attachment, network, selected, *, app_access=None):
+        from backend.mcp.native_cua_runtime import is_native_cua, native_cua_config
+        native = is_native_cua(selected)
+        if native:
+            selected = native_cua_config(selected, attachment, app_access or {})
+        elif attachment.is_remote or os.name != "nt":
             raise ValueError("The selected CUA runtime requires a local Windows receiving environment")
         identity = json.dumps([id(attachment.environment), attachment.permission_scope.identity(), _env_policy(attachment),
             attachment.config.mcp_policy, network.identity() if network is not None else None,
             selected.command, selected.args, selected.env], sort_keys=True)
         key = hashlib.sha256(identity.encode()).hexdigest()
-        config = replace(selected, source=SOURCE_PREFIX + key, cwd=attachment.selection.cwd, environment_id="local")
+        config = replace(selected, source=SOURCE_PREFIX + key, cwd=attachment.selection.cwd,
+            environment_id=attachment.selection.environment_id if native else "local")
         async with self.lock:
             if self.active_key is not None and self.active_key != key:
                 old = self.instances[self.active_key]
@@ -256,7 +283,13 @@ async def register_cua_companion(run_context, agent_session, *, execution):
     if owner_host.cua_repl_companions is None:
         owner_host.cua_repl_companions = CuaReplCompanions()
     owner = owner_host.cua_repl_companions
-    config = await owner.admit(attachment, run_context.network_step.policy_for(attachment), selected)
+    from backend.mcp.native_cua_runtime import is_native_cua
+    app_access = None
+    if is_native_cua(selected):
+        stack = execution.config.config_layer_stack
+        app_access = stack.effective_config().get("computer_use", {}) if stack is not None else {}
+    config = await owner.admit(attachment, run_context.network_step.policy_for(attachment), selected,
+        app_access=app_access)
     from backend.mcp.policy import load_mcp_policy
 
     policy = load_mcp_policy(managed_settings_dir=manager._managed_settings_dir,

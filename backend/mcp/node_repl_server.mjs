@@ -96,6 +96,23 @@ for (const name of ['Buffer','URL','URLSearchParams','TextEncoder','TextDecoder'
     'AbortController','AbortSignal','setTimeout','clearTimeout','setInterval','clearInterval','setImmediate','clearImmediate',
     'queueMicrotask','structuredClone','atob','btoa','crypto']) globals[name] = globalThis[name];
 const context = vm.createContext(globals, { name: 'MiniCode Node REPL' });
+if (workerData.extension) {
+  const { createCuaApi } = await import(workerData.extension.apiModule);
+  let nativeSequence = 0;
+  const nativeCalls = new Map();
+  parentPort.on('message', reply => {
+    if (reply.kind !== 'native_reply') return;
+    const waiter = nativeCalls.get(reply.id);
+    nativeCalls.delete(reply.id);
+    if (reply.error) waiter.reject(new Error(reply.error)); else waiter.resolve(reply.result);
+  });
+  globals.cua = createCuaApi((method, args) => new Promise((resolve, reject) => {
+    const call = executions.getStore(), id = ++nativeSequence;
+    if (!call || call.completed) throw new Error('Computer Use requires its original active js execution');
+    nativeCalls.set(id, { resolve, reject });
+    parentPort.postMessage({ kind: 'native_request', id, method, args, executionId: call.id, requestId: call.requestId });
+  }), nodeRepl);
+}
 // Inspector stores an execution-context ID, not a strong reference to this
 // object. Keep the VM alive for the worker's lifetime, including idle periods.
 globalThis.__minicodeNodeContext = context;
@@ -106,6 +123,7 @@ process.on('uncaughtExceptionMonitor', error => {
     error: error.stack || String(error) });
 });
 parentPort.on('message', message => {
+  if (message.kind === 'native_reply') return;
   if (message.kind === 'retire') { process.exit(0); }
   if (message.kind === 'add_module_dir') { moduleDirs.push(message.path); return; }
   if (message.kind === 'finished') {
@@ -135,6 +153,8 @@ const debuggerSession = new Session(); debuggerSession.connect();
 const kernels = new Map(), workerSessions = new Map(), commands = new Map();
 let commandSequence = 0;
 const send = message => process.stdout.write(JSON.stringify(message) + '\n');
+const extension = globalThis.__minicodeNodeReplExtension?.({ send });
+await extension?.initialize();
 const text = value => ({ type: 'text', text: value });
 const errorResult = message => ({ content: [text(message)], isError: true });
 const logError = error => send({ jsonrpc: '2.0', method: 'notifications/message',
@@ -183,7 +203,7 @@ function createKernel() {
   // its older async_hooks backend leaves a native async-id stack unbalanced.
   const execArgv = ['--expose-internals'];
   if (process.allowedNodeEnvironmentFlags.has('--experimental-async-context-frame')) execArgv.push('--experimental-async-context-frame');
-  const kernel = new Worker(workerSource, { eval: true, execArgv, workerData: { moduleDirs }, stdout: true, stderr: true });
+  const kernel = new Worker(workerSource, { eval: true, execArgv, workerData: { moduleDirs, extension: extension?.workerData }, stdout: true, stderr: true });
   const current = { kernel, id: String(kernel.threadId), bootstrap: deferred(), attached: deferred(),
     context: deferred(), exited: deferred(), failure: null };
   kernels.set(current.id, current);
@@ -191,6 +211,18 @@ function createKernel() {
   const enabled = Promise.all([current.bootstrap.promise, current.attached.promise]).then(() => postInspector(current, 'Runtime.enable'));
   current.ready = Promise.all([enabled, current.context.promise]).then(([,context]) => context);
   kernel.on('message', message => {
+    if (message.kind === 'native_request') {
+      const execution = pending.get(message.executionId);
+      if (!extension || !execution || execution.kernel !== current || execution.requestId !== message.requestId) {
+        kernel.postMessage({ kind: 'native_reply', id: message.id, error: 'Computer Use request has no matching active parent execution' });
+        return;
+      }
+      extension.request({ ...message, kernelId: current.id, requestId: execution.requestId,
+        requestMeta: execution.requestMeta }, execution.signal).then(
+        result => kernel.postMessage({ kind: 'native_reply', id: message.id, result }),
+        error => kernel.postMessage({ kind: 'native_reply', id: message.id, error: error.message }));
+      return;
+    }
     if (message.kind === 'ready') { current.bootstrap.resolve(); return; }
     if (message.kind === 'late_output' || message.kind === 'uncaught') {
       send({ jsonrpc: '2.0', method: 'notifications/message', params: { level: message.kind === 'uncaught' ? 'error' : 'info', logger: 'node_repl',
@@ -256,6 +288,7 @@ async function resetKernel(reason) {
   const interrupted = [...pending.values()]; pending.clear();
   resetting = (async () => {
     try {
+      if (previous) await extension?.retireKernel(previous.id);
       if (previous) await interruptKernel(previous);
       for (const call of interrupted) call.resolve({ content: [...call.content, text(reason)], isError: true });
     } catch (error) { for (const call of interrupted) call.reject(error); throw error; }
@@ -276,12 +309,13 @@ async function execute(request, signal, expectedGeneration) {
     return await new Promise((resolve, reject) => {
       // Register against this concrete kernel before awaiting its bootstrap;
       // an immediate reset must still own and settle the original request.
-      const call = { kernel: current, resolve, reject, content: [] }; pending.set(id, call);
+      const call = { kernel: current, resolve, reject, content: [], requestId: request.id,
+        requestMeta: request.params._meta || {}, signal }; pending.set(id, call);
       current.ready.then(context => {
         if (pending.get(id) !== call) return;
         call.context = context;
         timer = setTimeout(() => { void resetKernel('JavaScript execution exceeded ' + timeout + ' ms; the kernel was reset.').catch(logError); }, timeout);
-        current.kernel.postMessage({ id, requestId: request.id, code: params.code, meta: request.params._meta || {} });
+        current.kernel.postMessage({ id, requestId: call.requestId, code: params.code, meta: call.requestMeta });
       }, error => { if (pending.get(id) === call) { pending.delete(id); reject(error); } });
     });
   } finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
@@ -299,11 +333,13 @@ async function handle(request) {
   let result, cancelled = false;
   try {
     switch (request.method) {
-      case 'initialize': result = { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'MiniCode local Node companion', version: '1' }, instructions: common }; break;
+      case 'initialize': result = { protocolVersion: request.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: extension?.name || 'MiniCode local Node companion', version: '1' }, instructions: extension?.instructions || common }; break;
       case 'ping': result = {}; break;
       case 'tools/list': result = { tools }; break;
       case 'tools/call': {
         const name = request.params.name;
+        const extended = await extension?.callTool(name, request.params.arguments || {});
+        if (extended !== undefined) { result = extended; break; }
         if (name === 'js_reset') { await resetKernel('JavaScript kernel reset by js_reset.'); result = { content: [text('JavaScript kernel reset.')] }; break; }
         if (name === 'js_add_node_module_dir') {
           const dir = request.params.arguments?.path;
@@ -325,5 +361,5 @@ async function handle(request) {
   if (!cancelled) send({ jsonrpc: '2.0', id: request.id, result });
 }
 const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-lines.on('line', line => { const request = JSON.parse(line); void handle(request); });
-lines.on('close', () => { void resetKernel('Node companion closed.').then(() => process.exit(0)); });
+lines.on('line', line => { const request = JSON.parse(line); if (!extension?.acceptResponse(request)) void handle(request); });
+lines.on('close', () => { void resetKernel('Node companion closed.').then(async () => { await extension?.close(); process.exit(0); }); });

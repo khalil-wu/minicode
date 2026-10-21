@@ -193,9 +193,105 @@ test("guest permission prompts serialize and preserve an explicit policy changed
   dialog.prompts[0].respond({ response: 1 }); await new Promise(setImmediate);
   assert.equal(dialog.prompts.length, 2); assert.deepEqual(results, [["location", true]]);
   h.manager.setSitePolicy({ origin: "https://example.com", category: "camera", setting: "block" });
+  assert.equal(dialog.prompts[1].options.signal.aborted, true);
+  assert.deepEqual(results, [["location", true], ["camera", false]]);
   dialog.prompts[1].respond({ response: 2 }); await new Promise(setImmediate);
   assert.deepEqual(results, [["location", true], ["camera", false]]);
   assert.equal(h.manager.getSitePolicy().sites[0].settings.camera, "block");
+  h.manager.disposeAll();
+});
+
+test("one original permission choice settles duplicate queued requests without another prompt", async () => {
+  for (const response of [0, 1, 2]) {
+    const dialog = permissionDialog(); const h = browserHarness(dialog);
+    h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+    const target = { id: "duplicate-permissions", conversation_id: "owner", window_instance_id: "fixture-window" };
+    await h.manager.create({ ...target, url: "https://example.com/" });
+    h.manager.setBounds({ ...target, x: 0, y: 0, width: 400, height: 400 }); h.manager.activate(target.id, "owner", "fixture-window");
+    const contents = h.views[0].webContents; const results = [];
+    for (const name of ["first", "second"]) h.session.permissionRequest(contents, "notifications", allowed => results.push([name, allowed]), { requestingUrl: contents.url });
+    assert.equal(dialog.prompts.length, 1);
+    dialog.prompts[0].respond({ response }); await new Promise(setImmediate);
+    assert.deepEqual(results, [["first", response !== 0], ["second", response !== 0]]);
+    assert.equal(dialog.prompts.length, 1);
+    assert.equal(h.session.permissionCheck(contents, "notifications", "https://example.com", {}), response !== 0);
+    if (response === 1) assert.deepEqual(structuredClone(h.manager.getSitePolicy().sites), []);
+    else assert.equal(h.manager.getSitePolicy().sites[0].settings.notifications, response === 2 ? "allow" : "block");
+    h.manager.disposeAll();
+    assert.equal(results.length, 2);
+  }
+});
+
+test("a global site block settles visible and hidden original callbacks and cancels stale presentation", async () => {
+  const dialog = permissionDialog(); const h = browserHarness(dialog);
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const first = { id: "visible-policy", conversation_id: "first-owner", window_instance_id: "fixture-window" };
+  const second = { id: "hidden-policy", conversation_id: "second-owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...first, url: "https://first.example/" });
+  await h.manager.create({ ...second, url: "https://second.example/" });
+  h.manager.setBounds({ ...first, x: 0, y: 0, width: 400, height: 400 }); h.manager.activate(first.id, first.conversation_id, "fixture-window");
+  const results = [];
+  for (const [index, view] of h.views.entries()) h.session.permissionRequest(view.webContents, "notifications", value => results.push([index, value]), { requestingUrl: view.webContents.url });
+  assert.equal(dialog.prompts.length, 1);
+  h.manager.setSitePolicy({ category: "notifications", setting: "block" });
+  assert.deepEqual(results, [[0, false], [1, false]]);
+  assert.equal(dialog.prompts[0].options.signal.aborted, true);
+  dialog.prompts[0].respond({ response: 2 }); await new Promise(setImmediate);
+  assert.deepEqual(results, [[0, false], [1, false]]);
+  assert.equal(h.manager.getSitePolicy().defaults.notifications, "block");
+  assert.deepEqual(structuredClone(h.manager.getSitePolicy().sites), []);
+  h.manager.activate(second.id, second.conversation_id, "fixture-window");
+  assert.equal(dialog.prompts.length, 1);
+  h.manager.disposeAll();
+});
+
+test("saved site grants resolve hidden pending requests for only their original origin", async () => {
+  const dialog = permissionDialog(); const h = browserHarness(dialog);
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  for (const [id, origin] of [["first", "https://first.example"], ["second", "https://second.example"]])
+    await h.manager.create({ id, conversation_id: id, window_instance_id: "fixture-window", url: origin });
+  const results = [];
+  for (const [index, view] of h.views.entries()) h.session.permissionRequest(view.webContents, "geolocation", value => results.push([index, value]), { requestingUrl: view.webContents.url });
+  h.manager.setBrowserSettings({ origin: "https://first.example", permission: "geolocation", allowed: true });
+  assert.deepEqual(results, [[0, true]]);
+  assert.equal(dialog.prompts.length, 0);
+  h.manager.disposeAll();
+  assert.deepEqual(results, [[0, true], [1, false]]);
+});
+
+test("mixed media requests retain the original combined decision until all grants or one block exist", async () => {
+  const dialog = permissionDialog(); const h = browserHarness(dialog);
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "mixed-media", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  const contents = h.views[0].webContents; const results = [];
+  h.session.permissionRequest(contents, "media", value => results.push(value), { requestingUrl: contents.url, mediaTypes: ["video", "audio"] });
+  h.manager.setSitePolicy({ origin: "https://example.com", category: "camera", setting: "allow" });
+  assert.deepEqual(results, []);
+  h.manager.setSitePolicy({ origin: "https://example.com", category: "microphone", setting: "block" });
+  assert.deepEqual(results, [false]);
+  assert.equal(dialog.prompts.length, 0);
+  h.manager.disposeAll();
+  assert.deepEqual(results, [false]);
+});
+
+test("resetting one site category and the whole site revokes actual temporary document grants", async () => {
+  const dialog = permissionDialog(); const h = browserHarness(dialog);
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "reset-one-time", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://example.com/" });
+  h.manager.setBounds({ ...target, x: 0, y: 0, width: 400, height: 400 }); h.manager.activate(target.id, "owner", "fixture-window");
+  const contents = h.views[0].webContents;
+  const first = new Promise(resolve => h.session.permissionRequest(contents, "media", resolve, { requestingUrl: contents.url, mediaTypes: ["video", "audio"] }));
+  dialog.prompts[0].respond({ response: 1 }); assert.equal(await first, true); await new Promise(setImmediate);
+  h.manager.setSitePolicy({ origin: "https://example.com", category: "camera", setting: "default" });
+  assert.equal(h.session.permissionCheck(contents, "media", "https://example.com", { mediaType: "video" }), false);
+  assert.equal(h.session.permissionCheck(contents, "media", "https://example.com", { mediaType: "audio" }), true);
+  h.manager.removeSitePermissions({ origin: "https://example.com" });
+  assert.equal(h.session.permissionCheck(contents, "media", "https://example.com", { mediaType: "audio" }), false);
+  const next = new Promise(resolve => h.session.permissionRequest(contents, "media", resolve, { requestingUrl: contents.url, mediaTypes: ["audio"] }));
+  assert.equal(dialog.prompts.length, 2);
+  dialog.prompts[1].respond({ response: 0 }); assert.equal(await next, false);
   h.manager.disposeAll();
 });
 

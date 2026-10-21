@@ -8,6 +8,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
   const { app, BrowserWindow, ipcMain, nativeImage, screen } = require("electron");
   const http = require("node:http");
   const manager = require("./embedded-browser-manager");
+  const { buildUpdatePreflight } = require("./updater");
   app.setPath("userData", process.env.MINICODE_BROWSER_CAPTURE_TEST_PROFILE);
   app.whenReady().then(async () => {
     const area = screen.getPrimaryDisplay().workArea;
@@ -23,7 +24,26 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
     const nativePost = new Promise(resolve => { receiveNativePost = resolve; });
     let receiveNativeBackground;
     const nativeBackground = new Promise(resolve => { receiveNativeBackground = resolve; });
+    const streamBytes = Buffer.alloc(128 * 1024, "original resumable download;");
+    const streamResponses = new Set();
+    let streamReleased = false;
     const server = http.createServer((request, response) => {
+      if (request.url === "/stream-download") {
+        const range = request.headers.range ? /^bytes=(\d+)-(\d*)$/.exec(request.headers.range) : null;
+        const offset = range ? Number(range[1]) : 0;
+        const end = range?.[2] ? Number(range[2]) + 1 : streamBytes.length;
+        response.writeHead(range ? 206 : 200, { "content-type": "application/octet-stream",
+          "content-disposition": 'attachment; filename="original-stream.bin"', "accept-ranges": "bytes",
+          etag: '"original-stream-v1"', "content-length": end - offset,
+          ...(range ? { "content-range": `bytes ${offset}-${end - 1}/${streamBytes.length}` } : {}) });
+        if (streamReleased || range) response.end(streamBytes.subarray(offset, end));
+        else {
+          response.write(streamBytes.subarray(0, 64 * 1024));
+          streamResponses.add(response);
+          response.once("close", () => streamResponses.delete(response));
+        }
+        return;
+      }
       if (request.url === "/agent-download") {
         response.writeHead(200, { "content-type": "text/plain", "content-disposition": 'attachment; filename="original-download.txt"' });
         response.end("original native download bytes");
@@ -258,6 +278,46 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(manager.releaseAgentControl({ conversation_id: "capture-owner", window_instance_id: "fixture-window", control: agentControl }), 1);
       assert.equal(view.webContents.debugger.isAttached(), false);
       process.stdout.write("[capture] original main-frame Page.downloadWillBegin produced and consumed the dynamic blob permission\n");
+      const streamUrl = new URL("/stream-download", url).href;
+      await manager.executeControlCommand({ action: "allow_download", target_id: target.id, conversation_id: "capture-owner",
+        window_instance_id: "fixture-window", url: streamUrl }, { agentControl });
+      const streamStarted = new Promise((resolve, reject) => view.webContents.session.once("will-download", (event, item, contents) => {
+        if (event.defaultPrevented) { reject(new Error("The original streaming download was not admitted")); return; }
+        assert.equal(contents, view.webContents);
+        const record = manager.listDownloads().find(record => record.url === streamUrl);
+        const done = new Promise(finish => item.once("done", (_event, state) => finish(state)));
+        resolve({ item, record, done });
+      }));
+      console.log("[capture] authorized controlled HTTP stream; waiting for its original DownloadItem");
+      const streamLaunch = manager.executeControlCommand({ action: "evaluate", target_id: target.id,
+        conversation_id: "capture-owner", window_instance_id: "fixture-window",
+        expression: `(() => { const link=document.createElement('a'); link.href=${JSON.stringify(streamUrl)}; link.download='original-stream.bin'; document.body.append(link); link.click(); return true; })()` }, { agentControl });
+      const stream = await streamStarted;
+      await streamLaunch;
+      console.log("[capture] received the original streaming DownloadItem; requesting native pause");
+      assert.ok(stream.item.getReceivedBytes() < streamBytes.length);
+      await manager.runDownloadAction({ action: "pause", id: stream.record.id });
+      assert.equal(stream.item.isPaused(), true);
+      const paused = manager.listDownloads().find(record => record.id === stream.record.id);
+      assert.equal(paused.state, "paused"); assert.equal(paused.canResume, true);
+      assert.equal(manager.getActiveDownloadIds().includes(stream.record.id), true);
+      const blockedUpdate = buildUpdatePreflight({ activeDownloadIds: manager.getActiveDownloadIds() });
+      const downloadCheck = blockedUpdate.checks.find(check => check.code === "download.active");
+      assert.equal(downloadCheck.severity, "blocking"); assert.ok(downloadCheck.details.ids.includes(stream.record.id));
+      console.log("[capture] native pause and the active-download update blocker verified; requesting native resume");
+      await manager.runDownloadAction({ action: "resume", id: stream.record.id });
+      assert.equal(stream.item.isPaused(), false);
+      streamReleased = true;
+      for (const response of streamResponses) response.end(streamBytes.subarray(64 * 1024));
+      assert.equal(await stream.done, "completed");
+      assert.deepEqual(fs.readFileSync(stream.item.getSavePath()), streamBytes);
+      const completedStream = manager.listDownloads().find(record => record.id === stream.record.id);
+      assert.equal(completedStream.state, "completed"); assert.equal(completedStream.path, stream.item.getSavePath());
+      assert.equal(manager.getActiveDownloadIds().includes(stream.record.id), false);
+      assert.ok(buildUpdatePreflight({ activeDownloadIds: manager.getActiveDownloadIds() }).checks.some(check => check.code === "download.clear" && check.severity === "pass"));
+      assert.equal(manager.releaseAgentControl({ conversation_id: "capture-owner", window_instance_id: "fixture-window", control: agentControl }), 1);
+      console.log("[capture] original native DownloadItem paused, blocked update restart, resumed with exact bytes and released the restart blocker on completion");
+
       manager.close({ id: target.id, conversation_id: "capture-owner", window_instance_id: "fixture-window" });
       assert.equal(child.webContents.isDestroyed(), false); assert.equal(background.contents.isDestroyed(), false);
       assert.equal(await child.webContents.executeJavaScript("document.querySelector('h1').textContent"), "Native POST destination");

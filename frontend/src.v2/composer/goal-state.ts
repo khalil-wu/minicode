@@ -27,6 +27,12 @@ export const updateGoalEditor = (owner: string, patch: Partial<GoalEditorState>)
 };
 export const useGoalEditor = (owner: string) => useSyncExternalStore(subscribe, () => editors.get(owner));
 
+export function enterComposerGoalMode() {
+  const owner = useAppStore.getState();
+  useAppStore.setState({ goalMode: true });
+  if (owner.agentMode === "plan") void owner.setAgentMode("build");
+}
+
 export function prepareGoalEditor(owner: string, goal: ConversationGoal) {
   const previous = editors.get(owner);
   if (previous && previous.draft !== previous.savedObjective) return previous;
