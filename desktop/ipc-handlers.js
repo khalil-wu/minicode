@@ -326,6 +326,12 @@ function registerIpcHandlers() {
   // Window controls
   // -----------------------------------------------------------------------
 
+  for (const action of ["claim", "update", "release", "ready", "reply"]) {
+    const channel = `minicode:realtimeVoice:${action}`;
+    ipcMain.handle(channel, withMainSender(channel, (event, payload) =>
+      ctx.realtimeVoiceManager[action](getWindowRecord(getWin(event)), payload)));
+  }
+
   ipcMain.handle("minicode:pets:getState", withMainSender("minicode:pets:getState", async () => (await ctx.getPetManager()).getState()));
   ipcMain.handle("minicode:pets:refresh", withMainSender("minicode:pets:refresh", () => ctx.refreshPets()));
   ipcMain.handle("minicode:pets:update", withMainSender("minicode:pets:update", async (_event, patch) => (await ctx.getPetManager()).update(patch)));

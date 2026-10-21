@@ -41,7 +41,8 @@ export type RealtimeCommand = RealtimeOwner & (
       clientManagedHandoffs?: boolean; flushTranscriptTailOnSessionEnd?: boolean; delegationAckFiller?: boolean;
       codexResponsesAsItems?: boolean; codexResponseItemPrefix?: string; backendReasoningStatus?: boolean;
       codexResponseHandoffMode?: "thinking" | "commentary" | "bemTags";
-      codexResponseHandoffChannelPrefixes?: Record<string, string[]> }
+      codexResponseHandoffChannelPrefixes?: Record<string, string[]>;
+      desktopVoice?: import("../desktop/runtime").DesktopVoiceClaim }
   | { type: "thread/realtime/appendAudio"; audio: RealtimeAudioChunk }
   | { type: "thread/realtime/appendText"; role?: "user" | "assistant" | "system" | "developer"; text: string }
   | { type: "thread/realtime/appendSpeech"; text: string }

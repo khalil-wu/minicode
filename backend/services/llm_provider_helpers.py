@@ -9,11 +9,11 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from backend.application_network import application_http_client, ApplicationNetworkDenied
 
 from backend.secret_redaction import redact_secrets
 from backend.llm.capabilities import is_gpt_image_model
 from backend.llm.errors import llm_error_status_code as _http_error_status
-from backend.llm.proxy_policy import provider_httpx_proxy_kwargs
 from backend.llm.provider_contracts import normalize_model_limit
 
 logger = logging.getLogger(__name__)
@@ -373,14 +373,8 @@ async def _fetch_openai_compatible_models(
     models_url = _build_openai_models_url(base_url)
     if not models_url:
         raise ValueError("Provider models endpoint could not be resolved")
-    async with httpx.AsyncClient(
-        timeout=10.0,
-        follow_redirects=False,
-        **provider_httpx_proxy_kwargs(
-            models_url,
-            proxy_mode=proxy_mode,
-        ),
-    ) as client:
+    async with application_http_client(models_url, proxy_mode=proxy_mode,
+        timeout=10.0, follow_redirects=False) as client:
         response = await client.get(
             models_url,
             headers=_provider_request_headers(
@@ -469,6 +463,8 @@ async def _check_openai_compatible_generation(
                 },
             ):
                 if event.type == StreamEventType.ERROR:
+                    if event.raw.get("provider_error_type") == "application_network":
+                        raise ApplicationNetworkDenied(event.raw["provider_error_code"].removeprefix("application_network_"))
                     raise RuntimeError(event.content or "Responses generation check failed")
                 if event.type == StreamEventType.DONE:
                     saw_done = True
@@ -499,14 +495,8 @@ async def _check_openai_compatible_generation(
         # while still exercising a usable generation request.
         "max_tokens": _GENERATION_CHECK_MAX_TOKENS,
     }
-    async with httpx.AsyncClient(
-        timeout=15.0,
-        follow_redirects=False,
-        **provider_httpx_proxy_kwargs(
-            url,
-            proxy_mode=proxy_mode,
-        ),
-    ) as client:
+    async with application_http_client(url, proxy_mode=proxy_mode,
+        timeout=15.0, follow_redirects=False) as client:
         response = await client.post(
             url,
             headers=_provider_request_headers(
@@ -562,14 +552,8 @@ async def _check_openai_compatible_image_generation(
     clean_quality = str(quality or "").strip()
     if clean_quality:
         body["quality"] = clean_quality
-    async with httpx.AsyncClient(
-        timeout=60.0,
-        follow_redirects=False,
-        **provider_httpx_proxy_kwargs(
-            url,
-            proxy_mode=proxy_mode,
-        ),
-    ) as client:
+    async with application_http_client(url, proxy_mode=proxy_mode,
+        timeout=60.0, follow_redirects=False) as client:
         for attempt in range(2):
             response = await client.post(
                 url,
@@ -651,14 +635,8 @@ async def _check_anthropic_generation(
     endpoint = base_url.rstrip("/") if base_url.strip() else "https://api.anthropic.com/v1"
     if not endpoint.endswith("/v1"):
         endpoint = f"{endpoint}/v1"
-    async with httpx.AsyncClient(
-        timeout=15.0,
-        follow_redirects=False,
-        **provider_httpx_proxy_kwargs(
-            f"{endpoint}/messages",
-            proxy_mode=proxy_mode,
-        ),
-    ) as client:
+    async with application_http_client(f"{endpoint}/messages", proxy_mode=proxy_mode,
+        timeout=15.0, follow_redirects=False) as client:
         response = await client.post(
             f"{endpoint}/messages",
             headers=_provider_request_headers(
@@ -690,14 +668,8 @@ async def _fetch_anthropic_models(
     endpoint = base_url.rstrip("/") if base_url.strip() else "https://api.anthropic.com/v1"
     if not endpoint.endswith("/v1"):
         endpoint = f"{endpoint}/v1"
-    async with httpx.AsyncClient(
-        timeout=10.0,
-        follow_redirects=False,
-        **provider_httpx_proxy_kwargs(
-            f"{endpoint}/models",
-            proxy_mode=proxy_mode,
-        ),
-    ) as client:
+    async with application_http_client(f"{endpoint}/models", proxy_mode=proxy_mode,
+        timeout=10.0, follow_redirects=False) as client:
         response = await client.get(
             f"{endpoint}/models",
             headers=_provider_request_headers(

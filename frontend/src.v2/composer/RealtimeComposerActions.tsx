@@ -43,11 +43,10 @@ export function RealtimeComposerActions({ sendButton }: { sendButton: ReactNode 
     && call.phase === "inactive" && dictation.phase === "idle" && !blocked
     && typeof navigator.mediaDevices?.getUserMedia === "function"
     && typeof AudioContext !== "undefined" && typeof AudioWorkletNode !== "undefined";
-  const remote = !!window.__MINICODE_RUNTIME__?.remoteHost;
   const label = conversationId ? t("开始语音聊天") : t("开始新的语音聊天");
   return <><VoiceInput />{available
     ? <button type="button" className="composer-voice-btn composer-realtime-start" aria-label={label}
-        disabled={remote} title={remote ? t("语音不支持远程项目") : label}
+        title={label}
         onClick={() => { void realtimeController.start(capability); }}><AudioLines size={18} /></button>
     : sendButton}</>;
 }

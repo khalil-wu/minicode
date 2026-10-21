@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosed
 from backend.llm.proxy_policy import provider_httpx_proxy_kwargs, provider_proxy_url_for_base_url
 from backend.agent.guardian.truncation import truncate_guardian_text
 from backend.realtime.protocol import Start, V1_VOICES, V2_VOICES, context_chunks, input_text, text_message
+from backend.application_network import application_network_policy, application_http_client, application_websocket_connect
 
 
 def websocket_url(base: str, version: str, model: str | None = None, call_id: str | None = None) -> str:
@@ -65,6 +66,7 @@ class RealtimeConfig:
     configured: bool = True
     startup_context: str | None = None
     start_instructions: str | None = None
+    network_policy: object = field(default_factory=application_network_policy, repr=False, compare=False)
 
     def __post_init__(self):
         if self.version not in {"v1", "v2", "v3"}:
@@ -164,7 +166,7 @@ class RealtimeConnection:
                 parsed.path.rstrip("/") + ("/live" if self.version == "v3" else "/realtime/calls"), parsed.query, ""))
             model = self.start.model or self.config.model or ("gpt-live-1-codex" if self.version == "v3" else "gpt-realtime-1.5")
             session = {**self.session, "model": model}
-            async with httpx.AsyncClient(**provider_httpx_proxy_kwargs(endpoint, proxy_mode=self.config.proxy_mode)) as client:
+            async with application_http_client(endpoint, policy=self.config.network_policy, proxy_mode=self.config.proxy_mode) as client:
                 response = await client.post(endpoint, headers=self.headers,
                     files={"sdp": (None, self.start.transport.sdp), "session": (None, json.dumps(session))})
                 response.raise_for_status()
@@ -172,8 +174,9 @@ class RealtimeConnection:
                 call_id = urlsplit(response.headers["location"]).path.rstrip("/").rsplit("/", 1)[-1]
         model = None if call_id is not None else self.start.model or self.config.model or ("gpt-live-1-codex" if self.version == "v3" else "gpt-realtime-1.5")
         url = websocket_url(self.config.base_url, self.version, model, call_id)
-        self.socket = await connect(url, additional_headers=self.headers,
-            proxy=provider_proxy_url_for_base_url(url, proxy_mode=self.config.proxy_mode) or None)
+        self.socket = await application_websocket_connect(url, connect, policy=self.config.network_policy,
+            additional_headers=self.headers,
+            proxy_resolver=lambda destination: provider_proxy_url_for_base_url(destination, proxy_mode=self.config.proxy_mode) or None)
         try:
             if self.start.transport.type != "existingCall" and not (self.start.transport.type == "webrtc" and self.version == "v3"):
                 await self.send({"type": "session.update", "session": self.session})

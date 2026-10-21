@@ -58,6 +58,18 @@ const runtimeConfig = {
   windowBindingToken: mainRuntimeConfig?.windowBindingToken || "",
   initialNavigation: mainRuntimeConfig?.initialNavigation,
   desktop: {
+    realtimeVoice: {
+      claim: payload => ipcRenderer.invoke("minicode:realtimeVoice:claim", payload),
+      update: payload => ipcRenderer.invoke("minicode:realtimeVoice:update", payload),
+      release: payload => ipcRenderer.invoke("minicode:realtimeVoice:release", payload),
+      ready: payload => ipcRenderer.invoke("minicode:realtimeVoice:ready", payload),
+      reply: payload => ipcRenderer.invoke("minicode:realtimeVoice:reply", payload),
+      onRequest: callback => {
+        const listener = (_event, value) => callback(value);
+        ipcRenderer.on("minicode:realtimeVoice:request", listener);
+        return () => ipcRenderer.removeListener("minicode:realtimeVoice:request", listener);
+      },
+    },
     dictation: {
       get: () => ipcRenderer.invoke("minicode:dictation:get"),
       getLocalRuntime: () => ipcRenderer.invoke("minicode:dictation:getLocalRuntime"),

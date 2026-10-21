@@ -629,6 +629,32 @@ def v2_board_evidence(events, state, *, conversation_id, message_id, channel, no
         "source_call_ids": {name: [event["id"] for event in completed if event["name"] == name] for name in sorted(required)}}
 
 
+def observed_turn_outcomes(events, owners):
+    """Keep canonical turn results and their actual provider attempts on failure."""
+    outcomes = {}
+    for label, (conversation_id, message_id) in owners.items():
+        own = [event for event in events if event.get("conversation_id") == conversation_id
+            and event.get("message_id") == message_id]
+        terminals = [event for event in own if event.get("type") == "done"]
+        if not terminals:
+            continue
+        terminal = terminals[-1]
+        turn_id = terminal["turn_id"]
+        attempt_fields = ("stream_attempt", "retry_attempt", "max_retries", "error_type",
+            "provider_error_type", "status_code", "provider_error_code", "provider_error_message")
+        outcomes[label] = {
+            "conversation_id": conversation_id, "message_id": message_id,
+            "terminal": {key: terminal[key] for key in ("event_id", "turn_id", "task_id", "status", "reason") if key in terminal},
+            "errors": [{key: event[key] for key in ("event_id", "error_type", "error_code", "provider_error_type", "message") if key in event}
+                for event in own if event.get("type") == "error" and event.get("turn_id") == turn_id],
+            "provider_failures": [{"event_id": event["event_id"], "span_id": event["span_id"],
+                "data": {key: event["data"][key] for key in attempt_fields if key in event["data"]}}
+                for event in own if event.get("type") == "runtime.span"
+                    and event.get("event") == "provider.request.failed" and event.get("turn_id") == turn_id],
+        }
+    return outcomes
+
+
 class Client:
     def __init__(self, url: str, trace, secret: str):
         self.url, self.trace, self.secret = url, trace, secret
@@ -1102,6 +1128,9 @@ async def exercise(args, config):
                 subagent_events=sum(str(e.get("type", "")).startswith("subagent.") for e in client.events))
         except BaseException as error:
             result["error"] = f"{type(error).__name__}: {error}".replace(config.llm.api_key, "[redacted]")
+            outcomes = observed_turn_outcomes(client.events, {
+                label: (b if label == "b" else a, message_id) for label, message_id in messages.items()})
+            result["observed_turn_outcomes"] = json.loads(json.dumps(outcomes).replace(config.llm.api_key, "[redacted]"))
             raise
         finally:
             process_audit.stopping = True

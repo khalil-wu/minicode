@@ -376,6 +376,9 @@ class ToolsetPolicy:
                 "model_messages=" + json.dumps(self.model_messages, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
                 "coordination=" + json.dumps(self.coordination_options, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
                 f"realtime={bool(self.realtime_service is not None and self.realtime_service.active and self.realtime_service.started and not self.realtime_service.closing)}",
+                "realtime_desktop=" + ",".join(name for name in ("capture_screen_context", "transfer_voice_call")
+                    if self.realtime_service is not None and self.realtime_service.desktop_client is not None
+                    and self.realtime_service.desktop_client.supports(name)),
                 *(
                     f"availability[{index}]={clause.cache_key()}"
                     for index, clause in enumerate(self.availability_filters)
@@ -417,8 +420,11 @@ class ToolsetPolicy:
             )
 
     def is_available(self, spec: ToolSpec) -> bool:
-        if spec.name == "end_realtime_voice_call" and (self.realtime_service is None
+        if spec.name in {"end_realtime_voice_call", "capture_screen_context", "transfer_voice_call"} and (self.realtime_service is None
                 or not self.realtime_service.active or not self.realtime_service.started or self.realtime_service.closing):
+            return False
+        if spec.name in {"capture_screen_context", "transfer_voice_call"} and (self.realtime_service.desktop_client is None
+                or not self.realtime_service.desktop_client.supports(spec.name)):
             return False
         if spec.name == "tool_search" and not self.supports_search_tool:
             return False

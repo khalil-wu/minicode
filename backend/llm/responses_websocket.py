@@ -80,7 +80,9 @@ class _Connection:
 
 
 class ResponsesWebSocketPool:
-    def __init__(self) -> None:
+    def __init__(self, *, policy=None) -> None:
+        from backend.application_network import application_network_policy
+        self.policy = policy if policy is not None else application_network_policy()
         self.idle: _Connection | None = None
         self.active: set[ResponsesWebSocketRequest] = set()
         self.closed = False
@@ -122,7 +124,12 @@ class ResponsesWebSocketRequest:
         self, payload: dict[str, Any], *, url: str, headers: dict[str, str],
         proxy: str | None, wire_payload_sink: dict[str, Any] | None,
         on_handshake: Any,
+        proxy_resolver=None,
     ) -> AsyncIterator[dict[str, Any]]:
+        from backend.application_network import application_websocket_connect
+        self.pool.policy.acquire(url).check()
+        if proxy_resolver is not None:
+            proxy = proxy_resolver(url)
         # The sticky turn token is response state, so it must not invalidate
         # the connection identity or force a fresh socket on the next sample.
         identity = (self.owner, url, proxy, tuple(sorted(
@@ -141,8 +148,9 @@ class ResponsesWebSocketRequest:
             connection = None
         self.info["connection_reused"] = connection is not None
         if connection is None:
-            socket = await connect(
-                url, additional_headers=headers, proxy=proxy,
+            socket = await application_websocket_connect(url, connect, policy=self.pool.policy,
+                proxy_resolver=proxy_resolver if proxy_resolver is not None else lambda _url: proxy,
+                additional_headers=headers,
                 max_size=None, max_queue=1, open_timeout=10, close_timeout=1,
             )
             if self.closed or self.pool.closed:

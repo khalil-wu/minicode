@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.application_network import ApplicationNetworkDenied, ApplicationNetworkPolicy, application_network_policy
 from backend.config_requirements import normalize_string_array
 from backend.feature_flags import FeatureFlags, coerce_feature_bool, load_feature_flags
 from backend.llm.model_catalog import responses_model_catalog_entry
@@ -369,6 +370,7 @@ class AppConfig:
     model_request_policy: "ModelRequestPolicy | None" = None
     token_budget_startup_config: "TokenBudgetStartupConfig | None" = None
     context_window_config: "ContextWindowConfig | None" = None
+    application_network_policy: ApplicationNetworkPolicy = field(default_factory=application_network_policy)
 
 
 def _scoped_vault_name(provider: str, base_url: str) -> str:
@@ -642,6 +644,7 @@ def add_permission_content_rule(rule: str, *, deny: bool = False) -> list[str]:
 
 def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_credentials: bool = True) -> AppConfig:
     """Load effective config; metadata consumers leave credentials at execution."""
+    network_policy = application_network_policy()
     config_layer_stack = load_config_layer_stack(cwd=cwd)
     settings_data = config_layer_stack.effective_config()
     feature_flags = load_feature_flags(
@@ -774,6 +777,10 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
         response_reserve=response_reserve,
     )
 
+    if network_policy.managed:
+        with network_policy.controller.lock:
+            if network_policy.generation != network_policy.controller.revision:
+                raise ApplicationNetworkDenied("revoked")
     return AppConfig(
         llm=llm,
         token_budget=token_budget,
@@ -781,6 +788,7 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
         agent=agent,
         feature_flags=feature_flags,
         config_layer_stack=config_layer_stack,
+        application_network_policy=network_policy,
     )
 
 

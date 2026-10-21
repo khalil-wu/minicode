@@ -138,10 +138,13 @@ class AnthropicAdapter(LLMAdapter):
         supports_hosted_web_search: bool | None = None,
         input_modalities: tuple[str, ...] = (),
         parallel_tool_calls: bool | None = None,
+        network_policy=None,
     ) -> None:
         self._api_key = api_key
         self._provider_id = str(provider_id or "anthropic").strip() or "anthropic"
         self._proxy_mode = normalize_provider_proxy_mode(proxy_mode)
+        from backend.application_network import application_network_policy
+        self._application_network = network_policy if network_policy is not None else application_network_policy()
         self._model = model
         self._model_instructions = model_instructions
         self._tool_mode = tool_mode
@@ -592,6 +595,11 @@ class AnthropicAdapter(LLMAdapter):
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
+            if self._application_network.managed:
+                from backend.application_network import application_http_client
+                self._http_client = application_http_client(self._messages_url(), policy=self._application_network,
+                    proxy_mode=self._proxy_mode, timeout=None, follow_redirects=False)
+                return self._http_client
             # Provider request liveness is owned by the turn/stream policy;
             # this transport must not introduce a second idle timeout.
             self._http_client = httpx.AsyncClient(

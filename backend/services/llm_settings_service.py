@@ -13,6 +13,7 @@ from backend.config import (
 )
 from backend.mcp.config_file import read_mcp_config, write_mcp_config
 from backend.hooks.runtime import ConfigChangeHookBlocked, raise_if_config_change_blocked
+from backend.application_network import reload_application_config
 
 ConfigChangeHook = Callable[..., Awaitable[Any]]
 
@@ -64,7 +65,7 @@ async def update_llm_settings(
 
         def reload_config() -> None:
             nonlocal config
-            config = load_config()
+            config = reload_application_config(load_config, invalidate=True)
 
         saved = save_llm_settings(request.model_dump(exclude_unset=True), after_publish=reload_config)
     except SettingsError as exc:
@@ -97,7 +98,7 @@ async def delete_provider_history(
 
         def reload_config() -> None:
             nonlocal config
-            config = load_config()
+            config = reload_application_config(load_config, invalidate=True)
 
         saved = delete_llm_provider_history(request.model_dump(exclude_unset=True), after_publish=reload_config)
     except SettingsError as exc:

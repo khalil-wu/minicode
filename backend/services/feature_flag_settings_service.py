@@ -12,6 +12,7 @@ from backend.config import (
     load_config,
 )
 from backend.config_requirements import RequirementViolation
+from backend.application_network import reload_application_config
 from backend.feature_flags import (
     DEFAULT_FEATURE_FLAGS,
     coerce_feature_bool,
@@ -141,7 +142,7 @@ async def update_feature_flag_settings(
     _update_settings_json(apply_updates)
     return {
         **get_feature_flag_settings(),
-        "_config": load_config(),
+        "_config": reload_application_config(load_config),
     }
 
 

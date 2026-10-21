@@ -6,6 +6,7 @@ const { TextDecoder } = require("node:util");
 const { bridgeBindTarget } = require("./backend-host-contract");
 
 let manager = null;
+let voiceManager = null;
 let getWindowRecordByInstanceId = () => null;
 let token = "";
 let appendDesktopLog = () => {};
@@ -20,6 +21,7 @@ const remoteHosts = new Map();
 
 function init(deps = {}) {
   manager = deps.manager || null;
+  voiceManager = deps.voiceManager || null;
   if (typeof deps.getWindowRecordByInstanceId === "function") getWindowRecordByInstanceId = deps.getWindowRecordByInstanceId;
   token = typeof deps.token === "string" ? deps.token : "";
   configuredEndpoint = typeof deps.endpoint === "string" ? deps.endpoint.trim() : "";
@@ -221,7 +223,7 @@ async function handleRequest(request, response) {
   if (request.method === "GET" && request.url === "/v1/health") {
     return sendJson(response, 200, { ok: true, browser: "MiniCode Embedded Browser", browserEnabled: manager.getBrowserSettings("").browserEnabled });
   }
-  if (request.method !== "POST" || !["/v1/command", "/v1/operation", "/v1/window-binding", "/v1/session-control"].includes(request.url)) {
+  if (request.method !== "POST" || !["/v1/command", "/v1/operation", "/v1/window-binding", "/v1/session-control", "/v1/voice-control"].includes(request.url)) {
     return sendJson(response, 404, { ok: false, error: "Not found" });
   }
   try {
@@ -236,6 +238,16 @@ async function handleRequest(request, response) {
     if (request.url === "/v1/window-binding") {
       if (payload.window_owner_id !== binding.windowOwnerId) throw new Error("Desktop window owner does not match its binding.");
       return sendJson(response, 200, { ok: true, window_instance_id: binding.windowInstanceId, window_owner_id: binding.windowOwnerId });
+    }
+    if (request.url === "/v1/voice-control") {
+      const controller = new AbortController();
+      const disconnected = () => { if (!response.writableEnded) controller.abort(new Error("The original voice tool request disconnected.")); };
+      response.once("close", disconnected);
+      try {
+        if (response.destroyed) disconnected();
+        const value = await voiceManager.executeControl(payload, binding, controller.signal);
+        return sendJson(response, 200, { ok: true, value });
+      } finally { response.off("close", disconnected); }
     }
     if (request.url === "/v1/session-control") {
       if (payload.action !== "release") throw new Error("Unsupported browser session control.");

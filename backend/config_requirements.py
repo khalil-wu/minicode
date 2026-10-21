@@ -193,6 +193,14 @@ class ConfigRequirements:
         return value if isinstance(value, Mapping) else {}
 
     @property
+    def application_network_policy(self):
+        from backend.application_network import DestinationPolicy
+        network = self.raw.get("application", {}).get("network")
+        if network is None or not network.get("enabled", True):
+            return DestinationPolicy()
+        return DestinationPolicy(frozenset(host for host, permission in network.get("domains", {}).items() if permission == "allow"))
+
+    @property
     def marketplace_requirements(self) -> Mapping[str, Any]:
         value = self.raw.get("marketplaces")
         return value if isinstance(value, Mapping) else {}
@@ -417,6 +425,7 @@ def _normalize_requirements(
     if "experimental_network" in normalized:
         normalized["network"] = normalized.pop("experimental_network")
     _normalize_network_requirements(normalized, source)
+    _normalize_application_requirements(normalized, source)
     _normalize_filesystem_requirements(normalized, base_dir)
     reviewer = normalized.get("allowed_approvals_reviewers")
     if isinstance(reviewer, list):
@@ -431,6 +440,39 @@ def _normalize_requirements(
             raise ConfigRequirementsError(f"allowed_approval_policies in {source}: {error}") from error
     _validate_layer_requirements(normalized, source)
     return normalized
+
+
+def _normalize_application_requirements(payload, source):
+    application = payload.get("application")
+    if application is None:
+        return
+    if not isinstance(application, dict) or application.keys() - {"network"}:
+        raise ConfigRequirementsError(f"application in {source} supports only the network table")
+    network = application.get("network")
+    if network is None:
+        return
+    if not isinstance(network, dict) or network.keys() - {"enabled", "domains"}:
+        raise ConfigRequirementsError(f"application.network in {source} supports only enabled and domains")
+    if "enabled" in network and type(network["enabled"]) is not bool:
+        raise ConfigRequirementsError(f"application.network.enabled in {source} must be a boolean")
+    domains = network.get("domains", {})
+    if not isinstance(domains, dict):
+        raise ConfigRequirementsError(f"application.network.domains in {source} must be a table")
+    normalized = {}
+    for domain, permission in domains.items():
+        if not isinstance(domain, str):
+            raise ConfigRequirementsError("application.network.domains requires exact ASCII domain names")
+        host = domain.removesuffix(".").lower()
+        if (not domain.isascii() or len(host) > 253 or any(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+                for label in host.split("."))):
+            raise ConfigRequirementsError("application.network.domains requires exact ASCII domain names without URLs, ports, or wildcards")
+        if host in normalized:
+            raise ConfigRequirementsError(f"duplicate application.network domain after normalization: {domain!r}")
+        if not isinstance(permission, str) or permission not in {"allow", "deny"}:
+            raise ConfigRequirementsError(f"application.network.domains in {source} requires allow or deny")
+        normalized[host] = permission
+    if "domains" in network:
+        network["domains"] = normalized
 
 
 def _validate_layer_requirements(

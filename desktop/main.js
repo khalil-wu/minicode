@@ -13,6 +13,7 @@ const backendSidecar = require("./backend-sidecar");
 const cdpBridge = require("./cdp-bridge");
 const embeddedBrowserManager = require("./embedded-browser-manager");
 const embeddedBrowserBridge = require("./embedded-browser-bridge");
+const { RealtimeVoiceManager } = require("./realtime-voice-manager");
 const ptyManager = require("./pty-manager");
 const windowManager = require("./window-manager");
 const { releaseEditorWindow, closeWindowsAfterDraftCommit } = require("./window-lifecycle");
@@ -454,11 +455,21 @@ function getWindowRuntimeConfig(window) {
 const windowCleanupTasks = new Map();
 let desktopCleanupFailed = false;
 
+function getRemoteDesktop() {
+  if (!remoteDesktop) remoteDesktop = new RemoteDesktop({ userData: app.getPath("userData"),
+    bridgeEndpoint: process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT, windowManager,
+    browserBridge: embeddedBrowserBridge, log: appendDesktopLog });
+  return remoteDesktop;
+}
+
+const realtimeVoiceManager = new RealtimeVoiceManager({ windowManager, getRemoteDesktop });
+
 function releaseWindowResources(record, retry = false) {
   if (record.cleanupTask && !retry) return record.cleanupTask;
   const runtime = { ...record.runtime, windowOwnerId: record.windowOwnerId, windowInstanceId: record.windowInstanceId,
     desktopLifecycleToken: EMBEDDED_BROWSER_TOKEN };
   embeddedBrowserBridge.releaseWindow(record.windowInstanceId);
+  realtimeVoiceManager.releaseWindow(record.windowInstanceId);
   embeddedBrowserManager.releaseWindow(record.windowInstanceId);
   const cleanupTask = record.remoteHostId ? remoteDesktop.releaseWindow(record, retry) : Promise.all([
     ptyManager.releaseWindow(record.windowInstanceId),
@@ -1125,11 +1136,13 @@ windowManager.init({
     updater.registerWindow(record.windowInstanceId);
     mainWindow.on("focus", () => buildApplicationMenu(mainWindow));
     mainWindow.webContents.on("did-navigate", () => {
+      realtimeVoiceManager.releaseWindow(record.windowInstanceId);
       dictationHotkeys.releaseWindow(record.dictationSenderId);
       updater.invalidateActivity(record.windowInstanceId, "activity.renderer_navigation");
       petActionBridge.release(record.windowInstanceId);
     });
     mainWindow.webContents.on("render-process-gone", () => {
+      realtimeVoiceManager.releaseWindow(record.windowInstanceId);
       dictationHotkeys.releaseWindow(record.dictationSenderId);
       updater.invalidateActivity(record.windowInstanceId, "activity.renderer_gone");
       petActionBridge.release(record.windowInstanceId);
@@ -1163,6 +1176,7 @@ embeddedBrowserManager.init({
 
 embeddedBrowserBridge.init({
   manager: embeddedBrowserManager,
+  voiceManager: realtimeVoiceManager,
   getWindowRecordByInstanceId: windowManager.getWindowRecordByInstanceId,
   token: EMBEDDED_BROWSER_TOKEN,
   endpoint: MANAGE_BACKEND ? "" : process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT,
@@ -1170,6 +1184,7 @@ embeddedBrowserBridge.init({
 });
 
 ipcHandlers.init({
+  realtimeVoiceManager,
   dictationHotkeys,
   getBackendRuntimeConfig,
   browserPersonalData,
@@ -1182,12 +1197,7 @@ ipcHandlers.init({
     return state;
   },
   completePetAction: (ownerId, result) => petActionBridge.complete(ownerId, result),
-  getRemoteDesktop: () => {
-    if (!remoteDesktop) remoteDesktop = new RemoteDesktop({ userData: app.getPath("userData"),
-      bridgeEndpoint: process.env.MINICODE_EMBEDDED_BROWSER_ENDPOINT, windowManager,
-      browserBridge: embeddedBrowserBridge, log: appendDesktopLog });
-    return remoteDesktop;
-  },
+  getRemoteDesktop,
   desktopPreferences,
   onLocaleChanged: buildApplicationMenu,
   browserHistory,

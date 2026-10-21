@@ -33,6 +33,7 @@ class RealtimeRuntime:
         self.config, self.params = config, start
         self.emit, self.commit, self.delegate = emit, commit, delegate
         self.active_changed = active_changed
+        self.desktop_client = None
         self.record_tail, self.track_admission = record_tail, track_admission
         from backend.realtime.prompts import backend_prompt
         instructions = backend_prompt(start, config)

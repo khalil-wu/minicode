@@ -46,3 +46,11 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 回放发现真实projection缺陷：同child epoch2的done已推送工作记录，后续回切会话的durable UI快照仅含子agent元数据，整对象hydrate丢失了工作记录。现仅在原conversation、child、agentPath及mailboxEpoch相同时保留已收到的transcript缓存；当前快照继续负责其余状态。跨会话、path或epoch不借用旧记录。
 
 新V2真实replay1/1通过，原20261020 case本次未运行、筛选skip1；sessionEvents、SubagentsTab和processDisclosure合计114/114。共115个不同用例通过，TypeScript通过。严格验证child epoch[1,2]、工作记录非空且工具全部settled、新B实际往返final、队列、离线完成快照、草稿、精确最终cursor及updater无遗留后台任务。
+
+## 完整原生收据与新消费者整合
+
+`796ecae5` 的Desktop完整job实际成功：六项Electron smoke全部通过、0 skip；浏览器fixture为5314 ms，20秒时限未改。原POST/body/child/opener、preload实际trusted modifier click→原sender/frame/owner IPC、后台首次GET/referrer/只load一次/不抢当前页、HTTP精确URL/字节/路径/owner、动态blob实际授权及关闭来源后子页存活均有原日志证据：`ci-796e-desktop-job.log`。
+
+后续应用级network requirements与HTTP/WS/AWS消费者完成本地验证，11文件222个不同用例有通过证据，最终新增42/42统一通过；语音原窗口claim/页面摘要/transfer/return最终native63、frontend27、backend30通过、0 skip，分别见对应消费者报告。它们没有运行真实AWS、物理音频、外部双向Realtime或外机验收。
+
+新前端safe构建为 `index-DGnB5Tq5.js`，保留运行中app仍需的旧hashed assets；bundle与UI debt原门槛通过，未增限额。工具注册81个名字无重复；文件体积检查仅报告现有warning、exit 0。整合后完整最新HEAD的九项CI及hour-live-final-02最终结果仍待各自完整收据，旧候选成功不能替代。

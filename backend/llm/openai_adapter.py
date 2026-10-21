@@ -1756,25 +1756,26 @@ async def _download_remote_image(
     url: str,
     *,
     proxy_mode: str = "inherit",
+    network_policy=None,
 ) -> tuple[str, str]:
     """Download a provider-returned image through a bounded SSRF-safe path."""
 
     current = str(url or "").strip()
-    proxy_url = _proxy_url_for_base_url(current, proxy_mode)
+    from backend.application_network import application_network_policy, application_http_client
+    policy = network_policy if network_policy is not None else application_network_policy()
     client_kwargs: dict[str, Any] = {
         "follow_redirects": False,
-        "trust_env": False,
         "timeout": httpx.Timeout(60.0),
     }
-    if proxy_url:
-        client_kwargs["proxy"] = proxy_url
-    async with httpx.AsyncClient(**client_kwargs) as client:
+    async with application_http_client(current, policy=policy, proxy_mode=proxy_mode, **client_kwargs) as client:
         for redirect_index in range(_REMOTE_IMAGE_MAX_REDIRECTS + 1):
-            assessment = await asyncio.to_thread(assess_network_url, current)
+            permit = policy.acquire(current)
+            assessment = await permit.run(lambda: asyncio.to_thread(assess_network_url, current))
             if not assessment.allowed:
                 raise ValueError(
                     f"Images API remote image URL was blocked: {assessment.reason}"
                 )
+            proxy_url = _proxy_url_for_base_url(current, proxy_mode)
             async with client.stream(
                 "GET", current, headers={"Accept": "image/*"}
             ) as response:
@@ -1837,6 +1838,7 @@ async def _extract_images_api_images(
     response: Any,
     *,
     proxy_mode: str = "inherit",
+    network_policy=None,
 ) -> list[tuple[str, str]]:
     data = _get_attr_or_item(response, "data", []) or []
     if not isinstance(data, list):
@@ -1864,6 +1866,7 @@ async def _extract_images_api_images(
                 normalized = await _download_remote_image(
                     raw_value,
                     proxy_mode=proxy_mode,
+                    network_policy=network_policy,
                 )
             else:
                 normalized = _decode_images_api_value(raw_value)
@@ -2444,10 +2447,14 @@ class OpenAIAdapter(LLMAdapter):
         self,
         settings: LLMSettings,
         http_client: httpx.AsyncClient | None = None,
+        *, network_policy=None,
     ) -> None:
         if settings.aws is not None and (settings.wire_api != "responses" or settings.responses_websocket):
             raise ValueError("Amazon Bedrock uses Responses over HTTP; select wire_api=responses and disable Responses WebSocket")
         self._settings = settings
+        from backend.application_network import application_network_policy, application_http_client, ApplicationHttpClient
+        self._application_network = network_policy if network_policy is not None else application_network_policy()
+        self._bedrock_auth = None
         self._content_item_kinds_enabled = True
         self._default_headers = {
             str(key): str(value)
@@ -2456,7 +2463,7 @@ class OpenAIAdapter(LLMAdapter):
         }
         self._owns_http_client = http_client is None
         self._closed = False
-        self._responses_websocket = ResponsesWebSocketPool()
+        self._responses_websocket = ResponsesWebSocketPool(policy=self._application_network)
         self._responses_side_pools: set[ResponsesWebSocketPool] = set()
         self._responses_turn_states: dict[tuple[str, ...], str] = {}
         self._http_client: httpx.AsyncClient | None = http_client
@@ -2469,15 +2476,25 @@ class OpenAIAdapter(LLMAdapter):
                 from backend.llm.bedrock import BedrockRequestAuth
                 http_options["auth"] = BedrockRequestAuth(settings.aws, api_key=settings.api_key,
                     proxy_mode=settings.proxy_mode, base_url=settings.base_url,
+                    **({"network_policy": self._application_network} if self._application_network.managed else {}),
                     explicit_authorization=any(key.lower() == "authorization" for key in self._default_headers))
-            proxy_url = _proxy_url_for_base_url(
-                _normalized_openai_base_url(settings.base_url),
-                str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
-            )
-            if proxy_url:
-                http_options["proxy"] = proxy_url
-            http_client = httpx.AsyncClient(**http_options)
+                self._bedrock_auth = http_options["auth"]
+            if self._application_network.managed:
+                http_options.pop("trust_env")
+                http_client = application_http_client(_normalized_openai_base_url(settings.base_url),
+                    policy=self._application_network, proxy_mode=settings.proxy_mode, **http_options)
+            else:
+                proxy_url = _proxy_url_for_base_url(
+                    _normalized_openai_base_url(settings.base_url),
+                    str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
+                )
+                if proxy_url:
+                    http_options["proxy"] = proxy_url
+                http_client = httpx.AsyncClient(**http_options)
             self._http_client = http_client
+        elif self._application_network.managed:
+            self._http_client = ApplicationHttpClient(self._application_network, lambda _url: http_client, owns_clients=False)
+            self._owns_http_client = True
 
     def configure_content_item_kinds(self, enabled: bool) -> None:
         self._content_item_kinds_enabled = enabled
@@ -2522,6 +2539,8 @@ class OpenAIAdapter(LLMAdapter):
         self._http_client = None
         if http_client is not None:
             await http_client.aclose()
+        if self._bedrock_auth is not None:
+            await self._bedrock_auth.aclose()
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -2960,7 +2979,7 @@ class OpenAIAdapter(LLMAdapter):
                 input_includes_cache_read=True, context=context,
                 model_cost=getattr(self, "_request_model_costs", {}).get(model_id),
             )
-            return await _extract_images_api_images(response, proxy_mode=self._settings.proxy_mode)
+            return await _extract_images_api_images(response, proxy_mode=self._settings.proxy_mode, network_policy=self._application_network)
 
         return await self._run_auxiliary_call(
             [], options=SideQueryOptions(
@@ -3029,7 +3048,7 @@ class OpenAIAdapter(LLMAdapter):
                     raw={"provider": "openai_images", "model": reported_model,
                          "usage": _raw_usage_metadata(reported_usage)},
                 )
-            images = await _extract_images_api_images(response, proxy_mode=self._settings.proxy_mode)
+            images = await _extract_images_api_images(response, proxy_mode=self._settings.proxy_mode, network_policy=self._application_network)
         except LifecycleStaleError:
             raise
         except Exception as exc:
@@ -3326,7 +3345,9 @@ class OpenAIAdapter(LLMAdapter):
         if not request.pool.http_only:
             events = request.events(
                 sent_payload, url=ws_url, headers=headers,
-                proxy=_proxy_url_for_base_url(self._responses_url(), self._settings.proxy_mode) or None,
+                proxy=None,
+                proxy_resolver=lambda destination: _proxy_url_for_base_url(
+                    destination.replace("wss://", "https://", 1).replace("ws://", "http://", 1), self._settings.proxy_mode) or None,
                 wire_payload_sink=wire_payload_sink, on_handshake=handshake,
             )
             try:
@@ -5406,7 +5427,7 @@ class OpenAIAdapter(LLMAdapter):
             # Source creates a ModelClient/ModelClientSession for each detached
             # extraction. Its transport state must not lease the main turn's
             # idle socket or inherit that turn's HTTP fallback.
-            side_pool = ResponsesWebSocketPool()
+            side_pool = ResponsesWebSocketPool(policy=self._application_network)
             self._responses_side_pools.add(side_pool)
             websocket_options["websocket_request"] = side_pool.request(None)
         try:

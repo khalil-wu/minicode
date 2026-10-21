@@ -16,6 +16,7 @@ from backend.hooks.runtime import run_config_change_hook, raise_if_config_change
 from backend.llm.bedrock import aws_session, bedrock_base_url, bedrock_models
 from backend.llm.model_metadata import source_guardian_model_metadata
 from backend.vault.store import EnvVault
+from backend.application_network import application_network_policy, reload_application_config
 
 
 def bedrock_gov_cloud_check(config=None) -> dict:
@@ -46,7 +47,7 @@ def bedrock_gov_cloud_check(config=None) -> dict:
     methods = requirements.get("allowed_login_methods", [])
     network = requirements.get("application", {}).get("network", {})
     api_only = bool(methods) and all(method == "api" for method in methods)
-    network_allowed = network.get("enabled") is True and network.get("domains", {}).get(domain) == "allow"
+    network_allowed = network.get("enabled", True) is True and network.get("domains", {}).get(domain) == "allow"
     return {"isGovCloud": True, "shouldWarn": not api_only or not network_allowed}
 
 
@@ -79,12 +80,21 @@ async def setup_bedrock(request: BedrockSetupRequest):
         if not profile:
             raise ValueError("AWS profile name must not be empty")
         aws["profile"] = profile
+        policy = application_network_policy()
+        permit = policy.acquire(endpoint)
+        validation_session = aws_session(aws, **({"network_policy": policy} if policy.managed else {}))
+        if policy.managed:
+            validation_session._application_transport.bind_loop()
         def validate_profile():
-            credentials = aws_session(aws).get_credentials()
+            credentials = validation_session.get_credentials()
             if credentials is None:
                 raise ValueError("The selected AWS profile has no credentials")
             credentials.get_frozen_credentials()
-        await asyncio.to_thread(validate_profile)
+        try:
+            await permit.run(lambda: asyncio.to_thread(validate_profile))
+        finally:
+            if policy.managed:
+                await validation_session._application_transport.aclose()
     elif request.type == "environment":
         if aws.get("credential_id"):
             raise ValueError("Managed Bedrock credentials take priority over AWS environment credentials; clear the stored credentials first")
@@ -118,7 +128,7 @@ async def setup_bedrock(request: BedrockSetupRequest):
         nonlocal published, config
         def reload():
             nonlocal config
-            config = load_config()
+            config = reload_application_config(load_config, invalidate=True)
         published = save_llm_settings(payload, after_publish=reload)
     if credential is not None:
         key = "minicode-bedrock-" + hashlib.sha256(endpoint.encode()).hexdigest() + "-" + uuid4().hex

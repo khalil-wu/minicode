@@ -34,6 +34,7 @@ def build_wire_adapter(
     thinking_budget: int | None = None,
     cache_editing_beta_header: str = "",
     provider_id: str | None = None,
+    network_policy=None,
 ) -> LLMAdapter:
     """Construct one mature adapter from an explicit provider wire contract.
 
@@ -47,7 +48,7 @@ def build_wire_adapter(
     if settings.aws is not None and wire_api != "responses":
         raise ValueError("Amazon Bedrock requires the Responses HTTP transport")
     if wire_api in {"chat", "responses"}:
-        return OpenAIAdapter(settings=settings)
+        return OpenAIAdapter(settings=settings, **({"network_policy": network_policy} if network_policy is not None and network_policy.managed else {}))
     if wire_api == "anthropic":
         from backend.llm.anthropic_adapter import AnthropicAdapter
 
@@ -83,6 +84,7 @@ def build_wire_adapter(
             input_modalities=settings.input_modalities,
             parallel_tool_calls=settings.parallel_tool_calls,
             proxy_mode=str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
+            **({"network_policy": network_policy} if network_policy is not None and network_policy.managed else {}),
         )
     raise ValueError(f"Unsupported LLM wire API: {wire_api or '<empty>'}")
 
@@ -199,6 +201,7 @@ def build_provider_adapter(
     *,
     model_runtime: "ModelRuntime | None" = None,
     settings_snapshot: dict | None = None,
+    network_policy=None,
 ) -> LLMAdapter:
     """Construct one provider adapter, or fail explicitly."""
     requested_provider = (provider or "").strip() or get_llm_provider(settings_snapshot)
@@ -221,7 +224,7 @@ def build_provider_adapter(
         if not models:
             raise ValueError(f"Selected provider '{normalized}' has no model configuration")
         spec = model_runtime.resolve_adapter_spec(normalized, model_id)
-        adapter = _build_registered_provider_adapter(spec)
+        adapter = _build_registered_provider_adapter(spec, network_policy=network_policy)
         adapter.provider_adapter_spec = spec
         cost_models = [spec.model]
         if spec.small_fast_model and spec.small_fast_model != model_id:
@@ -277,6 +280,7 @@ def build_provider_adapter(
                 "MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""
             ),
             provider_id="anthropic",
+            network_policy=network_policy,
         )
 
     if normalized in ("openai", "custom"):
@@ -299,6 +303,7 @@ def build_provider_adapter(
                         "MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""
                     ),
                     provider_id="custom",
+                    network_policy=network_policy,
                 )
             openai_settings = _openai_compatible_settings(
                 custom,
@@ -314,12 +319,12 @@ def build_provider_adapter(
                 provider="openai",
                 model_override=model_override,
             )
-        return build_wire_adapter(openai_settings)
+        return build_wire_adapter(openai_settings, network_policy=network_policy)
 
     raise ValueError(f"Unknown LLM provider '{requested_provider}'")
 
 
-def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapter:
+def _build_registered_provider_adapter(spec: "ProviderAdapterSpec", *, network_policy=None) -> LLMAdapter:
     """Map a registered provider contract onto MiniCode transport adapters."""
 
     if spec.aws is not None and spec.api != "openai-responses":
@@ -354,6 +359,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             input_modalities=spec.model.input if spec.model is not None else (),
             parallel_tool_calls=spec.parallel_tool_calls,
             proxy_mode=spec.proxy_mode,
+            **({"network_policy": network_policy} if network_policy is not None and network_policy.managed else {}),
         )
 
     if spec.api in {"openai-responses", "openai-completions"}:
@@ -406,7 +412,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec") -> LLMAdapte
             ),
             auth_header=bool(spec.auth_header),
         )
-        return OpenAIAdapter(settings=settings)
+        return OpenAIAdapter(settings=settings, **({"network_policy": network_policy} if network_policy is not None and network_policy.managed else {}))
 
     # ModelRuntime validates this before publication. Keep the construction
     # boundary fail-closed if a future runtime accidentally passes a new API.
@@ -449,6 +455,7 @@ def create_session_llm(
             )
             adapter = build_wire_adapter(
                 model_settings,
+                **({"network_policy": config.application_network_policy} if config.application_network_policy.managed else {}),
                 cache_editing_beta_header=os.getenv("MINICODE_ANTHROPIC_CACHE_EDITING_BETA_HEADER", ""),
             )
             return _bind_config_model_request_policy(adapter, config, selected_model)
@@ -466,5 +473,6 @@ def create_session_llm(
         model_override=model_override,
         model_runtime=model_runtime,
         settings_snapshot=settings_snapshot,
+        **({"network_policy": config.application_network_policy} if config.application_network_policy.managed else {}),
     )
     return _bind_config_model_request_policy(adapter, config, str(model_override or config.llm.model))

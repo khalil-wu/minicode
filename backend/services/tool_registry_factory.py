@@ -140,8 +140,10 @@ def build_tool_registry(
         )
     )
     registry.register(PresentFileTool())
-    from backend.tools.realtime_tools import EndRealtimeVoiceCallTool
+    from backend.tools.realtime_tools import EndRealtimeVoiceCallTool, CaptureScreenContextTool, TransferVoiceCallTool
     registry.register(EndRealtimeVoiceCallTool())
+    registry.register(CaptureScreenContextTool())
+    registry.register(TransferVoiceCallTool())
     from backend.tools.thread_resource_tools import ThreadResourceTool
     for name in ("list_artifacts", "attach_artifact", "remove_artifact"):
         registry.register(ThreadResourceTool(name))

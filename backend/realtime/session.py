@@ -53,7 +53,7 @@ def capture_config(session, conversation_id: str, *, credentials: bool) -> Realt
         call_base_url=settings.get("experimental_realtime_webrtc_call_base_url") or llm.base_url, enabled=enabled,
         prompt=settings.get("experimental_realtime_ws_backend_prompt") or "", configured=configured,
         startup_context=settings.get("experimental_realtime_ws_startup_context"),
-        start_instructions=settings.get("experimental_realtime_start_instructions"))
+        start_instructions=settings.get("experimental_realtime_start_instructions"), network_policy=config.application_network_policy)
 
 
 def thread_runtime(session, conversation_id: str):
@@ -80,7 +80,7 @@ def startup_context(conversation) -> str:
     return "\n\n".join(reversed(selected))
 
 
-async def start_runtime(session, params: Start):
+async def start_runtime(session, params: Start, *, desktop_voice=None):
     conversation_id = params.thread_id
     conversation = session.conversation_repo.get_conversation(conversation_id)
     if conversation is None or conversation.archived:
@@ -148,6 +148,9 @@ async def start_runtime(session, params: Start):
         track_admission=lambda task: session.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id),
         startup_context=config.startup_context if config.startup_context is not None else startup_context(conversation),
         active_changed=activity_changed)
+    if desktop_voice is not None:
+        from backend.realtime.desktop_client import DesktopVoiceClient
+        service.desktop_client = DesktopVoiceClient(session, desktop_voice)
     owner.realtime_runtime = service
     service.launch()
     return service

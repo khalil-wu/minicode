@@ -11,6 +11,7 @@ import { toggleChangesPanel } from "../lib/changes-panel";
 import { consumeDictationProviderSettings } from "../lib/dictation-preferences";
 import { pushToast } from "../overlays/ToastContainer";
 import { routeQueuedMessageHistory } from "../composer/queued-message-undo";
+import { installDesktopVoiceControl } from "../desktop/voice-control";
 
 const markViewedConversationRead = (isWindowFocused: boolean) => {
   const state = useAppStore.getState();
@@ -24,6 +25,7 @@ const markViewedConversationRead = (isWindowFocused: boolean) => {
 
 export const useDesktopEvents = () => {
   useDesktopTerminalMirror();
+  useEffect(() => installDesktopVoiceControl(), []);
   useEffect(() => {
     if (isDesktop()) return;
     const readViewedConversation = () => markViewedConversationRead(document.hasFocus());

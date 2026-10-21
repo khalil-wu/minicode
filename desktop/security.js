@@ -323,6 +323,8 @@ const IPC_CAPABILITIES = new Set([
   "minicode:window:openConversation",
   "minicode:window:initialNavigation:consume",
   "minicode:runtime:get",
+  "minicode:realtimeVoice:claim", "minicode:realtimeVoice:update", "minicode:realtimeVoice:release",
+  "minicode:realtimeVoice:ready", "minicode:realtimeVoice:reply",
   "minicode:preferences:get", "minicode:preferences:set", "minicode:openPreferredPath", "minicode:saveFile",
   "minicode:preferences:chooseTaskDirectory",
   "minicode:browser:history", "minicode:browser:removeHistory",

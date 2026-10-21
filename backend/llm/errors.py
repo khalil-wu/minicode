@@ -141,6 +141,7 @@ class ProviderErrorType(StrEnum):
     RATE_LIMIT = "rate_limit"
     BUSY = "busy"
     NETWORK = "network"
+    APPLICATION_NETWORK = "application_network"
     MEDIA_SIZE = "media_size"
     PROMPT_TOO_LONG = "prompt_too_long"
     PROXY = "proxy"
@@ -208,6 +209,8 @@ def is_context_overflow_text(message: str | BaseException | None) -> bool:
 
 def classify_llm_error(message: str | BaseException | None) -> LLMErrorClassification:
     text = _normalize_error_text(message)
+    if "provider_error_type=application_network" in text:
+        return LLMErrorClassification(fatal=True, retryable=False, error_type="blocked", provider_error_type="application_network")
     status_codes = _extract_status_codes(message)
 
     # A provider's structured code is stronger than the transport status.
@@ -653,6 +656,11 @@ def llm_error_raw(exc: BaseException, provider: str) -> dict[str, Any]:
         "provider_error_type": classification.provider_error_type,
         "error_type": classification.error_type,
     }
+    from backend.application_network import ApplicationNetworkDenied
+    policy_error = next((error for error in _error_chain(exc) if isinstance(error, ApplicationNetworkDenied)), None)
+    if policy_error is not None:
+        raw.update(provider_error_code="application_network_" + policy_error.reason,
+            provider_error_message=str(policy_error))
     # The exception chain is discarded once this event is emitted, so the
     # connect-phase verdict must travel with it for the retry ladder.
     if is_connection_not_established(exc):
@@ -827,6 +835,8 @@ def sanitize_llm_error_message(
         return "\u56fe\u7247\u6216 PDF \u8d85\u51fa\u4e86\u6a21\u578b\u7684\u5927\u5c0f\u9650\u5236\uff0c\u8bf7\u7f29\u5c0f\u6216\u79fb\u9664\u9644\u4ef6\u540e\u91cd\u8bd5\u3002" + suffix
     if kind == "network":
         return "\u6a21\u578b\u670d\u52a1\u7f51\u7edc\u8bf7\u6c42\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u3002" + suffix
+    if kind == "application_network":
+        return "应用网络策略拒绝或撤销了该操作。" + suffix
     return "\u6a21\u578b\u8c03\u7528\u5931\u8d25\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix
 
 

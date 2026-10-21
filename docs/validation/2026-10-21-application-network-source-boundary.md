@@ -1,6 +1,8 @@
 # 应用网络规则与工具进程网络策略的边界
 
-结论：应独立记为 **APP-NET1 / partial_missing**，一组。MiniCode 已有工具进程的 NetworkExecutionPolicy、原生代理与 Windows WFP 消费者；它们不能代替 Source 的 application/network requirements→应用 HTTP/WS/AWS 准入与撤销。GovCloud 检查是已实现的 advisory consumer，不能作为该 enforcement 已完成的证据。
+当前结论：**APP-NET1 已补齐并完成本地集中验证**，仍按一组记录。应用自身的 requirements、owner/generation、HTTP逐跳与响应流、WS逐跳/读写/idle撤销、AWS实际SDK与unsupported命令gate均已接通，222个不同相关用例有通过证据；最终新增42/42统一通过。实际实现与未运行范围见 [消费者与验证收据](2026-10-21-application-network-consumers.md)。
+
+以下保留的是实现前的只读边界调查；其中“缺口”描述属于原调查冻结状态，由上述交付覆盖。工具进程的NetworkExecutionPolicy/WFP与GovCloud advisory仍是独立消费者，本轮没有将它们冒充应用策略enforcement。
 
 本次只读核对当前 MiniCode 与公开 Source `822e58cc3d666166c7446c5b1ea2e52f5d09594c`。未读取用户配置、环境变量值或凭据，未发起网络请求、操作 GUI、修改 backend 或重跑旧测试。Realtime 生产代码仍保持上一冻结。
 

@@ -42,10 +42,17 @@ def aws_settings(value: Mapping) -> dict:
     return result
 
 
-def aws_session(config: Mapping, *, proxy_mode: str = "inherit", base_url: str = ""):
+def aws_session(config: Mapping, *, proxy_mode: str = "inherit", base_url: str = "", network_policy=None):
     from botocore.session import Session
     from botocore.config import Config
     session = Session(profile=config.get("profile"))
+    from backend.application_network import application_network_policy
+    policy = network_policy if network_policy is not None else application_network_policy()
+    if policy.managed:
+        from backend.llm.bedrock_network import install_aws_transport
+        session.set_default_client_config(Config(proxies={}))
+        install_aws_transport(session, policy, proxy_mode=proxy_mode)
+        return session
     if proxy_mode == "direct":
         session.set_default_client_config(Config(proxies={}))
     elif base_url:
@@ -97,16 +104,19 @@ class BedrockRequestAuth(httpx.Auth):
     requires_request_body = True
 
     def __init__(self, config: Mapping, *, api_key: str = "", explicit_authorization: bool = False,
-        proxy_mode: str = "inherit", base_url: str = ""):
+        proxy_mode: str = "inherit", base_url: str = "", network_policy=None):
+        from backend.application_network import application_network_policy
+        self.network_policy = network_policy if network_policy is not None else application_network_policy()
         self.config = aws_settings(config)
         self.region = bedrock_region(self.config)
         self.service = "bedrock" if self.config["endpoint"] == "runtime" else "bedrock-mantle"
         self.proxy_mode, self.base_url = proxy_mode, base_url
-        self.session = aws_session(self.config, proxy_mode=proxy_mode, base_url=base_url)
+        self.session = aws_session(self.config, proxy_mode=proxy_mode, base_url=base_url,
+            **({"network_policy": self.network_policy} if self.network_policy.managed else {}))
         self.explicit_authorization = explicit_authorization
         from backend.llm.bedrock_credentials import credential_export, auth_refresh
-        self.exporter = credential_export(self.config)
-        self.refresher = auth_refresh(self.config)
+        self.exporter = credential_export(self.config, network_policy=self.network_policy)
+        self.refresher = auth_refresh(self.config, network_policy=self.network_policy)
         managed = None
         if self.config.get("credential_id") and not self.config.get("profile") and self.exporter is None:
             import json
@@ -135,6 +145,10 @@ class BedrockRequestAuth(httpx.Auth):
         return self.credentials.get_frozen_credentials()
 
     async def _sign(self, request: httpx.Request) -> None:
+        permit = self.network_policy.acquire(str(request.url))
+        await permit.run(lambda: self._sign_authorized(request))
+
+    async def _sign_authorized(self, request: httpx.Request) -> None:
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
         if self.exporter is not None:
@@ -143,7 +157,17 @@ class BedrockRequestAuth(httpx.Auth):
             except ValueError as error:
                 raise ValueError("provider_error_type=auth: " + str(error)) from error
         else:
-            frozen = await to_thread_cancel_safe(self._sdk_credentials)
+            if self.network_policy.managed:
+                self.session._application_transport.bind_loop()
+                credentials = asyncio.create_task(asyncio.to_thread(self._sdk_credentials))
+                try:
+                    frozen = await asyncio.shield(credentials)
+                except asyncio.CancelledError:
+                    self.session._application_transport.cancel_pending()
+                    await asyncio.gather(credentials, return_exceptions=True)
+                    raise
+            else:
+                frozen = await to_thread_cancel_safe(self._sdk_credentials)
         if self.service == "bedrock-mantle":
             # Source's Mantle front door drops snake_case compatibility
             # headers before verification. They cannot participate in SigV4.
@@ -159,6 +183,8 @@ class BedrockRequestAuth(httpx.Auth):
         request.headers.update(dict(signed.headers.items()))
 
     async def async_auth_flow(self, request: httpx.Request):
+        from backend.application_network import ApplicationNetworkDenied
+        self.network_policy.acquire(str(request.url)).check()
         if self.explicit_authorization:
             yield request
             return
@@ -172,6 +198,8 @@ class BedrockRequestAuth(httpx.Auth):
         async with self.lock:
             try:
                 await self._sign(request)
+            except ApplicationNetworkDenied:
+                raise
             except (BotoCoreError, OSError) as error:
                 if (self.refresher is None and self.exporter is None) or isinstance(error, (FileNotFoundError, PermissionError)):
                     raise ValueError("provider_error_type=auth: Failed to load AWS credentials: " + str(error)) from error
@@ -179,6 +207,8 @@ class BedrockRequestAuth(httpx.Auth):
                     await self._recover(generation)
                     recovered = True
                     await self._sign(request)
+                except ApplicationNetworkDenied:
+                    raise
                 except (BotoCoreError, OSError) as recovery_error:
                     raise ValueError("provider_error_type=auth: Failed to load AWS credentials: " + str(recovery_error)) from recovery_error
         response = yield request
@@ -203,5 +233,12 @@ class BedrockRequestAuth(httpx.Auth):
             await self.exporter.recover(self.refresher)
         else:
             await self.refresher.refresh(generation)
-        self.session = aws_session(self.config, proxy_mode=self.proxy_mode, base_url=self.base_url)
+        if self.network_policy.managed:
+            await self.session._application_transport.aclose()
+        self.session = aws_session(self.config, proxy_mode=self.proxy_mode, base_url=self.base_url,
+            **({"network_policy": self.network_policy} if self.network_policy.managed else {}))
         self.credentials = None
+
+    async def aclose(self):
+        if self.network_policy.managed:
+            await self.session._application_transport.aclose()

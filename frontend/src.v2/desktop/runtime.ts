@@ -405,7 +405,21 @@ export interface WindowAppearanceState {
 export interface DictationHotkeyState { available: boolean; holdHotkey: string; toggleHotkey: string; error: string }
 export interface NativeDictationEvent { action: "start" | "stop" | "cancel"; token: string; targetKind: "composer" | "external" }
 
+export type DesktopVoiceClaim = { claimId: string; hostId: string; captureScreenContext: boolean; transferVoiceCall: boolean };
+export type DesktopVoiceRequest = { type: "cancel"; requestId: string } | {
+  type: "capture" | "prepare" | "stop" | "start"; requestId: string; claimId: string; callId: string;
+  threadId?: string; transferId?: string; context?: string; capability?: import("../protocol/realtime-types").RealtimeCapability;
+};
+
 interface MiniCodeDesktop {
+  realtimeVoice?: {
+    claim(payload: { threadId: string; transferId?: string }): Promise<DesktopVoiceClaim>;
+    update(payload: { claimId: string; phase: "active" | "stopping" }): Promise<void>;
+    release(payload: { claimId: string }): Promise<void>;
+    ready(payload: { connected: boolean }): Promise<void>;
+    reply(payload: { requestId: string; claimId: string; callId: string; value?: unknown; error?: string }): Promise<boolean>;
+    onRequest(callback: (request: DesktopVoiceRequest) => void): () => void;
+  };
   dictation?: {
     getLocalRuntime(): Promise<{ apiBaseUrl: string; runtimeToken: string; revision: number }>;
     openProviderSettings(): Promise<true>;

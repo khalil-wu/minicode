@@ -26,3 +26,7 @@
 `runtime-live-short-05/result.json` 的真实gpt-6.1-sol/Responses/V2完整目录校准通过：总232.406秒，主业务75.453秒、75批共45150行，child100.282秒；36秒断线期间批次7→43。B使用新的真实read_file读当前进度；同child epoch[1,2]、初次final后原进程持续70.825秒、真实board turn与原句柄轮询、冷读及shutdown exit 0均有独立证据。backend输入未改变。该校准不能替代一小时验收。
 
 `hour-live-final/` 已失败退出，最后独立采样为779.485秒：主原PID8552/handle bg_58477a2b观测701.078秒，child原PID31624/handle bg_b1930d90观测690.219秒，业务699批。原wire在713.766秒及765.5秒记录实际provider error：网关HTTP500、internal_server_error、TLS handshake EOF，既有5次重试耗尽，主回合在oracle完成前结束；审计器据此拒绝通过。完整失败wire、result和console保留，不能把进程曾持续运行等同于模型及最终任务通过。未因此扩大重试、缩短时限或放松验收。
+
+审计失败收据现在保留原conversation/message/turn的实际done、error及provider attempt，不借用其他owner或旧turn，也不把侧会话恢复快照虚构为done。24个client审计用例通过；对上述真实失败wire另生成 `hour-live-final-outcomes.json`，精确关联主轮/队列两组failed和各6个实际provider失败attempt。未改原失败结果、成功断言或重试预算。
+
+应用网络与语音客户端功能冻结后，完整15工具目录再次真实预检通过，收据为 `namespace-provider-preflight-post-network/namespace-preflight.json`。2026-10-21 18:59 +08已启动 `hour-live-final-02/`：主3600秒、同child3660秒、turn budget5400秒、90秒断线、每600秒B实际provider/read_file往返。此时仍是运行中；最终result/原PID/原句柄/board/followup/冷读/关闭/冻结输入全部通过后才记RT11通过。

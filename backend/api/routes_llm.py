@@ -31,6 +31,7 @@ from backend.services.llm_settings_service import (
     update_mcp_config,
 )
 from backend.services.bedrock_service import BedrockSetupRequest
+from backend.application_network import ApplicationNetworkDenied
 
 from . import _state
 from .routes_health import get_mcp_status
@@ -77,6 +78,8 @@ async def setup_bedrock_api(request: BedrockSetupRequest):
     from backend.hooks.runtime import ConfigChangeHookBlocked
     try:
         payload, config = await setup_bedrock(request)
+    except ApplicationNetworkDenied as error:
+        raise HTTPException(403, str(error)) from error
     except (ValueError, SettingsError, BotoCoreError, ConfigChangeHookBlocked) as error:
         raise HTTPException(400, str(error)) from error
     if _state.bootstrap is not None:

@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 from weakref import WeakValueDictionary
+from backend.application_network import application_network_policy
 
 
 def command_config(value: dict, *, refresh: bool = False) -> dict:
@@ -59,7 +60,8 @@ async def run_aws_command(config: dict, *, export: bool) -> bytes:
 
 
 class AwsCredentialExport:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, network_policy=None):
+        self.network_policy = network_policy if network_policy is not None else application_network_policy()
         self.config = command_config(config)
         self.lock = asyncio.Lock()
         self.cached = None
@@ -67,6 +69,10 @@ class AwsCredentialExport:
         self.recovery_generation = 0
 
     async def get(self):
+        permit = self.network_policy.acquire_for_unsupported_sdk()
+        return await permit.run(self._get)
+
+    async def _get(self):
         async with self.lock:
             now = datetime.now(UTC)
             if self.cached is not None and now < self.refresh_at:
@@ -75,6 +81,10 @@ class AwsCredentialExport:
             return self.cached
 
     async def recover(self, refresher):
+        permit = self.network_policy.acquire_for_unsupported_sdk()
+        return await permit.run(lambda: self._recover(refresher))
+
+    async def _recover(self, refresher):
         generation = self.recovery_generation
         async with self.lock:
             if self.recovery_generation != generation:
@@ -119,12 +129,17 @@ class AwsCredentialExport:
 
 
 class AwsAuthRefresh:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, *, network_policy=None):
+        self.network_policy = network_policy if network_policy is not None else application_network_policy()
         self.config = command_config(config, refresh=True)
         self.lock = asyncio.Lock()
         self.generation = 0
 
     async def refresh(self, expected_generation: int):
+        permit = self.network_policy.acquire_for_unsupported_sdk()
+        return await permit.run(lambda: self._refresh(expected_generation))
+
+    async def _refresh(self, expected_generation: int):
         async with self.lock:
             if self.generation != expected_generation:
                 return False
@@ -133,29 +148,31 @@ class AwsAuthRefresh:
             return True
 
 
-_EXPORTERS: WeakValueDictionary[str, AwsCredentialExport] = WeakValueDictionary()
-_REFRESHERS: WeakValueDictionary[str, AwsAuthRefresh] = WeakValueDictionary()
+_EXPORTERS: WeakValueDictionary[tuple, AwsCredentialExport] = WeakValueDictionary()
+_REFRESHERS: WeakValueDictionary[tuple, AwsAuthRefresh] = WeakValueDictionary()
 
 
-def credential_export(aws: dict) -> AwsCredentialExport | None:
+def credential_export(aws: dict, *, network_policy=None) -> AwsCredentialExport | None:
     config = aws.get("credential_export")
     if config is None:
         return None
-    key = hashlib.sha256(json.dumps(aws, sort_keys=True).encode()).hexdigest()
+    policy = network_policy if network_policy is not None else application_network_policy()
+    key = (hashlib.sha256(json.dumps(aws, sort_keys=True).encode()).hexdigest(), policy.controller, policy.generation)
     exporter = _EXPORTERS.get(key)
     if exporter is None:
-        exporter = AwsCredentialExport(config)
+        exporter = AwsCredentialExport(config, network_policy=policy)
         _EXPORTERS[key] = exporter
     return exporter
 
 
-def auth_refresh(aws: dict) -> AwsAuthRefresh | None:
+def auth_refresh(aws: dict, *, network_policy=None) -> AwsAuthRefresh | None:
     config = aws.get("auth_refresh")
     if config is None:
         return None
-    key = hashlib.sha256(json.dumps(aws, sort_keys=True).encode()).hexdigest()
+    policy = network_policy if network_policy is not None else application_network_policy()
+    key = (hashlib.sha256(json.dumps(aws, sort_keys=True).encode()).hexdigest(), policy.controller, policy.generation)
     refresher = _REFRESHERS.get(key)
     if refresher is None:
-        refresher = AwsAuthRefresh(config)
+        refresher = AwsAuthRefresh(config, network_policy=policy)
         _REFRESHERS[key] = refresher
     return refresher

@@ -22,7 +22,8 @@ async def handle_realtime(session, data, *, operation):
         if session.conversation_repo.get_conversation_summary(conversation_id) is None:
             raise ValueError("The realtime thread was not found")
         params_data = {key: value for key, value in data.items()
-            if key not in {"conversation_id", "client_command_id", "owner_conversation_id", "ownerConversationId"}}
+            if key not in {"conversation_id", "client_command_id", "owner_conversation_id", "ownerConversationId"}
+                and not (operation == "start" and key == "desktopVoice")}
         if operation == "listVoices":
             from backend.realtime.protocol import Thread
             Thread.model_validate(params_data)
@@ -31,7 +32,9 @@ async def handle_realtime(session, data, *, operation):
             params = COMMAND_PARAMS[operation].model_validate(params_data)
             owner = thread_runtime(session, params.thread_id)
             if operation == "start":
-                await start_runtime(session, params)
+                from backend.realtime.desktop_client import DesktopVoiceClaim
+                claim = DesktopVoiceClaim.model_validate(data["desktopVoice"]) if "desktopVoice" in data else None
+                await start_runtime(session, params, desktop_voice=claim)
             elif operation == "stop":
                 if owner.realtime_runtime is not None:
                     await owner.realtime_runtime.aclose()

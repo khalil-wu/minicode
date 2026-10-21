@@ -7,7 +7,27 @@ import sys
 
 import pytest
 
-from scripts.audit_long_task_session import CHILD_PROBE, Client, successful_file_reads
+from scripts.audit_long_task_session import CHILD_PROBE, Client, observed_turn_outcomes, successful_file_reads
+
+
+def test_failure_receipt_keeps_actual_terminal_and_attempts_without_borrowing_another_owner_or_turn():
+    def event(kind, identity, **fields):
+        return {"type": kind, "event_id": identity, "conversation_id": "original", "message_id": "answer", "turn_id": "run-original", **fields}
+    failed = event("runtime.span", "attempt-original", event="provider.request.failed", span_id="provider:original:6",
+        data={"retry_attempt": 5, "max_retries": 5, "status_code": 500,
+            "provider_error_message": "TLS handshake EOF", "unrelated_private_header": "must not be exported"})
+    error = event("error", "error-original", error_type="api", error_code="internal_server_error", provider_error_type="network")
+    terminal = event("done", "done-original", task_id="original-task", status="failed", reason="api_error")
+    rows = [failed, error, terminal,
+        {**failed, "event_id": "foreign-attempt", "conversation_id": "other"},
+        {**terminal, "event_id": "foreign-done", "conversation_id": "other", "status": "completed"},
+        {**failed, "event_id": "older-attempt", "turn_id": "previous-run"}]
+    result = observed_turn_outcomes(rows, {"a": ("original", "answer"), "queue": ("original", "not-started")})
+    assert set(result) == {"a"}
+    assert result["a"]["terminal"] == {"event_id": "done-original", "turn_id": "run-original", "task_id": "original-task", "status": "failed", "reason": "api_error"}
+    assert result["a"]["provider_failures"] == [{"event_id": "attempt-original", "span_id": "provider:original:6",
+        "data": {"retry_attempt": 5, "max_retries": 5, "status_code": 500, "provider_error_message": "TLS handshake EOF"}}]
+    assert [row["event_id"] for row in result["a"]["errors"]] == ["error-original"]
 
 
 def test_source_snapshot_includes_actual_runtime_resources_and_excludes_python_cache(tmp_path, monkeypatch):

@@ -16,6 +16,7 @@ from backend.config import (
 from backend.llm.capabilities import is_gpt_image_model
 from backend.llm.reasoning_effort import normalize_reasoning_effort, reasoning_effort_levels
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
+from backend.application_network import ApplicationNetworkDenied
 
 from backend.services.llm_provider_helpers import (
     _check_anthropic_generation,
@@ -84,6 +85,8 @@ def _connection_failure_kind(
     status_code: int | None,
     exc: Exception | None = None,
 ) -> str:
+    if isinstance(exc, ApplicationNetworkDenied):
+        return "application_network_policy"
     if status_code in {401, 403}:
         return "authentication_failed"
     if status_code == 404:
@@ -105,6 +108,8 @@ def _image_connection_failure_kind(
     status_code: int | None,
     exc: Exception | None = None,
 ) -> str:
+    if isinstance(exc, ApplicationNetworkDenied):
+        return "application_network_policy"
     if status_code in {401, 403}:
         return "authentication_failed"
     if status_code == 404:
@@ -345,6 +350,9 @@ def _model_discovery_failure(
         }
 
     status_code = _http_error_status(exc) if exc is not None else None
+    if isinstance(exc, ApplicationNetworkDenied):
+        return {"status_code": None, "failure_kind": "application_network_policy", "retryable": False,
+            "message": _http_error_message(exc), "hint": "The managed application network policy must permit this operation."}
     if status_code in {401, 403}:
         failure_kind = "authentication_failed"
     elif status_code == 404:

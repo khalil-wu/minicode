@@ -24,6 +24,23 @@ def _repository(session_id):
     return _session(session_id).conversation_repo
 
 
+@router.get("/{conversation_id}/voice")
+def voice_target(conversation_id: str, response: Response, session_id: str = Query(..., min_length=1)):
+    from backend.realtime.session import capture_config
+    session = _session(session_id)
+    if not session.is_connected:
+        raise HTTPException(404, "The original session is not connected")
+    conversation = session.conversation_repo.get_conversation_summary(conversation_id)
+    if conversation is None or conversation.archived:
+        raise HTTPException(404, "The destination voice task does not exist or is archived")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        capability = capture_config(session, conversation_id, credentials=False).capabilities()
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+    return {"conversationId": conversation_id, "realtime": capability}
+
+
 async def _mutate(repository, background_tasks, operation):
     try:
         result = await to_thread_cancel_safe(operation)

@@ -82,6 +82,8 @@ class AppBootstrap:
         self.task_scheduler: Any | None = None
         self._pr_monitor_task: asyncio.Task[None] | None = None
         self._sandbox_probe_task: asyncio.Task[bool] | None = None
+        from backend.application_network import ApplicationNetworkController
+        self.application_network = ApplicationNetworkController()
 
     async def startup(self) -> None:
         from backend.agent.conversation_query_guard import conversation_query_guards
@@ -94,7 +96,9 @@ class AppBootstrap:
         self._sandbox_probe_task = asyncio.create_task(
             to_thread_cancel_safe(refresh_native_os_sandbox)
         )
-        self.config = load_config()
+        from backend.application_network import bind_application_network_owner
+        bind_application_network_owner(self.application_network)
+        self.config = self.application_network.load_config(load_config)
         from backend.config import STATE_ROOT
         from backend.environments.manager import EnvironmentManager
         from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
@@ -390,9 +394,12 @@ class AppBootstrap:
             from backend.hooks.manager import set_hook_manager
 
             set_hook_manager(None)
+            from backend.application_network import release_application_network_owner
+            self.application_network.invalidate()
+            release_application_network_owner(self.application_network)
 
     def refresh_config(self) -> AppConfig:
-        self.config = load_config()
+        self.config = self.application_network.load_config(load_config)
         return self.config
 
     def create_tool_registry(
