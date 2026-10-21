@@ -135,8 +135,12 @@ def test_nested_tool_cleanup_waits_for_the_actual_child_and_preserves_evidence(t
         digest = canonical_tool_request_digest(call.name, call.arguments)
         assert toolset_policy_guard_reason(call, registry, context) == ""
         outer = asyncio.create_task(run_tool_with_timeout(call, registry, context))
+        owned_tasks = {outer}
         try:
             await asyncio.wait_for(started.wait(), timeout=3)
+            call_wrapper = context.cleanup_tasks_by_call[call.id]
+            assert call_wrapper is not outer and call_wrapper is not tool.child
+            owned_tasks.update((call_wrapper, tool.child))
             if stop == "cancel":
                 outer.cancel()
             elif stop == "cancel_event":
@@ -151,15 +155,24 @@ def test_nested_tool_cleanup_waits_for_the_actual_child_and_preserves_evidence(t
             await asyncio.sleep(0)
             receipt = context.cleanup_receipts[call.id]
             assert outer.done() and not tool.child.done()
-            assert tool.child in context.pending_cleanup_tasks
-            assert context.cleanup_tasks_by_call[call.id] is tool.child
+            for _ in range(3):
+                call_owner = context.cleanup_tasks_by_call[call.id]
+                assert call_owner in {call_wrapper, tool.child}
+                assert call_owner in context.pending_cleanup_tasks and not call_owner.done()
+                assert tool.child in context.pending_cleanup_tasks and not tool.child.done()
+                if not call_wrapper.done():
+                    assert call_wrapper in context.pending_cleanup_tasks
+                assert receipt["pending"] == 1 and receipt["completed"] is False
+                await asyncio.sleep(0)
             assert receipt["pending"] == 1 and receipt["completed"] is False
             assert receipt["request_digest"] == digest
             assert receipt["retry_safe"] is False and receipt["manual_recovery_required"] is True
         finally:
             release.set()
-            await asyncio.gather(outer, tool.child, return_exceptions=True)
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
         await asyncio.sleep(0)
+        assert call_wrapper.done() and tool.child.done()
+        assert tool.child.result().content == "child settled"
         assert receipt["pending"] == 0 and receipt["completed"] is True
         assert receipt["cleanup_completed_after_deadline"] is True
         assert receipt["request_digest"] == digest
