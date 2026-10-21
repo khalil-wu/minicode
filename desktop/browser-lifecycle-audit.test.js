@@ -14,6 +14,7 @@ function browserHarness(dialog = {}, options = {}) {
   let finishDns;
   const views = [];
   const events = [];
+  const logs = [];
   let responseStarted;
   let beforeRequest;
   let headersReceived;
@@ -32,7 +33,7 @@ function browserHarness(dialog = {}, options = {}) {
     const contents = Object.assign(new EventEmitter(), {
       id: ++id, session, url: "", dead: false, navigationHistory: {},
       pickerCalls: [], stopCalls: 0,
-      captureCalls: 0, zoomFactor: 1, findRequests: [], findStopped: false, loadCalls: [],
+      captureCalls: 0, zoomFactor: 1, findRequests: [], findStopped: false, loadCalls: [], loadOptions: [],
       findInPage(text, options) { this.findRequests.push({ text, options }); return this.findRequests.length; },
       stopFindInPage(action) { this.findStopped = action; },
       getZoomFactor() { return this.zoomFactor; }, setZoomFactor(value) { this.zoomFactor = value; },
@@ -50,13 +51,20 @@ function browserHarness(dialog = {}, options = {}) {
       focus() { this.pickerCalls.push("focus"); },
       async executeJavaScript(expression) { this.pickerCalls.push(expression); return null; },
       setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }, getURL() { return this.url; }, getTitle: () => "", isLoading: () => false,
-      isDestroyed() { return this.dead; }, close() { this.dead = true; }, async loadURL(url) { this.loadCalls.push(url); this.url = url; this.mainFrame.url = url; },
+      isDestroyed() { return this.dead; }, close() { this.dead = true; },
+      async loadURL(url, loadOptions) {
+        this.loadCalls.push(url); this.loadOptions.push(loadOptions);
+        if (options.loadURL) await options.loadURL(this, url, loadOptions);
+        this.url = url; this.mainFrame.url = url;
+      },
     });
     contents.mainFrame = { url: "", detached: false, isDestroyed: () => false }; contents.mainFrame.top = contents.mainFrame;
     return contents;
   }
   class View {
-    constructor({ webContents, webPreferences }) {
+    constructor(options) {
+      assert.ok(!("webContents" in options) || options.webContents, "Electron's optional webContents must be omitted when no guest exists");
+      const { webContents, webPreferences } = options;
       this.webPreferences = webPreferences;
       this.bounds = { x: 0, y: 0, width: 0, height: 0 };
       this.visible = false;
@@ -85,10 +93,11 @@ function browserHarness(dialog = {}, options = {}) {
   manager.init({
     getWindowByInstanceId: () => ownerWindow,
     getMainWindows: () => [ownerWindow],
+    appendDesktopLog: message => logs.push(message),
     browserSettingsPath: path.join(fs.mkdtempSync(path.join(require("node:os").tmpdir(), "minicode-browser-audit-")), "settings.json"),
     lookupHostAddresses: () => new Promise((resolve) => { finishDns = resolve; }),
   });
-  return { manager, views, events, session, ownerWindow, createNativeContents,
+  return { manager, views, events, logs, session, ownerWindow, createNativeContents,
     beforeRequest: (details, callback) => beforeRequest(details, callback),
     headersReceived: (details, callback) => headersReceived(details, callback),
     responseStarted: (details) => responseStarted(details),
@@ -215,6 +224,7 @@ test("native child windows adopt Chromium's original contents without replaying 
   const postBody = { contentType: "application/x-www-form-urlencoded", data: [{ type: "rawData", bytes: Buffer.from("form=original") }] };
   const result = contents.windowOpenHandler({ url: "https://destination.example/submit", postBody });
   assert.equal(result.action, "allow"); assert.equal(typeof result.createWindow, "function");
+  assert.equal(result.outlivesOpener, true);
   const preferences = result.overrideBrowserWindowOptions.webPreferences;
   assert.equal(preferences.preload, path.join(__dirname, "browser-password-preload.js"));
   assert.equal(preferences.nodeIntegration, false); assert.equal(preferences.contextIsolation, true);
@@ -230,8 +240,62 @@ test("native child windows adopt Chromium's original contents without replaying 
   const published = h.events.at(-1);
   assert.equal(published.conversationId, "original-owner"); assert.equal(published.type, "page");
   assert.equal(published.url, "https://destination.example/submit");
+  assert.equal(published.active, true); assert.equal(published.insertToRightOfTabId, target.id);
   assert.equal(JSON.stringify(h.events).includes("form=original"), false);
   assert.equal(contents.windowOpenHandler({ url: "file:///C:/private" }).action, "deny");
+  h.manager.disposeAll();
+});
+
+test("OpenURLFromTab starts a missing guest exactly once with its original referrer, POST bytes and multipart boundary", async () => {
+  const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "native-source", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://source.example/original" });
+  h.manager.activate(target.id, "owner", "fixture-window");
+  const source = h.views[0].webContents;
+  const referrer = { url: source.getURL(), policy: "strict-origin-when-cross-origin" };
+  for (const postBody of [undefined,
+    { contentType: "application/x-www-form-urlencoded", data: [{ type: "rawData", bytes: Buffer.from("original=native+value") }] },
+    { contentType: "multipart/form-data", boundary: "----OriginalBoundary", data: [
+      { type: "rawData", bytes: Buffer.from("------OriginalBoundary\r\nContent-Disposition: form-data; name=original\r\n\r\nnative value\r\n") },
+      { type: "file", filePath: "original-upload.txt", offset: 3, length: 11, modificationTime: 17 },
+    ] },
+  ]) {
+    const destination = "https://destination.example/original";
+    const result = source.windowOpenHandler({ url: destination, disposition: "background-tab", referrer, postBody });
+    assert.equal(result.outlivesOpener, true);
+    const child = result.createWindow({ webContents: undefined, webPreferences: result.overrideBrowserWindowOptions.webPreferences });
+    assert.deepEqual(child.loadCalls, [destination]);
+    assert.equal(child.loadOptions.length, 1); assert.equal(child.loadOptions[0].httpReferrer, referrer);
+    if (postBody) {
+      assert.equal(child.loadOptions[0].postData, postBody.data);
+      assert.equal(child.loadOptions[0].extraHeaders, `content-type: ${postBody.contentType}${postBody.boundary ? `; boundary=${postBody.boundary}` : ""}`);
+    } else {
+      assert.equal("postData" in child.loadOptions[0], false); assert.equal("extraHeaders" in child.loadOptions[0], false);
+    }
+    assert.equal("openerId" in h.views.at(-1).webPreferences, false, "the browser-created page does not invent an opener");
+    const published = h.events.at(-1);
+    assert.equal(published.active, false); assert.equal(published.insertToRightOfTabId, target.id);
+    assert.equal(h.manager.listTargets("owner", "fixture-window").find(page => page.active).id, target.id);
+  }
+  assert.equal(JSON.stringify(h.events).includes("original=native+value"), false);
+  h.manager.disposeAll();
+});
+
+test("a browser-created child keeps native navigation failure observable and closing its source preserves the child", async () => {
+  const failure = new Error("ERR_NAME_NOT_RESOLVED: original browser-created destination");
+  const h = browserHarness({}, { loadURL: contents => { if (contents.id > 1) throw failure; } });
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
+  const target = { id: "source", conversation_id: "owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...target, url: "https://source.example/" });
+  const child = h.views[0].webContents.windowOpenHandler({ url: "https://destination.example/", disposition: "background-tab",
+    referrer: { url: "https://source.example/", policy: "default" } }).createWindow({ webContents: undefined, webPreferences: {} });
+  child.emit("did-fail-load", {}, -105, failure.message, "https://destination.example/", true);
+  await new Promise(setImmediate);
+  assert.equal(h.events.at(-1).type, "error"); assert.equal(h.events.at(-1).error, failure.message);
+  assert.ok(h.logs.some(line => line.includes(failure.message)));
+  h.manager.close(target);
+  assert.equal(child.isDestroyed(), false);
+  assert.equal(h.manager.listTargets("owner", "fixture-window").length, 1);
   h.manager.disposeAll();
 });
 

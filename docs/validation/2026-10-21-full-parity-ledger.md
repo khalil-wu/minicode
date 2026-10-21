@@ -1,10 +1,10 @@
 # MiniCode / Codex 全产品功能族去重清单
 
-本清单依据当前 MiniCode 消费代码、公开 Source `822e58cc3d666166c7446c5b1ea2e52f5d09594c` 和已取证 Codex Desktop `26.1013.4894.0`。Bedrock 设置、主题目录和语音客户端门控另只读核对当前安装 `26.1016.6573.0` 的 ASAR；没有把这三个范围扩张为全部新版桌面已验收。本批没有操作本机 GUI；旧截图不能代替当前构建所有状态的验收。
+本清单依据当前 MiniCode 消费代码、公开 Source `822e58cc3d666166c7446c5b1ea2e52f5d09594c` 和已取证 Codex Desktop `26.1013.4894.0`。Bedrock 设置、主题目录、语音客户端门控和远端安装consumer另只读核对当前安装 `26.1016.6573.0` 的 ASAR；没有把这些范围扩张为全部新版桌面已验收。本批没有操作本机 GUI；旧截图不能代替当前构建所有状态的验收。
 
 以独立行为组为单位。测试数、工具数及静态节点不作产品覆盖分母，不给没有全量验收依据的百分比。功能实现、集成验证、上游/设备/外机与视觉验收分别记录；官方账号排除仅适用于真正依赖账号的官方服务。
 
-当前已确认的待实现行为为 **15 组**：浏览器 BR-G1–G10、显式远端安装 NR-INSTALL1、独立 CUA 分发 DIST-CUA1、语音客户端页面上下文 VO-CAPTURE1、语音转移 VO-TRANSFER1、应用级网络要求 APP-NET1。队列 Undo/Redo 与 Bedrock 本地链路已实现；主题 DATA-THEME1 已由当前代码与完整数据验证撤回。真实上游、小时任务、CI、设备和视觉的待验收项不重复算成缺功能；这不是全产品覆盖率分母。
+当前已确认的待实现行为为 **14 组**：浏览器 BR-G1–G10、独立 CUA 分发 DIST-CUA1、语音客户端页面上下文 VO-CAPTURE1、语音转移 VO-TRANSFER1、应用级网络要求 APP-NET1。队列 Undo/Redo 与 Bedrock 本地链路已实现；主题 DATA-THEME1 已由当前代码与完整数据验证撤回。真实上游、小时任务、CI、设备和视觉的待验收项不重复算成缺功能；这不是全产品覆盖率分母。
 
 ## 主要功能族
 
@@ -21,7 +21,7 @@
 | 本地/远端附件与媒体 | G3远端附件仅一组：条件菜单→原picker多选→原host/window/session导入→同一上传/owner/adopt/retry/草稿/缩略图消费。Windows默认文件与目录混选已撤回为误报。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/remote-file-picker.md`、`output/full-parity-20261021/native-remote-audit.md` | UI-A1、NR-A1 |
 | 内嵌browser、下载、内容设置、密码与多级菜单 | 已有导航/标签/设备/历史/基础权限与清理/管理/原表单autofill/live下载；F1–F5已补原请求归属、单次下载准入和unknown-blob，真实 Electron POST/HTTP/blob smoke 待当前CI。G1–G10仍为不同引擎/原生边界。 证据：`output/full-parity-20261021/browser-audit.md`、`output/full-parity-20261021/browser-download-admission.md` | BR-G1、BR-G2、BR-G3、BR-G4、BR-G5、BR-G6、BR-G7、BR-G8、BR-G9、BR-G10、BR-A1、BR-A2、BR-A3、UI-A1 |
 | 听写与双向Realtime | 听写原链存在；Source公开六Realtime命令/11通知、V1/V2/V3、WebRTC/existing-call、原provider/owner、真实query/steer、已提交final回传、durable speech和不推理的私有结束tail已经闭环；模型结束工具及异步tail/真实工具结果成对已修，最新57例集中通过。 证据：`docs/validation/2026-10-21-realtime-source-chain.md`、`docs/validation/2026-10-21-voice-session-tools-source-gates.md` | VO-CAPTURE1、VO-TRANSFER1、APP-NET1、VO-A1、VO-RT-API1 |
-| SSH、WSL、独立executor与native sandbox | persistent host、真实alias/login shell、原窗口binding、PTY/流控、远端fs/git/LSP/worktree已有实现；Windows restricted readiness旧缺口已闭。Source显式remote CLI安装动作及实际Mini发布artifact仍缺。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-18-real-ssh-source-harness-delivery.md` | NR-INSTALL1、NR-A1、NR-A2 |
+| SSH、WSL、独立executor与native sandbox | persistent host、真实alias/login shell、原窗口binding、PTY/流控、远端fs/git/LSP/worktree已有实现；Windows restricted readiness旧缺口已闭。当前26.1016已移除旧显式remote安装RPC/方法，连接行仍过滤安装action；该历史内部API差异不计当前缺功能。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-18-real-ssh-source-harness-delivery.md` | NR-A1、NR-A2 |
 | Computer Use | 显式安装Source runtime的本机Windows消费与SDK/AgentSession/ThreadRuntime关闭链已实现；独立随Mini分发及remote/non-Windows receiving尚不在已交付覆盖。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-17-installed-cua-source-consumer.md` | DIST-CUA1、CUA-A1 |
 | 桌面shell、通知、设置、语言、外观与菜单布局 | 侧栏/工作记录/审批替换/完整final收起、native菜单与通知返回、设置/自定义指令/本地音频/窗口外观等已有消费者；已去掉Source不存在的常规控件；保留用户特色字体。 证据：`output/full-parity-20261021/general-audit.md`、`docs/validation/2026-10-21-desktop-agent-alignment.md`、`docs/validation/2026-10-14-notifications-source.md` | UI-A1、OS-A1、INTEG-A1 |
 
@@ -66,7 +66,6 @@ Realtime 当前冻结为一次 **57/57** 集中运行：13 个协议/原 owner/�
 | BR-G8 | partial_missing | collapse-all/recommended/expand-all及native推荐分类器缺失；原pending生命周期已补 证据：`output/full-parity-20261021/browser-audit.md` |
 | BR-G9 | partial_missing | Source私有save bubble、成功登录分类、suggestion/generation UI未复现；现有加密管理/原表单填充并非缺失 证据：`output/full-parity-20261021/browser-audit.md` |
 | BR-G10 | partial_missing | 任意iframe/script navigation仍缺相同trusted modifier事实；主frame HTML/SVG已补 证据：`output/full-parity-20261021/browser-audit.md` |
-| NR-INSTALL1 | partial_missing | Source确有install-remote-codex显式动作；Mini缺匹配的实际发布部署artifact和显式安装/升级consumer。自动安装不是Source差距。 证据：`output/full-parity-20261021/native-remote-audit.md` |
 | DIST-CUA1 | private_dependency | 独立随MiniCode分发的可再分发native runtime/完整替代，以及remote/non-Windows receiving覆盖尚未交付；已安装Source原runtime本机消费不是缺失。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/validation/2026-10-17-installed-cua-source-consumer.md` |
 | VO-CAPTURE1 | partial_missing | 缺原active voice/host/thread门控→实际主窗口前台→page/thread/right-sidebar/tabs summary的客户端consumer；browser screenshot不等价。证据：`docs/validation/2026-10-21-voice-session-tools-source-gates.md` |
 | VO-TRANSFER1 | partial_missing | 缺original locator→目标解析/返回→原媒体stop→目标start/context/前端状态迁移；换后端service owner不能代替。证据：`docs/validation/2026-10-21-voice-session-tools-source-gates.md` |
@@ -92,7 +91,7 @@ Realtime 当前冻结为一次 **57/57** 集中运行：13 个协议/原 owner/�
 - MCP私有relay不同即缺功能：真实public ext-apps消费已在；私有协议identity差异不自动成为功能差异。
 - MCP camera/microphone/geolocation授权缺口：当前Source native MCP session也拒绝这些设备；不虚构grant。
 - Windows默认必须混选文件和目录：Source默认openDirectory仅macOS；Windows openFile+multiSelections。
-- SSH必须自动安装peer：Source启动也PATH-probe失败并提示手动安装；确实存在的是独立显式安装动作。
+- SSH必须自动安装peer：Source启动也PATH-probe失败并提示手动安装；26.1013虽有独立显式安装内部API，但26.1016已无该RPC/方法，当前设置行也明确过滤安装action。NR-INSTALL1按新版consumer撤回，未声称Mini已实现受管远端安装；见 `2026-10-21-remote-install-current-boundary.md`。
 - 缺独立executor LSP：后续executor_editor真实process/stdin/stdout/LSP与原lease已实现，旧503报告被后续交付覆盖。
 - 没有CUA或restricted-token readiness仍依赖elevated marker：已安装Source runtime消费及discover_restricted_runtime当前已在；原早期报告过时。
 - 自动跨应用重启重建下载是必需Source parity：已核Source仅liveDownloads参与恢复/重启阻断，未确立自动跨重启重建合同。

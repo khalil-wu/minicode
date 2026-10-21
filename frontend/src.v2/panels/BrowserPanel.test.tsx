@@ -107,7 +107,7 @@ const pending = <T,>() => {
   return { promise, resolve, reject };
 };
 
-const page = (id: string, title: string, url: string, active = false) => ({
+const page = (id: string, title: string, url: string, active?: boolean) => ({
   id, title, url, active,
   conversationId: "conv-browser",
   type: "updated" as const,
@@ -130,10 +130,44 @@ describe("BrowserPanel", () => {
     await act(async () => { await Promise.resolve(); });
     act(() => emitNative({ ...page("native-child", "Original POST destination", "https://source.example/submitted"), type: "page" }));
     await screen.findByRole("tab", { name: "Original POST destination" });
+    expect(screen.getByRole("tab", { name: "Original POST destination" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByRole("group", { name: "设备工具栏" })).toBeTruthy();
     expect((screen.getByRole("spinbutton", { name: "视口宽度" }) as HTMLInputElement).value).toBe("390");
     expect(runtimeMocks.create).not.toHaveBeenCalled(); expect(runtimeMocks.navigate).not.toHaveBeenCalled();
     expect(useAppStore.getState().draft).toBe("Keep source draft");
+  });
+
+  it("inserts a native background page beside its source while preserving the selected tab, address draft and navigation", async () => {
+    useAppStore.setState({ rightPanelOpen: true, rightStackTab: "browser", draft: "Keep source draft" });
+    runtimeMocks.list.mockResolvedValueOnce([
+      page("original-opener", "Original opener", "https://source.example/", true),
+      page("existing-next", "Existing next", "https://source.example/next"),
+    ]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Original opener" });
+    await act(async () => { await Promise.resolve(); });
+    const address = screen.getByRole("textbox", { name: "搜索或输入网址" });
+    fireEvent.change(address, { target: { value: "https://unsent.example/original-draft" } });
+    runtimeMocks.activate.mockClear(); runtimeMocks.setBounds.mockClear();
+    act(() => emitNative({ ...page("native-background", "Original background page", "https://source.example/background", false),
+      type: "page", insertToRightOfTabId: "original-opener" }));
+    await screen.findByRole("tab", { name: "Original background page" });
+    act(() => emitNative({ ...page("native-background", "Loaded background page", "https://source.example/background"), type: "updated" }));
+    expect(screen.getAllByRole("tab").map(tab => tab.getAttribute("title"))).toEqual([
+      "Original opener", "Loaded background page", "Existing next",
+    ]);
+    expect(screen.getByRole("tab", { name: "Original opener" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Loaded background page" }).getAttribute("aria-selected")).toBe("false");
+    expect((address as HTMLInputElement).value).toBe("https://unsent.example/original-draft");
+    expect(runtimeMocks.activate).not.toHaveBeenCalled();
+    expect(runtimeMocks.setBounds.mock.calls.some(([bounds]) => bounds.id === "native-background")).toBe(false);
+    expect(runtimeMocks.create).not.toHaveBeenCalled(); expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(useAppStore.getState().draft).toBe("Keep source draft");
+    fireEvent.click(screen.getByRole("tab", { name: "Loaded background page" }));
+    await waitFor(() => expect(runtimeMocks.activate).toHaveBeenCalledWith("conv-browser", "native-background"));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    act(() => emitNative({ ...page("original-opener", "Original opener", "https://source.example/"), type: "closed" }));
+    expect(screen.getByRole("tab", { name: "Loaded background page" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("routes native guest number shortcuts through the existing tab and chat consumers with the original owner", async () => {

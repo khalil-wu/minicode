@@ -698,12 +698,17 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
         if (existing) {
           return current.map((tab) => tab.id === event.id ? updateTabFromEvent(tab, event) : tab);
         }
-        return [...current, updateTabFromEvent(blankTab(event.id), event)];
+        const tab = updateTabFromEvent(blankTab(event.id), event);
+        const openerIndex = current.findIndex(candidate => candidate.id === event.insertToRightOfTabId);
+        return openerIndex < 0 ? [...current, tab]
+          : [...current.slice(0, openerIndex + 1), tab, ...current.slice(openerIndex + 1)];
       });
       if (!knownTab) {
         setViewports(current => ({ ...current, [event.id]: alwaysShowDeviceToolbar.current ? { ...DEFAULT_DEVICE_VIEWPORT } : null }));
-        activeIdRef.current = event.id;
-        setActiveId(event.id);
+        if (event.active !== false) {
+          activeIdRef.current = event.id;
+          setActiveId(event.id);
+        }
       }
       if (event.id === activeIdRef.current && event.url !== "about:blank") {
         window.requestAnimationFrame(syncBounds);

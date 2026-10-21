@@ -1300,15 +1300,26 @@ function attachViewEvents(entry) {
   const webContents = entry.view.webContents;
   attachGuestAutofill(entry, () => browserPersonalData, { Menu, dialog, text: browserText, appendDesktopLog });
 
-  webContents.setWindowOpenHandler(({ url }) => {
+  webContents.setWindowOpenHandler(({ url, disposition, referrer, postBody }) => {
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
     if (decision.allowed || decision.requiresPrivateNetworkApproval) {
-      return { action: "allow", overrideBrowserWindowOptions: { webPreferences: GUEST_WEB_PREFERENCES }, createWindow: options => {
+      return { action: "allow", outlivesOpener: true, overrideBrowserWindowOptions: { webPreferences: GUEST_WEB_PREFERENCES }, createWindow: options => {
         const child = createViewEntry({ id: randomUUID(), conversationId: entry.conversationId,
           windowInstanceId: entry.windowInstanceId, mainWindow: entry.window, url }, options);
         child.agentControls = new Map(entry.agentControls);
         if (approvedPrivateOrigin(entry, url)) child.approvedPrivateOrigins.add(normalizeOrigin(url));
-        emit(child, "page");
+        emit(child, "page", { active: disposition !== "background-tab", insertToRightOfTabId: entry.id });
+        if (!options.webContents) {
+          // OpenURLFromTab supplies the original destination/referrer/body but
+          // no guest to adopt. Custom createWindow owns this first navigation.
+          void child.view.webContents.loadURL(url, { httpReferrer: referrer,
+            ...(postBody && { postData: postBody.data,
+              extraHeaders: `content-type: ${postBody.contentType}${postBody.boundary != null ? `; boundary=${postBody.boundary}` : ""}` }),
+          }).catch(error => {
+            // did-fail-load publishes the native failure to the original page.
+            appendDesktopLog(`[desktop] embedded browser child navigation rejected: ${error.message}`);
+          });
+        }
         return child.view.webContents;
       } };
     }
@@ -1425,9 +1436,11 @@ function attachViewEvents(entry) {
 function createViewEntry({ id, conversationId, windowInstanceId, mainWindow, url }, options = {}) {
   // Chromium's child already owns its navigation, POST body and opener. The
   // createWindow contract requires adopting and returning that exact contents.
-  const view = new WebContentsView({ ...options,
+  const viewOptions = {
     webPreferences: { ...options.webPreferences, ...GUEST_WEB_PREFERENCES },
-  });
+  };
+  if (options.webContents) viewOptions.webContents = options.webContents;
+  const view = new WebContentsView(viewOptions);
   const entry = {
     id, key: viewKey(windowInstanceId, id), windowInstanceId, window: mainWindow,
     conversationId, view, url, title: "新标签页", faviconUrl: "", visitSource: "other",

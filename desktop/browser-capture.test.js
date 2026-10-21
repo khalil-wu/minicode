@@ -5,7 +5,7 @@ const os = require("node:os");
 const path = require("node:path");
 
 if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
-  const { app, BrowserWindow, nativeImage, screen } = require("electron");
+  const { app, BrowserWindow, ipcMain, nativeImage, screen } = require("electron");
   const http = require("node:http");
   const manager = require("./embedded-browser-manager");
   app.setPath("userData", process.env.MINICODE_BROWSER_CAPTURE_TEST_PROFILE);
@@ -13,12 +13,26 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
     const area = screen.getPrimaryDisplay().workArea;
     const window = new BrowserWindow({ width: 1000, height: 750, show: false,
       x: area.x + area.width - 24, y: area.y, skipTaskbar: true });
+    const browserEvents = [];
+    const sendToHost = window.webContents.send.bind(window.webContents);
+    window.webContents.send = (channel, ...args) => {
+      if (channel === "minicode:embeddedBrowser:event") browserEvents.push(args[0]);
+      sendToHost(channel, ...args);
+    };
     let receiveNativePost;
     const nativePost = new Promise(resolve => { receiveNativePost = resolve; });
+    let receiveNativeBackground;
+    const nativeBackground = new Promise(resolve => { receiveNativeBackground = resolve; });
     const server = http.createServer((request, response) => {
       if (request.url === "/agent-download") {
         response.writeHead(200, { "content-type": "text/plain", "content-disposition": 'attachment; filename="original-download.txt"' });
         response.end("original native download bytes");
+        return;
+      }
+      if (request.url === "/native-background") {
+        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.end("<!doctype html><h1>Native background destination</h1>");
+        receiveNativeBackground({ method: request.method, referrer: request.headers.referer });
         return;
       }
       if (request.url === "/native-post") {
@@ -94,6 +108,9 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         contents.on("did-fail-load", (_event, code, description, destination, isMainFrame) => {
           if (isMainFrame) process.stderr.write(`[capture] original child ${contents.id} load ${code} ${description} ${destination}\n`);
         });
+        contents.on("preload-error", (_event, preloadPath, error) => {
+          process.stderr.write(`[capture] original child ${contents.id} preload ${preloadPath}: ${error.stack || error}\n`);
+        });
       });
       process.stdout.write("[capture] submitting original native POST form\n");
       await view.webContents.executeJavaScript(`{
@@ -108,13 +125,70 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       if (child.webContents.isLoading()) await new Promise(resolve => child.webContents.once("did-finish-load", resolve));
       assert.equal(await child.webContents.executeJavaScript("window.opener !== null"), true);
       const childPreferences = child.webContents.getLastWebPreferences();
-      assert.equal(childPreferences.preload, path.join(__dirname, "browser-password-preload.js"));
       assert.equal(childPreferences.nodeIntegration, false); assert.equal(childPreferences.contextIsolation, true);
       assert.equal(childPreferences.sandbox, true);
       assert.equal(child.webContents.getURL(), new URL("/native-post", url).href);
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 2);
       assert.equal(manager.listTargets("another-owner", "fixture-window").length, 0);
       process.stdout.write("[capture] native child POST body, original opener and conversation owner preserved\n");
+      const childTarget = manager.listTargets("capture-owner", "fixture-window").find(item => item.url === new URL("/native-post", url).href);
+      manager.activate(childTarget.id, "capture-owner", "fixture-window");
+      manager.setBounds({ id: childTarget.id, conversation_id: "capture-owner", x: 0, y: 0, width: 900, height: 600, window_instance_id: "fixture-window" });
+      const preloadLinkUrl = new URL("/native-preload-link", url).href;
+      const preloadLink = await child.webContents.executeJavaScript(`(() => {
+        const link = document.createElement('a'); link.href = ${JSON.stringify(preloadLinkUrl)}; link.textContent = 'Original preload link';
+        link.style = 'position:fixed;left:12px;top:12px;width:240px;height:36px;display:block'; document.body.append(link);
+        const rect = link.getBoundingClientRect(); return { x: Math.round(rect.x + 30), y: Math.round(rect.y + 15) };
+      })()`);
+      const originalPreloadClick = new Promise(resolve => ipcMain.once("minicode:browserLink:click", (event, request) => {
+        const accepted = manager.handleLinkClick(event, request);
+        event.returnValue = accepted;
+        resolve({ senderId: event.sender.id, sameFrame: event.senderFrame === child.webContents.mainFrame, request, accepted });
+      }));
+      window.focus(); child.webContents.focus();
+      const modifiers = [process.platform === "darwin" ? "meta" : "control"];
+      child.webContents.sendInputEvent({ type: "mouseDown", ...preloadLink, button: "left", clickCount: 1, modifiers });
+      child.webContents.sendInputEvent({ type: "mouseUp", ...preloadLink, button: "left", clickCount: 1, modifiers });
+      const preloadFact = await originalPreloadClick;
+      assert.equal(preloadFact.senderId, child.webContents.id); assert.equal(preloadFact.sameFrame, true); assert.equal(preloadFact.accepted, true);
+      assert.equal(preloadFact.request.documentUrl, new URL("/native-post", url).href); assert.equal(preloadFact.request.url, preloadLinkUrl);
+      assert.equal(child.webContents.getURL(), new URL("/native-post", url).href);
+      assert.ok(browserEvents.some(event => event.type === "external-link-request" && event.id === childTarget.id
+        && event.conversationId === "capture-owner" && event.requestedUrl === preloadLinkUrl));
+      process.stdout.write("[capture] original sandboxed child preload consumed the native modifier click through its existing owner/frame IPC\n");
+
+      manager.activate(target.id, "capture-owner", "fixture-window");
+      const backgroundUrl = new URL("/native-background", url).href;
+      const backgroundLink = await view.webContents.executeJavaScript(`(() => {
+        const link = document.createElement('a'); link.href = ${JSON.stringify(backgroundUrl)}; link.textContent = 'Original background link';
+        link.style = 'position:fixed;left:12px;top:12px;width:240px;height:36px;display:block'; document.body.append(link);
+        const rect = link.getBoundingClientRect(); return { x: Math.round(rect.x + 30), y: Math.round(rect.y + 15) };
+      })()`);
+      const backgroundCreated = new Promise(resolve => app.once("web-contents-created", (_event, contents) => {
+        const loadCalls = [];
+        const loadURL = contents.loadURL.bind(contents);
+        contents.loadURL = (destination, options) => { loadCalls.push({ destination, options }); return loadURL(destination, options); };
+        const loaded = new Promise(done => contents.once("did-finish-load", done));
+        resolve({ contents, loadCalls, loaded });
+      }));
+      process.stdout.write("[capture] middle-clicking the original page link for native OpenURLFromTab\n");
+      window.focus(); view.webContents.focus();
+      view.webContents.sendInputEvent({ type: "mouseDown", ...backgroundLink, button: "middle", clickCount: 1 });
+      view.webContents.sendInputEvent({ type: "mouseUp", ...backgroundLink, button: "middle", clickCount: 1 });
+      const [backgroundRequest, background] = await Promise.all([nativeBackground, backgroundCreated]);
+      await background.loaded;
+      assert.deepEqual(backgroundRequest, { method: "GET", referrer: url });
+      assert.equal(background.loadCalls.length, 1); assert.equal(background.loadCalls[0].destination, backgroundUrl);
+      assert.equal(background.loadCalls[0].options.httpReferrer.url, url);
+      assert.equal(await background.contents.executeJavaScript("window.opener === null"), true);
+      assert.equal(background.contents.getURL(), backgroundUrl);
+      const backgroundTarget = manager.listTargets("capture-owner", "fixture-window").find(item => item.url === backgroundUrl);
+      const backgroundEvent = browserEvents.find(event => event.type === "page" && event.id === backgroundTarget.id);
+      assert.equal(backgroundEvent.active, false); assert.equal(backgroundEvent.insertToRightOfTabId, target.id);
+      assert.equal(manager.listTargets("capture-owner", "fixture-window").find(item => item.active).id, target.id);
+      assert.equal(view.getVisible(), true); assert.equal(background.contents.getOwnerBrowserWindow(), window);
+      assert.equal(manager.listTargets("another-owner", "fixture-window").length, 0);
+      process.stdout.write("[capture] native background request loaded once with original referrer, no invented opener and original active page\n");
       const downloadDirectory = path.join(app.getPath("userData"), "owned-downloads");
       fs.mkdirSync(downloadDirectory);
       manager.setBrowserSettings({ downloadDirectory, downloadPolicy: "ask" });
@@ -149,6 +223,11 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(manager.releaseAgentControl({ conversation_id: "capture-owner", window_instance_id: "fixture-window", control: agentControl }), 1);
       assert.equal(view.webContents.debugger.isAttached(), false);
       process.stdout.write("[capture] original main-frame Page.downloadWillBegin produced and consumed the dynamic blob permission\n");
+      manager.close({ id: target.id, conversation_id: "capture-owner", window_instance_id: "fixture-window" });
+      assert.equal(child.webContents.isDestroyed(), false); assert.equal(background.contents.isDestroyed(), false);
+      assert.equal(await child.webContents.executeJavaScript("document.querySelector('h1').textContent"), "Native POST destination");
+      assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 2);
+      process.stdout.write("[capture] adopted and browser-created tabs outlived closure of their original source tab\n");
       manager.disposeAll(); window.destroy(); server.close(); app.exit(0);
     } catch (error) {
       process.stderr.write(`${error.stack || error}\n`);

@@ -194,6 +194,7 @@ export interface EmbeddedBrowserState {
   canGoBack: boolean;
   canGoForward: boolean;
   active?: boolean;
+  insertToRightOfTabId?: string;
   error?: string;
   requestedUrl?: string;
   findResult?: { requestId: number; matches: number; activeMatchOrdinal: number; finalUpdate: boolean };

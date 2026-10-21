@@ -1,6 +1,6 @@
 # 浏览器 BR-G1–G10 原生 producer 与 Electron 43.4 能力核查
 
-本轮只读当前 MiniCode、已保留 Desktop Source、当前安装 ASAR 和 Electron 的公开版本源码。**没有操作桌面实机，没有 GUI、computeruse、Playwright、CDP、浏览器请求或物理输入验收，也没有修改生产文件、后端和小时任务输入。**下述是源码与 API 合同证据，不是运行时通过记录。
+初次核查只读当前 MiniCode、已保留 Desktop Source、当前安装 ASAR 和 Electron 的公开版本源码。**没有操作桌面实机，没有 GUI、computeruse、Playwright、CDP、浏览器请求或物理输入验收，也没有修改后端和小时任务输入。**原始分类是源码与 API 合同证据；文末另记后续消费者修复及云端 CI 的实际边界。
 
 原清单为 `output/full-parity-20261021/browser-audit.md`。十项仍按完整功能组理解，不能把已具备的下载、Cookie 存储、通知权限或密码管理全部说成缺失；也不能将局部 API 的存在扩大成整个功能组已闭合。
 
@@ -59,7 +59,7 @@ MiniCode 已有真实 Cookie 计数及 cookies/site-data 清理。stock 43.4 的
 | BR-G3 Background Sync | Chromium 权限名称有真实转换；Mini 当前不接此类别 | controller 缺失导致固定版本 manager 真正停用，须原生运行时链路。 |
 | BR-G4 Third-party cookies | 真实存储/计数/清理；stock 提供 Storage Access 权限 API | 可补独立授权，但完整第三方 Cookie 默认、例外、partition 策略缺公开 binding。 |
 | BR-G5 Federated/embedded identity | 普通嵌入页面可加载 | 未有完整 FedCM/embedded identity 的设置及权限服务消费者。Storage Access 或阻断身份 URL 不能替代身份协议服务。 |
-| BR-G6 Popups/redirects | 公共 createWindow 保留实际新页面交易、POST、referrer、opener 和原会话；原 redirect 交易继续/取消已接通 | 仍缺 Source 内容策略的真实触发分类及 blocked-popup 展示/再次打开链。stock 内部 -add-new-contents 确有 user_gesture，但它不是已交付的完整公共 policy/blocked-request API，不能仅依据 disposition 拦截。 |
+| BR-G6 Popups/redirects | 公共 createWindow 采用原 Chromium guest；无 guest 的 OpenURLFromTab 按原 HandlerDetails 首次导航；background 选择和关闭 opener 后保留原子页按 Source 消费；原 redirect 交易继续/取消已接通 | 已实现的消费者不等于整组原生验收。仍缺 Source 内容策略的真实触发分类及 blocked-popup 展示/再次打开链。stock 内部 -add-new-contents 确有 user_gesture，但它不是已交付的完整公共 policy/blocked-request API，不能仅依据 disposition 拦截。 |
 | BR-G7 Website protocol handlers | 应用级 OS/URL loader 能力不计为网站注册 | native Register/Unregister delegate 默认空且 Electron 未覆盖；须真实注册 producer 与 registry。 |
 | BR-G8 Notification presentation | 实际权限请求与页面生命周期已接通 | 手动呈现能接现有 callback；recommended 分类与完整 native prompt metadata 仍缺。 |
 | BR-G9 Password surfaces | 加密管理、原 frame/form 填入与可信显式提交 Save/Update 已有 | stock d.ts 无完整密码管理器的成功登录、保存 bubble、建议和生成服务。Electron 内部 AutofillDriverFactory 的存在不能证明这些服务已暴露；当前未取得完整 public consumer。 |
@@ -71,4 +71,25 @@ MiniCode 已有真实 Cookie 计数及 cookies/site-data 清理。stock 43.4 的
 
 先决定原生运行时路线与明确负责的 producer 合同，优先 G3 controller 和 G7 register/unregister delegate，随后是 G4 network cookie policy 与 G8 native prompt metadata。每条路线都应把实际原请求、origin/frame、owner 生命周期、持久设置和页面投影一起列入实现范围。现有 MiniCode UI/权限保存可作为消费者复用，不需要创建另一套平行状态或补 Source 没有的控制按钮。
 
-本报告没有运行任何新产品测试，没有把官方版本源码检查计为本地 Electron 行为通过。最终需要隔离实际 Electron 页面验证、权限/设备验证及 UI 截图；当前普通用户桌面保持未操作。
+初次核查没有运行产品测试，没有把官方版本源码检查计为本地 Electron 行为通过。最终需要隔离实际 Electron 页面验证、权限/设备验证及 UI 截图；当前普通用户桌面保持未操作。
+
+## 后续：真实 child adoption 与 OpenURLFromTab 消费者修复
+
+本节依据 Electron **v43.4.0** 官方调用链，不把现成能力缺少消费者误记成运行时缺少 producer：
+
+- [`lib/browser/api/web-contents.ts:606–642`](https://github.com/electron/electron/blob/v43.4.0/lib/browser/api/web-contents.ts#L606) 把实际 `OpenURLFromTab` 的 URL、referrer、原 POST 数据组成 `HandlerDetails`。[`guest-window-manager.ts:69–103`](https://github.com/electron/electron/blob/v43.4.0/lib/browser/guest-window-manager.ts#L69) 在 custom `createWindow` 后直接返回；有 guest 时必须返回同一对象，无 guest 时消费者负责首次导航。官方 [`web-contents.md:1510–1513`](https://github.com/electron/electron/blob/v43.4.0/docs/api/web-contents.md#L1510) 也明确说明 background-tab 可能没有 `options.webContents`。
+- 有 guest 时，MiniCode 采用原 `options.webContents`，不调用 `loadURL`。无 guest 时只发起一次 `loadURL`，传回原 referrer 对象、原 `postBody.data` 数组、原 content type 和 multipart boundary；不把 POST 改为 GET，不自行复制上传字节，不制造 opener。首次请求仍进入原 entry 的 `onBeforeRequest` 私网审批 callback。
+- `WebContentsView` 的公开构造选项在没有 guest 时必须省略 `webContents` 字段，不能传 `webContents: undefined`；精确 [`electron_api_web_contents_view.cc:191–202`](https://github.com/electron/electron/blob/v43.4.0/shell/browser/api/electron_api_web_contents_view.cc#L191) 校验真实已有对象，`gin_helper::Dictionary::Get` 区分未提供字段与显式 undefined。MiniCode 只转换这两个真实构造分支。
+- 已保留 Source `main-C4DYk222.js` 字节位置 **1927417** 附近设置 `outlivesOpener: true`，并给 background-tab 发送 `active: false` 和 `insertToRightOfTabId`。MiniCode 将这三个事实传到已有 `BrowserPanel`：新页插在来源旁，后台新页不改变当前页、地址草稿或会话，原生加载更新不重放导航。没有新增 UI 控件。
+
+推送 `4356b948` 的云端 Desktop 已实际观察到原生 POST 到达、原 child 对象相等及原 opener 保留。该次运行随后停在 fixture 读取 `getLastWebPreferences().preload`：精确 [`web_contents_preferences.cc:364–383`](https://github.com/electron/electron/blob/v43.4.0/shell/browser/web_contents_preferences.cc#L364) 的 `SaveLastPreferences` 白名单本来就没有该字段；`:231–235` 仍接收并保存绝对 preload 路径，`WebContents::GetPreloadScript` 继续消费它。fixture 因此改用原 POST child 的实际 native modifier click → 现有 `minicode:browserLink:click` → `manager.handleLinkClick` 验证真实 preload 执行、sender/frame/owner 和原 URL，继续保留 sandbox、contextIsolation、nodeIntegration 的真实断言。这项增强尚待新云端 CI；没有以字段不存在推断 preload 已运行，也没有删除 preload 功能验收。
+
+新增云端 fixture 还保留原 POST、opener、HTTP 下载及动态 blob 断言，在原页对真实链接发出 native middle input，核对实际后台 HTTP 请求、原 referrer、一次首次导航、没有虚构 opener、原活动页与会话，并检查关闭来源后原子页仍存在。它没有在本机运行；本轮本机仅静态阅读与非 GUI 单测。
+
+本批非 GUI 验证：desktop browser/lifecycle/bridge/wait/link/password 六组文件 **92/92 通过、0 skip**；BrowserPanel 与 nil-owner 两组 **76/76 通过**；`tsc -b --pretty false`、manager/capture 语法检查及本批 `git diff --check` 通过。这些结果不代替上述待云端验证的 native 输入、preload、首次导航和下载事实。
+
+### BR-G6 / BR-G10 仍缺哪些事实
+
+**G6**：公开 `HandlerDetails.disposition` 是实际引擎给出的新页位置，可以直接消费 background 行为；它不是“网页恶意弹窗”判断。原生 `-add-new-contents` 含真实 `user_gesture`，但公开 `setWindowOpenHandler` 未投影该值，`OpenURLFromTab` 的原 `user_gesture` 也没有在公开 `HandlerDetails` 中保留。现有 stock 接口没有 Source browser content setting 的弹窗策略决定、原生 blocked-popup 分类、原请求的可再次开放句柄及完整队列。不能用 disposition、最近一次输入或脚本自报 trusted 状态制造这些事实；本轮不宣称 G6 整组已闭合。
+
+**G10**：stock `before-mouse-event` 产生真实输入，`will-frame-navigate` 产生真实目标与 initiator frame；两者没有同一浏览器导航交易的关联 ID，后者也没有原 modifier 字段。公开窗口 handler 的 disposition 可表达常规后台页，却不能反推用户设定的任意 external-link modifier，也不能将某次主页面输入可靠绑定到未来 iframe、脚本或重定向。MiniCode 现有主文档 HTML/SVG/area 链接 preload 仍消费实际 `event.isTrusted`、anchor 和 modifiers；没有扩大到未具备这些事实的任意导航。缺的是真实 request/input 关联 producer，不能通过一个“下一次导航”窗口或覆盖 navigator 来补写。没有据此声称原生扩展不可实现。
