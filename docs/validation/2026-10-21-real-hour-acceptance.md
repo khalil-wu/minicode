@@ -32,3 +32,5 @@
 应用网络与语音客户端功能冻结后，完整15工具目录再次真实预检通过，收据为 `namespace-provider-preflight-post-network/namespace-preflight.json`。2026-10-21 18:59 +08已启动 `hour-live-final-02/`：主3600秒、同child3660秒、turn budget5400秒、90秒断线、每600秒B实际provider/read_file往返。此时仍是运行中；最终result/原PID/原句柄/board/followup/冷读/关闭/冻结输入全部通过后才记RT11通过。
 
 该轮随后因CI确定性复现的真实host关闭竞态被主agent主动中止，1287.437秒、`passed=false`，不计小时通过。只关闭经原auditor父子关系核实的隔离backend，backend退出0，原主/child进程均已退出；中止前独立比较后端字节仍与开始snapshot一致。`intentional-stop.json`单独保留中止原因，原失败result未改。新一轮只在关闭准入根因修复并重新冻结后启动。
+
+`e3b4cce9` 修复原host关闭准入，并将正式WebSocket依赖统一为sidecar已锁定、已实际验证的16.0后，已启动 `hour-live-final-03/`。当前生产冻结输入767项与开始snapshot相同；原主PID26080/handle bg_90255425、child PID13756/handle bg_6a38b69e已持续观测，90秒断线后恢复，child初始final实际完成而原进程继续。首个B新provider/read_file往返在827.922秒完成。以上仍是中间事实，不能替代最终3600/3660秒、同child followup、原句柄退出、board与冷读/关闭完整通过收据。

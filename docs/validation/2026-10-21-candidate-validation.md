@@ -60,3 +60,5 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 `1712f7c8` 的实际CI为6成功/3失败，不计通过。Desktop三项旧VM fixture缺少正式RealtimeVoiceManager依赖，仅注入真实class，37/37相关测试通过；root suite的旧image fake补正式network_policy形参并保持原policy identity/proxy断言，另一owner/cost fake也补正式形参。
 
 backend suite发现SDK17.3与本地/sidecar16.0合同不同，正式依赖已统一至实际支持的16.0。另一真实产品竞态由原 `track_execution_cleanup` 完成回调确定性复现：host关闭等待原watcher期间仍可重新准入watcher。修复在首次关闭await前设置已有host lifecycle标记，活动通知继续唤醒原event，但不再创建新watcher；未在fixture增加sleep、重试或删除空watcher断言。真实回调回归及网络/重连/语音/adapter八文件一次集中143/143通过、0 skip，收据为 `ci-final-contract-repairs.xml`。随后继续等待修复后完整CI与重新计时的小时验收。
+
+`e3b4cce9` 完整CI为8成功/1失败：backend7754通过、162真实skip，只有语音链用例把同一provider接到的独立全局Memory请求误计为第三次语音请求。fixture现按实际metadata.session_id绑定原voice线程，只由该线程占用语音gate/inputs；所有请求仍记录，原精确两次请求、cold transcript及关闭断言保留。独立Memory的实际生产请求未被屏蔽。相关三个文件47/47通过；这次只改测试，运行中的hour-live-final-03生产输入保持不变。

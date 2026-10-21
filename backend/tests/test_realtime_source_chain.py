@@ -254,11 +254,17 @@ class FinalModel(LLMAdapter):
     model = "isolated-script-model"
     def __init__(self):
         self.inputs = []
+        self.requests = []
+        self.owner = None
         self.gate = None
     async def stream_chat(self, messages, tools=None, metadata=None):
-        self.inputs.append(messages)
-        if self.gate is not None:
-            await self.gate.wait()
+        self.requests.append((metadata, messages))
+        # The same provider also serves independently owned memory work. Only
+        # this actual thread's requests belong to the voice query gate/count.
+        if metadata["session_id"] == self.owner:
+            self.inputs.append(messages)
+            if self.gate is not None:
+                await self.gate.wait()
         yield StreamEvent(StreamEventType.TEXT_CHUNK, content="Actual backing query completed.", phase="final_answer")
         yield StreamEvent(StreamEventType.DONE, finish_reason="stop", end_turn=True)
     async def simple_chat(self, messages, *, max_tokens=None): return "unused"
@@ -286,6 +292,7 @@ async def test_actual_thread_owner_query_timeline_cold_read_and_stop_after_switc
         monkeypatch.setattr(session, "_conversation_tool_registry", lambda *_args, **_kwargs: session.tool_registry)
         first = session.conversation_repo.create_conversation(workspace_root=str(tmp_path), permission_mode="bypass", memory_mode="disabled")
         second = session.conversation_repo.create_conversation(workspace_root=str(tmp_path), permission_mode="bypass", memory_mode="disabled")
+        model.owner = first.id
         session.active_conversation_id = first.id
         captured = RealtimeConfig(remote.base_url, {"Authorization": "Bearer isolated-realtime"}, configured=True)
         monkeypatch.setattr(module, "capture_config", lambda *_args, **_kwargs: captured)
