@@ -26,3 +26,9 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 实际试运行发现的 URI、流式参数预览、公开结果无内部command ID，以及child actor ID与真实query turn的区别均已按现有producer修正。审计器保留原PID/create-time、独立OS退出/时长、原durable owner、实际启动/完成通知、真实monitor结果、同child epoch和SQL/工作记录关联；不解析summary补证，不新增public内部状态，不放松重启/换handle/跨owner拒绝。另修正CLI选择state root之前导入backend配置的初始化顺序，原用户配置未改变。
 
 进程、V2 board和现有client定向146个用例通过；最新board修正75/75，另CLI import单例通过。它们不是一小时收据。真实短任务校准和正式3600秒验收单列于 `2026-10-21-real-hour-acceptance.md`。最终GitHub HEAD及全部九个job结果待最终收据补充。
+
+## 原生 POST 的产品根因修复
+
+第二个候选 `70691945` 的九项 CI 中八项成功，Desktop job 在真实原生 POST 阶段失败；原900×600截图、隐藏等待取消和owner检查通过，其余五项Electron smoke也通过。这不是一轮完整通过。
+
+按 Electron 43.4 的 `guest-window-manager` 合同，`createWindow(options)` 必须采用并返回原 `options.webContents`。MiniCode此前另建第二个WebContents，丢失了原POST/opener；现将原guest交给WebContentsView，并在Chromium创建guest前通过overrideBrowserWindowOptions设置preload、sandbox与隔离偏好。原request继续，未用loadURL重放POST。非GUI定向85/85通过、零skip，真实POST/HTTP/blob仍等待新候选的云端Electron收据。

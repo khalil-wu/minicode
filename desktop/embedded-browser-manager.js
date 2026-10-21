@@ -11,6 +11,10 @@ const { atomicWriteTextSync } = require("./utils");
 const { attachGuestAutofill } = require("./browser-autofill");
 
 const DEFAULT_PARTITION = "persist:minicode-browser";
+const GUEST_WEB_PREFERENCES = {
+  contextIsolation: true, preload: path.join(__dirname, "browser-password-preload.js"),
+  nodeIntegration: false, sandbox: true, partition: DEFAULT_PARTITION, spellcheck: true,
+};
 const ID_PATTERN = /^[a-zA-Z0-9_-]{1,96}$/;
 const CONTROL_DEFAULT_MAX_CHARS = 20_000;
 const CONTROL_MAX_CHARS = 200_000;
@@ -1299,9 +1303,9 @@ function attachViewEvents(entry) {
   webContents.setWindowOpenHandler(({ url }) => {
     const decision = assessNavigationTarget(url, entry.conversationId, entry);
     if (decision.allowed || decision.requiresPrivateNetworkApproval) {
-      return { action: "allow", createWindow: options => {
+      return { action: "allow", overrideBrowserWindowOptions: { webPreferences: GUEST_WEB_PREFERENCES }, createWindow: options => {
         const child = createViewEntry({ id: randomUUID(), conversationId: entry.conversationId,
-          windowInstanceId: entry.windowInstanceId, mainWindow: entry.window, url }, options.webPreferences);
+          windowInstanceId: entry.windowInstanceId, mainWindow: entry.window, url }, options);
         child.agentControls = new Map(entry.agentControls);
         if (approvedPrivateOrigin(entry, url)) child.approvedPrivateOrigins.add(normalizeOrigin(url));
         emit(child, "page");
@@ -1418,11 +1422,12 @@ function attachViewEvents(entry) {
   });
 }
 
-function createViewEntry({ id, conversationId, windowInstanceId, mainWindow, url }, webPreferences = {}) {
-  const view = new WebContentsView({ webPreferences: { ...webPreferences,
-    contextIsolation: true, preload: path.join(__dirname, "browser-password-preload.js"),
-    nodeIntegration: false, sandbox: true, partition: DEFAULT_PARTITION, spellcheck: true,
-  } });
+function createViewEntry({ id, conversationId, windowInstanceId, mainWindow, url }, options = {}) {
+  // Chromium's child already owns its navigation, POST body and opener. The
+  // createWindow contract requires adopting and returning that exact contents.
+  const view = new WebContentsView({ ...options,
+    webPreferences: { ...options.webPreferences, ...GUEST_WEB_PREFERENCES },
+  });
   const entry = {
     id, key: viewKey(windowInstanceId, id), windowInstanceId, window: mainWindow,
     conversationId, view, url, title: "新标签页", faviconUrl: "", visitSource: "other",

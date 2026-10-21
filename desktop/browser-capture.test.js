@@ -22,6 +22,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         return;
       }
       if (request.url === "/native-post") {
+        process.stdout.write(`[capture] original native ${request.method} reached /native-post\n`);
         let body = "";
         request.on("data", chunk => { body += chunk; });
         request.on("end", () => {
@@ -35,7 +36,8 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       response.end('<!doctype html><style>html,body{margin:0;background:rgb(17,133,71);color:white;font:32px sans-serif}h1{margin:80px}</style><h1>Actual browser capture</h1>');
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-    manager.init({ getWindowByInstanceId: () => window });
+    manager.init({ getWindowByInstanceId: () => window,
+      appendDesktopLog: message => process.stdout.write(`[capture] ${message}\n`) });
     try {
       await window.loadURL("data:text/html,<h1>MiniCode capture host</h1>");
       const url = `http://127.0.0.1:${server.address().port}/`;
@@ -82,16 +84,33 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(view.webContents.getURL(), url);
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 1);
       process.stdout.write(`Real same-page compositor capture ${result.width}x${result.height}, ${buffer.length} bytes; hidden wait cancellation and ownership passed.\n`);
+      let originalChild;
+      app.once("web-contents-created", (_event, contents) => {
+        originalChild = contents;
+        process.stdout.write(`[capture] Chromium created original child WebContents ${contents.id}\n`);
+        contents.on("did-start-navigation", ({ url: destination, isMainFrame }) => {
+          if (isMainFrame) process.stdout.write(`[capture] original child ${contents.id} navigating ${destination}\n`);
+        });
+        contents.on("did-fail-load", (_event, code, description, destination, isMainFrame) => {
+          if (isMainFrame) process.stderr.write(`[capture] original child ${contents.id} load ${code} ${description} ${destination}\n`);
+        });
+      });
       process.stdout.write("[capture] submitting original native POST form\n");
       await view.webContents.executeJavaScript(`{
         const form = document.createElement('form'); form.action = '/native-post'; form.method = 'POST'; form.target = '_blank'; form.rel = 'opener';
         const input = document.createElement('input'); input.name = 'original'; input.value = 'native value'; form.append(input);
         document.body.append(form); form.submit();
       }`, true);
+      process.stdout.write("[capture] original form.submit returned\n");
       assert.deepEqual(await nativePost, { method: "POST", body: "original=native+value", contentType: "application/x-www-form-urlencoded" });
       const child = window.contentView.children.find(candidate => candidate !== view && candidate.webContents?.id !== window.webContents.id);
+      assert.equal(child.webContents, originalChild);
       if (child.webContents.isLoading()) await new Promise(resolve => child.webContents.once("did-finish-load", resolve));
       assert.equal(await child.webContents.executeJavaScript("window.opener !== null"), true);
+      const childPreferences = child.webContents.getLastWebPreferences();
+      assert.equal(childPreferences.preload, path.join(__dirname, "browser-password-preload.js"));
+      assert.equal(childPreferences.nodeIntegration, false); assert.equal(childPreferences.contextIsolation, true);
+      assert.equal(childPreferences.sandbox, true);
       assert.equal(child.webContents.getURL(), new URL("/native-post", url).href);
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 2);
       assert.equal(manager.listTargets("another-owner", "fixture-window").length, 0);

@@ -20,3 +20,9 @@
 完整目录真实预检已通过：`namespace-provider-preflight-full/namespace-preflight.json` 明确使用隔离配置中的 `minicode_agents` namespace，保留全部15个生产schema；实际 `list_agents` 执行、原结果回传与模型确认均完成，两次HTTP 200，耗时7.14秒。MiniCode生产默认仍为`collaboration`，没有自动改名或legacy回退。
 
 当前状态：正式一小时尚未取得通过收据；前述短时失败不计通过。最新构建、GitHub HEAD 与九项 CI 由最终验收记录补充。
+
+## 真实短校准与正式长跑失败
+
+`runtime-live-short-05/result.json` 的真实gpt-6.1-sol/Responses/V2完整目录校准通过：总232.406秒，主业务75.453秒、75批共45150行，child100.282秒；36秒断线期间批次7→43。B使用新的真实read_file读当前进度；同child epoch[1,2]、初次final后原进程持续70.825秒、真实board turn与原句柄轮询、冷读及shutdown exit 0均有独立证据。backend输入未改变。该校准不能替代一小时验收。
+
+`hour-live-final/` 已失败退出，最后独立采样为779.485秒：主原PID8552/handle bg_58477a2b观测701.078秒，child原PID31624/handle bg_b1930d90观测690.219秒，业务699批。原wire在713.766秒及765.5秒记录实际provider error：网关HTTP500、internal_server_error、TLS handshake EOF，既有5次重试耗尽，主回合在oracle完成前结束；审计器据此拒绝通过。完整失败wire、result和console保留，不能把进程曾持续运行等同于模型及最终任务通过。未因此扩大重试、缩短时限或放松验收。

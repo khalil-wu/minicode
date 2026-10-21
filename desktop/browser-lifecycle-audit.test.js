@@ -28,35 +28,39 @@ function browserHarness(dialog = {}, options = {}) {
     async resolveProxy() { return "DIRECT"; },
     webRequest: { onResponseStarted(_filter, callback) { responseStarted = callback; }, onBeforeRequest(_filter, callback) { beforeRequest = callback; }, onHeadersReceived(_filter, callback) { headersReceived = callback; } },
   };
+  function createNativeContents() {
+    const contents = Object.assign(new EventEmitter(), {
+      id: ++id, session, url: "", dead: false, navigationHistory: {},
+      pickerCalls: [], stopCalls: 0,
+      captureCalls: 0, zoomFactor: 1, findRequests: [], findStopped: false, loadCalls: [],
+      findInPage(text, options) { this.findRequests.push({ text, options }); return this.findRequests.length; },
+      stopFindInPage(action) { this.findStopped = action; },
+      getZoomFactor() { return this.zoomFactor; }, setZoomFactor(value) { this.zoomFactor = value; },
+      setAudioMuted(value) { this.audioMuted = value; },
+      print(_options, callback) { callback(true); },
+      enableDeviceEmulation(value) { this.emulation = value; }, disableDeviceEmulation() { this.emulation = null; },
+      backgroundThrottling: true,
+      getBackgroundThrottling() { return this.backgroundThrottling; },
+      setBackgroundThrottling(value) { this.backgroundThrottling = value; },
+      async capturePage() {
+        this.captureCalls++;
+        return { isEmpty: () => false, getSize: () => ({ width: 500, height: 600 }), toPNG: () => Buffer.from("actual-frame") };
+      },
+      stop() { this.stopCalls++; },
+      focus() { this.pickerCalls.push("focus"); },
+      async executeJavaScript(expression) { this.pickerCalls.push(expression); return null; },
+      setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }, getURL() { return this.url; }, getTitle: () => "", isLoading: () => false,
+      isDestroyed() { return this.dead; }, close() { this.dead = true; }, async loadURL(url) { this.loadCalls.push(url); this.url = url; this.mainFrame.url = url; },
+    });
+    contents.mainFrame = { url: "", detached: false, isDestroyed: () => false }; contents.mainFrame.top = contents.mainFrame;
+    return contents;
+  }
   class View {
-    constructor({ webPreferences }) {
+    constructor({ webContents, webPreferences }) {
       this.webPreferences = webPreferences;
       this.bounds = { x: 0, y: 0, width: 0, height: 0 };
       this.visible = false;
-      this.webContents = Object.assign(new EventEmitter(), {
-        id: ++id, session, url: "", dead: false, navigationHistory: {},
-        pickerCalls: [], stopCalls: 0,
-        captureCalls: 0, zoomFactor: 1, findRequests: [], findStopped: false, loadCalls: [],
-        findInPage(text, options) { this.findRequests.push({ text, options }); return this.findRequests.length; },
-        stopFindInPage(action) { this.findStopped = action; },
-        getZoomFactor() { return this.zoomFactor; }, setZoomFactor(value) { this.zoomFactor = value; },
-        setAudioMuted(value) { this.audioMuted = value; },
-        print(_options, callback) { callback(true); },
-        enableDeviceEmulation(value) { this.emulation = value; }, disableDeviceEmulation() { this.emulation = null; },
-        backgroundThrottling: true,
-        getBackgroundThrottling() { return this.backgroundThrottling; },
-        setBackgroundThrottling(value) { this.backgroundThrottling = value; },
-        async capturePage() {
-          this.captureCalls++;
-          return { isEmpty: () => false, getSize: () => ({ width: 500, height: 600 }), toPNG: () => Buffer.from("actual-frame") };
-        },
-        stop() { this.stopCalls++; },
-        focus() { this.pickerCalls.push("focus"); },
-        async executeJavaScript(expression) { this.pickerCalls.push(expression); return null; },
-        setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }, getURL() { return this.url; }, getTitle: () => "", isLoading: () => false,
-        isDestroyed() { return this.dead; }, close() { this.dead = true; }, async loadURL(url) { this.loadCalls.push(url); this.url = url; this.mainFrame.url = url; },
-      });
-      this.webContents.mainFrame = { url: "", detached: false, isDestroyed: () => false }; this.webContents.mainFrame.top = this.webContents.mainFrame;
+      this.webContents = webContents ?? createNativeContents();
       views.push(this);
     }
     getBounds() { return this.bounds; }
@@ -84,7 +88,7 @@ function browserHarness(dialog = {}, options = {}) {
     browserSettingsPath: path.join(fs.mkdtempSync(path.join(require("node:os").tmpdir(), "minicode-browser-audit-")), "settings.json"),
     lookupHostAddresses: () => new Promise((resolve) => { finishDns = resolve; }),
   });
-  return { manager, views, events, session, ownerWindow,
+  return { manager, views, events, session, ownerWindow, createNativeContents,
     beforeRequest: (details, callback) => beforeRequest(details, callback),
     headersReceived: (details, callback) => headersReceived(details, callback),
     responseStarted: (details) => responseStarted(details),
@@ -203,7 +207,7 @@ test("navigation, close and renderer exit settle only their original guest permi
   }
 });
 
-test("native child windows register the original Chromium destination without replaying it as a GET or crossing owners", async () => {
+test("native child windows adopt Chromium's original contents without replaying the destination or crossing owners", async () => {
   const h = browserHarness(); h.manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });
   const target = { id: "opener", conversation_id: "original-owner", window_instance_id: "fixture-window" };
   await h.manager.create({ ...target, url: "https://example.com/" });
@@ -211,8 +215,13 @@ test("native child windows register the original Chromium destination without re
   const postBody = { contentType: "application/x-www-form-urlencoded", data: [{ type: "rawData", bytes: Buffer.from("form=original") }] };
   const result = contents.windowOpenHandler({ url: "https://destination.example/submit", postBody });
   assert.equal(result.action, "allow"); assert.equal(typeof result.createWindow, "function");
-  const child = result.createWindow({ webPreferences: { openerId: contents.id, nodeIntegration: true, contextIsolation: false } });
-  assert.equal(child, h.views[1].webContents); assert.equal(child.loadCalls.length, 0);
+  const preferences = result.overrideBrowserWindowOptions.webPreferences;
+  assert.equal(preferences.preload, path.join(__dirname, "browser-password-preload.js"));
+  assert.equal(preferences.nodeIntegration, false); assert.equal(preferences.contextIsolation, true);
+  assert.equal(preferences.sandbox, true); assert.equal(preferences.partition, "persist:minicode-browser");
+  const originalChild = h.createNativeContents();
+  const child = result.createWindow({ webContents: originalChild, webPreferences: { openerId: contents.id, nodeIntegration: true, contextIsolation: false } });
+  assert.equal(child, originalChild); assert.equal(child, h.views[1].webContents); assert.equal(child.loadCalls.length, 0);
   assert.equal(h.views[1].webPreferences.openerId, contents.id);
   assert.equal(h.views[1].webPreferences.nodeIntegration, false); assert.equal(h.views[1].webPreferences.contextIsolation, true);
   assert.equal(h.views[1].webPreferences.sandbox, true);
@@ -223,6 +232,32 @@ test("native child windows register the original Chromium destination without re
   assert.equal(published.url, "https://destination.example/submit");
   assert.equal(JSON.stringify(h.events).includes("form=original"), false);
   assert.equal(contents.windowOpenHandler({ url: "file:///C:/private" }).action, "deny");
+  h.manager.disposeAll();
+});
+
+test("an adopted native child continues its original POST with its exact inherited private origin grant", async () => {
+  let respond;
+  const h = browserHarness({ showMessageBox: () => new Promise(resolve => { respond = resolve; }) });
+  const url = "http://127.0.0.1:3031/";
+  await h.manager.create({ id: "private-opener", conversation_id: "owner", window_instance_id: "fixture-window", url }, {
+    navigationAuthorization: { kind: "owned_preview", url, conversation_id: "owner" },
+  });
+  const parent = h.views[0].webContents;
+  const originalChild = h.createNativeContents();
+  const child = parent.windowOpenHandler({ url: new URL("/submit", url).href }).createWindow({ webContents: originalChild, webPreferences: {} });
+  const results = [];
+  h.beforeRequest({ id: 21, webContentsId: originalChild.id, resourceType: "mainFrame", method: "POST", url: new URL("/submit", url).href }, result => results.push(result));
+  await new Promise(setImmediate);
+  assert.equal(child, originalChild);
+  assert.deepEqual(structuredClone(results), [{ cancel: false }]);
+  assert.equal(respond, undefined, "the already approved exact origin does not ask again");
+  assert.deepEqual(child.loadCalls, []);
+  h.beforeRequest({ id: 22, webContentsId: originalChild.id, resourceType: "mainFrame", method: "POST", url: "http://127.0.0.1:3032/submit" }, result => results.push(result));
+  await new Promise(setImmediate);
+  assert.equal(typeof respond, "function"); assert.equal(results.length, 1);
+  respond({ response: 1 }); await new Promise(setImmediate);
+  assert.deepEqual(structuredClone(results), [{ cancel: false }, { cancel: false }]);
+  assert.deepEqual(child.loadCalls, []);
   h.manager.disposeAll();
 });
 
@@ -568,7 +603,9 @@ test("known blob download grants stay exact and native child pages inherit contr
   const url = "blob:https://example.com/exact-object-url";
   await h.manager.executeControlCommand({ ...target, target_id: target.id, action: "allow_download", url }, control);
   const parent = h.views[0].webContents;
-  const child = parent.windowOpenHandler({ url: "https://example.com/child" }).createWindow({ webPreferences: {} });
+  const originalChild = h.createNativeContents();
+  const child = parent.windowOpenHandler({ url: "https://example.com/child" }).createWindow({ webContents: originalChild, webPreferences: {} });
+  assert.equal(child, originalChild);
   assert.equal(attemptDownload(h, child, url).prevented, true);
   assert.equal(attemptDownload(h, parent, "blob:https://example.com/another-object").prevented, true);
   assert.equal(attemptDownload(h, parent, url).prevented, false);
