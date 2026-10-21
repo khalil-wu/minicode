@@ -309,7 +309,7 @@ def test_ui_followup_task_real_resume_restores_persisted_tool_policy(
             subagent_id = str(starts[-1]["subagent_id"])
             previous_epoch = runtime.get_subagent(subagent_id).mailbox_epoch
             if reopen:
-                runtime.close(release_lease=True)
+                assert await runtime.aclose(release_lease=True)
                 runtime = AgentRuntime(
                     metrics_file=tmp_path / "metrics.jsonl",
                     swarm_store_dir=tmp_path / "swarm",

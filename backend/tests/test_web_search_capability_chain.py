@@ -239,6 +239,7 @@ async def test_each_provider_step_uses_its_actual_model_and_restores_search_when
 
     search, _ = search_case
     monkeypatch.setattr(Model, "supports_hosted_web_search", lambda self: self._settings.model == "model-b")
+    monkeypatch.setattr(Model, "hosted_web_search_supports_cached", lambda self: self._settings.model == "model-b")
     fixture = None
     parent_snapshot = None
     parent_policy = None
