@@ -274,7 +274,7 @@ class WebSocketManager:
         event = self._execution_watch_events.get(context)
         if event is not None:
             event.set()
-        if context.shutting_down or context in self._execution_watch_tasks:
+        if context.shutting_down or context.host.session_lifecycle.is_shutting_down or context in self._execution_watch_tasks:
             return
         if event is None:
             event = asyncio.Event()
@@ -1006,6 +1006,7 @@ class WebSocketManager:
         # still say CONNECTED after its channel has closed; only the currently
         # attached, live transport belongs to this shutdown's close operation.
         websocket = session.ws if self._sessions.get(session_id) is session and session.is_connected else None
+        session.session_lifecycle.is_shutting_down = True
         retiring = self._disconnect_tasks.get(session_id)
         if retiring is not None and not retiring.done():
             if self._sessions.get(session_id) is session:

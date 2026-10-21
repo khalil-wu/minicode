@@ -10,6 +10,7 @@ const { spawn } = require("node:child_process");
 const { once, EventEmitter } = require("node:events");
 const { RemoteDesktop } = require("./remote-desktop");
 const { RemoteHost } = require("./remote-host");
+const { RealtimeVoiceManager } = require("./realtime-voice-manager");
 
 test("closing an offline window persists cleanup and the same daemon can receive it under a new connection", async (t) => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-remote-release-"));
@@ -330,7 +331,7 @@ for (const transport of ["connected", "closed"]) {
     const releaseCode = source.slice(source.indexOf("const windowCleanupTasks ="), source.indexOf("async function launchManagedBackend"));
     const drainCode = source.slice(source.indexOf("async function drainDesktopResources()"), source.indexOf("async function prepareAutomaticRollback()"));
     const events = [], logs = [];
-    const context = { module: { exports: {} }, Promise, remoteDesktop: remote, EMBEDDED_BROWSER_TOKEN: "local-lifecycle",
+    const context = { module: { exports: {} }, Promise, RealtimeVoiceManager, remoteDesktop: remote, EMBEDDED_BROWSER_TOKEN: "local-lifecycle",
       dictationHotkeys: { async dispose() { events.push("dictation-stopped"); } },
       generalMaintenance: null, petManager: null, petInitialization: null,
       appendDesktopLog: message => logs.push(message),

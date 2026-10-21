@@ -108,7 +108,7 @@ def test_sparse_done_keeps_same_attempt_metadata_and_terminal_overrides():
 def test_model_mirror_and_later_model_changes_cannot_reprice_captured_step(monkeypatch):
     cost = {"input": 1, "output": 2, "cacheRead": 0, "cacheWrite": 0, "tiers": [{"inputTokensAbove": 100, "input": 3, "output": 4, "cacheRead": 0, "cacheWrite": 0}]}
     runtime = ModelRuntime(provider_configs={"owned": {"api": "openai-completions", "base_url": "https://contract.invalid/v1", "api_key": "placeholder", "models": [{"id": "model", "cost": cost}]}})
-    monkeypatch.setattr(factory, "_build_registered_provider_adapter", lambda spec: SimpleNamespace())
+    monkeypatch.setattr(factory, "_build_registered_provider_adapter", lambda spec, *, network_policy: SimpleNamespace())
     adapter = factory.build_provider_adapter("owned", "model", model_runtime=runtime)
     model = runtime.get_model("owned", "model")
     for mirror in (model.to_extension_dict(), model.to_public_dict()):

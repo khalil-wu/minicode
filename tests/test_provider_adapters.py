@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import httpx
 
 from backend.config import LLMSettings
+from backend.application_network import ApplicationNetworkController, ApplicationNetworkPolicy, DestinationPolicy
 from backend.llm.base import (
     LLMAdapter,
     LLMMessage,
@@ -169,10 +170,13 @@ def test_owned_openai_and_anthropic_transports_apply_explicit_direct_networking(
 
 
 def test_remote_images_keep_the_provider_proxy_mode(monkeypatch) -> None:
-    seen: list[tuple[str, str]] = []
+    controller = ApplicationNetworkController()
+    controller.publish(0, DestinationPolicy(frozenset({"cdn.example"})))
+    policy = controller.policy.for_current_generation()
+    seen: list[tuple[str, str, ApplicationNetworkPolicy | None]] = []
 
-    async def download(url: str, *, proxy_mode: str = "inherit"):
-        seen.append((url, proxy_mode))
+    async def download(url: str, *, proxy_mode: str = "inherit", network_policy: ApplicationNetworkPolicy | None = None):
+        seen.append((url, proxy_mode, network_policy))
         return ("aW1hZ2U=", "image/png")
 
     monkeypatch.setattr(
@@ -184,11 +188,12 @@ def test_remote_images_keep_the_provider_proxy_mode(monkeypatch) -> None:
         _extract_images_api_images(
             {"data": [{"url": "https://cdn.example/image.png"}]},
             proxy_mode="direct",
+            network_policy=policy,
         )
     )
 
     assert images == [("aW1hZ2U=", "image/png")]
-    assert seen == [("https://cdn.example/image.png", "direct")]
+    assert seen == [("https://cdn.example/image.png", "direct", policy)]
 
 
 def test_remote_image_download_does_not_treat_proxy_peer_as_origin(monkeypatch) -> None:

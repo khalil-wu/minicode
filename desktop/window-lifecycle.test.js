@@ -6,6 +6,7 @@ const path = require("node:path");
 const vm = require("node:vm");
 const { EventEmitter } = require("node:events");
 const { closeWindowsAfterDraftCommit } = require("./window-lifecycle");
+const { RealtimeVoiceManager } = require("./realtime-voice-manager");
 
 test("transition close waits for each real closed event after the existing draft barrier resumes", async () => {
   const events = [];
@@ -29,7 +30,7 @@ test("actual main drain retains a failed closed-window operation and retries it 
   const events = [];
   let attempts = 0;
   const context = {
-    module: { exports: {} }, Promise,
+    module: { exports: {} }, Promise, RealtimeVoiceManager,
     remoteDesktop: null,
     dictationHotkeys: { async dispose() { events.push("dictation-stopped"); } },
     generalMaintenance: null, petManager: null, petInitialization: null,

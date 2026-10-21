@@ -30,3 +30,5 @@
 审计失败收据现在保留原conversation/message/turn的实际done、error及provider attempt，不借用其他owner或旧turn，也不把侧会话恢复快照虚构为done。24个client审计用例通过；对上述真实失败wire另生成 `hour-live-final-outcomes.json`，精确关联主轮/队列两组failed和各6个实际provider失败attempt。未改原失败结果、成功断言或重试预算。
 
 应用网络与语音客户端功能冻结后，完整15工具目录再次真实预检通过，收据为 `namespace-provider-preflight-post-network/namespace-preflight.json`。2026-10-21 18:59 +08已启动 `hour-live-final-02/`：主3600秒、同child3660秒、turn budget5400秒、90秒断线、每600秒B实际provider/read_file往返。此时仍是运行中；最终result/原PID/原句柄/board/followup/冷读/关闭/冻结输入全部通过后才记RT11通过。
+
+该轮随后因CI确定性复现的真实host关闭竞态被主agent主动中止，1287.437秒、`passed=false`，不计小时通过。只关闭经原auditor父子关系核实的隔离backend，backend退出0，原主/child进程均已退出；中止前独立比较后端字节仍与开始snapshot一致。`intentional-stop.json`单独保留中止原因，原失败result未改。新一轮只在关闭准入根因修复并重新冻结后启动。

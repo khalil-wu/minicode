@@ -19,7 +19,7 @@ dependencies = [
   "httpx>=0.28,<1.0",
   "httpx-sse>=0.4,<1.0",
   "botocore>=1.40,<2.0",
-  "websockets>=15,<18",
+  "websockets==16.0",
   "psutil>=6.0,<8.0",
   "pywin32>=306; sys_platform == 'win32'",
   "pathspec>=0.12,<1.0",

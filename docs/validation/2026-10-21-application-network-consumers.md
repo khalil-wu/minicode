@@ -39,6 +39,8 @@
 
 相关 Python 编译和 scoped `git diff --check` 均通过。没有跑全测试套件、调用真实模型、改动工具 NetworkExecutionPolicy/WFP、使用 GUI/CDP/Playwright、提交或推送。原 hour-live-final 的真实网络失败独立保留，不算一小时通过；最终 hour-live-final-02 由主 agent 另行执行，不纳入这份单元与本机协议测试的通过数。
 
+后续完整CI核实到发布依赖范围问题：开发环境及sidecar lock均为websockets16.0，原pyproject却允许17.3；17改变了所用SDK连接合同。正式依赖现统一为经过验证的 `websockets==16.0`，不在17上跳过逐跳准入，也不改变正在运行的用户sidecar。ROOT后续143项相关集中验证全部通过，其中保留上述真实WSS重定向和idle撤销断言；最终发行/冷安装仍由修复后CI确认。
+
 ## 冻结与文件范围
 
 生产修改为：`backend/application_network.py`、`backend/api/routes_llm.py`、`backend/bootstrap/app.py`、`backend/config.py`、`backend/config_requirements.py`、`backend/llm/anthropic_adapter.py`、`backend/llm/bedrock.py`、`backend/llm/bedrock_credentials.py`、`backend/llm/bedrock_network.py`、`backend/llm/errors.py`、`backend/llm/openai_adapter.py`、`backend/llm/responses_websocket.py`、`backend/realtime/transport.py`、`backend/services/bedrock_service.py`、`backend/services/feature_flag_settings_service.py`、`backend/services/llm_adapter_factory.py`、`backend/services/llm_provider_helpers.py`、`backend/services/llm_provider_service.py`、`backend/services/llm_settings_service.py`。共享 `backend/realtime/session.py` 仅接 capture_config 的 network_policy 参数，其余 voice consumer 变更由原 owner 负责。

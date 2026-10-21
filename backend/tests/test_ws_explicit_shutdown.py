@@ -14,6 +14,47 @@ from backend.tests.test_ws_session_retirement import _emit, _start_operation
 from backend.ws.manager import WebSocketManager
 
 
+@pytest.mark.asyncio
+async def test_host_shutdown_closes_admission_before_real_cleanup_completion_can_recreate_a_watcher(tmp_path, monkeypatch):
+    manager = WebSocketManager()
+    session, _ = await manager.connect(**_connection(tmp_path))
+    conversation = session.conversation_repo.create_conversation()
+    watcher_entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    watch = manager._watch_execution_context
+
+    async def entered_watch(context, event):
+        watcher_entered.set()
+        await watch(context, event)
+
+    monkeypatch.setattr(manager, "_watch_execution_context", entered_watch)
+    context = manager.load_conversation_execution(conversation.id, session)
+    original = manager._execution_watch_tasks[context]
+    await watcher_entered.wait()
+
+    async def cleanup_after_watch():
+        cleanup_entered.set()
+        await original
+
+    cleanup = asyncio.create_task(cleanup_after_watch())
+    manager.track_execution_cleanup(conversation.id, session, cleanup)
+    await cleanup_entered.wait()
+    activity = manager.note_execution_activity
+    closing_at_completion = []
+
+    def observed_activity(identity):
+        closing_at_completion.append(session.session_lifecycle.is_shutting_down)
+        activity(identity)
+
+    monkeypatch.setattr(manager, "note_execution_activity", observed_activity)
+    assert await manager.shutdown_execution_host(session.session_id)
+    assert closing_at_completion and all(closing_at_completion)
+    assert cleanup.done()
+    assert not manager._execution_watch_tasks
+    assert not manager.execution_contexts.contexts()
+    assert not manager.execution_contexts.retained_hosts()
+
+
 @asynccontextmanager
 async def _closing_session(tmp_path, monkeypatch, *, initiator="session", short_drain=False):
     manager = WebSocketManager()
