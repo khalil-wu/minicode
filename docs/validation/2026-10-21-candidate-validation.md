@@ -37,6 +37,8 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 
 `b9f3688f` 的原POST、child身份及opener再次通过；新增preload功能验证停在native input，20秒deadline真实失败。43.4官方SendInputEvent要求focused窗口，fixture原先为验证离屏compositor而特意仅保留24px可见边缘。现保留全部原capture断言后，才将同一window移到实际workArea、通过原capture管线等真实compositor帧、等待真实focus事件，再发送native input；没有增加sleep、改时限或放松IPC/owner/frame断言。相关非GUI58/58、语法与diff检查通过，新原生结果继续由后续CI判定。
 
+`8a2c1f69` 与诊断候选 `3d53dd86` 的失败同样保留。后者确证原child preload已配置，compositor、focus、DOM trusted ctrl+left click及anchor命中均真实到达；实际console报告 `SVGAnchorElement is not defined`。产品链接判型误用了不存在的构造器，旧unit还虚构了同名全局，掩盖了HTML链接同样会在构造器求值时抛错。现直接使用Chromium标准 `SVGAElement`，同步纠正fixture；不增加typeof兜底，不删除SVG/area/HTML或原native断言。相关5/5与静态检查通过，最终完整native链继续待新CI。
+
 ## 真实 V2 会话回放与工作记录修复
 
 脱敏fixture来自 `runtime-live-short-05` 的真实成功wire，保留24条client、1175条server及断线/恢复等audit事实；只去掉255条独立OS采样，替换57处实际provider base URL，不导出用户配置或凭据。fixture明确标记232.406秒short及原wire/result/backend输入哈希，不用作小时通过依据。

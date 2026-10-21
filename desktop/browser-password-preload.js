@@ -6,9 +6,9 @@ const editedPasswords = new WeakSet();
 document.addEventListener("click", event => {
   if (!event.isTrusted || event.defaultPrevented || event.button !== 0
     || !(event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)) return;
-  const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement || node instanceof SVGAnchorElement);
+  const anchor = event.composedPath().find(node => node instanceof HTMLAnchorElement || node instanceof HTMLAreaElement || node instanceof SVGAElement);
   if (!anchor) return;
-  const svg = anchor instanceof SVGAnchorElement;
+  const svg = anchor instanceof SVGAElement;
   if (svg ? !anchor.hasAttribute("href") && !anchor.hasAttributeNS("http://www.w3.org/1999/xlink", "href") : !anchor.hasAttribute("href")) return;
   const url = svg ? URL.parse(anchor.href.baseVal, anchor.baseURI)?.href : anchor.href;
   if (!url || !/^https?:/i.test(url)) return;

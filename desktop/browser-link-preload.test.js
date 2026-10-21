@@ -21,7 +21,7 @@ function preloadFixture() {
     hasAttributeNS(namespace, name) { assert.equal(namespace, "http://www.w3.org/1999/xlink"); assert.equal(name, "href"); return this.xlink; }
   }
   const context = { document: { addEventListener: (type, listener, capture) => { assert.equal(capture, true); listeners.set(type, listener); } },
-    location: { href: "https://source.example/current-document" }, HTMLAnchorElement: Anchor, HTMLAreaElement: Area, SVGAnchorElement: SvgAnchor, URL,
+    location: { href: "https://source.example/current-document" }, HTMLAnchorElement: Anchor, HTMLAreaElement: Area, SVGAElement: SvgAnchor, URL,
     require(name) { assert.equal(name, "electron"); return { ipcRenderer: { sendSync(channel, request) { calls.push({ channel, request: structuredClone(request) }); return accepted; } } }; } };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "browser-password-preload.js"), "utf8"), context);
   const click = (overrides = {}) => {
