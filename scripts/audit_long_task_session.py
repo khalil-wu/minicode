@@ -17,14 +17,12 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime
 from uuid import uuid4
 
 import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
 
 def backend_source_snapshot():
     return {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -154,6 +152,8 @@ class ProbeProcessAudit:
             await asyncio.sleep(self.interval)
 
     def sample(self):
+        from backend.workspace.executor_local_policy import local_path
+
         assert self.backend.is_running() and self.backend.create_time() == self.backend_started, "Original backend process changed"
         for name in self.expected:
             assert (self.workspace / name).read_text(encoding="utf-8") == self.sources[name], f"Independent probe changed: {name}"
@@ -166,7 +166,7 @@ class ProbeProcessAudit:
             if not names or owner["pid"] is None or owner["status"] != "running":
                 continue
             assert owner["owner_pid"] == self.backend.pid and owner["owner_start_time"] == self.backend_started, "Probe borrowed another backend owner"
-            assert Path(owner["cwd"]).resolve() == self.workspace, "Probe used another workspace"
+            assert local_path(owner["cwd"]).resolve() == self.workspace, "Probe used another workspace"
             try:
                 shell = psutil.Process(owner["pid"])
                 assert shell.create_time() == owner["process_start_time"], "Background shell PID was reused"
@@ -232,7 +232,7 @@ class ProbeProcessAudit:
         self.stopping = True
         await self.task
 
-    def evidence(self, *, conversation_id, main_turn_id, child_id=None, child_turn_id=None):
+    def evidence(self, *, conversation_id, main_turn_id, child_id=None):
         self.check()
         self.sample()
         assert set(self.probes) == set(self.expected), "A required probe never ran under a real backend command owner"
@@ -244,44 +244,95 @@ class ProbeProcessAudit:
         if child_id is not None:
             child = self.probes["child_probe.py"]
             assert child["identity"]["owner_task_id"] == child_id and child["identity"]["session_id"] == child_id, "Probe was not launched by the original reviewer"
-            assert child["identity"]["parent_run_id"] == child_turn_id, "Child probe belongs to another reviewer turn"
         return {name: self.public_probe(name) for name in self.expected}
 
 
-def original_probe_handle_evidence(processes, events, *, conversation_id, message_id, child_messages=None):
+def actual_tool_calls(events, *, conversation_id, message_id):
+    calls = {event["id"]: event for event in events if event.get("type") == "tool_call"
+        and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id
+        and event.get("streaming_announcement") is False}
+    return list(calls.values())
+
+
+def child_turn_evidence(events, calls, results, transcript, *, conversation_id, message_id, parent_turn_id):
+    """Bind query turns to their actual stable actor and mailbox incarnation."""
+    from backend.agent.agent_identity import AgentPath
+
+    child_id = transcript["subagent_id"]
+    starts = [event for event in events if event.get("type") == "subagent.start" and event.get("subagent_id") == child_id]
+    done = [event for event in events if event.get("type") == "subagent.done" and event.get("subagent_id") == child_id]
+    assert starts, "Child transcript has no original actor start"
+    path = starts[0]["agent_path"]
+    assert AgentPath.parse(path).segments[0] == parent_turn_id, "Child belongs to another original tree"
+    assert transcript["conversation_id"] == conversation_id and transcript["agent_path"] == path, "Child transcript belongs to another owner"
+    parents = {call["id"]: call for call in calls if call.get("turn_id") == parent_turn_id and call["id"] in results}
+    epochs = {}
+    for start in starts:
+        epoch = start["mailbox_epoch"]
+        finishes = [event for event in done if event["mailbox_epoch"] == epoch]
+        assert epoch not in epochs and len(finishes) == 1, "Child incarnation has no unique actual start and final"
+        finish = finishes[0]
+        for event in (start, finish):
+            assert (event["run_id"] == child_id == event["task_id"] and event["agent_path"] == path
+                and event["conversation_id"] == conversation_id and event["parent_message_id"] == message_id
+                and event["parent_run_id"] == parent_turn_id and event["parent_tool_call_id"] == start["parent_tool_call_id"]
+                and event["parent_tool_call_id"] in parents), "Child incarnation lost its original actor, parent call or tree"
+        assert finish["status"] == "completed", "Child incarnation did not actually complete"
+        messages = [message for message in transcript["messages"] if message["role"] == "assistant"
+            and message.get("terminal_status") == "completed"
+            and start["started_at"] <= message["timestamp"] <= message["completed_at"] <= finish["completed_at"]]
+        assert messages, "Child incarnation has no completed query turn in its transcript"
+        epochs[epoch] = {"start": start, "done": finish, "messages": messages,
+            "parent_call": parents[start["parent_tool_call_id"]]}
+    assert set(epochs) == {event["mailbox_epoch"] for event in done}, "Child final has no original incarnation start"
+    assert transcript["mailbox_epoch"] == max(epochs), "Child transcript retained another incarnation"
+    return epochs
+
+
+def original_probe_handle_evidence(processes, events, *, conversation_id, message_id, child_transcript=None):
     """Bind external process identities to actual original turn tool receipts."""
     main = processes["verify.py"]
-    calls = [event for event in events if event.get("type") == "tool_call"
-        and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id]
+    calls = actual_tool_calls(events, conversation_id=conversation_id, message_id=message_id)
     results = {event["id"]: event for event in events if event.get("type") == "tool_result"
         and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id
-        and event.get("turn_id") == main["parent_run_id"] and event.get("is_error") is False}
+        and event.get("turn_id") == main["parent_run_id"] and event.get("is_error") is False
+        and event.get("task_id") == main["owner_task_id"]}
     launches = [call for call in calls if call.get("args", {}).get("command") == main["command"]
         and call.get("turn_id") == main["parent_run_id"] and call["id"] in results
-        and results[call["id"]].get("command_id") == main["command_id"]]
+        and call.get("task_id") == main["owner_task_id"]]
     polls = [call for call in calls if call.get("name") == "monitor"
         and call.get("turn_id") == main["parent_run_id"]
         and call.get("args", {}).get("command_id") == main["command_id"] and call["id"] in results
-        and results[call["id"]].get("command_id") == main["command_id"] and results[call["id"]].get("exit_code") == 0]
+        and call.get("task_id") == main["owner_task_id"] and results[call["id"]].get("exit_code") == 0]
     assert len(launches) == 1 and polls, "Main turn did not launch once and inspect its original completed command handle"
-    receipt = {"main_launch_call_id": launches[0]["id"], "main_poll_call_ids": [call["id"] for call in polls]}
-    if child_messages is None:
+    background = [event for event in events if event.get("type") in {"background.started", "background.completed"}
+        and event.get("command_id") == main["command_id"]]
+    starts = [event for event in background if event["type"] == "background.started"]
+    finishes = [event for event in background if event["type"] == "background.completed"]
+    assert len(starts) == len(finishes) == 1, "Original main command has no unique canonical start and completion"
+    for event in background:
+        assert (event["conversation_id"] == conversation_id and event["parent_run_id"] == main["parent_run_id"]
+            and event["task_id"] == main["owner_task_id"] and event["run_id"] == main["command_id"]
+            and event["command"] == main["command"][:100] and event["incarnation"] == starts[0]["incarnation"]), \
+            "Main command lifecycle lost its original durable owner"
+    assert finishes[0]["status"] == "completed" and finishes[0]["exit_code"] == 0, "Original main command did not canonically complete successfully"
+    receipt = {"main_launch_call_id": launches[0]["id"], "main_poll_call_ids": [call["id"] for call in polls],
+        "main_command_id": main["command_id"], "main_command_incarnation": starts[0]["incarnation"]}
+    if child_transcript is None:
         return receipt
     child = processes["child_probe.py"]
     child_id = child["owner_task_id"]
-    started = [event for event in events if event.get("type") == "subagent.start"
-        and event.get("subagent_id") == child_id and event.get("conversation_id") == conversation_id
-        and event.get("parent_message_id") == message_id and event.get("parent_run_id") == main["parent_run_id"]
-        and event.get("run_id") == child["parent_run_id"]]
-    assert len(started) == 1, "Child probe is not owned by the original main-turn reviewer"
-    completed = [event for event in events if event.get("type") == "subagent.done"
-        and event.get("subagent_id") == child_id and event.get("status") == "completed"]
-    assert len({event["mailbox_epoch"] for event in completed}) >= 2, "Original reviewer has no actual final and follow-up"
-    first_done = datetime.fromisoformat(completed[0]["timestamp"]).timestamp()
+    assert child_transcript["subagent_id"] == child_id, "Child probe borrowed another reviewer transcript"
+    epochs = child_turn_evidence(events, calls, results, child_transcript,
+        conversation_id=conversation_id, message_id=message_id, parent_turn_id=main["parent_run_id"])
+    assert len(epochs) >= 2, "Original reviewer has no actual final and follow-up"
+    initial_epoch = min(epochs)
+    initial = epochs[initial_epoch]
+    first_done = initial["done"]["completed_at"] / 1000
     assert child["create_time"] < first_done < child["exited_at"] - 5, "Original child process did not survive its initial final"
     launches = []
     polls = []
-    for message in child_messages:
+    for message in child_transcript["messages"]:
         if message["role"] != "assistant":
             continue
         for block in message.get("blocks", []):
@@ -292,23 +343,28 @@ def original_probe_handle_evidence(processes, events, *, conversation_id, messag
                 continue
             if call.get("args", {}).get("command") == child["command"]:
                 launches.append((message, call))
-            if (message["turn_id"] != child["parent_run_id"] and message["timestamp"] / 1000 > first_done
+            if (any(message in value["messages"] and value["parent_call"]["name"] == "followup_task"
+                    for epoch, value in epochs.items() if epoch > initial_epoch)
+                    and message["turn_id"] != child["parent_run_id"] and message["timestamp"] / 1000 > first_done
                     and call.get("name") == "monitor" and call.get("args", {}).get("command_id") == child["command_id"]
                     and call.get("exitCode") == 0 and "CHILD_PROBE_OK" in call.get("outputPreview", "")):
                 polls.append(call)
-    assert len(launches) == 1 and launches[0][0]["turn_id"] == child["parent_run_id"], "Reviewer restarted or borrowed the probe launch"
+    assert (len(launches) == 1 and launches[0][0]["turn_id"] == child["parent_run_id"]
+        and launches[0][0] in initial["messages"]), "Reviewer restarted or borrowed the probe launch"
     assert polls, "Reviewer follow-up did not successfully poll its original completed command handle"
     return {**receipt, "child_id": child_id, "child_launch_call_id": launches[0][1]["id"],
-        "child_followup_poll_call_ids": [call["id"] for call in polls], "initial_final_at": first_done}
+        "child_followup_poll_call_ids": [call["id"] for call in polls], "initial_final_at": first_done,
+        "child_launch_turn_id": launches[0][0]["turn_id"], "child_mailbox_epochs": sorted(epochs)}
 
 
 def successful_file_reads(events, *, conversation_id, message_id, required_files):
     completed = {event["id"] for event in events if event.get("type") == "tool_result"
         and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id
         and event.get("is_error") is False}
-    reads = {Path(event["args"]["file_path"]).name: event["id"] for event in events
-        if event.get("type") == "tool_call" and event.get("name") == "read_file"
-        and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id
+    calls = {event["id"]: event for event in events if event.get("type") == "tool_call"
+        and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id}
+    reads = {Path(event["args"]["file_path"]).name: event["id"] for event in calls.values()
+        if event.get("name") == "read_file"
         and event["id"] in completed}
     assert set(required_files) <= reads.keys(), {"required_files": required_files, "successful_reads": reads}
     return {name: reads[name] for name in required_files}
@@ -490,13 +546,12 @@ def configure_v2_board_audit(state, profile, config, preflight, tool_namespace="
         runtime.retire()
 
 
-def v2_board_evidence(events, state, *, conversation_id, message_id, channel, nonce, child_probe, tool_namespace="collaboration"):
+def v2_board_evidence(events, state, *, conversation_id, message_id, channel, nonce, child_probe, child_transcript,
+        tool_namespace="collaboration"):
     import sqlite3
     from backend.agent.agent_identity import AgentPath
 
-    calls = [event for event in events if event.get("type") == "tool_call"
-        and event.get("conversation_id") == conversation_id and event.get("message_id") == message_id
-        and not event.get("streaming_announcement")]
+    calls = actual_tool_calls(events, conversation_id=conversation_id, message_id=message_id)
     turns = {event["turn_id"] for event in calls}
     assert len(turns) == 1, ("Main audit tool calls lost their turn identity", turns)
     turn_id = next(iter(turns))
@@ -524,27 +579,53 @@ def v2_board_evidence(events, state, *, conversation_id, message_id, channel, no
         rows = [dict(row) for row in db.execute("SELECT * FROM posts WHERE board=? AND channel=? ORDER BY seq", (conversation_id, channel))]
         creators = list(db.execute("SELECT author FROM channels WHERE board=? AND name=?", (conversation_id, channel)))
     assert creators and creators[0][0] == "/root", "Channel does not belong to the genuine root"
-    root = next(row for row in rows if row["author"] == "/root" and json.loads(row["payload"])["text"] == "ROOT_BOARD " + nonce)
-    assert root["request_id"].startswith(f"/root:{turn_id}:")
+    roots = [row for row in rows if row["author"] == "/root" and json.loads(row["payload"])["text"] == "ROOT_BOARD " + nonce
+        and any(call["name"] == "post" and call["args"].get("text") == "ROOT_BOARD " + nonce
+            and call["args"].get("channel_name") == channel and row["request_id"] == f"/root:{turn_id}:{call['id']}"
+            for call in completed)]
+    assert len(roots) == 1, "Original root board post has no unique successful native call"
+    root = roots[0]
+    selected_child = child_transcript["subagent_id"]
+    assert selected_child in children, "Board transcript belongs to another spawned actor"
+    child = children[selected_child]
+    path = AgentPath.parse(child["agent_path"]).logical_name
+    epochs = child_turn_evidence(events, calls, results, child_transcript,
+        conversation_id=conversation_id, message_id=message_id, parent_turn_id=turn_id)
+    initial_epoch = min(epochs)
+    assert epochs[initial_epoch]["start"]["parent_tool_call_id"] == child["parent_tool_call_id"], "Board child lost its original spawn"
     child_rows = []
-    for child_id, child in children.items():
-        path = AgentPath.parse(child["agent_path"]).logical_name
-        matches = [row for row in rows if row["author"] == path and row["root"] == root["id"]
-            and row["request_id"].startswith(f"{path}:{child['run_id']}:")]
-        initial = [row for row in matches if json.loads(row["payload"])["text"] == "CHILD_BOARD " + nonce]
-        followup = [row for row in matches if json.loads(row["payload"])["text"] == "CHILD_FOLLOWUP_BOARD " + nonce]
-        if initial and (followup or not child_probe):
-            child_rows = initial + followup
-            selected_child = child_id
-            break
-    assert child_rows, "No actual original child posted the initial/follow-up acknowledgements in the original board thread"
+    child_post_turns = {}
+    for label, text in (("initial", "CHILD_BOARD " + nonce), *([("followup", "CHILD_FOLLOWUP_BOARD " + nonce)] if child_probe else [])):
+        matches = []
+        for epoch, value in epochs.items():
+            if (label == "initial" and epoch != initial_epoch or label == "followup"
+                    and (epoch <= initial_epoch or value["parent_call"]["name"] != "followup_task")):
+                continue
+            for message in value["messages"]:
+                for block in message.get("blocks", []):
+                    if block.get("type") != "tool_call":
+                        continue
+                    call = block["record"]
+                    if (call.get("name") != "post" or call.get("status") != "success"
+                            or call.get("args", {}).get("text") != text or call["args"].get("thread_id") != root["id"]):
+                        continue
+                    matches.extend((row, message["turn_id"]) for row in rows if row["author"] == path and row["root"] == root["id"]
+                        and row["request_id"] == f"{path}:{message['turn_id']}:{call['id']}"
+                        and json.loads(row["payload"])["text"] == text)
+        assert matches, "No successful original child transcript post owns its actual board row and incarnation"
+        child_post_turns[label] = matches[0][1]
+        child_rows.extend(row for row, _turn in matches)
+    if child_probe:
+        assert child_post_turns["initial"] != child_post_turns["followup"], "Board follow-up reused the initial query turn"
     last_write = max(row["timestamp"] for row in child_rows) // 1000
+    latest = max(child_rows, key=lambda row: (row["timestamp"], row["seq"]))
     reads = [event for event in completed if event["name"] in {"read_post", "read_thread"}
         and event.get("started_at", 0) >= last_write and (event["args"].get("thread_id") == root["id"]
-            or event["args"].get("message_id") in {row["id"] for row in child_rows})]
+            or event["args"].get("message_id") == latest["id"])]
     assert reads, "Root did not successfully read the actual child's latest board result"
     return {"namespace": tool_namespace, "turn_id": turn_id, "channel": channel, "thread_id": root["id"], "child_id": selected_child,
-        "child_post_ids": [row["id"] for row in child_rows], "root_read_call_ids": [event["id"] for event in reads],
+        "child_post_ids": [row["id"] for row in child_rows], "child_post_turn_ids": child_post_turns,
+        "child_mailbox_epochs": sorted(epochs), "root_read_call_ids": [event["id"] for event in reads],
         "source_call_ids": {name: [event["id"] for event in completed if event["name"] == name] for name in sorted(required)}}
 
 
@@ -949,14 +1030,18 @@ async def exercise(args, config):
                 "nested_identity_matches": True}
             await client.command("conversation.switch", conversation_id=a)
             await client.command("session.sync", last_seq=client.last_seq)
-            child_messages = None
-            if args.child_probe:
-                assert "child_probe.py" in process_audit.probes, "No original child probe process was observed"
-                child_id = process_audit.probes["child_probe.py"]["identity"]["owner_task_id"]
-                child_transcript = await client.command("subagent.transcript", conversation_id=a, subagent_id=child_id)
-                assert child_transcript["data"]["conversation_id"] == a and child_transcript["data"]["subagent_id"] == child_id
-                child_messages = child_transcript["data"]["messages"]
-                (out / "child-transcript.json").write_text(json.dumps(child_transcript["data"], ensure_ascii=False), encoding="utf-8")
+            child_transcript = None
+            if args.child_probe or args.multi_agent_v2_board:
+                if args.child_probe:
+                    assert "child_probe.py" in process_audit.probes, "No original child probe process was observed"
+                    child_id = process_audit.probes["child_probe.py"]["identity"]["owner_task_id"]
+                else:
+                    child_id = next(event["subagent_id"] for event in client.events if event.get("type") == "subagent.start"
+                        and event.get("conversation_id") == a and event.get("parent_message_id") == messages["a"])
+                transcript_result = await client.command("subagent.transcript", conversation_id=a, subagent_id=child_id)
+                child_transcript = transcript_result["data"]
+                assert child_transcript["conversation_id"] == a and child_transcript["subagent_id"] == child_id
+                (out / "child-transcript.json").write_text(json.dumps(child_transcript, ensure_ascii=False), encoding="utf-8")
             await client.close()
             assert (workspace / "verify.py").read_text(encoding="utf-8") == VERIFIER, "Oracle was modified"
             verified = json.loads((workspace / "verification.json").read_text(encoding="utf-8"))
@@ -965,15 +1050,12 @@ async def exercise(args, config):
             repository = ConversationRepository(data / "conversations")
             records = {key: repository.get_conversation(identity) for key, identity in (("a", a), ("b", b))}
             by_id = {message["id"]: message for record in records.values() for message in record.transcript}
-            main_turns = {event["turn_id"] for event in client.events if event.get("type") == "tool_call"
-                and event.get("conversation_id") == a and event.get("message_id") == messages["a"]}
+            main_turns = {event["turn_id"] for event in actual_tool_calls(client.events, conversation_id=a, message_id=messages["a"])}
             assert len(main_turns) == 1, "Main probe lost its original turn"
-            child_start = next((event for event in client.events if args.child_probe and event.get("type") == "subagent.start"
-                and event.get("subagent_id") == child_id), None)
             result["probe_processes"] = process_audit.evidence(conversation_id=a, main_turn_id=next(iter(main_turns)),
-                child_id=child_id if args.child_probe else None, child_turn_id=child_start["run_id"] if child_start is not None else None)
+                child_id=child_id if args.child_probe else None)
             result["probe_handle_evidence"] = original_probe_handle_evidence(result["probe_processes"], client.events,
-                conversation_id=a, message_id=messages["a"], child_messages=child_messages)
+                conversation_id=a, message_id=messages["a"], child_transcript=child_transcript if args.child_probe else None)
             assert verified["pid"] == result["probe_processes"]["verify.py"]["pid"]
             main_progress = [json.loads(line) for line in (workspace / "progress.jsonl").read_text(encoding="utf-8").splitlines()]
             assert {row["pid"] for row in main_progress} == {verified["pid"]}
@@ -997,16 +1079,14 @@ async def exercise(args, config):
             assert reviewers and reviewers <= completed_reviewers, (reviewers, completed_reviewers)
             if args.multi_agent_v2_board:
                 result["v2_board"] = v2_board_evidence(client.events, state, conversation_id=a, message_id=messages["a"],
-                    channel=board_channel, nonce=board_nonce, child_probe=args.child_probe, tool_namespace=args.tool_namespace)
+                    channel=board_channel, nonce=board_nonce, child_probe=args.child_probe,
+                    child_transcript=child_transcript, tool_namespace=args.tool_namespace)
             if args.child_probe:
                 assert (workspace / "child_probe.py").read_text(encoding="utf-8") == CHILD_PROBE
                 probe = [json.loads(line) for line in (workspace / "child-progress.jsonl").read_text(encoding="utf-8").splitlines()]
                 child_result = json.loads((workspace / "child-result.json").read_text(encoding="utf-8"))
-                first_done = next(event for event in client.events if event.get("type") == "subagent.done"
-                    and event.get("subagent_id") == child_id and event.get("status") == "completed")
-                finished_at = datetime.fromisoformat(first_done["timestamp"]).timestamp()
-                epochs = {event["mailbox_epoch"] for event in client.events if event.get("type") == "subagent.done"
-                    and event.get("subagent_id") == first_done["subagent_id"] and event.get("status") == "completed"}
+                finished_at = result["probe_handle_evidence"]["initial_final_at"]
+                epochs = result["probe_handle_evidence"]["child_mailbox_epochs"]
                 original_pid = result["probe_processes"]["child_probe.py"]["pid"]
                 assert len(epochs) >= 2 and {row["pid"] for row in probe} == {original_pid} and child_result["pid"] == original_pid
                 assert probe[0]["timestamp"] < finished_at < probe[-1]["timestamp"] - 5

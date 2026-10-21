@@ -245,11 +245,11 @@ export const ConversationsTab = ({
   const { sections, mutate: mutateSections } = useSidebarSections();
   const sectionByThread = useMemo(() => new Map(sections.flatMap(section => section.item_keys.filter(key => key.startsWith("thread:")).map(key => [key.slice(7), section.id] as const))), [sections]);
   const sectionProjectKeys = useMemo(() => new Set(sections.flatMap(section => section.item_keys.filter(key => key.startsWith("project:")).map(key => workspaceGroupIdentity(key.slice(8))))), [sections]);
-  const sectionAction = async (path: string, body?: unknown, method?: string) => {
+  const sectionAction = useCallback(async (path: string, body?: unknown, method?: string) => {
     try { return await mutateSections(path, body, method); }
     catch (error) { pushToast(String(error), "error"); return undefined; }
-  };
-  const editSection = async (section?: SidebarSection, threadId?: string) => {
+  }, [mutateSections]);
+  const editSection = useCallback(async (section?: SidebarSection, threadId?: string) => {
     const name = await showPrompt({ title: tr(section ? "编辑分组" : "新建分组"), message: tr("按你的方式组织聊天和项目"),
       defaultValue: section?.name ?? "", placeholder: tr("分组名称"), allowEmpty: !section,
       confirmLabel: tr(section ? "保存" : "创建分组") });
@@ -260,8 +260,11 @@ export const ConversationsTab = ({
           ? { after_section_id: sectionByThread.get(threadId) } : {}) }, section ? "PATCH" : "POST");
       if (threadId) await mutateSections("/sections/move", { kind: "thread", id: threadId, section_id: result.section.id });
     } catch (error) { pushToast(String(error), "error"); }
-  };
-  const moveToSection = (id: string, sectionId: string | null) => { void sectionAction("/sections/move", { kind: "thread", id, section_id: sectionId }); };
+  }, [mutateSections, sectionByThread, tr]);
+  const moveToSection = useCallback((id: string, sectionId: string | null) => {
+    void sectionAction("/sections/move", { kind: "thread", id, section_id: sectionId });
+  }, [sectionAction]);
+  const createSectionForThread = useCallback((id: string) => { void editSection(undefined, id); }, [editSection]);
 
   useEffect(() => {
     if (isConnected) wsOutbox.sendClientCommand({ type: "workspace.recent" });
@@ -682,7 +685,7 @@ export const ConversationsTab = ({
       onPin={setPinned} onReadState={setReadState} onProjectChange={setProject}
       projectOptions={projectOptions}
       sectionOptions={sections} currentSection={sectionByThread.get(conversation.id)} onSectionChange={moveToSection}
-      onNewSection={id => { void editSection(undefined, id); }}
+      onNewSection={createSectionForThread}
       pullRequest={pullRequestStatuses[conversation.id]?.pr}
       currentProject={conversationWorkspacePath(conversation) ? workspaceGroupIdentity(conversationWorkspacePath(conversation)) : ""}
       treeDepth={conversation.treeDepth}
@@ -704,6 +707,7 @@ export const ConversationsTab = ({
     renamingRow,
     startRename,
     setPinned, setReadState, setProject, projectOptions, sections, sectionByThread, pullRequestStatuses,
+    moveToSection, createSectionForThread,
   ]);
 
   const selectSortMode = async (mode: "manual" | "updated_at") => {

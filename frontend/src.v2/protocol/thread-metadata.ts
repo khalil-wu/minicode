@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "./api";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useAppStore } from "../stores";
@@ -31,8 +31,8 @@ export function useSidebarSections() {
       .catch(error => { if (!controller.signal.aborted) pushToast(String(error), "error"); });
     return () => { controller.abort(); window.removeEventListener(SIDEBAR_SECTIONS_EVENT, apply); };
   }, [connected]);
-  const mutate = async <T,>(path: string, body?: unknown, method = "POST") => {
+  const mutate = useCallback(async <T,>(path: string, body?: unknown, method = "POST") => {
     return threadMetadataRequest<T>(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  };
+  }, []);
   return { sections, mutate };
 }

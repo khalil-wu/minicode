@@ -79,7 +79,8 @@ async def test_login_and_model_modifier_publish_exact_auth_facts_and_budget(chat
 def test_provider_restrictions_are_real_declared_facts(field):
     runtime = ModelRuntime(provider_configs={})
     runtime._auth_storage = _FakeAuthStorage()
-    runtime._model_configs["owned"] = {field: "declared", "supports_codex_backend_routes": True, "requires_openai_auth": True}
+    declaration = {"region": "us-east-1"} if field == "aws" else "declared"
+    runtime._model_configs["owned"] = {field: declaration, "supports_codex_backend_routes": True, "requires_openai_auth": True}
     auth = runtime.token_budget_auth_context("owned")
     assert getattr(auth, "has_" + field)
     assert auth.auth_mode is None and auth.account_plan_type is None

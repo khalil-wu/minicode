@@ -2464,10 +2464,10 @@ class OpenAIAdapter(LLMAdapter):
         # rejection is paid once per adapter, not on every turn.
         self._chat_unsupported_fields: set[str] = set()
         if http_client is None:
-            request_auth = None
+            http_options: dict[str, Any] = {"trust_env": False}
             if settings.aws is not None:
                 from backend.llm.bedrock import BedrockRequestAuth
-                request_auth = BedrockRequestAuth(settings.aws, api_key=settings.api_key,
+                http_options["auth"] = BedrockRequestAuth(settings.aws, api_key=settings.api_key,
                     proxy_mode=settings.proxy_mode, base_url=settings.base_url,
                     explicit_authorization=any(key.lower() == "authorization" for key in self._default_headers))
             proxy_url = _proxy_url_for_base_url(
@@ -2475,9 +2475,8 @@ class OpenAIAdapter(LLMAdapter):
                 str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
             )
             if proxy_url:
-                http_client = httpx.AsyncClient(proxy=proxy_url, trust_env=False, auth=request_auth)
-            else:
-                http_client = httpx.AsyncClient(trust_env=False, auth=request_auth)
+                http_options["proxy"] = proxy_url
+            http_client = httpx.AsyncClient(**http_options)
             self._http_client = http_client
 
     def configure_content_item_kinds(self, enabled: bool) -> None:

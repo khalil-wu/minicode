@@ -82,6 +82,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(view.webContents.getURL(), url);
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 1);
       process.stdout.write(`Real same-page compositor capture ${result.width}x${result.height}, ${buffer.length} bytes; hidden wait cancellation and ownership passed.\n`);
+      process.stdout.write("[capture] submitting original native POST form\n");
       await view.webContents.executeJavaScript(`{
         const form = document.createElement('form'); form.action = '/native-post'; form.method = 'POST'; form.target = '_blank'; form.rel = 'opener';
         const input = document.createElement('input'); input.name = 'original'; input.value = 'native value'; form.append(input);
@@ -107,6 +108,7 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         assert.equal(contents, view.webContents);
         item.once("done", (_done, state) => resolve({ item, state }));
       }));
+      process.stdout.write("[capture] exact native HTTP download authorized; starting original anchor\n");
       const [, downloaded] = await Promise.all([manager.executeControlCommand({ action: "evaluate", target_id: target.id, conversation_id: "capture-owner", window_instance_id: "fixture-window",
         expression: `(() => { const link=document.createElement('a'); link.href=${JSON.stringify(downloadUrl)}; link.download='original-download.txt'; document.body.append(link); link.click(); return true; })()` }, { agentControl }), downloadDone]);
       assert.equal(downloaded.state, "completed");
@@ -114,18 +116,19 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       const ownedDownloads = await manager.executeControlCommand({ action: "list_downloads", conversation_id: "capture-owner", window_instance_id: "fixture-window" });
       assert.equal(ownedDownloads.value.length, 1); assert.equal(ownedDownloads.value[0].isUserInitiated, false);
       assert.equal(ownedDownloads.value[0].path, downloaded.item.getSavePath());
+      process.stdout.write("[capture] original native DownloadItem completed with exact URL permission, bytes, save path and owner\n");
       await manager.executeControlCommand({ action: "set_blob_download_origin", target_id: target.id, conversation_id: "capture-owner",
         window_instance_id: "fixture-window", origin: new URL(url).origin }, { agentControl });
       const blobDone = new Promise((resolve, reject) => view.webContents.session.once("will-download", (event, item) => {
         if (event.defaultPrevented) { reject(new Error("The original main-frame blob event did not admit the native download")); return; }
         item.once("done", (_done, state) => resolve({ item, state }));
       }));
+      process.stdout.write("[capture] original main-frame blob origin authorized; starting dynamic blob anchor\n");
       const [, blob] = await Promise.all([manager.executeControlCommand({ action: "evaluate", target_id: target.id, conversation_id: "capture-owner", window_instance_id: "fixture-window",
         expression: "(() => { const link=document.createElement('a'); link.href=URL.createObjectURL(new Blob(['original main-frame blob bytes'],{type:'text/plain'})); link.download='original-blob.txt'; document.body.append(link); link.click(); return true; })()" }, { agentControl }), blobDone]);
       assert.equal(blob.state, "completed"); assert.equal(fs.readFileSync(blob.item.getSavePath(), "utf8"), "original main-frame blob bytes");
       assert.equal(manager.releaseAgentControl({ conversation_id: "capture-owner", window_instance_id: "fixture-window", control: agentControl }), 1);
       assert.equal(view.webContents.debugger.isAttached(), false);
-      process.stdout.write("[capture] original native DownloadItem completed with exact URL permission, bytes, save path and owner\n");
       process.stdout.write("[capture] original main-frame Page.downloadWillBegin produced and consumed the dynamic blob permission\n");
       manager.disposeAll(); window.destroy(); server.close(); app.exit(0);
     } catch (error) {
@@ -136,6 +139,16 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
 } else {
   const { test } = require("node:test");
   const { spawn } = require("node:child_process");
+  const { once } = require("node:events");
+  async function waitForClose(closed, milliseconds) {
+    let timer;
+    try {
+      return await Promise.race([
+        closed,
+        new Promise(resolve => { timer = setTimeout(() => resolve({ timedOut: true }), milliseconds); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
   test("agent browser captures the same presented page's real compositor frame", { timeout: 25000 }, async () => {
     const tempRoot = path.resolve(os.tmpdir());
     const prefix = "minicode-browser-capture-e2e-";
@@ -144,19 +157,41 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
     delete env.ELECTRON_RUN_AS_NODE;
     const args = process.platform === "win32" ? [] : ["--no-sandbox", "--disable-gpu"];
     const child = spawn(require("electron"), [...args, __filename], { cwd: __dirname, env, windowsHide: true });
+    const closed = once(child, "close").then(([code, signal]) => ({ code, signal, timedOut: false }));
     let output = "";
-    child.stdout.on("data", (chunk) => { output += chunk; });
-    child.stderr.on("data", (chunk) => { output += chunk; });
-    const timeout = setTimeout(() => child.kill(), 20000);
+    child.stdout.on("data", (chunk) => { output += chunk; process.stdout.write(chunk); });
+    child.stderr.on("data", (chunk) => { output += chunk; process.stderr.write(chunk); });
+    let timeout;
+    let exit;
+    let passed = false;
     try {
-      const code = await new Promise((resolve, reject) => { child.once("exit", resolve); child.once("error", reject); });
-      assert.equal(code, 0, output);
-      process.stdout.write(output);
+      exit = await Promise.race([closed, new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("Electron browser capture timed out after 20000ms")), 20000);
+      })]);
+      assert.equal(exit.code, 0, output);
+      assert.equal(exit.signal, null, output);
+      passed = true;
+    } catch (error) {
+      process.stderr.write(`${error.stack || error}\n`);
+      throw error;
     } finally {
       clearTimeout(timeout);
-      assert.equal(path.dirname(path.resolve(profile)), tempRoot);
-      assert.ok(path.basename(profile).startsWith(prefix));
-      fs.rmSync(profile, { recursive: true, force: true });
+      if (!exit) {
+        child.kill("SIGTERM");
+        exit = await waitForClose(closed, 1000);
+        if (exit.timedOut) {
+          child.kill("SIGKILL");
+          exit = await waitForClose(closed, 1000);
+        }
+      }
+      if (!passed) process.stderr.write(`[capture] failed profile retained: ${profile}\n`);
+      assert.equal(exit.timedOut, false,
+        `Owned Electron process or its stdio are still open; profile retained: ${profile}`);
+      if (passed) {
+        assert.equal(path.dirname(path.resolve(profile)), tempRoot);
+        assert.ok(path.basename(profile).startsWith(prefix));
+        fs.rmSync(profile, { recursive: true, force: true });
+      }
     }
   });
 }

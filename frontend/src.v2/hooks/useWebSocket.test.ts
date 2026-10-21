@@ -496,16 +496,22 @@ describe("useWebSocket server sequence tracking", () => {
       } as ServerEvent;
       const next = {
         type: "command.result",
+        command: "conversation.switch",
+        level: "success",
+        message: "Conversation switched",
         conversation_id: "conv-1",
         event_id: "durable-137",
         seq: 137,
         previous_replay_seq: 5,
-      } as ServerEvent;
+      } satisfies ServerEvent;
 
       commitProcessedInboundEvent(first);
       commitProcessedInboundEvent(transient);
       expect(getLastReceivedServerSeqForTests()).toBe(5);
+      expect(shouldAdvanceReplayCursor(next)).toBe(true);
       expect(() => assertInboundReplayCursorContinuity(next)).not.toThrow();
+      commitProcessedInboundEvent(next);
+      expect(getLastReceivedServerSeqForTests()).toBe(137);
     },
   );
 

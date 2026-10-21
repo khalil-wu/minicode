@@ -107,9 +107,32 @@ it("does not overwrite a committed websocket section projection with an older in
   let complete!: (value: Response) => void;
   mocks.fetch.mockImplementationOnce(() => new Promise<Response>(resolve => { complete = resolve; }));
   const hook = renderHook(() => useSidebarSections());
+  const mutate = hook.result.current.mutate;
   await waitFor(() => expect(mocks.fetch).toHaveBeenCalledOnce());
   const latest = { ...section(), name: "Committed Source name" };
   act(() => window.dispatchEvent(new CustomEvent(SIDEBAR_SECTIONS_EVENT, { detail: [latest] })));
   await act(async () => complete(response({ sections: [section()] })));
   expect(hook.result.current.sections).toEqual([latest]);
+  hook.rerender();
+  expect(hook.result.current.mutate).toBe(mutate);
+});
+
+it("creates a row's new section after its current projected section", async () => {
+  render(<ConversationsTab conversationId="direct" onSetConfirmDialog={vi.fn()} />);
+  await screen.findByRole("region", { name: "Source section" });
+  const current = { ...section(["thread:direct"]), id: "current-section", name: "Current section" };
+  act(() => window.dispatchEvent(new CustomEvent(SIDEBAR_SECTIONS_EVENT, { detail: [current] })));
+  const group = await screen.findByRole("region", { name: "Current section" });
+  mocks.prompt.mockResolvedValue("Fresh group");
+  fireEvent.click(within(group).getByRole("button", { name: "会话操作" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "移动到分组" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "新建分组…" }));
+  await waitFor(() => expect(mocks.fetch.mock.calls.some(([url, options]) => url.pathname === "/api/thread-metadata/sections/move" && options?.method === "POST")).toBe(true));
+  const [createUrl, createOptions] = mocks.fetch.mock.calls.find(([url, options]) => url.pathname === "/api/thread-metadata/sections" && options?.method === "POST")!;
+  expect(createUrl.searchParams.get("session_id")).toBe("original-window-session");
+  expect(JSON.parse(createOptions.body)).toEqual({ name: "Fresh group", after_section_id: "current-section" });
+  const [moveUrl, moveOptions] = mocks.fetch.mock.calls.find(([url, options]) => url.pathname === "/api/thread-metadata/sections/move" && options?.method === "POST")!;
+  expect(moveUrl.searchParams.get("session_id")).toBe("original-window-session");
+  expect(JSON.parse(moveOptions.body)).toEqual({ kind: "thread", id: "direct", section_id: "created-section" });
+  expect(useAppStore.getState().draft).toBe("Keep the active draft");
 });

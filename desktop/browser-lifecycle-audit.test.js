@@ -1211,3 +1211,87 @@ test("native guest external link clicks match Command on macOS without substitut
   assert.equal(h.manager.handleLinkClick({ sender: contents, senderFrame: contents.mainFrame }, request), true);
   assert.equal(h.manager.handleLinkClick({ sender: contents, senderFrame: contents.mainFrame }, { ...request, modifiers: { ...request.modifiers, ctrlKey: true, metaKey: false } }), false);
 });
+
+function captureParentHarness(script, withholdTermination = false) {
+  const os = require("node:os");
+  const { spawn } = require("node:child_process");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-capture-parent-audit-"));
+  const signals = [];
+  let run, options, profile, child, kill, closed, resolveReady;
+  let stdout = "", stderr = "";
+  const ready = new Promise(resolve => { resolveReady = resolve; });
+  const write = (channel, chunk) => {
+    if (channel === "stdout") stdout += chunk; else stderr += chunk;
+    if (stdout.includes("[capture] controlled child ready") && stderr.includes("controlled child diagnostic")) resolveReady();
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "browser-capture.test.js"), "utf8"), {
+    __dirname, __filename: path.join(__dirname, "browser-capture.test.js"), setTimeout, clearTimeout,
+    process: { env: {}, platform: process.platform, stdout: { write: chunk => write("stdout", chunk) }, stderr: { write: chunk => write("stderr", chunk) } },
+    require(name) {
+      if (name === "node:test") return { test(_name, value, callback) { options = value; run = callback; } };
+      if (name === "electron") return "unused-electron-fixture";
+      if (name === "node:os") return { ...os, tmpdir: () => root };
+      if (name === "node:fs") return { ...fs, mkdtempSync(prefix) { profile = fs.mkdtempSync(prefix); return profile; } };
+      if (name === "node:child_process") return { spawn() {
+        child = spawn(process.execPath, ["-e", script], { cwd: __dirname, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+        kill = child.kill.bind(child);
+        child.kill = signal => { signals.push(signal); return withholdTermination && signal === "SIGTERM" ? true : kill(signal); };
+        closed = require("node:events").once(child, "close");
+        return child;
+      } };
+      return require(name);
+    },
+  }, { filename: "browser-capture.test.js" });
+  return { run: () => run(), ready, signals, get options() { return options; }, get child() { return child; },
+    get profile() { return profile; }, get stdout() { return stdout; }, get stderr() { return stderr; },
+    async cleanup() {
+      if (child && child.exitCode === null && child.signalCode === null) kill("SIGKILL");
+      if (closed) await closed;
+      assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+      assert.ok(path.basename(root).startsWith("minicode-capture-parent-audit-"));
+      fs.rmSync(root, { recursive: true, force: true });
+    },
+  };
+}
+
+const captureChildOutput = "process.stdout.write('[capture] controlled child ready\\n'); process.stderr.write('controlled child diagnostic\\n'); ";
+
+test("capture fixture forwards its real child diagnostics live and waits for successful stdio close", async () => {
+  const h = captureParentHarness(captureChildOutput + "setTimeout(() => process.exit(0), 100);");
+  try {
+    const running = h.run();
+    await h.ready;
+    assert.match(h.stdout, /controlled child ready/);
+    assert.match(h.stderr, /controlled child diagnostic/);
+    assert.equal(h.child.exitCode, null);
+    await running;
+    assert.equal(h.options.timeout, 25000);
+    assert.equal(fs.existsSync(h.profile), false);
+    assert.deepEqual(h.signals, []);
+  } finally { await h.cleanup(); }
+});
+
+test("capture fixture preserves the original failure and profile after the owned child closes", async () => {
+  const h = captureParentHarness(captureChildOutput + "process.stderr.write('native fixture failure\\n'); process.exit(1);");
+  try {
+    await assert.rejects(h.run(), /native fixture failure/);
+    assert.equal(fs.existsSync(h.profile), true);
+    assert.ok(h.stderr.includes(`[capture] failed profile retained: ${h.profile}`));
+    assert.deepEqual(h.signals, []);
+  } finally { await h.cleanup(); }
+});
+
+test("capture fixture deadline reaps its original child when termination produces no close", { timeout: 25000 }, async () => {
+  const h = captureParentHarness(captureChildOutput + "setInterval(() => {}, 1000);", true);
+  try {
+    const running = h.run();
+    await h.ready;
+    await assert.rejects(running, /Electron browser capture timed out after 20000ms/);
+    assert.deepEqual(h.signals, ["SIGTERM", "SIGKILL"]);
+    assert.equal(h.child.signalCode, "SIGKILL");
+    assert.equal(h.child.stdout.closed, true);
+    assert.equal(h.child.stderr.closed, true);
+    assert.equal(fs.existsSync(h.profile), true);
+    assert.ok(h.stderr.includes(`[capture] failed profile retained: ${h.profile}`));
+  } finally { await h.cleanup(); }
+});

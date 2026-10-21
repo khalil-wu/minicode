@@ -167,46 +167,133 @@ def board_case(tmp_path, tool_namespace="collaboration"):
     with sqlite3.connect(path) as db:
         db.executescript("CREATE TABLE channels(board,name,author); CREATE TABLE posts(seq,board,id,channel,root,author,payload,request_id,timestamp);")
         db.execute("INSERT INTO channels VALUES('conversation','audit','/root')")
-        for seq, identity, author, text, turn in [(1, "root-post", "/root", "ROOT_BOARD token", "root-turn"),
-                (2, "child-post", "/root/reviewer", "CHILD_BOARD token", "child-turn"),
-                (3, "child-followup", "/root/reviewer", "CHILD_FOLLOWUP_BOARD token", "child-turn")]:
+        for seq, identity, author, text, turn, call_id in [(1, "root-post", "/root", "ROOT_BOARD token", "root-turn", "post"),
+                (2, "child-post", "/root/reviewer", "CHILD_BOARD token", "child-query-initial", "child-post-call"),
+                (3, "child-followup", "/root/reviewer", "CHILD_FOLLOWUP_BOARD token", "child-query-followup", "child-followup-call")]:
             db.execute("INSERT INTO posts VALUES(?,?,?,?,?,?,?,?,?)", (seq, "conversation", identity, "audit", "root-post", author,
-                json.dumps({"text": text}), f"{author}:{turn}:call-{seq}", seq * 1_000_000))
+                json.dumps({"text": text}), f"{author}:{turn}:{call_id}", seq * 1_000_000))
     events = []
     for name in ("create_channel", "post", "spawn_agent", "followup_task", "read_thread"):
-        events += [{"type": "tool_call", "id": name, "name": name, "conversation_id": "conversation", "message_id": "answer",
-            "turn_id": "root-turn", "native_namespace": tool_namespace, "args": {"thread_id": "root-post"}, "started_at": 4000},
-            {"type": "tool_result", "id": name, "conversation_id": "conversation", "message_id": "answer", "turn_id": "root-turn", "is_error": False}]
-    events.append({"type": "subagent.start", "subagent_id": "child-turn", "run_id": "child-turn", "conversation_id": "conversation",
-        "parent_message_id": "answer", "parent_tool_call_id": "spawn_agent", "parent_run_id": "root-turn", "agent_path": "root-turn/reviewer"})
-    return events, path
+        args = {"create_channel": {"channel_name": "audit"}, "post": {"channel_name": "audit", "text": "ROOT_BOARD token"},
+            "spawn_agent": {"task_name": "reviewer"}, "followup_task": {"target": "/root/reviewer"},
+            "read_thread": {"thread_id": "root-post"}}[name]
+        call = {"type": "tool_call", "id": name, "name": name, "conversation_id": "conversation", "message_id": "answer",
+            "turn_id": "root-turn", "task_id": "root-task", "native_namespace": tool_namespace, "args": args,
+            "status": "running", "streaming_announcement": False, "started_at": 4000}
+        preview = {**call, "status": "pending"}
+        preview.pop("streaming_announcement")
+        events += [{**call, "args": {}, "status": "pending", "streaming_announcement": True}, preview, call,
+            {"type": "tool_result", "id": name, "conversation_id": "conversation", "message_id": "answer",
+                "task_id": "root-task", "turn_id": "root-turn", "status": "success", "is_error": False}]
+    for epoch, started, completed, parent in ((1, 1500, 2500, "spawn_agent"), (2, 2600, 3500, "followup_task")):
+        scope = {"subagent_id": "subagent-reviewer", "run_id": "subagent-reviewer", "task_id": "subagent-reviewer",
+            "conversation_id": "conversation", "parent_message_id": "answer", "parent_tool_call_id": parent,
+            "parent_run_id": "root-turn", "agent_path": "root-turn/reviewer", "mailbox_epoch": epoch, "started_at": started}
+        events.extend([{**scope, "type": "subagent.start", "status": "running"},
+            {**scope, "type": "subagent.done", "status": "completed", "completed_at": completed}])
+    transcript = {"subagent_id": "subagent-reviewer", "conversation_id": "conversation", "agent_path": "root-turn/reviewer",
+        "mailbox_epoch": 2, "seq": 60, "messages": []}
+    for turn, timestamp, completed, call_id, text in (("child-query-initial", 1600, 2400, "child-post-call", "CHILD_BOARD token"),
+            ("child-query-followup", 2700, 3400, "child-followup-call", "CHILD_FOLLOWUP_BOARD token")):
+        transcript["messages"].append({"id": "subagent-turn-" + turn, "role": "assistant", "turn_id": turn,
+            "timestamp": timestamp, "completed_at": completed, "terminal_status": "completed", "blocks": [{"type": "tool_call",
+                "record": {"id": call_id, "name": "post", "status": "success", "args": {"thread_id": "root-post", "text": text}}}]})
+    return events, path, transcript
 
 
-@pytest.mark.parametrize("fault", [None, "wrong-namespace", "wrong-read-namespace", "failed-spawn", "wrong-parent-turn", "wrong-result-message", "stale-read", "legacy"])
+@pytest.mark.parametrize("fault", [None, "wrong-namespace", "wrong-read-namespace", "failed-spawn", "wrong-parent-turn",
+    "wrong-result-message", "stale-read", "legacy", "preview-only", "root-post-args", "root-post-call-id",
+    "child-actor-as-query-turn", "followup-initial-query-turn", "child-post-call-id", "wrong-child-author", "wrong-child-board",
+    "wrong-initial-transcript-turn", "wrong-followup-transcript-turn", "failed-child-post", "wrong-child-post-thread",
+    "wrong-child-post-text", "wrong-child-actor", "wrong-child-path", "wrong-child-final-epoch", "wrong-followup-parent",
+    "wrong-followup-turn", "read-old-post"])
 @pytest.mark.parametrize("tool_namespace", ["collaboration", "agents"])
 def test_v2_board_acceptance_requires_actual_success_original_tree_turn_and_latest_child_result(tmp_path, fault, tool_namespace):
-    events, _path = board_case(tmp_path, tool_namespace)
+    events, path, transcript = board_case(tmp_path, tool_namespace)
+    def call(name):
+        return next(event for event in events if event["type"] == "tool_call" and event["id"] == name
+            and event.get("streaming_announcement") is False)
+    def result(name):
+        return next(event for event in events if event["type"] == "tool_result" and event["id"] == name)
+    def lifecycle(kind, epoch):
+        return next(event for event in events if event["type"] == kind and event["mailbox_epoch"] == epoch)
+    def update_row(identity, column, value):
+        with sqlite3.connect(path) as db:
+            db.execute(f"UPDATE posts SET {column}=? WHERE id=?", (value, identity))
     if fault == "wrong-namespace":
-        events[0]["native_namespace"] = "functions"
+        call("create_channel")["native_namespace"] = "functions"
     elif fault == "wrong-read-namespace":
-        events[8]["native_namespace"] = "functions"
+        call("read_thread")["native_namespace"] = "functions"
     elif fault == "failed-spawn":
-        events[5]["is_error"] = True
+        result("spawn_agent")["is_error"] = True
     elif fault == "wrong-parent-turn":
-        events[-1]["parent_run_id"] = "different"
+        lifecycle("subagent.start", 1)["parent_run_id"] = "different"
     elif fault == "wrong-result-message":
-        events[1]["message_id"] = "different"
+        result("create_channel")["message_id"] = "different"
     elif fault == "stale-read":
-        events[8]["started_at"] = 1000
+        call("read_thread")["started_at"] = 1000
     elif fault == "legacy":
-        events[8]["name"] = "task"
+        call("read_thread")["name"] = "task"
+    elif fault == "preview-only":
+        events.remove(call("create_channel"))
+    elif fault == "root-post-args":
+        call("post")["args"]["text"] = "different text"
+    elif fault == "root-post-call-id":
+        update_row("root-post", "request_id", "/root:root-turn:invented-call")
+    elif fault == "child-actor-as-query-turn":
+        update_row("child-post", "request_id", "/root/reviewer:subagent-reviewer:child-post-call")
+    elif fault == "followup-initial-query-turn":
+        update_row("child-followup", "request_id", "/root/reviewer:child-query-initial:child-followup-call")
+    elif fault == "child-post-call-id":
+        update_row("child-post", "request_id", "/root/reviewer:child-query-initial:invented-call")
+    elif fault == "wrong-child-author":
+        update_row("child-followup", "author", "/root/another-reviewer")
+    elif fault == "wrong-child-board":
+        update_row("child-followup", "board", "another-conversation")
+    elif fault == "wrong-initial-transcript-turn":
+        transcript["messages"][0]["turn_id"] = "another-query"
+    elif fault in {"wrong-followup-transcript-turn", "wrong-followup-turn"}:
+        transcript["messages"][1]["turn_id"] = "another-query" if fault.endswith("transcript-turn") else "child-query-initial"
+    elif fault == "failed-child-post":
+        transcript["messages"][1]["blocks"][0]["record"]["status"] = "failed"
+    elif fault == "wrong-child-post-thread":
+        transcript["messages"][1]["blocks"][0]["record"]["args"]["thread_id"] = "another-thread"
+    elif fault == "wrong-child-post-text":
+        transcript["messages"][1]["blocks"][0]["record"]["args"]["text"] = "different text"
+    elif fault == "wrong-child-actor":
+        transcript["subagent_id"] = "another-reviewer"
+    elif fault == "wrong-child-path":
+        transcript["agent_path"] = "another-root/reviewer"
+    elif fault == "wrong-child-final-epoch":
+        lifecycle("subagent.done", 2)["mailbox_epoch"] = 3
+    elif fault == "wrong-followup-parent":
+        lifecycle("subagent.done", 2)["parent_tool_call_id"] = "spawn_agent"
+    elif fault == "read-old-post":
+        call("read_thread").update(name="read_post", args={"message_id": "child-post"})
     if fault:
         with pytest.raises(AssertionError):
-            v2_board_evidence(events, tmp_path, conversation_id="conversation", message_id="answer", channel="audit", nonce="token", child_probe=True, tool_namespace=tool_namespace)
+            v2_board_evidence(events, tmp_path, conversation_id="conversation", message_id="answer", channel="audit", nonce="token",
+                child_probe=True, child_transcript=transcript, tool_namespace=tool_namespace)
     else:
-        evidence = v2_board_evidence(events, tmp_path, conversation_id="conversation", message_id="answer", channel="audit", nonce="token", child_probe=True, tool_namespace=tool_namespace)
+        evidence = v2_board_evidence(events, tmp_path, conversation_id="conversation", message_id="answer", channel="audit", nonce="token",
+            child_probe=True, child_transcript=transcript, tool_namespace=tool_namespace)
         assert evidence["namespace"] == tool_namespace
-        assert evidence["child_id"] == "child-turn" and evidence["child_post_ids"] == ["child-post", "child-followup"]
+        assert evidence["child_id"] == "subagent-reviewer" and evidence["child_post_ids"] == ["child-post", "child-followup"]
+        assert evidence["child_post_turn_ids"] == {"initial": "child-query-initial", "followup": "child-query-followup"}
+        assert evidence["child_mailbox_epochs"] == [1, 2]
+        assert all(len(ids) == 1 for ids in evidence["source_call_ids"].values())
+
+
+def test_v2_board_without_child_probe_binds_the_initial_transcript_and_latest_post(tmp_path):
+    events, path, transcript = board_case(tmp_path)
+    events = [event for event in events if event.get("mailbox_epoch") != 2 and event.get("id") != "followup_task"]
+    transcript["messages"].pop()
+    transcript["mailbox_epoch"] = 1
+    with sqlite3.connect(path) as db:
+        db.execute("DELETE FROM posts WHERE id='child-followup'")
+    evidence = v2_board_evidence(events, tmp_path, conversation_id="conversation", message_id="answer", channel="audit", nonce="token",
+        child_probe=False, child_transcript=transcript)
+    assert evidence["child_post_ids"] == ["child-post"] and evidence["child_mailbox_epochs"] == [1]
 
 
 @pytest.mark.parametrize("explicit_namespace", [None, "agents"])

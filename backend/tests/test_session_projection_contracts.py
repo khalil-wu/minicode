@@ -288,6 +288,7 @@ def _conversation_list_session(versioned_listing: Any) -> WebSocketSession:
         list_conversations_with_revision=lambda: versioned_listing,
         get_pinned_order=lambda _summaries: {"pinned_conversation_ids": [], "pinned_sort_mode": "manual"},
         get_sidebar_order=lambda _summaries: {},
+        thread_sections=SimpleNamespace(list=lambda: []),
     )
     return session
 

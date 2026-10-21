@@ -233,7 +233,7 @@ def test_external_goal_pause_preserves_exhausted_budget():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version, expected_tool", [("v1", "task"), ("v2", "spawn_agent")])
+@pytest.mark.parametrize("version, expected_tool", [("v1", "task"), ("v2", None)])
 async def test_real_child_provider_uses_the_parent_mode_and_nested_profile(tmp_path, version, expected_tool):
     from backend.agent.model_execution import ModelExecutionSnapshot
     from backend.artifact.store import ArtifactStore
@@ -243,8 +243,8 @@ async def test_real_child_provider_uses_the_parent_mode_and_nested_profile(tmp_p
     from backend.tools.agent_tools import TaskTool
     from backend.tools.registry import ToolRegistry
 
-    # This fixture model advertises V1. A V2 parent must retain V2 even when
-    # its child's selected model does not advertise the newer protocol.
+    # A V2 parent retains its actor protocol and nested profile. The receiving
+    # V1 model still cannot advertise V2 tools or switch back to legacy task.
     config = role_stack(tmp_path, {"max_depth": 2})
     config.agent = replace(config.agent, code_mode_only=False)
     model = RecordingModel()
@@ -264,7 +264,11 @@ async def test_real_child_provider_uses_the_parent_mode_and_nested_profile(tmp_p
         result = await task.execute({"description": "Inspect child surface", "prompt": "Report the assigned result.", "task_name": "worker"}, parent)
         assert not result.is_error, result.content
         names = {tool["function"]["name"] for tool in model.calls[0][1]}
-        assert expected_tool in names
+        if expected_tool is not None:
+            assert expected_tool in names
+        else:
+            from backend.tools.toolsets import SOURCE_V2_COORDINATION_TOOLS
+            assert not names & (SOURCE_V2_COORDINATION_TOOLS | {"task"})
         record = runtime.get_subagent(result.runtime_metadata["subagent_id"])
         assert record.resume_config["source_spawn_version"] == version
         assert record.resume_config["execution_profile"]["delegation"] == "any"
