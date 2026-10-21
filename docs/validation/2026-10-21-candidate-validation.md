@@ -32,3 +32,13 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 第二个候选 `70691945` 的九项 CI 中八项成功，Desktop job 在真实原生 POST 阶段失败；原900×600截图、隐藏等待取消和owner检查通过，其余五项Electron smoke也通过。这不是一轮完整通过。
 
 按 Electron 43.4 的 `guest-window-manager` 合同，`createWindow(options)` 必须采用并返回原 `options.webContents`。MiniCode此前另建第二个WebContents，丢失了原POST/opener；现将原guest交给WebContentsView，并在Chromium创建guest前通过overrideBrowserWindowOptions设置preload、sandbox与隔离偏好。原request继续，未用loadURL重放POST。非GUI定向85/85通过、零skip，真实POST/HTTP/blob仍等待新候选的云端Electron收据。
+
+候选 `4356b948` 的真实Electron已收到原POST、采用原child对象并通过opener检查，随后在getLastWebPreferences的preload字段断言失败；本轮仍不是Desktop通过。字段映射与实际preload consumer正在核查，原sandbox/contextIsolation断言继续保留。
+
+## 真实 V2 会话回放与工作记录修复
+
+脱敏fixture来自 `runtime-live-short-05` 的真实成功wire，保留24条client、1175条server及断线/恢复等audit事实；只去掉255条独立OS采样，替换57处实际provider base URL，不导出用户配置或凭据。fixture明确标记232.406秒short及原wire/result/backend输入哈希，不用作小时通过依据。
+
+回放发现真实projection缺陷：同child epoch2的done已推送工作记录，后续回切会话的durable UI快照仅含子agent元数据，整对象hydrate丢失了工作记录。现仅在原conversation、child、agentPath及mailboxEpoch相同时保留已收到的transcript缓存；当前快照继续负责其余状态。跨会话、path或epoch不借用旧记录。
+
+新V2真实replay1/1通过，原20261020 case本次未运行、筛选skip1；sessionEvents、SubagentsTab和processDisclosure合计114/114。共115个不同用例通过，TypeScript通过。严格验证child epoch[1,2]、工作记录非空且工具全部settled、新B实际往返final、队列、离线完成快照、草稿、精确最终cursor及updater无遗留后台任务。

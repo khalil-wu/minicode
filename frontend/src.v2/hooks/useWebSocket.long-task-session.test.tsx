@@ -15,6 +15,7 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import { projectMessagesToTurns } from "../chat/chatSurfaceState";
 import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { buildUpdateActivitySnapshot } from "../desktop/updateActivityMirror";
+import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
 import { getLastReceivedServerSeqForTests, resetPendingClientCommandAcksForTests, resetRecentInboundEventIdsForTests, useWebSocketConnection } from "./useWebSocket";
 
@@ -34,10 +35,22 @@ class ReplaySocket {
 }
 const Harness = () => { useWebSocketConnection(); return null; };
 
+type ReplayCase = { name: string; file: string; calibration?: {
+  kind: "short" | "hour"; oracleSeconds: number; childSeconds: number; elapsedSeconds: number;
+} };
+const replayCases: ReplayCase[] = [
+  { name: "projects the actual long task, B snapshot completion, queue, child and 36-second reconnect without losing either draft",
+    file: "long-task-session-20261020.json.gz" },
+  { name: "projects the actual V2 short calibration with child followup, queue, B offline snapshot and both drafts",
+    file: "long-task-session-v2-short-20261021.json.gz",
+    calibration: { kind: "short", oracleSeconds: 75, childSeconds: 100, elapsedSeconds: 232.406 } },
+];
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
   ReplaySocket.instances = []; vi.stubGlobal("WebSocket", ReplaySocket); localStorage.clear();
   resetPendingClientCommandAcksForTests(); resetRecentInboundEventIdsForTests(); resetPendingUserMessagesForTests();
+  vi.mocked(pushToast).mockClear();
   useAppStore.setState({ conversationId: null, conversations: [], messages: [], conversationMessages: {}, conversationStreaming: {},
     isStreaming: false, runtimeSession: null, sideChats: {}, composerDraftsReady: true, draft: "", attachments: [], richDraft: undefined,
     conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, conversationAgentStates: {}, conversationHistoryPages: {},
@@ -50,8 +63,8 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-it("projects the actual long task, B snapshot completion, queue, child and 36-second reconnect without losing either draft", async () => {
-  const fixture = JSON.parse(gunzipSync(fs.readFileSync(path.resolve(__dirname, "../../test/fixtures/long-task-session-20261020.json.gz"))).toString("utf8"));
+for (const { name, file, calibration } of replayCases) it(name, async () => {
+  const fixture = JSON.parse(gunzipSync(fs.readFileSync(path.resolve(__dirname, "../../test/fixtures", file))).toString("utf8"));
   const rows: Array<{ direction: string; elapsed: number; payload: Wire }> = fixture.rows;
   const ids = new Map<string, string>(); const initializedDrafts = new Set<string>(); const deferred: Wire[] = []; const errors: string[] = [];
   vi.spyOn(console, "error").mockImplementation((...values) => errors.push(values.map(String).join(" ")));
@@ -131,4 +144,46 @@ it("projects the actual long task, B snapshot completion, queue, child and 36-se
   expect(buildUpdateActivitySnapshot(state).activeTurns).toEqual([]);
   expect(getLastReceivedServerSeqForTests()).toBeGreaterThanOrEqual(Math.max(...rows.filter(row => row.payload.type === "done").map(row => row.payload.seq)));
   expect(errors).toEqual([]);
+  if (calibration) {
+    expect(fixture.calibration).toMatchObject(calibration);
+    expect(fixture.calibration.shutdownExitCode).toBe(0);
+    expect(fixture.provenance.sourceWireSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(fixture.provenance.sourceResultSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(fixture.provenance.providerBaseUrlReplacement).toBe("https://provider.invalid/v1");
+    expect(fixture.provenance.providerBaseUrlOccurrences).toBeGreaterThan(0);
+    expect(rows.filter(row => row.direction === "server")).toHaveLength(fixture.provenance.serverRowCount);
+    expect(rows.filter(row => row.direction === "client")).toHaveLength(fixture.provenance.clientRowCount);
+    expect(rows.some(row => row.direction === "audit" && row.payload.type === "probe.observed")).toBe(false);
+    const offline = rows.find(row => row.direction === "audit" && row.payload.type === "offline")!;
+    const reconnected = rows.find(row => row.direction === "audit" && row.payload.type === "reconnected")!;
+    expect(reconnected.elapsed - offline.elapsed).toBeGreaterThanOrEqual(fixture.calibration.disconnectSeconds);
+    const starts = rows.filter(row => row.payload.type === "subagent.start" && row.payload.subagent_id === fixture.calibration.childId);
+    expect([...new Set(starts.map(row => row.payload.mailbox_epoch))]).toEqual(fixture.calibration.childMailboxEpochs);
+    expect(fixture.calibration.childMailboxEpochs).toEqual([1, 2]);
+    expect(fixture.calibration.childBoardPostTurnIds.initial).toBe(fixture.calibration.childLaunchTurnId);
+    expect(fixture.calibration.childBoardPostTurnIds.followup).not.toBe(fixture.calibration.childBoardPostTurnIds.initial);
+    const child = state.conversationAgentStates[fixture.conversationA].subagents.find(agent => agent.id === fixture.calibration.childId)!;
+    expect(child).toMatchObject({ status: "done", mailboxEpoch: 2 });
+    expect(child.transcriptMessages!.length).toBeGreaterThan(0);
+    for (const message of child.transcriptMessages!) {
+      expect(getToolCallsFromMessage(message).filter(tool => tool.status === "running" || tool.status === "pending"), message.id).toEqual([]);
+    }
+    expect(projectMessagesToTurns(child.transcriptMessages!, false).some(turn => turn.activeCell || turn.status === "streaming")).toBe(false);
+    for (const final of fixture.calibration.additionalFinals) {
+      const expected = rows.find(row => row.payload.type === "item.completed" && row.payload.message_id === final.messageId)!.payload.item.text;
+      const answer = ownerMessages(final.conversationId).find(message => message.id === final.messageId)!;
+      expect(answer).toMatchObject({ terminalStatus: "completed", content: expected });
+    }
+    for (const id of [fixture.conversationA, fixture.conversationB]) for (const message of ownerMessages(id)) {
+      expect(getToolCallsFromMessage(message).filter(tool => tool.status === "running" || tool.status === "pending"), `${id}/${message.id}`).toEqual([]);
+    }
+    const finalRecordedCursor = Math.max(...rows.filter(row => row.direction === "server").flatMap(row =>
+      "previous_replay_seq" in row.payload ? [row.payload.seq]
+        : ["session.restored", "session.replay", "session.synced"].includes(row.payload.type) ? [row.payload.current_seq] : []));
+    expect(getLastReceivedServerSeqForTests()).toBe(finalRecordedCursor);
+    expect(buildUpdateActivitySnapshot(state).backgroundTasks).toEqual([]);
+    expect(state.connectionPhase).toBe("connected");
+    expect(state.connectionError).toBeNull();
+    expect(vi.mocked(pushToast).mock.calls.filter(([, level]) => level === "error")).toEqual([]);
+  }
 });

@@ -4,6 +4,7 @@ import { handleSessionEvent } from "./sessionEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
+import type { ChatMessage, SubagentState } from "../stores/types";
 import { getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -2319,6 +2320,36 @@ describe("handleSessionEvent", () => {
     } as unknown as ServerEvent, { textStreamBuffer, thinkingStreamBuffer })).toBe(true);
 
     expect(useAppStore.getState().workingDirectory).toBe("C:/repo-other");
+  });
+
+  it.each([
+    { title: "retains the same incarnation", agentPath: "root/reviewer", mailboxEpoch: 2, retainsTranscript: true },
+    { title: "starts a new mailbox epoch", agentPath: "root/reviewer", mailboxEpoch: 3, retainsTranscript: false },
+    { title: "changes the agent path", agentPath: "root/replacement", mailboxEpoch: 2, retainsTranscript: false },
+  ])("restores the original conversation's child working record when it $title", ({ agentPath, mailboxEpoch, retainsTranscript }) => {
+    const transcript: ChatMessage[] = [{ id: "original-child-final", role: "assistant", content: "Original child result",
+      blocks: [{ type: "text", content: "Original child result" }], artifacts: [], timestamp: 1, terminalStatus: "completed" }];
+    const foreignTranscript: ChatMessage[] = [{ ...transcript[0], id: "other-owner-final", content: "Other conversation" }];
+    const child: SubagentState = { id: "same-child", role: "subagent", status: "running", agentPath: "root/reviewer",
+      mailboxEpoch: 2, transcriptMessages: transcript, transcriptSeq: 17 };
+    const foreign = { ...child, transcriptMessages: foreignTranscript, transcriptSeq: 900 };
+    useAppStore.setState({ conversationId: "conv-other", messages: [], isStreaming: false, conversationMessages: {}, conversationStreaming: {},
+      subagents: [foreign], conversationAgentStates: {
+        "conv-original": { plan: null, todos: [], subagents: [child], agentProgress: [] },
+        "conv-other": { plan: null, todos: [], subagents: [foreign], agentProgress: [] },
+      } });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-original",
+      conversation: { id: "conv-original", title: "Original task", updated_at: "2026-10-21", transcript: [],
+        context_snapshot: { ui_agent_state: { plan: null, todos: [], agentProgress: [],
+          subagents: [{ id: "same-child", role: "subagent", status: "done", summary: "Latest authoritative metadata", agentPath, mailboxEpoch }] } } },
+    } as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+    const state = useAppStore.getState();
+    const restored = state.subagents.find(agent => agent.id === "same-child")!;
+    expect(restored).toMatchObject({ status: "done", summary: "Latest authoritative metadata", agentPath, mailboxEpoch });
+    expect(restored.transcriptMessages).toBe(retainsTranscript ? transcript : undefined);
+    expect(restored.transcriptSeq).toBe(retainsTranscript ? 17 : undefined);
+    expect(state.conversationAgentStates["conv-original"].subagents[0]).toBe(restored);
+    expect(state.conversationAgentStates["conv-other"].subagents[0].transcriptMessages).toBe(foreignTranscript);
   });
 
   it("hydrates plan, todos, subagents, and progress from conversation snapshot", () => {

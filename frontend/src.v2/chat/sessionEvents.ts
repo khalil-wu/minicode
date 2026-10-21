@@ -549,13 +549,22 @@ const hydrateConversationAgentState = (
   }
   if (!agentState) return;
   if (hasStreamingAssistantForConversation(conversationId)) return;
-  useAppStore.setState((state) => ({
-    ...(state.conversationId === conversationId ? agentState : {}),
-    conversationAgentStates: {
-      ...(state.conversationAgentStates ?? {}),
-      [conversationId]: agentState,
-    },
-  }));
+  useAppStore.setState((state) => {
+    const previousAgents = state.conversationId === conversationId ? state.subagents
+      : state.conversationAgentStates[conversationId]?.subagents ?? [];
+    const hydrated = { ...agentState, subagents: agentState.subagents.map(agent => {
+      const previous = previousAgents.find(candidate => candidate.id === agent.id);
+      // Durable UI snapshots carry metadata, while transcript pushes own the
+      // working record. A return to the same incarnation must retain that record.
+      return previous && previous.agentPath === agent.agentPath && previous.mailboxEpoch === agent.mailboxEpoch
+        ? { ...agent, transcriptMessages: previous.transcriptMessages, transcriptSeq: previous.transcriptSeq }
+        : agent;
+    }) };
+    return {
+      ...(state.conversationId === conversationId ? hydrated : {}),
+      conversationAgentStates: { ...state.conversationAgentStates, [conversationId]: hydrated },
+    };
+  });
 };
 
 const hasStreamingAssistantForConversation = (conversationId: string): boolean => {
