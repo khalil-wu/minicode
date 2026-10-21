@@ -111,6 +111,9 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         contents.on("preload-error", (_event, preloadPath, error) => {
           process.stderr.write(`[capture] original child ${contents.id} preload ${preloadPath}: ${error.stack || error}\n`);
         });
+        contents.on("before-mouse-event", (_event, input) => {
+          process.stdout.write(`[capture] original child ${contents.id} native ${input.type} ${input.button} ${input.x},${input.y}\n`);
+        });
       });
       process.stdout.write("[capture] submitting original native POST form\n");
       await view.webContents.executeJavaScript(`{
@@ -131,7 +134,11 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
       assert.equal(manager.listTargets("capture-owner", "fixture-window").length, 2);
       assert.equal(manager.listTargets("another-owner", "fixture-window").length, 0);
       process.stdout.write("[capture] native child POST body, original opener and conversation owner preserved\n");
+      // The capture above deliberately used a narrow visible edge. Native input
+      // needs this same window and page fully presented on the actual display.
+      window.setPosition(area.x, area.y); window.show();
       const childTarget = manager.listTargets("capture-owner", "fixture-window").find(item => item.url === new URL("/native-post", url).href);
+      process.stdout.write("[capture] presenting the original child for native preload input\n");
       manager.activate(childTarget.id, "capture-owner", "fixture-window");
       manager.setBounds({ id: childTarget.id, conversation_id: "capture-owner", x: 0, y: 0, width: 900, height: 600, window_instance_id: "fixture-window" });
       const preloadLinkUrl = new URL("/native-preload-link", url).href;
@@ -140,12 +147,20 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         link.style = 'position:fixed;left:12px;top:12px;width:240px;height:36px;display:block'; document.body.append(link);
         const rect = link.getBoundingClientRect(); return { x: Math.round(rect.x + 30), y: Math.round(rect.y + 15) };
       })()`);
+      process.stdout.write(`[capture] original child link prepared at ${preloadLink.x},${preloadLink.y}\n`);
+      await manager.executeControlCommand({ action: "screenshot", target_id: childTarget.id,
+        conversation_id: "capture-owner", window_instance_id: "fixture-window" });
+      process.stdout.write("[capture] original child link reached its presented compositor frame\n");
       const originalPreloadClick = new Promise(resolve => ipcMain.once("minicode:browserLink:click", (event, request) => {
         const accepted = manager.handleLinkClick(event, request);
         event.returnValue = accepted;
         resolve({ senderId: event.sender.id, sameFrame: event.senderFrame === child.webContents.mainFrame, request, accepted });
       }));
-      window.focus(); child.webContents.focus();
+      window.focus();
+      if (!window.isFocused()) await new Promise(resolve => window.once("focus", resolve));
+      child.webContents.focus();
+      if (!child.webContents.isFocused()) await new Promise(resolve => child.webContents.once("focus", resolve));
+      process.stdout.write("[capture] original child and its native window focused; submitting modifier input\n");
       const modifiers = [process.platform === "darwin" ? "meta" : "control"];
       child.webContents.sendInputEvent({ type: "mouseDown", ...preloadLink, button: "left", clickCount: 1, modifiers });
       child.webContents.sendInputEvent({ type: "mouseUp", ...preloadLink, button: "left", clickCount: 1, modifiers });
@@ -164,6 +179,8 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         link.style = 'position:fixed;left:12px;top:12px;width:240px;height:36px;display:block'; document.body.append(link);
         const rect = link.getBoundingClientRect(); return { x: Math.round(rect.x + 30), y: Math.round(rect.y + 15) };
       })()`);
+      await manager.executeControlCommand({ action: "screenshot", target_id: target.id,
+        conversation_id: "capture-owner", window_instance_id: "fixture-window" });
       const backgroundCreated = new Promise(resolve => app.once("web-contents-created", (_event, contents) => {
         const loadCalls = [];
         const loadURL = contents.loadURL.bind(contents);
@@ -172,7 +189,10 @@ if (process.env.MINICODE_BROWSER_CAPTURE_TEST_CHILD === "1") {
         resolve({ contents, loadCalls, loaded });
       }));
       process.stdout.write("[capture] middle-clicking the original page link for native OpenURLFromTab\n");
-      window.focus(); view.webContents.focus();
+      window.focus();
+      if (!window.isFocused()) await new Promise(resolve => window.once("focus", resolve));
+      view.webContents.focus();
+      if (!view.webContents.isFocused()) await new Promise(resolve => view.webContents.once("focus", resolve));
       view.webContents.sendInputEvent({ type: "mouseDown", ...backgroundLink, button: "middle", clickCount: 1 });
       view.webContents.sendInputEvent({ type: "mouseUp", ...backgroundLink, button: "middle", clickCount: 1 });
       const [backgroundRequest, background] = await Promise.all([nativeBackground, backgroundCreated]);

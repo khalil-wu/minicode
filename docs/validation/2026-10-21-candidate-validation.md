@@ -35,6 +35,8 @@ Backend 三个旧 fixture 分别补齐真实 repository 的 sections consumer、
 
 候选 `4356b948` 的真实Electron已收到原POST、采用原child对象并通过opener检查，随后在getLastWebPreferences的preload字段断言失败；本轮仍不是Desktop通过。字段映射与实际preload consumer正在核查，原sandbox/contextIsolation断言继续保留。
 
+`b9f3688f` 的原POST、child身份及opener再次通过；新增preload功能验证停在native input，20秒deadline真实失败。43.4官方SendInputEvent要求focused窗口，fixture原先为验证离屏compositor而特意仅保留24px可见边缘。现保留全部原capture断言后，才将同一window移到实际workArea、通过原capture管线等真实compositor帧、等待真实focus事件，再发送native input；没有增加sleep、改时限或放松IPC/owner/frame断言。相关非GUI58/58、语法与diff检查通过，新原生结果继续由后续CI判定。
+
 ## 真实 V2 会话回放与工作记录修复
 
 脱敏fixture来自 `runtime-live-short-05` 的真实成功wire，保留24条client、1175条server及断线/恢复等audit事实；只去掉255条独立OS采样，替换57处实际provider base URL，不导出用户配置或凭据。fixture明确标记232.406秒short及原wire/result/backend输入哈希，不用作小时通过依据。
