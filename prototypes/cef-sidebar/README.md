@@ -18,6 +18,13 @@ commit `c1a097eaa7738483abe2ea9d6297a937d6a884c0`. It exports the documented
 `RunConsoleMain` entry, copies the full runtime resources, and applies the
 CEF LPAC ACL macro. It does not set `no_sandbox` or `enable-automation`.
 
+Before launching Electron, a separate native setup records the runner's actual
+screen/work area, maximum track dimensions and available display modes. If the
+work area cannot contain the unchanged 1680x1140-pixel owner, it selects an
+enumerated mode of at least 1920x1200 and applies it to the disposable session
+without updating the registry. Unsupported or insufficient modes fail the job;
+owner dimensions, scale factors and browser assertions are not reduced.
+
 Each 1×/1.5× run starts the CEF helper twice against the same isolated profile
 and local HTTP origin. The first process writes content settings and a random
 localStorage token; the second only reads them. Both processes check:

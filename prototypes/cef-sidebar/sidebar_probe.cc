@@ -63,6 +63,12 @@ CefRect SidebarBounds(HWND owner) {
   facts->SetInt("paneDipX", origin.x);
   facts->SetInt("paneDipWidth", end.x - origin.x);
   facts->SetInt("paneDipHeight", end.y - origin.y);
+  const CefRect bounds = display->GetBounds();
+  const CefRect work = display->GetWorkArea();
+  facts->SetInt("cefDisplayDipWidth", bounds.width);
+  facts->SetInt("cefDisplayDipHeight", bounds.height);
+  facts->SetInt("cefWorkAreaDipWidth", work.width);
+  facts->SetInt("cefWorkAreaDipHeight", work.height);
   Emit(facts);
   return CefRect(origin.x, origin.y, end.x - origin.x, end.y - origin.y);
 }
@@ -258,6 +264,7 @@ class ProbeClient final : public CefClient,
     facts->SetInt("height", height);
     facts->SetInt("ownerDpi", static_cast<int>(GetDpiForWindow(config_.owner)));
     facts->SetInt("childDpi", static_cast<int>(GetDpiForWindow(child)));
+    facts->SetInt("systemMaxTrackHeight", GetSystemMetrics(SM_CYMAXTRACK));
     Emit(facts);
     Check(stage + ":cross-process-owner", owner_pid != GetCurrentProcessId());
     Check(stage + ":original-hwnd-child", GetParent(child) == config_.owner &&

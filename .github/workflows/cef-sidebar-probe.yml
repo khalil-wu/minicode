@@ -40,6 +40,11 @@ jobs:
           cmake --build $build --config Release --target cef_sidebar_probe --parallel 2 2>&1 | Tee-Object "$env:CEF_PROBE_OUTPUT/build.log"
           if ($LASTEXITCODE -ne 0) { throw 'CEF build failed' }
           "CEF_PROBE_EXE=$build/Release/cef_sidebar_probe.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CEF_PROBE_DISPLAY_EXE=$build/Release/cef_probe_display.exe" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Record and provision the disposable runner display
+        run: |
+          & $env:CEF_PROBE_DISPLAY_EXE "$env:CEF_PROBE_OUTPUT/display.jsonl"
+          if ($LASTEXITCODE -ne 0) { throw 'Runner display cannot contain the original 1680x1140 owner; see display.jsonl' }
       - name: Install isolated Electron host
         working-directory: prototypes/cef-sidebar
         run: npm ci --no-audit --no-fund
