@@ -14,7 +14,7 @@ import {
   readWorkspaceFile,
   searchWorkspaceFiles,
 } from "../protocol/workspace";
-import { fsReadFileInfo, fsSearchFiles, isDesktop, revealPath } from "../desktop/runtime";
+import { fsReadFileInfo, fsSearchFiles, isDesktop, registeredSettingsEditorOwner, revealPath } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
 import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 import { SelectMenu } from "../components/SelectMenu";
@@ -393,7 +393,9 @@ const reactNodeText = (node: React.ReactNode): string => {
 
 const readFileSnapshot = async (path: string, workingDirectory: string, owner?: WorkspaceRequestOwner): Promise<FileSnapshot | null> => {
   if (!isEditablePath(path)) return null;
-  if (isDesktop() && !owner && !workspaceHasConversation()) {
+  const registeredOwner = registeredSettingsEditorOwner(path, workingDirectory);
+  const readOwner = registeredOwner ?? owner;
+  if (isDesktop() && !readOwner && !workspaceHasConversation()) {
     const desktopFile = await fsReadFileInfo(resolveDesktopFsPath(path, workingDirectory));
     if (desktopFile != null) {
       return {
@@ -404,14 +406,14 @@ const readFileSnapshot = async (path: string, workingDirectory: string, owner?: 
       };
     }
   }
-  const response = await readWorkspaceFile(path, workingDirectory, undefined, owner);
+  const response = await readWorkspaceFile(path, workingDirectory, undefined, readOwner);
   if (!response) return null;
   return {
     content: response.content,
     contentHash: response.content_hash,
     sizeBytes: response.size_bytes ?? response.size,
     readOnly: response.read_only,
-    workspaceOwner: workspaceFileOwner(response),
+    workspaceOwner: registeredOwner ?? workspaceFileOwner(response),
   };
 };
 
@@ -801,7 +803,7 @@ export const EditorPanel = ({ chrome = "full" }: { chrome?: "full" | "minimal" }
         }
         // Both single-file and project saves share the backend's guarded mutation
         // queue and acknowledge the exact submitted buffer, preserving newer edits.
-        const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace, tab.workspaceOwner);
+        const result = await compareWriteWorkspaceFile(savePath, expectedHash, saveContent, saveWorkspace, registeredSettingsEditorOwner(savePath, saveWorkspace) ?? tab.workspaceOwner);
         const state = useAppStore.getState();
         const workspace = workspaceRootsEqual(state.workingDirectory, saveWorkspace)
           ? state : editorStateForWorkspace(saveWorkspace);

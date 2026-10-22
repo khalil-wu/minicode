@@ -48,6 +48,10 @@ class WorkspaceService:
     ) -> None:
         self._get_workspace_root = get_workspace_root
         self._max_file_bytes = max_file_bytes
+        self._registered_editor_file: Path | None = None
+
+    def register_editor_file(self, path: Path) -> None:
+        self._registered_editor_file = path
 
     def _invalidate_derived_caches(self, *, file_tree_changed: bool, changed_paths: tuple[Path, ...]) -> None:
         """Publish committed editor mutations to the same caches used by tools."""
@@ -168,7 +172,7 @@ class WorkspaceService:
 
         snapshot = WorkspaceFileResponse(
             workspace_root=str(root),
-            path=target.relative_to(root).as_posix(),
+            path=self.to_workspace_relative(target),
             name=target.name,
             content=content,
             content_hash=self.content_hash(content),
@@ -473,7 +477,7 @@ class WorkspaceService:
             candidate = lexical.resolve()
         else:
             candidate = lexical.parent.resolve() / lexical.name
-        if candidate != root and root not in candidate.parents:
+        if candidate != root and root not in candidate.parents and candidate != self._registered_editor_file:
             raise HTTPException(status_code=400, detail="Path is outside workspace root.")
         return candidate
 
@@ -482,6 +486,8 @@ class WorkspaceService:
         resolved = path.resolve() if follow_symlinks else path.absolute()
         if resolved == root:
             return "."
+        if resolved == self._registered_editor_file:
+            return str(resolved)
         try:
             return resolved.relative_to(root).as_posix()
         except ValueError as exc:
@@ -576,6 +582,8 @@ class WorkspaceService:
         """Allow the user's preview config in the GUI without widening agent access."""
         root = self.workspace_root_path()
         target = path.resolve() if resolved_path is None else resolved_path
+        if path == self._registered_editor_file and target == self._registered_editor_file:
+            return
         launch_path = root / ".minicode" / "launch.json"
         if path == launch_path and target == launch_path:
             self.ensure_not_sensitive_file(root, operation=operation)

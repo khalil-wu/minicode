@@ -19,8 +19,9 @@ import { SidebarLeft } from "../shell/SidebarLeft";
 
 const response = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
 const configFields = { approval_policy: "on-request", sandbox_mode: "workspace-write", network_access: false, web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
-const config = { path: "C:/settings.json", ...configFields, effective: configFields, origins: {}, requirements: {},
+const config = { path: "C:/settings.json", default_scope_id: "user", ...configFields, effective: configFields, origins: {}, requirements: {},
   scopes: [{ id: "user", kind: "user", path: "C:/settings.json", version: "user-v1", values: {}, readonly: false,
+    workspace_root: null, disabled_reason: null,
     source: { type: "user", display: "user (C:/settings.json)" } }] };
 beforeEach(() => {
   vi.clearAllMocks();

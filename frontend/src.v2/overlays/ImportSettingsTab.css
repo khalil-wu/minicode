@@ -10,8 +10,8 @@
 .settings-import-providers { display: grid; gap: 12px; }
 .settings-import-provider { display: flex; align-items: center; gap: 16px; padding: 16px; border: 1px solid var(--border-subtle); border-radius: 16px; box-shadow: var(--shadow-sm); }
 .settings-import-provider > span:nth-child(2) { flex: 1; }
-.settings-import-provider-icon { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 12px; background: var(--text-primary); color: var(--surface-raised); }
-.settings-import-provider-icon[data-provider="claude"] { background: #d9784d; color: white; }
+.settings-import-provider-icon { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 8px; color: var(--text-primary); }
+.settings-import-provider-icon[data-provider="claude"] { background: #da6a44; color: white; }
 .settings-import-content { max-height: min(58dvh, 520px); overflow: auto; border: 1px solid var(--border-subtle); border-radius: 16px; }
 .settings-import-choice { display: flex; align-items: center; gap: 12px; min-height: 62px; padding: 12px; }
 .settings-import-content > .settings-import-choice + .settings-import-choice, .settings-import-tools + .settings-import-choice, .settings-import-tools { border-top: 1px solid var(--border-subtle); }
@@ -30,9 +30,6 @@
 .settings-import-loading { display: flex; align-items: center; gap: 10px; min-height: 76px; color: var(--text-muted); }
 .settings-import-empty { margin: 16px 0; color: var(--text-muted); }
 .settings-import-error { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.settings-import-results { max-height: 180px; overflow: auto; }
-.settings-import-results p { margin: 0; padding: 8px 0; }
-.settings-import-results span { display: block; margin-top: 4px; color: var(--text-muted); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .settings-import-dialog footer { gap: 14px; }
 .settings-import-dialog footer .settings-action-button { border-radius: 10px; padding-inline: 16px; min-height: 32px; }
 .settings-import-dialog footer .settings-import-cancel { border-color: transparent; background: transparent; color: var(--text-muted); }
@@ -45,7 +42,10 @@
 .settings-import-history summary > span + span, .settings-import-history p { font-size: var(--text-xs); color: var(--text-muted); }
 .settings-import-history p { overflow-wrap: anywhere; }
 .settings-import-files-dialog { display: flex; flex-direction: column; width: min(520px, calc(100vw - 32px)); max-height: min(720px, calc(100dvh - 64px)); gap: 0; padding: 0; overflow: hidden; border-radius: 20px; }
-.settings-import-files-content { min-height: 0; overflow-y: auto; padding: 20px 24px 32px; }
+.settings-import-files-scroll { position: relative; display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.settings-import-files-content { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 24px 32px; }
+.settings-import-scroll-bottom { position: absolute; left: 50%; bottom: 40px; transform: translateX(-50%); display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 1px solid var(--border-subtle); border-radius: 50%; background: var(--surface-raised); color: var(--text-secondary); box-shadow: var(--shadow-md); }
+.settings-import-scroll-bottom:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
 .settings-import-files-heading { display: flex; align-items: flex-start; gap: 16px; }
 .settings-import-files-heading h2 { margin: 0; font-size: 20px; line-height: 28px; font-weight: var(--fw-semibold); }
 .settings-import-files-heading p { margin: 4px 0 0; color: var(--text-secondary); font-size: 16px; line-height: 24px; }

@@ -11,7 +11,7 @@ import tomlkit
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.config import _update_settings_json, load_config_layer_stack
-from backend.config_layers import ConfigLayer, ConfigLayerStack
+from backend.config_layers import ConfigLayer, ConfigLayerStack, _sanitize_project_config
 from backend.hooks.runtime import raise_if_config_change_blocked, run_config_change_hook
 
 
@@ -30,13 +30,20 @@ def _values(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _scope_layers(stack: ConfigLayerStack) -> dict[str, ConfigLayer]:
-    layers = stack.get_layers()
+    layers = stack.get_layers(include_disabled=True)
     user = next(layer for layer in reversed(layers) if layer.source.kind == "user")
     managed = next((layer for layer in reversed(layers) if layer.source.kind in MANAGED_SOURCES), None)
-    return {"user": user, **({"managed": managed} if managed is not None else {})}
+    projects = {f"project:{_scope_workspace(layer)}": layer for layer in layers if layer.source.kind == "project"}
+    return {**projects, "user": user, **({"managed": managed} if managed is not None else {})}
+
+
+def _scope_workspace(layer: ConfigLayer) -> str | None:
+    return str(Path(layer.source.project_config_folder).parent) if layer.source.kind == "project" else None
 
 
 def _scope_path(layer: ConfigLayer) -> str | None:
+    if layer.source.kind == "project":
+        return str(Path(layer.source.project_config_folder) / "config.toml")
     file = layer.source.file
     merged_files = layer.source.kind == "policy" and layer.source.source_id == "managed_files" and "; " in file
     return file if file and not merged_files and Path(file).is_absolute() else None
@@ -53,24 +60,28 @@ def _origins(stack: ConfigLayerStack) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _settings_payload(stack: ConfigLayerStack) -> dict[str, Any]:
+def _settings_payload(stack: ConfigLayerStack, workspace_root: str = "") -> dict[str, Any]:
     scopes = _scope_layers(stack)
     effective = {**_DEFAULTS, **_values(stack.effective_config())}
     requirements = {key: deepcopy(stack.requirements.value_for(key)) for key in (
         "allowed_approval_policies", "allowed_sandbox_modes", "allowed_web_search_modes",
     ) if stack.requirements.value_for(key) is not None}
+    default = f"project:{Path(workspace_root).resolve()}" if workspace_root else "user"
     return {"path": scopes["user"].source.file, **effective, "effective": effective,
-            "scopes": [{"id": key, "kind": key, "path": _scope_path(layer), "version": layer.version,
-                        "values": _values(layer.config), "readonly": key == "managed", "source": layer.source.to_payload()}
+            "default_scope_id": default if default in scopes else next(iter(scopes)),
+            "scopes": [{"id": key, "kind": "project" if layer.source.kind == "project" else key,
+                        "path": _scope_path(layer), "workspace_root": _scope_workspace(layer), "version": layer.version,
+                        "disabled_reason": layer.disabled_reason, "values": _values(layer.config),
+                        "readonly": key == "managed", "source": layer.source.to_payload()}
                        for key, layer in scopes.items()],
             "origins": _origins(stack), "requirements": requirements}
 
 
 def agent_config_settings(workspace_root: str = "") -> dict[str, Any]:
-    return _settings_payload(load_config_layer_stack(cwd=Path(workspace_root) if workspace_root else None))
+    return _settings_payload(load_config_layer_stack(cwd=Path(workspace_root) if workspace_root else None), workspace_root)
 
 
-def agent_config_target(workspace_root: str = "", scope_id: str = "user") -> Path:
+def agent_config_target(workspace_root: str = "", scope_id: str = "user") -> dict[str, str]:
     stack = load_config_layer_stack(cwd=Path(workspace_root) if workspace_root else None)
     layer = _scope_layers(stack).get(scope_id)
     if layer is None:
@@ -78,7 +89,10 @@ def agent_config_target(workspace_root: str = "", scope_id: str = "user") -> Pat
     path = _scope_path(layer)
     if path is None:
         raise ValueError("This configuration source has no individual file to open.")
-    return Path(path)
+    target = {"path": str(Path(path).resolve())}
+    if layer.source.kind == "project":
+        target["workspace_root"] = _scope_workspace(layer)
+    return target
 
 
 def _apply_updates(document: MutableMapping[str, Any], updates: dict[str, Any]) -> None:
@@ -106,32 +120,38 @@ def _validate_requirements(stack: ConfigLayerStack, updates: dict[str, Any]) -> 
             raise ValueError(f"{key} is restricted by administrator policy.")
 
 
-def _write_user_layer(stack: ConfigLayerStack, layer: ConfigLayer, updates: dict[str, Any], expected_version: str | None) -> str:
-    path = Path(layer.source.file)
+def _write_layer(stack: ConfigLayerStack, layer: ConfigLayer, updates: dict[str, Any], expected_version: str | None) -> str:
+    path = Path(_scope_path(layer))
+
+    def document_layer(raw: Mapping[str, Any]) -> ConfigLayer:
+        config = deepcopy(dict(raw))
+        if layer.source.kind == "project":
+            _sanitize_project_config(config)
+        return ConfigLayer(layer.source, config)
 
     def apply(document: MutableMapping[str, Any], raw: Mapping[str, Any]) -> None:
-        if expected_version is not None and ConfigLayer(layer.source, raw).version != expected_version:
+        if expected_version is not None and document_layer(raw).version != expected_version:
             raise ValueError("Configuration changed since it was read; reload before saving.")
         resets = [key for key, value in updates.items() if value is None]
         if resets:
             candidate = deepcopy(dict(raw))
             _apply_updates(candidate, updates)
-            changed_layer = ConfigLayer(layer.source, candidate)
+            changed_layer = document_layer(candidate)
             changed_stack = replace(stack, layers=tuple(changed_layer if item is layer else item for item in stack.layers))
             effective = {**_DEFAULTS, **_values(changed_stack.effective_config())}
             _validate_requirements(changed_stack, {key: effective[key] for key in resets})
         _apply_updates(document, updates)
 
-    if not layer.source.profile:
+    if layer.source.kind == "user" and not layer.source.profile:
         document = _update_settings_json(lambda document: apply(document, document), settings_file=path)
-        return ConfigLayer(layer.source, document).version
+        return document_layer(document).version
     else:
         with file_mutation_locks([path]):
             document = tomlkit.parse(path.read_text(encoding="utf-8") if path.exists() else "")
             apply(document, document.unwrap())
             path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(path, tomlkit.dumps(document))
-            return ConfigLayer(layer.source, document.unwrap()).version
+            return document_layer(document.unwrap()).version
 
 
 async def update_agent_config_settings(updates: dict[str, Any], workspace_root: str = "", *,
@@ -142,22 +162,29 @@ async def update_agent_config_settings(updates: dict[str, Any], workspace_root: 
         raise ValueError("Configuration scope is no longer available.")
     if scope_id == "managed":
         raise ValueError("Administrator configuration is read-only.")
+    if layer.is_disabled:
+        raise ValueError(layer.disabled_reason)
     origins = _origins(stack)
     for field in updates:
         origin = origins.get(field)
         if origin is not None and origin["source"]["type"] in MANAGED_SOURCES:
             raise ValueError(f"{field} is managed by administrator policy.")
     _validate_requirements(stack, updates)
-    path = str(layer.source.file)
-    result = await run_config_change_hook(source="user_settings", file_path=path)
-    raise_if_config_change_blocked(result, source="user_settings", file_path=path)
-    written_version = _write_user_layer(stack, layer, updates, expected_version)
-    after = agent_config_settings(workspace_root)
+    path = _scope_path(layer)
+    change_source = "project_settings" if layer.source.kind == "project" else "user_settings"
+    result = await run_config_change_hook(source=change_source, file_path=path)
+    raise_if_config_change_blocked(result, source=change_source, file_path=path)
+    written_version = _write_layer(stack, layer, updates, expected_version)
+    after_stack = load_config_layer_stack(cwd=Path(workspace_root) if workspace_root else None)
+    after = _settings_payload(after_stack, workspace_root)
+    origins = after_stack.origins()
+    precedence = {item.source: index for index, item in enumerate(after_stack.get_layers())}
     fields = {}
     for key, requested in updates.items():
         effective = after["effective"][key]
         origin = after["origins"].get(key)
-        overridden = origin is not None and origin["source"]["precedence"] > layer.source.precedence and requested != effective
+        field_path = "sandbox_workspace_write.network_access" if key == "network_access" else key
+        overridden = origin is not None and precedence[origins[field_path].source] > precedence[layer.source] and requested != effective
         fields[key] = {"requested_value": requested, "effective_value": effective,
                        **({"overriding_source": origin} if overridden else {})}
     after["write"] = {"status": "overridden" if any("overriding_source" in field for field in fields.values()) else "applied",

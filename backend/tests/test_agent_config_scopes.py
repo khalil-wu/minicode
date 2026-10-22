@@ -23,7 +23,6 @@ def catalog(monkeypatch, tmp_path):
     user.write_text(json.dumps({"model_verbosity": "low", "llm": {"custom": {"api_key": "private-user-key"}}}), encoding="utf-8")
     workspace = tmp_path / "workspace"
     (workspace / ".git").mkdir(parents=True)
-    (workspace / ".minicode").mkdir()
     managed = tmp_path / "managed"
     managed.mkdir()
     requirements = tmp_path / "requirements.toml"
@@ -43,8 +42,8 @@ def catalog(monkeypatch, tmp_path):
                               requirements=requirements, hook=hook, monkeypatch=monkeypatch)
 
 
-def read(catalog):
-    response = catalog.client.get("/api/settings/agent-config", params={"workspace_root": str(catalog.workspace)})
+def read(catalog, workspace=None):
+    response = catalog.client.get("/api/settings/agent-config", params={"workspace_root": str(workspace or catalog.workspace)})
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -116,13 +115,14 @@ def test_stale_version_rejects_before_writing_and_a_fresh_patch_preserves_the_ot
 
 
 def test_written_user_value_reports_actual_project_override_without_false_failure(catalog):
+    (catalog.workspace / ".minicode").mkdir()
     (catalog.workspace / ".minicode" / "config.toml").write_text('web_search = "live"\n', encoding="utf-8")
     before = read(catalog)
     response = save(catalog, before, web_search="disabled")
     assert response.status_code == 200, response.text
     after = response.json()
     assert after["write"]["status"] == "overridden"
-    assert after["scopes"][0]["values"]["web_search"] == "disabled"
+    assert next(scope for scope in after["scopes"] if scope["id"] == "user")["values"]["web_search"] == "disabled"
     assert after["effective"]["web_search"] == "live"
     assert after["write"]["fields"]["web_search"]["overriding_source"]["source"]["type"] == "project"
     assert json.loads(catalog.user.read_text())["web_search"] == "disabled"
@@ -192,3 +192,187 @@ def test_new_profile_write_creates_only_that_registered_user_file(catalog):
     assert response.json()["write"]["path"] == str(profile)
     assert tomllib.loads(profile.read_text())["sandbox_workspace_write"]["network_access"] is True
     assert catalog.user.read_bytes() == original
+
+
+def project_file(workspace, text=""):
+    path = workspace / ".minicode" / "config.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def save_project(catalog, payload, workspace, owner, **patch):
+    scope = next(scope for scope in payload["scopes"] if scope["workspace_root"] == str(owner))
+    return catalog.client.put("/api/settings/agent-config", json={"workspace_root": str(workspace),
+        "scope_id": scope["id"], "expected_version": scope["version"], **patch})
+
+
+def test_project_catalog_preserves_actual_layer_order_owners_raw_fields_and_disabled_reason(catalog):
+    root_file = project_file(catalog.workspace, 'web_search = "live"\n[llm.custom]\napi_key = "ignored-project-secret"\n')
+    child = catalog.workspace / "app"
+    child_file = project_file(child, 'model_verbosity = "high"\n')
+    catalog.monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda root: root != catalog.workspace)
+    payload = read(catalog, child)
+    scopes = payload["scopes"]
+    assert [scope["kind"] for scope in scopes] == ["project", "project", "user"]
+    assert [scope["workspace_root"] for scope in scopes] == [str(catalog.workspace), str(child), None]
+    assert [scope["path"] for scope in scopes] == [str(root_file), str(child_file), str(catalog.user)]
+    assert payload["default_scope_id"] == scopes[1]["id"] == f"project:{child}"
+    assert scopes[0]["disabled_reason"] and "not trusted" in scopes[0]["disabled_reason"]
+    assert scopes[0]["values"] == {"web_search": "live"}
+    assert scopes[0]["readonly"] is False
+    assert scopes[1]["disabled_reason"] is None
+    assert scopes[1]["values"] == {"model_verbosity": "high"}
+    assert payload["effective"]["web_search"] == "cached"
+    assert payload["effective"]["model_verbosity"] == "high"
+    assert scopes[2]["disabled_reason"] is None
+    assert "ignored-project-secret" not in json.dumps(payload)
+    assert "private-user-key" not in json.dumps(payload)
+
+
+def test_scope_default_uses_only_discovered_projects_and_keeps_projectless_user(catalog):
+    assert read(catalog)["default_scope_id"] == "user"
+    project_file(catalog.workspace)
+    child = catalog.workspace / "app"
+    child.mkdir()
+    payload = read(catalog, child)
+    assert payload["default_scope_id"] == f"project:{catalog.workspace}"
+    assert [scope["kind"] for scope in payload["scopes"]] == ["project", "user"]
+    response = catalog.client.get("/api/settings/agent-config")
+    assert response.status_code == 200, response.text
+    assert [scope["id"] for scope in response.json()["scopes"]] == ["user"]
+
+
+@pytest.mark.parametrize("sandbox_table", [
+    '[sandbox_workspace_write]\nnetwork_access = false # keep network\nexclude_tmpdir_env_var = true\n\n',
+    'sandbox_workspace_write = { network_access = false, exclude_tmpdir_env_var = true } # keep network\n\n',
+])
+def test_project_toml_write_preserves_comments_unrelated_and_ignored_values_and_unsets_only_selected_fields(catalog, sandbox_table):
+    path = project_file(catalog.workspace, '# authored project\nweb_search = "cached" # keep search\nmodel_verbosity = "high"\n\n'
+        + sandbox_table +
+        '[notes]\nmessage = "preserve me"\n\n[llm.custom]\napi_key = "ignored-project-secret"\n')
+    original_user = catalog.user.read_bytes()
+    response = save_project(catalog, read(catalog), catalog.workspace, catalog.workspace,
+                            web_search="live", model_verbosity=None, network_access=True)
+    assert response.status_code == 200, response.text
+    written = path.read_text(encoding="utf-8")
+    document = tomllib.loads(written)
+    assert document["web_search"] == "live"
+    assert "model_verbosity" not in document
+    assert document["sandbox_workspace_write"] == {"network_access": True, "exclude_tmpdir_env_var": True}
+    assert document["notes"] == {"message": "preserve me"}
+    assert document["llm"]["custom"]["api_key"] == "ignored-project-secret"
+    assert all(comment in written for comment in ("# authored project", "# keep search", "# keep network"))
+    after = response.json()
+    selected = next(scope for scope in after["scopes"] if scope["kind"] == "project")
+    assert selected["version"] == after["write"]["version"]
+    assert selected["values"] == {"web_search": "live", "network_access": True}
+    assert after["effective"]["model_verbosity"] == "low"
+    assert after["write"]["status"] == "applied"
+    assert after["write"]["path"] == str(path)
+    assert catalog.user.read_bytes() == original_user
+    catalog.hook.assert_awaited_once_with(source="project_settings", file_path=str(path))
+
+
+def test_project_version_is_checked_inside_the_file_transaction_after_hooks(catalog):
+    path = project_file(catalog.workspace, 'web_search = "cached"\n')
+    before = read(catalog)
+    external = 'web_search = "cached"\nmodel_reasoning_summary = "detailed" # external edit\n'
+
+    async def change_during_hook(**_kwargs):
+        path.write_text(external, encoding="utf-8")
+
+    catalog.monkeypatch.setattr(service, "run_config_change_hook", change_during_hook)
+    response = save_project(catalog, before, catalog.workspace, catalog.workspace, web_search="live")
+    assert response.status_code == 409, response.text
+    assert "changed since it was read" in response.json()["detail"]
+    assert path.read_text(encoding="utf-8") == external
+
+
+def test_discovered_project_folder_can_create_its_missing_config_without_touching_user_settings(catalog):
+    (catalog.workspace / ".minicode").mkdir()
+    path = catalog.workspace / ".minicode" / "config.toml"
+    original_user = catalog.user.read_bytes()
+    response = save_project(catalog, read(catalog), catalog.workspace, catalog.workspace, model_verbosity="high")
+    assert response.status_code == 200, response.text
+    assert tomllib.loads(path.read_text())["model_verbosity"] == "high"
+    assert catalog.user.read_bytes() == original_user
+
+
+def test_disabled_project_retains_raw_diagnostics_but_cannot_write_or_run_change_hooks(catalog):
+    path = project_file(catalog.workspace, 'web_search = "live"\n')
+    original = path.read_bytes()
+    catalog.monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: False)
+    payload = read(catalog)
+    scope = payload["scopes"][0]
+    response = save_project(catalog, payload, catalog.workspace, catalog.workspace, web_search="disabled")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == scope["disabled_reason"]
+    assert path.read_bytes() == original
+    catalog.hook.assert_not_awaited()
+
+
+def test_parent_and_child_project_overrides_use_actual_layer_order_and_child_unset_inherits_parent(catalog):
+    parent_file = project_file(catalog.workspace, 'model_verbosity = "low"\n')
+    child = catalog.workspace / "app"
+    child_file = project_file(child, 'model_verbosity = "high" # child\n')
+    original_child = child_file.read_bytes()
+    response = save_project(catalog, read(catalog, child), child, catalog.workspace, model_verbosity="medium")
+    assert response.status_code == 200, response.text
+    after = response.json()
+    assert after["write"]["status"] == "overridden"
+    assert after["write"]["fields"]["model_verbosity"]["overriding_source"]["source"]["project_config_folder"] == str(child_file.parent)
+    assert after["effective"]["model_verbosity"] == "high"
+    assert tomllib.loads(parent_file.read_text())["model_verbosity"] == "medium"
+    assert child_file.read_bytes() == original_child
+    response = save_project(catalog, after, child, child, model_verbosity=None)
+    assert response.status_code == 200, response.text
+    assert response.json()["write"]["status"] == "applied"
+    assert response.json()["effective"]["model_verbosity"] == "medium"
+    assert "model_verbosity" not in tomllib.loads(child_file.read_text())
+
+
+def test_project_cannot_bypass_managed_origins_or_requirements_with_null(catalog):
+    path = project_file(catalog.workspace, 'sandbox_mode = "read-only"\nweb_search = "live"\n')
+    (catalog.managed / "managed-settings.json").write_text('{"web_search":"cached"}', encoding="utf-8")
+    catalog.requirements.write_text('allowed_sandbox_modes = ["read-only"]\n', encoding="utf-8")
+    original = path.read_bytes()
+    payload = read(catalog)
+    for patch in ({"web_search": "disabled"}, {"sandbox_mode": None}, {"sandbox_mode": "danger-full-access"}):
+        response = save_project(catalog, payload, catalog.workspace, catalog.workspace, **patch)
+        assert response.status_code == 409, response.text
+        assert path.read_bytes() == original
+    assert catalog.hook.await_count == 1  # Only unset reaches the transaction to check the inherited effective value.
+
+
+def test_unregistered_project_scope_does_not_write_an_arbitrary_file(catalog):
+    path = project_file(catalog.workspace, 'web_search = "cached"\n')
+    original = path.read_bytes()
+    response = catalog.client.put("/api/settings/agent-config", json={"workspace_root": str(catalog.workspace),
+        "scope_id": f"project:{catalog.home}", "web_search": "live", "path": str(catalog.user)})
+    assert response.status_code == 409, response.text
+    assert "scope is no longer available" in response.json()["detail"]
+    assert path.read_bytes() == original
+    catalog.hook.assert_not_awaited()
+
+
+def test_project_hook_refusal_and_filesystem_failure_preserve_the_actual_file(catalog):
+    from backend.hooks.manager import HookResult
+    path = project_file(catalog.workspace, 'web_search = "cached" # authored\n')
+    original = path.read_bytes()
+    before = read(catalog)
+    catalog.hook.return_value = HookResult(blocked=True, message="Project change blocked by fixture hook")
+    response = save_project(catalog, before, catalog.workspace, catalog.workspace, web_search="live")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == "Project change blocked by fixture hook"
+    assert path.read_bytes() == original
+    catalog.hook.return_value = None
+
+    def denied(*_args, **_kwargs):
+        raise OSError("fixture project disk write rejected")
+
+    catalog.monkeypatch.setattr(service, "atomic_write_text", denied)
+    response = save_project(catalog, before, catalog.workspace, catalog.workspace, web_search="live")
+    assert response.status_code == 500, response.text
+    assert response.json()["detail"] == "fixture project disk write rejected"
+    assert path.read_bytes() == original

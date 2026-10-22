@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AtSign, BookOpen, Bot, Braces, ChevronDown, Code2, FolderClosed, Info, Layers, LoaderCircle, MessageCircle, MousePointer2, Settings, Terminal, Workflow, X } from "../lib/icons";
+import { ArrowDown, AtSign, BookOpen, Bot, Braces, ChevronDown, FolderClosed, Info, Layers, LoaderCircle, MessageCircle, Settings, Terminal, Workflow, X } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { Tip } from "../components/Tooltip";
@@ -12,21 +12,23 @@ import "./ImportSettingsTab.css";
 import { projectOwnsWorkspace, projectWorkspaceRoots } from "../lib/project-registry";
 import { openPreferredFile } from "../lib/open-preferred-target";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
+import { ImportProviderIcon } from "./ImportProviderIcon";
 
 type ItemType = "sessions" | "projects" | "instructions" | "settings" | "skills" | "plugins" | "mcp" | "agents" | "hooks" | "commands" | "memory";
 type Item = { id: string; provider_id: string; item_type: ItemType; title: string; source_path: string; target_path: string; workspace_root: string; supported: boolean; reason: string };
 type ImportResult = Item & { status: "success" | "skipped" | "unsupported" | "error"; message: string };
 type ImportOutcome = { results: ImportResult[]; setup_errors?: string[] };
+type ImportProgress = ImportOutcome & { id: string | null; detection_id?: string; status: "running" | "success" | "error" | "unchanged"; items: Item[]; error?: string };
 type History = { id: string; completed_at: string; automatic: boolean; results: ImportResult[]; setup_errors?: string[] };
-type ImportState = { providers: { id: string; name: string }[]; history: History[]; sync: { enabled: boolean; item_types: ItemType[]; last_error?: string }; connected_provider_ids: string[]; item_types: ItemType[]; running_import?: { id: string; item_types: ItemType[] } | null };
+type ImportState = { providers: { id: string; name: string }[]; history: History[]; sync: { enabled: boolean; item_types: ItemType[]; last_error?: string }; connected_provider_ids: string[]; item_types: ItemType[]; running_import: { id: string; item_types: ItemType[] } | null; import_progress: ImportProgress | null };
 type Detection = { detection_id: string; items: Item[]; issues: { provider_id: string; source_path: string; status: string; message: string }[] };
 
 const EN = {
   title: "Import from another AI app", subtitle: "Bring setup, projects, and chats from other AI apps into MiniCode", detected: "Detected setup that can be added to MiniCode",
   generalTitle: "Import work from other AI apps", generalDescription: "Bring over your setup, projects, and recent chats", importedSetup: "Imported agent setup", lastImported: "Last imported {relativeTime}", generalChecking: "Checking", noData: "No data detected", importAgain: "Import again", viewImported: "View imported files", tryAgain: "Try again",
-  viewImportedAction: "View imported", resultTitle: "Imported external agent config", resultSubtitle: "Selected config was copied into MiniCode", resultErrorTitle: "Import failed", resultErrorSubtitle: "Some config could not be imported. Check the selected items and try again", resultUnchangedTitle: "No content imported", resultUnchangedSubtitle: "Review the results for the selected items", userConfig: "User config", currentProject: "Current project", ok: "OK",
+  resultTitle: "Imported external agent config", resultSubtitle: "Selected config was copied into MiniCode", resultErrorTitle: "Import failed", resultErrorSubtitle: "Some config could not be imported. Check the selected items and try again", resultUnchangedTitle: "No content imported", resultUnchangedSubtitle: "Review the results for the selected items", resultRunningTitle: "Importing external agent config", resultRunningSubtitle: "Hang tight, this may take a few moments", scrollToBottom: "Scroll to bottom", userConfig: "User config", currentProject: "Current project", ok: "OK",
   checking: "Checking for imports", checkingDetail: "Looking for compatible setup, projects, and recent chats", empty: "Import from other AI apps", emptyDetail: "No importable setup found", noNew: "No new items found",
-  import: "Import", importTo: "Import", importing: "Importing", importProgress: "Import in progress", background: "Do it in background", checkAgain: "Check again", retry: "Retry", review: "Select items to import", reviewDetail: "Choose what to bring over. Your existing setup won’t be affected.", cancel: "Cancel", close: "Close",
+  import: "Import", importTo: "Import", importing: "Importing", importProgress: "Import in progress", checkAgain: "Check again", retry: "Retry", review: "Select items to import", reviewDetail: "Choose what to bring over. Your existing setup won’t be affected.", cancel: "Cancel", close: "Close",
   dialogTitle: "Import from other AI apps", appsFound: "Apps found", continue: "Continue", tools: "Tools & setup", toolsDetail: "Settings, instructions, plugins, skills", projectsDetail: "Use your existing project folders", chatsDetail: "Recent chats", showTools: "Show Tools & setup details", hideTools: "Hide Tools & setup details", info: "What will be imported for", imported: "Import results",
   syncTitle: "Automatic sync", sync: "Keep imports in sync", syncDetail: "Automatically sync new and updated content from connected sources", paused: "Sync paused. Your content selections are saved", content: "Content", customize: "Customize", afterImport: "Available after your first import", save: "Save",
   history: "Import history", automatic: "Automatic sync", viewMore: "View more", noneSelected: "No content selected", categories: { sessions: "Chat sessions", projects: "Projects", instructions: "Instructions", settings: "Settings", skills: "Skills", plugins: "Plugins", mcp: "MCP servers", agents: "Agents", hooks: "Hooks", commands: "Commands", memory: "Memory" },
@@ -35,14 +37,20 @@ const EN = {
 const ZH: typeof EN = {
   title: "从其他 AI 应用导入", subtitle: "将其他 AI 应用的配置、项目和聊天导入 MiniCode", detected: "检测到可添加到 MiniCode 的配置",
   generalTitle: "从其他 AI 应用导入", generalDescription: "导入配置、项目和近期聊天", importedSetup: "已导入智能体配置", lastImported: "上次导入：{relativeTime}", generalChecking: "正在检查", noData: "未检测到数据", importAgain: "再次导入", viewImported: "查看导入的文件", tryAgain: "重试",
-  viewImportedAction: "查看导入内容", resultTitle: "已导入外部智能体配置", resultSubtitle: "所选配置已复制到 MiniCode", resultErrorTitle: "导入失败", resultErrorSubtitle: "部分配置未能导入，请检查所选内容后重试", resultUnchangedTitle: "未导入内容", resultUnchangedSubtitle: "查看所选内容的处理结果", userConfig: "用户配置", currentProject: "当前项目", ok: "确定",
+  resultTitle: "已导入外部智能体配置", resultSubtitle: "所选配置已复制到 MiniCode", resultErrorTitle: "导入失败", resultErrorSubtitle: "部分配置未能导入，请检查所选内容后重试", resultUnchangedTitle: "未导入内容", resultUnchangedSubtitle: "查看所选内容的处理结果", resultRunningTitle: "正在导入外部智能体配置", resultRunningSubtitle: "请稍候，这可能需要一些时间", scrollToBottom: "滚动到底部", userConfig: "用户配置", currentProject: "当前项目", ok: "确定",
   checking: "正在检查可导入的内容", checkingDetail: "查找兼容的配置、项目和近期聊天", empty: "从其他 AI 应用导入", emptyDetail: "未找到可导入的配置", noNew: "未发现新内容",
-  import: "导入", importTo: "导入", importing: "正在导入", importProgress: "正在导入", background: "在后台继续", checkAgain: "再次检查", retry: "重试", review: "选择要导入的内容", reviewDetail: "选择要导入的内容。现有配置不会受到影响。", cancel: "取消", close: "关闭",
+  import: "导入", importTo: "导入", importing: "正在导入", importProgress: "正在导入", checkAgain: "再次检查", retry: "重试", review: "选择要导入的内容", reviewDetail: "选择要导入的内容。现有配置不会受到影响。", cancel: "取消", close: "关闭",
   dialogTitle: "从其他 AI 应用导入", appsFound: "找到的应用", continue: "继续", tools: "工具与配置", toolsDetail: "设置、指令、插件、技能", projectsDetail: "使用现有项目文件夹", chatsDetail: "最近的聊天", showTools: "展开工具与配置详情", hideTools: "收起工具与配置详情", info: "将导入的内容", imported: "导入结果",
   syncTitle: "自动同步", sync: "保持导入内容同步", syncDetail: "自动同步已连接来源中新增和更新的内容", paused: "同步已暂停，内容选择会保留", content: "内容", customize: "自定义", afterImport: "首次导入后可用", save: "保存",
   history: "导入历史", automatic: "自动同步", viewMore: "查看更多", noneSelected: "未选择内容", categories: { sessions: "聊天会话", projects: "项目", instructions: "指令", settings: "设置", skills: "技能", plugins: "插件", mcp: "MCP 服务", agents: "Agent", hooks: "Hook", commands: "命令", memory: "记忆" },
   status: { success: "已导入", skipped: "已跳过", unsupported: "不支持", error: "导入失败" },
 };
+
+function completedImport(outcome: ImportOutcome, id: string | null): ImportProgress {
+  return { ...outcome, id, items: outcome.results,
+    status: outcome.setup_errors?.length || outcome.results.some(result => result.status === "error") ? "error"
+      : outcome.results.some(result => result.status === "success") ? "success" : "unchanged" };
+}
 
 async function request<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
   const response = await fetchWithTimeout(new URL(`/api/settings/import${path}`, apiBase()), {
@@ -69,51 +77,72 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [selection, setSelection] = useState<{ provider?: string } | null>(null);
-  const [result, setResult] = useState<ImportOutcome | null>(null);
+  const [progress, setProgress] = useState<ImportProgress | null>(null);
   const [importing, setImporting] = useState(false);
   const [syncSaving, setSyncSaving] = useState(false);
   const [customize, setCustomize] = useState(false);
   const [showAllHistory, setShowAllHistory] = useState(false);
   const sequence = useRef(0);
+  const receiveState = (next: ImportState) => {
+    setState(next);
+    setProgress(current => {
+      const remote = next.import_progress;
+      if (!current) return remote?.status === "running" ? remote : null;
+      if (current.status !== "running") return current;
+      if (remote && (remote.id === current.id || remote.detection_id === current.detection_id)) {
+        return importing ? { ...remote, status: "running" } : remote;
+      }
+      const history = next.history.find(entry => entry.id === current.id);
+      return !importing && history ? completedImport(history, history.id) : current;
+    });
+  };
   const load = async () => {
     const revision = ++sequence.current;
     setLoading(true); setError("");
     try {
-      const [nextState, nextDetection] = await Promise.all([request<ImportState>(""), request<Detection>("/detect", { workspace_roots: JSON.parse(rootsKey), provider_ids: ["claude", "cursor"], include_home: true, max_session_age_days: 30, max_sessions: 50 })]);
-      if (sequence.current === revision) { setState(nextState); setDetection(nextDetection); }
+      const [, nextDetection] = await Promise.all([
+        request<ImportState>("").then(next => { if (sequence.current === revision) receiveState(next); }),
+        request<Detection>("/detect", { workspace_roots: JSON.parse(rootsKey), provider_ids: ["claude", "cursor"], include_home: true, max_session_age_days: 30, max_sessions: 50 }),
+      ]);
+      if (sequence.current === revision) setDetection(nextDetection);
     } catch (reason) { if (sequence.current === revision) setError(String(reason)); }
     finally { if (sequence.current === revision) setLoading(false); }
   };
   useEffect(() => {
     if (!active) return;
     setSelection(null);
-    setResult(null);
     void load();
     return () => { sequence.current++; };
   }, [active, rootsKey]);
   useEffect(() => {
-    if (!active || !state?.running_import) return;
+    if (!active || !(importing || state?.running_import || progress?.status === "running")) return;
     const timer = window.setInterval(() => { void request<ImportState>("").then(next => {
-      setState(next);
+      receiveState(next);
       if (!next.running_import && !importing) void load();
     }).catch(reason => setError(String(reason))); }, 2000);
     return () => window.clearInterval(timer);
-  }, [active, state?.running_import?.id, importing, rootsKey]);
+  }, [active, state?.running_import?.id, progress?.status, importing, rootsKey]);
 
   const apply = async (itemIds: string[]) => {
+    const plan = detection!;
     setImporting(true); setError("");
+    setSelection(null);
+    setProgress({ id: null, detection_id: plan.detection_id, status: "running", items: plan.items.filter(item => itemIds.includes(item.id)), results: [] });
     let imported: ImportOutcome | undefined;
     try {
-      imported = await request<ImportOutcome>("", { detection_id: detection!.detection_id, item_ids: itemIds });
+      imported = await request<ImportOutcome>("", { detection_id: plan.detection_id, item_ids: itemIds });
+      const outcome = imported;
+      setProgress(current => current?.detection_id === plan.detection_id ? completedImport(outcome, current.id) : current);
       sendClientCommand({ type: "conversation.list" }, { silent: true });
       sendClientCommand({ type: "workspace.recent" }, { silent: true });
       sendClientCommand({ type: "skills.list" }, { silent: true });
       sendClientCommand({ type: "commands.list" }, { silent: true });
-      setState(await request<ImportState>(""));
-      if (imported.setup_errors?.length) setError(imported.setup_errors.join("\n"));
-    } catch (reason) { setError(String(reason)); }
+      receiveState(await request<ImportState>(""));
+    } catch (reason) {
+      if (!imported) setProgress(current => current?.detection_id === plan.detection_id ? { ...current, status: "error", error: String(reason) } : current);
+      else setError(String(reason));
+    }
     finally { setImporting(false); }
-    return imported;
   };
   const saveSync = async (enabled: boolean, itemTypes: ItemType[]) => {
     setSyncSaving(true); setError("");
@@ -127,8 +156,8 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
     setSelection(null);
     void load();
   };
-  const selectionDialog = <ImportSelectionDialog key={detection?.detection_id || "detecting"} text={text} providers={detectedProviders} preselectedProvider={selection?.provider} detection={detection} loading={loading} error={error} busy={importing || Boolean(state?.running_import)} onClose={closeSelection} onRetry={() => void load()} onImport={apply} onViewImported={outcome => { setSelection(null); setResult(outcome); }} />;
-  const resultDialog = active && result && <ImportedFilesDialog text={text} outcome={result} onClose={() => setResult(null)} />;
+  const selectionDialog = <ImportSelectionDialog key={detection?.detection_id || "detecting"} text={text} providers={detectedProviders} preselectedProvider={selection?.provider} detection={detection} loading={loading} error={error} busy={importing || Boolean(state?.running_import)} onClose={closeSelection} onRetry={() => void load()} onImport={apply} />;
+  const resultDialog = active && progress && <ImportedFilesDialog text={text} progress={progress} onClose={() => { setProgress(null); void load(); }} />;
   if (variant === "general-row") {
     const busy = importing || Boolean(state?.running_import);
     const hasImports = detection?.items.some(item => item.supported) === true;
@@ -146,7 +175,7 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
           <div className="settings-row-description">{latestImport ? text.lastImported.replace("{relativeTime}", relativeTime) : text.generalDescription}</div></div>
         <div className="settings-row-control"><button type="button" className="settings-action-button"
           disabled={loading || busy || (!detectionFailed && !hasImports && !latestResult)} aria-busy={busy}
-          onClick={() => { if (detectionFailed) void load(); else if (!hasImports && latestResult) setResult(latestResult); else setSelection({}); }}>
+          onClick={() => { if (detectionFailed) void load(); else if (!hasImports && latestResult) setProgress(completedImport(latestResult, latestResult.id)); else setSelection({}); }}>
           {busy && <LoaderCircle className="animate-spin" size={14} />}
           {busy ? text.importing : loading ? text.generalChecking : detectionFailed ? text.tryAgain : hasImports ? latestImport ? text.importAgain : text.import : latestResult ? text.viewImported : text.noData}
         </button></div>
@@ -179,16 +208,14 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
 const TOOL_CATEGORIES: ItemType[] = ["settings", "instructions", "skills", "plugins", "mcp", "agents", "hooks", "commands", "memory"];
 const CATEGORY_ICONS = { settings: Braces, instructions: BookOpen, skills: Layers, plugins: AtSign, mcp: Braces, agents: Bot, hooks: Workflow, commands: Terminal, memory: BookOpen };
 
-function ImportSelectionDialog({ text, providers, preselectedProvider, detection, loading, error, busy, onClose, onRetry, onImport, onViewImported }: {
+function ImportSelectionDialog({ text, providers, preselectedProvider, detection, loading, error, busy, onClose, onRetry, onImport }: {
   text: typeof EN; providers: { id: string; name: string }[]; preselectedProvider?: string; detection?: Detection;
-  loading: boolean; error: string; busy: boolean; onClose: () => void; onRetry: () => void; onImport: (ids: string[]) => Promise<ImportOutcome | undefined>;
-  onViewImported: (outcome: ImportOutcome) => void;
+  loading: boolean; error: string; busy: boolean; onClose: () => void; onRetry: () => void; onImport: (ids: string[]) => Promise<void>;
 }) {
   const [step, setStep] = useState<"providers" | "items">("providers");
   const [chosenProviders, setChosenProviders] = useState(() => new Set(preselectedProvider ? [preselectedProvider] : providers.filter(provider => detection!.items.some(item => item.provider_id === provider.id && item.supported)).map(provider => provider.id)));
   const [selected, setSelected] = useState(() => new Set(detection?.items.filter(item => item.supported).map(item => item.id)));
   const [toolsExpanded, setToolsExpanded] = useState(false);
-  const [outcome, setOutcome] = useState<ImportOutcome>();
   const dialog = useFocusTrap(true);
   const toolsId = useId();
   const items = detection?.items.filter(item => chosenProviders.has(item.provider_id)) || [];
@@ -197,7 +224,7 @@ function ImportSelectionDialog({ text, providers, preselectedProvider, detection
   const chats = items.filter(item => item.item_type === "sessions");
   const projectRoots = [...new Set(projects.map(item => item.workspace_root))];
   const chosenItems = items.filter(item => selected.has(item.id));
-  const disabled = busy || Boolean(outcome);
+  const disabled = busy;
   const toggle = (group: Item[], enabled: boolean) => setSelected(current => {
     const next = new Set(current);
     for (const item of group.filter(item => item.supported)) enabled ? next.add(item.id) : next.delete(item.id);
@@ -208,7 +235,7 @@ function ImportSelectionDialog({ text, providers, preselectedProvider, detection
   const title = step === "providers" ? text.dialogTitle : text.review;
   const submit = async () => {
     if (step === "providers") setStep("items");
-    else setOutcome(await onImport(chosenItems.map(item => item.id)));
+    else await onImport(chosenItems.map(item => item.id));
   };
   return createPortal(<div ref={dialog} className="mc-project-dialog-backdrop" onClick={() => { if (!busy) onClose(); }}>
     <form role="dialog" aria-modal="true" aria-label={title} className="mc-project-dialog settings-import-dialog" tabIndex={-1} onClick={event => event.stopPropagation()}
@@ -220,8 +247,7 @@ function ImportSelectionDialog({ text, providers, preselectedProvider, detection
         <p className="settings-import-list-label">{text.appsFound}</p>
         <div className="settings-import-providers" role="list" aria-label={text.appsFound}>{providers.map(provider => {
           const supported = detection!.items.some(item => item.provider_id === provider.id && item.supported);
-          const Icon = provider.id === "claude" ? Code2 : MousePointer2;
-          return <div key={provider.id} role="listitem" className="settings-import-provider"><span className="settings-import-provider-icon" data-provider={provider.id}><Icon size={23} /></span><span>{provider.name}</span>
+          return <div key={provider.id} role="listitem" className="settings-import-provider"><span className="settings-import-provider-icon" data-provider={provider.id}><ImportProviderIcon provider={provider.id === "claude" ? "claude" : "cursor"} /></span><span>{provider.name}</span>
             <button type="button" role="switch" className="settings-toggle" aria-label={provider.name} aria-checked={chosenProviders.has(provider.id)} data-active={chosenProviders.has(provider.id)} disabled={!supported || busy} onClick={() => setChosenProviders(current => { const next = new Set(current); next.has(provider.id) ? next.delete(provider.id) : next.add(provider.id); return next; })}><span /></button>
           </div>;
         })}</div>{providers.length === 0 && !error && <p className="settings-import-empty">{text.emptyDetail}</p>}
@@ -244,53 +270,65 @@ function ImportSelectionDialog({ text, providers, preselectedProvider, detection
       </div>}
       {error && <p className="settings-import-error" role="alert">{error}</p>}
       {detection?.issues.filter(issue => chosenProviders.has(issue.provider_id)).map((issue, index) => <p className="settings-import-issue" key={`${issue.source_path}:${index}`}>{issue.source_path}<br />{issue.message}</p>)}
-      {outcome && <div className="settings-import-results" role="status" aria-label={text.imported}>{outcome.results.map(result => <p key={result.id}><strong>{text.status[result.status]} · {result.title}</strong><span>{result.message || result.target_path}</span></p>)}</div>}
-      <footer>{outcome ? <><button type="button" className="settings-action-button settings-import-cancel" onClick={onClose}>{text.close}</button><button type="button" className="settings-action-button" data-primary="true" onClick={() => onViewImported(outcome)}>{text.viewImportedAction}</button></> : <>
-        <button type="button" className="settings-action-button settings-import-cancel" onClick={onClose}>{busy ? text.background : text.cancel}</button>
+      <footer>
+        <button type="button" className="settings-action-button settings-import-cancel" disabled={busy} onClick={onClose}>{text.cancel}</button>
         {error && !detection ? <button type="button" className="settings-action-button" data-primary="true" onClick={onRetry}>{text.retry}</button> : <button type="submit" className="settings-action-button" data-primary="true" disabled={loading || busy || chosenItems.length === 0}>{busy ? text.importing : step === "providers" ? text.continue : text.importTo}</button>}
-      </>}</footer>
+      </footer>
     </form>
   </div>, document.body);
 }
 
 const IMPORTED_FILE_TYPES: ItemType[] = ["instructions", "settings", "mcp", "agents", "hooks", "commands"];
 
-function ImportedFilesDialog({ text, outcome, onClose }: { text: typeof EN; outcome: ImportOutcome; onClose: () => void }) {
+function ImportedFilesDialog({ text, progress, onClose }: { text: typeof EN; progress: ImportProgress; onClose: () => void }) {
   const dialog = useFocusTrap(true);
-  const hasErrors = outcome.results.some(result => result.status === "error") || Boolean(outcome.setup_errors?.length);
-  const hasImports = outcome.results.some(result => result.status === "success");
-  const title = hasErrors ? text.resultErrorTitle : hasImports ? text.resultTitle : text.resultUnchangedTitle;
-  const groups = [...new Set(outcome.results.map(result => result.workspace_root))];
-  return createPortal(<div className="mc-project-dialog-backdrop" onClick={onClose}>
+  const content = useRef<HTMLDivElement>(null);
+  const [showScroll, setShowScroll] = useState(false);
+  const running = progress.status === "running";
+  const hasErrors = progress.status === "error";
+  const hasImports = progress.status === "success";
+  const title = running ? text.resultRunningTitle : hasErrors ? text.resultErrorTitle : hasImports ? text.resultTitle : text.resultUnchangedTitle;
+  const groups = [...new Set(progress.items.map(item => item.workspace_root))].sort((left, right) => left === "" ? -1 : right === "" ? 1 : 0);
+  const updateScroll = () => { const element = content.current!; setShowScroll(element.scrollHeight - element.scrollTop - element.clientHeight > 8); };
+  useEffect(() => {
+    const frame = requestAnimationFrame(updateScroll);
+    window.addEventListener("resize", updateScroll);
+    return () => { cancelAnimationFrame(frame); window.removeEventListener("resize", updateScroll); };
+  }, [progress]);
+  return createPortal(<div className="mc-project-dialog-backdrop" onClick={() => { if (!running) onClose(); }}>
     <div ref={dialog} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
       className="mc-project-dialog settings-import-files-dialog" onClick={event => event.stopPropagation()} onKeyDown={event => {
-        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); if (!running) onClose(); }
       }}>
-      <div className="settings-import-files-content">
+      <div className="settings-import-files-scroll"><div ref={content} className="settings-import-files-content" onScroll={updateScroll}>
         <header className="settings-import-files-heading">
-          <span className="settings-import-result-icon" data-status={hasErrors ? "error" : hasImports ? "success" : "skipped"}>
-            <SettingsSourceIcon icon={hasErrors ? "importError" : hasImports ? "importSuccess" : "themeImport"} size={24} />
+          <span className="settings-import-result-icon" data-status={progress.status}>
+            {running ? <LoaderCircle size={24} className="animate-spin" /> : <SettingsSourceIcon icon={hasErrors ? "importError" : hasImports ? "importSuccess" : "themeImport"} size={24} />}
           </span>
-          <div><h2>{title}</h2><p>{hasErrors ? text.resultErrorSubtitle : hasImports ? text.resultSubtitle : text.resultUnchangedSubtitle}</p></div>
+          <div><h2>{title}</h2><p>{running ? text.resultRunningSubtitle : hasErrors ? text.resultErrorSubtitle : hasImports ? text.resultSubtitle : text.resultUnchangedSubtitle}</p></div>
         </header>
         {groups.map(root => <section className="settings-import-files-group" key={root}>
           <h3>{root ? text.currentProject : text.userConfig}{root && <span>{root}</span>}</h3>
-          {outcome.results.filter(result => result.workspace_root === root).map(result => <div className="settings-import-file-result" key={result.id}>
-            <div><strong>{result.title}</strong><div className="settings-import-file-path">
-              {result.status === "success" && IMPORTED_FILE_TYPES.includes(result.item_type)
-                ? <a href={result.target_path} onClick={event => {
+          {progress.items.filter(item => item.workspace_root === root).map(item => {
+            const result = progress.results.find(result => result.id === item.id);
+            return <div className="settings-import-file-result" key={item.id}>
+            <div><strong>{item.title}</strong><div className="settings-import-file-path">
+              {!running && result?.status === "success" && IMPORTED_FILE_TYPES.includes(item.item_type)
+                ? <a href={item.target_path} onClick={event => {
                   event.preventDefault(); onClose(); useAppStore.setState({ settingsOpen: false });
-                  void openPreferredFile(result.target_path);
-                }}>{result.target_path}</a> : <span>{result.target_path}</span>}
-            </div>{result.message && <p>{result.message}</p>}</div>
-            <span className="settings-import-file-status" data-status={result.status} aria-label={text.status[result.status]}>
-              {result.status === "success" ? <SettingsSourceIcon icon="check" size={14} /> : result.status === "error" ? <SettingsSourceIcon icon="importError" size={16} /> : text.status[result.status]}
-            </span>
-          </div>)}
+                  void openPreferredFile(item.target_path);
+                }}>{item.target_path}</a> : <span>{item.target_path}</span>}
+            </div>{result?.message && <p>{result.message}</p>}</div>
+            {running ? <span className="settings-import-file-status" aria-label={text.importing}><LoaderCircle size={16} className="animate-spin" /></span>
+              : result && <span className="settings-import-file-status" data-status={result.status} aria-label={text.status[result.status]}>
+                {result.status === "success" ? <SettingsSourceIcon icon="check" size={14} /> : result.status === "error" ? <SettingsSourceIcon icon="importError" size={16} /> : text.status[result.status]}
+              </span>}
+          </div>; })}
         </section>)}
-        {outcome.setup_errors?.map((error, index) => <p key={index} className="settings-import-error" role="alert">{error}</p>)}
-      </div>
-      <footer><button type="button" className="settings-action-button" data-primary="true" onClick={onClose}>{text.ok}</button></footer>
+        {progress.error && <p className="settings-import-error" role="alert">{progress.error}</p>}
+        {progress.setup_errors?.map((error, index) => <p key={index} className="settings-import-error" role="alert">{error}</p>)}
+      </div>{showScroll && <button type="button" className="settings-import-scroll-bottom" aria-label={text.scrollToBottom} onClick={() => content.current!.scrollTo({ top: content.current!.scrollHeight, behavior: "smooth" })}><ArrowDown size={18} aria-hidden="true" /></button>}</div>
+      {hasImports && <footer><button type="button" className="settings-action-button" data-primary="true" onClick={onClose}>{text.ok}</button></footer>}
     </div>
   </div>, document.body);
 }

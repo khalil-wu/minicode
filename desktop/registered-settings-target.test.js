@@ -15,21 +15,30 @@ async function settingsFixture(t) {
     assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()));
     fs.rmSync(directory, { recursive: true });
   });
-  const workspace = path.join(directory, "workspace");
+  const projectRoot = path.join(directory, "repository");
+  const workspace = path.join(projectRoot, "child");
+  const projectConfig = path.join(projectRoot, ".minicode", "config.toml");
+  const projectScopeId = `project:${projectRoot}`;
   const settingsPath = path.join(directory, "profile", "settings.json");
   const dataPath = path.join(directory, "profile", "data");
   const profileHook = path.join(directory, "profile", "audit.config.toml");
   const managedConfig = path.join(directory, "managed-settings.json");
   const pluginHook = path.join(directory, "installed", "fixture-plugin", ".minicode-plugin", "plugin.json");
-  fs.mkdirSync(workspace);
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(path.dirname(projectConfig));
+  fs.writeFileSync(projectConfig, "# authored project\n");
   fs.mkdirSync(dataPath, { recursive: true });
   fs.mkdirSync(path.dirname(pluginHook), { recursive: true });
   for (const target of [settingsPath, profileHook, pluginHook, managedConfig]) fs.writeFileSync(target, "fixture");
   const hooks = new Map([["profile-key", profileHook], ["plugin-key", pluginHook]]);
+  const configs = new Map([["user", { path: profileHook }], ["managed", { path: managedConfig }],
+    [projectScopeId, { path: projectConfig, workspace_root: projectRoot }]]);
   security.init({ initialRoots: [workspace], readOnlyRoots: [], userOutputRoots: [] });
   const requests = [];
   const opened = [];
-  const state = { status: 200, detail: "Settings catalog rejected this action", shellError: "", shellException: null };
+  const preferredOwners = [], preferredOpened = [];
+  const state = { status: 200, detail: "Settings catalog rejected this action", shellError: "", shellException: null,
+    fileTarget: "cursor", targetException: null };
   const server = http.createServer((request, response) => {
     const url = new URL(request.url, "http://fixture");
     requests.push({ url, token: request.headers["x-minicode-token"], cache: request.headers["cache-control"] });
@@ -43,10 +52,10 @@ async function settingsFixture(t) {
       return;
     }
     const kind = url.searchParams.get("kind");
-    const target = kind === "config" ? url.searchParams.get("scope_id") === "user" ? profileHook : url.searchParams.get("scope_id") === "managed" ? managedConfig : settingsPath
-      : kind === "data" ? dataPath : hooks.get(url.searchParams.get("hook_key"));
-    if (!target) response.writeHead(404).end(JSON.stringify({ detail: "Hook is no longer registered; reload its configuration." }));
-    else response.end(JSON.stringify({ path: target }));
+    const target = kind === "config" ? url.searchParams.has("scope_id") ? configs.get(url.searchParams.get("scope_id")) : { path: settingsPath }
+      : kind === "data" ? { path: dataPath } : hooks.has(url.searchParams.get("hook_key")) ? { path: hooks.get(url.searchParams.get("hook_key")) } : null;
+    if (!target) response.writeHead(404).end(JSON.stringify({ detail: kind === "config" ? "Configuration scope is no longer available." : "Hook is no longer registered; reload its configuration." }));
+    else response.end(JSON.stringify(target));
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -68,12 +77,19 @@ async function settingsFixture(t) {
         if (state.shellException) throw state.shellException;
         return state.shellError;
       } },
-    } : require(name),
+    } : name === "./open-targets" ? { openInTarget: async (opener, target) => {
+      preferredOpened.push({ id: opener.id, path: target });
+      if (state.targetException) throw state.targetException;
+    } } : require(name),
   });
   moduleBox.exports.init({
     getWindowForSender: contents => contents === webContents ? window : null,
     getWindowRecord: owner => { assert.equal(owner, window); return record; },
     getRemoteDesktop: () => ({ invokes: RemoteDesktop.prototype.invokes }),
+    desktopPreferences: {
+      preferredFileOpenTarget: owner => { preferredOwners.push(owner); return state.fileTarget; },
+      fileOpenTargets: () => [{ id: "cursor", kind: "editor" }, { id: "system", kind: "systemDefault" }],
+    },
     getRuntimeConfig: owner => {
       runtimeOwners.push(owner);
       return { apiBaseUrl, runtimeToken: "owned-runtime-token" };
@@ -90,7 +106,8 @@ async function settingsFixture(t) {
     process: { env: {}, argv: [], contextIsolated: true, platform: "win32", arch: "x64" }, window: {}, console,
   });
   return { directory, workspace, settingsPath, dataPath, profileHook, pluginHook, hooks, requests, opened,
-    managedConfig, state, sender, record, window, runtimeOwners, open: request => runtime.desktop.settings.openTarget(request) };
+    managedConfig, projectRoot, projectConfig, projectScopeId, configs, preferredOwners, preferredOpened,
+    state, sender, record, window, runtimeOwners, open: request => runtime.desktop.settings.openTarget(request) };
 }
 
 test("real preload opens registered profile and installed settings without granting generic roots or accepting renderer paths", async t => {
@@ -171,4 +188,64 @@ test("an OS shell exception retains its actual error through the dedicated prelo
   fixture.state.shellException = error;
   await assert.rejects(fixture.open({ kind: "hook", hookKey: "profile-key" }), error);
   assert.deepEqual(fixture.opened, [fixture.profileHook]);
+});
+
+test("project opening uses the catalog file and its workspace preference without granting its ancestor directory", async t => {
+  const fixture = await settingsFixture(t);
+  const roots = [...security.getTrustedWorkspaceRoots()];
+  const original = fs.readFileSync(fixture.projectConfig, "utf8");
+  assert.equal(security.isReadablePath(fixture.projectConfig), false);
+  assert.equal(await fixture.open({ kind: "config", scopeId: fixture.projectScopeId, workspaceRoot: fixture.workspace,
+    path: fixture.profileHook, targetId: "system", projectWorkspaceRoot: fixture.directory }), true);
+  assert.deepEqual(fixture.preferredOwners, [fixture.projectRoot]);
+  assert.deepEqual(fixture.preferredOpened, [{ id: "cursor", path: fixture.projectConfig }]);
+  assert.deepEqual(fixture.opened, []);
+  assert.equal(fs.readFileSync(fixture.projectConfig, "utf8"), original);
+  assert.equal(fixture.requests[0].url.searchParams.get("workspace_root"), fixture.workspace);
+  assert.equal(fixture.requests[0].url.searchParams.get("scope_id"), fixture.projectScopeId);
+  assert.equal(fixture.requests[0].url.searchParams.has("path"), false);
+  assert.equal(security.isReadablePath(fixture.projectConfig), false);
+  assert.deepEqual([...security.getTrustedWorkspaceRoots()], roots);
+});
+
+test("a built-in project target returns only the registered file and owner for the existing editor consumer", async t => {
+  const fixture = await settingsFixture(t);
+  fixture.state.fileTarget = "minicode";
+  const opened = await fixture.open({ kind: "config", scopeId: fixture.projectScopeId, workspaceRoot: fixture.workspace,
+    sessionId: "actual-editor-session", conversationId: "" });
+  assert.equal(opened.openInEditor, true);
+  assert.equal(opened.path, fixture.projectConfig);
+  assert.equal(opened.workspaceRoot, fixture.projectRoot);
+  assert.deepEqual(fixture.opened, []);
+  assert.deepEqual(fixture.preferredOpened, []);
+  assert.equal(security.isReadablePath(fixture.projectConfig), false);
+  assert.equal(fixture.requests[0].url.searchParams.get("session_id"), "actual-editor-session");
+  assert.equal(fixture.requests[0].url.searchParams.get("conversation_id"), "");
+});
+
+test("removed or arbitrary project identities cannot reach a file opener", async t => {
+  const fixture = await settingsFixture(t);
+  fixture.configs.delete(fixture.projectScopeId);
+  for (const scopeId of [fixture.projectScopeId, `project:${fixture.directory}`]) {
+    await assert.rejects(fixture.open({ kind: "config", scopeId, workspaceRoot: fixture.workspace }), /scope is no longer available/);
+  }
+  assert.deepEqual(fixture.preferredOwners, []);
+  assert.deepEqual(fixture.preferredOpened, []);
+  assert.deepEqual(fixture.opened, []);
+});
+
+test("a missing preferred application is an error rather than a different target", async t => {
+  const fixture = await settingsFixture(t);
+  fixture.state.fileTarget = "removed-editor";
+  await assert.rejects(fixture.open({ kind: "config", scopeId: fixture.projectScopeId, workspaceRoot: fixture.workspace }), /application is no longer installed/);
+  assert.deepEqual(fixture.preferredOpened, []);
+  assert.deepEqual(fixture.opened, []);
+});
+
+test("project opener failures retain the original error", async t => {
+  const fixture = await settingsFixture(t);
+  fixture.state.targetException = new Error("Configured editor could not start");
+  await assert.rejects(fixture.open({ kind: "config", scopeId: fixture.projectScopeId, workspaceRoot: fixture.workspace }), fixture.state.targetException);
+  assert.deepEqual(fixture.preferredOpened, [{ id: "cursor", path: fixture.projectConfig }]);
+  assert.deepEqual(fixture.opened, []);
 });

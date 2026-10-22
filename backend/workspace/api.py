@@ -78,6 +78,34 @@ def create_workspace_router() -> APIRouter:
         owner_root = service.workspace_root_path()
         return resolve_workspace_git_root(path, owner_root), owner_root
 
+    def _editor_file_api(request: Request) -> bool:
+        return (request.method == "GET" and request.url.path.endswith("/file")
+            or request.method == "PUT" and request.url.path.endswith("/file/compare-write"))
+
+    async def _editor_file_service(request: Request, service, value: str):
+        from backend.api import _state
+        from .executor_paths import ExecutorPath
+        session_id = request.query_params.get("session_id")
+        if not session_id or isinstance(service, ExecutorEditorService) and service.context.turn_environment.is_remote:
+            return service
+        root = request.query_params["workspace_root"]
+        if root.startswith("file:"):
+            return service
+        session = _state.ws_manager.get_session(session_id)
+        workspace = Path(root).expanduser().resolve()
+        if isinstance(service, ExecutorEditorService) and Path(service.workspace_root_value).resolve() != workspace:
+            return service
+        platform_os = service.scope.platform_os if isinstance(service, ExecutorEditorService) else None
+        target = ExecutorPath.resolve(value, cwd_uri=workspace.as_uri(), platform_os=platform_os).to_local_path().resolve()
+        registered = session.editor_config_files.get((str(workspace), str(target)))
+        if registered is not None:
+            service.register_editor_file(Path(registered))
+        elif not request.query_params.get("conversation_id"):
+            raise HTTPException(403, "This file is not registered in this editor workspace.")
+        elif not isinstance(service, ExecutorEditorService):
+            _service(str(workspace))
+        return service
+
     async def _request_service(request: Request):
         from backend.api import _state
         from backend.environments.errors import ExecutorError, ExecutorRpcError
@@ -96,11 +124,18 @@ def create_workspace_router() -> APIRouter:
                 raise HTTPException(409, "A connected session and conversation owner are required for executor workspace access.")
             yield _service(root)
             return
-        if not session_id or not conversation_id:
+        if not session_id:
             raise HTTPException(422, "session_id and conversation_id are required together.")
         session = _state.ws_manager.get_session(session_id)
         if session is None:
             raise HTTPException(404, "Session is not connected.")
+        if not conversation_id:
+            if not _editor_file_api(request):
+                raise HTTPException(422, "session_id and conversation_id are required together.")
+            if root.startswith("file:") or params.get("environment_id"):
+                raise HTTPException(409, "A conversation owner is required for executor workspace access.")
+            yield WorkspaceService(get_workspace_root=lambda: Path(root).expanduser().resolve())
+            return
         if conversation_id != session.active_conversation_id:
             raise HTTPException(409, "Workspace conversation owner is stale.")
         conversation = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
@@ -112,7 +147,13 @@ def create_workspace_router() -> APIRouter:
                 if context is None:
                     if root.startswith("file:"):
                         raise HTTPException(409, "No usable execution environment is attached to this workspace URI.")
-                    yield (_browser_service(session_id, conversation_id, root) if browser else _service(root))
+                    if _editor_file_api(request):
+                        if not bound or bound.startswith("file:") or Path(bound).resolve() != Path(root).expanduser().resolve():
+                            raise HTTPException(409, "Workspace execution owner is stale.")
+                        service = WorkspaceService(get_workspace_root=lambda: Path(root).expanduser().resolve())
+                    else:
+                        service = _browser_service(session_id, conversation_id, root) if browser else _service(root)
+                    yield service
                     return
                 scope = context.permission.environment_scope
                 bound_matches = (ExecutorPath.parse(root) == ExecutorPath.parse(scope.cwd_uri) if root.startswith("file:")
@@ -402,12 +443,14 @@ def create_workspace_router() -> APIRouter:
 
     @router.get("/file", response_model=WorkspaceFileResponse)
     async def workspace_read_file_api(
+        http_request: Request,
         path: str = Query(..., min_length=1),
         workspace_root: str = Query(..., min_length=1),
         service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
         # Blocking disk I/O + sha256 must not stall the event loop while a
         # conversation streams tokens over the same process's WebSocket.
+        service = await _editor_file_service(http_request, service, path)
         return await _call(service, "read_file", path)
 
     @router.get("/raw")
@@ -444,9 +487,11 @@ def create_workspace_router() -> APIRouter:
     @router.put("/file/compare-write", response_model=WorkspaceFileResponse)
     async def workspace_compare_write_file_api(
         request: WorkspaceFileCompareWriteRequest,
+        http_request: Request,
         workspace_root: str = Query(..., min_length=1),
         service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
+        service = await _editor_file_service(http_request, service, request.path)
         return await _call(
             service, "compare_and_write_file",
             path=request.path,

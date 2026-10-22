@@ -17,11 +17,13 @@ export type AgentConfigFields = {
 type Field = keyof AgentConfigFields;
 type ConfigSource = { type: string; display: string; file?: string | null; profile?: string | null };
 type ConfigOrigin = { source: ConfigSource; version: string };
-type ConfigScope = { id: "user" | "managed"; kind: "user" | "managed"; path: string | null;
+type ConfigScope = { id: string; kind: "project" | "user" | "managed"; path: string | null;
+  workspace_root: string | null; disabled_reason: string | null;
   version: string; values: Partial<AgentConfigFields>; readonly: boolean; source: ConfigSource };
 type WriteField = { requested_value: unknown; effective_value: unknown; overriding_source?: ConfigOrigin };
 export type AgentConfigSnapshot = AgentConfigFields & {
   path: string;
+  default_scope_id: string;
   effective: AgentConfigFields;
   scopes: ConfigScope[];
   origins: Partial<Record<Field, ConfigOrigin>>;
@@ -29,11 +31,11 @@ export type AgentConfigSnapshot = AgentConfigFields & {
     allowed_sandbox_modes?: string[]; allowed_web_search_modes?: string[] };
   write?: { status: "applied" | "overridden"; path: string; version: string; fields: Partial<Record<Field, WriteField>> };
 };
-type ConfigPage = { snapshot: AgentConfigSnapshot | null; scopeId: "user" | "managed"; loading: boolean;
-  loadError: string; openError: { scopeId: string; message: string } | null; pending: Field[];
-  errors: Partial<Record<Field, string>>; overrides: Partial<Record<Field, WriteField>> };
-const newPage = (): ConfigPage => ({ snapshot: null, scopeId: "user", loading: false, loadError: "", openError: null,
-  pending: [], errors: {}, overrides: {} });
+type ConfigPage = { snapshot: AgentConfigSnapshot | null; scopeId: string | null; loading: boolean;
+  loadError: string; openError: { scopeId: string; message: string } | null; pending: Record<string, Field[]>;
+  errors: Record<string, Partial<Record<Field, string>>>; overrides: Record<string, Partial<Record<Field, WriteField>>> };
+const newPage = (): ConfigPage => ({ snapshot: null, scopeId: null, loading: false, loadError: "", openError: null,
+  pending: {}, errors: {}, overrides: {} });
 const managedSources = new Set(["policy", "mdm", "session_flags", "legacy_managed_config_file", "legacy_managed_config_mdm", "enterprise_managed"]);
 const modelDefault = "model-default";
 const errorText = (reason: unknown) => reason instanceof Error ? reason.message : String(reason);
@@ -55,9 +57,15 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
   };
   const page = pages[workspaceRoot];
   const config = page?.snapshot;
-  const requestedScope = page?.scopeId ?? "user";
-  const scope = config?.scopes.find(item => item.id === requestedScope) ?? config?.scopes[0];
-  const scopeId = scope?.id ?? requestedScope;
+  const scope = config?.scopes.find(item => item.id === page?.scopeId)
+    ?? config?.scopes.find(item => item.id === config.default_scope_id) ?? config?.scopes[0];
+  const scopeId = scope?.id ?? "";
+  const projectScopes = config?.scopes.filter(item => item.kind === "project") ?? [];
+  const globalScopes = config?.scopes.filter(item => item.kind !== "project") ?? [];
+  const scopeLabel = (item: ConfigScope) => item.kind === "project"
+    ? item.workspace_root!.split(/[/\\]/).at(-1) || item.workspace_root!
+    : item.kind === "managed" ? t("管理员") : t("用户");
+  const projectDisabledReason = scope?.kind === "project" ? scope.disabled_reason : null;
   const effective = config?.effective;
   const values = scope?.values;
   const value = <K extends Field>(field: K): AgentConfigFields[K] | undefined => values?.[field] ?? effective?.[field];
@@ -79,8 +87,9 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
   const save = (field: Field, requested: AgentConfigFields[Field] | null) => {
     const owner = workspaceRoot;
     const targetId = scope!.id;
-    updatePage(owner, current => ({ ...current, pending: [...current.pending, field],
-      errors: { ...current.errors, [field]: undefined }, overrides: { ...current.overrides, [field]: undefined } }));
+    updatePage(owner, current => ({ ...current, pending: { ...current.pending, [targetId]: [...(current.pending[targetId] ?? []), field] },
+      errors: { ...current.errors, [targetId]: { ...current.errors[targetId], [field]: undefined } },
+      overrides: { ...current.overrides, [targetId]: { ...current.overrides[targetId], [field]: undefined } } }));
     // Source uTn serializes writes and refreshes the chosen layer version at
     // dispatch. The queued edit retains its original workspace and scope.
     pendingConfigWrite = pendingConfigWrite.then(async () => {
@@ -94,11 +103,13 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
         if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
         const next = await response.json() as AgentConfigSnapshot;
         updatePage(owner, state => ({ ...state, snapshot: next, overrides: { ...state.overrides,
-          [field]: next.write?.status === "overridden" ? next.write.fields[field] : undefined } }));
+          [targetId]: { ...state.overrides[targetId], [field]: next.write?.status === "overridden" ? next.write.fields[field] : undefined } } }));
       } catch (reason) {
-        updatePage(owner, current => ({ ...current, errors: { ...current.errors, [field]: errorText(reason) } }));
+        updatePage(owner, current => ({ ...current, errors: { ...current.errors,
+          [targetId]: { ...current.errors[targetId], [field]: errorText(reason) } } }));
       } finally {
-        updatePage(owner, current => ({ ...current, pending: current.pending.filter(item => item !== field) }));
+        updatePage(owner, current => ({ ...current, pending: { ...current.pending,
+          [targetId]: current.pending[targetId].filter(item => item !== field) } }));
       }
     });
     return pendingConfigWrite;
@@ -118,7 +129,8 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
     if (field === "approval_policy" && typeof value(field) === "object") return t("请在配置文件中编辑自定义审批策略。");
     return undefined;
   };
-  const disabled = (field: Field, hasOptions = true) => !scope || page?.loading || page?.pending.includes(field) || Boolean(lockReason(field, hasOptions));
+  const disabled = (field: Field, hasOptions = true) => !scope || page?.loading || projectDisabledReason !== null
+    || page?.pending[scopeId]?.includes(field) || Boolean(lockReason(field, hasOptions));
   const descriptions: Record<Field, string> = {
     approval_policy: t("选择 MiniCode 何时请求批准。"), sandbox_mode: t("选择 MiniCode 运行命令时的访问范围。"),
     network_access: t("允许工作区写入沙箱访问网络。"), web_search: t("选择 MiniCode 如何访问网页。"),
@@ -126,8 +138,8 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
   };
   const row = (field: Field, label: string, control: ReactNode, hasOptions = true) => {
     const lock = lockReason(field, hasOptions), origin = config?.origins[field];
-    const error = scope?.kind === "user" ? page?.errors[field] : undefined;
-    const overridden = scope?.kind === "user" ? page?.overrides[field] : undefined;
+    const error = page?.errors[scopeId]?.[field];
+    const overridden = page?.overrides[scopeId]?.[field];
     return <div className="settings-row" key={field}><div className="settings-row-copy">
       <div className="settings-row-title">{label}</div>
       <div className="settings-row-description" id={`config-description-${field}`} title={origin ? t("生效来源：{source}", { source: origin.source.display }) : undefined}>
@@ -167,14 +179,21 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
       <div className="settings-section-heading settings-section-heading-row">
         <SelectMenu ariaLabel={t("配置作用域")} value={scopeId} selectedLabel={!config ? t("正在加载…") : undefined}
           className="settings-select config-scope-select" menuWidth={240} disabled={!config || config.scopes.length === 0}
-          title={scope?.path ?? scope?.source.display} onValueChange={next => updatePage(workspaceRoot, current => ({ ...current, scopeId: next as "user" | "managed" }))}>
-          {config?.scopes.map(item => <option key={item.id} value={item.id}>{item.kind === "managed" ? t("管理员") : t("用户")}</option>)}
+          title={scope?.path ?? scope?.source.display} onValueChange={next => updatePage(workspaceRoot, current => ({ ...current, scopeId: next }))}>
+          {projectScopes.length > 0 && <optgroup label={t("项目配置")}>{projectScopes.map(item => <option key={item.id} value={item.id} title={item.path ?? item.source.display}>{scopeLabel(item)}</option>)}</optgroup>}
+          <optgroup label={t("全局配置")}>{globalScopes.map(item => <option key={item.id} value={item.id} title={item.path ?? item.source.display}>{scopeLabel(item)}</option>)}</optgroup>
         </SelectMenu>
         <button type="button" className="settings-action-button" disabled={!scope?.path} onClick={openConfig}>{t("打开配置文件")}</button>
       </div>
       <p className="settings-section-description">{t("为新聊天配置权限、网络访问和智能体回复。")}</p>
       {page?.loadError && <p role="alert">{page.loadError}</p>}
       {page?.openError?.scopeId === scopeId && <p role="alert">{page.openError.message}</p>}
+      {projectDisabledReason !== null && <div className="config-scope-warning" role="alert">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M9.995 12.315c.489 0 .875.37.875.842 0 .473-.386.843-.875.843-.488 0-.875-.37-.875-.843 0-.472.387-.842.875-.842ZM10.001 6c.478 0 .778.295.778.79 0 .042 0 .107-.006.16l-.08 3.716c-.016.456-.252.725-.698.725-.445 0-.681-.269-.692-.725L9.217 6.95c0-.053-.006-.118-.006-.16 0-.495.307-.79.79-.79Z" />
+          <path fillRule="evenodd" clipRule="evenodd" d="M10 2.085a7.915 7.915 0 1 1 0 15.83 7.915 7.915 0 0 1 0-15.83Zm0 1.33a6.585 6.585 0 1 0 0 13.17 6.585 6.585 0 0 0 0-13.17Z" />
+        </svg><span>{projectDisabledReason}</span>
+      </div>}
       <div className="settings-card">
         {choice("approval_policy", t("审批策略"), approvalOptions, {
           "on-request": t("请求提升权限时询问批准"), never: t("受阻操作直接失败，不请求批准"),

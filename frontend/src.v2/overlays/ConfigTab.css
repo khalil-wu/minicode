@@ -2,3 +2,5 @@
 .config-field-lock { display: flex; align-items: center; gap: 4px; color: var(--state-warning); }
 .config-lock-icon { width: 14px; height: 14px; flex: 0 0 auto; background: currentColor; }
 .config-field-error { color: var(--state-danger); }
+.config-scope-warning { display: flex; align-items: flex-start; gap: 8px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); color: var(--state-warning); font-size: var(--mc-font-body); }
+.config-scope-warning > svg { flex: 0 0 auto; }

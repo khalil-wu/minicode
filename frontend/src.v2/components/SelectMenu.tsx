@@ -7,6 +7,7 @@ import "./select-menu.css";
 type SelectOption = {
   value: string;
   label: string;
+  title?: string;
   disabled: boolean;
   group?: string;
 };
@@ -49,6 +50,7 @@ const optionsFromChildren = (children: ReactNode, group?: string, groupDisabled 
     options.push({
       value: String(option.props.value ?? ""),
       label: nodeText(option.props.children) || String(option.props.value ?? ""),
+      title: option.props.title,
       disabled: groupDisabled || Boolean(option.props.disabled),
       group,
     });
@@ -278,7 +280,7 @@ export const SelectMenu = ({
                   tabIndex={-1}
                   aria-selected={active}
                   data-value={option.value}
-                  title={option.label}
+                  title={option.title ?? option.label}
                   className="mc-select-option"
                   disabled={option.disabled}
                   onMouseMove={event => { if (!option.disabled) event.currentTarget.focus({ preventScroll: true }); }}

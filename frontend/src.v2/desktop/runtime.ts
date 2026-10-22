@@ -1,7 +1,8 @@
 import { pushToast } from "../overlays/ToastContainer";
-import { workspaceHasConversation, workspaceRequestOwner, workspaceRequestPath, workspaceViewRoot } from "../protocol/workspace-owner";
+import { workspaceHasConversation, workspaceRequestOwner, workspaceRequestPath, workspaceViewRoot, type WorkspaceRequestOwner } from "../protocol/workspace-owner";
 import type { DictationPreferences } from "../lib/workbench-preferences";
 import type { UploadResponse } from "../protocol/api";
+import { workspaceFilePathComparisonKey, workspaceRootsEqual, workspacePathComparisonKey } from "../lib/workspace-path";
 
 export interface FsEntry {
   name: string;
@@ -348,9 +349,15 @@ export interface OpenPreferredPathOptions {
   persistPreferredTargetPath?: string;
   column?: number;
 }
-export type ManagedSettingsTarget = { kind: "config"; workspaceRoot?: string; scopeId?: "user" | "managed" }
+export type ManagedSettingsTarget = { kind: "config"; workspaceRoot?: string; scopeId?: string; sessionId?: string; conversationId?: string }
   | { kind: "data"; workspaceRoot?: string }
   | { kind: "hook"; hookKey: string; workspaceRoot?: string };
+export type ManagedSettingsOpenResult = true | { openInEditor: true; path: string; workspaceRoot: string };
+// The backend opener registers the exact file. This map only retains its editor route.
+const registeredSettingsEditorRoutes = new Map<string, WorkspaceRequestOwner>();
+const registeredSettingsEditorKey = (path: string, workspaceRoot: string) => `${workspacePathComparisonKey(workspaceRoot)}\0${workspaceFilePathComparisonKey(path, workspaceRoot)}`;
+export const registeredSettingsEditorOwner = (path: string, workspaceRoot: string): WorkspaceRequestOwner | undefined =>
+  registeredSettingsEditorRoutes.get(registeredSettingsEditorKey(path, workspaceRoot));
 
 export interface DesktopPreferences extends DictationPreferences {
   autoArchiveAfterDays: 0 | 1 | 7 | 14 | 30 | 90;
@@ -541,7 +548,7 @@ interface MiniCodeDesktop {
   openExternal(target: string): Promise<boolean>;
   openPath(target: string): Promise<boolean>;
   revealPath(target: string): Promise<void>;
-  settings: { openTarget(request: ManagedSettingsTarget): Promise<true> };
+  settings: { openTarget(request: ManagedSettingsTarget): Promise<ManagedSettingsOpenResult> };
   skills: {
     reveal(request: { path: string; workspaceRoot: string }): Promise<boolean>;
   };
@@ -701,8 +708,8 @@ export const trustWorkspace = async (path: string): Promise<string | null> =>
 // --- Filesystem ---
 
 export const fsReadFileInfo = async (path: string): Promise<FsFileResponse | null> => {
-  const owner = workspaceRequestOwner();
   const root = workspaceViewRoot();
+  const owner = registeredSettingsEditorOwner(path, root) ?? workspaceRequestOwner();
   if (owner || workspaceHasConversation()) {
     const { readWorkspaceFile } = await import("../protocol/workspace");
     return await readWorkspaceFile(workspaceRequestPath(path, root), root, undefined, owner);
@@ -983,7 +990,23 @@ export const revealRegisteredSkill = (request: { path: string; workspaceRoot: st
 };
 export const openManagedSettingsTarget = (request: ManagedSettingsTarget) => {
   if (!requireDesktopShell("打开配置和应用数据")) return undefined;
-  return desktop()!.settings.openTarget(request);
+  const owner = request.workspaceRoot ?? workspaceViewRoot();
+  return (async () => {
+    const { useAppStore } = await import("../stores");
+    const { getWebSocket } = await import("../hooks/useWebSocket");
+    const sessionId = getWebSocket()?.sessionId;
+    const capturedRequest = request.kind === "config" ? { ...request, sessionId, conversationId: useAppStore.getState().conversationId ?? "" } : request;
+    const result = await desktop()!.settings.openTarget(capturedRequest);
+    if (result === true) return true as const;
+    const state = useAppStore.getState();
+    if (!workspaceRootsEqual(state.workingDirectory, owner)) {
+      const { translateApp } = await import("../i18n");
+      throw new Error(translateApp("工作区已切换，请返回原工作区后打开配置文件。"));
+    }
+    registeredSettingsEditorRoutes.set(registeredSettingsEditorKey(result.path, owner), { session_id: sessionId!, conversation_id: "" });
+    state.openEditorFile(result.path, undefined, { exact: true, preview: false });
+    return true as const;
+  })();
 };
 export const exportDiagnostics = () => desktop()?.diagnostics.export();
 export const browserDiscover = async (endpoint?: string): Promise<BrowserDiscoveryResult | null> => {

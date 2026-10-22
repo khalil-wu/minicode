@@ -2,8 +2,8 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import React from "react";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { fsListTree, fsReadFileInfo, fsSearchFiles, isDesktop } from "../desktop/runtime";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { fsListTree, fsReadFileInfo, fsSearchFiles, isDesktop, registeredSettingsEditorOwner } from "../desktop/runtime";
 import { compareWriteWorkspaceFile, listWorkspaceTree, readWorkspaceFile, searchWorkspaceFiles } from "../protocol/workspace";
 import { pushToast } from "../overlays/ToastContainer";
 import { useAppStore } from "../stores";
@@ -14,6 +14,9 @@ import type { CodeSelectionRange } from "../stores/types";
 import { defineMiniCodeMonacoTheme } from "./monacoTheme";
 import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
 import { installAppThemeTokens } from "../../test/app-theme-tokens";
+// Preload the actual Markdown fixture with the module graph, outside hook and
+// user-action timers. Packaged lazy-load timing belongs to the renderer audit.
+import "./LiveMarkdownEditor";
 
 const editorMocks = vi.hoisted(() => ({
   actions: [] as Array<{ id: string; run: (editor: unknown) => void }>,
@@ -209,6 +212,7 @@ vi.mock("../desktop/runtime", () => ({
   fsReadFileInfo: vi.fn(),
   fsSearchFiles: vi.fn(),
   fsListTree: vi.fn(),
+  registeredSettingsEditorOwner: vi.fn(),
   trustWorkspace: vi.fn(),
   isDesktop: vi.fn(() => false),
   revealPath: vi.fn(),
@@ -225,12 +229,6 @@ vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 const originalRequestGitChanges = useAppStore.getState().requestGitChanges;
 
 describe("EditorPanel", () => {
-  beforeAll(async () => {
-    // Load this test's Markdown/Monaco fixture before timing user actions.
-    // Packaged lazy-load timing requires the separate renderer verification.
-    await import("./LiveMarkdownEditor");
-  });
-
   beforeEach(() => {
     vi.resetAllMocks();
     editorMocks.actions.length = 0;
@@ -310,6 +308,34 @@ describe("EditorPanel", () => {
     view.unmount();
     for (const event of ["editor:find", "editor:find-next", "editor:find-previous"]) fireEvent(window, new Event(event));
     expect(actions.map(action => action.run.mock.calls.length)).toEqual([1, 1, 1]);
+  });
+
+  it("reads and repairs a registered ancestor config through its session editor owner without a chat", async () => {
+    const root = "C:/projects/demo/nested", path = "C:/projects/demo/.minicode/config.toml";
+    const owner = { session_id: "registered-editor-session", conversation_id: "" };
+    vi.mocked(isDesktop).mockReturnValue(true);
+    vi.mocked(registeredSettingsEditorOwner).mockImplementation((file, workspace) => file === path && workspace === root ? owner : undefined);
+    vi.mocked(readWorkspaceFile).mockResolvedValue({ path, content: 'model_verbosity = "high"', content_hash: "before", ...owner });
+    vi.mocked(compareWriteWorkspaceFile)
+      .mockResolvedValueOnce({ ok: true, file: { path, content: "[", content_hash: "invalid", ...owner } })
+      .mockResolvedValueOnce({ ok: true, file: { path, content: 'model_verbosity = "low"', content_hash: "repaired", ...owner } });
+    useAppStore.setState({ workingDirectory: root, conversationId: null });
+    useAppStore.getState().openEditorFile(path, undefined, { exact: true, preview: false });
+    render(<EditorPanel />);
+    const editor = await screen.findByTestId("monaco-editor") as HTMLTextAreaElement;
+    await waitFor(() => expect(editor.value).toBe('model_verbosity = "high"'));
+    expect(readWorkspaceFile).toHaveBeenCalledWith(path, root, undefined, owner);
+    expect(fsReadFileInfo).not.toHaveBeenCalled();
+    expect(useAppStore.getState().editorTabs[0].workspaceOwner).toEqual(owner);
+    fireEvent.change(editor, { target: { value: "[" } });
+    act(() => window.dispatchEvent(new Event("editor:save")));
+    await waitFor(() => expect(useAppStore.getState().editorTabs[0].contentHash).toBe("invalid"));
+    expect(compareWriteWorkspaceFile).toHaveBeenNthCalledWith(1, path, "before", "[", root, owner);
+    fireEvent.change(editor, { target: { value: 'model_verbosity = "low"' } });
+    act(() => window.dispatchEvent(new Event("editor:save")));
+    await waitFor(() => expect(useAppStore.getState().editorTabs[0].contentHash).toBe("repaired"));
+    expect(compareWriteWorkspaceFile).toHaveBeenNthCalledWith(2, path, "invalid", 'model_verbosity = "low"', root, owner);
+    expect(useAppStore.getState().conversationId).toBeNull();
   });
 
   it("updates the mounted Monaco palette in the same mode without replacing or saving its dirty model", async () => {

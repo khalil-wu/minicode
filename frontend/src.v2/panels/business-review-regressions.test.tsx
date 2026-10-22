@@ -22,7 +22,7 @@ vi.mock("../overlays/DialogService", () => ({ showConfirm: seams.confirm }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: seams.toast }));
 vi.mock("../lib/monaco-colorize", () => ({ useColorizedLines: () => null, extractFilePathFromDiff: () => "a.txt", guessLanguageFromPath: () => "plaintext" }));
 vi.mock("../lib/file-icons", () => ({ fileIcon: () => null, fileGlyphColor: () => "inherit" }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, desktop: () => null, fsReadFileInfo: vi.fn(), fsSearchFiles: vi.fn(), revealPath: vi.fn() }));
+vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, desktop: () => null, fsReadFileInfo: vi.fn(), fsSearchFiles: vi.fn(), registeredSettingsEditorOwner: () => undefined, revealPath: vi.fn() }));
 vi.mock("../protocol/workspace", () => ({ compareWriteWorkspaceFile: seams.write, readWorkspaceFile: vi.fn(), searchWorkspaceFiles: vi.fn() }));
 vi.mock("monaco-editor/editor/editor.worker?worker", () => ({ default: class {} }));
 vi.mock("./monacoRuntime", () => ({}));

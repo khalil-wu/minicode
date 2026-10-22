@@ -280,6 +280,9 @@ class WebSocketSession(
         window_binding_token: str = "",
     ) -> None:
         self.session_id = session_id
+        # Explicit settings-file opens belong to this window's workspace editor,
+        # including its empty-chat state. Agent permission contexts do not use these.
+        self.editor_config_files: dict[tuple[str, str], str] = {}
         self.window_instance_id = window_instance_id
         self.window_owner_id = window_owner_id
         self._window_binding_token = window_binding_token

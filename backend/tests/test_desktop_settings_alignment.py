@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -22,7 +23,7 @@ from backend.ws.permission_runtime import _managed_permission_projection
 
 
 def stack(settings, path="settings.json"):
-    return ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(path)), settings),))
+    return ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(Path(path).resolve())), settings),))
 
 
 def test_hook_switch_changes_the_registry_used_at_turn_admission(monkeypatch, tmp_path):

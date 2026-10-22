@@ -500,3 +500,39 @@ async def test_fresh_backend_main_process_starts_real_http(tmp_path, record_test
         record_testsuite_property("executor_editor_cold_http_log_path", str(log_path))
         record_testsuite_property("executor_editor_cold_http_log", log_bytes.decode("utf-8", errors="replace"))
     assert process.returncode == 0, b"".join(lines).decode("utf-8", errors="replace")
+
+
+@pytest.mark.asyncio
+async def test_registered_editor_file_uses_the_captured_executor_without_widening_its_directory_or_agent_scope(executor_host, tmp_path):
+    from fastapi import HTTPException
+    from backend.agent.environment_selection import bind_tool_execution_environment, close_tool_execution_environment
+    host = executor_host
+    path = tmp_path / "registered-project" / ".minicode" / "config.toml"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b'model_verbosity = "high"\n')
+    neighbor = path.parent / "private.txt"
+    neighbor.write_text("not granted", encoding="utf-8")
+    captured = bind_tool_execution_environment(host.context, host.environments.primary())
+    original_scope = captured.permission.environment_scope
+    service = ExecutorEditorService(captured)
+    try:
+        with pytest.raises(HTTPException) as denied:
+            await service.read_file(str(path))
+        assert denied.value.status_code == 400
+        service.register_editor_file(path.resolve())
+        before = await service.read_file(str(path))
+        assert before.path_uri == path.as_uri()
+        assert before.content == 'model_verbosity = "high"\n'
+        written = await service.compare_and_write_file(str(path), before.content_hash, 'model_verbosity = "medium"\n')
+        assert written.content == path.read_text(encoding="utf-8") == 'model_verbosity = "medium"\n'
+        assert captured.permission.environment_scope is original_scope
+        with pytest.raises(HTTPException) as denied:
+            await service.read_file(str(neighbor))
+        assert denied.value.status_code == 400
+        with pytest.raises(HTTPException) as denied:
+            await service.compare_and_write_file(str(neighbor), "", "must not write")
+        assert denied.value.status_code == 400
+        assert neighbor.read_text(encoding="utf-8") == "not granted"
+    finally:
+        await service.aclose()
+        await close_tool_execution_environment(captured)

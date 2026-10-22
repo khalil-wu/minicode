@@ -672,7 +672,9 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:settings:openTarget", withMainSender("minicode:settings:openTarget", async (event, request) => {
     if (!request || !["config", "hook", "data"].includes(request.kind)
       || (request.workspaceRoot !== undefined && typeof request.workspaceRoot !== "string")
-      || (request.scopeId !== undefined && (request.kind !== "config" || !["user", "managed"].includes(request.scopeId)))
+      || (request.scopeId !== undefined && (request.kind !== "config" || typeof request.scopeId !== "string"))
+      || (request.sessionId !== undefined && typeof request.sessionId !== "string")
+      || (request.conversationId !== undefined && typeof request.conversationId !== "string")
       || (request.kind === "hook" && typeof request.hookKey !== "string")) {
       throw new TypeError("A registered settings action is required.");
     }
@@ -685,12 +687,22 @@ function registerIpcHandlers() {
     url.searchParams.set("kind", request.kind);
     url.searchParams.set("workspace_root", request.workspaceRoot ?? "");
     if (request.kind === "config" && request.scopeId !== undefined) url.searchParams.set("scope_id", request.scopeId);
+    if (request.kind === "config" && request.sessionId !== undefined) url.searchParams.set("session_id", request.sessionId);
+    if (request.kind === "config" && request.conversationId !== undefined) url.searchParams.set("conversation_id", request.conversationId);
     if (request.kind === "hook") url.searchParams.set("hook_key", request.hookKey);
     const response = await fetch(url, { headers: { "X-MiniCode-Token": runtime.runtimeToken }, cache: "no-store" });
     if (!response.ok) throw new Error((await response.json()).detail);
     const target = await response.json();
     if (typeof target.path !== "string" || !path.isAbsolute(target.path)) {
       throw new Error("The settings service did not return an absolute registered path.");
+    }
+    if (target.workspace_root !== undefined) {
+      const targetId = ctx.desktopPreferences.preferredFileOpenTarget(target.workspace_root);
+      if (targetId === "minicode") return { openInEditor: true, path: target.path, workspaceRoot: target.workspace_root };
+      const opener = ctx.desktopPreferences.fileOpenTargets().find(item => item.id === targetId);
+      if (!opener) throw new Error("The selected file application is no longer installed.");
+      await openInTarget(opener, target.path);
+      return true;
     }
     const error = await shell.openPath(target.path);
     if (error) throw new Error(error);

@@ -4,10 +4,13 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { createServer as createPortServer } from "node:net";
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { auditProjectConfig } from "./audit-project-config.mjs";
+import { auditImportFlow } from "./audit-import-flow.mjs";
 
 assert.equal(process.env.CI, "true", "Run this audit in isolated CI, never against a user's desktop profile");
 setTimeout(() => { throw new Error("Current UI audit exceeded its 180-second execution window"); }, 180000).unref();
@@ -15,6 +18,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..")
 const evidence = path.join(root, "output/playwright/ui-alignment-current");
 const profile = await mkdtemp(path.join(tmpdir(), "minicode-ui-profile-"));
 const workspace = await mkdtemp(path.join(tmpdir(), "minicode-ui-work-"));
+const sourceHome = path.join(profile, "source-home");
 await mkdir(path.join(profile, "data"));
 await mkdir(path.join(profile, "managed"));
 await mkdir(evidence, { recursive: true });
@@ -23,6 +27,15 @@ await writeFile(path.join(profile, "data/active_workspace.json"), JSON.stringify
 await writeFile(path.join(profile, "data/trusted_workspaces.json"), JSON.stringify({ version: 1, roots: [workspace] }));
 await writeFile(path.join(profile, "settings.json"), JSON.stringify({ agent: { code_mode_only: true, stream_max_attempts: 5 } }));
 await writeFile(path.join(profile, "managed/managed-settings.json"), JSON.stringify({ web_search: "disabled" }));
+const git = spawnSync("git", ["init", "-q", workspace], { encoding: "utf8" });
+assert.equal(git.status, 0, git.stderr);
+await mkdir(path.join(workspace, ".minicode"));
+await writeFile(path.join(workspace, ".minicode/config.toml"), "# Actual project settings: preserve this comment\n[sandbox_workspace_write]\nnetwork_access = true # Preserve the inline network comment\n");
+await mkdir(path.join(sourceHome, ".claude", "commands"), { recursive: true });
+await mkdir(path.join(sourceHome, ".claude", "skills", "ui-import-skill"), { recursive: true });
+await writeFile(path.join(sourceHome, ".claude", "CLAUDE.md"), "Imported UI audit conventions.\n");
+await writeFile(path.join(sourceHome, ".claude", "skills", "ui-import-skill", "SKILL.md"), "---\nname: ui-import-skill\ndescription: Read the UI audit fixture\n---\nRead the actual fixture files.\n");
+for (let index = 0; index < 30; index++) await writeFile(path.join(sourceHome, ".claude", "commands", `audit-${String(index).padStart(2, "0")}.md`), `---\ndescription: Actual audit command ${index}\n---\nRead fixture ${index}.\n`);
 
 const model = "ui-audit-loopback";
 const requests = [], wire = [], pageErrors = [], logs = [], captures = [], checks = [];
@@ -64,6 +77,33 @@ const backendPort = portServer.address().port;
 await new Promise(resolve => portServer.close(resolve));
 const { ELECTRON_RUN_AS_NODE: _nodeMode, ...environment } = process.env;
 let app, page, success = false;
+const launchOptions = {
+  executablePath: createRequire(path.join(root, "desktop/package.json"))("electron"),
+  args: [path.join(root, "desktop/main.js")], cwd: path.join(root, "desktop"),
+  env: { ...environment, MINICODE_USER_DATA_DIR: profile, MINICODE_BACKEND_PORT: String(backendPort), MINICODE_FRONTEND_URL: "",
+    HOME: sourceHome, USERPROFILE: sourceHome,
+    MINICODE_DISABLE_HARDWARE_ACCELERATION: "1", MINICODE_DISABLE_CHROMIUM_SANDBOX: "1",
+    MINICODE_SYSTEM_CONFIG_FILE: path.join(profile, "absent-system.toml"), MINICODE_REQUIREMENTS_FILE: path.join(profile, "absent-requirements.toml"),
+    MINICODE_MANAGED_SETTINGS_DIR: path.join(profile, "managed"), LLM_PROVIDER: "custom", CUSTOM_API_KEY: "controlled-loopback-key",
+    CUSTOM_BASE_URL: providerUrl, CUSTOM_MODEL: model, CUSTOM_WIRE_API: "chat", CUSTOM_REASONING_EFFORT: "", CUSTOM_SMALL_FAST_MODEL: "",
+    OPENAI_API_KEY: "", OPENAI_BASE_URL: "", OPENAI_MODEL: "", ANTHROPIC_API_KEY: "", ANTHROPIC_BASE_URL: "", ANTHROPIC_MODEL: "" },
+};
+async function connectDesktop(scale = 1) {
+  app = await _electron.launch({ ...launchOptions, args: [
+    ...(scale === 1 ? [] : [`--force-device-scale-factor=${scale}`]), ...launchOptions.args,
+  ] });
+  app.process().stdout.on("data", chunk => logs.push(String(chunk)));
+  app.process().stderr.on("data", chunk => logs.push(String(chunk)));
+  page = await app.firstWindow();
+  page.on("pageerror", error => pageErrors.push(error.message));
+  page.on("websocket", socket => {
+    socket.on("framereceived", event => wire.push({ direction: "server", message: JSON.parse(String(event.payload)) }));
+    socket.on("framesent", event => wire.push({ direction: "client", message: JSON.parse(String(event.payload)) }));
+  });
+  if (scale === 1) await page.setViewportSize({ width: 1800, height: 1000 });
+  else await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 900));
+  await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
+}
 async function capture(name, context = {}) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -78,24 +118,7 @@ async function capture(name, context = {}) {
   captures.push({ name, ...context, metrics, boundary: "Electron renderer viewport; excludes native OS window decoration" });
 }
 try {
-  app = await _electron.launch({ executablePath: createRequire(path.join(root, "desktop/package.json"))("electron"),
-    args: [path.join(root, "desktop/main.js")], cwd: path.join(root, "desktop"),
-    env: { ...environment, MINICODE_USER_DATA_DIR: profile, MINICODE_BACKEND_PORT: String(backendPort), MINICODE_FRONTEND_URL: "",
-      MINICODE_DISABLE_HARDWARE_ACCELERATION: "1", MINICODE_DISABLE_CHROMIUM_SANDBOX: "1",
-      MINICODE_SYSTEM_CONFIG_FILE: path.join(profile, "absent-system.toml"), MINICODE_REQUIREMENTS_FILE: path.join(profile, "absent-requirements.toml"),
-      MINICODE_MANAGED_SETTINGS_DIR: path.join(profile, "managed"), LLM_PROVIDER: "custom", CUSTOM_API_KEY: "controlled-loopback-key",
-      CUSTOM_BASE_URL: providerUrl, CUSTOM_MODEL: model, CUSTOM_WIRE_API: "chat", CUSTOM_REASONING_EFFORT: "", CUSTOM_SMALL_FAST_MODEL: "",
-      OPENAI_API_KEY: "", OPENAI_BASE_URL: "", OPENAI_MODEL: "", ANTHROPIC_API_KEY: "", ANTHROPIC_BASE_URL: "", ANTHROPIC_MODEL: "" } });
-  app.process().stdout.on("data", chunk => logs.push(String(chunk)));
-  app.process().stderr.on("data", chunk => logs.push(String(chunk)));
-  page = await app.firstWindow();
-  page.on("pageerror", error => pageErrors.push(error.message));
-  page.on("websocket", socket => {
-    socket.on("framereceived", event => wire.push({ direction: "server", message: JSON.parse(String(event.payload)) }));
-    socket.on("framesent", event => wire.push({ direction: "client", message: JSON.parse(String(event.payload)) }));
-  });
-  await page.setViewportSize({ width: 1800, height: 1000 });
-  await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
+  await connectDesktop();
   assert(page.url().includes("/dist/index.html"));
   assert.equal(await page.getByRole("alert").count(), 0, "Initial ready state must not produce a disconnected-session error");
   await capture("01-current-build-idle");
@@ -156,6 +179,7 @@ try {
   await capture("06-actual-terminal-model-failure");
   checks.push("Actual exhausted provider retries retain their original Wi-Fi evidence and one standalone terminal notice");
 
+  await composer.fill("KEEP_SETTINGS_DRAFT");
   await page.evaluate(() => { const state = window.__zustandStore.getState(); state.setSettingsTab("appearance"); state.toggleSettings(); });
   await page.getByRole("radio", { name: "浅色", exact: true }).click();
   const trigger = page.locator(".appearance-code-theme-picker .mc-select-trigger").first();
@@ -244,6 +268,7 @@ try {
       assert.equal(Object.hasOwn(JSON.parse(await readFile(unset.write.path, "utf8")), "model_verbosity"), false);
       await page.getByRole("button", { name: "回复详细程度，当前：模型默认值", exact: true }).waitFor();
       checks.push("Real User/Admin scope menu, managed field lock, actual User file write and explicit-null override removal");
+      await auditProjectConfig({ page, app, workspace, profile, capture, checks });
     }
     if (label === "钩子") {
       const emptyTitle = page.getByText("未找到钩子", { exact: true });
@@ -254,6 +279,43 @@ try {
     }
     await capture(`settings-${String(index + 1).padStart(2, "0")}`, { settingsPage: label });
   }
+  await auditImportFlow({ page, profile, sourceHome, capture, checks });
+  await page.keyboard.press("Escape");
+  await page.locator(".settings-center").waitFor({ state: "hidden" });
+  assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
+
+  // Relaunch only the isolated CI desktop with actual Chromium device scales.
+  // These captures exclude OS decorations; Windows-native scaling is separate.
+  for (const scale of [1.25, 1.5]) {
+    await app.close();
+    await connectDesktop(scale);
+    const dpr = await page.evaluate(() => devicePixelRatio);
+    assert(Math.abs(dpr - scale) < 0.01, `Requested ${scale} scale, actual DPR ${dpr}`);
+    await page.evaluate(() => { const state = window.__zustandStore.getState(); state.setSettingsTab("appearance"); state.toggleSettings(); });
+    const theme = page.locator(".appearance-code-theme-picker .mc-select-trigger").first();
+    await theme.waitFor();
+    const geometry = await theme.evaluate(element => {
+      const preview = element.querySelector(".appearance-code-theme-preview").getBoundingClientRect();
+      const arrow = element.lastElementChild.getBoundingClientRect();
+      return { width: element.getBoundingClientRect().width, offset: Math.abs(preview.y + preview.height / 2 - arrow.y - arrow.height / 2) };
+    });
+    assert(Math.abs(geometry.width - 176) < 0.1 && geometry.offset <= 1);
+    await capture(`dpi-${scale}-appearance`);
+    await theme.click();
+    await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).focus();
+    await page.keyboard.press("ArrowRight");
+    await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
+    await capture(`dpi-${scale}-theme-submenu-focus`);
+    await page.keyboard.press("Escape");
+    for (const label of settingsPages) {
+      await page.locator(".settings-center-tab").filter({ hasText: label }).click();
+      if (label === "存储") await page.locator('.settings-storage-chart[role="img"]').waitFor();
+      if (label === "配置") await page.getByRole("button", { name: /^配置作用域，当前：/ }).click();
+      await capture(`dpi-${scale}-settings-${String(settingsPages.indexOf(label) + 1).padStart(2, "0")}`, { settingsPage: label });
+      if (label === "配置") await page.keyboard.press("Escape");
+    }
+    checks.push({ scenario: `Actual renderer scale ${scale}: Theme geometry and keyboard submenu, all settings-page baselines`, dpr, geometry });
+  }
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
   success = true;
 } catch (error) {
@@ -261,7 +323,7 @@ try {
   throw error;
 } finally {
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors,
-    scope: "Production backend and renderer; model replies controlled; settings-page captures are current baselines, not full visual parity acceptance" }, null, 2));
+    scope: "Production backend and renderer; model replies and delivery of one actual completed import response controlled. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, not every OS/native state." }, null, 2));
   await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
   await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
   await writeFile(path.join(evidence, "desktop.log"), logs.join(""));

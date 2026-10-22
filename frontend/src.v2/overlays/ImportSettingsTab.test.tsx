@@ -16,7 +16,7 @@ vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: send }));
 const categories = ["sessions", "projects", "instructions", "settings", "skills", "plugins", "mcp", "agents", "hooks", "commands", "memory"];
 const item = (id: string, type: string, supported = true, workspace = "") => ({ id, provider_id: "claude", item_type: type, title: id,
   source_path: `C:/source/.claude/${id}`, target_path: `C:/target/${id}`, workspace_root: workspace, supported, reason: supported ? "" : "Unsupported source hook type" });
-const state = () => ({ providers: [{ id: "claude", name: "Claude Code" }, { id: "cursor", name: "Cursor" }], history: [], sync: { enabled: false, item_types: ["skills"] }, connected_provider_ids: [], item_types: categories });
+const state = () => ({ providers: [{ id: "claude", name: "Claude Code" }, { id: "cursor", name: "Cursor" }], history: [], sync: { enabled: false, item_types: ["skills"] }, connected_provider_ids: [], item_types: categories, running_import: null, import_progress: null });
 let imported = false;
 let syncEnabled = false;
 let selection: string[] = [];
@@ -122,8 +122,10 @@ it("detects compatible local sources and sends only selected detected identities
   expect(document.querySelector(".settings-import-tooltip")?.textContent).toContain("C:/source/.claude/source-skill → C:/target/source-skill");
   fireEvent.click(within(dialog).getByRole("button", { name: "导入", exact: true }));
   await waitFor(() => expect(selection).toEqual(["source-skill"]));
-  await within(dialog).findByText("已导入 · source-skill");
-  fireEvent.click(within(dialog.querySelector("footer")!).getByRole("button", { name: "关闭" }));
+  const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });
+  expect(within(completed).getByText("source-skill")).toBeTruthy();
+  expect(within(completed).getByLabelText("已导入")).toBeTruthy();
+  fireEvent.click(within(completed).getByRole("button", { name: "确定" }));
   await screen.findByText("已导入 1");
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(screen.queryByText("导出偏好")).toBeNull();
@@ -200,8 +202,9 @@ it("opens provider selection from the active Import page and keeps each app conn
   expect(selection).not.toContain(cursor.id);
   expect(useAppStore.getState().workingDirectory).toBe("C:/project");
   expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
-  await within(screen.getByRole("dialog")).findByText("已导入 · project");
-  fireEvent.click(within(screen.getByRole("dialog").querySelector("footer")!).getByRole("button", { name: "关闭" }));
+  const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });
+  expect(within(completed).getByText("project")).toBeTruthy();
+  fireEvent.click(within(completed).getByRole("button", { name: "确定" }));
   expect(screen.queryByRole("dialog")).toBeNull();
 });
 
@@ -224,9 +227,92 @@ it("retains returned skipped and failed records in the dialog instead of reporti
   fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
   fireEvent.click(screen.getByRole("button", { name: "导入", exact: true }));
-  expect(await screen.findByText("已跳过 · source-skill")).toBeTruthy();
-  expect(screen.getByText("导入失败 · CLAUDE.md")).toBeTruthy();
+  const completed = await screen.findByRole("dialog", { name: "导入失败" });
+  expect(within(completed).getByText("source-skill")).toBeTruthy();
+  expect(within(completed).getByText("CLAUDE.md")).toBeTruthy();
+  expect(within(completed).getByText("已跳过")).toBeTruthy();
+  expect(completed.querySelector('.settings-import-file-status[data-status="error"]')).toBeTruthy();
   expect(screen.getByText("Destination has local edits")).toBeTruthy();
   expect(screen.getByText("Actual write failure")).toBeTruthy();
-  expect(screen.queryByText("已导入 · source-skill")).toBeNull();
+  expect(completed.querySelector('.settings-import-file-status[data-status="success"]')).toBeNull();
+});
+
+it("replaces selection with the Source progress dialog for the actual request and blocks dismissal until its receipt", async () => {
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  let release!: (response: Response) => void;
+  vi.mocked(fetch).mockImplementation((input, init) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST"
+    ? new Promise<Response>(resolve => { release = resolve; }) : fetcher(input, init));
+  render(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "继续" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "选择要导入的内容" })).getByRole("button", { name: "导入", exact: true }));
+  const pending = screen.getByRole("dialog", { name: "正在导入外部智能体配置" });
+  expect(screen.queryByRole("dialog", { name: "选择要导入的内容" })).toBeNull();
+  expect(within(pending).queryByRole("button")).toBeNull();
+  expect(within(pending).queryByRole("link")).toBeNull();
+  expect(screen.queryByText(/在后台继续|查看导入内容/)).toBeNull();
+  const paths = [...pending.querySelectorAll(".settings-import-file-path")].map(element => element.textContent);
+  expect(paths).toContain("C:/target/project-settings");
+  fireEvent.keyDown(pending, { key: "Escape" });
+  fireEvent.click(pending.closest(".mc-project-dialog-backdrop")!);
+  expect(screen.getByRole("dialog")).toBe(pending);
+  expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => init?.method === "POST" && new URL(String(url)).pathname === "/api/settings/import")).toHaveLength(1);
+  act(() => useAppStore.setState({ workingDirectory: "C:/next-project" }));
+  await act(async () => release(Response.json({ results: [{ ...item("project-settings", "settings", true, "C:/project"), status: "success", message: "Actual project settings copied" }] })));
+  const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });
+  expect(completed).toBe(pending);
+  expect(within(completed).getByText("C:/project")).toBeTruthy();
+  expect(within(completed).queryByText("C:/next-project")).toBeNull();
+  expect(within(completed).getByRole("link").textContent).toBe("C:/target/project-settings");
+  fireEvent.click(within(completed).getByRole("button", { name: "确定" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(useAppStore.getState()).toMatchObject({ workingDirectory: "C:/next-project", draft: "Keep the current chat draft" });
+});
+
+it("retains the original request failure without fabricating per-item outcomes or a success action", async () => {
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  vi.mocked(fetch).mockImplementation((input, init) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST"
+    ? Promise.resolve(Response.json({ detail: "Original admission rejected" }, { status: 409 })) : fetcher(input, init));
+  render(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
+  fireEvent.click(screen.getByRole("button", { name: "继续" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "选择要导入的内容" })).getByRole("button", { name: "导入", exact: true }));
+  const completed = await screen.findByRole("dialog", { name: "导入失败" });
+  expect(within(completed).getByRole("alert").textContent).toContain("Original admission rejected");
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+  expect(completed.querySelector(".settings-import-file-status")).toBeNull();
+  expect(within(completed).queryByRole("button")).toBeNull();
+  expect(within(completed).queryByRole("link")).toBeNull();
+  fireEvent.keyDown(completed, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
+});
+
+it("restores actual running import items before detection completes and follows its own terminal snapshot", async () => {
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  const actualItem = item("other-window-skill", "skills", true, "C:/original-project");
+  let remote: Record<string, unknown> = { id: "original-import", detection_id: "original-detection", status: "running", items: [actualItem], results: [] };
+  let releaseDetection!: (response: Response) => void;
+  let holdDetection = true;
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const path = new URL(String(input)).pathname;
+    if (path.endsWith("/detect") && holdDetection) return new Promise<Response>(resolve => { releaseDetection = resolve; });
+    if (path === "/api/settings/import" && init?.method === "GET") return Response.json({ ...state(),
+      running_import: remote.status === "running" ? { id: remote.id, item_types: ["skills"] } : null, import_progress: remote });
+    return fetcher(input, init);
+  });
+  const view = render(<ImportSettingsTab variant="general-row" />);
+  const pending = await screen.findByRole("dialog", { name: "正在导入外部智能体配置" });
+  expect(within(pending).getByText("other-window-skill")).toBeTruthy();
+  await act(async () => releaseDetection(Response.json({ detection_id: "current-detection", items: detectedItems, issues: [] })));
+  holdDetection = false;
+  remote = { ...remote, status: "error", results: [{ ...actualItem, status: "skipped", message: "Preserved actual local edits" }], setup_errors: ["Original refresh error"] };
+  view.rerender(<ImportSettingsTab variant="general-row" active={false} />);
+  view.rerender(<ImportSettingsTab variant="general-row" />);
+  const completed = await screen.findByRole("dialog", { name: "导入失败" });
+  expect(within(completed).getByText("已跳过")).toBeTruthy();
+  expect(within(completed).getByRole("alert").textContent).toBe("Original refresh error");
+  expect(within(completed).queryByRole("link")).toBeNull();
+  fireEvent.click(completed.closest(".mc-project-dialog-backdrop")!);
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });

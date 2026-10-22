@@ -1,5 +1,8 @@
 {
   "配置作用域": "Configuration scope",
+  "项目配置": "Project",
+  "全局配置": "Global",
+  "工作区已切换，请返回原工作区后打开配置文件。": "The workspace changed. Return to the original workspace to open the config file.",
   "模型默认值": "Model default",
   "管理员": "Admin",
   "此配置来源无法在此处编辑。": "This config source cannot be edited here.",

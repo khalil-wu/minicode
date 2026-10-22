@@ -183,13 +183,15 @@ class ExternalAgentImportService:
         self.ledger_path = self.state_dir / "external-agent-import.json"
         self._plans: dict[str, dict[str, ImportItem]] = {}
         self._import_lock = asyncio.Lock()
-        self._running_import: dict | None = None
+        self._import_progress: dict | None = None
 
     def state(self) -> dict:
         ledger = self._ledger()
         return {"providers": [{"id": key, "name": value["name"]} for key, value in PROVIDERS.items()],
                 "history": ledger.get("history", []), "sync": ledger.get("sync", {"enabled": False, "item_types": list(ITEM_TYPES)}),
-                "connected_provider_ids": list(ledger.get("connections", {})), "item_types": list(ITEM_TYPES), "running_import": self._running_import}
+                "connected_provider_ids": list(ledger.get("connections", {})), "item_types": list(ITEM_TYPES),
+                "running_import": self._import_progress if self._import_progress and self._import_progress["status"] == "running" else None,
+                "import_progress": self._import_progress}
 
     def _ledger(self) -> dict:
         return read_json(self.ledger_path)
@@ -409,13 +411,15 @@ class ExternalAgentImportService:
         if self._import_lock.locked():
             raise ValueError("Another local import is in progress.")
         async with self._import_lock:
-            self._running_import = {"id": uuid4().hex, "started_at": datetime.now(timezone.utc).isoformat(),
-                                    "provider_ids": list(dict.fromkeys(plan[key].provider_id for key in item_ids)),
-                                    "item_types": list(dict.fromkeys(plan[key].item_type for key in item_ids)), "total": len(item_ids), "completed": 0}
+            progress = self._import_progress = {"id": uuid4().hex, "detection_id": detection_id, "status": "running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "provider_ids": list(dict.fromkeys(plan[key].provider_id for key in item_ids)),
+                "item_types": list(dict.fromkeys(plan[key].item_type for key in item_ids)), "total": len(item_ids), "completed": 0,
+                "items": [plan[key].public() for key in item_ids], "results": []}
             try:
                 ledger = self._ledger()
                 owned = ledger.setdefault("owned", {})
-                results = []
+                results = progress["results"]
                 for key in item_ids:
                     item = plan[key]
                     result = {**item.public(), "status": "unsupported" if not item.supported else "success", "message": item.reason}
@@ -435,7 +439,7 @@ class ExternalAgentImportService:
                             result.update(status="error", message=str(error))
                     result.pop("ownership", None)
                     results.append(result)
-                    self._running_import["completed"] = len(results)
+                    progress["completed"] = len(results)
                 connections = ledger.setdefault("connections", {})
                 sync = ledger.setdefault("sync", {"enabled": False, "item_types": []})
                 for result in results:
@@ -451,15 +455,19 @@ class ExternalAgentImportService:
                         connection["item_types"].append(result["item_type"])
                     if not automatic and result["item_type"] not in sync["item_types"]:
                         sync["item_types"].append(result["item_type"])
-                history = {"id": uuid4().hex, "completed_at": datetime.now(timezone.utc).isoformat(), "automatic": automatic, "results": results}
+                history = {"id": progress["id"], "completed_at": datetime.now(timezone.utc).isoformat(), "automatic": automatic, "results": results}
                 ledger["history"] = [history, *ledger.get("history", [])][:50]
                 _write_json(self.ledger_path, ledger)
                 self._plans.pop(detection_id, None)
                 from backend.agent.instruction_discovery import clear_guideline_cache
                 clear_guideline_cache()
+                progress.update(status="error" if any(result["status"] == "error" for result in results)
+                    else "success" if any(result["status"] == "success" for result in results) else "unchanged",
+                    completed_at=history["completed_at"])
                 return {"results": results, "history": history}
-            finally:
-                self._running_import = None
+            except (OSError, ValueError, TypeError) as error:
+                progress.update(status="error", error=str(error))
+                raise
 
     def _import_item(self, item: ImportItem, previous: dict | None) -> dict:
         if item.item_type == "projects":
@@ -726,6 +734,8 @@ class ExternalAgentImportService:
                     history["setup_errors"] = messages
                     break
             _write_json(self.ledger_path, ledger)
+            if self._import_progress and self._import_progress["id"] == import_id:
+                self._import_progress.update(status="error", setup_errors=messages)
 
     async def sync_connected(self) -> list[dict]:
         ledger = self._ledger()

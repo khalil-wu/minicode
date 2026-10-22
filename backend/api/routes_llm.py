@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Response
@@ -107,12 +108,14 @@ def get_hook_settings_api(response: Response, workspace_root: str = "") -> dict[
 
 
 @router.get("/api/settings/open-target")
-def get_settings_open_target_api(
+async def get_settings_open_target_api(
     response: Response,
     kind: Literal["config", "hook", "data"],
     workspace_root: str = "",
     hook_key: str | None = None,
-    scope_id: Literal["user", "managed"] | None = None,
+    scope_id: str | None = None,
+    session_id: str = "",
+    conversation_id: str = "",
 ) -> dict[str, str]:
     """Resolve an application's registered settings action, never a caller path."""
     from pathlib import Path
@@ -126,13 +129,32 @@ def get_settings_open_target_api(
         else:
             from backend.services.agent_config_settings_service import agent_config_target
             try:
-                target = agent_config_target(workspace_root, scope_id)
+                target = await asyncio.to_thread(agent_config_target, workspace_root, scope_id)
             except ValueError as exc:
                 raise HTTPException(404, detail=str(exc)) from exc
+            if "workspace_root" in target and (session_id or conversation_id):
+                from backend.api import _state
+                if not session_id:
+                    raise HTTPException(422, "An editor session owner is required.")
+                session = _state.ws_manager.get_session(session_id)
+                if session is None:
+                    raise HTTPException(404, "Session is not connected.")
+                if conversation_id:
+                    if session.active_conversation_id != conversation_id:
+                        raise HTTPException(409, "Workspace conversation owner is stale.")
+                    conversation = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
+                    if conversation is None or conversation.archived:
+                        raise HTTPException(404, "The target conversation is not available.")
+                    bound = conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root
+                    if not bound or bound.startswith("file:") or Path(bound).resolve() != Path(workspace_root).resolve():
+                        raise HTTPException(409, "Workspace execution owner is stale.")
+                session.editor_config_files[(str(Path(workspace_root).resolve()), target["path"])] = target["path"]
+            return target
     elif kind == "data":
         target = DATA_ROOT
     else:
-        hook = next((entry for entry in hook_settings(workspace_root)["hooks"] if entry["key"] == hook_key), None)
+        hooks = await asyncio.to_thread(hook_settings, workspace_root)
+        hook = next((entry for entry in hooks["hooks"] if entry["key"] == hook_key), None)
         if hook is None:
             raise HTTPException(404, detail="Hook is no longer registered; reload its configuration.")
         target = Path(hook["source_path"])
@@ -151,7 +173,7 @@ async def update_hook_settings_api(request: HookSettingsUpdate) -> dict[str, Any
 
 class AgentConfigUpdate(BaseModel):
     workspace_root: str = ""
-    scope_id: Literal["user", "managed"] = "user"
+    scope_id: str = "user"
     expected_version: str | None = None
     approval_policy: Literal["untrusted", "on-request", "never"] | None = None
     sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] | None = None

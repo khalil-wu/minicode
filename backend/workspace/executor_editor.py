@@ -13,6 +13,7 @@ from starlette.background import BackgroundTask
 from backend.documents.service import parse_document_preview
 from backend.media_types import media_type_for_path
 from backend.security.sensitive_files import _is_dangerous_path
+from backend.sandbox.policy import AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath, FileSystemPermissions, FileSystemSandboxEntry
 from backend.workspace.executor_service import ExecutorWorkspaceService
 from backend.workspace.executor_paths import ExecutorPath
 from backend.environments.errors import ExecutorError
@@ -26,8 +27,15 @@ class ExecutorEditorService(ExecutorWorkspaceService):
     def __init__(self, context, *, application_config=None, editor_root=None):
         super().__init__(context)
         self.application_config = application_config
+        self._registered_editor_file = None
         if editor_root is not None:
             self.cwd = editor_root
+
+    def register_editor_file(self, path: Path) -> None:
+        self._registered_editor_file = self.resolve(str(path))
+        entry = FileSystemSandboxEntry(FileSystemPath("path", self._registered_editor_file.uri), FileSystemAccessMode.WRITE)
+        self.scope = self.scope.with_additional_permissions(AdditionalPermissionProfile(file_system=FileSystemPermissions((entry,))))
+        self.sandbox = self.scope.sandbox_context()
 
     @property
     def workspace_root_value(self):
@@ -40,7 +48,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
     def resolve_workspace_path(self, value):
         path = ExecutorPath.resolve(value, cwd_uri=self.cwd.uri, platform_os=self.scope.platform_os,
             user_home_uri=self.scope.user_home_uri)
-        if not path.is_relative_to(self.cwd):
+        if not path.is_relative_to(self.cwd) and path != self._registered_editor_file:
             raise HTTPException(400, "Path is outside workspace root.")
         return path
 
@@ -55,10 +63,11 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         canonical = self.resolve(await self.filesystem.canonicalize(path.uri, sandbox=self.sandbox))
         if path != lexical:
             canonical = canonical.joinpath(lexical.relative_to(path).as_posix())
-        if not canonical.is_relative_to(self.cwd):
+        registered = lexical == canonical == self._registered_editor_file
+        if not canonical.is_relative_to(self.cwd) and not registered:
             raise HTTPException(400, "Path is outside workspace root.")
         launch = self.cwd.joinpath(".minicode/launch.json")
-        if not inventory and (lexical != launch or canonical != launch):
+        if not inventory and not registered and (lexical != launch or canonical != launch):
             if _is_dangerous_path(lexical.relative_to(self.cwd)) or _is_dangerous_path(canonical.relative_to(self.cwd)):
                 raise HTTPException(403, "Refusing to access protected path.")
         return lexical

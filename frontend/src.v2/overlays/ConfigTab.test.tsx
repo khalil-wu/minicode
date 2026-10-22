@@ -14,10 +14,22 @@ const path = "C:/Profile/config.toml";
 const defaults: AgentConfigFields = { approval_policy: "on-request", sandbox_mode: "workspace-write", network_access: false,
   web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
 const snapshot = (effective: Partial<AgentConfigFields> = {}, values: Partial<AgentConfigFields> = {}): AgentConfigSnapshot => ({
-  path, ...defaults, ...effective, effective: { ...defaults, ...effective }, origins: {}, requirements: {},
+  path, default_scope_id: "user", ...defaults, ...effective, effective: { ...defaults, ...effective }, origins: {}, requirements: {},
   scopes: [{ id: "user", kind: "user", path, version: "user-v1", values, readonly: false,
+    workspace_root: null, disabled_reason: null,
     source: { type: "user", file: path, profile: "review", display: `user (${path}, profile=review)` } }],
 });
+const projectScope = (workspace: string, values: Partial<AgentConfigFields> = {}, disabledReason: string | null = null): AgentConfigSnapshot["scopes"][number] => ({
+  id: `project:${workspace}`, kind: "project", path: `${workspace}/.minicode/config.toml`, workspace_root: workspace,
+  version: `project-v1:${workspace}`, disabled_reason: disabledReason, values, readonly: false,
+  source: { type: "project", display: `project (${workspace}/.minicode/config.toml)` },
+});
+const projectSnapshot = (workspace: string, values: Partial<AgentConfigFields> = {}, effective: Partial<AgentConfigFields> = {}): AgentConfigSnapshot => {
+  const config = snapshot(effective);
+  config.scopes.unshift(projectScope(workspace, values));
+  config.default_scope_id = config.scopes[0].id;
+  return config;
+};
 const button = (label: string) => screen.getByRole("button", { name: new RegExp(`^${label}，当前：`) });
 const choose = (label: string, option: string) => {
   fireEvent.click(button(label));
@@ -55,6 +67,7 @@ it("shows only actual Admin layers, makes them readonly and locks only managed U
   const config = snapshot({ model_verbosity: "high" }, { model_verbosity: "low" });
   const source = { type: "mdm", display: "MDM (test-domain:agent-policy)" };
   config.scopes.push({ id: "managed", kind: "managed", path: null, version: "managed-v1", readonly: true,
+    workspace_root: null, disabled_reason: null,
     source, values: { web_search: "disabled", sandbox_mode: "workspace-write" } });
   config.origins.model_verbosity = { source, version: "managed-v1" };
   config.requirements.allowed_approval_policies = ["never"];
@@ -193,6 +206,7 @@ it("retains a granular approval value as readonly and opens the selected registe
 it("localizes the real User/Admin scope and managed origin in English without an account gate", async () => {
   const config = snapshot();
   config.scopes.push({ id: "managed", kind: "managed", path: null, version: "managed-v1", readonly: true,
+    workspace_root: null, disabled_reason: null,
     source: { type: "session_flags", display: "session-flags" }, values: {} });
   mocks.fetch.mockResolvedValue(Response.json(config));
   render(<LanguageProvider locale="en-US"><ConfigTab active /></LanguageProvider>);
@@ -201,4 +215,157 @@ it("localizes the real User/Admin scope and managed origin in English without an
   expect(screen.getAllByText("This config source cannot be edited here.").length).toBeGreaterThan(0);
   expect(within(button("Approval policy")).getByText("On request")).toBeTruthy();
   expect(mocks.fetch).toHaveBeenCalledTimes(1);
+});
+
+it("defaults to the actual current project, groups every discovered layer, and uses each layer's raw values and path", async () => {
+  const workspace = "C:/Projects/App";
+  useAppStore.setState({ workingDirectory: workspace });
+  const config = projectSnapshot(workspace, { sandbox_mode: "read-only" }, { web_search: "live" });
+  config.scopes.unshift(projectScope("C:/Projects", { web_search: "cached" }));
+  mocks.fetch.mockImplementation(async () => Response.json(config));
+  render(<ConfigTab active />);
+  await screen.findByRole("button", { name: "配置作用域，当前：App" });
+  await waitFor(() => expect(button("推理摘要")).toHaveProperty("disabled", false));
+  expect(button("配置作用域").title).toBe(`${workspace}/.minicode/config.toml`);
+  expect(button("沙箱模式").textContent).toBe("只读");
+  expect(button("网页搜索").textContent).toBe("实时");
+  expect(screen.queryByRole("switch")).toBeNull();
+  fireEvent.click(button("配置作用域"));
+  const menu = screen.getByRole("listbox");
+  expect(within(menu).getAllByRole("option").map(option => option.textContent)).toEqual(["Projects", "App", "用户"]);
+  expect(within(menu).getByText("项目")).toBeTruthy();
+  expect(within(menu).getByText("全局")).toBeTruthy();
+  expect(within(menu).getByRole("option", { name: "Projects", exact: true }).title).toBe("C:/Projects/.minicode/config.toml");
+  fireEvent.click(within(menu).getByRole("option", { name: "Projects", exact: true }));
+  expect(button("网页搜索").textContent).toBe("缓存");
+  expect(button("沙箱模式").textContent).toBe("工作区写入");
+  expect(screen.getByRole("switch", { name: "允许网络访问" })).toHaveProperty("disabled", false);
+});
+
+it("retains each workspace's explicit selection across reloads and falls back when a real project scope disappears", async () => {
+  let config = projectSnapshot("C:/A");
+  config.scopes.unshift(projectScope("C:/", { web_search: "disabled" }));
+  mocks.fetch.mockImplementation(async url => Response.json(new URL(url).searchParams.get("workspace_root") === "C:/B" ? projectSnapshot("C:/B") : config));
+  const view = render(<ConfigTab active />);
+  await screen.findByRole("button", { name: "配置作用域，当前：A" });
+  choose("配置作用域", "用户");
+  view.rerender(<ConfigTab active={false} />); view.rerender(<ConfigTab active />);
+  await ready();
+  act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
+  await screen.findByRole("button", { name: "配置作用域，当前：B" });
+  act(() => useAppStore.setState({ workingDirectory: "C:/A" }));
+  await ready();
+  choose("配置作用域", "C:");
+  config = projectSnapshot("C:/A");
+  view.rerender(<ConfigTab active={false} />); view.rerender(<ConfigTab active />);
+  await screen.findByRole("button", { name: "配置作用域，当前：A" });
+  fireEvent.click(button("配置作用域"));
+  expect(screen.getAllByRole("option").map(option => option.textContent)).toEqual(["A", "用户"]);
+});
+
+it("shows a disabled project's original warning once, disables editing, and still opens its registered file", async () => {
+  const reason = "Project config files are disabled in this folder because it is not trusted.";
+  const config = projectSnapshot("C:/A", { sandbox_mode: "workspace-write", model_verbosity: "low" }, { model_verbosity: "high" });
+  config.scopes[0].disabled_reason = reason;
+  mocks.fetch.mockImplementation(async () => Response.json(config));
+  render(<ConfigTab active />);
+  expect((await screen.findByRole("alert")).textContent).toBe(reason);
+  expect(screen.getAllByText(reason)).toHaveLength(1);
+  for (const label of ["审批策略", "沙箱模式", "网页搜索", "回复详细程度", "推理摘要"]) expect(button(label)).toHaveProperty("disabled", true);
+  expect(screen.getByRole("switch", { name: "允许网络访问" })).toHaveProperty("disabled", true);
+  expect(button("回复详细程度").textContent).toBe("低");
+  const open = screen.getByRole("button", { name: "打开配置文件" });
+  expect(open).toHaveProperty("disabled", false); fireEvent.click(open);
+  expect(mocks.open).toHaveBeenCalledExactlyOnceWith({ kind: "config", workspaceRoot: "C:/A", scopeId: "project:C:/A" });
+  expect(mocks.fetch.mock.calls.every(([, init]) => init?.method !== "PUT")).toBe(true);
+  choose("配置作用域", "用户");
+  expect(screen.queryByRole("alert")).toBeNull();
+  await waitFor(() => expect(button("回复详细程度")).toHaveProperty("disabled", false));
+});
+
+it("unsets the selected project's Model default and uses the inherited effective value after an applied receipt", async () => {
+  let finish!: (response: Response) => void;
+  const initial = projectSnapshot("C:/A", { model_verbosity: "low" }, { model_verbosity: "high" });
+  mocks.fetch.mockImplementation(async (_url, init) => init?.method === "PUT" ? new Promise<Response>(resolve => { finish = resolve; }) : Response.json(initial));
+  render(<ConfigTab active />);
+  await screen.findByRole("button", { name: "配置作用域，当前：A" });
+  await waitFor(() => expect(button("回复详细程度")).toHaveProperty("disabled", false));
+  choose("回复详细程度", "模型默认值");
+  await waitFor(() => expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
+  const request = mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
+  expect(JSON.parse(request[1].body)).toEqual({ workspace_root: "C:/A", scope_id: "project:C:/A", expected_version: "project-v1:C:/A", model_verbosity: null });
+  const next = projectSnapshot("C:/A", {}, { model_verbosity: "high" });
+  next.scopes[0].version = "project-v2:C:/A";
+  next.write = { status: "applied", path: next.scopes[0].path!, version: next.scopes[0].version, fields: {
+    model_verbosity: { requested_value: null, effective_value: "high" },
+  } };
+  await act(async () => finish(Response.json(next)));
+  expect(button("回复详细程度").textContent).toBe("高");
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("queues parent-project edits with their original lookup workspace, actual layer id and refreshed layer versions", async () => {
+  const owner = "C:/Projects/App", parent = "C:/Projects";
+  useAppStore.setState({ workingDirectory: owner });
+  const original = projectSnapshot(owner, { model_reasoning_summary: "auto" }, { model_verbosity: "low" });
+  original.scopes.unshift(projectScope(parent, { model_verbosity: "low" }));
+  let current = original, finish!: (response: Response) => void;
+  const writes: Record<string, unknown>[] = [], reads: string[] = [];
+  mocks.fetch.mockImplementation(async (url, init) => {
+    if (init?.method !== "PUT") {
+      const requested = new URL(url).searchParams.get("workspace_root")!; reads.push(requested);
+      return Response.json(requested === owner ? current : projectSnapshot("C:/B"));
+    }
+    const body = JSON.parse(init.body); writes.push(body);
+    if (writes.length === 1) return new Promise<Response>(resolve => { finish = resolve; });
+    current.scopes[0] = { ...current.scopes[0], version: "parent-v3", values: { model_verbosity: "high", model_reasoning_summary: "detailed" } };
+    const overridingSource = { source: current.scopes[1].source, version: current.scopes[1].version };
+    current.origins.model_reasoning_summary = overridingSource;
+    current.write = { status: "overridden", path: current.scopes[0].path!, version: "parent-v3", fields: {
+      model_reasoning_summary: { requested_value: "detailed", effective_value: "auto", overriding_source: overridingSource },
+    } };
+    return Response.json(current);
+  });
+  render(<ConfigTab active />);
+  await screen.findByRole("button", { name: "配置作用域，当前：App" });
+  await waitFor(() => expect(button("推理摘要")).toHaveProperty("disabled", false));
+  choose("配置作用域", "Projects"); choose("回复详细程度", "高"); choose("推理摘要", "详细");
+  await waitFor(() => expect(writes).toHaveLength(1));
+  choose("配置作用域", "App");
+  expect(button("回复详细程度")).toHaveProperty("disabled", false);
+  act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
+  await screen.findByRole("button", { name: "配置作用域，当前：B" });
+  current = { ...original, model_verbosity: "high", effective: { ...original.effective, model_verbosity: "high" },
+    scopes: original.scopes.map(item => item.id === `project:${parent}` ? { ...item, version: "parent-v2", values: { model_verbosity: "high" } } : item) };
+  await act(async () => finish(Response.json(current)));
+  await waitFor(() => expect(writes).toHaveLength(2));
+  expect(writes).toEqual([
+    { workspace_root: owner, scope_id: `project:${parent}`, expected_version: `project-v1:${parent}`, model_verbosity: "high" },
+    { workspace_root: owner, scope_id: `project:${parent}`, expected_version: "parent-v2", model_reasoning_summary: "detailed" },
+  ]);
+  expect(reads.filter(root => root === owner)).toHaveLength(3);
+  expect(button("推理摘要").textContent).toBe("自动");
+  expect(screen.queryByRole("alert")).toBeNull();
+  act(() => useAppStore.setState({ workingDirectory: owner }));
+  await screen.findByRole("button", { name: "配置作用域，当前：App" });
+  choose("配置作用域", "Projects");
+  await waitFor(() => expect(button("推理摘要").textContent).toBe("详细"));
+  expect((await screen.findByRole("status")).textContent).toContain(`${owner}/.minicode/config.toml`);
+});
+
+it("keeps a delayed project write failure on its actual scope after selecting User", async () => {
+  let finish!: (response: Response) => void;
+  mocks.fetch.mockImplementation(async (_url, init) => init?.method === "PUT" ? new Promise<Response>(resolve => { finish = resolve; }) : Response.json(projectSnapshot("C:/A")));
+  render(<ConfigTab active />);
+  await screen.findByRole("button", { name: "配置作用域，当前：A" });
+  await waitFor(() => expect(button("网页搜索")).toHaveProperty("disabled", false));
+  choose("网页搜索", "实时");
+  await waitFor(() => expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
+  choose("配置作用域", "用户");
+  await act(async () => finish(new Response("Project TOML changed on disk", { status: 409 })));
+  expect(screen.queryByRole("alert")).toBeNull();
+  choose("配置作用域", "A");
+  expect((await screen.findByRole("alert")).textContent).toContain("Project TOML changed on disk");
+  expect(button("网页搜索").textContent).toBe("缓存");
 });

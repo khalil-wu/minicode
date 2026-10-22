@@ -55,6 +55,70 @@ def migration(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_import_progress_keeps_real_selected_items_partial_results_and_terminal_identity(migration, monkeypatch):
+    service, home, project, _stack = migration
+    write(home / ".claude" / "CLAUDE.md", "Keep the real conventions.")
+    write(home / ".claude" / "skills" / "progress-skill" / "SKILL.md", "---\nname: progress-skill\ndescription: Actual import progress\n---\nRead actual files.")
+    detected = service.detect(workspace_roots=[str(project)], provider_ids=["claude"])
+    selected = [item for item in detected["items"] if item["item_type"] in {"instructions", "skills"}]
+    entered, release = threading.Event(), threading.Event()
+    original = service._import_item
+
+    def import_item(item, previous):
+        if item.item_type == "skills":
+            entered.set()
+            assert release.wait(5)
+        return original(item, previous)
+
+    monkeypatch.setattr(service, "_import_item", import_item)
+    task = asyncio.create_task(service.import_items(detected["detection_id"], [item["id"] for item in selected]))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        wire = json.loads(json.dumps(service.state()))
+        progress = wire["import_progress"]
+        assert progress["status"] == "running"
+        assert progress["items"] == selected
+        assert progress["detection_id"] == detected["detection_id"]
+        assert progress["completed"] == 1 and progress["total"] == 2
+        assert [item["status"] for item in progress["results"]] == ["success"]
+        assert wire["running_import"]["id"] == progress["id"]
+    finally:
+        release.set()
+        outcome = await task
+    finished = service.state()
+    assert finished["running_import"] is None
+    assert finished["import_progress"]["status"] == "success"
+    assert finished["import_progress"]["id"] == outcome["history"]["id"] == progress["id"]
+    assert finished["import_progress"]["results"] == outcome["results"]
+    await service.record_refresh_errors(progress["id"], ["Actual catalog refresh error"])
+    assert service.state()["import_progress"]["status"] == "error"
+    assert service.state()["import_progress"]["setup_errors"] == ["Actual catalog refresh error"]
+    assert service.state()["history"][0]["setup_errors"] == ["Actual catalog refresh error"]
+
+
+@pytest.mark.asyncio
+async def test_import_ledger_error_retains_actual_copy_receipt_and_rethrows_original_error(migration, monkeypatch):
+    service, home, _project, _stack = migration
+    write(home / ".claude" / "CLAUDE.md", "The actual copy completes before ledger persistence.")
+    detected = service.detect(provider_ids=["claude"])
+    selected = next(item for item in detected["items"] if item["item_type"] == "instructions")
+
+    def reject_ledger(_path, _value):
+        raise OSError("Actual import ledger write denied")
+
+    monkeypatch.setattr("backend.services.external_agent_import._write_json", reject_ledger)
+    with pytest.raises(OSError, match="Actual import ledger write denied"):
+        await service.import_items(detected["detection_id"], [selected["id"]])
+    state = service.state()
+    assert state["running_import"] is None
+    assert state["import_progress"]["status"] == "error"
+    assert state["import_progress"]["error"] == "Actual import ledger write denied"
+    assert state["import_progress"]["results"][0]["status"] == "success"
+    assert Path(selected["target_path"]).read_text() == "The actual copy completes before ledger persistence."
+    assert state["history"] == []
+
+
+@pytest.mark.asyncio
 async def test_detect_select_import_reaches_native_consumers_without_modifying_sources(migration):
     service, home, project, stack = migration
     claude = home / ".claude"
