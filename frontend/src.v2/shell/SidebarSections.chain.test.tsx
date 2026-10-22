@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ConversationsTab } from "./ConversationsTab";
 import { SIDEBAR_SECTIONS_EVENT, useSidebarSections, type SidebarSection } from "../protocol/thread-metadata";
+import { handleControlPlaneProjectionEvent } from "../chat/controlPlaneEvents";
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), prompt: vi.fn(), confirm: vi.fn(), command: vi.fn(), archive: vi.fn(),
   sessionId: "original-window-session", sections: [] as SidebarSection[] }));
@@ -89,6 +90,23 @@ it("marks and archives every real chat in the section and its project, including
   expect(useAppStore.getState().draft).toBe("Keep the active draft");
 });
 
+it("keeps the project's chats in its section when the committed project inventory unpins it, including after remount", async () => {
+  const view = render(<ConversationsTab conversationId="project-0" onSetConfirmDialog={vi.fn()} />);
+  await screen.findByRole("region", { name: "Source section" });
+  act(() => { handleControlPlaneProjectionEvent({ type: "workspace.recent.list", projects: [{
+    path: "C:/project", name: "Project", project_type: "node", last_opened: 1, pinned: false, named: true,
+  }] }); });
+  let group = screen.getByRole("region", { name: "Source section" });
+  expect(within(group).getByRole("region", { name: "工作区 Project" })).toBeTruthy();
+  expect(within(group).getByRole("button", { name: "Project task 0", exact: true })).toBeTruthy();
+  expect(screen.getAllByRole("region", { name: "工作区 Project" })).toHaveLength(1);
+  view.unmount();
+  render(<ConversationsTab conversationId="project-0" onSetConfirmDialog={vi.fn()} />);
+  group = await screen.findByRole("region", { name: "Source section" });
+  expect(within(group).getByRole("button", { name: "Project task 0", exact: true })).toBeTruthy();
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "project-0", workingDirectory: "C:/project", draft: "Keep the active draft" });
+});
+
 it("uses Source's empty create name and original session without adding a directory or appearance control", async () => {
   mocks.prompt.mockResolvedValue("   ");
   render(<ConversationsTab conversationId="project-0" onSetConfirmDialog={vi.fn()} />);
@@ -125,7 +143,7 @@ it("creates a row's new section after its current projected section", async () =
   const group = await screen.findByRole("region", { name: "Current section" });
   mocks.prompt.mockResolvedValue("Fresh group");
   fireEvent.click(within(group).getByRole("button", { name: "会话操作" }));
-  fireEvent.click(screen.getByRole("menuitem", { name: "移动到分组" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "分组", exact: true }));
   fireEvent.click(screen.getByRole("menuitem", { name: "新建分组…" }));
   await waitFor(() => expect(mocks.fetch.mock.calls.some(([url, options]) => url.pathname === "/api/thread-metadata/sections/move" && options?.method === "POST")).toBe(true));
   const [createUrl, createOptions] = mocks.fetch.mock.calls.find(([url, options]) => url.pathname === "/api/thread-metadata/sections" && options?.method === "POST")!;

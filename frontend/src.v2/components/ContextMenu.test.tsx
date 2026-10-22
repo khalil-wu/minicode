@@ -5,6 +5,11 @@ import { ContextMenu } from "./ContextMenu";
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
+const menuLayout = (width: number, height: number) => {
+  vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockReturnValue(width);
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockReturnValue(height);
+};
+
 describe("ContextMenu keyboard navigation", () => {
   it("typeaheads and returns through a five-level submenu without selecting a different level", () => {
     const action = vi.fn(), close = vi.fn();
@@ -126,6 +131,7 @@ describe("ContextMenu keyboard navigation", () => {
 
   it.each(["right", "left"] as const)("keeps a diagonal path to a %s flyout from being intercepted by its sibling", side => {
     vi.useFakeTimers();
+    menuLayout(180, 126);
     const left = side === "right" ? 100 : window.innerWidth - 224;
     const childLeft = side === "right" ? left + 184 : left - 184;
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
@@ -159,9 +165,10 @@ describe("ContextMenu keyboard navigation", () => {
     expect(document.activeElement).toBe(parent);
   });
 
-  it("bottom-aligns the profile Help flyout with the real parent row", () => {
+  it("bottom-aligns Help using layout dimensions rather than its transformed paint bounds", () => {
+    menuLayout(180, 126);
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
-      if (this.getAttribute("role") === "menu") return { left: 100, right: 280, top: 100, bottom: 226, width: 180, height: 126 } as DOMRect;
+      if (this.getAttribute("role") === "menu") return { left: 100, right: 278.2, top: 100, bottom: 224.74, width: 178.2, height: 124.74 } as DOMRect;
       return { left: 107, right: 273, top: 330, bottom: 364, width: 166, height: 34 } as DOMRect;
     });
     render(<ContextMenu position={{ x: 100, y: 100 }} onClose={vi.fn()} items={[
@@ -171,6 +178,23 @@ describe("ContextMenu keyboard navigation", () => {
     const child = screen.getByRole("menu", { name: "Help" });
     expect(child.style.left).toBe("277px");
     expect(Number.parseFloat(child.style.top) + 126).toBe(368);
+  });
+
+  it("anchors the profile to the rail's actual end edge and keeps sizing local to the root", () => {
+    menuLayout(228, 100);
+    const trigger = document.createElement("button");
+    document.body.appendChild(trigger);
+    vi.spyOn(trigger, "getBoundingClientRect").mockReturnValue({ left: 16, right: 48, top: 600, bottom: 632, width: 32, height: 32 } as DOMRect);
+    render(<ContextMenu position={{ x: 0, y: 0 }} anchor={trigger} side="right" align="end" alignOffset={-4}
+      style={{ width: 228 }} onClose={vi.fn()} items={[{ label: "Help", submenuClassName: "opaque-help", submenu: [{ label: "Guide" }] }]} />);
+    const root = screen.getByRole("menu");
+    expect(root.style.left).toBe("52px");
+    expect(root.style.top).toBe("536px");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Help" }));
+    const child = screen.getByRole("menu", { name: "Help" });
+    expect(child.classList.contains("opaque-help")).toBe(true);
+    expect(child.style.width).toBe("");
+    trigger.remove();
   });
 
   it("closes on Escape without sending it to the global interrupt handler", () => {
@@ -208,6 +232,7 @@ describe("ContextMenu keyboard navigation", () => {
     view.unmount(); trigger.remove(); target.remove();
   });
   it("keeps a menu on screen after a negative launcher coordinate and a viewport resize", () => {
+    menuLayout(200, 180);
     const box = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 200, height: 180 } as DOMRect);
     const view = render(<ContextMenu position={{ x: -50, y: window.innerHeight - 4 }} onClose={vi.fn()} items={[{ label: "Open" }]} />);
     const menu = screen.getByRole("menu");
@@ -233,6 +258,7 @@ describe("ContextMenu keyboard navigation", () => {
     view.unmount(); trigger.remove(); nextInput.remove();
   });
   it("keeps both menu levels anchored while the underlying pane scrolls without closing or stealing focus", async () => {
+    menuLayout(180, 100);
     const pane = document.createElement("div");
     const trigger = document.createElement("button");
     pane.appendChild(trigger);
@@ -245,8 +271,8 @@ describe("ContextMenu keyboard navigation", () => {
         return { left, right: left + 180, top, bottom: top + 100, width: 180, height: 100 } as DOMRect;
       }
       const parent = this.closest<HTMLElement>('[role="menu"]')!;
-      const left = Number.parseFloat(parent.style.left) + 7, top = Number.parseFloat(parent.style.top) + 6;
-      return { left, right: left + 166, top, bottom: top + 34, width: 166, height: 34 } as DOMRect;
+      const left = Number.parseFloat(parent.style.left) + 4, top = Number.parseFloat(parent.style.top) + 4;
+      return { left, right: left + 172, top, bottom: top + 34, width: 172, height: 34 } as DOMRect;
     });
     const close = vi.fn();
     const view = render(<ContextMenu position={{ x: 20, y: 20 }} anchor={trigger} onClose={close} items={[{ label: "Open", submenu: [{ label: "Editor" }] }]} />);

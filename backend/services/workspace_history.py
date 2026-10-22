@@ -4,18 +4,18 @@ from pathlib import Path
 
 from backend.atomic_io import canonical_file_path_key
 from backend.conversations.repository import ConversationRepository
-from backend.services.workspace_service import conversation_workspace_path
+from backend.workspace.recent_projects import RecentProjectStore
+
+
+def workspace_project_roots(path: str) -> tuple[str, ...]:
+    identity = canonical_file_path_key(path)
+    project = next((item for item in RecentProjectStore().list() if canonical_file_path_key(item.path) == identity), None)
+    return project.workspace_roots if project is not None else (str(Path(path).resolve()),)
 
 
 def workspace_conversation_ids(repository: ConversationRepository, path: str) -> list[str]:
-    """Return the ids of conversations bound to ``path``.
+    """Use explicit membership, or saved source roots for older records.
 
-    Removing a recent-workspace entry only edits the navigation list. The
-    conversations themselves stay in the app's own store keyed by workspace, so
-    reopening the project restores them without copying any transcript (which
-    can contain tool output with secrets) into the project directory.
+    Projectless membership is explicit; execution cwd does not assign a project.
     """
-    identity = canonical_file_path_key(Path(path).resolve())
-    return [item.id for item in repository.list_conversations()
-            if conversation_workspace_path(item)
-            and canonical_file_path_key(conversation_workspace_path(item)) == identity]
+    return repository.project_conversation_ids(path, workspace_project_roots(path))

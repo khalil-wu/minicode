@@ -60,6 +60,7 @@ export function AppearanceCodeThemePicker({ variant, colors, value, onSelect }: 
 
   const themeItem = (theme: typeof themes[number]) => ({ label: theme.label,
     icon: <CodeThemePreview id={theme.id} label={theme.label} variant={variant} colors={colors} />,
+    iconWidth: 24,
     checked: value === theme.id, checkType: "radio" as const, onClick: () => { void select(theme.id); } });
   return <div className="mc-select-menu settings-select appearance-code-theme-picker" data-open={Boolean(position)}>
     <button ref={trigger} type="button" className="mc-select-trigger" aria-label={t("{variant}代码主题", { variant: variantLabel })}
@@ -81,10 +82,10 @@ export function AppearanceCodeThemePicker({ variant, colors, value, onSelect }: 
     {position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-code-theme-menu" onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
       ariaLabel={t("{variant}代码主题", { variant: variantLabel })} items={[
         themeItem(themes.find(theme => theme.id === "codex")!),
-        { label: t("Codex 主题"), icon: <span className="appearance-code-theme-preview" aria-hidden="true" style={{
+        { label: t("Codex 主题"), iconWidth: 24, icon: <span className="appearance-code-theme-preview" aria-hidden="true" style={{
           "--code-theme-preview-accent": "var(--text-muted)", "--code-theme-preview-surface": colors.surface,
           "--code-theme-preview-border": `color-mix(in srgb, ${colors.ink} 16%, ${colors.surface})`,
-        } as CSSProperties}>Aa</span>, submenuMaxHeight: 320, submenu: themes.filter(theme => theme.id !== "codex").map(themeItem) },
+        } as CSSProperties}>Aa</span>, submenuClassName: "appearance-code-theme-menu", submenuMaxHeight: 320, submenu: themes.filter(theme => theme.id !== "codex").map(themeItem) },
       ]} />}
   </div>;
 }

@@ -1,5 +1,8 @@
 .settings-row-control.voice-settings-device { display: flex; align-items: center; flex-wrap: nowrap; }
 .voice-settings-device .mc-select-menu { flex: 1; min-width: 0; }
+.voice-microphone-message { padding: 12px 8px; color: var(--text-secondary); font-size: var(--text-chrome); line-height: var(--leading-snug); overflow-wrap: anywhere; }
+.voice-microphone-loading { display: flex; align-items: center; justify-content: center; gap: 8px; padding-block: 8px; }
+.voice-microphone-error { display: grid; gap: 4px; color: var(--state-danger); }
 .voice-settings-error { color: var(--state-danger); overflow-wrap: anywhere; margin: 6px 20px 12px; font-size: var(--text-xs); }
 .settings-row-copy .voice-settings-error { margin: 4px 0 0; }
 .voice-settings-observation { display: flex; align-items: center; gap: 12px; padding: 0 20px 12px; font-size: var(--text-xs); }
@@ -9,8 +12,10 @@
 .voice-shortcut-control { display: flex; align-items: center; gap: 5px; }
 .voice-shortcut-capture[data-capturing="true"] { outline: 1px solid var(--border-focus); }
 .voice-history-row { display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border-subtle); }
-.voice-history-copy { flex: 1; min-width: 0; }
-.voice-history-time { font-size: var(--text-xs); color: var(--text-muted); }
+.voice-history-copy { display: grid; flex: 1; min-width: 0; gap: 4px; }
+.voice-history-transcript { display: block; overflow: hidden; color: var(--text-primary); font-size: var(--text-sm); font-weight: var(--fw-normal); text-overflow: ellipsis; white-space: nowrap; }
+.voice-history-time { font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.voice-history-actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
 .voice-history-copy p { margin: 5px 0 0; font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
 .voice-history-copy .voice-recording-error { color: var(--text-muted); }
 .voice-dictionary-entry { display: flex; align-items: center; gap: 8px; padding: 8px 20px 8px 36px; }

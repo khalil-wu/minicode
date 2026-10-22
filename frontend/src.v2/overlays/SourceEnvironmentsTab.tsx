@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight, FileCog, Pencil, Plus, Bug, FlaskConical, Play, Settings2, Trash2 } from "../lib/icons";
+import { ChevronRight, Pencil, Plus, Bug, FlaskConical, Play, Settings2, Trash2 } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import { ContextMenu } from "../components/ContextMenu";
 import { environmentRequest, type EnvironmentDocument, type EnvironmentScript, type LocalEnvironment, type LocalEnvironmentAction, type ProjectEnvironments } from "../protocol/local-environments";
 import { openPreferredWebLink } from "../lib/open-preferred-target";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import "./SourceEnvironmentsTab.css";
 
 type Project = { path: string; name: string };
@@ -18,6 +19,9 @@ export function SourceEnvironmentsTab({ active = true }: { active?: boolean }) {
   const currentRoot = useAppStore(state => state.workingDirectory);
   const recent = useAppStore(state => state.recentWorkspaces);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsStatus, setProjectsStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [projectsError, setProjectsError] = useState("");
+  const [projectsRevision, setProjectsRevision] = useState(0);
   const [project, setProject] = useState<Project | null>(null);
   const [info, setInfo] = useState<ProjectEnvironments | null>(null);
   const [editPath, setEditPath] = useState<string | null>(null);
@@ -31,9 +35,12 @@ export function SourceEnvironmentsTab({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (!active) return;
     const controller = new AbortController();
-    void environmentRequest<{ projects: Project[] }>({}, undefined, "", controller.signal).then(result => setProjects(result.projects)).catch(reason => { if (!controller.signal.aborted) setError(String(reason)); });
+    setProjectsStatus("loading"); setProjectsError("");
+    void environmentRequest<{ projects: Project[] }>({}, undefined, "", controller.signal).then(result => {
+      setProjects(result.projects); setProjectsStatus("ready");
+    }).catch(reason => { if (!controller.signal.aborted) { setProjectsError(String(reason)); setProjectsStatus("error"); } });
     return () => controller.abort();
-  }, [active, recent]);
+  }, [active, recent, projectsRevision]);
   useEffect(() => {
     if (!active || !project) return;
     const controller = new AbortController();
@@ -87,7 +94,10 @@ export function SourceEnvironmentsTab({ active = true }: { active?: boolean }) {
     {!project ? <>
       <p className="settings-section-description">{t("本地环境用于配置项目工作树的设置脚本和操作。")} <button type="button" className="source-environment-learn" onClick={() => void openPreferredWebLink("https://developers.openai.com/codex/app/local-environments")}>{t("了解更多")}</button></p>
       <div className="source-environment-section-heading"><h3>{t("选择项目")}</h3><button type="button" className="settings-action-button" onClick={() => useAppStore.setState({ projectEditTarget: "create" })}>{t("添加项目")}</button></div>
-      <div className="source-environment-projects">{projects.map(item => <div className="settings-card source-environment-project" key={item.path}><button type="button" className="source-environment-project-label" onClick={() => { setInfo(null); setProject(item); setEditPath(null); }}><FileCog size={18} /><span title={item.path}>{item.name}</span></button><button type="button" className="settings-icon-button" aria-label={t("创建项目环境 {name}", { name: item.name })} onClick={() => { setInfo(null); setProject(item); setEditPath(null); setCreateOnLoad(true); }}><Plus size={16} /></button></div>)}</div>
+      {projectsStatus === "loading" && projects.length === 0 ? <p className="source-environment-project-loading" role="status"><SettingsSourceIcon icon="spinner" />{t("正在加载项目…")}</p>
+        : projectsStatus === "error" ? <div className="settings-card source-environment-project-state"><div><span role="alert">{t("无法加载项目")}</span><p>{projectsError}</p></div><button type="button" className="settings-action-button" onClick={() => setProjectsRevision(value => value + 1)}>{t("重试")}</button></div>
+        : projects.length === 0 ? <div className="settings-card source-environment-project-state source-environment-project-empty"><p>{t("尚无项目。添加项目以配置本地环境。")}</p><button type="button" className="settings-action-button" data-primary="true" onClick={() => useAppStore.setState({ projectEditTarget: "create" })}>{t("添加项目")}</button></div>
+        : <div className="source-environment-projects" role="list" aria-label={t("可用项目")}>{projects.map(item => <div className="settings-card source-environment-project" role="listitem" key={item.path}><button type="button" className="source-environment-project-label" onClick={() => { setInfo(null); setProject(item); setEditPath(null); }}><SettingsSourceIcon icon="environmentProject" /><span title={item.path}>{item.name}</span></button><button type="button" className="settings-icon-button" aria-label={t("创建项目环境 {name}", { name: item.name })} onClick={() => { setInfo(null); setProject(item); setEditPath(null); setCreateOnLoad(true); }}><Plus size={16} /></button></div>)}</div>}
     </> : draft ? <>
       <header className="settings-page-heading"><h2>{t("编辑本地环境")}</h2></header>
       <div className="settings-card source-environment-name"><label>{t("名称")}<input aria-label={t("环境名称")} value={draft.environment.name} disabled={busy} onChange={event => updateDraft({ ...draft.environment, name: event.target.value })} /></label></div>

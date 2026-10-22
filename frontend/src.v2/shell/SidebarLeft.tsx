@@ -15,6 +15,7 @@ import { useComposerPlugins } from "../composer/useComposerPlugins";
 import { selectSkillForComposer } from "../lib/select-skill-for-composer";
 import { MenuSourceIcon } from "../lib/menu-source-icons";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
+import "./ShellMenus.css";
 
 export const SidebarLeft = ({
   embedded = false,
@@ -42,6 +43,7 @@ export const SidebarLeft = ({
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const [profileMenu, setProfileMenu] = useState<{ x: number; y: number } | null>(null);
+  const profileTrigger = useRef<HTMLButtonElement>(null);
   const [modeMenu, setModeMenu] = useState<{ x: number; y: number } | null>(null);
   const modeTrigger = useRef<HTMLButtonElement>(null);
   const isOpen = embedded || leftSidebarWidth > 0;
@@ -177,14 +179,16 @@ export const SidebarLeft = ({
       </div>
 
       {!withGlobalRail && <div className="mc-sidebar-footer">
-        <button type="button" className="mc-sidebar-profile-button" aria-label={tr("打开个人资料菜单")} aria-haspopup="menu" aria-expanded={Boolean(profileMenu)} onClick={event => {
+        <button ref={profileTrigger} type="button" className="mc-sidebar-profile-button" aria-label={tr("打开个人资料菜单")} aria-haspopup="menu" aria-expanded={Boolean(profileMenu)} onClick={event => {
           const bounds = event.currentTarget.getBoundingClientRect();
-          setProfileMenu(profileMenu ? null : { x: bounds.left, y: bounds.bottom - 154 });
+          setProfileMenu(profileMenu ? null : { x: bounds.left, y: bounds.top });
         }}><MenuSourceIcon kind="settings" /><span>MiniCode</span></button>
       </div>}
-      {profileMenu && <ContextMenu position={profileMenu} onClose={() => setProfileMenu(null)} items={[
+      {profileMenu && <ContextMenu position={profileMenu} anchor={profileTrigger.current!} returnFocusTo={profileTrigger.current!}
+        side="top" align="start" style={{ width: sidebarRef.current!.getBoundingClientRect().width - 16 }} onClose={() => setProfileMenu(null)} items={[
         { label: tr("设置"), icon: <MenuSourceIcon kind="settings" />, shortcut: formatShortcut(settingsShortcut), onClick: () => navigate(() => { useAppStore.getState().setSettingsTab("general"); toggleSettings(); }) },
-        { label: tr("帮助"), icon: <MenuSourceIcon kind="help" />, alignToParentBottom: true, submenu: [
+        { label: "", separator: true },
+        { label: tr("帮助"), icon: <MenuSourceIcon kind="help" />, alignToParentBottom: true, submenuClassName: "mc-profile-help-menu", submenu: [
           { label: tr("新增内容"), icon: <MenuSourceIcon kind="whats-new" />, onClick: () => { void openPreferredWebLink("https://developers.openai.com/codex/changelog"); } },
           { label: "", separator: true },
           { label: tr("键盘快捷键"), icon: <MenuSourceIcon kind="shortcuts" />, onClick: () => useAppStore.getState().toggleShortcutsHelp() },

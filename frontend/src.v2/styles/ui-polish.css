@@ -19,6 +19,8 @@
   --mc-chat-width: min(var(--input-max-width), calc(100vw - 48px));
   --mc-scrollbar-color: color-mix(in oklch, var(--text-primary) 15%, transparent);
   --mc-scrollbar-hover: color-mix(in oklch, var(--text-primary) 30%, transparent);
+  --menu-surface: var(--surface-base);
+  --menu-shadow: 0 0 0 .5px var(--border-subtle), 0 8px 16px -4px oklch(0 0 0 / 0.1215686275);
 }
 
 /* Typography and focus */
@@ -774,8 +776,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   color: var(--text-primary) !important;
 }
 
-.mc-dropdown-menu,
-.context-menu-surface,
+.mc-dropdown-menu:not(.composer-add-menu),
 .queued-message-menu,
 .mc-conversation-menu,
 .prompt-history-card {
@@ -787,13 +788,57 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   transform-origin: var(--mc-menu-origin, top center);
 }
 
-.mc-dropdown-menu :where(button, [role="option"]),
-.context-menu-surface [role="menuitem"],
+.mc-dropdown-menu:not(.composer-add-menu) :where(button, [role="option"]),
 .queued-message-menu button,
 .mc-conversation-menu [role="menuitem"] {
   border-radius: var(--radius-sm) !important;
   font-family: var(--font-ui) !important;
   letter-spacing: 0;
+}
+
+/* Source U8(menu), JSn and gCn share this desktop popup surface. */
+.context-menu-surface {
+  min-width: min(180px, calc(100vw - 16px));
+  border: 0;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--menu-surface) 90%, transparent);
+  box-shadow: 0 0 0 .5px var(--border-subtle), var(--menu-shadow);
+  backdrop-filter: blur(8px);
+}
+.context-menu-surface .mc-menu-item {
+  border-radius: 12px;
+  font-family: var(--font-ui);
+  letter-spacing: 0;
+  outline-style: none;
+}
+.context-menu-surface .mc-menu-leading-icon { color: inherit; opacity: .75; }
+.context-menu-surface .mc-menu-content { display: flex; flex: 1; min-width: 0; align-items: center; gap: var(--mc-menu-content-gap, 6px); }
+.context-menu-surface .mc-menu-item:is(:hover, :focus, [aria-expanded="true"]) .mc-menu-leading-icon { opacity: 1; }
+.mc-dropdown-menu.composer-add-menu {
+  bottom: calc(100% + 4px);
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  background: var(--menu-surface);
+  box-shadow: none;
+}
+.composer-add-menu > button {
+  min-height: 0;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 12px;
+  outline-style: none;
+  font-family: var(--font-ui);
+  font-size: var(--text-chrome);
+  line-height: calc(1.25 / .875);
+}
+.composer-add-menu > button[data-highlighted="true"] { background: var(--surface-hover); }
+@supports (corner-shape: superellipse(1.5)) {
+  .context-menu-surface, .mc-dropdown-menu.composer-add-menu { border-radius: 20px; corner-shape: superellipse(1.5); }
+  .context-menu-surface .mc-menu-item, .composer-add-menu > button { border-radius: 15px; corner-shape: superellipse(1.5); }
+}
+@media (forced-colors: active) {
+  .context-menu-surface .mc-menu-item, .composer-add-menu > button { outline-offset: 2px; outline: 2px solid transparent; }
 }
 
 .composer-picker-menu {

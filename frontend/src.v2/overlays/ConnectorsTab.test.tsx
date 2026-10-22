@@ -101,10 +101,12 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     fireEvent.click(screen.getByRole("button", { name: "清除所有应用数据" }));
     expect(nativeSandbox.clearData).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "清除所有应用数据" })).toHaveProperty("disabled", true);
+    expect(screen.getByRole("button", { name: "清除所有应用数据" }).getAttribute("aria-busy")).toBe("true");
     expect(pushToastMock).not.toHaveBeenCalled();
     await act(async () => complete());
     expect(pushToastMock).toHaveBeenCalledWith("MCP 应用数据已清除", "success");
     expect(screen.getByRole("button", { name: "清除所有应用数据" })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "清除所有应用数据" }).getAttribute("aria-busy")).toBe("false");
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 

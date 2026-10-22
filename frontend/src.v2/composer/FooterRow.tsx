@@ -1,5 +1,5 @@
 import { useI18n, type Translate, type TranslationKey } from "../i18n";
-import { ArrowUp, Check, ChevronDown, ChevronRight, Folder, Globe, Hand, ListChecks, Plus, RotateCcw, ShieldAlert, Square, TerminalSquare, X } from "../lib/icons";
+import { ArrowUp, Check, ChevronRight, Folder, Globe, Hand, ListChecks, RotateCcw, ShieldAlert, Square, TerminalSquare, X } from "../lib/icons";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { SendButtonState } from "../lib/send-state";
 import { useAppStore } from "../stores";
@@ -15,6 +15,7 @@ import { workspaceRootsEqual } from "../lib/workspace-path";
 import { pushToast } from "../overlays/ToastContainer";
 import { Button } from "../components/Button";
 import { ComposerAddMenu } from "./ComposerAddMenu";
+import { PromptSourceIcon } from "../lib/prompt-source-icons";
 import { isDesktop, openExternal } from "../desktop/runtime";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 import { Target } from "../lib/icons";
@@ -104,11 +105,10 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   const [permissionOpen, setPermissionOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const addTrigger = useRef<HTMLButtonElement>(null);
   const footerRef = useRef<HTMLDivElement>(null);
   useEffect(() => { setAddOpen(false); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
   useEffect(() => {
-    const openAddMenu = () => { setAddOpen(true); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); };
+    const openAddMenu = () => { window.dispatchEvent(new Event("composer:focus")); setAddOpen(true); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); };
     window.addEventListener("composer:open-add-menu", openAddMenu);
     return () => window.removeEventListener("composer:open-add-menu", openAddMenu);
   }, []);
@@ -148,7 +148,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
     queueMicrotask(() => {
       const items = options();
       (root.querySelector<HTMLInputElement>('input[type="range"]')
-        ?? items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0])?.focus();
+        ?? items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0])?.focus({ preventScroll: true });
     });
     const handleMenuKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
@@ -157,7 +157,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
         setModelOpen(false);
         setPermissionOpen(false);
         setEffortOpen(false);
-        queueMicrotask(() => trigger?.focus());
+        queueMicrotask(() => trigger?.focus({ preventScroll: true }));
         return;
       }
       const items = options();
@@ -167,21 +167,21 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
       if (event.key === "Enter" && slider) {
         event.preventDefault(); event.stopPropagation();
         setEffortOpen(false);
-        queueMicrotask(() => trigger?.focus());
+        queueMicrotask(() => trigger?.focus({ preventScroll: true }));
         return;
       }
       if (event.key === "Tab") {
         event.preventDefault(); event.stopPropagation();
-        items[(current + (event.shiftKey ? -1 : 1) + items.length) % items.length].focus();
+        if (effortOpen) items[(current + (event.shiftKey ? -1 : 1) + items.length) % items.length].focus();
         return;
       }
       if (slider && !["ArrowDown", "ArrowUp"].includes(event.key)) return;
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
         event.stopPropagation();
-        const next = event.key === "ArrowDown"
-          ? (current + 1 + items.length) % items.length
-          : (current - 1 + items.length) % items.length;
+        const next = effortOpen ? (current + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length
+          : current < 0 ? event.key === "ArrowDown" ? 0 : items.length - 1
+          : Math.max(0, Math.min(items.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
         items[next].focus();
       } else if (event.key === "Home" || event.key === "End") {
         event.preventDefault();
@@ -439,7 +439,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
         onRemoteFiles={remoteHost ? () => void openRemoteFilePicker() : undefined}
         onGoal={() => void editGoal()} onPlan={togglePlanMode}
         onPlugin={(id, name) => useAppStore.getState().addSelectedMention({ kind: "plugin", name, configName: id, path: `plugin://${id}` })}
-        onClose={() => { setAddOpen(false); addTrigger.current!.focus(); }} />}
+        onClose={restoreFocus => { setAddOpen(false); if (restoreFocus) window.dispatchEvent(new Event("composer:focus")); }} />}
       {prMonitor && (
         <div style={prMonitorStyle(prMonitor.ciStatus)}>
           <span className={prMonitor.ciStatus === "running" ? "thinking-pulse-dot" : undefined} style={prDotStyle(prMonitor.ciStatus)} />
@@ -501,7 +501,6 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
         <div className="composer-footer-primary" style={footerLeftStyle}>
             <button
               type="button"
-            ref={addTrigger}
             title={tr("添加文件等内容")}
             className="composer-attach-btn"
             style={iconBtn(compact)}
@@ -509,9 +508,10 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
             aria-haspopup="menu"
             aria-expanded={addOpen}
             disabled={Boolean(pendingConversationSwitchId)}
-            onClick={() => { setAddOpen(value => !value); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }}
+            onMouseDown={event => event.preventDefault()}
+            onClick={() => { window.dispatchEvent(new Event("composer:focus")); setAddOpen(value => !value); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }}
           >
-            <Plus size={compact ? 16 : 18} strokeWidth={1.8} />
+            <PromptSourceIcon icon="plus" />
           </button>
 
           <Picker
@@ -580,7 +580,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
           >
             <span className="composer-model-trigger-label">{modelLabel}</span>
             {supportsReasoningEffort && <span className="composer-model-trigger-effort" data-effort={displayedEffort}>{effortLabel}</span>}
-            <ChevronDown size={13} aria-hidden="true" />
+            <PromptSourceIcon icon="model-chevron-down" />
           </button>
           {modelOpen && (
             <div className="mc-dropdown-menu composer-picker-menu composer-model-menu" role="listbox" aria-label={tr("选择模型")} style={{ ...dropdownStyle("right"), overflow: "hidden" }}>

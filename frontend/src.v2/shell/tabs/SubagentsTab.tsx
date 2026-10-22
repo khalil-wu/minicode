@@ -6,7 +6,7 @@ import { useI18n, type Translate, type TranslationKey } from "../../i18n";
  * Inspector. This panel only answers: what is being worked on, where it stands,
  * and what result is available.
  */
-import { ArrowLeft } from "lucide-react";
+import { PromptSourceIcon } from "../../lib/prompt-source-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
 import { ChatTurn } from "../../chat/components/ChatTurn";
@@ -221,7 +221,7 @@ const AgentDetail = ({
           aria-label={t("返回子智能体列表")}
           onClick={onBack}
         >
-          <ArrowLeft size={16} />
+          <PromptSourceIcon icon="arrow-left" />
         </button>
         <AgentGlyph view={view} large />
         <span className="subagents-detail-heading">

@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
 from backend.async_cleanup import to_thread_cancel_safe
-from backend.services.thread_metadata_service import publish_thread_metadata
+from backend.services.thread_metadata_service import publish_project_metadata, publish_thread_metadata
 from backend.workspace.recent_projects import RecentProjectStore
 from . import _state
 
@@ -121,6 +121,8 @@ async def move_section_item(request: SectionMove, background_tasks: BackgroundTa
             raise HTTPException(404, "Project not found")
         operation = lambda: repository.thread_sections.move_project(request.id, request.section_id, before_item_key=request.before_item_key)
     await _mutate(repository, background_tasks, operation)
+    if request.kind == "project":
+        background_tasks.add_task(publish_project_metadata)
     return {}
 
 

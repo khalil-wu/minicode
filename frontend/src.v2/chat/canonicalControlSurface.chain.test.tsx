@@ -175,6 +175,66 @@ describe("Source native command prefix approval", () => {
 });
 
 describe("source request-input wizard through wire, owner store and semantic response", () => {
+  it("shows the Source recommended badge while numeric selection submits the untouched original labels", async () => {
+    handleControlEvent({ ...input(), request: { subtype: "request_user_input", tool_use_id: "same-model-call", isBlocking: true,
+      questions: questions.map((question, index) => index === 0 ? { ...question, options: [
+        { label: "Parser (Recommended)", description: "Keep actual files." }, question.options[1],
+      ] } : question) } } as ServerEvent);
+    render(<InlineAgentPrompt />);
+    const recommended = screen.getByRole("radio", { name: "Parser (Recommended)" });
+    expect(recommended.textContent).toContain("推荐");
+    expect(recommended.textContent).not.toContain("(Recommended)");
+    vi.useFakeTimers();
+    fireEvent.keyDown(recommended, { key: "1" });
+    expect(recommended.getAttribute("data-advancing")).toBe("true");
+    expect(mocks.response).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(180));
+    fireEvent.keyDown(screen.getByRole("radio", { name: "Bytes" }), { key: "1" });
+    act(() => vi.advanceTimersByTime(180));
+    vi.useRealTimers();
+    await waitFor(() => expect(mocks.response).toHaveBeenCalledWith(expect.objectContaining({
+      conversation_id: "owner", turn_id: "turn-one", message_id: "message-turn-one", task_id: "task-turn-one",
+      response: { subtype: "success", response: { answers: { area: { answers: ["Parser (Recommended)"] }, details: { answers: ["Bytes"] } } } },
+    })));
+    expect(useAppStore.getState().draft).toBe("unsent main draft");
+  });
+
+  it("moves from the last choice or its numbered Other shortcut into freeform without consuming typed digits", () => {
+    handleControlEvent(input()); render(<InlineAgentPrompt />);
+    const first = screen.getByRole("radio", { name: "Parser" }), last = screen.getByRole("radio", { name: "Runner" });
+    fireEvent.keyDown(first, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(last, { key: "ArrowDown" });
+    const editor = screen.getByRole("textbox", { name: "回答当前问题" });
+    expect(document.activeElement).toBe(editor);
+    expect(last.getAttribute("aria-checked")).toBe("false");
+    act(() => first.focus());
+    fireEvent.keyDown(first, { key: "3" });
+    expect(document.activeElement).toBe(editor);
+    fireEvent.change(editor, { target: { value: "Literal digit 2" } });
+    fireEvent.keyDown(editor, { key: "2" });
+    expect((editor as HTMLTextAreaElement).value).toBe("Literal digit 2");
+    expect(mocks.response).not.toHaveBeenCalled();
+    expect(screen.getByText("Which area?")).toBeTruthy();
+  });
+
+  it("keeps the original action label disabled while awaiting acceptance and restores it after a real refusal", async () => {
+    let finish!: (value: any) => void;
+    mocks.response.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    handleControlEvent(input()); render(<InlineAgentPrompt />);
+    fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    const action = screen.getByRole("button", { name: "跳过" });
+    expect((action as HTMLButtonElement).disabled).toBe(true);
+    expect(action.closest("form")!.getAttribute("aria-busy")).toBe("true");
+    expect(action.querySelector("svg")).toBeNull();
+    await act(async () => finish({ type: "command.result", command: "control_response", level: "error", message: "Original request refused", data: {} }));
+    expect(screen.getByRole("alert").textContent).toBe("Original request refused");
+    expect((screen.getByRole("button", { name: "跳过" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(useAppStore.getState().pendingAskUser).toMatchObject({ conversationId: "owner", turnId: "turn-one" });
+    expect(useAppStore.getState().draft).toBe("unsent main draft");
+  });
+
   it("retains every typed question and description, advances after 180ms and submits labels plus literal custom text", async () => {
     handleControlEvent(input()); render(<InlineAgentPrompt />);
     expect(screen.getByText("Which area?")).toBeTruthy(); expect(screen.getByText("Keep actual files.")).toBeTruthy();

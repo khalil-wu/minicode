@@ -46,8 +46,6 @@ const pages = [
     button: async () => { const button = screen.getByRole("button", { name: "打开配置文件" }); await waitFor(() => expect(button).toHaveProperty("disabled", false)); return button; } },
   { name: "Hooks", render: () => <HooksTab />, request: { kind: "hook", hookKey: hook.key } as ManagedSettingsTarget,
     button: async () => { const description = await screen.findByText(hook.command, { selector: ".settings-row-description" }); const details = description.closest("details")!; fireEvent.click(details.querySelector("summary")!); return within(details).getByRole("button", { name: "打开配置文件" }); } },
-  { name: "Storage", render: () => <StorageTab />, request: { kind: "data" } as ManagedSettingsTarget,
-    button: async () => screen.findByRole("button", { name: `应用数据文件夹: ${usage.path}` }) },
   { name: "Import", render: () => <ImportSettingsTab variant="general-row" />, request: { kind: "import-item", importId: "actual-ledger-import",
     itemId: importedItem.id, workspaceRoot, ...executionOwner } as ManagedSettingsTarget,
     button: async () => { fireEvent.click(await screen.findByRole("button", { name: "查看导入的文件" })); return screen.getByRole("link", { name: importedFile }); } },
@@ -70,6 +68,14 @@ beforeEach(() => {
     conversation_id: useAppStore.getState().conversationId ?? "", workspace_root: useAppStore.getState().workingDirectory }));
 });
 afterEach(() => { cleanup(); delete window.__MINICODE_RUNTIME__; bindWorkspaceOwnerRuntime(() => undefined); });
+
+it("shows the storage folder as selectable information without adding a native action", async () => {
+  render(<StorageTab />);
+  const folder = await screen.findByText(usage.path);
+  fireEvent.click(folder);
+  expect(folder.closest("button, a")).toBeNull();
+  expect(mocks.openTarget).not.toHaveBeenCalled();
+});
 
 it.each(pages)("$name uses the real runtime helper with only its registered action identity", async page => {
   const before = useAppStore.getState();

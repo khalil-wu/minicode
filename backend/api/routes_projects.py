@@ -11,6 +11,7 @@ from backend.workspace.trust import is_workspace_trusted
 from backend.workspace.trust import trust_created_task_directory
 from backend.workspace.delivery import run_delivery_command
 from backend.atomic_io import canonical_file_path_key
+from backend.services.thread_metadata_service import publish_project_metadata as _publish
 from . import _state
 
 router = APIRouter()
@@ -59,14 +60,6 @@ def _accepted_folders(folders: list[str]) -> list[str]:
         if not is_workspace_trusted(path): raise HTTPException(403, f"Source folder is not trusted: {path}")
         accepted.append(str(path))
     return accepted
-
-
-async def _publish() -> dict[str, Any]:
-    from backend.services.workspace_service import list_workspace_recent_payload
-    payload = await to_thread_cancel_safe(list_workspace_recent_payload)
-    for session in _state.ws_manager.iter_sessions():
-        if session.is_connected: await session.send_payload(payload, log_context="projects.updated")
-    return payload
 
 
 async def _create_managed_workspace(store: RecentProjectStore) -> str:

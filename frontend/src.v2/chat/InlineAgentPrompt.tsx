@@ -3,7 +3,6 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import { elicitationChoices, elicitationContent, elicitationDefaults, type ElicitationField } from "./elicitationForm";
 import {
   Check,
-  ChevronDown,
   ExternalLink,
   File,
   Folder,
@@ -36,6 +35,7 @@ import { summarizeArgs, humanizeKey } from "./toolUtils";
 import { readableToolLabel } from "./toolDisplayName";
 import { SelectMenu } from "../components/SelectMenu";
 import { ContextMenu } from "../components/ContextMenu";
+import { PromptSourceIcon } from "../lib/prompt-source-icons";
 import { openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { pushToast } from "../overlays/ToastContainer";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
@@ -459,7 +459,7 @@ const NativeApprovalScopeMenu = ({ responding, onAllow, scopedAction }: {
     <Button ref={triggerRef} variant="primary" size="sm" className="inline-approval-scope-action" aria-label={tr("选择允许范围")}
       aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={responding}
       onKeyDown={event => { if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); setOpen(true); } }}
-      onClick={() => setOpen(value => !value)}><ChevronDown size={14} aria-hidden="true" /></Button>
+      onClick={() => setOpen(value => !value)}><PromptSourceIcon icon="chevron-down" size={14} /></Button>
     {open && <ContextMenu id={menuId} ariaLabel={tr("选择允许范围")} className="inline-approval-native-scope-menu" position={{ x: 0, y: 0 }}
       anchor={triggerRef.current!} side="top" returnFocusTo={triggerRef.current!} onClose={() => setOpen(false)} items={[
         ...(onAllow ? [{ label: tr("允许一次"), onClick: onAllow, disabled: responding }] : []),

@@ -15,18 +15,21 @@ from backend.conversations.repository import ConversationRepository
 from backend.conversations.thread_resources import pull_request_identity, pull_request_resource, resource_reference
 from backend.services import thread_pull_request_service as pr_service
 from backend.tools.thread_resource_tools import ThreadResourceTool
+from backend.workspace.recent_projects import RecentProjectStore
+from backend.atomic_io import canonical_file_path_key
 
 
 @pytest.fixture
 def stores(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.workspace.recent_projects.DEFAULT_STORE_PATH", tmp_path / "recent_projects.json")
     original = ConversationRepository(tmp_path / "original")
     foreign = ConversationRepository(tmp_path / "foreign")
     sessions = {
-        "original-session": SimpleNamespace(conversation_repo=original, is_connected=True, send_conversation_list=AsyncMock(),
+        "original-session": SimpleNamespace(conversation_repo=original, is_connected=True, send_conversation_list=AsyncMock(), send_payload=AsyncMock(),
             environment_manager=None, active_conversation_id="unused"),
         "same-store-window": SimpleNamespace(conversation_repo=ConversationRepository(original.storage_root),
-            is_connected=True, send_conversation_list=AsyncMock()),
-        "other-store-window": SimpleNamespace(conversation_repo=foreign, is_connected=True, send_conversation_list=AsyncMock()),
+            is_connected=True, send_conversation_list=AsyncMock(), send_payload=AsyncMock()),
+        "other-store-window": SimpleNamespace(conversation_repo=foreign, is_connected=True, send_conversation_list=AsyncMock(), send_payload=AsyncMock()),
     }
     monkeypatch.setattr(routes._state, "ws_manager", SimpleNamespace(get_session=sessions.get, iter_sessions=lambda: sessions.values()))
     app = FastAPI()
@@ -48,7 +51,9 @@ def test_sections_keep_archived_slots_pins_clone_and_delete_on_cold_read(stores)
         ["thread:" + last.id, "thread:" + original.id])
     assert sections.list()[0]["item_keys"] == ["thread:" + original.id, "thread:" + hidden.id, "thread:" + last.id]
     repository.set_archived(hidden.id, True)
-    sections.move_project(str(repository.storage_root / "project"), first["id"], before_item_key="thread:" + hidden.id)
+    project_path = str(repository.storage_root / "project")
+    RecentProjectStore().add(project_path, "Project")
+    sections.move_project(project_path, first["id"], before_item_key="thread:" + hidden.id)
     clone = repository.clone_conversation(original.id)
     cold = ConversationRepository(repository.storage_root)
     catalog = cold.thread_sections.list()
@@ -135,6 +140,49 @@ def test_source_resource_capacity_and_utf8_bounds_are_enforced_at_the_shared_sto
         repository.thread_resources.add(record.id, "type", "overflow", {})
     repository.thread_resources.remove(record.id, "type", "key-0")
     assert repository.thread_resources.add(record.id, "type", "replacement", {})["outcome"] == "created"
+
+
+@pytest.mark.asyncio
+async def test_project_section_move_unpins_durably_and_publishes_the_real_project_and_section_inventories(stores, tmp_path):
+    repository, sessions, app = stores
+    root, secondary = tmp_path / "project", tmp_path / "secondary"
+    root.mkdir()
+    secondary.mkdir()
+    store = RecentProjectStore()
+    project = store.create("Two sources", [str(root), str(secondary)])
+    chat = repository.create_conversation(workspace_root=str(secondary), execution_cwd=str(secondary),
+        context_snapshot={"original": "keep hidden workspace checkpoint"}, transcript=[{"id": "u", "role": "user", "content": "Saved task"}])
+    before = chat.to_dict()
+    section = repository.thread_sections.create("Source section")
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://metadata") as client:
+        stale = await client.post("/api/thread-metadata/sections/move", params={"session_id": "original-session"},
+            json={"kind": "project", "id": project.path, "section_id": "removed-section"})
+        assert stale.status_code == 409, stale.text
+        assert RecentProjectStore().list()[0].pinned is True
+        assert repository.thread_sections.list()[0]["item_keys"] == []
+        for session in sessions.values():
+            session.send_payload.assert_not_awaited()
+        result = await client.post("/api/thread-metadata/sections/move", params={"session_id": "original-session"},
+            json={"kind": "project", "id": project.path, "section_id": section["id"]})
+        assert result.status_code == 200, result.text
+        cold = ConversationRepository(repository.storage_root)
+        assert cold.thread_sections.list()[0]["item_keys"] == ["project:" + canonical_file_path_key(project.path)]
+        assert RecentProjectStore().list()[0].pinned is False
+        assert cold.get_conversation(chat.id).to_dict() == before
+        for session in sessions.values():
+            payload = session.send_payload.await_args.args[0]
+            assert payload["type"] == "workspace.recent.list"
+            assert payload["projects"][0]["pinned"] is False
+            assert payload["projects"][0]["source_folders"] == [str(root), str(secondary)]
+        sessions["original-session"].send_conversation_list.assert_awaited_once()
+        sessions["same-store-window"].send_conversation_list.assert_awaited_once()
+        sessions["other-store-window"].send_conversation_list.assert_not_awaited()
+        removed = await client.post("/api/thread-metadata/sections/move", params={"session_id": "original-session"},
+            json={"kind": "project", "id": project.path, "section_id": None})
+        assert removed.status_code == 200, removed.text
+    assert RecentProjectStore().list()[0].pinned is False
+    assert ConversationRepository(repository.storage_root).thread_sections.list()[0]["item_keys"] == []
+    assert ConversationRepository(repository.storage_root).get_conversation(chat.id).to_dict() == before
 
 
 @pytest.mark.asyncio

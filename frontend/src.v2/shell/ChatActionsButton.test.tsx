@@ -41,6 +41,33 @@ it("renames the captured canonical conversation even if selection changes while 
   expect(useAppStore.getState().conversations[0].title).toBe("Chat A");
 });
 
+it.each([false, true])("sends the real header pin operation for pinned=%s and waits for the inventory projection", async (pinned) => {
+  useAppStore.setState({ draft: "Keep the current draft", conversations: useAppStore.getState().conversations.map(chat => ({ ...chat, pinned })) });
+  let finish!: (result: { type: string; level: string; data: object }) => void;
+  mocks.send.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+  render(<ChatActionsButton />); open();
+  fireEvent.click(screen.getByRole("menuitem", { name: pinned ? "取消固定" : "固定", exact: true }));
+  expect(mocks.send).toHaveBeenCalledExactlyOnceWith({ type: "conversation.pin.set", conversation_id: "A", pinned: !pinned }, "conversation.pin.set");
+  expect(useAppStore.getState().conversations[0].pinned).toBe(pinned);
+  act(() => useAppStore.setState({ conversationId: "B", workingDirectory: "C:/B" }));
+  await act(async () => finish({ type: "command.result", level: "success", data: {} }));
+  expect(useAppStore.getState().conversations[0].pinned).toBe(pinned);
+  expect(useAppStore.getState().draft).toBe("Keep the current draft");
+});
+
+it("pins remote chats through the same canonical header command", async () => {
+  useAppStore.setState({ conversations: [{ id: "A", title: "Remote A", workspaceRoot: "C:/A", updatedAt: "today", environment: "remote" }] });
+  render(<ChatActionsButton />); open();
+  fireEvent.click(screen.getByRole("menuitem", { name: "固定", exact: true }));
+  await waitFor(() => expect(mocks.send).toHaveBeenCalledWith({ type: "conversation.pin.set", conversation_id: "A", pinned: true }, "conversation.pin.set"));
+});
+
+it("keeps a child chat out of the header pin action", () => {
+  useAppStore.setState({ conversations: [{ id: "A", title: "Child A", workspaceRoot: "C:/A", updatedAt: "today", conversationType: "side_chat" }] });
+  render(<ChatActionsButton />); open();
+  expect(screen.queryByRole("menuitem", { name: "固定", exact: true })).toBeNull();
+});
+
 it("copies the actual captured chat as source Markdown and exposes no export-tree action", async () => {
   render(<ChatActionsButton />); open();
   expect(screen.queryByRole("menuitem", { name: "导出会话树" })).toBeNull();

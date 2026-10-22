@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n";
 import { AtSign, Clock3, Folder, House, MoreHorizontal } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { openAutomations } from "../lib/automations-navigation";
 import { ContextMenu } from "../components/ContextMenu";
@@ -10,6 +10,7 @@ import { SourcePetIcon } from "../pets/SourcePetIcon";
 import { MenuSourceIcon } from "../lib/menu-source-icons";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
 import { pushToast } from "../overlays/ToastContainer";
+import "./ShellMenus.css";
 
 export function NavigationRail() {
   const { t: tr } = useI18n();
@@ -21,6 +22,7 @@ export function NavigationRail() {
   const settingsShortcut = useAppStore(state => state.shortcutBindings.settings);
   const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
   const [settingsMenu, setSettingsMenu] = useState<{ x: number; y: number } | null>(null);
+  const profileTrigger = useRef<HTMLButtonElement>(null);
   const pets = desktop()?.pets;
   const [petState, setPetState] = useState<DesktopPetState>();
   useEffect(() => {
@@ -63,15 +65,17 @@ export function NavigationRail() {
         ]} />}
       </div>
     </div>
-    <button type="button" title={tr("打开个人资料菜单")} aria-label={tr("打开个人资料菜单")} className="mc-navigation-rail-settings" aria-haspopup="menu" aria-expanded={Boolean(settingsMenu)} aria-current={settingsOpen && settingsTab !== "scheduler" ? "page" : undefined} onClick={event => {
+    <button ref={profileTrigger} type="button" title={tr("打开个人资料菜单")} aria-label={tr("打开个人资料菜单")} className="mc-navigation-rail-settings" aria-haspopup="menu" aria-expanded={Boolean(settingsMenu)} aria-current={settingsOpen && settingsTab !== "scheduler" ? "page" : undefined} onClick={event => {
       const bounds = event.currentTarget.getBoundingClientRect(); setMoreMenu(null);
-      setSettingsMenu(settingsMenu ? null : {x:bounds.right+4,y:bounds.bottom-120});
+      setSettingsMenu(settingsMenu ? null : { x: bounds.right + 4, y: bounds.bottom });
     }}><MenuSourceIcon kind="settings" /></button>
-    {settingsMenu && <ContextMenu position={settingsMenu} onClose={()=>setSettingsMenu(null)} items={[
+    {settingsMenu && <ContextMenu className="mc-profile-menu-rail" position={settingsMenu} anchor={profileTrigger.current!} returnFocusTo={profileTrigger.current!}
+      side="right" align="end" alignOffset={-4} onClose={()=>setSettingsMenu(null)} items={[
       ...(pets && petState ? [{ label: tr(petState.miniOpen ? "隐藏虚拟宠物" : "显示虚拟宠物"), icon: <SourcePetIcon active={petState.miniOpen} />,
         onClick: () => { void pets.update({ petVisible: !petState.miniOpen }).catch(error => pushToast(String(error), "error")); } }] : []),
       {label:tr("设置"),icon:<MenuSourceIcon kind="settings" />,shortcut:formatShortcut(settingsShortcut),onClick:()=>showSettings("general")},
-      {label:tr("帮助"),icon:<MenuSourceIcon kind="help" />,alignToParentBottom:true,submenu:[
+      {label:"",separator:true},
+      {label:tr("帮助"),icon:<MenuSourceIcon kind="help" />,alignToParentBottom:true,submenuClassName:"mc-profile-help-menu",submenu:[
         {label:tr("新增内容"),icon:<MenuSourceIcon kind="whats-new" />,onClick:()=>{void openPreferredWebLink("https://developers.openai.com/codex/changelog");}},
         {label:"",separator:true},
         {label:tr("键盘快捷键"),icon:<MenuSourceIcon kind="shortcuts" />,onClick:()=>useAppStore.getState().toggleShortcutsHelp()},

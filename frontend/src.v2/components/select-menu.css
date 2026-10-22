@@ -101,9 +101,22 @@
   opacity: 0.5;
 }
 
-.settings-select .mc-select-trigger { min-height: 32px; padding: 5px 9px; background: var(--surface-soft); }
+.settings-select .mc-select-trigger {
+  height: 28px;
+  min-height: 28px;
+  box-sizing: border-box;
+  grid-template-columns: minmax(0, 1fr) 14px;
+  gap: 4px;
+  padding: 0 12px;
+  border-radius: 10px;
+  background: var(--menu-surface);
+  font-size: var(--text-chrome);
+  line-height: 18px;
+}
 .settings-select .mc-select-trigger:hover:not(:disabled),
-.settings-select[data-open="true"] .mc-select-trigger { border-color: var(--border-subtle); background: var(--surface-soft); }
+.settings-select[data-open="true"] .mc-select-trigger { border-color: var(--border-subtle); background: var(--surface-hover); }
+.settings-select .mc-select-trigger:disabled { opacity: .4; cursor: default; }
+.settings-select .mc-select-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
 
 .mc-select-popover {
   position: fixed;
@@ -131,13 +144,26 @@
   transform-origin: bottom;
 }
 
-/* Source settings hNs has a static down chevron. Sji's menu surface has no
-   authored scale/fade entry; keep the common form-select motion separate. */
-.mc-select-popover[data-settings-select="true"] { animation: none; }
+/* Voice Mn and Config scope use t5 -> qSn with surface=menu and size=default. */
+.mc-select-popover[data-settings-select="true"] {
+  padding: 4px;
+  border: 0;
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--menu-surface) 90%, transparent);
+  box-shadow: 0 0 0 .5px var(--border-subtle), var(--menu-shadow);
+  backdrop-filter: blur(8px);
+  font-family: var(--font-ui);
+  font-size: var(--text-chrome);
+  line-height: calc(1.25 / .875);
+  animation: none;
+}
 
 .mc-select-option-wrap {
   display: contents;
 }
+
+.mc-select-separator { padding: 4px 8px; }
+.mc-select-separator > div { height: 1px; background: var(--border-subtle); }
 
 .mc-select-group {
   padding: 9px 10px 5px;
@@ -202,6 +228,33 @@
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.mc-select-popover[data-settings-select="true"] .mc-select-option {
+  display: flex;
+  min-height: 0;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 12px;
+  font-family: var(--font-ui);
+  font-size: var(--text-chrome);
+  line-height: calc(1.25 / .875);
+  outline-style: none;
+}
+.mc-select-popover[data-settings-select="true"] .mc-select-option:disabled { cursor: default; opacity: .5; }
+.mc-select-popover[data-settings-select="true"] .mc-select-option-content { order: 0; flex: 1; }
+.mc-select-popover[data-settings-select="true"] .mc-select-option-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; overflow-wrap: normal; }
+.mc-select-popover[data-settings-select="true"] .mc-select-check { order: 1; flex: 0 0 16px; opacity: .75; }
+.mc-select-popover[data-settings-select="true"] .mc-select-check[data-visible="false"] { display: none; }
+.mc-select-popover[data-settings-select="true"] .mc-select-option:is(:hover, :focus-visible) .mc-select-check { opacity: 1; }
+
+@supports (corner-shape: superellipse(1.5)) {
+  .settings-select .mc-select-trigger { border-radius: 12.5px; corner-shape: superellipse(1.5); }
+  .mc-select-popover[data-settings-select="true"] { border-radius: 20px; corner-shape: superellipse(1.5); }
+  .mc-select-popover[data-settings-select="true"] .mc-select-option { border-radius: 15px; corner-shape: superellipse(1.5); }
+}
+@media (forced-colors: active) {
+  .mc-select-popover[data-settings-select="true"] .mc-select-option { outline-offset: 2px; outline: 2px solid transparent; }
 }
 
 @keyframes mc-select-enter {

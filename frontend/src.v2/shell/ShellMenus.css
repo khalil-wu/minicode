@@ -1,0 +1,9 @@
+/* Source DOc uses railMenu (w-57); thread overflow uses menu (min-width 220px). */
+.context-menu-surface.mc-profile-menu-rail { width: 228px; }
+.context-menu-surface.mc-chat-actions-menu { min-width: min(220px, calc(100vw - 16px)); }
+.context-menu-surface.mc-profile-help-menu {
+  min-width: min(220px, calc(100vw - 16px));
+  background: var(--menu-surface) !important;
+  box-shadow: var(--menu-shadow);
+  backdrop-filter: none !important;
+}

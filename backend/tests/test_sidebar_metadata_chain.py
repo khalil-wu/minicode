@@ -20,6 +20,8 @@ def conversation(repo, root):
 def test_sidebar_mutations_survive_cold_read_without_rewriting_transcript_context_or_activity_time(tmp_path):
     repo = ConversationRepository(tmp_path / "conversations")
     original = conversation(repo, tmp_path / "A")
+    assert original.project_id is None
+    assert project_public_conversation(ConversationRepository(repo.storage_root).get_conversation(original.id))["project_id"] is None
     checkpoint_files = {path.name: path.read_bytes() for path in repo.storage_root.glob("*.g*") if ".meta." not in path.name}
     pinned = repo.set_conversation_pinned("conv-sidebar", True)
     unread = repo.set_conversation_read_state("conv-sidebar", True)
@@ -61,6 +63,7 @@ def test_repeated_read_state_is_idempotent_and_empty_project_is_explicit_removal
     assert cleared.project_id == ""
     assert cleared.execution_cwd == str(tmp_path / "A")
     assert ConversationRepository(repo.storage_root).get_conversation("conv-sidebar").project_id == ""
+    assert project_public_conversation(ConversationRepository(repo.storage_root).get_conversation("conv-sidebar"))["project_id"] == ""
 
 
 def test_metadata_mutations_do_not_lose_a_frozen_turn_or_other_sidebar_writer(tmp_path):

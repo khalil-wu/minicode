@@ -8,6 +8,7 @@ from pathlib import Path
 from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.conversations.sidebar_order import replace_visible_slots
 from backend.ids import new_uuid7
+from backend.workspace.recent_projects import RecentProjectStore
 
 
 class ThreadSectionStore:
@@ -64,7 +65,7 @@ class ThreadSectionStore:
             by_id = {section["id"]: section for section in sections}
             self._write([by_id[identifier] for identifier in order])
 
-    def move(self, item_key, section_id, *, before_item_key=None):
+    def move(self, item_key, section_id, *, before_item_key=None, before_move=None):
         with file_mutation_locks([self.path]):
             sections = self._read()
             destination = next((section for section in sections if section["id"] == section_id), None)
@@ -74,6 +75,8 @@ class ThreadSectionStore:
                 return
             if before_item_key is not None and (destination is None or before_item_key not in destination["item_keys"]):
                 raise ValueError("The destination item changed before this move")
+            if before_move is not None:
+                before_move()
             for section in sections:
                 section["item_keys"] = [key for key in section["item_keys"] if key != item_key]
             if destination is not None:
@@ -96,7 +99,19 @@ class ThreadSectionStore:
             repository.set_conversation_pinned(conversation_id, False)
 
     def move_project(self, path, section_id, *, before_item_key=None):
-        self.move("project:" + canonical_file_path_key(path), section_id, before_item_key=before_item_key)
+        self.move("project:" + canonical_file_path_key(path), section_id, before_item_key=before_item_key,
+            before_move=(lambda: RecentProjectStore().update(path, {"pinned": False})) if section_id is not None else None)
+
+    def remove_project(self, path):
+        key = "project:" + canonical_file_path_key(path)
+        with file_mutation_locks([self.path]):
+            sections = self._read()
+            if not any(key in section["item_keys"] for section in sections):
+                return False
+            for section in sections:
+                section["item_keys"] = [item for item in section["item_keys"] if item != key]
+            self._write(sections)
+            return True
 
     def reorder_items(self, section_id, moved_key, before_key, visible_keys):
         with file_mutation_locks([self.path]):

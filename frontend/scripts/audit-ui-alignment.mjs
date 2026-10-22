@@ -352,6 +352,24 @@ try {
   await capture("07-theme-root-menu");
   await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).hover();
   await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
+  const themeMenus = await page.locator(".appearance-code-theme-menu").evaluateAll(elements => elements.map(element => {
+    const row = element.querySelector('[role="menuitemradio"]');
+    const preview = row.querySelector(".appearance-code-theme-preview");
+    const slot = row.querySelector(".mc-menu-leading-icon");
+    return { width: element.getBoundingClientRect().width, padding: getComputedStyle(element).padding,
+      fontSize: getComputedStyle(row).fontSize, fontWeight: getComputedStyle(row).fontWeight, previewWidth: preview.getBoundingClientRect().width,
+      slotWidth: slot.getBoundingClientRect().width, contentGap: getComputedStyle(row.querySelector(".mc-menu-content")).gap,
+      previewOpacity: getComputedStyle(slot).opacity, trailingGap: getComputedStyle(row).gap,
+      checks: Array.from(element.querySelectorAll('[data-sidebar-source-icon="sort-check"]'), check => check.getBoundingClientRect().width) };
+  }));
+  assert.equal(themeMenus.length, 2);
+  for (const { checks: indicatorWidths, ...geometry } of themeMenus) {
+    assert(indicatorWidths.every(width => width === 18));
+    assert.deepEqual(geometry, {
+    width: 240, padding: "4px", fontSize: "13px", fontWeight: "500", previewWidth: 24, slotWidth: 24, contentGap: "8px", previewOpacity: "1", trailingGap: "8px",
+    });
+  }
+  checks.push({ scenario: "Both actual theme menu levels retain the Source 240px surface and full 24px preview slots", themeMenus });
   await capture("08-theme-nested-menu");
   await page.keyboard.press("Escape");
   await page.getByRole("menu", { name: "浅色代码主题", exact: true }).waitFor({ state: "hidden" });
@@ -401,6 +419,14 @@ try {
       checks.push({ scenario: "Actual Configuration description → Agent defaults → scope toolbar; Source ghost opener and external arrow", configGeometry });
       await scope.click();
       assert.equal(await page.getByRole("option", { name: "管理员", exact: true }).count(), 1);
+      const scopeMenuGeometry = await page.getByRole("listbox").evaluate(element => {
+        const row = element.querySelector('[role="option"]');
+        const style = getComputedStyle(row);
+        return { width: element.getBoundingClientRect().width, padding: getComputedStyle(element).padding,
+          fontSize: style.fontSize, rowPadding: style.padding, rowMinHeight: style.minHeight };
+      });
+      assert.deepEqual(scopeMenuGeometry, { width: 240, padding: "4px", fontSize: "13px", rowPadding: "5px 8px", rowMinHeight: "0px" });
+      checks.push({ scenario: "Actual configuration scope uses Source menuWide and default menu rows", scopeMenuGeometry });
       await capture("settings-06-config-scope-menu");
       await page.getByRole("option", { name: "管理员", exact: true }).click();
       assert.equal(await verbosity.isDisabled(), true);

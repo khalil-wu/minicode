@@ -180,15 +180,15 @@
 }
 
 .subagents-detail-header .subagents-glyph[data-size="large"] { --agent-avatar-size: 24px; }
-.subagents-detail-model { flex: 0 1 auto; max-width: 130px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--text-xs); }
+.subagents-detail-model { flex: 0 1 auto; max-width: 50%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-muted); font-size: var(--text-xs); }
 
 .subagents-back {
   display: grid;
   width: 24px;
-  height: 28px;
+  height: 24px;
   place-items: center;
   border: 0;
-  border-radius: var(--mc-control-radius);
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -217,7 +217,7 @@
 .subagents-detail-heading strong {
   color: var(--text-primary);
   font-size: var(--text-sm);
-  font-weight: var(--fw-regular);
+  font-weight: var(--fw-medium);
 }
 
 .subagents-detail-heading span {

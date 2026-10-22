@@ -1,5 +1,9 @@
 {
   "本地环境": "Local environments",
+  "正在加载项目…": "Loading projects…",
+  "无法加载项目": "Could not load projects",
+  "尚无项目。添加项目以配置本地环境。": "No projects yet. Add one to configure local environments.",
+  "可用项目": "Available projects",
   "本地环境用于配置项目工作树的设置脚本和操作。": "Local environments tell MiniCode how to set up worktrees for a project.",
   "编辑本地环境": "Edit local environment",
   "环境名称": "Environment name",

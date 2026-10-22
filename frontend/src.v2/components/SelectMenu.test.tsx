@@ -110,19 +110,66 @@ describe("SelectMenu", () => {
   });
 
   it("opens settings on primary pointer press and consumes its following click only once", async () => {
-    render(<SelectMenu ariaLabel="Scope" className="settings-select" value="user" onValueChange={vi.fn()}>
+    const onOpen = vi.fn();
+    render(<SelectMenu ariaLabel="Scope" className="settings-select" value="user" onValueChange={vi.fn()} onOpen={onOpen}>
       <option value="user">User</option>
     </SelectMenu>);
     const trigger = screen.getByRole("button", { name: "Scope，当前：User" });
+    expect(trigger.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 20 21");
+    expect(trigger.querySelector("svg")?.getAttribute("width")).toBe("14");
+    expect(onOpen).not.toHaveBeenCalled();
     fireEvent(trigger, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     const menu = screen.getByRole("listbox");
+    const check = screen.getByRole("option", { name: "User" }).querySelector(".mc-select-check svg");
+    expect(check?.getAttribute("viewBox")).toBe("0 0 16 16");
+    expect(check?.getAttribute("width")).toBe("16");
+    expect(onOpen).toHaveBeenCalledTimes(1);
     fireEvent.click(trigger, { detail: 1 });
+    expect(onOpen).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("listbox")).toBe(menu);
     await waitFor(() => expect(document.activeElement).toBe(menu));
     fireEvent(trigger, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
     fireEvent.click(trigger, { detail: 1 });
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(document.activeElement).toBe(trigger);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps dynamic messages and separators outside keyboard selection and does not reopen on status updates", async () => {
+    const onOpen = vi.fn(), onValueChange = vi.fn();
+    const view = render(<SelectMenu ariaLabel="Microphone" className="settings-select" value="" onOpen={onOpen} onValueChange={onValueChange}
+      status={<div role="status">Loading microphones</div>}>
+      <option value="">System default</option><hr /><option value="usb">USB microphone</option>
+    </SelectMenu>);
+    const trigger = screen.getByRole("button", { name: "Microphone，当前：System default" });
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("listbox");
+    await waitFor(() => expect(document.activeElement).toBe(menu));
+    expect(menu.contains(screen.getByRole("status"))).toBe(true);
+    expect(screen.getAllByRole("option")).toHaveLength(2);
+    expect(screen.getByRole("separator")).toBeTruthy();
+    view.rerender(<SelectMenu ariaLabel="Microphone" className="settings-select" value="" onOpen={onOpen} onValueChange={onValueChange}
+      status={<div role="alert">Unable to load microphones</div>}>
+      <option value="">System default</option><hr /><option value="usb">USB microphone</option>
+    </SelectMenu>);
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(menu);
+    expect(menu.contains(screen.getByRole("alert"))).toBe(true);
+    expect(fireEvent.keyDown(menu, { key: "Tab" })).toBe(false);
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "USB microphone" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(onValueChange).toHaveBeenCalledExactlyOnceWith("usb");
+    expect(document.activeElement).toBe(trigger);
+    view.rerender(<SelectMenu ariaLabel="Microphone" className="settings-select" value="" disabled onOpen={onOpen} onValueChange={onValueChange}
+      status={<div role="status">No microphones found</div>}><option value="">System default</option></SelectMenu>);
+    fireEvent.click(trigger);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(onOpen).toHaveBeenCalledTimes(1);
   });
 
   it("anchors an intrinsically wider option menu at the trigger end instead of the selected label width", () => {
@@ -179,7 +226,10 @@ describe("SelectMenu", () => {
   it("opens a themed menu and updates the controlled value", () => {
     const { container } = render(<ControlledSelect />);
 
-    fireEvent.click(screen.getByRole("button", { name: "推理强度，当前：自动" }));
+    const trigger = screen.getByRole("button", { name: "推理强度，当前：自动" });
+    expect(trigger.querySelector("svg")?.getAttribute("viewBox")).toBe("0 0 24 24");
+    expect(trigger.querySelector("svg")?.getAttribute("width")).toBe("15");
+    fireEvent.click(trigger);
     fireEvent.click(screen.getByRole("option", { name: "高" }));
 
     expect(screen.getByRole("button", { name: "推理强度，当前：高" })).toBeTruthy();

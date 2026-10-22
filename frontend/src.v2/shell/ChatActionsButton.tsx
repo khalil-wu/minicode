@@ -16,9 +16,10 @@ import { loadConversationMarkdown, type ConversationMarkdownOwner } from "../cha
 import { openNewSideChat } from "../chat/openSideChat";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import type { PermissionMode } from "../stores/types";
+import "./ShellMenus.css";
 
-type MenuOwner = ConversationMarkdownOwner & { archived: boolean; environment?: "local" | "remote" | "ssh"; conversationType?: "main" | "side_chat"; isRunning: boolean; isWorktree: boolean; isGitRepo: boolean; permissionMode: PermissionMode; forkWorkspaceRoot?: string };
-const sourceIcon = (name: "copy" | "fork" | "local" | "worktree" | "new-chat" | "rename" | "archive" | "new-window") => <span aria-hidden="true" style={{
+type MenuOwner = ConversationMarkdownOwner & { archived: boolean; pinned: boolean; environment?: "local" | "remote" | "ssh"; conversationType?: "main" | "side_chat"; isRunning: boolean; isWorktree: boolean; isGitRepo: boolean; permissionMode: PermissionMode; forkWorkspaceRoot?: string };
+const sourceIcon = (name: "copy" | "fork" | "local" | "worktree" | "new-chat" | "rename" | "archive" | "new-window" | "pin" | "unpin") => <span aria-hidden="true" style={{
   width: 16, height: 16, background: "currentColor", mask: `url(${import.meta.env.BASE_URL}apps/thread-${name}.svg) center / contain no-repeat`,
 }} />;
 
@@ -79,7 +80,7 @@ export function ChatActionsButton() {
         const state = useAppStore.getState();
         const root = conversation!.executionCwd || conversation!.worktreePath || conversation!.workspaceRoot || workspaceRoot;
         const requestedMenu = { position: { x: rect.right - 228, y: rect.bottom + 6 }, owner: {
-          id: conversation!.id, title: conversation!.title, archived: Boolean(conversation!.archived),
+          id: conversation!.id, title: conversation!.title, archived: Boolean(conversation!.archived), pinned: Boolean(conversation!.pinned),
           workspaceRoot: root, messages: state.getVisibleMessages(conversation!.id), historyPage: state.conversationHistoryPages[conversation!.id], sessionId: getWebSocket()?.sessionId ?? "",
           messageCount: conversation!.messageCount, forkWorkspaceRoot: conversation!.worktreePath || conversation!.workspaceRoot || undefined,
           isRunning: Boolean(conversation!.sessionStatus === "running" || conversation!.sessionStatus === "waiting" || state.conversationStreaming[conversation!.id] || state.isStreaming),
@@ -90,8 +91,11 @@ export function ChatActionsButton() {
         } };
         setMenu(requestedMenu);
       }}><MoreHorizontal size={17} /></button>
-    {menu && owner && owner.id === conversationId && !pendingOwner && <ContextMenu position={menu.position} onClose={closeMenu} items={[
+    {menu && owner && owner.id === conversationId && !pendingOwner && <ContextMenu className="mc-chat-actions-menu" position={menu.position} onClose={closeMenu} items={[
       ...(!owner.archived ? [{ label: tr("重命名"), icon: sourceIcon("rename"), onClick: () => void rename(owner) },
+        ...(owner.conversationType !== "side_chat"
+          ? [{ label: tr(owner.pinned ? "取消固定" : "固定"), icon: sourceIcon(owner.pinned ? "unpin" : "pin"), onClick: () => void runCommand({ type: "conversation.pin.set", conversation_id: owner.id, pinned: !owner.pinned }) }] : []),
+        { label: "", separator: true },
         { label: tr("菜单侧边聊天"), icon: sourceIcon("new-chat"), onClick: () => { openNewSideChat({ conversationId: owner.id, workspaceRoot: owner.workspaceRoot, permissionMode: owner.permissionMode }); } },
         ...(owner.messages.length ? [{ label: appMode === "cowork" ? tr("继续") : tr("分叉"), icon: sourceIcon("fork"), submenu: [
           { label: appMode === "cowork" ? (owner.isWorktree ? tr("在同一工作树中继续") : tr("在新聊天中继续")) : (owner.isWorktree ? tr("在同一工作树中创建聊天分支") : tr("创建聊天分支")),

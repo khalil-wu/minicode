@@ -4,11 +4,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { FooterRow } from "./FooterRow";
 import { useAppStore } from "../stores";
 // These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
-beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
+beforeEach(() => useAppStore.setState({ composerPlainTextMode: true, composerDraftsReady: true }));
 vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
 
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { ComposerAddMenu } from "./ComposerAddMenu";
+import { ComposerTextarea } from "./ComposerTextarea";
 const remote = vi.hoisted(() => ({ pick: vi.fn(), upload: vi.fn(), list: vi.fn() }));
 
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => null }));
@@ -149,8 +150,74 @@ it("can leave conversational plan mode while retaining full access",async()=>{
 });
 
 it("opens the real add menu from a source-card request",()=>{
-  render(<FooterRow sendState="idle" onSend={()=>{}} />);
+  render(<><ComposerTextarea value="Keep this draft" onChange={() => {}} onSubmit={() => {}} /><FooterRow sendState="idle" onSend={()=>{}} /></>);
   act(()=>window.dispatchEvent(new Event("composer:open-add-menu")));
   expect(screen.getByRole("menu",{name:"添加内容"})).toBeTruthy();
-  expect(document.activeElement).toBe(screen.getByRole("menuitem",{name:"文件和文件夹"}));
+  expect(document.activeElement).toBe(screen.getByRole("textbox"));
+  expect(screen.getByRole("menuitem",{name:"文件和文件夹"}).getAttribute("data-highlighted")).toBe("true");
+});
+
+it("keeps composer focus while suggestion arrows loop and Enter activates the highlighted action", async () => {
+  const submit = vi.fn();
+  const view = render(<><ComposerTextarea value="Keep this draft" onChange={() => {}} onSubmit={submit} /><FooterRow sendState="idle" onSend={submit} /></>);
+  const composer = screen.getByRole("textbox");
+  const trigger = screen.getByRole("button", { name: "添加文件等内容" });
+  expect(fireEvent.mouseDown(trigger)).toBe(false);
+  fireEvent.click(trigger);
+  const first = screen.getByRole("menuitem", { name: "文件和文件夹" });
+  const last = await screen.findByRole("menuitem", { name: /Notes/ });
+  expect(document.activeElement).toBe(composer);
+  expect(fireEvent.keyDown(composer, { key: "ArrowUp" })).toBe(false);
+  expect(last.getAttribute("data-highlighted")).toBe("true");
+  expect(fireEvent.keyDown(composer, { key: "ArrowDown" })).toBe(false);
+  expect(first.getAttribute("data-highlighted")).toBe("true");
+  for (const event of [{ key: "Home" }, { key: "End" }, { key: "Tab" }, { key: "Tab", shiftKey: true }]) {
+    expect(fireEvent.keyDown(composer, event)).toBe(true);
+    expect(document.activeElement).toBe(composer);
+    expect(first.getAttribute("data-highlighted")).toBe("true");
+    expect(screen.getByRole("menu", { name: "添加内容" })).toBeTruthy();
+  }
+  const filePicker = vi.fn();
+  view.container.querySelector('input[type="file"]')!.addEventListener("click", filePicker);
+  expect(fireEvent.keyDown(composer, { key: "Enter" })).toBe(false);
+  expect(filePicker).toHaveBeenCalledOnce();
+  expect(submit).not.toHaveBeenCalled();
+  expect(screen.queryByRole("menu")).toBeNull();
+  fireEvent.click(trigger);
+  expect(fireEvent.keyDown(composer, { key: "Escape" })).toBe(false);
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(composer);
+  expect(useAppStore.getState().draft).toBe("Keep this draft");
+  expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+});
+
+it("skips disabled actions and leaves typing and Space to the composer rather than menu typeahead", async () => {
+  const plan = vi.fn(), close = vi.fn();
+  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} goalAvailable={false}
+    onFiles={vi.fn()} onGoal={vi.fn()} onPlan={plan} onPlugin={vi.fn()} onClose={close} />);
+  await screen.findByRole("menuitem", { name: /Notes/ });
+  const first = screen.getByRole("menuitem", { name: "文件和文件夹" }), item = screen.getByRole("menuitem", { name: /^计划模式/ });
+  for (const key of ["p", "l", "a", "n", " ", "m"]) expect(fireEvent.keyDown(window, { key })).toBe(true);
+  expect(first.getAttribute("data-highlighted")).toBe("true");
+  expect(plan).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+  fireEvent.keyDown(window, { key: "ArrowDown" });
+  expect(item.getAttribute("data-highlighted")).toBe("true");
+  fireEvent.keyDown(window, { key: "Enter" });
+  expect(plan).toHaveBeenCalledOnce();
+  expect(close).toHaveBeenCalledWith(true);
+});
+
+it("preserves outside focus and closes stale add controls while switching conversation owners", () => {
+  render(<><ComposerTextarea value="Keep this draft" onChange={() => {}} onSubmit={() => {}} /><FooterRow sendState="idle" onSend={() => {}} /><button>Outside target</button></>);
+  const trigger = screen.getByRole("button", { name: "添加文件等内容" }), outside = screen.getByRole("button", { name: "Outside target" });
+  fireEvent.click(trigger);
+  act(() => outside.focus());
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(document.activeElement).toBe(outside);
+  fireEvent.click(trigger);
+  act(() => useAppStore.setState({ pendingConversationSwitchId: "next-owner" }));
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect((trigger as HTMLButtonElement).disabled).toBe(true);
+  expect(useAppStore.getState().draft).toBe("Keep this draft");
 });

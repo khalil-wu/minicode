@@ -2,6 +2,7 @@ import { Children, isValidElement, useEffect, useLayoutEffect, useId, useMemo, u
 import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent, OptionHTMLAttributes, ReactElement, ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { MenuControlSourceIcon } from "../lib/menu-control-source-icons";
 import "./select-menu.css";
 
 type SelectOption = {
@@ -10,12 +11,16 @@ type SelectOption = {
   title?: string;
   disabled: boolean;
   group?: string;
+  separatorBefore?: boolean;
 };
 
 type SelectMenuProps = {
   value: string;
   selectedLabel?: string;
   onValueChange: (value: string) => void;
+  onOpen?: () => void;
+  /** Non-option messages rendered after the actual menu options. */
+  status?: ReactNode;
   children: ReactNode;
   ariaLabel: string;
   ariaDescribedBy?: string;
@@ -38,11 +43,15 @@ const nodeText = (node: ReactNode): string => Children.toArray(node)
 
 const optionsFromChildren = (children: ReactNode, group?: string, groupDisabled = false): SelectOption[] => {
   const options: SelectOption[] = [];
+  let separatorBefore = false;
   Children.forEach(children, (child) => {
     if (!isValidElement(child)) return;
+    if (child.type === "hr") { separatorBefore = true; return; }
     if (child.type === "optgroup") {
       const props = child.props as { label?: string; disabled?: boolean; children?: ReactNode };
-      options.push(...optionsFromChildren(props.children, String(props.label || "").trim() || undefined, Boolean(props.disabled)));
+      const grouped = optionsFromChildren(props.children, String(props.label || "").trim() || undefined, Boolean(props.disabled));
+      if (grouped.length > 0) { grouped[0].separatorBefore ||= separatorBefore; separatorBefore = false; }
+      options.push(...grouped);
       return;
     }
     if (child.type !== "option") return;
@@ -53,7 +62,9 @@ const optionsFromChildren = (children: ReactNode, group?: string, groupDisabled 
       title: option.props.title,
       disabled: groupDisabled || Boolean(option.props.disabled),
       group,
+      separatorBefore,
     });
+    separatorBefore = false;
   });
   return options;
 };
@@ -62,6 +73,8 @@ export const SelectMenu = ({
   value,
   selectedLabel,
   onValueChange,
+  onOpen,
+  status,
   children,
   ariaLabel,
   ariaDescribedBy,
@@ -171,6 +184,7 @@ export const SelectMenu = ({
     openedByKeyboard.current = keyboard;
     typeahead.current = { value: "", time: 0 };
     setOpen(true);
+    if (!open) onOpen?.();
   };
 
   const selectValue = (nextValue: string) => {
@@ -256,7 +270,7 @@ export const SelectMenu = ({
         className="mc-select-native-proxy"
       >
         {!selected && selectedLabel !== undefined && <option value={value}>{selectedLabel}</option>}
-        {children}
+        {options.map(option => <option key={`${option.group || ""}:${option.value}`} value={option.value} disabled={option.disabled} title={option.title}>{option.label}</option>)}
       </select>
       <button
         id={id}
@@ -282,7 +296,7 @@ export const SelectMenu = ({
           {selected && renderOptionIcon && <span className="mc-select-option-icon" aria-hidden="true">{renderOptionIcon(selected.value)}</span>}
           <span className="mc-select-trigger-label">{selectedText || "请选择"}</span>
         </span>
-        <ChevronDown size={15} aria-hidden="true" />
+        {settingsSelect ? <MenuControlSourceIcon icon="chevronDown" size={14} /> : <ChevronDown size={15} aria-hidden="true" />}
       </button>
       {open && createPortal(
         <div
@@ -303,6 +317,7 @@ export const SelectMenu = ({
             const active = option.value === value;
             return (
               <div key={`${option.group || ""}:${option.value}`} className="mc-select-option-wrap">
+                {option.separatorBefore && <div className="mc-select-separator" role="separator"><div /></div>}
                 {showGroup && <div className="mc-select-group">{option.group}</div>}
                 <button
                   type="button"
@@ -317,7 +332,7 @@ export const SelectMenu = ({
                   onClick={() => selectValue(option.value)}
                   onKeyDown={(event) => handleOptionKeyDown(event, option)}
                 >
-                  <span className="mc-select-check" data-visible={active ? "true" : "false"}><Check size={14} /></span>
+                  <span className="mc-select-check" data-visible={active ? "true" : "false"}>{settingsSelect ? <MenuControlSourceIcon icon="check" /> : <Check size={14} />}</span>
                   <span className="mc-select-option-content">
                     {renderOptionIcon && <span className="mc-select-option-icon" aria-hidden="true">{renderOptionIcon(option.value)}</span>}
                     {optionDescriptions?.[option.value] ? <span className="mc-select-option-copy">
@@ -328,6 +343,7 @@ export const SelectMenu = ({
               </div>
             );
           })}
+          {status}
         </div>, document.body
       )}
     </div>

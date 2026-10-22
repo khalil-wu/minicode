@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { ChevronDown, ChevronRight, Copy, Download, LoaderCircle, MoreHorizontal, Plus, RotateCcw, Trash2, X } from "../lib/icons";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { ChevronDown, ChevronRight, Copy, Download, MoreHorizontal, Plus, Trash2, X } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import { saveDictationPreferences } from "../lib/dictation-preferences";
@@ -9,6 +9,7 @@ import { ContextMenu } from "../components/ContextMenu";
 import { desktop, type DictationHotkeyState } from "../desktop/runtime";
 import { fetchVoiceService, listDictationRecordings, deleteDictationRecording, downloadDictationRecording, transcribeDictationRecording, type DictationRecording, type VoiceServiceStatus } from "../protocol/voice";
 import { pushToast } from "./ToastContainer";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import "./VoiceSettings.css";
 
 export function VoiceSettings({ active = true }: { active?: boolean }) {
@@ -18,12 +19,14 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
   const providerRevision = useAppStore((state) => state.currentProvider + state.currentProviderBaseUrl);
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [deviceError, setDeviceError] = useState("");
+  const [devicesLoading, setDevicesLoading] = useState(true);
+  const [microphoneAccessPending, setMicrophoneAccessPending] = useState(false);
+  const [microphoneAccessError, setMicrophoneAccessError] = useState("");
   const [service, setService] = useState<VoiceServiceStatus | null>(null);
   const [serviceError, setServiceError] = useState("");
   const [history, setHistory] = useState<DictationRecording[]>([]);
   const [historyError, setHistoryError] = useState("");
   const [revision, setRevision] = useState(0);
-  const [deviceRevision, setDeviceRevision] = useState(0);
   const [serviceRevision, setServiceRevision] = useState(0);
   const [native, setNative] = useState<DictationHotkeyState | null>(null);
   const [advanced, setAdvanced] = useState(false);
@@ -34,6 +37,31 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
   const skipBlur = useRef(false);
   const dictionary = dictionaryDraft ?? (settings.dictationDictionary.length ? settings.dictationDictionary : [""]);
   const changed = () => setRevision(value => value + 1);
+  const microphoneSupported = Boolean(navigator.mediaDevices?.enumerateDevices);
+  const selectedMicrophone = devices.find(device => device.deviceId === settings.microphoneId);
+  const microphoneLabel = settings.microphoneId && !selectedMicrophone ? tr(devices.length === 0 ? "已选择的麦克风" : "不可用的麦克风") : undefined;
+  const microphoneLoading = devicesLoading || microphoneAccessPending;
+  const microphoneError = microphoneAccessError || deviceError;
+  const refreshMicrophones = useCallback(async () => {
+    setDevicesLoading(true); setDeviceError("");
+    try {
+      const items = await navigator.mediaDevices.enumerateDevices();
+      setDevices(items.filter(device => device.kind === "audioinput" && device.deviceId.length > 0 && device.deviceId !== "default"));
+    } catch (reason) { setDeviceError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setDevicesLoading(false); }
+  }, []);
+  const requestMicrophoneAccess = async () => {
+    setMicrophoneAccessPending(true); setMicrophoneAccessError("");
+    let stream: MediaStream | undefined;
+    try {
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+      catch (reason) { setMicrophoneAccessError(reason instanceof Error ? reason.message : String(reason)); }
+      await refreshMicrophones();
+    } finally {
+      stream?.getTracks().forEach(track => track.stop());
+      setMicrophoneAccessPending(false);
+    }
+  };
 
   useEffect(() => { if (!active) setMenu(null); }, [active]);
   useEffect(() => {
@@ -74,15 +102,11 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
     return () => { controller.abort(); window.removeEventListener("dictation:history-changed", changed); window.removeEventListener("focus", changed); };
   }, [active, revision]);
   useEffect(() => {
-    if (!active) return;
-    if (!navigator.mediaDevices?.enumerateDevices) { setDeviceError(tr("当前页面无法读取录音设备，请在桌面端打开语音设置。")); return; }
-    let cancelled = false;
-    const refresh = () => { void navigator.mediaDevices.enumerateDevices().then(items => {
-      if (!cancelled) { setDevices(items.filter(item => item.kind === "audioinput")); setDeviceError(""); }
-    }).catch(reason => { if (!cancelled) setDeviceError(reason instanceof Error ? reason.message : String(reason)); }); };
+    if (!active || !microphoneSupported) return;
+    const refresh = () => { void refreshMicrophones(); };
     refresh(); navigator.mediaDevices.addEventListener("devicechange", refresh);
-    return () => { cancelled = true; navigator.mediaDevices.removeEventListener("devicechange", refresh); };
-  }, [active, deviceRevision, tr]);
+    return () => navigator.mediaDevices.removeEventListener("devicechange", refresh);
+  }, [active, microphoneSupported, refreshMicrophones]);
 
   const runAction = async (record: DictationRecording, action: "copy" | "download" | "retry" | "delete") => {
     setBusy(record.id);
@@ -96,7 +120,7 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
         await transcribeDictationRecording(record.id, configured, settings.speechModel, settings.dictationDictionary);
       }
     } catch (reason) { pushToast(reason instanceof Error ? reason.message : String(reason), "error"); }
-    finally { setBusy(null); changed(); }
+    finally { setBusy(null); if (action !== "copy") changed(); }
   };
   const saveDictionary = async (entries: string[]) => {
     setDictionaryDraft(entries);
@@ -111,13 +135,16 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
   };
   return <>
     <section className="settings-group"><h3 className="settings-group-title">{tr("常规")}</h3><div className="settings-card">
-      <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("麦克风")}</div><div className="settings-row-description">{tr("选择用于听写的输入设备。")}</div></div>
-        <div className="settings-row-control voice-settings-device"><SelectMenu ariaLabel={tr("麦克风设备")} className="settings-select" align="end" value={settings.microphoneId} onValueChange={value => update({ microphoneId: value })}>
+      <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("麦克风")}</div><div className="settings-row-description">{tr(microphoneSupported ? "选择用于听写的输入设备。" : "当前设备不支持选择麦克风。")}</div></div>
+        <div className="settings-row-control voice-settings-device"><SelectMenu ariaLabel={tr("麦克风设备")} className="settings-select" align="end" menuWidth={240} value={settings.microphoneId} selectedLabel={microphoneLabel} disabled={!microphoneSupported || !active} onValueChange={value => update({ microphoneId: value })}
+          onOpen={active ? () => void requestMicrophoneAccess() : undefined}
+          status={microphoneLoading ? <div className="voice-microphone-message voice-microphone-loading" role="status"><span className="settings-refresh-spinner"><SettingsSourceIcon icon="spinner" size={12} /></span>{tr("正在加载麦克风")}</div>
+            : microphoneError ? <div className="voice-microphone-message voice-microphone-error" role="alert"><span>{tr("无法加载麦克风")}</span><span>{microphoneError}</span></div>
+              : devices.length === 0 ? <div className="voice-microphone-message" role="status">{tr("未找到麦克风")}</div> : null}>
           <option value="">{tr("系统默认")}</option>
-          {settings.microphoneId && !devices.some(device => device.deviceId === settings.microphoneId) && <option value={settings.microphoneId}>{tr("已选设备（当前未检测到）")}</option>}
+          {devices.length > 0 && <hr />}
           {devices.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || tr("麦克风 {v0}", { v0: index + 1 })}</option>)}
         </SelectMenu></div></div>
-      {deviceError && <div className="voice-settings-observation"><p role="alert">{deviceError}</p><button type="button" className="settings-action-button" onClick={() => setDeviceRevision(value => value + 1)}>{tr("重试")}</button></div>}
     </div></section>
     <section className="settings-group"><h3 className="settings-group-title">{tr("听写")}</h3><div className="settings-card">
       <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("听写")}</div>
@@ -134,10 +161,14 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
       <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("最近的录音")}</div><div className="settings-row-description">{tr("最近 20 段录音保存在这台设备上。")}</div></div></div>
       {historyError && <div className="voice-settings-observation"><p role="alert">{historyError}</p><button type="button" className="settings-action-button" onClick={changed}>{tr("重试")}</button></div>}
       {history.map(record => <div key={record.id} className="voice-history-row">
-        <div className="voice-history-copy"><div className="voice-history-time">{new Date(record.created_at * 1000).toLocaleString(locale, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}{record.duration_ms >= 1000 ? " · " + Math.floor(record.duration_ms / 1000) + "s" : ""}</div>
-          {record.text && <p>{record.text}</p>}{record.error && <p className="voice-recording-error">{record.error}</p>}</div>
-        {busy === record.id && <LoaderCircle size={14} className="settings-spin" aria-label={tr("正在处理录音")} />}
-        <button type="button" className="settings-icon-button" aria-label={tr("录音操作")} disabled={busy !== null} onClick={event => setMenu({ record, anchor: event.currentTarget })}><MoreHorizontal size={16} /></button>
+        <div className="voice-history-copy"><span className="voice-history-transcript">{record.text || (record.status === "cancelled" ? tr("录音已取消") : record.status === "interrupted" ? tr("录音已中断") : tr("录音已保存"))}</span>
+          <time className="voice-history-time" dateTime={new Date(record.created_at * 1000).toISOString()}>{new Date(record.created_at * 1000).toLocaleString(locale, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}</time>
+          {record.error && <p className="voice-recording-error">{record.error}</p>}</div>
+        <div className="voice-history-actions">
+          {record.text && <button type="button" className="settings-icon-button" aria-label={tr("复制转录文字")} title={tr("复制转录文字")} disabled={busy !== null} onClick={() => void runAction(record, "copy")}><Copy size={16} /></button>}
+          {!record.text && settings.speechEnabled && service?.can_attempt && <button type="button" className="settings-action-button" aria-label={tr("重新转录")} aria-busy={busy === record.id} disabled={busy !== null} onClick={() => void runAction(record, "retry")}>{busy === record.id && <span className="settings-refresh-spinner" role="status" aria-label={tr("正在处理录音")}><SettingsSourceIcon icon="spinner" size={12} /></span>}{tr("重试")}</button>}
+          <button type="button" className="settings-icon-button" aria-label={tr("录音操作")} disabled={busy !== null} onClick={event => setMenu({ record, anchor: event.currentTarget })}><MoreHorizontal size={16} /></button>
+        </div>
       </div>)}
       <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("听写词典")}</div><div className="settings-row-description">{tr("听写时应识别的词语或短语。")}</div></div>
         <button type="button" className="settings-action-button" onMouseDown={event => event.preventDefault()} onClick={() => addEntry(dictionary.length)}><Plus size={14} />{tr("添加条目")}</button></div>
@@ -151,9 +182,7 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
       </div>)}
     </div></section>
     {menu && active && <ContextMenu anchor={menu.anchor} returnFocusTo={menu.anchor} position={{ x: menu.anchor.getBoundingClientRect().right, y: menu.anchor.getBoundingClientRect().bottom }} onClose={() => setMenu(null)} items={[
-      { label: tr("复制转录文字"), icon: <Copy size={14} />, disabled: !menu.record.text, onClick: () => void runAction(menu.record, "copy") },
       { label: tr("下载录音"), icon: <Download size={14} />, onClick: () => void runAction(menu.record, "download") },
-      { label: tr("重新转录"), icon: <RotateCcw size={14} />, onClick: () => void runAction(menu.record, "retry") },
       { label: tr("删除"), icon: <Trash2 size={14} />, onClick: () => void runAction(menu.record, "delete") },
     ]} />}
   </>;

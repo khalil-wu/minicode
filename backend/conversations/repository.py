@@ -17,7 +17,7 @@ from typing import Any, Callable
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from backend.agent.turn_state import content_from_blocks
-from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.conversations.context_delta import apply_context_snapshot_delta, compose_context_snapshot_deltas
 from backend.conversations.projection_log import append_projection, read_projection
 from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message
@@ -1710,6 +1710,29 @@ class ConversationRepository:
             self._prepend_sidebar_occurrence(record, recent=False)
             return True
         return self._mutate_meta(conversation_id, mutate, touch_updated_at=False)
+
+    @staticmethod
+    def _belongs_to_project(record: ConversationRecord | ConversationSummary, project_path: str, workspace_roots: tuple[str, ...]) -> bool:
+        if record.project_id is not None:
+            return bool(record.project_id) and canonical_file_path_key(record.project_id) == canonical_file_path_key(project_path)
+        root = record.worktree_path or record.workspace_root
+        return bool(root) and any(canonical_file_path_key(root) == canonical_file_path_key(folder) for folder in workspace_roots)
+
+    def project_conversation_ids(self, project_path: str, workspace_roots: tuple[str, ...]) -> list[str]:
+        return [record.id for record in self.list_conversations() if self._belongs_to_project(record, project_path, workspace_roots)]
+
+    def remove_project_memberships(self, project_path: str, workspace_roots: tuple[str, ...]) -> list[str]:
+        """Source removeLocal detaches membership without changing pins or execution."""
+        changed: list[str] = []
+        for conversation_id in self.project_conversation_ids(project_path, workspace_roots):
+            def mutate(record: ConversationRecord) -> bool:
+                if not self._belongs_to_project(record, project_path, workspace_roots):
+                    return False
+                record.project_id = ""
+                changed.append(record.id)
+                return True
+            self._mutate_meta(conversation_id, mutate, touch_updated_at=False)
+        return changed
 
     def rename_conversation(
         self, conversation_id: str, title: str

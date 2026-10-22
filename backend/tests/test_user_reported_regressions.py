@@ -12,6 +12,7 @@ from starlette.requests import Request
 
 from backend.api import auth as api_auth
 from backend.conversations.models import ConversationRecord
+from backend.conversations.repository import ConversationRepository
 from backend.artifact.store import ArtifactStore
 from backend.services.artifact_service import read_artifact_content
 from backend.services.chat_api_service import (
@@ -88,6 +89,12 @@ def test_recent_workspace_handlers_are_idempotent_and_publish_list_before_result
 
     class _Session:
         active_conversation_id = ""
+        is_connected = True
+        ws_manager = None
+        conversation_repo = ConversationRepository(tmp_path / "conversations")
+
+        async def send_conversation_list(self):
+            events.append(("inventory", {}))
 
         async def send_payload(self, payload, *, log_context):
             events.append(("payload", payload))
@@ -182,6 +189,7 @@ def test_recent_workspace_explicit_mutation_does_not_claim_success_when_persiste
 )
 def test_recent_workspace_handler_returns_retryable_error_on_persistence_failure(
     monkeypatch,
+    tmp_path,
     handler,
     command: str,
     payload: dict[str, object],
@@ -195,7 +203,10 @@ def test_recent_workspace_handler_returns_retryable_error_on_persistence_failure
         else "backend.services.workspace_service.clear_workspace_recent"
     )
     monkeypatch.setattr(target, fail_mutation)
+    monkeypatch.setattr(recent_projects, "DEFAULT_STORE_PATH", tmp_path / "recent.json")
     session = SimpleNamespace(
+        conversation_repo=ConversationRepository(tmp_path / "conversations"), ws_manager=None, is_connected=True,
+        send_conversation_list=AsyncMock(),
         send_payload=AsyncMock(),
         emit_command_result=AsyncMock(),
     )

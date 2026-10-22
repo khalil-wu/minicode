@@ -15,6 +15,13 @@ export async function auditShellMenus({ page, capture, checks }) {
   const helpBottom = await help.evaluate(element => element.getBoundingClientRect().bottom);
   const submenuBottom = await helpMenu.evaluate(element => element.getBoundingClientRect().bottom);
   assert(Math.abs(submenuBottom - helpBottom - 4) <= 1);
+  const helpGeometry = await helpMenu.evaluate(element => {
+    const row = element.querySelector('[role="menuitem"]');
+    return { padding: getComputedStyle(element).padding, borderWidth: getComputedStyle(element).borderTopWidth,
+      blur: getComputedStyle(element).backdropFilter, fontSize: getComputedStyle(row).fontSize,
+      rowPadding: getComputedStyle(row).padding, transform: getComputedStyle(element).transform };
+  });
+  assert.deepEqual(helpGeometry, { padding: "4px", borderWidth: "0px", blur: "none", fontSize: "13px", rowPadding: "5px 8px", transform: "none" });
   await capture("shell-02-help-submenu");
   await page.keyboard.press("End");
   const guide = helpMenu.getByRole("menuitem", { name: "使用指南", exact: true });
@@ -49,5 +56,5 @@ export async function auditShellMenus({ page, capture, checks }) {
   await page.keyboard.press("Escape");
   await page.getByRole("menu").waitFor({ state: "hidden" });
   assert.equal(await actions.evaluate(element => document.activeElement === element), true);
-  checks.push("Actual profile/Help and chat Copy menus retain Source separators, parent-bottom alignment, non-looping focus, trapped Tab and original trigger focus on dismissal");
+  checks.push({ scenario: "Actual profile/Help and chat Copy menus retain Source separators, opaque Help surface, parent-bottom alignment, non-looping focus, trapped Tab and original trigger focus on dismissal", helpGeometry });
 }

@@ -9,6 +9,7 @@ export interface ContextMenuItem {
   label: string;
   content?: React.ReactNode;
   icon?: React.ReactNode;
+  iconWidth?: number;
   rightIcon?: React.ReactNode;
   rightIconTooltip?: string;
   shortcut?: string;
@@ -17,6 +18,7 @@ export interface ContextMenuItem {
   separator?: boolean;
   onClick?: () => void;
   submenu?: ContextMenuItem[];
+  submenuClassName?: string;
   submenuMaxHeight?: number;
   alignToParentBottom?: boolean;
   tooltip?: string;
@@ -31,13 +33,16 @@ interface ContextMenuProps {
   id?: string;
   ariaLabel?: string;
   className?: string;
+  style?: CSSProperties;
   itemFontSize?: string;
   returnFocusTo?: HTMLElement;
   anchor?: HTMLElement;
-  side?: "top" | "bottom";
+  side?: "top" | "bottom" | "left" | "right";
+  align?: "start" | "end";
+  alignOffset?: number;
 }
 
-export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className, itemFontSize, returnFocusTo, anchor, side = "bottom" }: ContextMenuProps) => {
+export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className, style, itemFontSize, returnFocusTo, anchor, side = "bottom", align = "end", alignOffset = 0 }: ContextMenuProps) => {
   const surfaces = useRef(new Set<HTMLElement>());
   const triggerRef = useRef(returnFocusTo ?? document.activeElement as HTMLElement);
   const focusListenerRef = useRef<(event: FocusEvent) => void>();
@@ -72,15 +77,13 @@ export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className
   const dismiss = () => { closeMenu(); triggerRef.current?.focus({ preventScroll: true }); };
   const select = (item: ContextMenuItem) => { dismiss(); item.onClick?.(); };
   return createPortal(<MenuSurface items={items} position={position} surfaces={surfaces.current} onDismiss={dismiss} onSelect={select}
-    id={id} ariaLabel={ariaLabel} className={className} itemFontSize={itemFontSize} trigger={anchor} side={side} />, document.body);
+    id={id} ariaLabel={ariaLabel} className={className} style={style} itemFontSize={itemFontSize} trigger={anchor} side={side} align={align} alignOffset={alignOffset} />, document.body);
 };
 
 const surfaceStyle: CSSProperties = {
   position: "fixed", zIndex: "var(--z-context-menu)",
-  minWidth: "min(180px, calc(100vw - 16px))", maxWidth: "min(260px, calc(100vw - 16px))",
-  maxHeight: "calc(100dvh - 16px)", overflowY: "auto", background: "var(--surface-raised)",
-  border: "1px solid var(--border-subtle)", borderRadius: "var(--radius-md)",
-  boxShadow: "var(--shadow-strong-overlay)", padding: "6px", outline: "none",
+  maxWidth: "calc(100vw - 16px)",
+  maxHeight: "calc(100dvh - 16px)", overflowY: "auto", padding: "4px", outline: "none",
 };
 
 type Point = { x: number; y: number };
@@ -93,12 +96,14 @@ const containsPoint = (point: Point, polygon: Point[]) => {
   return inside;
 };
 
-function MenuSurface({ items, position, anchor, trigger, side, focusFirst = false, surfaces, onDismiss, onSelect, onBack, id, ariaLabel, className, itemFontSize, maxHeight, alignToParentBottom, surfaceRef }: {
+function MenuSurface({ items, position, anchor, trigger, side, align = "end", alignOffset = 0, focusFirst = false, surfaces, onDismiss, onSelect, onBack, id, ariaLabel, className, style, itemFontSize, maxHeight, alignToParentBottom, surfaceRef }: {
   items: ContextMenuItem[];
   position: { x: number; y: number };
   anchor?: HTMLButtonElement;
   trigger?: HTMLElement;
-  side?: "top" | "bottom";
+  side?: "top" | "bottom" | "left" | "right";
+  align?: "start" | "end";
+  alignOffset?: number;
   focusFirst?: boolean;
   surfaces: Set<HTMLElement>;
   onDismiss: () => void;
@@ -107,6 +112,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
   id?: string;
   ariaLabel?: string;
   className?: string;
+  style?: CSSProperties;
   maxHeight?: number;
   itemFontSize?: string;
   alignToParentBottom?: boolean;
@@ -219,19 +225,22 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
     const el = ref.current!;
     surfaces.add(el);
     const place = () => {
-      const rect = el.getBoundingClientRect();
+      // Placement uses layout size; the menu's entrance transform only affects paint.
+      const width = el.offsetWidth, height = el.offsetHeight;
       const parent = anchor?.getBoundingClientRect();
       const triggerRect = trigger?.getBoundingClientRect();
       const parentMenu = anchor?.closest('[role="menu"]')!.getBoundingClientRect();
       const offset = parent && parentMenu ? 4 + (alignToParentBottom ? 0 : Math.max(parent.left - parentMenu.left, parentMenu.right - parent.right, 0)) : 0;
-      const opensLeft = parent != null && parent.right + offset + rect.width + 8 > window.innerWidth;
-      const x = parent ? (opensLeft ? parent.left - rect.width - offset : parent.right + offset)
-        : triggerRect ? triggerRect.right - rect.width : position.x;
-      const y = parent ? alignToParentBottom ? parent.bottom + 4 - rect.height : parent.top - 6
-        : triggerRect ? side === "top" ? triggerRect.top - rect.height - 6 : triggerRect.bottom + 6 : position.y;
+      const opensLeft = parent != null && parent.right + offset + width + 8 > window.innerWidth;
+      const x = parent ? (opensLeft ? parent.left - width - offset : parent.right + offset)
+        : triggerRect ? side === "right" ? triggerRect.right + 4 : side === "left" ? triggerRect.left - width - 4
+          : align === "start" ? triggerRect.left + alignOffset : triggerRect.right - width - alignOffset : position.x;
+      const y = parent ? alignToParentBottom ? parent.bottom + 4 - height : parent.top - Number.parseFloat(getComputedStyle(el).paddingTop)
+        : triggerRect ? side === "top" ? triggerRect.top - height - 6 : side === "bottom" ? triggerRect.bottom + 6
+          : align === "start" ? triggerRect.top + alignOffset : triggerRect.bottom - height - alignOffset : position.y;
       setAdjusted({
-        x: Math.max(8, Math.min(x, window.innerWidth - rect.width - 8)),
-        y: Math.max(8, Math.min(y, window.innerHeight - rect.height - 8)),
+        x: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+        y: Math.max(8, Math.min(y, window.innerHeight - height - 8)),
         side: opensLeft ? "left" : "right",
       });
     };
@@ -242,7 +251,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
     window.addEventListener("resize", place);
     window.addEventListener("scroll", followScroll, true);
     return () => { surfaces.delete(el); observer.disconnect(); window.removeEventListener("resize", place); window.removeEventListener("scroll", followScroll, true); };
-  }, [position, anchor, trigger, side, surfaces, alignToParentBottom]);
+  }, [position, anchor, trigger, side, align, alignOffset, surfaces, alignToParentBottom]);
 
   // Focus the menu so keyboard events work
   useEffect(() => {
@@ -263,7 +272,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
         pointer.current.x = event.clientX;
       }}
       aria-label={ariaLabel ?? anchor?.textContent ?? undefined}
-      style={{ ...surfaceStyle, ...(maxHeight === undefined ? {} : { maxHeight: `min(${maxHeight}px, calc(100dvh - 16px))` }), left: adjusted.x, top: adjusted.y }}
+      style={{ ...surfaceStyle, ...style, ...(maxHeight === undefined ? {} : { maxHeight: `min(${maxHeight}px, calc(100dvh - 16px))` }), left: adjusted.x, top: adjusted.y }}
     >
       {items.map((item, i) =>
         item.separator ? (
@@ -273,7 +282,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
             style={{
               height: 1,
               background: "var(--border-subtle)",
-              margin: "5px 10px",
+              margin: "4px 8px",
             }}
           />
         ) : item.content ? <div key={i} className="mc-menu-custom-row" role="group" aria-label={item.label}>{item.content}</div> : (
@@ -298,34 +307,32 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 8,
+              gap: "var(--mc-menu-row-gap, 6px)",
               width: "100%",
-              minHeight: 34,
+              minHeight: 0,
               textAlign: "left",
               background: "transparent",
               border: 0,
-              color: item.disabled
-                ? "var(--text-muted)"
-                : item.danger ? "var(--state-danger)" : "var(--text-primary)",
+              color: item.danger ? "var(--state-danger)" : "var(--text-primary)",
               cursor: item.disabled ? "default" : "pointer",
-              padding: "6px 10px",
-              fontSize: itemFontSize ?? "var(--mc-font-body)",
-              lineHeight: "var(--leading-snug)",
-              opacity: item.disabled ? 0.45 : 1,
+              padding: "5px 8px",
+              fontSize: itemFontSize ?? "var(--text-chrome)",
+              lineHeight: 1.25 / .875,
+              opacity: item.disabled ? 0.5 : 1,
             }}
           >
-            {reserveIcon && <span aria-hidden="true" className="shrink-0" style={{ display: "inline-flex", width: 16, alignItems: "center", justifyContent: "center", color: item.danger ? "inherit" : "var(--text-secondary)" }}>
-              {item.icon}
-            </span>}
-            <span className="flex-fill truncate">
-              {item.label}
+            <span className="mc-menu-content">
+              {reserveIcon && <span aria-hidden="true" className="mc-menu-leading-icon shrink-0" style={{ display: "inline-flex", width: item.iconWidth ?? 16, alignItems: "center", justifyContent: "center" }}>
+                {item.icon}
+              </span>}
+              <span className="flex-fill truncate">{item.label}</span>
             </span>
             {item.shortcut && (
               <span
                 className="shrink-0"
                 style={{
                   color: "var(--text-muted)",
-                  marginLeft: 12,
+                  marginLeft: 8,
                   fontFamily: "var(--font-ui)",
                   fontSize: "var(--mc-font-caption)",
                 }}
@@ -333,7 +340,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
                 {item.shortcut}
               </span>
             )}
-            {item.checked && <SidebarSortSourceIcon kind="sort-check" />}
+            {(item.checkType === "radio" || item.checked) && <span className="shrink-0" style={{ display: "inline-flex", visibility: item.checked ? "visible" : "hidden" }}><SidebarSortSourceIcon kind="sort-check" /></span>}
             {item.rightIcon && (item.rightIconTooltip
               ? <Tip content={item.rightIconTooltip}><span className="shrink-0" aria-hidden="true">{item.rightIcon}</span></Tip>
               : <span className="shrink-0" aria-hidden="true">{item.rightIcon}</span>)}
@@ -343,6 +350,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
       )}
     </div>
     {submenu && !items[submenu.index]?.disabled && items[submenu.index]?.submenu && createPortal(<MenuSurface items={items[submenu.index].submenu!} position={{ x: 0, y: 0 }} anchor={submenu.anchor}
+      className={items[submenu.index].submenuClassName}
       ariaLabel={typeof items[submenu.index].label === "string" ? items[submenu.index].label as string : undefined}
       focusFirst={submenu.focusFirst} surfaces={surfaces} onDismiss={onDismiss} onSelect={onSelect}
       itemFontSize={itemFontSize}

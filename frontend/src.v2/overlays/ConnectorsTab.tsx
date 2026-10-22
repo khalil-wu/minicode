@@ -22,8 +22,8 @@ import { desktop, openExternal } from "../desktop/runtime";
 import { reportCommandFailure } from "./commandFeedback";
 import { normalizeWorkspaceRoot } from "../lib/workspace-path";
 import { McpToolsEditor } from "./McpToolsEditor";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import {
-  Section,
   secondaryActionStyle,
   mcpServerRowStyle,
   mcpNameStyle,
@@ -48,14 +48,15 @@ function McpAppDataSettings() {
       pushToast(tr("无法清除 MCP 应用数据：{v0}", { v0: error instanceof Error ? error.message : String(error) }), "error");
     } finally { setClearing(false); }
   };
-  return <Section title={tr("MCP 应用")}>
+  return <section className="settings-group settings-mcp-apps" aria-label={tr("MCP 应用")}>
+    <h3 className="settings-group-title">{tr("MCP 应用")}</h3>
     <div className="settings-card"><div className="settings-row">
       <div className="settings-row-copy"><div className="settings-row-title">{tr("应用数据")}</div>
         <div className="settings-row-description">{tr("清除所有 MCP 应用的站点数据和缓存")}</div>
       </div>
-      <button type="button" className="settings-action-button" disabled={clearing} onClick={() => void clear()}>{tr("清除所有应用数据")}</button>
+      <button type="button" className="settings-action-button" disabled={clearing} aria-busy={clearing} onClick={() => void clear()}>{clearing && <span className="settings-refresh-spinner"><SettingsSourceIcon icon="spinner" size={12} /></span>}{tr("清除所有应用数据")}</button>
     </div></div>
-  </Section>;
+  </section>;
 }
 
 type ValueRow = { id: string; value: string };

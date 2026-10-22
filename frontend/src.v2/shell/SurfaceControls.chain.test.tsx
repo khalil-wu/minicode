@@ -19,7 +19,7 @@ beforeEach(() => {
   anchor = document.createElement("button");
   document.body.append(anchor);
   anchor.getBoundingClientRect = () => ({ top: 100, bottom: 125, left: 200, right: 224, width: 24, height: 25, x: 200, y: 100, toJSON: () => ({}) });
-  useAppStore.setState({ conversationId: "owner-a", workingDirectory: "C:/a", appMode: "code", permissionMode: "confirm" });
+  useAppStore.setState({ conversationId: "owner-a", workingDirectory: "C:/a", appMode: "code", permissionMode: "confirm", draft: "Keep workspace draft" });
 });
 afterEach(() => { cleanup(); anchor.remove(); });
 
@@ -79,7 +79,7 @@ it("does not close a newer code workspace from an old removal receipt", async ()
   render(<WorkspaceContextMenu path="C:/a" position={{ x: 200, y: 100 }} onClose={vi.fn()} />);
   fireEvent.click(screen.getByRole("menuitem", { name: "移除工作区" }));
   useAppStore.setState({ conversationId: "owner-b", workingDirectory: "C:/b", appMode: "code" });
-  await act(async () => finish({ level: "success", data: { closed_active: true, conversation_id: "projectless-result", workspace_root: "", path: "C:/a" } }));
+  await act(async () => finish({ level: "success", data: { removed: true, path: "C:/a" } }));
   expect(useAppStore.getState()).toMatchObject({ conversationId: "owner-b", workingDirectory: "C:/b", appMode: "code" });
 });
 
@@ -104,10 +104,11 @@ it("applies the workspace receipt mode when its conversation and root are still 
   expect(useAppStore.getState().appMode).toBe("code");
 });
 
-it("applies the removal mode only to its resulting projectless conversation", async () => {
-  useAppStore.setState({ conversationId: "projectless-result", workingDirectory: "", appMode: "code" });
-  send.mockResolvedValue({ level: "success", data: { closed_active: true, conversation_id: "projectless-result", workspace_root: "", path: "C:/a" } });
+it("keeps the selected conversation, editor mode and draft after the real removal receipt", async () => {
+  send.mockResolvedValue({ level: "success", data: { removed: true, path: "C:/a" } });
   render(<WorkspaceContextMenu path="C:/a" position={{ x: 200, y: 100 }} onClose={vi.fn()} />);
   await act(async () => fireEvent.click(screen.getByRole("menuitem", { name: "移除工作区" })));
-  expect(useAppStore.getState().appMode).toBe("cowork");
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "owner-a", workingDirectory: "C:/a", appMode: "code", draft: "Keep workspace draft" });
+  expect(send).toHaveBeenCalledExactlyOnceWith({ type: "workspace.recent.remove", path: "C:/a" }, "workspace.recent.remove");
+  expect(toast).not.toHaveBeenCalled();
 });

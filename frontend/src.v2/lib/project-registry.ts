@@ -1,7 +1,7 @@
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import type { WorkspaceRecentProjectPayload } from "../protocol/workspace-types";
 import { useAppStore } from "../stores";
-import type { RecentWorkspaceProjection } from "../stores/types";
+import type { ConversationMeta, RecentWorkspaceProjection } from "../stores/types";
 import type { ProjectAppearance } from "./project-appearance";
 import { workspaceRootsEqual } from "./workspace-path";
 
@@ -12,6 +12,10 @@ export const projectWorkspaceRoots = (project: RecentWorkspaceProjection): strin
 };
 export const projectExecutionRoot = (project: RecentWorkspaceProjection): string => projectWorkspaceRoots(project)[0];
 export const projectOwnsWorkspace = (project: RecentWorkspaceProjection, root: string): boolean => projectWorkspaceRoots(project).some(folder => workspaceRootsEqual(folder, root));
+export const projectOwnsConversation = (project: RecentWorkspaceProjection, conversation: Pick<ConversationMeta, "projectId" | "worktreePath" | "workspaceRoot">): boolean =>
+  conversation.projectId !== undefined && conversation.projectId !== null
+    ? workspaceRootsEqual(project.path, conversation.projectId)
+    : projectOwnsWorkspace(project, conversation.worktreePath || conversation.workspaceRoot || "");
 
 export const projectProjection = (project: WorkspaceRecentProjectPayload): RecentWorkspaceProjection => ({ path: project.path, name: project.name,
   projectType: project.project_type, lastOpened: project.last_opened,

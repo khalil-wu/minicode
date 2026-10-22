@@ -89,6 +89,7 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
     "--surface-active": active,
     "--workbench-sidebar": under,
     "--workbench-tool": control,
+    "--menu-surface": control,
     "--workbench-hover": hover,
     "--workbench-active": active,
     "--text-primary": colors.ink,

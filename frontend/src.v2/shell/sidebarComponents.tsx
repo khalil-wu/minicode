@@ -101,7 +101,7 @@ export const MenuItem = ({
   </button>
 );
 
-export const threadMenuIcon = (name: "copy" | "local" | "worktree" | "rename" | "archive" | "pin" | "unpin" | "read" | "project" | "pin-row" | "pin-row-filled" | "new-window") => <span aria-hidden="true" style={{
+export const threadMenuIcon = (name: "copy" | "local" | "worktree" | "rename" | "archive" | "pin" | "unpin" | "read" | "project" | "project-target" | "remove-project" | "section" | "project-remove" | "project-folder" | "mark-read-all" | "pin-row" | "pin-row-filled" | "new-window") => <span aria-hidden="true" style={{
   width: 16, height: 16, background: "currentColor", mask: `url(${import.meta.env.BASE_URL}apps/thread-${name}.svg) center / contain no-repeat`,
 }} />;
 
@@ -167,15 +167,15 @@ export const ConversationMenu = ({
         { label: tr("重命名"), icon: threadMenuIcon("rename"), onClick: onRename },
         { label: tr(pinned ? "取消固定" : "固定"), icon: threadMenuIcon(pinned ? "unpin" : "pin"), onClick: onPin },
         { label: tr(hasUnreadTurn ? "标记为已读" : "标记为未读"), icon: threadMenuIcon("read"), onClick: onReadState },
-        ...(onNewSection ? [{ label: tr("移动到分组"), submenu: [
+        ...(onNewSection ? [{ label: tr("分组"), icon: threadMenuIcon("section"), submenu: [
           ...sectionOptions.map(section => ({ label: section.name, checked: section.id === currentSection, checkType: "checkbox" as const,
             onClick: () => onSectionChange!(section.id === currentSection ? null : section.id) })),
           ...(sectionOptions.length ? [{ label: "", separator: true }] : []),
-          { label: tr("新建分组…"), onClick: onNewSection },
+          { label: tr("新建分组…"), icon: threadMenuIcon("project-target"), onClick: onNewSection },
         ] }] : []),
         ...(projectOptions.some(project => project.id !== currentProject) || currentProject ? [{ label: tr("项目"), icon: threadMenuIcon("project"), submenu: [
-          ...projectOptions.filter(project => project.id !== currentProject).map(project => ({ label: project.name, icon: threadMenuIcon("project"), onClick: () => onProjectChange(project.id) })),
-          ...(currentProject ? [{ label: tr("移出项目"), icon: threadMenuIcon("project"), onClick: () => onProjectChange("") }] : []),
+          ...projectOptions.filter(project => project.id !== currentProject).map(project => ({ label: project.name, icon: threadMenuIcon("project-target"), onClick: () => onProjectChange(project.id) })),
+          ...(currentProject ? [{ label: tr("从 {name} 移出", { name: projectOptions.find(project => project.id === currentProject)?.name ?? currentProject }), icon: threadMenuIcon("remove-project"), onClick: () => onProjectChange("") }] : []),
         ] }] : []),
         { label: "", separator: true },
       ] : []),

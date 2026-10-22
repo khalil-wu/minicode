@@ -58,29 +58,29 @@ async def handle_workspace_recent(session: "WebSocketSession", data: dict[str, A
 
 async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.services.workspace_service import remove_workspace_recent
+    from backend.services.workspace_history import workspace_project_roots
+    from backend.services.thread_metadata_service import publish_project_metadata
     from backend.workspace.recent_projects import RecentProjectPersistenceError
     from backend.ws.command_results import emit_command_error
+    from backend.ws.conversation_activity import live_sessions
 
     path = str(data.get("path") or "").strip()
     if not path:
         await emit_command_error(session, "workspace.recent.remove", "Path is required")
         return True
-    closed_active = False
-    ids: list[str] = []
-    if data.get("preserve_history") is True:
-        from backend.services.workspace_history import workspace_conversation_ids
-        from backend.ws.handlers.conversation import _conversation_has_active_run, handle_conversation_create
-        from backend.workspace.state import set_active_workspace_root
-
-        # Removing the recent-workspace entry only edits the navigation list.
-        # The conversations stay in the app's own store keyed by workspace, so
-        # reopening the project restores them; nothing is copied into the
-        # project directory (that dump was never read and would leak tool
-        # output, which can contain secrets, into a git-tracked path).
-        ids = await asyncio.to_thread(workspace_conversation_ids, session.conversation_repo, path)
-        if any(_conversation_has_active_run(session, conversation_id) for conversation_id in ids):
-            await emit_command_error(session, "workspace.recent.remove", "此工作区还有运行中的任务，请先停止任务再移除。")
-            return True
+    workspace_roots = await asyncio.to_thread(workspace_project_roots, path)
+    owners = live_sessions(session)
+    # Source removeLocal detaches project membership before deleting the project;
+    # a failed metadata write must leave the project available for a real retry.
+    repositories = {owner.conversation_repo.storage_root: owner.conversation_repo for owner in owners}
+    membership_changed = set()
+    for repository in repositories.values():
+        changed = await to_thread_cancel_safe(repository.remove_project_memberships, path, workspace_roots)
+        if changed:
+            membership_changed.add(repository.storage_root)
+    for owner in owners:
+        if owner.is_connected and owner.conversation_repo.storage_root in membership_changed:
+            await owner.send_conversation_list()
     try:
         removed, payload = await to_thread_cancel_safe(remove_workspace_recent, path)
     except RecentProjectPersistenceError:
@@ -92,21 +92,20 @@ async def handle_workspace_recent_remove(session: "WebSocketSession", data: dict
             data={"path": path, "reason": "persistence_failed", "retryable": True},
         )
         return True
-    if session.active_conversation_id in ids:
-        await handle_conversation_create(session, {"workspace_root": "", "title": "New chat", "conversation_type": "main"})
-        closed_active = session.active_conversation_id not in ids
-        if closed_active:
-            set_active_workspace_root(None)
-    await session.send_payload(payload, log_context="workspace.recent.list")
+    sections_changed = set()
+    for repository in repositories.values():
+        if await to_thread_cancel_safe(repository.thread_sections.remove_project, path):
+            sections_changed.add(repository.storage_root)
+    # Chat selection and running execution remain with their original owner.
+    for owner in owners:
+        if owner.is_connected and owner.conversation_repo.storage_root in sections_changed:
+            await owner.send_conversation_list()
+    await publish_project_metadata(payload, sessions=owners)
     await session.emit_command_result(
         "workspace.recent.remove",
         "Recent workspace entry removed." if removed else "Recent workspace entry was already absent.",
         level="success",
-        data={"path": path, "removed": removed, **({
-            "closed_active": True,
-            "conversation_id": session.active_conversation_id,
-            "workspace_root": "",
-        } if closed_active else {})},
+        data={"path": path, "removed": removed},
     )
     return True
 

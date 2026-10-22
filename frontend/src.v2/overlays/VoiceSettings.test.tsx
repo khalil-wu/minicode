@@ -7,6 +7,7 @@ import { defaultWorkbenchPreferences } from "../lib/workbench-preferences";
 import type { DictationHotkeyState } from "../desktop/runtime";
 const supported = { provider: "custom", label: "自定义服务", endpoint: "https://speech.example/v1", compatible: true, configured: true, can_attempt: true, reason: "配置未验证", last_check: null };
 const recording = { id: "original-audio-id", created_at: 1792430000, mime_type: "audio/webm", language: "zh", duration_ms: 1250, status: "failed", conversation_id: "original-owner", workspace_root: "C:/original", text: "saved transcript", error: "actual earlier provider error" };
+let recordings = [recording];
 function nativeBridge() {
   let state: DictationHotkeyState = { available: true, holdHotkey: "Ctrl+Shift+Space", toggleHotkey: "", error: "" };
   return { getLocalRuntime: vi.fn(async () => ({ apiBaseUrl: "http://127.0.0.1:8000", runtimeToken: "local", revision: 1 })), get: vi.fn(async () => state), onState: vi.fn(() => () => {}), suspend: vi.fn(async () => {}),
@@ -15,13 +16,17 @@ function nativeBridge() {
 let bridge: ReturnType<typeof nativeBridge> | undefined;
 vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => bridge ? { dictation: bridge } : undefined }));
 vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
-let mediaDevices: EventTarget & { enumerateDevices: ReturnType<typeof vi.fn> };
+let mediaDevices: EventTarget & { enumerateDevices: ReturnType<typeof vi.fn>; getUserMedia: ReturnType<typeof vi.fn> };
+let stopMicrophone: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   bridge = undefined;
-  mediaDevices = Object.assign(new EventTarget(), { enumerateDevices: vi.fn(async () => []) });
+  recordings = [recording];
+  stopMicrophone = vi.fn();
+  mediaDevices = Object.assign(new EventTarget(), { enumerateDevices: vi.fn(async () => []),
+    getUserMedia: vi.fn(async () => ({ getTracks: () => [{ stop: stopMicrophone }] })) });
   Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: mediaDevices });
   useAppStore.setState({ workbenchPreferences: { ...defaultWorkbenchPreferences, speechEnabled: true, speechModel: "asr-current", dictationDictionary: ["MiniCode", "术语,保留"] }, currentProvider: "custom", currentProviderBaseUrl: "", draft: "keep current draft" });
-  vi.stubGlobal("fetch", vi.fn(async url => new Response(JSON.stringify(String(url).includes("/status") ? supported : String(url).includes("/transcribe") ? { text: "retried original recording" } : { recordings: [recording] }))));
+  vi.stubGlobal("fetch", vi.fn(async url => new Response(JSON.stringify(String(url).includes("/status") ? supported : String(url).includes("/transcribe") ? { text: "retried original recording" } : { recordings }))));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -36,9 +41,9 @@ it("uses Source voice controls without custom service diagnostics or unavailable
 });
 
 it("retries the selected stored ID with current provider and dictionary without writing or sending any draft", async () => {
-  render(<VoiceSettings />); await screen.findByText("saved transcript");
-  fireEvent.click(screen.getByRole("button", { name: "录音操作" }));
-  fireEvent.click(screen.getByRole("menuitem", { name: "重新转录" }));
+  recordings = [{ ...recording, text: "" }];
+  render(<VoiceSettings />);
+  fireEvent.click(await screen.findByRole("button", { name: "重新转录" }));
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("original-audio-id/transcribe"))).toBe(true));
   const request = vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes("/transcribe"))!;
   expect(JSON.parse(String(request[1]!.body))).toEqual({ provider: "custom", expected_endpoint: supported.endpoint, model: "asr-current", dictionary: ["MiniCode", "术语,保留"] });
@@ -49,11 +54,30 @@ it("copies only the selected transcript and deletes only its saved ID", async ()
   const writeText = vi.fn(async () => {});
   Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   render(<VoiceSettings />); await screen.findByText("saved transcript");
-  fireEvent.click(screen.getByRole("button", { name: "录音操作" })); fireEvent.click(screen.getByRole("menuitem", { name: "复制转录文字" }));
+  expect(screen.queryByRole("button", { name: "重新转录" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "复制转录文字" }));
   await waitFor(() => expect(writeText).toHaveBeenCalledWith("saved transcript"));
   await waitFor(() => expect((screen.getByRole("button", { name: "录音操作" }) as HTMLButtonElement).disabled).toBe(false));
-  fireEvent.click(screen.getByRole("button", { name: "录音操作" })); fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
+  fireEvent.click(screen.getByRole("button", { name: "录音操作" }));
+  expect(screen.getAllByRole("menuitem").map(item => item.textContent)).toEqual(["下载录音", "删除"]);
+  fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url, options]) => String(url).endsWith("/original-audio-id") && options?.method === "DELETE")).toBe(true));
+});
+
+it("shows the actual audio-only recording status and keeps retries unavailable without dictation", async () => {
+  recordings = [
+    { ...recording, id: "cancelled-audio", status: "cancelled", text: "", error: "" },
+    { ...recording, id: "interrupted-audio", status: "interrupted", text: "", error: "interrupted provider request" },
+    { ...recording, id: "saved-audio", status: "saved", text: "", error: "" },
+  ];
+  useAppStore.getState().setWorkbenchPreferences({ speechEnabled: false });
+  render(<VoiceSettings />);
+  await screen.findByText("录音已取消");
+  expect(screen.getByText("录音已中断")).toBeTruthy();
+  expect(screen.getByText("录音已保存")).toBeTruthy();
+  expect(screen.getByText("interrupted provider request")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "复制转录文字" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "重新转录" })).toBeNull();
 });
 
 it("edits, adds, trims, and removes individual dictionary entries in the one persisted array", async () => {
@@ -74,21 +98,106 @@ it("retains a disconnected selected microphone and refreshes from actual devicec
   useAppStore.getState().setWorkbenchPreferences({ microphoneId: "saved-mic" });
   const { rerender } = render(<VoiceSettings active={false} />);
   expect(mediaDevices.enumerateDevices).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "麦克风设备，当前：已选设备（当前未检测到）" }));
-  fireEvent.keyDown(screen.getByRole("option", { name: "已选设备（当前未检测到）" }), { key: "Escape" });
+  expect(screen.getByRole("button", { name: "麦克风设备，当前：已选择的麦克风" })).toHaveProperty("disabled", true);
   rerender(<VoiceSettings active />); await waitFor(() => expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(1));
+  mediaDevices.enumerateDevices.mockResolvedValue([{ deviceId: "other-mic", label: "Other microphone", kind: "audioinput" }]);
+  act(() => mediaDevices.dispatchEvent(new Event("devicechange")));
+  fireEvent.click(await screen.findByRole("button", { name: "麦克风设备，当前：不可用的麦克风" }));
+  await screen.findByRole("option", { name: "Other microphone" });
+  expect(screen.queryByRole("option", { name: "不可用的麦克风" })).toBeNull();
+  expect(useAppStore.getState().workbenchPreferences.microphoneId).toBe("saved-mic");
+  fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
   mediaDevices.enumerateDevices.mockResolvedValue([{ deviceId: "saved-mic", label: "USB 麦克风", kind: "audioinput" }]);
   act(() => mediaDevices.dispatchEvent(new Event("devicechange")));
   expect(await screen.findByRole("button", { name: "麦克风设备，当前：USB 麦克风" })).toBeTruthy();
+  expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
 });
 
-it("offers microphone Retry only after a real enumeration failure", async () => {
-  mediaDevices.enumerateDevices.mockRejectedValueOnce(new Error("fixture microphone permission error"));
+it("requests microphone access only on a real open, keeps loading through the device read and releases the stream", async () => {
+  let allow!: (stream: { getTracks: () => { stop: typeof stopMicrophone }[] }) => void;
+  let enumerate!: (devices: { deviceId: string; label: string; kind: string }[]) => void;
+  mediaDevices.getUserMedia.mockReturnValueOnce(new Promise(resolve => { allow = resolve; }));
+  mediaDevices.enumerateDevices.mockResolvedValueOnce([]).mockReturnValueOnce(new Promise(resolve => { enumerate = resolve; }));
   render(<VoiceSettings />);
-  expect((await screen.findByRole("alert")).textContent).toContain("fixture microphone permission error");
-  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await waitFor(() => expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(1));
+  expect(mediaDevices.getUserMedia).not.toHaveBeenCalled();
+  const trigger = screen.getByRole("button", { name: "麦克风设备，当前：系统默认" });
+  fireEvent(trigger, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+  fireEvent.click(trigger, { detail: 1 });
+  expect(screen.getByRole("listbox").style.width).toBe("240px");
+  expect(mediaDevices.getUserMedia).toHaveBeenCalledExactlyOnceWith({ audio: true });
+  expect(screen.getByRole("status").textContent).toContain("正在加载麦克风");
+  expect(screen.queryByText("未找到麦克风")).toBeNull();
+  await act(async () => allow({ getTracks: () => [{ stop: stopMicrophone }] }));
   await waitFor(() => expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(2));
-  expect(screen.queryByText("fixture microphone permission error")).toBeNull();
+  expect(stopMicrophone).not.toHaveBeenCalled();
+  expect(screen.getByRole("status").textContent).toContain("正在加载麦克风");
+  await act(async () => enumerate([
+    { deviceId: "default", label: "Default alias", kind: "audioinput" },
+    { deviceId: "", label: "Unexposed device", kind: "audioinput" },
+    { deviceId: "usb", label: "USB microphone", kind: "audioinput" },
+    { deviceId: "camera", label: "Camera", kind: "videoinput" },
+  ]));
+  expect(screen.getAllByRole("option").map(option => option.textContent)).toEqual(["系统默认", "USB microphone"]);
+  expect(screen.getByRole("separator")).toBeTruthy();
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(stopMicrophone).toHaveBeenCalledTimes(1);
+  expect(useAppStore.getState().draft).toBe("keep current draft");
+});
+
+it("keeps a real permission denial in the menu while refetching actual devices", async () => {
+  mediaDevices.getUserMedia.mockRejectedValueOnce(new DOMException("Microphone permission denied", "NotAllowedError"));
+  mediaDevices.enumerateDevices.mockResolvedValue([{ deviceId: "known", label: "Known microphone", kind: "audioinput" }]);
+  render(<VoiceSettings />);
+  await waitFor(() => expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(1));
+  const trigger = screen.getByRole("button", { name: "麦克风设备，当前：系统默认" });
+  fireEvent.click(trigger);
+  expect((await screen.findByRole("alert")).textContent).toContain("Microphone permission denied");
+  expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("option", { name: "Known microphone" })).toBeTruthy();
+  expect(screen.queryByText("未找到麦克风")).toBeNull();
+  expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
+  expect(stopMicrophone).not.toHaveBeenCalled();
+});
+
+it("retries actual enumeration failures by reopening and stops granted streams on both outcomes", async () => {
+  mediaDevices.enumerateDevices.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("Device enumeration failed"));
+  render(<VoiceSettings />);
+  await waitFor(() => expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(1));
+  const trigger = screen.getByRole("button", { name: "麦克风设备，当前：系统默认" });
+  fireEvent.click(trigger);
+  expect((await screen.findByRole("alert")).textContent).toContain("Device enumeration failed");
+  expect(stopMicrophone).toHaveBeenCalledTimes(1);
+  fireEvent.keyDown(screen.getByRole("listbox"), { key: "Escape" });
+  fireEvent.click(trigger);
+  await waitFor(() => expect(screen.getByRole("status").textContent).toContain("未找到麦克风"));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getAllByRole("option")).toHaveLength(1);
+  expect(stopMicrophone).toHaveBeenCalledTimes(2);
+});
+
+it("closes the microphone menu when hidden and still releases an already requested stream", async () => {
+  let allow!: (stream: { getTracks: () => { stop: typeof stopMicrophone }[] }) => void;
+  mediaDevices.getUserMedia.mockReturnValueOnce(new Promise(resolve => { allow = resolve; }));
+  const view = render(<VoiceSettings />);
+  await waitFor(() => expect(mediaDevices.enumerateDevices).toHaveBeenCalledTimes(1));
+  fireEvent.click(screen.getByRole("button", { name: "麦克风设备，当前：系统默认" }));
+  view.rerender(<VoiceSettings active={false} />);
+  expect(screen.queryByRole("listbox")).toBeNull();
+  await act(async () => allow({ getTracks: () => [{ stop: stopMicrophone }] }));
+  expect(stopMicrophone).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(mediaDevices.getUserMedia).toHaveBeenCalledTimes(1);
+});
+
+it("disables microphone selection when the actual device API is unavailable", () => {
+  Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: undefined });
+  render(<VoiceSettings />);
+  const trigger = screen.getByRole("button", { name: "麦克风设备，当前：系统默认" });
+  expect(trigger).toHaveProperty("disabled", true);
+  expect(screen.getByText("当前设备不支持选择麦克风。")).toBeTruthy();
+  fireEvent.click(trigger);
+  expect(screen.queryByRole("listbox")).toBeNull();
 });
 
 it("captures native hold and optional single-tap settings only when the actual bridge is available", async () => {

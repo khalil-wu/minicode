@@ -93,7 +93,7 @@ it("moves the pinned task to a real project then removes membership while preser
   expect(useAppStore.getState().conversations.find(item => item.id === "task")?.executionCwd).toBe("C:/A");
   menuFor(target);
   fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
-  fireEvent.click(screen.getByRole("menuitem", { name: "移出项目", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "从 B 移出", exact: true }));
   publish({ revision: 4, project_id: "" });
   expect(within(target).queryByText("Actual task")).toBeNull();
   expect(within(screen.getByRole("region", { name: "最近" })).getByText("Actual task")).toBeTruthy();

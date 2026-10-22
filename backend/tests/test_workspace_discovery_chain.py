@@ -213,7 +213,8 @@ async def test_failed_recent_removal_does_not_close_the_initiating_conversation(
     RecentProjectStore().add(str(root), "project")
     repo = ConversationRepository(tmp_path / "conversations")
     record = repo.create_conversation(workspace_root=str(root))
-    session = SimpleNamespace(conversation_repo=repo, active_conversation_id=record.id, send_payload=AsyncMock(), emit_command_result=AsyncMock())
+    session = SimpleNamespace(conversation_repo=repo, active_conversation_id=record.id, ws_manager=None, is_connected=True,
+        send_conversation_list=AsyncMock(), send_payload=AsyncMock(), emit_command_result=AsyncMock())
     monkeypatch.setattr(conversation, "_conversation_has_active_run", lambda *_: False)
     close = AsyncMock()
     monkeypatch.setattr(conversation, "handle_conversation_create", close)
@@ -222,6 +223,9 @@ async def test_failed_recent_removal_does_not_close_the_initiating_conversation(
     close.assert_not_called()
     assert session.active_conversation_id == record.id
     assert session.emit_command_result.call_args.kwargs["level"] == "error"
+    assert RecentProjectStore().list()[0].path == str(root)
+    assert ConversationRepository(repo.storage_root).get_conversation(record.id).project_id == ""
+    session.send_conversation_list.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } 
 import { commandResultSucceeded, sendClientCommandAwaitResult, LONG_COMMAND_RESULT_TIMEOUT_MS } from "../protocol/ws-outbox";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { SelectMenu } from "../components/SelectMenu";
-import { isDesktop, openManagedSettingsTarget } from "../desktop/runtime";
+import { isDesktop } from "../desktop/runtime";
 import { showConfirm } from "./DialogService";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import "./StorageTab.css";
@@ -95,7 +95,7 @@ export function StorageTab({ active = true }: { active?: boolean }) {
         {usage && categories && <>
           <div className="settings-storage-chart" role="img" aria-labelledby={totalLabelId}>{categories.map(category => <div key={category.name} className="settings-storage-segment" data-category={category.name} style={{ width: `${usage.total_bytes > 0 ? category.bytes / usage.total_bytes * 100 : 0}%` }} />)}</div>
           <ul className="settings-storage-legend">{categories.map(category => <li key={category.name}><span className="settings-storage-category"><span className="settings-storage-dot" data-category={category.name} aria-hidden="true" />{categoryLabels[category.name]}</span><span className="settings-storage-category-bytes">{bytes(category.bytes, locale)}</span></li>)}</ul>
-          <button type="button" className="settings-storage-path" aria-label={`${t("应用数据文件夹")}: ${usage.path}`} onClick={() => { void openManagedSettingsTarget({ kind: "data" })?.catch(reason => setError(String(reason))); }}>{usage.path}</button>
+          <p className="settings-storage-path">{usage.path}</p>
         </>}
       </div>
     </section>

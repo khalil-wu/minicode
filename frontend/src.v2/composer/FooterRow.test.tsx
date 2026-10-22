@@ -822,6 +822,30 @@ describe("FooterRow permission picker", () => {
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
+  it("keeps the model list non-looping with Tab trapped while leaving the reasoning dialog's traversal separate", async () => {
+    useAppStore.setState({ availableModels: ["gpt-5", "gpt-5.5"],
+      runtimeCapabilities: { provider_capabilities: { reasoning_effort: false, reasoning_effort_levels: [] } } });
+    const view = render(<FooterRow sendState="idle" onSend={() => {}} />);
+    const trigger = view.container.querySelector<HTMLButtonElement>(".composer-model-select")!;
+    fireEvent.click(trigger);
+    const first = screen.getByRole("option", { name: "5", exact: true });
+    const last = screen.getByRole("option", { name: "5.5", exact: true });
+    await waitFor(() => expect(document.activeElement).toBe(first));
+    fireEvent.keyDown(first, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: "End" });
+    expect(document.activeElement).toBe(last);
+    for (const event of [{ key: "ArrowDown" }, { key: "Tab" }, { key: "Tab", shiftKey: true }]) {
+      expect(fireEvent.keyDown(last, event)).toBe(false);
+      expect(document.activeElement).toBe(last);
+      expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
+    }
+    fireEvent.keyDown(last, { key: "Escape" });
+    await waitFor(() => expect(document.activeElement).toBe(trigger));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
   it("keeps model-menu Tab navigation inside its controls and confirms the current effort with Enter", async () => {
     useAppStore.setState({ runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"] } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);

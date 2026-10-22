@@ -356,18 +356,20 @@ export const ConversationsTab = ({
   }, [conversations, conversationId, isStreaming, conversationStreaming, waitingLabelsByConversation, runtimeSession]);
 
   const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived), [enrichedConversations]);
+  const sidebarProjects = useMemo(() => recentWorkspaces.filter(project => project.pinned !== false
+    || sectionProjectKeys.has(workspaceGroupIdentity(project.path))), [recentWorkspaces, sectionProjectKeys]);
 
   const workspaceConversations = useMemo(() => {
-    const opened = new Set(recentWorkspaces.filter(project => project.pinned !== false).map((workspace) => workspaceGroupIdentity(workspace.path)));
+    const opened = new Set(sidebarProjects.map((workspace) => workspaceGroupIdentity(workspace.path)));
     return filtered.map(conversation => {
       if (conversation.projectId !== undefined && conversation.projectId !== null) return conversation;
       const project = recentWorkspaces.find(project => project.named && projectOwnsWorkspace(project, conversation.workspaceRoot || conversation.worktreePath || ""));
       return project ? { ...conversation, projectId: project.path } : conversation;
     }).filter((conversation) => !conversation.pinned && !sectionByThread.has(conversation.id) && isWorkspaceConversation(conversation)
       && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
-  }, [filtered, recentWorkspaces, sectionByThread]);
-  const allProjectGroups = useMemo(() => groupByWorkspace(workspaceConversations, recentWorkspaces.filter(project => project.pinned !== false).map((workspace) => workspace.path),
-    new Map(recentWorkspaces.filter(project => project.named).map(project => [workspaceGroupIdentity(project.path), project.name]))), [workspaceConversations, recentWorkspaces]);
+  }, [filtered, recentWorkspaces, sidebarProjects, sectionByThread]);
+  const allProjectGroups = useMemo(() => groupByWorkspace(workspaceConversations, sidebarProjects.map((workspace) => workspace.path),
+    new Map(recentWorkspaces.filter(project => project.named).map(project => [workspaceGroupIdentity(project.path), project.name]))), [workspaceConversations, sidebarProjects, recentWorkspaces]);
   const projectGroups = useMemo(() => new Map([...allProjectGroups].filter(([, group]) => !sectionProjectKeys.has(workspaceGroupIdentity(group.path)))), [allProjectGroups, sectionProjectKeys]);
   const allOrderedProjectGroups = useMemo(() => (
     orderSidebarItems(Array.from(allProjectGroups.entries(), ([projectKey, group]) => ({

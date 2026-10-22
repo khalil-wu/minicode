@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, MoreHorizontal, Pin, Plus, Search, SquarePen } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
-import { projectExecutionRoot, projectOwnsWorkspace, projectWorkspaceRoots } from "../lib/project-registry";
+import { projectExecutionRoot, projectOwnsConversation, projectWorkspaceRoots } from "../lib/project-registry";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { activateWorkspaceFolder } from "../workspace/openWorkspaceFolder";
@@ -26,7 +26,7 @@ export function ProjectsPage() {
   useEffect(() => { sendClientCommand({ type: "workspace.recent" }, { silent: true }); }, []);
   const projects = useMemo(() => workspaces.filter(workspace => `${workspace.name} ${workspace.path}`.toLowerCase().includes(query.trim().toLowerCase()))
     .map(workspace => ({ ...workspace, chats: conversations.filter(conversation => !conversation.archived
-      && (conversation.projectId === workspace.path || projectOwnsWorkspace(workspace, conversation.workspaceRoot || conversation.worktreePath || ""))) }))
+      && projectOwnsConversation(workspace, conversation)) }))
     .sort((left, right) => sort === "name" ? (left.name || workspaceDisplayName(left.path)).localeCompare(right.name || workspaceDisplayName(right.path), locale)
       : right.lastOpened - left.lastOpened), [workspaces, conversations, query, sort, locale]);
   const close = () => useAppStore.setState({ projectsOpen: false });

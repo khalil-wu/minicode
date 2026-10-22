@@ -81,3 +81,28 @@ it("keeps the form draft across hidden Settings and an authoritative file confli
   expect(screen.getByRole("textbox", { name: "设置脚本 · default" })).toHaveProperty("value", "unsaved setup contents");
   expect(fetchSettings.mock.calls.some(([url, init]) => new URL(url).pathname.endsWith("/selection") && init?.method === "PUT")).toBe(false);
 });
+
+it("shows the real project load before its empty state and opens project creation without changing drafts", async () => {
+  let complete!: (response: Response) => void;
+  fetchSettings.mockReturnValueOnce(new Promise<Response>(resolve => { complete = resolve; }));
+  render(<SourceEnvironmentsTab />);
+  expect(screen.getByRole("status").textContent).toContain("正在加载项目…");
+  await act(async () => complete(response({ projects: [] })));
+  expect(screen.queryByRole("status")).toBeNull();
+  expect(screen.getByText("尚无项目。添加项目以配置本地环境。")).toBeTruthy();
+  fireEvent.click(screen.getAllByRole("button", { name: "添加项目" })[1]);
+  expect(useAppStore.getState().projectEditTarget).toBe("create");
+  expect(useAppStore.getState().draft).toBe("untouched conversation draft");
+});
+
+it("retries an actual project-list failure without making the error into an empty list", async () => {
+  fetchSettings.mockRejectedValueOnce(new Error("Project registry unavailable"));
+  render(<SourceEnvironmentsTab />);
+  expect((await screen.findByRole("alert")).textContent).toBe("无法加载项目");
+  expect(screen.getByText("Error: Project registry unavailable")).toBeTruthy();
+  expect(screen.queryByText("尚无项目。添加项目以配置本地环境。")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await screen.findByRole("button", { name: "创建项目环境 App" });
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(fetchSettings).toHaveBeenCalledTimes(2);
+});
