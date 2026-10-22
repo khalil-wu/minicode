@@ -481,7 +481,7 @@
 .plugins-settings .plugin-switch input:checked + span i { transform: translateX(12px); }
 .plugin-row-chevron { color: var(--text-muted); }
 
-.plugin-marketplace-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: 24px; background: color-mix(in oklch, black 20%, transparent); }
+.plugin-marketplace-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: 24px; background: var(--dialog-overlay); }
 .plugin-marketplace-dialog { position: relative; width: min(600px, calc(100vw - 48px)); max-height: calc(100dvh - 48px); overflow: auto; display: grid; gap: 16px; box-sizing: border-box; padding: 20px; border: 1px solid var(--border-subtle); border-radius: 20px; background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
 .plugin-marketplace-dialog h2 { margin: 0 28px 6px 0; font-size: 20px; font-weight: var(--fw-semibold); }
 .plugin-marketplace-dialog header p { margin: 0; color: var(--text-muted); font-size: var(--mc-font-secondary); line-height: var(--leading-normal); }

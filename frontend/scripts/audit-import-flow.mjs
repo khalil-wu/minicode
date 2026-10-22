@@ -47,12 +47,14 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
       const content = element.querySelector(".settings-import-files-content");
       return { width: element.getBoundingClientRect().width, display: getComputedStyle(element).display,
         padding: getComputedStyle(element).padding, headingFont: getComputedStyle(element.querySelector("h2")).fontSize,
+        overlay: getComputedStyle(element.parentElement).backgroundColor,
         contentHeight: content.clientHeight, scrollHeight: content.scrollHeight };
     });
     assert.equal(scrollGeometry.width, 520);
     assert.equal(scrollGeometry.display, "flex");
     assert.equal(scrollGeometry.padding, "0px");
     assert.equal(scrollGeometry.headingFont, "20px");
+    assert.equal(scrollGeometry.overlay, "rgba(0, 0, 0, 0.133)");
     assert(scrollGeometry.scrollHeight > scrollGeometry.contentHeight);
     await capture("import-03-real-request-awaiting-receipt", { scrollGeometry });
     const scroll = pending.getByRole("button", { name: "滚动到底部", exact: true });
@@ -142,6 +144,20 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
     assert.equal(await error.getByRole("button", { name: "确定", exact: true }).count(), 0);
     assert.equal(await error.getByRole("link").count(), 0);
     await capture("import-07-real-destination-failure");
+    await error.getByRole("button", { name: "滚动到底部", exact: true }).click();
+    await page.waitForFunction(() => {
+      const element = document.querySelector(".settings-import-files-content");
+      return element.scrollHeight - element.clientHeight - element.scrollTop <= 8;
+    });
+    const failedItem = error.locator(".settings-import-file-result").filter({ hasText: "write-denied.md" });
+    assert((await failedItem.innerText()).includes("Permission denied"));
+    const failureGeometry = await failedItem.evaluate(element => {
+      const row = element.getBoundingClientRect();
+      const viewport = element.closest(".settings-import-files-content").getBoundingClientRect();
+      return { rowTop: row.top, rowBottom: row.bottom, viewportTop: viewport.top, viewportBottom: viewport.bottom };
+    });
+    assert(failureGeometry.rowTop >= failureGeometry.viewportTop && failureGeometry.rowBottom <= failureGeometry.viewportBottom);
+    await capture("import-08-real-destination-failure-detail", { failureGeometry });
     await page.keyboard.press("Escape");
     await error.waitFor({ state: "hidden" });
     checks.push("Actual import destination write failure preserves the original item error, exposes no nonexistent file link and closes only after the real result");

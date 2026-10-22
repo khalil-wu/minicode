@@ -1,4 +1,4 @@
-.mc-project-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: var(--backdrop-strong); font-family: var(--font-ui); }
+.mc-project-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: var(--dialog-overlay); font-family: var(--font-ui); }
 .mc-project-dialog { width: min(480px, calc(100vw - 48px)); padding: 24px; display: grid; gap: 24px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
 .mc-project-dialog h2 { margin: 0; font-size: var(--text-lg); font-weight: var(--fw-semibold); }
 .mc-project-name-input { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }

@@ -309,6 +309,18 @@ try {
     await capture(`settings-${String(index + 1).padStart(2, "0")}`, { settingsPage: label });
   }
   await auditImportFlow({ page, profile, sourceHome, capture, checks });
+  await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
+  await page.getByRole("radio", { name: "深色", exact: true }).click();
+  await page.getByRole("button", { name: "导入深色主题", exact: true }).click();
+  const darkThemeDialog = page.getByRole("dialog", { name: "导入主题", exact: true });
+  await darkThemeDialog.waitFor();
+  const darkDialogOverlay = await page.locator(".appearance-theme-import-backdrop").evaluate(element => getComputedStyle(element).backgroundColor);
+  assert.equal(darkDialogOverlay, "rgba(0, 0, 0, 0.133)");
+  await capture("dialog-dark-theme-import", { darkDialogOverlay });
+  await page.keyboard.press("Escape");
+  await darkThemeDialog.waitFor({ state: "hidden" });
+  await page.getByRole("radio", { name: "浅色", exact: true }).click();
+  checks.push("Actual default Dialog overlay uses the Source #0002 value in light import progress and dark theme import");
   await page.keyboard.press("Escape");
   await page.locator(".settings-center").waitFor({ state: "hidden" });
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
@@ -335,6 +347,16 @@ try {
     await page.keyboard.press("ArrowRight");
     await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
     await capture(`dpi-${scale}-theme-submenu-focus`);
+    await page.keyboard.press("End");
+    const lastTheme = page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true });
+    await page.waitForFunction(() => document.activeElement?.textContent.includes("VS Code Plus"));
+    const lastThemeGeometry = await lastTheme.evaluate(element => {
+      const item = element.getBoundingClientRect(), menu = element.closest('[role="menu"]').getBoundingClientRect();
+      return { focused: document.activeElement === element, itemTop: item.top, itemBottom: item.bottom, menuTop: menu.top, menuBottom: menu.bottom };
+    });
+    assert(lastThemeGeometry.focused && lastThemeGeometry.itemTop >= lastThemeGeometry.menuTop
+      && lastThemeGeometry.itemBottom <= lastThemeGeometry.menuBottom);
+    await capture(`dpi-${scale}-theme-submenu-last-item`, { lastThemeGeometry });
     await page.keyboard.press("Escape");
     for (const label of settingsPages) {
       await page.locator(".settings-center-tab").filter({ hasText: label }).click();

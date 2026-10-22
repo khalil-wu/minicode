@@ -212,13 +212,11 @@
   --glass-backdrop: blur(12px) saturate(150%);
   --glass-bg: color-mix(in oklch, var(--surface-panel) 72%, transparent);
 
-  /* ── Backdrop overlays (3) ─────────────────────────────
-     Ordered by depth: subtle < overlay < strong. (Previously "strong" 0.48 was
-     shallower than "overlay" 0.50, so destructive-confirmation dialogs read as
-     the lightest scrim — inverted. Strong is now genuinely the deepest.) */
+  /* Media/tool scrims and the Source default Dialog overlay. */
   --backdrop-overlay: oklch(0 0 0 / 0.50);
   --backdrop-strong:  oklch(0 0 0 / 0.60);
   --backdrop-subtle:  oklch(0 0 0 / 0.18);
+  --dialog-overlay: #0002;
 
   /* ── Semantic shadows (3) — one elevation ladder with refined. ───── */
   --shadow-soft:   var(--shadow-refined);

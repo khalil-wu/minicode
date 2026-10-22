@@ -187,7 +187,7 @@ function ConnectionEditor({ draft, saving, error, onClose, onSave }: { draft: Re
   const [name, setName] = useState(draft.displayName), [host, setHost] = useState((discovered ? draft.alias : draft.sshHost) || ""), [port, setPort] = useState(draft.sshPort?.toString() || "");
   const [identity, setIdentity] = useState(draft.identity || ""), [auth, setAuth] = useState(draft.identity ? "identity" : "default");
   const focus = useFocusTrap(true);
-  return createPortal(<div ref={focus} className="mc-dialog-backdrop remote-connection-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose(); }}>
+  return createPortal(<div ref={focus} className="mc-dialog-backdrop remote-connection-backdrop" data-dialog-variant="default" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose(); }}>
     <form className="mc-dialog-panel remote-connection-dialog" role="dialog" aria-modal="true" aria-label={tr("SSH 连接")} onKeyDown={event => { if (event.key === "Escape" && !saving) { event.stopPropagation(); onClose(); } }} onSubmit={event => {
       event.preventDefault(); onSave(discovered ? { ...draft, displayName: name.trim() } : { ...draft, source: "manual", alias: undefined, displayName: name.trim(), sshHost: host.trim(), sshPort: port ? Number(port) : null, identity: auth === "identity" ? identity.trim() : null });
     }}>

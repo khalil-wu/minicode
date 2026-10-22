@@ -1,4 +1,4 @@
-.skill-details-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: 24px; background: var(--backdrop-subtle); }
+.skill-details-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: grid; place-items: center; padding: 24px; background: var(--dialog-overlay); }
 .skill-details-dialog { display: flex; flex-direction: column; width: min(640px, 100%); max-height: min(800px, calc(100dvh - 48px)); border: 1px solid var(--border-subtle); border-radius: var(--radius-xl); background: var(--surface-base); box-shadow: var(--shadow-lg); outline: none; }
 .skill-details-toolbar { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; padding: 24px 24px 12px; }
 .skill-details-toolbar > div { display: flex; align-items: center; gap: 16px; }
