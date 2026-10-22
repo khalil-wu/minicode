@@ -402,6 +402,56 @@ jobs:
       - name: Electron smoke test
         run: xvfb-run -a npm run test:e2e
 
+  desktop-ui:
+    name: Current desktop UI and reconnect audit
+    runs-on: ubuntu-latest
+    needs: [native-execpolicy, native-network]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-execpolicy-linux-x64
+          path: backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-network-linux-x64
+          path: backend/network/resources/x86_64-unknown-linux-gnu
+      - name: Restore pinned runtime executable permissions
+        run: |
+          chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy
+          chmod +x backend/network/resources/x86_64-unknown-linux-gnu/minicode-network
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - name: Install isolated desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth bubblewrap ripgrep
+          python -m pip install -e .
+          npm ci --prefix frontend
+          npm ci --prefix desktop
+      - name: Build current desktop renderer
+        working-directory: frontend
+        run: npm run build
+      - name: Capture real UI and provider retry chain
+        run: xvfb-run -a --server-args='-screen 0 1920x1200x24' node frontend/scripts/audit-ui-alignment.mjs
+      - name: Upload current build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-desktop-ui-evidence
+          path: output/playwright/ui-alignment-current/
+          if-no-files-found: error
+
   electron-frontend:
     name: Electron Playwright integration
     runs-on: ubuntu-latest

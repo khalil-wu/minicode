@@ -192,6 +192,9 @@ try {
   }
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
   success = true;
+} catch (error) {
+  if (page) await capture("failure-current-state");
+  throw error;
 } finally {
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors,
     scope: "Production backend and renderer; model replies controlled; settings-page captures are current baselines, not full visual parity acceptance" }, null, 2));
