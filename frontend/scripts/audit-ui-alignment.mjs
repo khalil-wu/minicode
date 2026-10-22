@@ -134,6 +134,53 @@ async function capture(name, context = {}) {
     boundary: "Static Electron renderer viewport; finite animations fast-forwarded and continuous animations temporarily reset; excludes natural-motion completion and native OS window decoration" });
   trace(`capture:${name}:complete`);
 }
+async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
+  const button = page.locator(selector);
+  await page.waitForFunction(selector => !document.querySelector(selector).disabled, selector);
+  const idle = await button.evaluate(element => ({ width: element.getBoundingClientRect().width,
+    height: element.getBoundingClientRect().height, border: getComputedStyle(element).borderTopColor,
+    glyph: element.querySelector("svg").getAttribute("viewBox") }));
+  assert.equal(idle.width, size);
+  assert.equal(idle.height, size);
+  assert.equal(idle.border, "rgba(0, 0, 0, 0)");
+  assert.equal(idle.glyph, "0 0 16 16");
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const ready = Promise.withResolvers();
+  const actualReads = [];
+  const matcher = url => paths.includes(url.pathname);
+  const handler = async route => {
+    try {
+      assert.equal(route.request().method(), "GET");
+      const response = await route.fetch();
+      assert.equal(response.status(), 200);
+      actualReads.push(new URL(route.request().url()).pathname);
+      if (actualReads.length === paths.length) ready.resolve();
+      await held;
+      await route.fulfill({ response });
+    } catch (error) { ready.reject(error); throw error; }
+  };
+  await page.route(matcher, handler);
+  try {
+    await button.click();
+    await ready.promise;
+    assert.deepEqual([...actualReads].sort(), [...paths].sort());
+    assert.equal(await button.isDisabled(), true);
+    assert.equal(await button.getAttribute("aria-busy"), "true");
+    const pending = await button.evaluate(element => ({ spinner: element.querySelector(".settings-refresh-spinner") !== null,
+      glyph: element.querySelector("svg").getAttribute("viewBox"), width: element.querySelector("svg").getBoundingClientRect().width }));
+    assert.equal(pending.spinner, spinner);
+    assert.equal(pending.glyph, spinner ? "0 0 24 24" : "0 0 16 16");
+    assert.equal(pending.width, spinner ? 12 : 16);
+    await capture(name, { idle, pending, actualReads });
+  } finally {
+    release();
+    await page.unroute(matcher, handler);
+  }
+  await page.waitForFunction(selector => !document.querySelector(selector).disabled, selector);
+  assert.equal(await button.getAttribute("aria-busy"), "false");
+  checks.push({ scenario: `${name}: actual backend GETs complete, pending delivery disables refresh with the Source glyph; original responses restore the idle button`, actualReads });
+}
 async function persistEvidence(extra = {}) {
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
     scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", ...extra }, null, 2));
@@ -329,6 +376,13 @@ try {
       const copyWidth = await emptyTitle.evaluate(element => element.parentElement.getBoundingClientRect().width);
       assert(copyWidth > 400, "The empty Hooks message must use the content column instead of the icon column");
       checks.push({ scenario: "Actual empty Hooks row keeps its text horizontal", copyWidth });
+      await auditSettingsRefresh({ selector: ".settings-hooks-refresh", paths: ["/api/settings/hooks"],
+        name: "settings-12-refresh-pending", size: 26, spinner: false });
+    }
+    if (label === "工作树") {
+      await auditSettingsRefresh({ selector: ".settings-worktrees-refresh",
+        paths: ["/api/settings/worktrees", "/api/settings/worktrees/managed"],
+        name: "settings-15-refresh-pending", size: 28, spinner: true });
     }
     await capture(`settings-${String(index + 1).padStart(2, "0")}`, { settingsPage: label });
   }

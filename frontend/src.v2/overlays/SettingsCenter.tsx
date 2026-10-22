@@ -259,6 +259,8 @@ export const SettingsCenter = () => {
   }, [activeTab, pluginCount, settingsOpen, setActiveTab, skillCount, marketplaceCount, pluginsEnabled]);
   const navigationTab = integrationOpen ? "plugins" : ["provider", "features"].includes(activeTab) ? "config" : activeTab;
   const activeTabMeta = tabs.find((tab) => tab.id === navigationTab)!;
+  const documentationHref = activeTab === "config" ? "https://developers.openai.com/codex/config-basic"
+    : activeTab === "hooks" ? "https://developers.openai.com/codex/hooks" : null;
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
   const navigationTabs = tabs.filter(tab => !["import", "connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id)
     && (tab.id !== "computerUse" || computerUse.data?.navigation_visible));
@@ -349,9 +351,9 @@ export const SettingsCenter = () => {
             {!(activeTab === "general" && licensesOpen) && <header className="settings-page-heading">
               <div className="settings-page-heading-copy">
               <h2 id="settings-page-title">{activeTabMeta.label}</h2>
-              {activeTab === "config" && <p>{activeTabMeta.description}{" "}<a
-                className="config-learn-more" href="https://developers.openai.com/codex/config-basic" target="_blank" rel="noreferrer"
-                onClick={event => { event.preventDefault(); void import("../lib/open-preferred-target").then(({ openPreferredWebLink }) => openPreferredWebLink("https://developers.openai.com/codex/config-basic")); }}
+              {documentationHref && <p>{activeTabMeta.description}{" "}<a
+                className="settings-learn-more" href={documentationHref} target="_blank" rel="noreferrer"
+                onClick={event => { event.preventDefault(); void import("../lib/open-preferred-target").then(({ openPreferredWebLink }) => openPreferredWebLink(documentationHref)); }}
               >{tr("了解更多")}</a></p>}
               {integrationOpen && <p>{tr("管理插件、技能和 MCP。")}</p>}
               {activeTab === "computerUse" && <p>{tr("管理 MiniCode 如何使用电脑上的其他应用。")}</p>}

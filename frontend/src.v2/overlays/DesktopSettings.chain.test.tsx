@@ -88,6 +88,43 @@ it("uses Source worktree confirmation before persisting automatic deletion chang
   expect(JSON.parse(mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")![1].body)).toEqual({ auto_cleanup_enabled: false });
 });
 
+it.each([false, true])("keeps both Worktrees refresh reads pending and retains an unsaved draft (first read fails=%s)", async firstFails => {
+  const prefs = { worktree_root: "C:/original-worktrees", default_worktree_root: "C:/home/worktrees", auto_cleanup_enabled: true, keep_count: 15, upstream_refresh_mode: "never" };
+  const reads: { path: string; finish: (value: Response) => void }[] = [];
+  mocks.fetch.mockImplementation(url => new Promise<Response>(finish => { reads.push({ path: new URL(url).pathname, finish }); }));
+  render(<WorktreesTab />);
+  const refresh = screen.getByRole("button", { name: "刷新" });
+  expect(refresh).toHaveProperty("disabled", true);
+  expect(reads.map(read => read.path)).toEqual(["/api/settings/worktrees", "/api/settings/worktrees/managed"]);
+  await act(async () => {
+    reads[0].finish(response(prefs));
+    reads[1].finish(response({ worktrees: [] }));
+  });
+  await waitFor(() => expect(refresh).toHaveProperty("disabled", false));
+  const root = screen.getByRole("textbox", { name: "工作树根目录" });
+  expect(root).toHaveProperty("value", prefs.worktree_root);
+  fireEvent.change(root, { target: { value: "C:/unsaved-root-draft" } });
+  fireEvent.click(refresh);
+  expect(refresh).toHaveProperty("disabled", true);
+  expect(refresh.getAttribute("aria-busy")).toBe("true");
+  expect(reads.slice(2).map(read => read.path)).toEqual(["/api/settings/worktrees", "/api/settings/worktrees/managed"]);
+  await act(async () => { reads[2].finish(firstFails
+    ? new Response(JSON.stringify({ detail: "Actual prefs read failed" }), { status: 500 })
+    : response({ ...prefs, worktree_root: "C:/refreshed-server-root" })); });
+  if (firstFails) expect(screen.getByRole("alert").textContent).toContain("Actual prefs read failed");
+  expect(refresh).toHaveProperty("disabled", true);
+  expect(refresh.getAttribute("aria-busy")).toBe("true");
+  expect(root).toHaveProperty("value", "C:/unsaved-root-draft");
+  await act(async () => {
+    reads[3].finish(response({ worktrees: [{ path: "C:/managed/tree", repo_root: "C:/repo", branch: "feature", pinned: false, conversation_ids: [], can_remove: true, protection_reason: "" }] }));
+  });
+  await waitFor(() => expect(refresh).toHaveProperty("disabled", false));
+  expect(refresh.getAttribute("aria-busy")).toBe("false");
+  expect(root).toHaveProperty("value", "C:/unsaved-root-draft");
+  if (firstFails) expect(screen.getByRole("alert").textContent).toContain("Actual prefs read failed");
+  else expect(screen.getByText("repo · feature")).toBeTruthy();
+});
+
 it("rechecks Storage snapshots through the authoritative delete command and reports skips separately", async () => {
   const chats = ["deleted", "changed", "failed"].map((id, index) => ({ id, title: id, updated_at: "2026-01-01", archived: true, subagent_count: index, snapshot: { revision: index } }));
   mocks.fetch.mockImplementation(async url => response(new URL(url).pathname.endsWith("/review") ? { cutoff: "2026-07-01", days: 90, archived_only: true, chats } : { path: "C:/data", total_bytes: 1024, categories: [

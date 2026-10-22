@@ -253,13 +253,14 @@
 
 .settings-page-heading {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 20px;
+  gap: 16px;
   margin-bottom: 32px;
 }
 .settings-page-heading-copy { display: grid; gap: 6px; min-width: 0; }
-.settings-page-heading-actions { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; }
+.settings-learn-more { display: inline-flex; color: var(--accent-primary); text-decoration: none; }
+.settings-page-heading-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .settings-page-heading-actions:empty { display: none; }
 .settings-center-content:has(.settings-tab-pane:not([hidden]) .settings-browser-history) > .settings-page-heading { display: none; }
 .settings-browser-history { display: grid; gap: 22px; }
@@ -556,6 +557,28 @@
 .settings-icon-button:disabled {
   opacity: .5;
   cursor: default;
+}
+
+.settings-icon-button.settings-refresh-button {
+  --mc-icon-size: 16px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-tertiary);
+}
+.settings-icon-button.settings-refresh-button:hover:not(:disabled) { color: var(--text-tertiary); }
+.settings-hooks-refresh { --mc-control-radius: 6px; width: 26px; height: 26px; padding: 4px; }
+.settings-worktrees-refresh { --mc-control-radius: 8px; width: 28px; height: 28px; padding: 0; }
+.settings-refresh-spinner {
+  --mc-icon-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  contain: layout paint style;
+  animation: settings-spin 2s steps(60, end) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) .settings-refresh-spinner { animation: none; }
 }
 
 /* 高度 / 圆角 / 描边 / 底色 / 字号沿用 settings-center-main 的输入控件契约。 */

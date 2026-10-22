@@ -39,7 +39,7 @@ export const GeneralTab = ({
   const setFollowUpBehavior = useAppStore((s) => s.setFollowUpBehavior);
   const modifierSymbol = navigator.platform.startsWith("Mac") ? "⌘" : "^";
   return (
-    <>
+    <div className="settings-general-groups">
       {isDesktop() ? <DesktopGeneralPreferences onOpenLicenses={onOpenLicenses} importSettings={importSettings} /> : importSettings && <SettingsGroup title={t("常规")}>{importSettings}</SettingsGroup>}
       <SettingsGroup title={t("输入框")}>
         <PlainTextComposerPreference />
@@ -72,7 +72,7 @@ export const GeneralTab = ({
       {isDesktop() && <DefaultPermissionSettings />}
       {isDesktop() && <DesktopUpdates />}
       </div></details>
-    </>
+    </div>
   );
 };
 

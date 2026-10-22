@@ -1,3 +1,10 @@
+.settings-general-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 40px;
+  min-width: 0;
+}
+
 .settings-segmented.settings-follow-up-segmented {
   padding: 0;
   gap: 2px;

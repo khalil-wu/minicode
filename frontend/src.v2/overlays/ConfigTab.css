@@ -4,7 +4,6 @@
 .config-open-button:hover:not(:disabled) { background: var(--surface-hover); }
 .config-open-button:disabled { color: var(--text-muted); cursor: default; }
 .config-open-button > svg { flex: 0 0 auto; }
-.config-learn-more { display: inline-flex; color: var(--accent-primary); text-decoration: none; }
 .config-field-lock { display: flex; align-items: center; gap: 4px; color: var(--state-warning); }
 .config-lock-icon { width: 14px; height: 14px; flex: 0 0 auto; background: currentColor; }
 .config-field-error { color: var(--state-danger); }
