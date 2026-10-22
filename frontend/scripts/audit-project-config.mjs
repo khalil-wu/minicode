@@ -193,7 +193,44 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   }, { id: originalConversation, root: workspace });
   assert(wire.slice(restoreAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
     && row.message.conversation_id === originalConversation && row.message.client_command_type === "conversation.switch"));
-  await showConfig();
-  await scope.click();
-  await page.getByRole("option", { name: "用户", exact: true }).click();
+  // Observe the real final reopen without retries: a prior run lost its scope
+  // menu here. Keep the event order to distinguish focus/scroll from config load.
+  await page.evaluate(() => {
+    const events = [];
+    const describe = node => node instanceof Element ? { tag: node.tagName, className: node.className,
+      role: node.getAttribute("role"), label: node.getAttribute("aria-label") } : { name: node?.constructor.name };
+    const record = (kind, details = {}) => events.push({ at: performance.now(), kind, ...details,
+      active: describe(document.activeElement), scrollTop: document.querySelector(".settings-center-main").scrollTop,
+      open: document.querySelector(".config-scope-select").dataset.open,
+      triggerDisabled: document.querySelector(".config-scope-select .mc-select-trigger").disabled,
+      fieldDisabled: document.querySelector('[aria-label^="回复详细程度，当前："]').disabled });
+    const onEvent = event => record(event.type, { target: describe(event.target), related: describe(event.relatedTarget),
+      path: event.composedPath().slice(0, 5).map(describe) });
+    const kinds = ["pointerdown", "pointerup", "click", "focusin", "focusout", "scroll", "resize"];
+    for (const kind of kinds) window.addEventListener(kind, onEvent, true);
+    const observer = new MutationObserver(changes => {
+      for (const change of changes) if (change.target.matches(".config-scope-select, .config-scope-select .mc-select-trigger")) {
+        record("mutation", { target: describe(change.target), attribute: change.attributeName,
+          before: change.oldValue, after: change.target.getAttribute(change.attributeName) });
+      }
+    });
+    observer.observe(document.querySelector(".config-scope-select"), { attributes: true, subtree: true,
+      attributeOldValue: true, attributeFilter: ["data-open", "disabled"] });
+    record("before-reopen");
+    window.__finishConfigReopenAudit = () => {
+      record("finished");
+      for (const kind of kinds) window.removeEventListener(kind, onEvent, true);
+      observer.disconnect();
+      delete window.__finishConfigReopenAudit;
+      return events;
+    };
+  });
+  try {
+    await showConfig();
+    await scope.click();
+    await page.getByRole("option", { name: "用户", exact: true }).click();
+  } finally {
+    checks.push({ scenario: "Actual final Configuration reopen and scope selection event order",
+      events: await page.evaluate(() => window.__finishConfigReopenAudit()) });
+  }
 }
