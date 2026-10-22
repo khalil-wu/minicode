@@ -77,6 +77,7 @@ class ImportSelectionRequest(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
     detection_id: str = Field(min_length=1)
     item_ids: list[str] = Field(min_length=1)
+    workspace_root: str | None = None
 
 
 class ImportSyncRequest(BaseModel):
@@ -102,7 +103,7 @@ async def detect_external_agents(request: ImportDetectionRequest) -> dict:
 @router.post("/api/settings/import")
 async def import_external_agents(request: ImportSelectionRequest) -> dict:
     try:
-        result = await import_service().import_items(request.detection_id, request.item_ids)
+        result = await import_service().import_items(request.detection_id, request.item_ids, workspace_root=request.workspace_root)
     except (OSError, ValueError) as error:
         raise HTTPException(400, str(error)) from error
     result["setup_errors"] = await refresh_import_consumers(result, publish=False)

@@ -146,7 +146,14 @@ try {
   const other = await page.evaluate(() => window.__zustandStore.getState().conversationId);
   await composer.fill("KEEP_B_DRAFT");
   assert.equal(await page.locator(".stream-error-cell").count(), 0);
-  await page.evaluate(id => window.__zustandStore.getState().switchConversation(id), owner);
+  const returnToOwnerAt = wire.length;
+  await page.evaluate(id => window.__zustandStore.getState().requestConversationSwitch(id), owner);
+  await page.waitForFunction(id => {
+    const state = window.__zustandStore.getState();
+    return state.conversationId === id && state.pendingConversationSwitchId === null;
+  }, owner);
+  assert(wire.slice(returnToOwnerAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
+    && row.message.conversation_id === owner && row.message.client_command_type === "conversation.switch"));
   await page.locator('.stream-error-cell[data-retry-attempt="2"]').waitFor();
   assert.equal(await composer.innerText(), "KEEP_A_DRAFT");
   await capture("04-return-to-running-owner");
@@ -160,8 +167,14 @@ try {
   reply(heldResponse);
   await page.getByText("HARNESS_RECONNECT_COMPLETE", { exact: true }).waitFor({ timeout: 30000 });
   await page.waitForFunction(() => !window.__zustandStore.getState().isStreaming);
-  await page.evaluate(id => window.__zustandStore.getState().switchConversation(id), other);
-  await page.waitForFunction(id => window.__zustandStore.getState().conversationId === id, other);
+  const returnToOtherAt = wire.length;
+  await page.evaluate(id => window.__zustandStore.getState().requestConversationSwitch(id), other);
+  await page.waitForFunction(id => {
+    const state = window.__zustandStore.getState();
+    return state.conversationId === id && state.pendingConversationSwitchId === null;
+  }, other);
+  assert(wire.slice(returnToOtherAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
+    && row.message.conversation_id === other && row.message.client_command_type === "conversation.switch"));
   assert.equal(await composer.innerText(), "KEEP_B_DRAFT");
   checks.push("Actual provider 503 → retry 1/5 → retry 2/5 → live owner switch → session restore → final response, both drafts retained");
 
@@ -233,8 +246,24 @@ try {
       checks.push("Real storage measurement uses the Source 24px category bar, five-category legend and actual data path");
     }
     if (label === "配置") {
+      const defaultsHeading = page.getByRole("heading", { name: "智能体默认设置", exact: true });
+      await defaultsHeading.waitFor();
+      assert.equal(await page.getByRole("link", { name: "了解更多", exact: true }).getAttribute("href"), "https://developers.openai.com/codex/config-basic");
       const scope = page.getByRole("button", { name: /^配置作用域，当前：/ });
       const verbosity = page.getByRole("button", { name: /^回复详细程度，当前：/ });
+      const configGeometry = await page.evaluate(() => {
+        const description = document.querySelector(".settings-page-heading-copy p");
+        const heading = document.querySelector(".settings-tab-pane:not([hidden]) .settings-group-title");
+        const toolbar = document.querySelector(".config-scope-toolbar");
+        const opener = document.querySelector(".config-open-button");
+        return { descriptionBottom: description.getBoundingClientRect().bottom, headingTop: heading.getBoundingClientRect().top,
+          headingBottom: heading.getBoundingClientRect().bottom, toolbarTop: toolbar.getBoundingClientRect().top,
+          openerBorder: getComputedStyle(opener).borderTopWidth, openerIconWidth: opener.querySelector("svg").getBoundingClientRect().width };
+      });
+      assert(configGeometry.descriptionBottom < configGeometry.headingTop && configGeometry.headingBottom < configGeometry.toolbarTop);
+      assert.equal(configGeometry.openerBorder, "0px");
+      assert.equal(configGeometry.openerIconWidth, 14);
+      checks.push({ scenario: "Actual Configuration description → Agent defaults → scope toolbar; Source ghost opener and external arrow", configGeometry });
       await scope.click();
       assert.equal(await page.getByRole("option", { name: "管理员", exact: true }).count(), 1);
       await capture("settings-06-config-scope-menu");
@@ -268,7 +297,7 @@ try {
       assert.equal(Object.hasOwn(JSON.parse(await readFile(unset.write.path, "utf8")), "model_verbosity"), false);
       await page.getByRole("button", { name: "回复详细程度，当前：模型默认值", exact: true }).waitFor();
       checks.push("Real User/Admin scope menu, managed field lock, actual User file write and explicit-null override removal");
-      await auditProjectConfig({ page, app, workspace, profile, capture, checks });
+      await auditProjectConfig({ page, app, workspace, profile, capture, checks, wire });
     }
     if (label === "钩子") {
       const emptyTitle = page.getByText("未找到钩子", { exact: true });

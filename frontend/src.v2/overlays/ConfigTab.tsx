@@ -4,6 +4,7 @@ import { useAppStore } from "../stores";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { SelectMenu } from "../components/SelectMenu";
 import { openManagedSettingsTarget } from "../desktop/runtime";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import "./ConfigTab.css";
 
 export type AgentConfigFields = {
@@ -176,16 +177,18 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
     || config.requirements.allowed_web_search_modes.includes(option));
   return <>
     <section className="settings-group">
-      <div className="settings-section-heading settings-section-heading-row">
+      <h3 className="settings-group-title">{t("智能体默认设置")}</h3>
+      <div className="settings-section-heading-row config-scope-toolbar">
         <SelectMenu ariaLabel={t("配置作用域")} value={scopeId} selectedLabel={!config ? t("正在加载…") : undefined}
           className="settings-select config-scope-select" menuWidth={240} disabled={!config || config.scopes.length === 0}
           title={scope?.path ?? scope?.source.display} onValueChange={next => updatePage(workspaceRoot, current => ({ ...current, scopeId: next }))}>
           {projectScopes.length > 0 && <optgroup label={t("项目配置")}>{projectScopes.map(item => <option key={item.id} value={item.id} title={item.path ?? item.source.display}>{scopeLabel(item)}</option>)}</optgroup>}
           <optgroup label={t("全局配置")}>{globalScopes.map(item => <option key={item.id} value={item.id} title={item.path ?? item.source.display}>{scopeLabel(item)}</option>)}</optgroup>
         </SelectMenu>
-        <button type="button" className="settings-action-button" disabled={!scope?.path} onClick={openConfig}>{t("打开配置文件")}</button>
+        <button type="button" className="config-open-button" disabled={!scope?.path} onClick={openConfig}>
+          {t("打开配置文件")}<SettingsSourceIcon icon="openConfig" size={14} />
+        </button>
       </div>
-      <p className="settings-section-description">{t("为新聊天配置权限、网络访问和智能体回复。")}</p>
       {page?.loadError && <p role="alert">{page.loadError}</p>}
       {page?.openError?.scopeId === scopeId && <p role="alert">{page.openError.message}</p>}
       {projectDisabledReason !== null && <div className="config-scope-warning" role="alert">

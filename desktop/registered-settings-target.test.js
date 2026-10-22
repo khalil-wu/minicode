@@ -33,6 +33,7 @@ async function settingsFixture(t) {
   const hooks = new Map([["profile-key", profileHook], ["plugin-key", pluginHook]]);
   const configs = new Map([["user", { path: profileHook }], ["managed", { path: managedConfig }],
     [projectScopeId, { path: projectConfig, workspace_root: projectRoot }]]);
+  const importedFiles = new Map([["actual-import\0actual-item", { path: profileHook, workspace_root: "" }]]);
   security.init({ initialRoots: [workspace], readOnlyRoots: [], userOutputRoots: [] });
   const requests = [];
   const opened = [];
@@ -53,8 +54,10 @@ async function settingsFixture(t) {
     }
     const kind = url.searchParams.get("kind");
     const target = kind === "config" ? url.searchParams.has("scope_id") ? configs.get(url.searchParams.get("scope_id")) : { path: settingsPath }
+      : kind === "import-item" ? importedFiles.get(`${url.searchParams.get("import_id")}\0${url.searchParams.get("item_id")}`)
       : kind === "data" ? { path: dataPath } : hooks.has(url.searchParams.get("hook_key")) ? { path: hooks.get(url.searchParams.get("hook_key")) } : null;
-    if (!target) response.writeHead(404).end(JSON.stringify({ detail: kind === "config" ? "Configuration scope is no longer available." : "Hook is no longer registered; reload its configuration." }));
+    if (!target) response.writeHead(404).end(JSON.stringify({ detail: kind === "config" ? "Configuration scope is no longer available."
+      : kind === "import-item" ? "This file is not registered in a successful import result." : "Hook is no longer registered; reload its configuration." }));
     else response.end(JSON.stringify(target));
   });
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -106,7 +109,7 @@ async function settingsFixture(t) {
     process: { env: {}, argv: [], contextIsolated: true, platform: "win32", arch: "x64" }, window: {}, console,
   });
   return { directory, workspace, settingsPath, dataPath, profileHook, pluginHook, hooks, requests, opened,
-    managedConfig, projectRoot, projectConfig, projectScopeId, configs, preferredOwners, preferredOpened,
+    managedConfig, projectRoot, projectConfig, projectScopeId, configs, importedFiles, preferredOwners, preferredOpened,
     state, sender, record, window, runtimeOwners, open: request => runtime.desktop.settings.openTarget(request) };
 }
 
@@ -247,5 +250,39 @@ test("project opener failures retain the original error", async t => {
   fixture.state.targetException = new Error("Configured editor could not start");
   await assert.rejects(fixture.open({ kind: "config", scopeId: fixture.projectScopeId, workspaceRoot: fixture.workspace }), fixture.state.targetException);
   assert.deepEqual(fixture.preferredOpened, [{ id: "cursor", path: fixture.projectConfig }]);
+  assert.deepEqual(fixture.opened, []);
+});
+
+test("an imported file uses only its actual ledger identity and the global saved file target", async t => {
+  const fixture = await settingsFixture(t);
+  const roots = [...security.getTrustedWorkspaceRoots()];
+  assert.equal(await fixture.open({ kind: "import-item", importId: "actual-import", itemId: "actual-item",
+    workspaceRoot: fixture.workspace, sessionId: "actual-editor-session", conversationId: "",
+    path: fixture.settingsPath, targetId: "system", projectWorkspaceRoot: fixture.directory }), true);
+  const receipt = fixture.requests[0].url;
+  assert.equal(receipt.searchParams.get("kind"), "import-item");
+  assert.equal(receipt.searchParams.get("import_id"), "actual-import");
+  assert.equal(receipt.searchParams.get("item_id"), "actual-item");
+  assert.equal(receipt.searchParams.get("session_id"), "actual-editor-session");
+  assert.equal(receipt.searchParams.get("conversation_id"), "");
+  assert.equal(receipt.searchParams.has("path"), false);
+  assert.deepEqual(fixture.preferredOwners, [undefined]);
+  assert.deepEqual(fixture.preferredOpened, [{ id: "cursor", path: fixture.profileHook }]);
+  assert.deepEqual([...security.getTrustedWorkspaceRoots()], roots);
+  assert.equal(security.isReadablePath(fixture.profileHook), false);
+});
+
+test("an imported built-in file returns the same registered editor receipt while removed identities fail", async t => {
+  const fixture = await settingsFixture(t);
+  fixture.state.fileTarget = "minicode";
+  const request = { kind: "import-item", importId: "actual-import", itemId: "actual-item", workspaceRoot: fixture.workspace,
+    sessionId: "actual-editor-session", conversationId: "" };
+  const opened = await fixture.open(request);
+  assert.equal(opened.openInEditor, true);
+  assert.equal(opened.path, fixture.profileHook);
+  assert.equal(opened.workspaceRoot, "");
+  fixture.importedFiles.clear();
+  await assert.rejects(fixture.open(request), /not registered in a successful import result/);
+  assert.deepEqual(fixture.preferredOpened, []);
   assert.deepEqual(fixture.opened, []);
 });

@@ -110,12 +110,14 @@ def get_hook_settings_api(response: Response, workspace_root: str = "") -> dict[
 @router.get("/api/settings/open-target")
 async def get_settings_open_target_api(
     response: Response,
-    kind: Literal["config", "hook", "data"],
+    kind: Literal["config", "hook", "data", "import-item"],
     workspace_root: str = "",
     hook_key: str | None = None,
     scope_id: str | None = None,
     session_id: str = "",
     conversation_id: str = "",
+    import_id: str = "",
+    item_id: str = "",
 ) -> dict[str, str]:
     """Resolve an application's registered settings action, never a caller path."""
     from pathlib import Path
@@ -123,33 +125,22 @@ async def get_settings_open_target_api(
     from backend.services.hook_settings_service import hook_settings
 
     response.headers["Cache-Control"] = "no-store"
+    resolved = None
     if kind == "config":
         if scope_id is None:
             target = SETTINGS_FILE
         else:
             from backend.services.agent_config_settings_service import agent_config_target
             try:
-                target = await asyncio.to_thread(agent_config_target, workspace_root, scope_id)
+                resolved = await asyncio.to_thread(agent_config_target, workspace_root, scope_id)
             except ValueError as exc:
                 raise HTTPException(404, detail=str(exc)) from exc
-            if "workspace_root" in target and (session_id or conversation_id):
-                from backend.api import _state
-                if not session_id:
-                    raise HTTPException(422, "An editor session owner is required.")
-                session = _state.ws_manager.get_session(session_id)
-                if session is None:
-                    raise HTTPException(404, "Session is not connected.")
-                if conversation_id:
-                    if session.active_conversation_id != conversation_id:
-                        raise HTTPException(409, "Workspace conversation owner is stale.")
-                    conversation = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
-                    if conversation is None or conversation.archived:
-                        raise HTTPException(404, "The target conversation is not available.")
-                    bound = conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root
-                    if not bound or bound.startswith("file:") or Path(bound).resolve() != Path(workspace_root).resolve():
-                        raise HTTPException(409, "Workspace execution owner is stale.")
-                session.editor_config_files[(str(Path(workspace_root).resolve()), target["path"])] = target["path"]
-            return target
+    elif kind == "import-item":
+        from backend.api.routes_import import import_service
+        try:
+            resolved = await asyncio.to_thread(import_service().file_target, import_id, item_id)
+        except ValueError as exc:
+            raise HTTPException(404, detail=str(exc)) from exc
     elif kind == "data":
         target = DATA_ROOT
     else:
@@ -158,6 +149,25 @@ async def get_settings_open_target_api(
         if hook is None:
             raise HTTPException(404, detail="Hook is no longer registered; reload its configuration.")
         target = Path(hook["source_path"])
+    if resolved is not None:
+        if "workspace_root" in resolved and (session_id or conversation_id):
+            from backend.api import _state
+            if not session_id:
+                raise HTTPException(422, "An editor session owner is required.")
+            session = _state.ws_manager.get_session(session_id)
+            if session is None:
+                raise HTTPException(404, "Session is not connected.")
+            if conversation_id:
+                if session.active_conversation_id != conversation_id:
+                    raise HTTPException(409, "Workspace conversation owner is stale.")
+                conversation = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
+                if conversation is None or conversation.archived:
+                    raise HTTPException(404, "The target conversation is not available.")
+                bound = conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root
+                if not bound or bound.startswith("file:") or Path(bound).resolve() != Path(workspace_root).resolve():
+                    raise HTTPException(409, "Workspace execution owner is stale.")
+            session.editor_config_files[(str(Path(workspace_root).resolve()), resolved["path"])] = resolved["path"]
+        return resolved
     return {"path": str(target.resolve())}
 
 

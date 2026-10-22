@@ -1,6 +1,10 @@
 // Exact Codex 26.1016 settings glyphs: navigation assets/consumers and theme toolbar.
 // Source: app-shared-9cc135f1bdc1; use-visible-settings-sections-57ea2a800d85; app-initial-2b6b8063022d.
 const icons = {
+  openConfig: { // app-initial::d0u / configuration-panel::Pt, icon-2xs
+    viewBox: "0 0 20 20",
+    paths: <path d="M14.3349 13.3301V6.60645L5.47065 15.4707C5.21095 15.7304 4.78895 15.7304 4.52925 15.4707C4.26955 15.211 4.26955 14.789 4.52925 14.5293L13.3935 5.66504H6.66011C6.29284 5.66504 5.99507 5.36727 5.99507 5C5.99507 4.63273 6.29284 4.33496 6.66011 4.33496H14.9999L15.1337 4.34863C15.4369 4.41057 15.665 4.67857 15.665 5V13.3301C15.6649 13.6973 15.3672 13.9951 14.9999 13.9951C14.6327 13.9951 14.335 13.6973 14.3349 13.3301Z" fill="currentColor" />,
+  },
   general: { // gear-light-16
     viewBox: "0 0 16 16",
     paths: <>

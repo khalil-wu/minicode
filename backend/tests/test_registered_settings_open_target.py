@@ -259,3 +259,41 @@ def test_project_editor_registration_and_reads_keep_the_actual_session_and_conve
     denied = fixture.client.get("/api/settings/open-target", params={**owner, "kind": "config", "scope_id": f"project:{fixture.workspace}"})
     assert denied.status_code == 409, denied.text
     assert path.read_text(encoding="utf-8") == "# original\n"
+
+
+def test_import_result_file_uses_actual_ledger_identity_and_existing_exact_editor_permission(registered_settings, monkeypatch):
+    import asyncio
+    from backend.api import routes_import
+    from backend.services.external_agent_import import ExternalAgentImportService
+    fixture = registered_settings
+    home = fixture.settings.parent / "import-source"
+    source = home / ".claude" / "CLAUDE.md"
+    source.parent.mkdir(parents=True)
+    source.write_text("Original external instructions", encoding="utf-8")
+    service = ExternalAgentImportService(source_home=home, config_home=fixture.settings.parent,
+        settings_file=fixture.settings, state_dir=fixture.data)
+    monkeypatch.setattr(routes_import, "_service", service)
+    plan = service.detect(provider_ids=["claude"])
+    item = next(item for item in plan["items"] if item["item_type"] == "instructions")
+    outcome = asyncio.run(service.import_items(plan["detection_id"], [item["id"]], workspace_root=str(fixture.workspace)))
+    session, owner = editor_session(fixture, monkeypatch, fixture.workspace)
+    target = Path(item["target_path"])
+    before = fixture.trusted_file.read_bytes()
+    identity = {"kind": "import-item", "import_id": outcome["history"]["id"], "item_id": item["id"]}
+    opened = fixture.client.get("/api/settings/open-target", params={**owner, **identity, "path": str(fixture.profile)})
+    assert opened.status_code == 200, opened.text
+    assert opened.json() == {"path": str(target), "workspace_root": ""}
+    read = fixture.client.get("/api/workspace/file", params={**owner, "path": str(target)})
+    assert read.status_code == 200 and read.json()["content"] == "Original external instructions", read.text
+    saved = fixture.client.put("/api/workspace/file/compare-write", params=owner,
+        json={"path": str(target), "expected_hash": read.json()["content_hash"], "content": "User edited only the registered imported file"})
+    assert saved.status_code == 200, saved.text
+    assert target.read_text() == "User edited only the registered imported file"
+    assert source.read_text() == "Original external instructions"
+    assert fixture.client.get("/api/workspace/file", params={**owner, "path": str(fixture.profile)}).status_code == 403
+    assert fixture.trusted_file.read_bytes() == before
+    assert len(session.editor_config_files) == 1
+    for patch in ({"item_id": str(fixture.profile)}, {"import_id": "removed-import"}):
+        denied = fixture.client.get("/api/settings/open-target", params={**owner, **identity, **patch})
+        assert denied.status_code == 404, denied.text
+    assert len(session.editor_config_files) == 1

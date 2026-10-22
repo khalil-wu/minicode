@@ -4,7 +4,7 @@ import path from "node:path";
 
 // Called only by the isolated production-desktop CI audit. Fixtures are real
 // files; renderer setup uses existing public actions, never injected snapshots.
-export async function auditProjectConfig({ page, app, workspace, profile, capture, checks }) {
+export async function auditProjectConfig({ page, app, workspace, profile, capture, checks, wire }) {
   assert.equal(process.env.CI, "true");
   const projectFile = path.join(workspace, ".minicode", "config.toml");
   const userFile = path.join(profile, "settings.json");
@@ -177,8 +177,15 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   assert.equal(await readFile(userFile, "utf8"), initialUser);
   assert.equal(await readFile(dirtyFile, "utf8"), "CI disk content must remain unchanged\n");
   checks.push({ scenario: "Registered ancestor config opens and repairs invalid TOML through its real session editor context, without switching workspace or changing the existing dirty buffer and chat draft", file: projectFile, workspace: child, processId: app.process().pid });
-  await page.evaluate(id => window.__zustandStore.getState().switchConversation(id), originalConversation);
-  await page.waitForFunction(id => window.__zustandStore.getState().conversationId === id, originalConversation);
+  const restoreAt = wire.length;
+  await page.evaluate(id => window.__zustandStore.getState().requestConversationSwitch(id), originalConversation);
+  await page.waitForFunction(({ id, root }) => {
+    const state = window.__zustandStore.getState();
+    return state.conversationId === id && state.pendingConversationSwitchId === null
+      && state.workingDirectory.replaceAll("\\", "/") === root.replaceAll("\\", "/");
+  }, { id: originalConversation, root: workspace });
+  assert(wire.slice(restoreAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
+    && row.message.conversation_id === originalConversation && row.message.client_command_type === "conversation.switch"));
   await showConfig();
   await scope.click();
   await page.getByRole("option", { name: "用户", exact: true }).click();

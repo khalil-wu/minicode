@@ -196,6 +196,14 @@ class ExternalAgentImportService:
     def _ledger(self) -> dict:
         return read_json(self.ledger_path)
 
+    def file_target(self, import_id: str, item_id: str) -> dict[str, str]:
+        history = next((entry for entry in self._ledger().get("history", []) if entry["id"] == import_id), None)
+        result = next((item for item in history["results"] if item["id"] == item_id), None) if history is not None else None
+        if (result is None or result["status"] != "success"
+                or result["item_type"] not in {"instructions", "settings", "mcp", "agents", "hooks", "commands"}):
+            raise ValueError("This file is not registered in a successful import result.")
+        return {"path": str(Path(result["target_path"]).resolve()), "workspace_root": result["workspace_root"]}
+
     def detect(self, *, workspace_roots: list[str] | None = None, provider_ids: list[str] | None = None,
                include_home: bool = True, max_session_age_days: int = 30, max_sessions: int = 50) -> dict:
         providers = provider_ids if provider_ids is not None else list(PROVIDERS)
@@ -402,7 +410,8 @@ class ExternalAgentImportService:
         decoded = re.sub(r"^([A-Za-z])-", r"\1:/", encoded).replace("-", "/") if re.match(r"^[A-Za-z]-", encoded) else "/" + encoded.strip("-").replace("-", "/")
         return str(Path(decoded).resolve()) if Path(decoded).is_dir() else ""
 
-    async def import_items(self, detection_id: str, item_ids: list[str], *, automatic: bool = False) -> dict:
+    async def import_items(self, detection_id: str, item_ids: list[str], *, automatic: bool = False,
+                           workspace_root: str | None = None) -> dict:
         if detection_id not in self._plans:
             raise ValueError("Run local detection before selecting items to import.")
         plan = self._plans[detection_id]
@@ -412,6 +421,7 @@ class ExternalAgentImportService:
             raise ValueError("Another local import is in progress.")
         async with self._import_lock:
             progress = self._import_progress = {"id": uuid4().hex, "detection_id": detection_id, "status": "running",
+                **({"workspace_root": workspace_root} if workspace_root is not None else {}),
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "provider_ids": list(dict.fromkeys(plan[key].provider_id for key in item_ids)),
                 "item_types": list(dict.fromkeys(plan[key].item_type for key in item_ids)), "total": len(item_ids), "completed": 0,
@@ -455,7 +465,8 @@ class ExternalAgentImportService:
                         connection["item_types"].append(result["item_type"])
                     if not automatic and result["item_type"] not in sync["item_types"]:
                         sync["item_types"].append(result["item_type"])
-                history = {"id": progress["id"], "completed_at": datetime.now(timezone.utc).isoformat(), "automatic": automatic, "results": results}
+                history = {"id": progress["id"], "completed_at": datetime.now(timezone.utc).isoformat(), "automatic": automatic, "results": results,
+                           **({"workspace_root": workspace_root} if workspace_root is not None else {})}
                 ledger["history"] = [history, *ledger.get("history", [])][:50]
                 _write_json(self.ledger_path, ledger)
                 self._plans.pop(detection_id, None)

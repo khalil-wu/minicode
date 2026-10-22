@@ -43,7 +43,18 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
     await page.keyboard.press("Escape");
     await page.locator(".mc-project-dialog-backdrop").click({ position: { x: 4, y: 4 } });
     await pending.waitFor();
-    await capture("import-03-real-request-awaiting-receipt");
+    const scrollGeometry = await pending.evaluate(element => {
+      const content = element.querySelector(".settings-import-files-content");
+      return { width: element.getBoundingClientRect().width, display: getComputedStyle(element).display,
+        padding: getComputedStyle(element).padding, headingFont: getComputedStyle(element.querySelector("h2")).fontSize,
+        contentHeight: content.clientHeight, scrollHeight: content.scrollHeight };
+    });
+    assert.equal(scrollGeometry.width, 520);
+    assert.equal(scrollGeometry.display, "flex");
+    assert.equal(scrollGeometry.padding, "0px");
+    assert.equal(scrollGeometry.headingFont, "20px");
+    assert(scrollGeometry.scrollHeight > scrollGeometry.contentHeight);
+    await capture("import-03-real-request-awaiting-receipt", { scrollGeometry });
     const scroll = pending.getByRole("button", { name: "滚动到底部", exact: true });
     await scroll.click();
     await page.waitForFunction(() => {
@@ -62,15 +73,56 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
     assert((await readFile(result.target_path, "utf8")).length > 0);
   }
   await completed.locator(".settings-import-files-content").evaluate(element => element.scrollTo({ top: 0 }));
+  assert.equal(await completed.getByRole("button", { name: "确定", exact: true }).count(), 1);
   await capture("import-05-actual-files-imported");
-  await completed.getByRole("button", { name: "确定", exact: true }).click();
   await page.unroute("**/api/settings/import", routeImport);
   checks.push("Actual import detection and file copies → pending response delivery → locked progress dialog → actual item results and success OK; no Background/View imported intermediary");
+
+  const importedFile = migrated.results.find(result => result.item_type === "instructions" && result.workspace_root === "");
+  assert(importedFile, "The actual home instruction file must be present in this import");
+  const beforeOpen = await page.evaluate(() => {
+    const state = window.__zustandStore.getState();
+    return { workspace: state.workingDirectory, conversation: state.conversationId, draft: state.draft,
+      attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts };
+  });
+  await completed.getByRole("link", { name: importedFile.target_path, exact: true }).click();
+  await completed.waitFor({ state: "hidden" });
+  await page.locator(".settings-center").waitFor({ state: "hidden" });
+  await page.waitForFunction(target => window.__zustandStore.getState().editorTabs.some(tab => tab.path === target && !tab.loading), importedFile.target_path);
+  const opened = await page.evaluate(target => {
+    const state = window.__zustandStore.getState();
+    return { workspace: state.workingDirectory, conversation: state.conversationId, draft: state.draft,
+      attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts,
+      tab: state.editorTabs.find(tab => tab.path === target) };
+  }, importedFile.target_path);
+  assert.equal(opened.tab.error ?? null, null);
+  assert.equal(opened.tab.content, await readFile(importedFile.target_path, "utf8"));
+  assert(opened.tab.workspaceOwner.session_id);
+  assert.equal(opened.tab.workspaceOwner.conversation_id, "");
+  for (const field of Object.keys(beforeOpen)) assert.deepEqual(opened[field], beforeOpen[field]);
+  const editedImport = `${opened.tab.content}\nAn actual saved edit from the isolated import opener audit.\n`;
+  await page.evaluate(({ file, content }) => window.__zustandStore.getState().updateTabContent(file, content), { file: opened.tab.path, content: editedImport });
+  const [savedImport] = await Promise.all([
+    page.waitForResponse(response => response.url().includes("/api/workspace/file/compare-write") && response.request().method() === "PUT"),
+    page.evaluate(() => window.dispatchEvent(new Event("editor:save"))),
+  ]);
+  assert(savedImport.ok(), await savedImport.text());
+  assert.equal(new URL(savedImport.url()).searchParams.get("conversation_id"), "");
+  assert.equal(new URL(savedImport.url()).searchParams.get("session_id"), opened.tab.workspaceOwner.session_id);
+  await page.waitForFunction(({ file, content }) => window.__zustandStore.getState().editorTabs.some(tab => tab.path === file && tab.original === content), { file: opened.tab.path, content: editedImport });
+  assert.equal(await readFile(importedFile.target_path, "utf8"), editedImport);
+  await capture("import-06-open-and-save-real-imported-file");
+  checks.push("Actual successful home-import link resolves its ledger identity, honors the preferred file target and reads/saves the exact registered file in the original editor workspace with drafts retained");
 
   // Create a real destination I/O failure after detection, without substituting
   // an API payload or claiming a successful write from a synthetic transcript.
   const commandSource = path.join(sourceHome, ".claude", "commands", "write-denied.md");
   await writeFile(commandSource, "---\ndescription: Audit an actual failed destination write\n---\nRead the actual file.\n");
+  await page.evaluate(() => {
+    const state = window.__zustandStore.getState();
+    state.setSettingsTab("appearance");
+    state.toggleSettings();
+  });
   await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
   await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
   await page.getByRole("button", { name: "再次导入", exact: true }).click();
@@ -89,7 +141,7 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
     await error.waitFor();
     assert.equal(await error.getByRole("button", { name: "确定", exact: true }).count(), 0);
     assert.equal(await error.getByRole("link").count(), 0);
-    await capture("import-06-real-destination-failure");
+    await capture("import-07-real-destination-failure");
     await page.keyboard.press("Escape");
     await error.waitFor({ state: "hidden" });
     checks.push("Actual import destination write failure preserves the original item error, exposes no nonexistent file link and closes only after the real result");

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ConfigTab } from "./ConfigTab";
 import { HooksTab } from "./HooksTab";
 import { StorageTab } from "./StorageTab";
+import { ImportSettingsTab } from "./ImportSettingsTab";
 import { useAppStore } from "../stores";
 import { bindWorkspaceOwnerRuntime } from "../protocol/workspace-owner";
 import { fsReadFileInfo, registeredSettingsEditorOwner, type ManagedSettingsOpenResult, type ManagedSettingsTarget } from "../desktop/runtime";
@@ -34,6 +35,12 @@ const usage = { path: "C:/Profile/data", total_bytes: 1024, categories: [
   { name: "chats", bytes: 1024 }, { name: "archived", bytes: 0 }, { name: "subagents", bytes: 0 },
   { name: "unclassified", bytes: 0 }, { name: "worktrees", bytes: 0 }, { name: "other", bytes: 0 },
 ] };
+const importedFile = "C:/Profile/imported/AGENTS.md";
+const importedItem = { id: "actual-imported-instructions", provider_id: "claude", item_type: "instructions", title: "AGENTS.md",
+  source_path: "C:/Other AI/CLAUDE.md", target_path: importedFile, workspace_root: "", supported: true, reason: "", status: "success", message: "Imported actual instructions" };
+const importState = { providers: [], history: [{ id: "actual-ledger-import", completed_at: "2026-10-22T00:00:00Z", automatic: false,
+  workspace_root: workspaceRoot, results: [importedItem] }], sync: { enabled: false, item_types: ["instructions"] },
+  connected_provider_ids: [], item_types: ["instructions"], running_import: null, import_progress: null };
 const pages = [
   { name: "Config", render: () => <ConfigTab active />, request: { kind: "config", workspaceRoot, scopeId: "user", ...executionOwner } as ManagedSettingsTarget,
     button: async () => { const button = screen.getByRole("button", { name: "打开配置文件" }); await waitFor(() => expect(button).toHaveProperty("disabled", false)); return button; } },
@@ -41,13 +48,17 @@ const pages = [
     button: async () => { const description = await screen.findByText(hook.command, { selector: ".settings-row-description" }); const details = description.closest("details")!; fireEvent.click(details.querySelector("summary")!); return within(details).getByRole("button", { name: "打开配置文件" }); } },
   { name: "Storage", render: () => <StorageTab />, request: { kind: "data" } as ManagedSettingsTarget,
     button: async () => screen.findByRole("button", { name: `应用数据文件夹: ${usage.path}` }) },
+  { name: "Import", render: () => <ImportSettingsTab variant="general-row" />, request: { kind: "import-item", importId: "actual-ledger-import",
+    itemId: importedItem.id, workspaceRoot, ...executionOwner } as ManagedSettingsTarget,
+    button: async () => { fireEvent.click(await screen.findByRole("button", { name: "查看导入的文件" })); return screen.getByRole("link", { name: importedFile }); } },
 ];
 
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.openTarget.mockResolvedValue(true);
   mocks.fetch.mockImplementation(async url => Response.json(new URL(url).pathname.endsWith("/hooks") ? { hooks: [hook], warnings: [] }
-    : new URL(url).pathname.endsWith("/storage") ? usage : config));
+    : new URL(url).pathname.endsWith("/storage") ? usage : new URL(url).pathname === "/api/settings/import" ? importState
+      : new URL(url).pathname.endsWith("/detect") ? { detection_id: "no-new-imports", items: [], issues: [] } : config));
   window.__MINICODE_RUNTIME__ = { desktop: {
     platformInfo: { isDesktop: true, platform: "win32", arch: "x64" }, settings: { openTarget: mocks.openTarget },
   } } as never;
@@ -164,4 +175,30 @@ it("routes registered project files through the real session editor context with
   expect(registeredSettingsEditorOwner(`${projectOwner}/ordinary.txt`, owner)).toBeUndefined();
   expect((await fsReadFileInfo(`${projectOwner}/ordinary.txt`))?.content).toBe("ordinary native file");
   expect(nativeRead).toHaveBeenCalledExactlyOnceWith(`${projectOwner}/ordinary.txt`);
+});
+
+it("opens a home import's registered file in the current editor context and retains dirty buffers and drafts", async () => {
+  useAppStore.setState({ settingsOpen: true });
+  useAppStore.getState().openEditorTab("keep-unsaved.ts");
+  useAppStore.getState().markTabLoaded("keep-unsaved.ts", "const disk = true;", null);
+  useAppStore.getState().updateTabContent("keep-unsaved.ts", "const unsaved = true;");
+  const before = useAppStore.getState();
+  mocks.openTarget.mockResolvedValue({ openInEditor: true, path: importedFile, workspaceRoot: "" });
+  render(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看导入的文件" }));
+  fireEvent.click(screen.getByRole("link", { name: importedFile }));
+  await waitFor(() => expect(useAppStore.getState().editorOpenRequests).toHaveLength(1));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  const after = useAppStore.getState();
+  expect(mocks.openTarget).toHaveBeenCalledExactlyOnceWith({ kind: "import-item", importId: "actual-ledger-import",
+    itemId: importedItem.id, workspaceRoot, ...executionOwner });
+  expect(mocks.openTarget.mock.calls[0][0]).not.toHaveProperty("path");
+  expect(after.workingDirectory).toBe(workspaceRoot);
+  expect(after.editorOpenRequests[0]).toMatchObject({ path: importedFile, exact: true, preview: false });
+  expect(registeredSettingsEditorOwner(importedFile, workspaceRoot)).toEqual({ session_id: executionOwner.sessionId, conversation_id: "" });
+  expect(after.editorTabs).toEqual(before.editorTabs);
+  expect(after.editorTabs[0]).toMatchObject({ content: "const unsaved = true;", original: "const disk = true;" });
+  expect(after.draft).toBe(before.draft);
+  expect(after.attachments).toEqual(before.attachments);
+  expect(after.settingsOpen).toBe(false);
 });

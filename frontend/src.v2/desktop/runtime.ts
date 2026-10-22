@@ -350,6 +350,7 @@ export interface OpenPreferredPathOptions {
   column?: number;
 }
 export type ManagedSettingsTarget = { kind: "config"; workspaceRoot?: string; scopeId?: string; sessionId?: string; conversationId?: string }
+  | { kind: "import-item"; importId: string; itemId: string; workspaceRoot?: string; sessionId?: string; conversationId?: string }
   | { kind: "data"; workspaceRoot?: string }
   | { kind: "hook"; hookKey: string; workspaceRoot?: string };
 export type ManagedSettingsOpenResult = true | { openInEditor: true; path: string; workspaceRoot: string };
@@ -995,7 +996,8 @@ export const openManagedSettingsTarget = (request: ManagedSettingsTarget) => {
     const { useAppStore } = await import("../stores");
     const { getWebSocket } = await import("../hooks/useWebSocket");
     const sessionId = getWebSocket()?.sessionId;
-    const capturedRequest = request.kind === "config" ? { ...request, sessionId, conversationId: useAppStore.getState().conversationId ?? "" } : request;
+    const capturedRequest = request.kind === "config" || request.kind === "import-item"
+      ? { ...request, sessionId, conversationId: useAppStore.getState().conversationId ?? "" } : request;
     const result = await desktop()!.settings.openTarget(capturedRequest);
     if (result === true) return true as const;
     const state = useAppStore.getState();

@@ -10,16 +10,17 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import "./ProjectDialog.css";
 import "./ImportSettingsTab.css";
 import { projectOwnsWorkspace, projectWorkspaceRoots } from "../lib/project-registry";
-import { openPreferredFile } from "../lib/open-preferred-target";
+import { openManagedSettingsTarget } from "../desktop/runtime";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import { ImportProviderIcon } from "./ImportProviderIcon";
 
 type ItemType = "sessions" | "projects" | "instructions" | "settings" | "skills" | "plugins" | "mcp" | "agents" | "hooks" | "commands" | "memory";
 type Item = { id: string; provider_id: string; item_type: ItemType; title: string; source_path: string; target_path: string; workspace_root: string; supported: boolean; reason: string };
 type ImportResult = Item & { status: "success" | "skipped" | "unsupported" | "error"; message: string };
-type ImportOutcome = { results: ImportResult[]; setup_errors?: string[] };
+type ImportOutcome = { results: ImportResult[]; setup_errors?: string[]; workspace_root?: string };
+type ImportReceipt = ImportOutcome & { history: History & { workspace_root: string } };
 type ImportProgress = ImportOutcome & { id: string | null; detection_id?: string; status: "running" | "success" | "error" | "unchanged"; items: Item[]; error?: string };
-type History = { id: string; completed_at: string; automatic: boolean; results: ImportResult[]; setup_errors?: string[] };
+type History = ImportOutcome & { id: string; completed_at: string; automatic: boolean };
 type ImportState = { providers: { id: string; name: string }[]; history: History[]; sync: { enabled: boolean; item_types: ItemType[]; last_error?: string }; connected_provider_ids: string[]; item_types: ItemType[]; running_import: { id: string; item_types: ItemType[] } | null; import_progress: ImportProgress | null };
 type Detection = { detection_id: string; items: Item[]; issues: { provider_id: string; source_path: string; status: string; message: string }[] };
 
@@ -125,14 +126,16 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
 
   const apply = async (itemIds: string[]) => {
     const plan = detection!;
+    const owner = workspace;
     setImporting(true); setError("");
     setSelection(null);
-    setProgress({ id: null, detection_id: plan.detection_id, status: "running", items: plan.items.filter(item => itemIds.includes(item.id)), results: [] });
-    let imported: ImportOutcome | undefined;
+    setProgress({ id: null, detection_id: plan.detection_id, workspace_root: owner, status: "running", items: plan.items.filter(item => itemIds.includes(item.id)), results: [] });
+    let imported: ImportReceipt | undefined;
     try {
-      imported = await request<ImportOutcome>("", { detection_id: plan.detection_id, item_ids: itemIds });
+      imported = await request<ImportReceipt>("", { detection_id: plan.detection_id, item_ids: itemIds, workspace_root: owner });
       const outcome = imported;
-      setProgress(current => current?.detection_id === plan.detection_id ? completedImport(outcome, current.id) : current);
+      setProgress(current => current?.detection_id === plan.detection_id
+        ? completedImport({ ...outcome, workspace_root: outcome.history.workspace_root }, outcome.history.id) : current);
       sendClientCommand({ type: "conversation.list" }, { silent: true });
       sendClientCommand({ type: "workspace.recent" }, { silent: true });
       sendClientCommand({ type: "skills.list" }, { silent: true });
@@ -284,12 +287,25 @@ function ImportedFilesDialog({ text, progress, onClose }: { text: typeof EN; pro
   const dialog = useFocusTrap(true);
   const content = useRef<HTMLDivElement>(null);
   const [showScroll, setShowScroll] = useState(false);
+  const [openError, setOpenError] = useState("");
   const running = progress.status === "running";
   const hasErrors = progress.status === "error";
   const hasImports = progress.status === "success";
   const title = running ? text.resultRunningTitle : hasErrors ? text.resultErrorTitle : hasImports ? text.resultTitle : text.resultUnchangedTitle;
   const groups = [...new Set(progress.items.map(item => item.workspace_root))].sort((left, right) => left === "" ? -1 : right === "" ? 1 : 0);
   const updateScroll = () => { const element = content.current!; setShowScroll(element.scrollHeight - element.scrollTop - element.clientHeight > 8); };
+  const openImportedFile = async (item: ImportResult) => {
+    const owner = progress.workspace_root ?? useAppStore.getState().workingDirectory;
+    setOpenError("");
+    try {
+      const opened = await openManagedSettingsTarget({ kind: "import-item", importId: progress.id!, itemId: item.id, workspaceRoot: owner });
+      if (opened && dialog.current) {
+        onClose();
+        const state = useAppStore.getState();
+        if (state.settingsOpen) state.toggleSettings();
+      }
+    } catch (reason) { setOpenError(reason instanceof Error ? reason.message : String(reason)); }
+  };
   useEffect(() => {
     const frame = requestAnimationFrame(updateScroll);
     window.addEventListener("resize", updateScroll);
@@ -314,10 +330,9 @@ function ImportedFilesDialog({ text, progress, onClose }: { text: typeof EN; pro
             return <div className="settings-import-file-result" key={item.id}>
             <div><strong>{item.title}</strong><div className="settings-import-file-path">
               {!running && result?.status === "success" && IMPORTED_FILE_TYPES.includes(item.item_type)
-                ? <a href={item.target_path} onClick={event => {
-                  event.preventDefault(); onClose(); useAppStore.setState({ settingsOpen: false });
-                  void openPreferredFile(item.target_path);
-                }}>{item.target_path}</a> : <span>{item.target_path}</span>}
+                ? <a href={result.target_path} onClick={event => {
+                  event.preventDefault(); void openImportedFile(result);
+                }}>{result.target_path}</a> : <span>{item.target_path}</span>}
             </div>{result?.message && <p>{result.message}</p>}</div>
             {running ? <span className="settings-import-file-status" aria-label={text.importing}><LoaderCircle size={16} className="animate-spin" /></span>
               : result && <span className="settings-import-file-status" data-status={result.status} aria-label={text.status[result.status]}>
@@ -326,6 +341,7 @@ function ImportedFilesDialog({ text, progress, onClose }: { text: typeof EN; pro
           </div>; })}
         </section>)}
         {progress.error && <p className="settings-import-error" role="alert">{progress.error}</p>}
+        {openError && <p className="settings-import-error" role="alert">{openError}</p>}
         {progress.setup_errors?.map((error, index) => <p key={index} className="settings-import-error" role="alert">{error}</p>)}
       </div>{showScroll && <button type="button" className="settings-import-scroll-bottom" aria-label={text.scrollToBottom} onClick={() => content.current!.scrollTo({ top: content.current!.scrollHeight, behavior: "smooth" })}><ArrowDown size={18} aria-hidden="true" /></button>}</div>
       {hasImports && <footer><button type="button" className="settings-action-button" data-primary="true" onClick={onClose}>{text.ok}</button></footer>}

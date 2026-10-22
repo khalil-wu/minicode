@@ -5,8 +5,8 @@ import { useAppStore } from "../stores";
 import { ImportSettingsTab } from "./ImportSettingsTab";
 
 const send = vi.hoisted(() => vi.fn());
-const openPreferredFile = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock("../lib/open-preferred-target", () => ({ openPreferredFile }));
+const openTarget = vi.hoisted(() => vi.fn(async () => true as const));
+vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), openManagedSettingsTarget: openTarget }));
 const runtime = vi.hoisted(() => {
   const value = { apiBaseUrl: "http://127.0.0.1:9187", wsBaseUrl: "ws://127.0.0.1:9187", runtimeToken: "isolated-import-runtime-token" };
   vi.stubGlobal("__MINICODE_RUNTIME__", value);
@@ -16,17 +16,22 @@ vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: send }));
 const categories = ["sessions", "projects", "instructions", "settings", "skills", "plugins", "mcp", "agents", "hooks", "commands", "memory"];
 const item = (id: string, type: string, supported = true, workspace = "") => ({ id, provider_id: "claude", item_type: type, title: id,
   source_path: `C:/source/.claude/${id}`, target_path: `C:/target/${id}`, workspace_root: workspace, supported, reason: supported ? "" : "Unsupported source hook type" });
+const receipt = (results: Array<ReturnType<typeof item> & { status: string; message: string }>, workspace: string, id = "import-result") => ({ results,
+  history: { id, completed_at: "2026-10-22T00:00:00Z", automatic: false, workspace_root: workspace, results } });
 const state = () => ({ providers: [{ id: "claude", name: "Claude Code" }, { id: "cursor", name: "Cursor" }], history: [], sync: { enabled: false, item_types: ["skills"] }, connected_provider_ids: [], item_types: categories, running_import: null, import_progress: null });
 let imported = false;
 let syncEnabled = false;
 let selection: string[] = [];
 let connected = false;
+let operationWorkspace: string | undefined;
 let detectedItems: ReturnType<typeof item>[];
 
 beforeEach(() => {
   imported = false; syncEnabled = false; selection = []; connected = false;
+  operationWorkspace = undefined;
   detectedItems = [item("source-skill", "skills"), item("CLAUDE.md", "instructions"), item("legacy-hook", "hooks", false), item("project", "projects", true, "C:/project"), item("project-settings", "settings", true, "C:/project"), item("source-chat", "sessions", true, "C:/project")];
   vi.clearAllMocks();
+  openTarget.mockResolvedValue(true);
   vi.stubGlobal("__MINICODE_RUNTIME__", runtime);
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -39,11 +44,12 @@ beforeEach(() => {
     const response = state();
     response.sync.enabled = syncEnabled;
     response.connected_provider_ids = connected ? ["claude"] : [] as never;
-    if (imported) response.history = [{ id: "import-result", completed_at: "2026-10-19T00:00:00Z", automatic: false,
+    if (imported) response.history = [{ id: "import-result", completed_at: "2026-10-19T00:00:00Z", automatic: false, workspace_root: operationWorkspace,
       results: detectedItems.filter(item => selection.includes(item.id)).map(item => ({ ...item, status: "success", message: "Imported actual content" })) }] as never;
     if (url.pathname.endsWith("/detect")) return Response.json({ detection_id: "detected-plan", items: imported ? [] : detectedItems, issues: [] });
     if (url.pathname.endsWith("/sync")) { const body = JSON.parse(init!.body as string); syncEnabled = body.enabled; response.sync = body; return Response.json(response); }
-    if (init?.method === "POST") { selection = JSON.parse(init.body as string).item_ids; imported = true; connected = true; return Response.json({ results: detectedItems.filter(item => selection.includes(item.id)).map(item => ({ ...item, status: "success", message: "Imported actual content" })) }); }
+    if (init?.method === "POST") { const body = JSON.parse(init.body as string); selection = body.item_ids; operationWorkspace = body.workspace_root;
+      imported = true; connected = true; return Response.json(receipt(detectedItems.filter(item => selection.includes(item.id)).map(item => ({ ...item, status: "success", message: "Imported actual content" })), operationWorkspace!)); }
     return Response.json(response);
   }));
 });
@@ -75,10 +81,11 @@ it("shows actual completed result files and opens only a successful known file t
   const dialog = screen.getByRole("dialog", { name: "已导入外部智能体配置" });
   const path = within(dialog).getByRole("link", { name: "C:/target/CLAUDE.md" });
   expect(within(dialog).getByText("用户配置")).toBeTruthy();
+  act(() => useAppStore.setState({ workingDirectory: "C:/history-viewer" }));
   fireEvent.click(path);
-  expect(openPreferredFile).toHaveBeenCalledExactlyOnceWith("C:/target/CLAUDE.md");
-  expect(screen.queryByRole("dialog")).toBeNull();
-  expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/project", draft: "Keep the current chat draft" });
+  expect(openTarget).toHaveBeenCalledExactlyOnceWith({ kind: "import-item", importId: "import-result", itemId: "CLAUDE.md", workspaceRoot: "C:/history-viewer" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/history-viewer", draft: "Keep the current chat draft" });
 });
 
 it("keeps skipped and failed history visible without labelling it as an imported setup or offering nonexistent files", async () => {
@@ -102,7 +109,7 @@ it("keeps skipped and failed history visible without labelling it as an imported
   expect(within(dialog).getByText("Destination contains local changes")).toBeTruthy();
   expect(within(dialog).getByText("Actual write error")).toBeTruthy();
   expect(within(dialog).queryByRole("link")).toBeNull();
-  expect(openPreferredFile).not.toHaveBeenCalled();
+  expect(openTarget).not.toHaveBeenCalled();
 });
 
 it("detects compatible local sources and sends only selected detected identities to the real import route", async () => {
@@ -134,7 +141,7 @@ it("detects compatible local sources and sends only selected detected identities
   expect(send).toHaveBeenCalledWith({ type: "conversation.list" }, { silent: true });
   expect(send).toHaveBeenCalledWith({ type: "skills.list" }, { silent: true });
   const post = vi.mocked(fetch).mock.calls.find(([url, init]) => new URL(String(url)).pathname === "/api/settings/import" && init?.method === "POST")!;
-  expect(JSON.parse(post[1]!.body as string)).toEqual({ detection_id: "detected-plan", item_ids: ["source-skill"] });
+  expect(JSON.parse(post[1]!.body as string)).toEqual({ detection_id: "detected-plan", item_ids: ["source-skill"], workspace_root: "C:/project" });
   expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "GET")).toBe(true);
   for (const [, init] of vi.mocked(fetch).mock.calls) expect(new Headers(init?.headers).get("X-MiniCode-Token")).toBe(runtime.runtimeToken);
 });
@@ -222,7 +229,7 @@ it("cancels provider selection without importing or replacing the existing draft
 it("retains returned skipped and failed records in the dialog instead of reporting them as imports", async () => {
   const fetcher = vi.mocked(fetch).getMockImplementation()!;
   vi.mocked(fetch).mockImplementation((input, init) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST"
-    ? Promise.resolve(Response.json({ results: [{ ...item("source-skill", "skills"), status: "skipped", message: "Destination has local edits" }, { ...item("CLAUDE.md", "instructions"), status: "error", message: "Actual write failure" }] })) : fetcher(input, init));
+    ? Promise.resolve(Response.json(receipt([{ ...item("source-skill", "skills"), status: "skipped", message: "Destination has local edits" }, { ...item("CLAUDE.md", "instructions"), status: "error", message: "Actual write failure" }], "C:/project"))) : fetcher(input, init));
   render(<ImportSettingsTab />);
   fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
@@ -238,6 +245,7 @@ it("retains returned skipped and failed records in the dialog instead of reporti
 });
 
 it("replaces selection with the Source progress dialog for the actual request and blocks dismissal until its receipt", async () => {
+  useAppStore.setState({ settingsOpen: true });
   const fetcher = vi.mocked(fetch).getMockImplementation()!;
   let release!: (response: Response) => void;
   vi.mocked(fetch).mockImplementation((input, init) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST"
@@ -258,15 +266,74 @@ it("replaces selection with the Source progress dialog for the actual request an
   expect(screen.getByRole("dialog")).toBe(pending);
   expect(vi.mocked(fetch).mock.calls.filter(([url, init]) => init?.method === "POST" && new URL(String(url)).pathname === "/api/settings/import")).toHaveLength(1);
   act(() => useAppStore.setState({ workingDirectory: "C:/next-project" }));
-  await act(async () => release(Response.json({ results: [{ ...item("project-settings", "settings", true, "C:/project"), status: "success", message: "Actual project settings copied" }] })));
+  await act(async () => release(Response.json(receipt([{ ...item("project-settings", "settings", true, "C:/project"), status: "success", message: "Actual project settings copied" }], "C:/project", "actual-post-import-id"))));
   const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });
   expect(completed).toBe(pending);
   expect(within(completed).getByText("C:/project")).toBeTruthy();
   expect(within(completed).queryByText("C:/next-project")).toBeNull();
   expect(within(completed).getByRole("link").textContent).toBe("C:/target/project-settings");
+  openTarget.mockRejectedValueOnce(new Error("The original editor workspace is no longer active."));
+  fireEvent.click(within(completed).getByRole("link"));
+  expect(openTarget).toHaveBeenCalledExactlyOnceWith({ kind: "import-item", importId: "actual-post-import-id", itemId: "project-settings", workspaceRoot: "C:/project" });
+  expect((await within(completed).findByRole("alert")).textContent).toBe("The original editor workspace is no longer active.");
+  expect(useAppStore.getState().settingsOpen).toBe(true);
   fireEvent.click(within(completed).getByRole("button", { name: "确定" }));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(useAppStore.getState()).toMatchObject({ workingDirectory: "C:/next-project", draft: "Keep the current chat draft" });
+});
+
+it("opens a fast import using the actual POST history identity without waiting for a progress poll", async () => {
+  useAppStore.setState({ settingsOpen: true });
+  render(<ImportSettingsTab />);
+  fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+  fireEvent.click(screen.getByRole("button", { name: "继续" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "选择要导入的内容" })).getByRole("button", { name: "导入", exact: true }));
+  const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });
+  fireEvent.click(within(completed).getByRole("link", { name: "C:/target/CLAUDE.md" }));
+  expect(openTarget).toHaveBeenCalledExactlyOnceWith({ kind: "import-item", importId: "import-result", itemId: "CLAUDE.md", workspaceRoot: "C:/project" });
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/project", draft: "Keep the current chat draft" });
+});
+
+it("keeps the successful import dialog and original open error until the registered opener actually succeeds", async () => {
+  imported = true; selection = ["CLAUDE.md"]; operationWorkspace = "C:/project";
+  useAppStore.setState({ settingsOpen: true });
+  let reject!: (reason: Error) => void;
+  openTarget.mockImplementationOnce(() => new Promise<true>((_resolve, fail) => { reject = fail; }));
+  render(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看导入的文件" }));
+  const completed = screen.getByRole("dialog", { name: "已导入外部智能体配置" });
+  fireEvent.click(within(completed).getByRole("link"));
+  expect(screen.getByRole("dialog")).toBe(completed);
+  expect(useAppStore.getState().settingsOpen).toBe(true);
+  await act(async () => reject(new Error("Registered imported file was removed from disk.")));
+  expect((await within(completed).findByRole("alert")).textContent).toBe("Registered imported file was removed from disk.");
+  expect(screen.getByRole("dialog")).toBe(completed);
+  expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, workingDirectory: "C:/project", draft: "Keep the current chat draft" });
+  fireEvent.click(within(completed).getByRole("link"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(useAppStore.getState().settingsOpen).toBe(false);
+});
+
+it("retains a restored import snapshot's real operation workspace and identity for home-file links", async () => {
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  const importedItem = item("restored-home.md", "instructions");
+  let remote: Record<string, unknown> = { id: "restored-operation", detection_id: "restored-detection", workspace_root: "C:/original-operation",
+    status: "running", items: [importedItem], results: [] };
+  vi.mocked(fetch).mockImplementation((input, init) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "GET"
+    ? Promise.resolve(Response.json({ ...state(), import_progress: remote })) : fetcher(input, init));
+  useAppStore.setState({ workingDirectory: "C:/current-viewer", settingsOpen: true });
+  const view = render(<ImportSettingsTab variant="general-row" />);
+  await screen.findByRole("dialog", { name: "正在导入外部智能体配置" });
+  remote = { ...remote, status: "success", results: [{ ...importedItem, status: "success", message: "Actual restored import" }] };
+  view.rerender(<ImportSettingsTab variant="general-row" active={false} />);
+  view.rerender(<ImportSettingsTab variant="general-row" />);
+  const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });
+  openTarget.mockRejectedValueOnce(new Error("Return to the original operation workspace."));
+  fireEvent.click(within(completed).getByRole("link"));
+  expect(openTarget).toHaveBeenCalledExactlyOnceWith({ kind: "import-item", importId: "restored-operation", itemId: importedItem.id, workspaceRoot: "C:/original-operation" });
+  expect((await within(completed).findByRole("alert")).textContent).toBe("Return to the original operation workspace.");
+  expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, workingDirectory: "C:/current-viewer", draft: "Keep the current chat draft" });
 });
 
 it("retains the original request failure without fabricating per-item outcomes or a success action", async () => {

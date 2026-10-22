@@ -71,7 +71,7 @@ async def test_import_progress_keeps_real_selected_items_partial_results_and_ter
         return original(item, previous)
 
     monkeypatch.setattr(service, "_import_item", import_item)
-    task = asyncio.create_task(service.import_items(detected["detection_id"], [item["id"] for item in selected]))
+    task = asyncio.create_task(service.import_items(detected["detection_id"], [item["id"] for item in selected], workspace_root=str(project)))
     try:
         assert await asyncio.to_thread(entered.wait, 3)
         wire = json.loads(json.dumps(service.state()))
@@ -79,6 +79,7 @@ async def test_import_progress_keeps_real_selected_items_partial_results_and_ter
         assert progress["status"] == "running"
         assert progress["items"] == selected
         assert progress["detection_id"] == detected["detection_id"]
+        assert progress["workspace_root"] == str(project)
         assert progress["completed"] == 1 and progress["total"] == 2
         assert [item["status"] for item in progress["results"]] == ["success"]
         assert wire["running_import"]["id"] == progress["id"]
@@ -90,6 +91,7 @@ async def test_import_progress_keeps_real_selected_items_partial_results_and_ter
     assert finished["import_progress"]["status"] == "success"
     assert finished["import_progress"]["id"] == outcome["history"]["id"] == progress["id"]
     assert finished["import_progress"]["results"] == outcome["results"]
+    assert outcome["history"]["workspace_root"] == str(project)
     await service.record_refresh_errors(progress["id"], ["Actual catalog refresh error"])
     assert service.state()["import_progress"]["status"] == "error"
     assert service.state()["import_progress"]["setup_errors"] == ["Actual catalog refresh error"]
@@ -387,7 +389,7 @@ async def test_import_settings_and_detection_cross_the_main_runtime_authorizatio
 
 @pytest.mark.asyncio
 async def test_import_http_contract_rejects_forged_selection_and_never_exposes_settings_values(migration, monkeypatch):
-    service, home, _, _ = migration
+    service, home, project, _ = migration
     write(home / ".claude" / "settings.json", {"env": {"SECRET": "fixture-credential"}})
     from backend.api import routes_import
     monkeypatch.setattr(routes_import, "_service", service)
@@ -399,9 +401,12 @@ async def test_import_http_contract_rejects_forged_selection_and_never_exposes_s
         payload = detected.json()
         forged = await client.post("/api/settings/import", json={"detection_id": payload["detection_id"], "item_ids": ["not-a-detected-id"]})
         assert forged.status_code == 400
-        imported = await client.post("/api/settings/import", json={"detection_id": payload["detection_id"], "item_ids": [payload["items"][0]["id"]]})
+        imported = await client.post("/api/settings/import", json={"detection_id": payload["detection_id"],
+            "item_ids": [payload["items"][0]["id"]], "workspace_root": str(project)})
         assert imported.status_code == 200 and imported.json()["results"][0]["status"] == "success"
+        assert imported.json()["history"]["workspace_root"] == str(project)
         state = await client.get("/api/settings/import")
+        assert state.json()["import_progress"]["workspace_root"] == str(project)
         assert "fixture-credential" not in state.text
         sync = await client.put("/api/settings/import/sync", json={"enabled": True, "item_types": ["settings"]})
         assert sync.status_code == 200 and sync.json()["sync"]["enabled"] is True
@@ -503,3 +508,32 @@ async def test_registered_sync_worker_consumes_saved_preferences_and_stops_its_a
     assert (service.config_home / "INSTRUCTIONS.md").read_text() == "version two"
     assert source.read_text() == "version two"
     assert service.state()["history"][0]["automatic"] is True
+    assert "workspace_root" not in service.state()["history"][0]
+
+
+@pytest.mark.asyncio
+async def test_imported_file_targets_resolve_only_successful_ledger_identities_and_retain_explicit_empty_ui_origin(migration):
+    service, home, project, _stack = migration
+    write(home / ".claude" / "CLAUDE.md", "Actual imported user instructions")
+    write(home / ".claude" / "commands" / "skipped.md", "Original command")
+    write(home / ".claude" / "skills" / "not-a-file" / "SKILL.md", "---\nname: not-a-file\ndescription: Actual skill\n---\nRead the actual file.")
+    detected = service.detect(workspace_roots=[str(project)], provider_ids=["claude"])
+    selected = [item for item in detected["items"] if item["item_type"] in {"instructions", "commands", "skills"}]
+    skipped = next(item for item in selected if item["item_type"] == "commands")
+    write(Path(skipped["target_path"]), "Local command authored after detection")
+    outcome = await service.import_items(detected["detection_id"], [item["id"] for item in selected], workspace_root="")
+    import_id = outcome["history"]["id"]
+    assert outcome["history"]["workspace_root"] == ""
+    assert service.state()["import_progress"]["workspace_root"] == ""
+    instruction = next(item for item in outcome["results"] if item["item_type"] == "instructions")
+    assert instruction["status"] == "success"
+    assert service.file_target(import_id, instruction["id"]) == {"path": instruction["target_path"], "workspace_root": ""}
+    assert Path(instruction["target_path"]).read_text() == "Actual imported user instructions"
+    for item in outcome["results"]:
+        if item["item_type"] in {"skills", "commands"}:
+            with pytest.raises(ValueError, match="not registered in a successful import"):
+                service.file_target(import_id, item["id"])
+    assert next(item for item in outcome["results"] if item["id"] == skipped["id"])["status"] == "skipped"
+    for operation, identity in (("unknown-import", instruction["id"]), (import_id, "unknown-item")):
+        with pytest.raises(ValueError, match="not registered in a successful import"):
+            service.file_target(operation, identity)
