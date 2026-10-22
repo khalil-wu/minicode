@@ -138,17 +138,15 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
       page.getByRole("dialog", { name: "选择要导入的内容", exact: true }).getByRole("button", { name: "导入", exact: true }).click(),
     ]);
     const failed = await response.json();
+    assert.equal(failed.results.length, 1, "The new command is the only newly detected import item");
     assert(failed.results.some(result => result.status === "error" && result.title.includes("write-denied")));
     const error = page.getByRole("dialog", { name: "导入失败", exact: true });
     await error.waitFor();
     assert.equal(await error.getByRole("button", { name: "确定", exact: true }).count(), 0);
     assert.equal(await error.getByRole("link").count(), 0);
-    await capture("import-07-real-destination-failure");
-    await error.getByRole("button", { name: "滚动到底部", exact: true }).click();
-    await page.waitForFunction(() => {
-      const element = document.querySelector(".settings-import-files-content");
-      return element.scrollHeight - element.clientHeight - element.scrollTop <= 8;
-    });
+    assert.equal(await error.getByRole("button", { name: "滚动到底部", exact: true }).count(), 0);
+    const failureScroll = await error.locator(".settings-import-files-content").evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
+    assert.equal(failureScroll.scrollHeight, failureScroll.height);
     const failedItem = error.locator(".settings-import-file-result").filter({ hasText: "write-denied.md" });
     assert((await failedItem.innerText()).includes("Permission denied"));
     const failureGeometry = await failedItem.evaluate(element => {
@@ -157,7 +155,7 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
       return { rowTop: row.top, rowBottom: row.bottom, viewportTop: viewport.top, viewportBottom: viewport.bottom };
     });
     assert(failureGeometry.rowTop >= failureGeometry.viewportTop && failureGeometry.rowBottom <= failureGeometry.viewportBottom);
-    await capture("import-08-real-destination-failure-detail", { failureGeometry });
+    await capture("import-07-real-destination-failure", { failureScroll, failureGeometry });
     await page.keyboard.press("Escape");
     await error.waitFor({ state: "hidden" });
     checks.push("Actual import destination write failure preserves the original item error, exposes no nonexistent file link and closes only after the real result");
