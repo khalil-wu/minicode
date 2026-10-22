@@ -67,8 +67,8 @@ const provider = createServer(async (request, response) => {
   requests.push({ path: request.url, main: Boolean(main), terminal: Boolean(terminal), body });
   if (terminal) {
     terminalAttempts++;
-    response.writeHead(503, { "content-type": "application/json", "retry-after": "0" });
-    response.end(JSON.stringify({ error: { message: "Controlled provider remained unavailable", type: "server_error", code: "controlled_terminal" } })); return;
+    response.writeHead(429, { "content-type": "application/json", "retry-after": "0" });
+    response.end(JSON.stringify({ error: { message: "Controlled provider remained rate-limited", type: "rate_limit_error", code: "controlled_terminal" } })); return;
   }
   if (!main) { reply(response); return; }
   attempts++;
@@ -222,16 +222,23 @@ try {
   await composer.fill("HARNESS_RECONNECT: Return the completed response after the two real provider failures.");
   await composer.press("Enter");
   await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor({ timeout: 45000 });
-  assert.match(await page.locator(".stream-error-summary").innerText(), /繁忙.*1\/5/u);
+  assert.match(await page.locator(".stream-error-summary").innerText(), /服务器繁忙，正在重连\s*1\s*\/5/u);
   const busyRetryReceipt = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
     && row.message.retry_attempt === 1 && row.message.visibility === "timeline").message;
   assert.equal(busyRetryReceipt.status_code, 429);
   assert.equal(busyRetryReceipt.provider_error_code, "controlled_retry");
+  await page.waitForFunction(id => window.__zustandStore.getState().inspectorEntries.some(entry =>
+    entry.targetKind === "provider" && entry.payload?.event === "rate_limit" && entry.payload.conversation_id === id), owner);
+  const ownedRateLimit = wire.findLast(row => row.direction === "server" && row.message.type === "rate_limit"
+    && row.message.conversation_id === owner).message;
+  assert.equal(ownedRateLimit.message_id, busyRetryReceipt.message_id);
+  assert.equal(ownedRateLimit.turn_id, busyRetryReceipt.turn_id);
+  assert.equal(await page.locator('.toast-container [role="alert"]').count(), 0, "The owned retry has one transcript row without a duplicate provider toast");
   await capture("02-actual-provider-busy-reconnect-one");
   await page.reload();
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
   await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor();
-  assert.match(await page.locator(".stream-error-summary").innerText(), /繁忙.*1\/5/u);
+  assert.match(await page.locator(".stream-error-summary").innerText(), /服务器繁忙，正在重连\s*1\s*\/5/u);
   assert.equal(await page.locator(".stream-error-cell").count(), 1);
   const restoredBusyRetry = await page.evaluate(id => window.__zustandStore.getState().getVisibleMessages(id)
     .flatMap(message => message.blocks || []).find(block => block.type === "progress" && block.retryAttempt === 1 && block.visibility === "timeline"), owner);
@@ -308,11 +315,15 @@ try {
   await page.waitForFunction(() => !window.__zustandStore.getState().isStreaming);
   assert.equal(await page.locator(".error-cell-notice").count(), 1);
   const terminalError = wire.findLast(row => row.direction === "server" && row.message.type === "error" && row.message.provider_error_type).message;
+  const terminalRateLimit = wire.findLast(row => row.direction === "server" && row.message.type === "rate_limit"
+    && row.message.conversation_id === terminalError.conversation_id && row.message.message === terminalError.message).message;
+  assert.equal(terminalRateLimit.message_id, terminalError.message_id);
+  assert.equal(terminalRateLimit.turn_id, terminalError.turn_id);
   assert.equal(await page.getByRole("alert").filter({ hasText: terminalError.message }).count(), 1, "The model failure belongs to its original turn without a duplicate global toast");
   assert.equal(await page.getByText("处理失败", { exact: true }).count(), 0);
   assert(terminalAttempts > 1);
   await capture("06-actual-terminal-model-failure");
-  checks.push("Actual exhausted provider retries retain their original Wi-Fi evidence and one standalone terminal notice");
+  checks.push("Actual exhausted 429 retries and their terminal rate-limit notification retain the original owner, Wi-Fi evidence and one standalone notice without a duplicate provider toast");
 
   await composer.fill("KEEP_SETTINGS_DRAFT");
   await page.evaluate(() => { const state = window.__zustandStore.getState(); state.setSettingsTab("appearance"); state.toggleSettings(); });

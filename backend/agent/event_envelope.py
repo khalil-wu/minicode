@@ -63,6 +63,7 @@ _TURN_SCOPED: frozenset[str] = frozenset({
     "artifact.preview",
     "done",
     "error",
+    "rate_limit",
     "stream_resume",
     "permission.decision",
     "context_compacted",

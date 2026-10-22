@@ -2561,7 +2561,40 @@ describe("provider control projections", () => {
     expect(pushToast).not.toHaveBeenCalled();
   });
 
-  it("shows structured rate-limit detail only for a live event owned by the active conversation", () => {
+  it.each([false, true])("retains turn-owned rate limits in diagnostics without a duplicate retry or terminal toast (replayed=%s)", (replayed) => {
+    vi.clearAllMocks();
+    useAppStore.setState({ conversationId: "conv-active", messages: [], inspectorEntries: [], draft: "Keep the unsent prompt" });
+    const event = normalizeInboundServerEvent({ type: "rate_limit", conversation_id: "conv-active",
+      message_id: "original-assistant", turn_id: "original-host-turn", provider: "actual-provider", error_type: "rate_limit",
+      retry_after_seconds: 2.1, recoverable: true, message: "Published provider retry", seq: 77, replayed });
+    expect(event).toBeTruthy();
+    expect(handleRuntimeEventImpl(event!, "another-conversation")).toBe(true);
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().draft).toBe("Keep the unsent prompt");
+    expect(useAppStore.getState().inspectorEntries).toEqual([expect.objectContaining({ targetKind: "provider",
+      payload: expect.objectContaining({ event: "rate_limit", conversation_id: "conv-active", message_id: "original-assistant",
+        turn_id: "original-host-turn", retry_after_seconds: 2.1, message: "Published provider retry" }) })]);
+  });
+
+  it.each(["message_id", "turn_id"])("uses the explicit rate-limit %s owner even before its transcript notice arrives", (ownerField) => {
+    vi.clearAllMocks();
+    useAppStore.setState({ conversationId: "conv-active", messages: [], inspectorEntries: [] });
+    expect(handleRuntimeEventImpl({ type: "rate_limit", conversation_id: "conv-active", [ownerField]: "original-owner",
+      error_type: "busy", recoverable: false, message: "Published terminal provider failure" } as unknown as ServerEvent)).toBe(true);
+    expect(pushToast).not.toHaveBeenCalled();
+    expect(useAppStore.getState().inspectorEntries[0].payload).toMatchObject({ event: "rate_limit", [ownerField]: "original-owner" });
+  });
+
+  it("does not invent a turn owner from the active-conversation fallback for an operation quota notification", () => {
+    vi.clearAllMocks();
+    useAppStore.setState({ conversationId: "conv-active", inspectorEntries: [] });
+    expect(handleRuntimeEventImpl({ type: "rate_limit", message_id: "operation-request", error_type: "quota_exceeded",
+      message: "Published operation quota" } as unknown as ServerEvent, "conv-active")).toBe(true);
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("Published operation quota"), "warning", 5000);
+  });
+
+  it("shows structured rate-limit detail for a live conversation notification without a turn or message owner", () => {
     expect(handleRuntimeEvent({
       type: "rate_limit",
       conversation_id: "conv-active",

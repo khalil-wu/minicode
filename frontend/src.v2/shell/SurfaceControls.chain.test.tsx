@@ -83,10 +83,16 @@ it("does not close a newer code workspace from an old removal receipt", async ()
   expect(useAppStore.getState()).toMatchObject({ conversationId: "owner-b", workingDirectory: "C:/b", appMode: "code" });
 });
 
-it("dismisses the conversation menu with Tab and returns focus to the trigger", () => {
+it("traps Tab in the conversation menu and returns focus to the trigger after Escape", () => {
   const props = menuProps();
   render(<ConversationMenu {...props} />);
-  fireEvent.keyDown(screen.getByRole("menu"), { key: "Tab" });
+  const menu = screen.getByRole("menu"), focused = document.activeElement;
+  for (const shiftKey of [false, true]) {
+    expect(fireEvent.keyDown(menu, { key: "Tab", shiftKey })).toBe(false);
+    expect(props.onClose).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(focused);
+  }
+  fireEvent.keyDown(menu, { key: "Escape" });
   expect(props.onClose).toHaveBeenCalledOnce();
   expect(document.activeElement).toBe(anchor);
 });

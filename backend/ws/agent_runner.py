@@ -148,6 +148,7 @@ _TURN_MESSAGE_SCOPED_EVENT_TYPES = {
     "artifact.preview",
     "done",
     "error",
+    "rate_limit",
     "stream_resume",
 }
 
@@ -5853,13 +5854,18 @@ class SessionAgentRunnerMixin:
                     # Emit rate_limit event if this is a rate-limit error
                     provider_error_type = str(event.data.get("provider_error_type") or "")
                     if provider_error_type in ("rate_limit", "busy"):
-                        await self.send_event(AgentEvent.rate_limit(
+                        rate_limit_event = AgentEvent.rate_limit(
                             provider=str(getattr(self, "provider", "") or event.data.get("provider") or ""),
                             error_type=provider_error_type,
                             message=str(event.data.get("message") or ""),
                             recoverable=bool(event.data.get("recoverable", True)),
                             conversation_id=conversation.id,
-                        ))
+                        )
+                        rate_limit_event.data.update({
+                            "message_id": event.data["message_id"],
+                            "turn_id": event.data.get("turn_id") or run_metadata["run_id"],
+                        })
+                        await self.send_event(rate_limit_event)
 
                 if event.type in {
                     "tool_call",

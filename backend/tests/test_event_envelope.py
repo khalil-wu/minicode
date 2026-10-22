@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from backend.agent.event_envelope import EventEnvelope
 from backend.agent.loop import AgentLoopSessionContext
 from backend.agent.message import AgentEvent
@@ -69,8 +71,11 @@ def test_explicit_host_turn_binds_plain_events_and_keeps_runtime_incarnation() -
     envelope.stamp(started)
     message = AgentEvent.agent_message_completed("Actual model output")
     envelope.stamp(message)
+    limit = AgentEvent.rate_limit(retry_after_seconds=2)
+    envelope.stamp(limit)
     assert started.data["run_id"] == "runtime-incarnation"
     assert message.data["turn_id"] == envelope.turn_id == "host-turn"
+    assert limit.data["turn_id"] == "host-turn"
 
 
 def test_envelope_skips_adapter_internal_events() -> None:
@@ -120,7 +125,11 @@ def test_tool_result_serializes_activity_kind() -> None:
     assert event.data["activity_kind"] == "file_read"
 
 
-def test_query_engine_stamps_envelope_on_events(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("task_id", "conversation_id"), [
+    ("task_123", "conv_test"),
+    ("child_task", "child_conversation"),
+])
+def test_query_engine_stamps_envelope_on_events(tmp_path: Path, task_id: str, conversation_id: str) -> None:
     """Integration: QueryEngine.submit stamps task_id, turn_id, seq."""
 
     async def fake_runner(**kwargs):
@@ -128,11 +137,12 @@ def test_query_engine_stamps_envelope_on_events(tmp_path: Path) -> None:
         yield AgentEvent.agent_message_completed("hello")
         yield AgentEvent.tool_call("tc_1", "read_file", {"path": "a.py"})
         yield AgentEvent.tool_result("tc_1", "ok")
+        yield AgentEvent.rate_limit(retry_after_seconds=2, message="Published provider retry")
         yield AgentEvent.done(status="completed")
 
     engine = QueryEngine(runner=fake_runner)
     state = AgentState(user_message="test", max_iterations=1)
-    state.conversation_id = "conv_test"
+    state.conversation_id = conversation_id
 
     submission = QuerySubmission(
         user_message="test",
@@ -145,7 +155,7 @@ def test_query_engine_stamps_envelope_on_events(tmp_path: Path) -> None:
             token_budget=TokenBudget(),
         ),
         state=state,
-        runtime=AgentLoopSessionContext(task_id="task_123"),
+        runtime=AgentLoopSessionContext(task_id=task_id),
     )
 
     async def collect():
@@ -160,8 +170,8 @@ def test_query_engine_stamps_envelope_on_events(tmp_path: Path) -> None:
 
     # QueryEngine owns the durable run id and stamps it on every event.
     for event in events:
-        assert event.data.get("task_id") == "task_123"
-        assert event.data.get("conversation_id") == "conv_test"
+        assert event.data.get("task_id") == task_id
+        assert event.data.get("conversation_id") == conversation_id
 
     # The first event (agent.run.started) captures turn_id.
     run_started = next(e for e in events if e.type == "agent.run.started")
@@ -170,6 +180,9 @@ def test_query_engine_stamps_envelope_on_events(tmp_path: Path) -> None:
     # Subsequent events should have the captured turn_id.
     completed = next(e for e in events if e.type == "item.completed")
     assert completed.data.get("turn_id") == run_started.data.get("run_id")
+    limit = next(e for e in events if e.type == "rate_limit")
+    assert limit.data["turn_id"] == run_started.data["run_id"]
+    assert limit.data["message"] == "Published provider retry"
 
 
 def test_query_engine_rejects_concurrent_prompts_on_one_agent_session(

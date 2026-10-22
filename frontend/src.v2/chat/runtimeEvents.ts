@@ -1794,6 +1794,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           {
             event: ev.type,
             conversation_id: conversationId,
+            message_id: messageId,
+            turn_id: eventTurnIdentity(e),
             provider: ev.provider,
             error_type: ev.error_type,
             retry_after_seconds: ev.retry_after_seconds,
@@ -1802,7 +1804,10 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
             message: ev.message,
           },
         );
-        if (!isReplayedRuntimeEvent(e)) {
+        const hasTranscriptOwner = Boolean(typeof eventOwner === "string" && eventOwner.trim()
+          && (messageId || eventTurnIdentity(e)));
+        // Turn retries and terminal failures already have their transcript notice.
+        if (!isReplayedRuntimeEvent(e) && !hasTranscriptOwner) {
           pushToast(rateLimitMessage(ev), "warning", 5000);
         }
         return true;
