@@ -81,7 +81,10 @@ export function AppearanceCodeThemePicker({ variant, colors, value, onSelect }: 
     {position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-code-theme-menu" onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
       ariaLabel={t("{variant}代码主题", { variant: variantLabel })} items={[
         themeItem(themes.find(theme => theme.id === "codex")!),
-        { label: t("Codex 主题"), submenuMaxHeight: 480, submenu: themes.filter(theme => theme.id !== "codex").map(themeItem) },
+        { label: t("Codex 主题"), icon: <span className="appearance-code-theme-preview" aria-hidden="true" style={{
+          "--code-theme-preview-accent": "var(--text-muted)", "--code-theme-preview-surface": colors.surface,
+          "--code-theme-preview-border": `color-mix(in srgb, ${colors.ink} 16%, ${colors.surface})`,
+        } as CSSProperties}>Aa</span>, submenuMaxHeight: 320, submenu: themes.filter(theme => theme.id !== "codex").map(themeItem) },
       ]} />}
   </div>;
 }

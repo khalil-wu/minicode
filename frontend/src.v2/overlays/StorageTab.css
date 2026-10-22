@@ -1,0 +1,121 @@
+.settings-storage-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.settings-storage-overview > .settings-section-heading {
+  margin-bottom: 4px;
+}
+
+.settings-storage-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.settings-storage-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-storage-total {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--mc-font-body);
+  font-weight: var(--fw-semibold);
+}
+
+.settings-storage-chart {
+  display: flex;
+  height: 24px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--border-subtle);
+}
+
+.settings-storage-chart-loading {
+  background: var(--surface-soft);
+}
+
+.settings-storage-segment {
+  height: 100%;
+  flex-shrink: 0;
+  background: var(--storage-category-color);
+}
+
+.settings-storage-breakdown [data-category="chats"] {
+  --storage-category-color: light-dark(#ffc300, #ffd240);
+}
+
+.settings-storage-breakdown [data-category="subagents"] {
+  --storage-category-color: light-dark(#924ff7, #ad7bf9);
+}
+
+.settings-storage-breakdown [data-category="archived"] {
+  --storage-category-color: light-dark(#e25507, #fb6a22);
+}
+
+.settings-storage-breakdown [data-category="worktrees"] {
+  --storage-category-color: light-dark(#00a240, #40c977);
+}
+
+.settings-storage-breakdown [data-category="other"] {
+  --storage-category-color: var(--text-tertiary);
+}
+
+.settings-storage-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text-secondary);
+}
+
+.settings-storage-legend > li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-storage-category {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--mc-font-body);
+}
+
+.settings-storage-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--storage-category-color);
+}
+
+.settings-storage-category-bytes {
+  font-size: var(--mc-font-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-storage-path {
+  width: fit-content;
+  max-width: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--mc-font-secondary);
+  text-align: start;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: pointer;
+}

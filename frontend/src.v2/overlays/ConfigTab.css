@@ -1,5 +1,4 @@
 .config-scope-select { width: fit-content; min-width: 116px; }
-.config-field-origin { overflow-wrap: anywhere; }
 .config-field-lock { display: flex; align-items: center; gap: 4px; color: var(--state-warning); }
 .config-lock-icon { width: 14px; height: 14px; flex: 0 0 auto; background: currentColor; }
 .config-field-error { color: var(--state-danger); }

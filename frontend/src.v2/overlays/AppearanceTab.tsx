@@ -1,10 +1,10 @@
 import { useState, type KeyboardEvent } from "react";
 import { useI18n } from "../i18n";
-import { Check, Monitor, Moon, Sun } from "lucide-react";
 import { useAppStore } from "../stores";
 import { EditorPreferencesSettings } from "./EditorPreferencesSettings";
 import { AppearanceColors, AppearanceWindowCapabilitiesProvider, useAppearanceTranslucency } from "./AppearanceColors";
 import { AppearanceFontCatalogProvider } from "./AppearanceFonts";
+import { AppearanceModePreview } from "./AppearanceModePreview";
 import { defaultThemePreferences } from "../lib/appearance-themes";
 import { NumberInput } from "../components/NumberInput";
 import { pushToast } from "./ToastContainer";
@@ -18,7 +18,7 @@ const onRadioGroupKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     : (current + (["ArrowLeft", "ArrowUp"].includes(event.key) ? -1 : 1) + buttons.length) % buttons.length;
   buttons[next].focus(); buttons[next].click();
 };
-const THEMES = [{ id: "system", label: "系统", icon: Monitor }, { id: "light", label: "浅色", icon: Sun }, { id: "dark", label: "深色", icon: Moon }] as const;
+const THEMES = [{ id: "system", label: "系统" }, { id: "light", label: "浅色" }, { id: "dark", label: "深色" }] as const;
 
 function AppearanceSettings() {
   const { t } = useI18n();
@@ -46,13 +46,10 @@ function AppearanceSettings() {
       <div className="settings-card"><div className="settings-row settings-mode-row">
         <div className="settings-row-copy"><div className="settings-row-title">{t("模式")}</div></div>
         <div className="settings-theme-grid" role="radiogroup" aria-label={t("应用主题")} onKeyDown={onRadioGroupKeyDown}>
-          {THEMES.map(({ id, label, icon: Icon }) => <button key={id} type="button" className="settings-theme-card" data-theme-preview={id}
+          {THEMES.map(({ id, label }) => <button key={id} type="button" className="settings-theme-card" data-theme-preview={id}
             data-active={String(themeMode === id)} role="radio" aria-checked={themeMode === id} tabIndex={themeMode === id ? 0 : -1} aria-label={t(label)}
             onClick={() => useAppStore.getState().setThemeMode(id)}>
-            <span className="settings-theme-preview" aria-hidden="true"><span className="settings-theme-preview-chrome" />
-              <span className="settings-theme-preview-sidebar"><i /><i /><i /></span><span className="settings-theme-preview-main"><b /><i /><i /><i /></span>
-              {themeMode === id && <span className="settings-theme-selected"><Check /></span>}
-            </span><span className="sr-only"><Icon aria-hidden="true" />{t(label)}</span>
+            <span className="settings-theme-preview" aria-hidden="true"><AppearanceModePreview mode={id} /></span>
           </button>)}
         </div>
       </div></div>

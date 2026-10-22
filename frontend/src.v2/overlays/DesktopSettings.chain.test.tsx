@@ -89,7 +89,10 @@ it("uses Source worktree confirmation before persisting automatic deletion chang
 
 it("rechecks Storage snapshots through the authoritative delete command and reports skips separately", async () => {
   const chats = ["deleted", "changed", "failed"].map((id, index) => ({ id, title: id, updated_at: "2026-01-01", archived: true, subagent_count: index, snapshot: { revision: index } }));
-  mocks.fetch.mockImplementation(async url => response(new URL(url).pathname.endsWith("/review") ? { cutoff: "2026-07-01", days: 90, archived_only: true, chats } : { path: "C:/data", total_bytes: 1024, categories: [{ name: "subagents", bytes: 1024 }] }));
+  mocks.fetch.mockImplementation(async url => response(new URL(url).pathname.endsWith("/review") ? { cutoff: "2026-07-01", days: 90, archived_only: true, chats } : { path: "C:/data", total_bytes: 1024, categories: [
+    { name: "chats", bytes: 0 }, { name: "archived", bytes: 0 }, { name: "subagents", bytes: 1024 },
+    { name: "unclassified", bytes: 0 }, { name: "worktrees", bytes: 0 }, { name: "other", bytes: 0 },
+  ] }));
   mocks.command.mockImplementation(async command => ({ level: command.conversation_id === "failed" ? "error" : command.conversation_id === "changed" ? "warning" : "success", data: { deleted: command.conversation_id === "deleted", reason: command.conversation_id === "changed" ? "storage_review_changed" : undefined } }));
   render(<StorageTab />);
   fireEvent.click(screen.getByRole("button", { name: "查看" }));

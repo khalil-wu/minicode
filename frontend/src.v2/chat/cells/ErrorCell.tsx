@@ -1,7 +1,23 @@
 import { CircleAlert, Lightbulb, ShieldAlert } from "lucide-react";
+import { Lexer } from "marked";
 import type { ErrorCellState } from "./cellTypes";
 import { normalizeAgentErrorMessage, purifyToolErrorText } from "../errorMessages";
+import { openPreferredWebLink } from "../../lib/open-preferred-target";
 import "./cells.css";
+
+function ErrorInlineLinks({ text, conversationId }: { text: string; conversationId?: string }) {
+  return Lexer.lexInline(text).map((token, index) => token.type === "link"
+    && /^https?:\/\//i.test(token.raw)
+    && typeof token.href === "string"
+    && URL.canParse(token.href)
+    ? <a key={index} href={token.href} className="md-text-link text-[var(--accent-primary)] no-underline" onClick={event => {
+      event.preventDefault();
+      void openPreferredWebLink(token.href, conversationId, {
+        ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey,
+      });
+    }}>{token.raw}</a>
+    : token.raw);
+}
 
 /**
  * ErrorCell — dedicated error display.
@@ -9,7 +25,7 @@ import "./cells.css";
  * Source turn failures are neutral, standalone notices. Permission and tool
  * notices retain their own presentation and original diagnostics.
  */
-export function ErrorCell({ cell }: { cell: ErrorCellState }) {
+export function ErrorCell({ cell, conversationId }: { cell: ErrorCellState; conversationId?: string }) {
   const isPermissionNotice = cell.source === "permission";
   const tone = isPermissionNotice ? "warning" : "danger";
   const purifiedMessage = purifyToolErrorText(cell.message);
@@ -26,7 +42,7 @@ export function ErrorCell({ cell }: { cell: ErrorCellState }) {
       <path fillRule="evenodd" d="M8 1.333a6.667 6.667 0 1 1 0 13.334A6.667 6.667 0 0 1 8 1.333Zm0 1.334a5.333 5.333 0 1 0 0 10.666A5.333 5.333 0 0 0 8 2.667Z" clipRule="evenodd" />
     </svg>
     {displayMessage && <span className="sr-only">{cell.title}</span>}
-    <span>{displayMessage || cell.title}{cell.rawError && cell.rawError.trim() !== cell.message.trim() && <><br />{cell.rawError}</>}</span>
+    <span><ErrorInlineLinks text={displayMessage || cell.title} conversationId={conversationId} />{cell.rawError && cell.rawError.trim() !== cell.message.trim() && <><br /><ErrorInlineLinks text={cell.rawError} conversationId={conversationId} /></>}</span>
   </div>;
 
   return (

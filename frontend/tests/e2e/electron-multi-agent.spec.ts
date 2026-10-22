@@ -136,6 +136,10 @@ class MultiAgentBackend {
         res.end(JSON.stringify({ status: "ok", ready: true }));
         return;
       }
+      if (new URL(req.url!, "http://fixture").pathname === "/api/thread-metadata/sections") {
+        res.end(JSON.stringify({ sections: [] }));
+        return;
+      }
       res.end(JSON.stringify({ ok: true, providers: [], models: [] }));
     });
     this.server.on("upgrade", (request, socket) => {
@@ -154,22 +158,16 @@ class MultiAgentBackend {
         this.transportErrors.push({ connection, code: error.code, message: error.message,
           duringNativeClose: this.closingConnections.has(connection) });
       });
-      let bootstrapped = false;
       const ws = new TestWebSocket(socket, (command) => {
         this.commands.push(command);
         this.wire.push({ connection, direction: "client", atMs: Date.now(), message: command });
         if (typeof command.client_command_id === "string") {
           ws.send({ type: "client.command.ack", client_command_id: command.client_command_id, command_type: command.type });
         }
-        if (command.type === "session.restore") {
-          bootstrapped = true;
+        if (command.type === "session.restore" || command.type === "session.sync") {
           this.sendSessionSnapshot(ws, connection > 1, command);
         } else if (command.type === "conversation.list") {
           this.sendConversationList(ws);
-          if (!bootstrapped && connection === 1) {
-            bootstrapped = true;
-            this.sendSessionSnapshot(ws, false);
-          }
         } else if (command.type === "subagent.transcript") {
           const data = this.childTranscript(String(command.subagent_id));
           ws.send({ type: "command.result", command: "subagent.transcript", level: "success", message: "",
@@ -309,7 +307,8 @@ class MultiAgentBackend {
       active_conversation_id: ownerId });
   }
 
-  private sendSessionSnapshot(ws: TestWebSocket, recovered: boolean, restore?: JsonRecord) {
+  private sendSessionSnapshot(ws: TestWebSocket, recovered: boolean, command: JsonRecord) {
+    const restore = command.type === "session.restore";
     const conversation = this.activeConversation(recovered);
     const session = { session_id: "session-electron", active_conversation_id: ownerId, active_conversation: conversation,
       active_stream_conversation_ids: recovered ? [] : [ownerId], active_subagents: [],
@@ -318,9 +317,10 @@ class MultiAgentBackend {
         content: "Continue with the recovered verification path.", queued_at_ms: 3 }],
     };
     ws.send({ type: "llm.model.updated", model: "gpt-5", current_model: "gpt-5", available_models: ["gpt-5"] });
-    ws.send({ type: restore ? "session.restored" : "session.synced", restored: true, active_conversation_id: ownerId,
-      active_conversation: conversation, conversation, conversation_switched_follows: Boolean(restore), session,
-      last_seq: Number(restore?.last_seq ?? 0), current_seq: recovered ? 2 : 0, replayed_events: 0 });
+    ws.send({ type: restore ? "session.restored" : "session.synced", ...(restore ? { restored: true } : {}),
+      client_command_id: command.client_command_id, active_conversation_id: ownerId,
+      active_conversation: conversation, conversation, conversation_switched_follows: true, session,
+      last_seq: Number(command.last_seq ?? 0), current_seq: recovered ? 2 : 0, replayed_events: 0 });
     ws.send({ type: "conversation.switched", conversation_id: ownerId, conversation, session });
     this.sendConversationList(ws);
   }
@@ -438,8 +438,7 @@ test("real Electron workbench supports read-only child transcripts, lazy results
     ownedApps.add(app);
     const window = await app.firstWindow();
     await window.setViewportSize(desktopViewport);
-    await expect.poll(() => backend.commands.some((command) =>
-      ["session.restore", "conversation.list"].includes(String(command.type))), { timeout: 30_000 }).toBe(true);
+    await expect.poll(() => backend.commands.some((command) => command.type === "session.sync"), { timeout: 30_000 }).toBe(true);
     await expect(window.getByText("Continue with the recovered verification path.", { exact: true })).toBeVisible();
     const initialNative = await nativeWindowState(app);
     nativeStates.push({ phase: "initial", ...initialNative });

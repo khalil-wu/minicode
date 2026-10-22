@@ -21,14 +21,17 @@ const configFields = { approval_policy: "on-request", sandbox_mode: "workspace-w
 const config = { path: "C:/Profile/settings.json", ...configFields, effective: configFields, origins: {}, requirements: {},
   scopes: [{ id: "user", kind: "user", path: "C:/Profile/settings.json", version: "user-v1", values: {}, readonly: false,
     source: { type: "user", display: "user (C:/Profile/settings.json)" } }] };
-const usage = { path: "C:/Profile/data", total_bytes: 1024, categories: [] };
+const usage = { path: "C:/Profile/data", total_bytes: 1024, categories: [
+  { name: "chats", bytes: 1024 }, { name: "archived", bytes: 0 }, { name: "subagents", bytes: 0 },
+  { name: "unclassified", bytes: 0 }, { name: "worktrees", bytes: 0 }, { name: "other", bytes: 0 },
+] };
 const pages = [
   { name: "Config", render: () => <ConfigTab active />, request: { kind: "config", workspaceRoot, scopeId: "user" } as ManagedSettingsTarget,
     button: async () => { const button = screen.getByRole("button", { name: "打开配置文件" }); await waitFor(() => expect(button).toHaveProperty("disabled", false)); return button; } },
   { name: "Hooks", render: () => <HooksTab />, request: { kind: "hook", hookKey: hook.key } as ManagedSettingsTarget,
     button: async () => { const description = await screen.findByText(hook.command, { selector: ".settings-row-description" }); const details = description.closest("details")!; fireEvent.click(details.querySelector("summary")!); return within(details).getByRole("button", { name: "打开配置文件" }); } },
   { name: "Storage", render: () => <StorageTab />, request: { kind: "data" } as ManagedSettingsTarget,
-    button: async () => { const row = screen.getByText("应用数据文件夹").closest<HTMLElement>(".settings-row")!; const button = within(row).getByRole("button"); await waitFor(() => expect(button).toHaveProperty("disabled", false)); return button; } },
+    button: async () => screen.findByRole("button", { name: `应用数据文件夹: ${usage.path}` }) },
 ];
 
 beforeEach(() => {

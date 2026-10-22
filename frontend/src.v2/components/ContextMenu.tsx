@@ -342,6 +342,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
       )}
     </div>
     {submenu && !items[submenu.index]?.disabled && items[submenu.index]?.submenu && createPortal(<MenuSurface items={items[submenu.index].submenu!} position={{ x: 0, y: 0 }} anchor={submenu.anchor}
+      ariaLabel={typeof items[submenu.index].label === "string" ? items[submenu.index].label as string : undefined}
       focusFirst={submenu.focusFirst} surfaces={surfaces} onDismiss={onDismiss} onSelect={onSelect}
       itemFontSize={itemFontSize}
       surfaceRef={submenuRef}

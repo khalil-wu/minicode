@@ -175,7 +175,7 @@ export const HistoryCellRenderer = memo(function HistoryCellRenderer({
       return <DiffCell cell={cell} allowRevert={allowFileRevert} conversationId={conversationId} workspaceRoot={workspaceRoot} />;
 
     case "error":
-      return <ErrorCell cell={cell} />;
+      return <ErrorCell cell={cell} conversationId={conversationId} />;
 
     case "assistant_markdown":
       return <AssistantMarkdownCell

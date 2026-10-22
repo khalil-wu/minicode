@@ -2,6 +2,7 @@
 .appearance-code-theme-picker .mc-select-trigger { border-radius: 999px; padding-left: 6px; }
 .appearance-code-theme-picker .mc-select-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .context-menu-surface.appearance-code-theme-menu { width: 240px; }
+.appearance-code-theme-menu .mc-menu-item[aria-haspopup="menu"] { font-weight: var(--fw-medium); }
 .appearance-code-theme-preview {
   display: inline-flex;
   flex: 0 0 auto;

@@ -130,9 +130,8 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
     const overridden = scope?.kind === "user" ? page?.overrides[field] : undefined;
     return <div className="settings-row" key={field}><div className="settings-row-copy">
       <div className="settings-row-title">{label}</div>
-      <div className="settings-row-description" id={`config-description-${field}`}>
+      <div className="settings-row-description" id={`config-description-${field}`} title={origin ? t("生效来源：{source}", { source: origin.source.display }) : undefined}>
         <div>{descriptions[field]}</div>
-        {origin && <div className="config-field-origin">{t("生效来源：{source}", { source: origin.source.display })}</div>}
         {lock && <div className="config-field-lock"><span aria-hidden="true" className="config-lock-icon"
           style={{ mask: `url('${import.meta.env.BASE_URL}apps/config-lock.svg') center / contain no-repeat` }} />{lock}</div>}
         {error && <div className="config-field-error" role="alert">{error}</div>}

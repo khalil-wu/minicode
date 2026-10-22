@@ -170,10 +170,16 @@ try {
     });
     assert(Math.abs(layout.preview.centerY - layout.arrow.centerY) <= 1, "Theme preview and arrow must remain on the same line");
     assert.equal(layout.button.width, 176);
+    const modePreviews = await page.locator(".settings-theme-card .settings-theme-preview").evaluateAll(elements => elements.map(element => {
+      const { width, height } = element.getBoundingClientRect(); return { width, height, vectors: element.querySelectorAll("svg").length };
+    }));
+    assert.deepEqual(modePreviews, [{ width: 80, height: 60, vectors: 2 }, { width: 80, height: 60, vectors: 1 }, { width: 80, height: 60, vectors: 1 }]);
     checks.push({ scenario: `Theme trigger current rendered geometry at ${width}px`, layout });
     await capture(`06-theme-row-${width}`);
   }
-  await trigger.click(); await capture("07-theme-root-menu");
+  await trigger.click();
+  assert.equal(await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).locator(".appearance-code-theme-preview").count(), 1);
+  await capture("07-theme-root-menu");
   await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).hover();
   await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
   await capture("08-theme-nested-menu");
@@ -194,6 +200,14 @@ try {
   const settingsPages = await page.locator(".settings-center-tab").evaluateAll(elements => elements.map(element => element.getAttribute("aria-label")));
   for (const [index, label] of settingsPages.entries()) {
     await page.locator(".settings-center-tab").filter({ hasText: label }).click();
+    if (label === "存储") {
+      const chart = page.locator('.settings-storage-chart[role="img"]');
+      await chart.waitFor();
+      assert.equal((await chart.boundingBox()).height, 24);
+      assert.equal(await page.locator(".settings-storage-legend > li").count(), 5);
+      assert((await page.locator(".settings-storage-path").innerText()).startsWith(profile));
+      checks.push("Real storage measurement uses the Source 24px category bar, five-category legend and actual data path");
+    }
     if (label === "配置") {
       const scope = page.getByRole("button", { name: /^配置作用域，当前：/ });
       const verbosity = page.getByRole("button", { name: /^回复详细程度，当前：/ });

@@ -50,6 +50,7 @@
     "diff": "8.0.4",
     "katex": "^0.17.0",
     "lucide-react": "^0.460.0",
+    "marked": "16.4.2",
     "material-icon-theme": "^5.38.1",
     "mdast-util-from-markdown": "^2.0.3",
     "mermaid": "^11.16.1",
