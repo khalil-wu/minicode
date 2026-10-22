@@ -4,7 +4,7 @@ import path from "node:path";
 
 // Called only by the isolated production-desktop CI audit. Fixtures are real
 // files; renderer setup uses existing public actions, never injected snapshots.
-export async function auditProjectConfig({ page, app, workspace, profile, capture, checks, wire }) {
+export async function auditProjectConfig({ page, app, workspace, profile, capture, checks, wire, trace }) {
   assert.equal(process.env.CI, "true");
   const projectFile = path.join(workspace, ".minicode", "config.toml");
   const userFile = path.join(profile, "settings.json");
@@ -32,11 +32,13 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   };
   const showConfig = async () => {
     const owner = await page.evaluate(() => window.__zustandStore.getState().workingDirectory);
-    const [request] = await Promise.all([
-      page.waitForRequest(request => {
-        const url = new URL(request.url());
-        return request.method() === "GET" && url.pathname === "/api/settings/agent-config"
-          && url.searchParams.get("workspace_root") === owner;
+    const activatedAt = Date.now();
+    trace("config:reopen:request", { owner });
+    const [response] = await Promise.all([
+      page.waitForResponse(response => {
+        const request = response.request(), url = new URL(response.url());
+        return request.method() === "GET" && request.timing().startTime >= activatedAt
+          && url.pathname === "/api/settings/agent-config" && url.searchParams.get("workspace_root") === owner;
       }),
       page.evaluate(() => {
         const state = window.__zustandStore.getState();
@@ -44,12 +46,13 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
         if (!state.settingsOpen) state.toggleSettings();
       }),
     ]);
-    const response = await request.response();
-    assert(response);
-    assert.equal(await response.finished(), null);
     assert.equal(response.status(), 200);
+    trace("config:reopen:headers", { owner });
     await scope.waitFor();
     await page.waitForFunction(() => !document.querySelector('[aria-label^="回复详细程度，当前："]').disabled);
+    assert.equal(await page.locator('[data-settings-tab="config"] p[role="alert"]').count(), 0,
+      "Reopen must not accept a cached snapshot after a real config-load failure");
+    trace("config:reopen:ready", { owner });
   };
   const hideSettings = () => page.evaluate(() => {
     const state = window.__zustandStore.getState();
@@ -113,19 +116,25 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   const initialTrust = await readFile(trustFile, "utf8");
   await writeFile(trustFile, JSON.stringify({ ...JSON.parse(initialTrust), roots: [] }));
   await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
-  const [disabledRequest] = await Promise.all([
-    page.waitForRequest(request => {
-      const url = new URL(request.url());
-      return request.method() === "GET" && url.pathname === "/api/settings/agent-config"
+  const revokedAt = Date.now();
+  trace("config:disabled:request");
+  const [disabledResponse] = await Promise.all([
+    page.waitForResponse(response => {
+      const request = response.request(), url = new URL(response.url());
+      return request.method() === "GET" && request.timing().startTime >= revokedAt && url.pathname === "/api/settings/agent-config"
         && url.searchParams.get("workspace_root") === workspace;
     }),
     page.locator(".settings-center-tab").filter({ hasText: "配置" }).click(),
   ]);
-  const disabledResponse = await disabledRequest.response();
-  assert(disabledResponse);
-  assert.equal(await disabledResponse.finished(), null);
   assert.equal(disabledResponse.status(), 200);
-  const disabled = (await disabledResponse.json()).scopes.find(item => item.id === projectId);
+  trace("config:disabled:headers");
+  // Read the unchanged revoked ledger through the actual API as an independent
+  // oracle. The renderer must consume its own response and project the same
+  // warning/locks; no CDP response-body/finished barrier controls the UI audit.
+  const canonical = await page.request.get(disabledResponse.url(), { headers: disabledResponse.request().headers() });
+  assert.equal(canonical.status(), 200);
+  const disabled = (await canonical.json()).scopes.find(item => item.id === projectId);
+  trace("config:disabled:canonical-read");
   assert(disabled.disabled_reason);
   const warning = page.locator(".config-scope-warning");
   await warning.waitFor();
@@ -137,9 +146,11 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   assert.equal(await page.getByRole("button", { name: "打开配置文件", exact: true }).isDisabled(), false);
   await capture("settings-06-project-disabled", { disabledReason: disabled.disabled_reason });
   await writeFile(trustFile, initialTrust);
+  trace("config:trust-restored:navigate");
   await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
   await page.locator(".settings-center-tab").filter({ hasText: "配置" }).click();
   await warning.waitFor({ state: "hidden" });
+  trace("config:trust-restored:ready");
   checks.push("An actual revoked CI trust ledger produces the original project disabled reason and disabled controls while the registered file opener remains available; the ledger is restored");
 
   const originalConversation = await page.evaluate(() => window.__zustandStore.getState().conversationId);
@@ -149,12 +160,14 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   await writeFile(childConfig, "# Child project config for the actual ancestor-open flow\n[sandbox_workspace_write]\nnetwork_access = true\n");
   await writeFile(dirtyFile, "CI disk content must remain unchanged\n");
   await hideSettings();
+  trace("config:child:create");
   await page.evaluate(workspaceRoot => window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" }), child);
   await page.waitForFunction(({ root, previous }) => {
     const state = window.__zustandStore.getState();
     return state.conversationId !== previous && state.workingDirectory.replaceAll("\\", "/") === root.replaceAll("\\", "/");
   }, { root: child, previous: originalConversation });
   await page.locator(".composer-input-region [data-composer-input]:visible").first().fill("KEEP_CHILD_PROJECT_DRAFT");
+  trace("config:child:editor-open");
   await page.evaluate(file => window.__zustandStore.getState().openEditorFile(file, undefined, { exact: true, preview: false }), dirtyFile);
   const dirtyTab = await waitForFile(path.relative(child, dirtyFile));
   await page.evaluate(({ file, content }) => window.__zustandStore.getState().updateTabContent(file, content), { file: dirtyTab.path, content: "CI unsaved editor buffer must survive registered opening\n" });
@@ -258,7 +271,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
     await page.getByRole("option", { name: "用户", exact: true }).click();
     await page.getByRole("button", { name: "配置作用域，当前：用户", exact: true }).waitFor();
     await page.locator(".settings-center-main").evaluate((element, top) => { element.scrollTop = top; }, initialScroll.before);
-    checks.push("Reopening Configuration awaits its own real workspace GET and loaded controls; the mouse-open scope menu retains container focus, follows an actual 40px parent scroll and selects User without a retry");
+    checks.push("Reopening Configuration observes its own real workspace GET headers and loaded controls; the mouse-open scope menu retains container focus, follows an actual 40px parent scroll and selects User without a retry");
   } finally {
     checks.push({ scenario: "Actual final Configuration reopen and scope selection event order",
       events: await page.evaluate(() => window.__finishConfigReopenAudit()) });

@@ -321,7 +321,7 @@ try {
       assert.equal(Object.hasOwn(JSON.parse(await readFile(unset.write.path, "utf8")), "model_verbosity"), false);
       await page.getByRole("button", { name: "回复详细程度，当前：模型默认值", exact: true }).waitFor();
       checks.push("Real User/Admin scope menu, managed field lock, actual User file write and explicit-null override removal");
-      await auditProjectConfig({ page, app, workspace, profile, capture, checks, wire });
+      await auditProjectConfig({ page, app, workspace, profile, capture, checks, wire, trace });
     }
     if (label === "钩子") {
       const emptyTitle = page.getByText("未找到钩子", { exact: true });
