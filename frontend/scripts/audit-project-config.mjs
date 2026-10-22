@@ -101,11 +101,18 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   const initialTrust = await readFile(trustFile, "utf8");
   await writeFile(trustFile, JSON.stringify({ ...JSON.parse(initialTrust), roots: [] }));
   await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
-  const [disabledResponse] = await Promise.all([
-    page.waitForResponse(response => response.url().includes("/api/settings/agent-config") && response.request().method() === "GET"),
+  const [disabledRequest] = await Promise.all([
+    page.waitForRequest(request => {
+      const url = new URL(request.url());
+      return request.method() === "GET" && url.pathname === "/api/settings/agent-config"
+        && url.searchParams.get("workspace_root") === workspace;
+    }),
     page.locator(".settings-center-tab").filter({ hasText: "配置" }).click(),
   ]);
-  assert(disabledResponse.ok(), await disabledResponse.text());
+  const disabledResponse = await disabledRequest.response();
+  assert(disabledResponse);
+  assert.equal(await disabledResponse.finished(), null);
+  assert.equal(disabledResponse.status(), 200);
   const disabled = (await disabledResponse.json()).scopes.find(item => item.id === projectId);
   assert(disabled.disabled_reason);
   const warning = page.locator(".config-scope-warning");
