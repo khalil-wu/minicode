@@ -315,6 +315,7 @@ jobs:
           backend/tests/test_terminal_service_canonical_exec.py
           backend/tests/test_background_command_lifecycle.py
           backend/tests/test_native_cua_runtime.py
+          backend/tests/test_plugin_cua_companion.py
           backend/tests/test_apply_patch.py
           backend/tests/test_projectless_execution_cwd_chain.py
           tests/test_windows_low_integrity_sandbox.py

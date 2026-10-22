@@ -226,8 +226,17 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     if (installed) {
       openDetail({ id: requestedPluginId, installed });
       useAppStore.setState({ skillsMarketplaceSelectedPluginId: null });
+      return;
     }
-  }, [catalog, active, requestedPluginId, plugins]);
+    for (const source of marketplaces) {
+      const entry = source.plugins.find(plugin => plugin.id === requestedPluginId);
+      if (entry) {
+        openDetail({ id: requestedPluginId, catalog: entry, source });
+        useAppStore.setState({ skillsMarketplaceSelectedPluginId: null });
+        return;
+      }
+    }
+  }, [catalog, active, requestedPluginId, plugins, marketplaces]);
   const closeDetail = () => { setDetail(null); window.requestAnimationFrame(() => detailTrigger.current?.focus()); };
   useEffect(() => { if (detail) detailRef.current?.focus(); }, [detail]);
   useEffect(() => { if (searchTarget === "插件来源" || searchTarget === "添加插件市场") setMarketplaceDialogOpen(true); }, [searchTarget]);

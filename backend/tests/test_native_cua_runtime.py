@@ -373,7 +373,8 @@ async def test_blocked_native_process_is_reclaimed_by_its_actual_owner_without_w
 
 
 @pytest.mark.asyncio
-async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_and_preserves_turn_cleanup(sdk_owner, monkeypatch, request):
+@pytest.mark.parametrize("origin", ["configured", "plugin"])
+async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_and_preserves_turn_cleanup(sdk_owner, monkeypatch, request, origin):
     from contextlib import aclosing
     from backend.agent.run_context import RunContext
     from backend.sdk import create_session, create_tool_registry
@@ -416,7 +417,28 @@ async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_
         replace(attachment, peer_info={**attachment.peer_info, "platformOs": "windows"}), access))
     selected = MCPServerConfig("cua_repl", command=shutil.which("node"), env={
         "MINICODE_CUA_PROVIDER": PROVIDER, "CUA_REPL_ENABLED_SURFACES": "computer", "MINICODE_CUA_FIXTURE_LOG": str(log)})
-    host = MCPServerManager(config_path=workspace / "mcp.json", workspace_root=workspace, runtime_configs=(selected,))
+    if origin == "plugin":
+        from backend.plugins.manager import PluginManager, PluginSnapshot
+
+        root = workspace / "plugin"
+        manifest = root / ".codex-plugin/plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({"name": "computer-use", "mcp_servers": {"cua_repl": {
+            "transport": selected.transport, "command": selected.command, "args": selected.args, "env": selected.env}}}), encoding="utf-8")
+        plugin = {"id": "computer-use@fixture", "name": "computer-use", "path": str(root),
+            "manifest_paths": [str(manifest)], "enabled": True}
+        monkeypatch.setattr(PluginManager, "snapshot", lambda self, **kwargs: PluginSnapshot({
+            "plugins_enabled": True, "plugins": [plugin]}))
+        managed = workspace / "managed"
+        managed.mkdir()
+        (managed / "managed-settings.json").write_text(json.dumps({
+            "allowed_mcp_servers": [{"command": [selected.command]}]}), encoding="utf-8")
+        host = MCPServerManager(config_path=workspace / "mcp.json", workspace_root=workspace, managed_settings_dir=managed)
+        await host.start_all()
+        assert host.get_client("cua_repl") is None
+        assert host.get_server_config("cua_repl").plugin_id == plugin["id"]
+    else:
+        host = MCPServerManager(config_path=workspace / "mcp.json", workspace_root=workspace, runtime_configs=(selected,))
     run = RunContext(agent_runtime=runtime, mcp_manager=host)
     model = CuaModel("await cua.getState();nodeRepl.write('native provider initialized')", run)
     async def approve_tool(_call_id):
@@ -434,6 +456,16 @@ async def test_existing_sdk_mcp_initialization_selects_the_independent_provider_
         assert client.native and client.runtime is None
         assert {tool.name for tool in await client.list_tools()} == {"js", "js_reset", "js_add_node_module_dir"}
         assert payloads and len(client._args[-1]) == payloads[0]["controlled_bootstrap_chars"]
+        if origin == "plugin":
+            from backend.mcp.registry import MCPToolProxy
+
+            admitted = run.mcp_manager.get_server_config("cua_repl")
+            assert admitted.source.startswith("builtin:cua_repl:")
+            assert admitted.plugin_id == plugin["id"] and admitted.plugin_server_name == "cua_repl"
+            proxy = MCPToolProxy("cua_repl", next(tool for tool in await client.list_tools() if tool.name == "js"),
+                client, manager=run.mcp_manager)
+            assert proxy.session_approval_key() == ("cua_repl", plugin["id"], None, None, "js")
+            assert proxy.persistent_approval_target() == {"kind": "plugin", "plugin_id": plugin["id"], "server": "cua_repl"}
         request.node.user_properties.append(("full_native_production_payload", json.dumps({
             **payloads[0], "production_source_sha256": hashlib.sha256(production_source.encode()).hexdigest(),
             "production_source_bytes": len(production_source.encode()), "node_executable": client._command,

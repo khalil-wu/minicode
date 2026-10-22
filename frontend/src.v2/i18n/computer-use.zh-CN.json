@@ -8,5 +8,14 @@
   "要从始终允许的应用中移除“{displayName}”吗？": "要从始终允许的应用中移除“{displayName}”吗？",
   "MiniCode 将在下次电脑操作会话中询问是否使用“{displayName}”。": "MiniCode 将在下次电脑操作会话中询问是否使用“{displayName}”。",
   "移除 {displayName}": "移除 {displayName}",
-  "已移除允许的应用": "已移除允许的应用"
+  "已移除允许的应用": "已移除允许的应用",
+  "控制": "控制",
+  "任意应用": "任意应用",
+  "让 MiniCode 控制电脑上的应用。": "让 MiniCode 控制电脑上的应用。",
+  "查看插件详情 {pluginName}": "查看插件详情 {pluginName}",
+  "切换 {pluginName}": "切换 {pluginName}",
+  "停用 {pluginName}": "停用 {pluginName}",
+  "启用 {pluginName}": "启用 {pluginName}",
+  "安装 {pluginName}": "安装 {pluginName}",
+  "插件配置已保存，但运行时尚未完成加载。": "插件配置已保存，但运行时尚未完成加载。"
 }

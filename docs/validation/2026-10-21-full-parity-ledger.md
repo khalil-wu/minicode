@@ -70,7 +70,7 @@ Realtime 协议与结束工具上一冻结批为 **57/57**：13 个协议/原 ow
 | BR-G9 | partial_missing | Source私有save bubble、成功登录分类、suggestion/generation UI未复现；现有加密管理/原表单填充并非缺失 证据：`output/full-parity-20261021/browser-audit.md` |
 | BR-G10 | partial_missing | 任意iframe/script navigation仍缺相同trusted modifier事实；主frame HTML/SVG已补 证据：`output/full-parity-20261021/browser-audit.md` |
 | DIST-CUA1 | partial_implemented | 自有Windows provider及原receiving executor链已接入，107个不同相关用例有通过证据，完整生产体SDK/原helper关闭亦已补验；永久授权、高级signer/accessibility、其他平台及实机仍未完成，不据底层adapter推导桌面全部平台开放。证据：`2026-10-22-independent-windows-cua.md` |
-| UI-CUA1 | partial_native_consumer | 本地native目录/真实always授权/读取/确认撤销/活动目标失权已实现；installed-source、remote、插件与浏览器扩展管理尚未补齐，不加空控件。Windows参考无点击声音。证据：`2026-10-22-computer-use-settings-delivery.md`、`2026-10-22-computer-use-settings-source-gap.md` |
+| UI-CUA1 | partial_native_consumer | 本地native永久授权、AnyApp真实plugin安装/启停/详情及plugin声明的原companion链已实现；installed-source永久授权、remote、Office apps与浏览器扩展管理尚未补齐，不加空控件。Windows参考无点击声音。证据：`2026-10-22-computer-use-settings-delivery.md`、`2026-10-22-computer-use-settings-source-gap.md` |
 | RT11 | hour_failed_continuation_verified | 03主/child实际跑满3600/3660秒并退出0；同actor原句柄、board、冷读及B2–5通过，B1误读截断头630使整轮仍失败。131.516秒独立冷续跑已恢复原A/B、同child epoch2→3及正确尾读3575；不重算小时或回写原failed结果。证据：`2026-10-21-real-hour-acceptance.md`、`2026-10-21-source-long-task-chain-review.md` |
 | BR-A1 | native_passed_head_0a6c64cb | 原DownloadItem暂停/恢复、128KiB精确字节、原ID/save path、生产updater阻断及完成解除已在云端实际通过；6/6 smoke、0 skip。本机未GUI。证据：`output/native-browser-completion-20261021/ci-0a6c-desktop-job.log` |
 | BR-A2 | pending_physical_acceptance | 真实device/native permission及OS secure storage，不由fixture推断。 证据：`output/full-parity-20261021/browser-audit.md` |
@@ -81,7 +81,7 @@ Realtime 协议与结束工具上一冻结批为 **57/57**：13 个协议/原 ow
 | NR-A2 | pending_physical_acceptance | selected restricted/elevated/managed networking、ACL/private desktop/进程清理、IPv4/IPv6/proxy等真实策略矩阵；不改用户机器政策来伪造通过。 证据：`output/full-parity-20261021/native-remote-audit.md`、`docs/windows-native-sandbox.md` |
 | CUA-A1 | pending_physical_acceptance | 实际截图/输入/app approval与原pipe/helper关闭；历史仅bootstrap/list_apps不能替代。 证据：`output/full-parity-20261021/native-remote-audit.md` |
 | OS-A1 | pending_physical_acceptance | 原生clipboard/default app/focus/Mica及MCP encrypted-media/手势clipboard；macOS路径仅相应平台验收。 证据：`output/full-parity-20261021/native-remote-audit.md`、`output/full-parity-20261021/general-audit.md` |
-| INTEG-A1 | verified_head_0a6c64cb | 0a6c64cb完整9/9 job成功，含Windows CUA、原生smoke及wheel冷安装；工作区新设置与CEF原型批次尚未冻结。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/runtime-audit.md` |
+| INTEG-A1 | verified_head_1363a344 | 1363a344完整9/9 job成功，含native永久授权设置、Windows CUA、原生smoke及wheel冷安装；AnyApp/plugin companion另批尚未冻结。 证据：`output/full-parity-20261021/general-audit.md`、`output/full-parity-20261021/runtime-audit.md` |
 | PROV-BEDROCK-A1 | pending_external_provider_acceptance | 本批独立签名、真实loopback HTTP/SSE和前端验证证明本地实现；没有真实AWS/GovCloud凭据或上游推理回执。证据：`docs/validation/2026-10-21-bedrock-provider-chain.md`、`docs/validation/2026-10-21-bedrock-setup-ui.md` |
 | VO-RT-API1 | pending_external_provider_and_physical_acceptance | 本轮loopback真实HTTP/WS与ScriptModel证明本地协议和harness链；未使用真实麦克风/扬声器和外部Realtime服务，不把配置可用等同上游兼容或设备已验收。 证据：`output/full-parity-20261021/realtime-source-expanded-repair.xml` |
 
@@ -111,3 +111,7 @@ Realtime 协议与结束工具上一冻结批为 **57/57**：13 个协议/原 ow
 本批增量：Goal/Plan三处入口与原owner目标清除75/75通过；浏览器已排队权限随设置重判及临时授权reset88/88通过；自有Windows CUA协议/SDK/原helper回收按最后用例107项通过。safe构建index-D96xHrJW.js保留旧assets，bundle/UI debt门槛通过。真实DownloadItem pause/resume与更新重启阻断新云端fixture待本批HEAD验证；未做本机GUI。详见 `2026-10-21-native-parity-completion-batch.md`。
 
 当前已验证提交为 `0a6c64cbb78a32305f76df6fe7946cbc99123e0f`，整轮 [CI 39637592599](https://github.com/khalil-wu/minicode/actions/runs/39637592599) 为 **9/9 jobs success**。其原生下载验收和当前Source完整生产体SDK测试均实际执行；工作区后续Computer use设置与CEF原型另按新提交验证。完整原始收据：`output/native-browser-completion-20261021/ci-0a6c-receipt.json`。
+
+后续 `1363a34429c4b7777d38b594c124153f421211a1` 的 [完整生产CI](https://github.com/khalil-wu/minicode/actions/runs/39715653614) 已 **9/9 jobs success**，包含本地native永久授权设置。CEF原型 `5dfaaca6` 的[隔离Windows验收](https://github.com/khalil-wu/minicode/actions/runs/39716892614)也success，两种scale各78检查，但仍不是BR-G1–G10生产整组完成；详见 `2026-10-22-cef-native-embedding-proof.md`。AnyApp及plugin来源companion为之后工作区批次，按其新提交另验。
+
+AnyApp控制与plugin声明的CUA接收端/权限/关闭链已在后续批补齐，最终本地11/11控制接口、6/6来源策略及25/25 native/完整SDK均有明确收据；普通plugin命名未改，当前官方AnyApp包只有skills/hooks，不虚构其MCP server。详见 `2026-10-22-computer-use-any-app.md`。本批最终HEAD的完整CI另验，UI-CUA1仍有Office、external extension及未证provider分支，不能整组删除。

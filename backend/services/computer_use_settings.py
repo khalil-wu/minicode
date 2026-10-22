@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from backend.mcp.cua_approval_store import NativeAppApprovalStore, native_approval_home
 from backend.mcp.cua_repl import CuaRuntime, is_configured_cua
 from backend.owner_scope import canonical_workspace_root
+from backend.services.computer_use_controls import computer_use_plugin_controls
 
 
 def _selection(manager, session_id, conversation_id, workspace_root):
@@ -46,8 +47,18 @@ def _selection(manager, session_id, conversation_id, workspace_root):
                 receiving_ids.add(companion.config.environment_id)
                 receiving_known = True
     receiving_ids = tuple(sorted(receiving_ids))
-    selection_id = hashlib.sha256(json.dumps([owner, asdict(selected), receiving_ids, receiving_known], sort_keys=True).encode()).hexdigest() if selected else None
-    return owner, selected, selection_id, receiving_ids, receiving_known
+    controls, revision = [], None
+    if (receiving_known and all(identity == "local" for identity in receiving_ids) and os.name == "nt"
+            and (selected is None or selected.environment_id == "local")):
+        controls, revision, installed, stack = computer_use_plugin_controls(owner["workspace_root"])
+        if selected is None and installed is not None and mcp is not None:
+            from backend.mcp.cua_repl import plugin_cua_declaration
+            try:
+                selected = plugin_cua_declaration(mcp, installed, config_stack=stack)
+            except ValueError as error:
+                raise HTTPException(422, str(error)) from error
+    selection_id = hashlib.sha256(json.dumps([owner, asdict(selected), receiving_ids, receiving_known, revision], sort_keys=True).encode()).hexdigest() if selected else None
+    return owner, selected, selection_id, receiving_ids, receiving_known, controls
 
 
 def _payload(owner, selected, selection_id, receiving_ids, receiving_known):
@@ -88,22 +99,46 @@ def _payload(owner, selected, selection_id, receiving_ids, receiving_known):
         "approved_apps": [{key: app[key] for key in ("app_id", "display_name", "icon_data_url")} for app in store.list_apps()]}
 
 
-def get_computer_use_settings(manager, *, session_id, conversation_id=None, workspace_root=None):
-    owner, selected, identity, receiving_ids, receiving_known = _selection(manager, session_id, conversation_id, workspace_root)
+def _settings_snapshot(manager, *, session_id, conversation_id=None, workspace_root=None):
+    owner, selected, identity, receiving_ids, receiving_known, controls = _selection(manager, session_id, conversation_id, workspace_root)
     payload = _payload(owner, selected, identity, receiving_ids, receiving_known)
-    if _selection(manager, session_id, conversation_id, workspace_root)[2] != identity:
+    if payload["available"]:
+        payload["controls"] = controls
+        if controls:
+            payload["navigation_visible"] = True
+    return payload
+
+
+def get_computer_use_settings(manager, *, session_id, conversation_id=None, workspace_root=None):
+    scope = dict(session_id=session_id, conversation_id=conversation_id, workspace_root=workspace_root)
+    payload = _settings_snapshot(manager, **scope)
+    if _settings_snapshot(manager, **scope)["selection_id"] != payload["selection_id"]:
         raise HTTPException(409, "The selected Computer Use provider has changed")
     return payload
 
 
 def remove_computer_use_app_approval(manager, *, session_id, conversation_id, workspace_root,
         provider_id, selection_id, app_id):
-    owner, selected, identity, receiving_ids, receiving_known = _selection(manager, session_id, conversation_id, workspace_root)
-    provider = selected.env.get("MINICODE_CUA_PROVIDER", "installed-source") if selected else None
-    if identity != selection_id or provider != provider_id:
+    current = get_computer_use_settings(manager, session_id=session_id,
+        conversation_id=conversation_id, workspace_root=workspace_root)
+    if current["selection_id"] != selection_id or current["provider_id"] != provider_id:
         raise HTTPException(409, "The selected Computer Use provider has changed")
-    current = _payload(owner, selected, identity, receiving_ids, receiving_known)
     if not current["capabilities"]["revoke_app_approval"]:
         raise HTTPException(503, current["reason"] or "This provider cannot revoke persistent app approvals")
     NativeAppApprovalStore(native_approval_home()).remove(app_id)
     return get_computer_use_settings(manager, session_id=session_id, conversation_id=conversation_id, workspace_root=workspace_root)
+
+
+def selected_computer_use_plugin_control(manager, *, session_id, conversation_id, workspace_root,
+        provider_id, selection_id, control_id, action):
+    current = get_computer_use_settings(manager, session_id=session_id,
+        conversation_id=conversation_id, workspace_root=workspace_root)
+    if current["selection_id"] != selection_id or current["provider_id"] != provider_id:
+        raise HTTPException(409, "The selected Computer Use provider or plugin has changed")
+    control = next((item for item in current["controls"] if item["id"] == control_id), None)
+    if control is None:
+        raise HTTPException(409, "The original Computer Use plugin is no longer available")
+    capability = "can_install" if action == "install" else "can_toggle"
+    if not control[capability]:
+        raise HTTPException(409, "The original Computer Use plugin does not allow this action")
+    return control

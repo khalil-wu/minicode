@@ -197,6 +197,21 @@ describe("PluginsTab loading", () => {
     expect(screen.queryByRole("button", { name: /安装到项目/ })).toBeNull();
   });
 
+  it("opens an uninstalled requested plugin from its actual marketplace record", async () => {
+    const plugin = { id: "computer-use@openai-bundled", name: "computer-use", description: "Actual computer control package",
+      interface: { displayName: "Computer Use" }, longDescription: "Original marketplace package detail" };
+    useAppStore.setState({ skillsMarketplaceSelectedPluginId: plugin.id });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces")
+      ? { marketplaces: [{ name: "openai-bundled", status: "ready", source: { source: "local", path: "C:/actual-marketplace" }, plugins: [plugin] }] }
+      : { plugins: [] }), { status: 200 }))));
+    render(<PluginsTab catalog />);
+    const detail = await screen.findByRole("region", { name: "插件详情" });
+    expect(within(detail).getByText("Original marketplace package detail")).toBeTruthy();
+    expect(within(detail).getByRole("button", { name: "安装到用户级配置" })).toBeTruthy();
+    expect(useAppStore.getState().skillsMarketplaceSelectedPluginId).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === "POST" || init?.method === "PUT")).toBe(false);
+  });
+
   it("connects installed MCP components to their real login state and configuration", async () => {
     useAppStore.setState({ mcpServers: [{ name: "tool_server", status: "connected", tools: 1 }, { name: "plugin:tools@local:tool_server", status: "error", phase: "auth_required", lastError: "login expired", tools: 0 }] });
     const plugin = { id: "tools@local", name: "tools", displayName: "工具包", path: "C:/plugins/tools", enabled: true, mcp_server_count: 1, mcp_server_names: ["tool_server"] };

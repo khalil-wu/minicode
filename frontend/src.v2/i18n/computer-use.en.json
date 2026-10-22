@@ -8,5 +8,14 @@
   "要从始终允许的应用中移除“{displayName}”吗？": "Remove “{displayName}” from always allowed apps?",
   "MiniCode 将在下次电脑操作会话中询问是否使用“{displayName}”。": "MiniCode will ask to use “{displayName}” in the next computer use session.",
   "移除 {displayName}": "Remove {displayName}",
-  "已移除允许的应用": "Allowed app removed"
+  "已移除允许的应用": "Allowed app removed",
+  "控制": "Control",
+  "任意应用": "Any App",
+  "让 MiniCode 控制电脑上的应用。": "Let MiniCode control apps on your computer.",
+  "查看插件详情 {pluginName}": "View {pluginName} plugin details",
+  "切换 {pluginName}": "Toggle {pluginName}",
+  "停用 {pluginName}": "Disable {pluginName}",
+  "启用 {pluginName}": "Enable {pluginName}",
+  "安装 {pluginName}": "Install {pluginName}",
+  "插件配置已保存，但运行时尚未完成加载。": "Plugin settings were saved, but the runtime has not finished loading."
 }

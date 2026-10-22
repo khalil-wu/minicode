@@ -53,3 +53,5 @@ Any App/Office live control、插件与浏览器扩展 Install/Manage/Remove 需
 生产构建和原bundle预算通过，入口 `index-6VrBV1St.js`；旧 `index-D96xHrJW.js`、`index-DGnB5Tq5.js` 及其hashed assets实际保留，未重载用户窗口。协议同步、工具重名、模块大小和agent边界检查通过。收据为 `output/native-browser-completion-20261021/frontend-cua-settings-*.log`。本批最终提交的完整CI结果另存精确HEAD原始收据，不继承旧0a6c64cb的通过。
 
 主CI只对CEF原型路径及其独立工作流的push跳过重复生产测试；pull_request仍执行原完整验证，CEF工作流按自己的push路径实际编译和运行。没有降低测试或预算门槛。
+
+后续 Any App 的真实插件目录/安装/启停/详情消费者见 [Any App 交付](2026-10-22-computer-use-any-app.md)。本文件的 `controls=[]` 保留为上一冻结批边界，不覆盖后续已实现分支。Office connector与外部浏览器扩展管理仍单独列为未完成。

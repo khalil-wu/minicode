@@ -13,7 +13,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from typing import Any, Awaitable, Callable
 
 from backend.config import DATA_ROOT, PROJECT_ROOT
@@ -604,9 +604,9 @@ class MCPServerManager:
             if config.approval_status != PROJECT_MCP_APPROVED and config.name not in manual:
                 inactive_project_configs[config.name] = config
 
-        # Plugin keys are namespaced, so name collisions cannot suppress a
-        # manually configured server. A manual declaration owns an equivalent
-        # execution/credential context; between plugins, the first owns it.
+        # Ordinary plugin keys are namespaced. CUA retains its declared
+        # canonical identity; manual declarations still win and the first
+        # plugin owns an otherwise unclaimed canonical name.
         manual_signatures = {
             signature
             for config in manual.values()
@@ -615,6 +615,8 @@ class MCPServerManager:
         plugin_signatures: set[tuple[Any, ...]] = set()
         merged: dict[str, MCPServerConfig] = {}
         for config in plugin_configs:
+            if config.name == "cua_repl" and config.name in merged:
+                continue
             signature = _mcp_server_signature(config)
             if signature and (signature in manual_signatures or signature in plugin_signatures):
                 logger.info("Suppressing duplicate plugin MCP server '%s'", config.name)
@@ -691,7 +693,8 @@ class MCPServerManager:
             allowed.append(config)
         return allowed
 
-    def _load_plugin_configs(self, *, config_stack: Any | None = None) -> list[MCPServerConfig]:
+    def _load_plugin_configs(self, *, config_stack: Any | None = None,
+            plugins: Iterable[Mapping[str, Any]] | None = None) -> list[MCPServerConfig]:
         if config_stack is None:
             from backend.config import load_config_layer_stack
 
@@ -702,11 +705,12 @@ class MCPServerManager:
             raise RuntimeError("Plugin MCP discovery is unavailable") from exc
 
         configs: list[MCPServerConfig] = []
-        try:
-            enabled_plugins = PluginManager(config_stack=config_stack).snapshot().enabled_plugins
-        except Exception as exc:
-            raise RuntimeError("Unified plugin snapshot unavailable for MCP") from exc
-        for plugin_order, plugin in enumerate(enabled_plugins):
+        if plugins is None:
+            try:
+                plugins = PluginManager(config_stack=config_stack).snapshot().enabled_plugins
+            except Exception as exc:
+                raise RuntimeError("Unified plugin snapshot unavailable for MCP") from exc
+        for plugin_order, plugin in enumerate(plugins):
             plugin_root = Path(str(plugin.get("path") or ""))
             plugin_name = str(plugin.get("name") or plugin_root.name)
             plugin_id = str(plugin.get("id") or plugin_name)
@@ -782,6 +786,11 @@ class MCPServerManager:
                             priority=plugin_order * 1000 + server_index,
                             base_dir=plugin_root,
                         )
+                        from backend.mcp.cua_repl import is_computer_cua_declaration
+
+                        if is_computer_cua_declaration(str(name), config.env):
+                            config = replace(config, name="cua_repl", plugin_id=plugin_id,
+                                plugin_server_name=str(name), config_path=str(manifest_path))
                         configs.append(config)
         return configs
 

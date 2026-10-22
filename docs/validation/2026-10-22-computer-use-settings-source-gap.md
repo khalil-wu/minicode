@@ -22,3 +22,5 @@
 当前没有可直接连接前端的完整统一契约，因此本批不加空页面、假Install/Manage、永久授权按钮或Windows声音设置。后续需先完成provider能力、真实授权store与应用元数据、读取/确认撤销、插件/扩展管理的原host归属，再接设置页面。
 
 完整静态范围、符号与精确片段索引：`output/full-parity-20261021/frontend-current-static-audit.md` 及 `frontend-current-reference/`。同批已修复的Goal/Plan模式互斥是独立已交付链路，75/75通过，不能抵消本组缺失或代表所有菜单已实机核完。
+
+后续 Any App 的真实插件目录/安装/启停/详情消费者见 [Any App 交付](2026-10-22-computer-use-any-app.md)。本文件的 `controls=[]` 保留为上一冻结批边界，不覆盖后续已实现分支。Office connector与外部浏览器扩展管理仍单独列为未完成。

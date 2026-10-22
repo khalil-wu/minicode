@@ -5,17 +5,28 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { useComputerUseSettings } from "../hooks/useComputerUseSettings";
 import { ComputerUseSettings } from "./ComputerUseSettings";
-import type { ComputerUseSettingsSnapshot } from "../protocol/computer-use-settings";
+import type { ComputerUsePluginControl, ComputerUseSettingsSnapshot } from "../protocol/computer-use-settings";
 
-const mocks = vi.hoisted(() => ({ fetch: vi.fn(), confirm: vi.fn(), toast: vi.fn(), session: "original-session" }));
-vi.mock("../protocol/api", () => ({ apiBase: () => "http://owner-backend.test", authHeaders: (headers?: HeadersInit) => ({ ...headers, Authorization: "Bearer original-runtime" }),
-  fetchWithTimeout: mocks.fetch, errorMessageFromResponseText: (text: string) => text }));
+const mocks = vi.hoisted(() => ({ fetch: vi.fn(), confirm: vi.fn(), toast: vi.fn(), command: vi.fn(), session: "original-session" }));
+vi.mock("../protocol/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../protocol/api")>();
+  return { apiBase: () => "http://owner-backend.test", authHeaders: (headers?: HeadersInit) => ({ ...headers, Authorization: "Bearer original-runtime" }),
+    fetchWithTimeout: mocks.fetch, errorMessageFromResponseText: (text: string) => text, LONG_HTTP_TIMEOUT_MS: 300_000,
+    pluginAssetResourceUrlWithToken: (path: string, variant: "composer" | "logo" | "logo-dark") => actual.pluginAssetResourceUrlWithToken(path, variant, window.location.origin),
+  };
+});
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: mocks.session }) }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null }) }));
 vi.mock("./DialogService", () => ({ showConfirm: mocks.confirm }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
+vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: mocks.command }));
 
 const approved = { app_id: "app-A", display_name: "Actual App A", icon_data_url: null };
+const anyApp = (patch: Partial<ComputerUsePluginControl> = {}): ComputerUsePluginControl => ({
+  kind: "plugin", id: "any-app", plugin_id: "computer-use@openai-bundled", plugin_name: "computer-use", marketplace: "openai-bundled",
+  display_name: "Computer Use", installed: false, enabled: false, can_install: true, can_toggle: false,
+  icon_url: null, plugin_path: null, icon_variant: null, icon_variants: [], load_errors: [], ...patch,
+});
 const snapshot = (patch: Partial<ComputerUseSettingsSnapshot> = {}): ComputerUseSettingsSnapshot => ({
   owner: { session_id: "original-session", conversation_id: "A", workspace_root: "C:/project-A" }, provider_id: "minicode-win32", selection_id: "selected-native-A",
   navigation_visible: true, available: true, status: "ready", reason: null,
@@ -33,6 +44,7 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.fetch.mockReset(); mocks.session = "original-session"; mocks.confirm.mockResolvedValue(true);
   mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => response(snapshot(init?.method === "POST" ? { approved_apps: [] } : {})));
   useAppStore.setState({ conversationId: "A", workingDirectory: "C:/project-A", isConnected: true, pendingConversationSwitchId: null,
+    skillsMarketplaceOpen: false, skillsMarketplaceSelectedPluginId: null, resolvedTheme: "dark",
     runtimeCapabilities: { mcp_registry_version: 1 }, draft: "Keep the unsaved draft", attachments: [{ id: "kept-file", name: "notes.txt", type: "text/plain", size: 0, status: "ready" }],
     quotedMessage: { id: "kept-quote", role: "assistant", content: "Keep this quote" } });
 });
@@ -182,4 +194,134 @@ it("remounts the real settings effect under StrictMode without reusing an aborte
   await screen.findByRole("button", { name: "移除 Actual App A" });
   expect(mocks.fetch.mock.calls[0][1].signal.aborted).toBe(true);
   expect(mocks.fetch.mock.calls.at(-1)![1].signal.aborted).toBe(false);
+});
+
+it("installs only the returned Any App control through its original owner and consumes the real enabled receipt", async () => {
+  mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => response(snapshot({ controls: [anyApp(init?.method === "POST"
+    ? { installed: true, enabled: true, can_install: false, can_toggle: true } : {})] })));
+  render(<Harness />);
+  fireEvent.click(await screen.findByRole("button", { name: "安装 Computer Use" }));
+  const toggle = await screen.findByRole("switch", { name: "切换 Computer Use" });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  const [url, init, options] = mocks.fetch.mock.calls[1];
+  expect(url.pathname).toBe("/api/settings/computer-use/controls/plugin");
+  expect(options).toEqual({ timeoutMs: 300_000 });
+  expect(JSON.parse(init.body)).toEqual({ session_id: "original-session", conversation_id: "A", workspace_root: "C:/project-A",
+    provider_id: "minicode-win32", selection_id: "selected-native-A", control_id: "any-app", action: "install" });
+  expect(mocks.command.mock.calls.map(([command]) => command.type)).toEqual(["skills.list", "mcp.list", "runtime.capabilities.inspect"]);
+  expect(screen.queryByRole("button", { name: "管理" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "删除" })).toBeNull();
+  expect(useAppStore.getState().draft).toBe("Keep the unsaved draft");
+});
+
+it("does not project a requested plugin toggle before its actual mutation result", async () => {
+  const changing = deferred<Response>();
+  mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => init?.method === "POST" ? changing.promise
+    : response(snapshot({ controls: [anyApp({ installed: true, enabled: true, can_toggle: true })] })));
+  render(<Harness />);
+  const toggle = await screen.findByRole("switch", { name: "切换 Computer Use" });
+  fireEvent.click(toggle);
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  expect((toggle as HTMLButtonElement).disabled).toBe(true);
+  const [, init] = mocks.fetch.mock.calls[1];
+  expect(JSON.parse(init.body)).toMatchObject({ control_id: "any-app", action: "set_enabled", enabled: false });
+  await act(async () => changing.resolve(response(snapshot({ controls: [anyApp({ installed: true, enabled: false, can_toggle: true })] }))));
+  expect(toggle.getAttribute("aria-checked")).toBe("false");
+});
+
+it("keeps Install text with the existing loading spinner while the actual package operation is pending", async () => {
+  const installing = deferred<Response>();
+  mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => init?.method === "POST" ? installing.promise
+    : response(snapshot({ controls: [anyApp()] })));
+  render(<Harness />);
+  const install = await screen.findByRole("button", { name: "安装 Computer Use" });
+  fireEvent.click(install);
+  expect(install.textContent).toBe("安装");
+  expect(install.getAttribute("aria-busy")).toBe("true");
+  expect((install as HTMLButtonElement).disabled).toBe(true);
+  expect(install.querySelector("svg.animate-spin[aria-hidden='true']")).not.toBeNull();
+  expect(screen.queryByText("安装中…")).toBeNull();
+  await act(async () => installing.resolve(response(snapshot({ controls: [anyApp({ installed: true, enabled: true, can_toggle: true })] }))));
+  expect(screen.getByRole("switch", { name: "切换 Computer Use" }).getAttribute("aria-checked")).toBe("true");
+});
+
+it("uses real plugin asset URLs for the dark variant and preserves the declared light URL on theme change", async () => {
+  mocks.fetch.mockResolvedValue(response(snapshot({ controls: [anyApp({ installed: true, can_toggle: true,
+    plugin_path: "C:/真实插件/computer-use", icon_variant: "logo", icon_variants: ["logo", "logo-dark"],
+    icon_url: "https://vendor.example/declared-light.png" })] })));
+  render(<Harness />);
+  const details = await screen.findByRole("button", { name: "查看插件详情 Computer Use" });
+  const dark = new URL(details.querySelector("img")!.getAttribute("src")!);
+  expect(dark.origin).toBe(window.location.origin);
+  expect(dark.pathname).toBe("/api/plugins/asset");
+  expect(dark.searchParams.get("plugin_path")).toBe("C:/真实插件/computer-use");
+  expect(dark.searchParams.get("variant")).toBe("logo-dark");
+  act(() => useAppStore.setState({ resolvedTheme: "light" }));
+  expect(details.querySelector("img")!.getAttribute("src")).toBe("https://vendor.example/declared-light.png");
+  expect(mocks.fetch).toHaveBeenCalledOnce();
+});
+
+it("uses the actual path and composer variant helper when no URL is declared and leaves catalog placeholders generic", async () => {
+  mocks.fetch.mockResolvedValue(response(snapshot({ controls: [anyApp({ installed: true, plugin_path: "C:/plugins/actual-app",
+    icon_variant: "composer", icon_variants: ["composer"], icon_url: null })] })));
+  render(<Harness />);
+  const details = await screen.findByRole("button", { name: "查看插件详情 Computer Use" });
+  const icon = new URL(details.querySelector("img")!.getAttribute("src")!);
+  expect(icon.pathname).toBe("/api/plugins/asset");
+  expect(icon.searchParams.get("plugin_path")).toBe("C:/plugins/actual-app");
+  expect(icon.searchParams.get("variant")).toBe("composer");
+  mocks.fetch.mockResolvedValue(response(snapshot({ controls: [anyApp()] })));
+  act(() => window.dispatchEvent(new Event("focus")));
+  await screen.findByRole("button", { name: "安装 Computer Use" });
+  expect(details.querySelector("img")).toBeNull();
+  expect(details.querySelector("[data-brand='generic']")).not.toBeNull();
+});
+
+it("opens the existing marketplace details for the actual canonical plugin without activating it", async () => {
+  mocks.fetch.mockResolvedValue(response(snapshot({ controls: [anyApp()] })));
+  render(<Harness />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 Computer Use" }));
+  expect(useAppStore.getState()).toMatchObject({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "plugins",
+    skillsMarketplaceReturnTarget: "settings", skillsMarketplaceSelectedPluginId: "computer-use@openai-bundled",
+    draft: "Keep the unsaved draft", attachments: [{ id: "kept-file" }] });
+  expect(mocks.fetch).toHaveBeenCalledOnce();
+  expect(mocks.command).not.toHaveBeenCalled();
+});
+
+it("preserves the original control and true error when plugin mutation is refused", async () => {
+  mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => init?.method === "POST"
+    ? new Response("Original plugin inventory changed", { status: 409 }) : response(snapshot({ controls: [anyApp()] })));
+  render(<Harness />);
+  fireEvent.click(await screen.findByRole("button", { name: "安装 Computer Use" }));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Original plugin inventory changed");
+  expect(screen.getByRole("button", { name: "安装 Computer Use" })).toBeTruthy();
+  expect(screen.queryByRole("switch")).toBeNull();
+  expect(mocks.command).not.toHaveBeenCalled();
+});
+
+it("keeps the saved plugin state and actual runtime failure distinct from successful activation", async () => {
+  mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => response(snapshot({
+    controls: [anyApp({ installed: true, enabled: init?.method === "POST", can_toggle: true })],
+    ...(init?.method === "POST" ? { runtime_refresh: { ok: false, errors: ["Actual CUA runtime failed to load"] } } : {}),
+  })));
+  render(<Harness />);
+  fireEvent.click(await screen.findByRole("switch", { name: "切换 Computer Use" }));
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", "Actual CUA runtime failed to load");
+  expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
+  expect(mocks.toast).not.toHaveBeenCalled();
+});
+
+it("does not send late plugin results or refresh commands into a newly selected task", async () => {
+  const changing = deferred<Response>();
+  mocks.fetch.mockImplementation(async (_url: URL, init?: RequestInit) => init?.method === "POST" ? changing.promise
+    : response(snapshot({ controls: [anyApp()] })));
+  render(<Harness />);
+  fireEvent.click(await screen.findByRole("button", { name: "安装 Computer Use" }));
+  mocks.fetch.mockResolvedValue(response(snapshot({ owner: { session_id: "original-session", conversation_id: "B", workspace_root: "C:/project-B" }, controls: [] })));
+  act(() => useAppStore.setState({ conversationId: "B", workingDirectory: "C:/project-B", draft: "B unsaved" }));
+  await waitFor(() => expect(screen.queryByRole("button", { name: "安装 Computer Use" })).toBeNull());
+  await act(async () => changing.resolve(response(snapshot({ controls: [anyApp({ installed: true, enabled: true })] }))));
+  expect(screen.queryByRole("switch")).toBeNull();
+  expect(mocks.command).not.toHaveBeenCalled();
+  expect(useAppStore.getState().draft).toBe("B unsaved");
 });

@@ -3,6 +3,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,9 @@ from backend.tests.test_native_cua_runtime import native_companion, text, OWNER
 
 def settings_client(monkeypatch, workspace, selected, *, conversation_id="real-thread"):
     import backend.services.computer_use_settings as service
+    state_root = Path(os.environ["MINICODE_STATE_ROOT"])
+    monkeypatch.setattr("backend.config.STATE_ROOT", state_root)
+    monkeypatch.setattr("backend.commands.plugins.STATE_ROOT", state_root)
     monkeypatch.setattr(service, "os", SimpleNamespace(name="nt"))
     choices = [selected] if selected is not None else []
     session = SimpleNamespace(active_conversation_id=conversation_id,

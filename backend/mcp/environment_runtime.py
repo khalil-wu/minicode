@@ -80,6 +80,9 @@ class MCPEnvironmentRuntime:
     def apply_authority(self, config: MCPServerConfig) -> MCPServerConfig:
         if not config.enabled or self.snapshot is None:
             return config
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_COMPANION_SOURCE
+
+        declaration = self.cua_repl_config if config.source.startswith(CUA_COMPANION_SOURCE) else config
         selection = next((selection for selection in self.snapshot.all_selections()
             if selection.environment_id == config.environment_id), None)
         if selection is None:
@@ -95,15 +98,15 @@ class MCPEnvironmentRuntime:
             else:
                 parsed = mcp_policy_from_requirements({"mcp_servers": policy.get("servers"), "plugins": policy.get("plugins")},
                     source=f"environment {config.environment_id}")
-                if config.plugin_id is None:
-                    requirement = parsed.requirements.get(config.name) if parsed.requirements is not None else None
-                    allowed = parsed.requirements is None or requirement is not None and requirement.matches(config)
+                if declaration.plugin_id is None:
+                    requirement = parsed.requirements.get(declaration.name) if parsed.requirements is not None else None
+                    allowed = parsed.requirements is None or requirement is not None and requirement.matches(declaration)
                 else:
                     plugin_rules = parsed.plugin_requirements
                     has_plugin_servers = bool(plugin_rules)
-                    rules = plugin_rules.get(config.plugin_id) if plugin_rules is not None else None
-                    requirement = rules.get(config.plugin_server_name) if rules is not None else None
-                    allowed = parsed.requirements != {} and (not has_plugin_servers or requirement is not None and requirement.matches(config))
+                    rules = plugin_rules.get(declaration.plugin_id) if plugin_rules is not None else None
+                    requirement = rules.get(declaration.plugin_server_name) if rules is not None else None
+                    allowed = parsed.requirements != {} and (not has_plugin_servers or requirement is not None and requirement.matches(declaration))
         return config if allowed else replace(config, enabled=False,
             disabled_reason=f"MCP server is unavailable under environment `{config.environment_id}` authority")
 

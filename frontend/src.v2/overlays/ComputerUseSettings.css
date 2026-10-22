@@ -2,3 +2,9 @@
 .settings-computer-use-app { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .settings-computer-use-app-icon { width: 36px; height: 36px; flex: 0 0 36px; border-radius: var(--radius-sm); object-fit: contain; }
 .settings-computer-use-app-initial { display: grid; place-items: center; background: var(--surface-soft); color: var(--text-secondary); font-weight: var(--fw-medium); }
+.settings-computer-use-control { min-height: 60px; }
+.settings-computer-use-plugin-icon { box-sizing: border-box; overflow: hidden; border: 1px solid var(--border-subtle); border-radius: 8px; }
+.settings-computer-use-plugin-icon[data-brand="generic"] > svg { width: 20px; height: 20px; }
+.settings-computer-use-plugin-details { display: flex; align-items: center; flex: 1; gap: 12px; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: start; cursor: pointer; }
+.settings-computer-use-plugin-details:focus-visible { border-radius: var(--radius-sm); outline: 2px solid var(--focus-ring); outline-offset: 4px; }
+.settings-computer-use-plugin-details:disabled { cursor: default; }

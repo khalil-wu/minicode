@@ -26,3 +26,9 @@ CEF支持接收parent HWND，并不等于已经验证跨进程Electron宿主中�
 在线信誉、广告规则或其他provider服务仍需各自真实依赖与回执，不能由普通下载成功或设置页可打开推导。原生默认Chrome UI可作为验证路线；若需要投影Codex私有prompt元数据，还须评估引擎扩展。
 
 本批只读收集小型公开源码，没有下载大型SDK、构建、启动浏览器或修改用户runtime。完整27处引用、103份源码清单和分发/服务边界在 `output/full-parity-20261021/cef-native-route-audit/report.md`；其数量不作为产品完成率。
+
+## 后续原位基础验证已完成
+
+独立原型 `5dfaaca641bb57bd4cc6782e9110e258e355bb94` 的 [Windows CI 39716892614](https://github.com/khalil-wu/minicode/actions/runs/39716892614) 已success。Chrome style的原跨进程child、1×/1.5×原pane矩形、焦点、关闭后owner存活、同profile的新PID真实读回均通过；原owner尺寸和全部断言保留。真实display设置消除了已测得的788px系统max-track限制，不是缩小原pane或放宽断言。完整失败轮和精确范围见 `2026-10-22-cef-native-embedding-proof.md`。
+
+这项仅验证引擎原位基础。当前生产BrowserPanel、agent桥和下载/权限/密码消费者尚未切入CEF，不能据此关闭BR-G1–G10或宣称已完成当前界面像素对齐。

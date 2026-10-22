@@ -195,7 +195,8 @@ class MCPToolProxy(BaseTool):
         self._approval_config = copy.deepcopy(server_config)
         runtime = getattr(manager, "environment_runtime", None)
         self._permission_scope = runtime.permission_scope(server_config.environment_id) if runtime is not None else None
-        self._plugin_id = server_config.source.removeprefix("plugin:") if server_config is not None and server_config.source.startswith("plugin:") else None
+        self._plugin_id = (server_config.plugin_id or
+            (server_config.source.removeprefix("plugin:") if server_config.source.startswith("plugin:") else None)) if server_config is not None else None
 
         # Source Auto preserves Option<bool>: D=true first, then R=true,
         # otherwise only an explicit D=false and O=false need no approval.
@@ -289,7 +290,7 @@ class MCPToolProxy(BaseTool):
             return None
         if self._plugin_id is not None:
             return {"kind": "plugin", "plugin_id": self._plugin_id,
-                "server": self._server_name.removeprefix(f"plugin:{self._plugin_id}:")}
+                "server": config.plugin_server_name or self._server_name.removeprefix(f"plugin:{self._plugin_id}:")}
         if config.source in {"user", "project"} and config.config_path:
             return {"kind": "custom", "path": config.config_path, "server": config.name}
         return None

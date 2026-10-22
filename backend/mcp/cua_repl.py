@@ -25,12 +25,33 @@ SOURCE_PREFIX = "builtin:cua_repl:"
 _HOST_SCRIPT = Path(__file__).with_name("computer_use_host.mjs")
 
 
-def is_configured_cua(config) -> bool:
-    configured = config.name == "cua_repl" and (
-        "computer" in config.env.get("CUA_REPL_ENABLED_SURFACES", "").split(","))
-    if configured and config.env.get("MINICODE_CUA_PROVIDER", "installed-source") not in {"installed-source", "minicode-win32"}:
+def is_computer_cua_declaration(name, env) -> bool:
+    configured = name == "cua_repl" and "computer" in env.get("CUA_REPL_ENABLED_SURFACES", "").split(",")
+    if configured and env.get("MINICODE_CUA_PROVIDER", "installed-source") not in {"installed-source", "minicode-win32"}:
         raise ValueError("Unknown MINICODE_CUA_PROVIDER; select installed-source or minicode-win32 explicitly")
     return configured
+
+
+def is_configured_cua(config) -> bool:
+    return is_computer_cua_declaration(config.name, config.env)
+
+
+def plugin_cua_declaration(manager, plugin, *, config_stack=None):
+    """Read one installed plugin's actual declaration without activating it."""
+    from backend.config import load_config_layer_stack
+    from backend.mcp.policy import load_mcp_policy
+
+    if config_stack is None:
+        config_stack = load_config_layer_stack(cwd=manager.workspace_root,
+            requirements_path=manager._requirements_path, managed_settings_dir=manager._managed_settings_dir)
+    configs = [config for config in manager._load_plugin_configs(config_stack=config_stack, plugins=(plugin,))
+        if is_configured_cua(config)]
+    if len(configs) > 1:
+        raise ValueError("The selected plugin declares more than one CUA computer runtime")
+    if not configs:
+        return None
+    policy = load_mcp_policy(managed_settings_dir=manager._managed_settings_dir, config_stack=config_stack)
+    return manager._apply_mcp_policies(configs, policy=policy)[0]
 
 
 @dataclass(frozen=True)
@@ -236,7 +257,8 @@ class CuaReplCompanions(NodeReplCompanions):
             raise ValueError("The selected CUA runtime requires a local Windows receiving environment")
         identity = json.dumps([id(attachment.environment), attachment.permission_scope.identity(), _env_policy(attachment),
             attachment.config.mcp_policy, network.identity() if network is not None else None,
-            selected.command, selected.args, selected.env], sort_keys=True)
+            selected.command, selected.args, selected.env, selected.source, selected.config_path,
+            selected.plugin_id, selected.plugin_server_name], sort_keys=True)
         key = hashlib.sha256(identity.encode()).hexdigest()
         config = replace(selected, source=SOURCE_PREFIX + key, cwd=attachment.selection.cwd,
             environment_id=attachment.selection.environment_id if native else "local")
@@ -274,6 +296,12 @@ async def register_cua_companion(run_context, agent_session, *, execution):
         return
     manager = prepared.mcp_manager
     selected = prepared.runtime.cua_repl_config
+    if selected is not None:
+        from backend.mcp.policy import load_mcp_policy
+
+        policy = load_mcp_policy(managed_settings_dir=manager._managed_settings_dir,
+            config_stack=execution.config.config_layer_stack)
+        [selected] = manager._apply_mcp_policies([replace(selected)], policy=policy)
     thread = run_context.environment_thread_runtime
     owner_host = thread if thread is not None else run_context.node_repl_owner or agent_session
     if selected is None or not selected.enabled:
@@ -291,11 +319,6 @@ async def register_cua_companion(run_context, agent_session, *, execution):
         app_access = stack.effective_config().get("computer_use", {}) if stack is not None else {}
     config = await owner.admit(attachment, run_context.network_step.policy_for(attachment), selected,
         app_access=app_access)
-    from backend.mcp.policy import load_mcp_policy
-
-    policy = load_mcp_policy(managed_settings_dir=manager._managed_settings_dir,
-        config_stack=execution.config.config_layer_stack)
-    [config] = manager._apply_mcp_policies([config], policy=policy)
     config = manager.environment_runtime.apply_authority(config)
     if execution.model_info is not None and execution.model_info.extra.get("node_repl_disabled", False):
         config = replace(config, enabled=False, disabled_reason="The selected model disables node_repl")

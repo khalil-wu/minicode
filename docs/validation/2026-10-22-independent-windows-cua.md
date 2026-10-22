@@ -8,8 +8,9 @@ MiniCode 新增显式 `minicode-win32` provider，使用公开 Win32 API、Pillo
 
 ```json
 {
-  "mcpServers": {
+  "servers": {
     "cua_repl": {
+      "transport": "stdio",
       "command": "<接收端 Node 的路径>",
       "args": [],
       "env": {
