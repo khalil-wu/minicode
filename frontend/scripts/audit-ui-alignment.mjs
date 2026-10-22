@@ -347,16 +347,17 @@ try {
     await page.keyboard.press("ArrowRight");
     await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
     await capture(`dpi-${scale}-theme-submenu-focus`);
+    const lastTheme = page.getByRole("menu", { name: "Codex 主题", exact: true }).getByRole("menuitemradio").last();
+    const lastThemeText = await lastTheme.textContent();
     await page.keyboard.press("End");
-    const lastTheme = page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true });
-    await page.waitForFunction(() => document.activeElement?.textContent.includes("VS Code Plus"));
+    await page.waitForFunction(text => document.activeElement?.textContent === text, lastThemeText);
     const lastThemeGeometry = await lastTheme.evaluate(element => {
       const item = element.getBoundingClientRect(), menu = element.closest('[role="menu"]').getBoundingClientRect();
       return { focused: document.activeElement === element, itemTop: item.top, itemBottom: item.bottom, menuTop: menu.top, menuBottom: menu.bottom };
     });
     assert(lastThemeGeometry.focused && lastThemeGeometry.itemTop >= lastThemeGeometry.menuTop
       && lastThemeGeometry.itemBottom <= lastThemeGeometry.menuBottom);
-    await capture(`dpi-${scale}-theme-submenu-last-item`, { lastThemeGeometry });
+    await capture(`dpi-${scale}-theme-submenu-last-item`, { lastThemeText, lastThemeGeometry });
     await page.keyboard.press("Escape");
     for (const label of settingsPages) {
       await page.locator(".settings-center-tab").filter({ hasText: label }).click();
