@@ -8,8 +8,8 @@ read user profiles, or install a runtime into MiniCode.
 The independent `CEF sidebar prototype (Windows)` workflow runs on matching
 push paths and `workflow_dispatch`. The SDK is downloaded only inside the
 disposable Windows runner. `prepare-cef.py` and the JS launcher refuse local
-execution. No Playwright, CDP, screenshots, or desktop automation is involved.
-The prototype itself exercises native HWND/CEF APIs on the runner.
+execution. No Playwright, CDP, screenshots, or local desktop interaction is
+involved. The prototype itself exercises native HWND/CEF/display APIs on the runner.
 
 The workflow builds one DLL against the pinned standard CEF distribution and
 renames its matching `bootstrapc.exe` to the probe's executable. This follows
@@ -20,10 +20,14 @@ CEF LPAC ACL macro. It does not set `no_sandbox` or `enable-automation`.
 
 Before launching Electron, a separate native setup records the runner's actual
 screen/work area, maximum track dimensions and available display modes. If the
-work area cannot contain the unchanged 1680x1140-pixel owner, it selects an
-enumerated mode of at least 1920x1200 and applies it to the disposable session
-without updating the registry. Unsupported or insufficient modes fail the job;
-owner dimensions, scale factors and browser assertions are not reduced.
+work area and maximum track dimensions cannot contain the unchanged CEF child's
+largest 1008x1140-pixel size, it selects one enumerated mode with room for that
+child and the measured work-area insets, then applies it to the disposable
+session without updating the registry. Unsupported modes or a failed apply fail
+the job; there is no second-mode retry. The 1680x1140-pixel owner may extend
+beyond the screen. This proves child geometry and profile restart, not a fully
+onscreen owner or a pixel capture. Owner dimensions, scale factors and browser
+assertions are not reduced.
 
 Each 1×/1.5× run starts the CEF helper twice against the same isolated profile
 and local HTTP origin. The first process writes content settings and a random

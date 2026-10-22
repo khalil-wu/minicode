@@ -44,7 +44,7 @@ jobs:
       - name: Record and provision the disposable runner display
         run: |
           & $env:CEF_PROBE_DISPLAY_EXE "$env:CEF_PROBE_OUTPUT/display.jsonl"
-          if ($LASTEXITCODE -ne 0) { throw 'Runner display cannot contain the original 1680x1140 owner; see display.jsonl' }
+          if ($LASTEXITCODE -ne 0) { throw 'Runner display cannot contain the original 1008x1140 CEF child; see display.jsonl' }
       - name: Install isolated Electron host
         working-directory: prototypes/cef-sidebar
         run: npm ci --no-audit --no-fund
