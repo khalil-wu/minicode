@@ -16,11 +16,14 @@ const workspaceRoot = "C:/Current workspace";
 const hook = { key: "catalog-owned-plugin-key", event: "stop", handler_type: "command", command: "node installed-hook.js",
   source: "plugin", source_path: "C:/Installed plugin/.minicode-plugin/plugin.json", plugin_id: "installed-plugin",
   enabled: true, is_managed: false, current_hash: "registered-hash", trust_status: "trusted", timeout_seconds: null };
-const config = { path: "C:/Profile/settings.json", approval_policy: "on-request", sandbox_mode: "workspace-write",
+const configFields = { approval_policy: "on-request", sandbox_mode: "workspace-write",
   network_access: false, web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
+const config = { path: "C:/Profile/settings.json", ...configFields, effective: configFields, origins: {}, requirements: {},
+  scopes: [{ id: "user", kind: "user", path: "C:/Profile/settings.json", version: "user-v1", values: {}, readonly: false,
+    source: { type: "user", display: "user (C:/Profile/settings.json)" } }] };
 const usage = { path: "C:/Profile/data", total_bytes: 1024, categories: [] };
 const pages = [
-  { name: "Config", render: () => <ConfigTab active />, request: { kind: "config", workspaceRoot } as ManagedSettingsTarget,
+  { name: "Config", render: () => <ConfigTab active />, request: { kind: "config", workspaceRoot, scopeId: "user" } as ManagedSettingsTarget,
     button: async () => { const button = screen.getByRole("button", { name: "打开配置文件" }); await waitFor(() => expect(button).toHaveProperty("disabled", false)); return button; } },
   { name: "Hooks", render: () => <HooksTab />, request: { kind: "hook", hookKey: hook.key } as ManagedSettingsTarget,
     button: async () => { const description = await screen.findByText(hook.command, { selector: ".settings-row-description" }); const details = description.closest("details")!; fireEvent.click(details.querySelector("summary")!); return within(details).getByRole("button", { name: "打开配置文件" }); } },

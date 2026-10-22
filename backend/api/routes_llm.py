@@ -112,6 +112,7 @@ def get_settings_open_target_api(
     kind: Literal["config", "hook", "data"],
     workspace_root: str = "",
     hook_key: str | None = None,
+    scope_id: Literal["user", "managed"] | None = None,
 ) -> dict[str, str]:
     """Resolve an application's registered settings action, never a caller path."""
     from pathlib import Path
@@ -120,7 +121,14 @@ def get_settings_open_target_api(
 
     response.headers["Cache-Control"] = "no-store"
     if kind == "config":
-        target = SETTINGS_FILE
+        if scope_id is None:
+            target = SETTINGS_FILE
+        else:
+            from backend.services.agent_config_settings_service import agent_config_target
+            try:
+                target = agent_config_target(workspace_root, scope_id)
+            except ValueError as exc:
+                raise HTTPException(404, detail=str(exc)) from exc
     elif kind == "data":
         target = DATA_ROOT
     else:
@@ -143,6 +151,8 @@ async def update_hook_settings_api(request: HookSettingsUpdate) -> dict[str, Any
 
 class AgentConfigUpdate(BaseModel):
     workspace_root: str = ""
+    scope_id: Literal["user", "managed"] = "user"
+    expected_version: str | None = None
     approval_policy: Literal["untrusted", "on-request", "never"] | None = None
     sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] | None = None
     web_search: Literal["disabled", "cached", "indexed", "live"] | None = None
@@ -155,7 +165,12 @@ class AgentConfigUpdate(BaseModel):
 def get_agent_config_settings_api(response: Response, workspace_root: str = "") -> dict[str, Any]:
     from backend.services.agent_config_settings_service import agent_config_settings
     response.headers["Cache-Control"] = "no-store"
-    return agent_config_settings(workspace_root)
+    try:
+        return agent_config_settings(workspace_root)
+    except ValueError as exc:
+        raise HTTPException(409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(500, detail=str(exc)) from exc
 
 
 @router.put("/api/settings/agent-config")
@@ -164,9 +179,12 @@ async def update_agent_config_settings_api(request: AgentConfigUpdate) -> dict[s
     from backend.hooks.runtime import ConfigChangeHookBlocked
     from backend.services.agent_config_settings_service import update_agent_config_settings
     try:
-        return await update_agent_config_settings(request.model_dump(exclude_none=True, exclude={"workspace_root"}), request.workspace_root)
+        return await update_agent_config_settings(request.model_dump(exclude_unset=True, exclude={"workspace_root", "scope_id", "expected_version"}), request.workspace_root,
+                                                   scope_id=request.scope_id, expected_version=request.expected_version)
     except (ValueError, RequirementViolation, ConfigChangeHookBlocked) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/api/settings/config-layers")

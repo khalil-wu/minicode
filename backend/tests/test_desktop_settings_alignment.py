@@ -57,7 +57,9 @@ def test_hook_switch_changes_the_registry_used_at_turn_admission(monkeypatch, tm
 
 def test_config_controls_write_the_fields_consumed_by_permission_and_model_policy(monkeypatch):
     settings = {}
-    def update(mutator): mutator(settings)
+    def update(mutator, **_kwargs):
+        mutator(settings)
+        return settings
     monkeypatch.setattr(config_service, "_update_settings_json", update)
     monkeypatch.setattr(config_service, "load_config_layer_stack", lambda **_kwargs: stack(settings))
     monkeypatch.setattr(config_service, "run_config_change_hook", AsyncMock(return_value=None))
@@ -122,10 +124,13 @@ def test_indexed_config_reaches_responses_without_calling_the_live_direct_source
 
     settings = {}
     monkeypatch.setattr(config_service, "load_config_layer_stack", lambda **kwargs: stack(settings))
-    monkeypatch.setattr(config_service, "_update_settings_json", lambda update: update(settings))
+    def update(mutator, **_kwargs):
+        mutator(settings)
+        return settings
+    monkeypatch.setattr(config_service, "_update_settings_json", update)
     monkeypatch.setattr(config_service, "run_config_change_hook", AsyncMock(return_value=None))
     request = AgentConfigUpdate(web_search="indexed")
-    asyncio.run(config_service.update_agent_config_settings(request.model_dump(exclude_none=True, exclude={"workspace_root"})))
+    asyncio.run(config_service.update_agent_config_settings(request.model_dump(exclude_none=True, exclude={"workspace_root", "scope_id", "expected_version"})))
     config = SimpleNamespace(config_layer_stack=stack(settings), feature_flags=FeatureFlags({}))
     assert resolve_web_search_mode(config, permission_mode="bypass") == "indexed"
     adapter, responses = _adapter([openai_response("completed")])

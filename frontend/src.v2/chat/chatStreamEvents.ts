@@ -1523,7 +1523,10 @@ const applyChatStreamEvent = (
         if (!replayed) pushToast(message, "warning", 3000);
         return true;
       }
-      if (!replayed) pushToast(message, "error", 6000);
+      // Source projects an owned provider error in its turn. Keep the actual
+      // failure there instead of duplicating it as a global toast as well.
+      const transcriptOwnsProviderError = Boolean(err.conversation_id && err.message_id && err.provider_error_type);
+      if (!replayed && !transcriptOwnsProviderError) pushToast(message, "error", 6000);
       if (err.error_code === "workspace_missing") {
         if (!replayed) clearMissingWorkspaceBinding(conversationId);
         s.finishAgentProgress(conversationId, "failed");

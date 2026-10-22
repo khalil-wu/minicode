@@ -866,42 +866,24 @@ export const useWebSocketConnection = () => {
         const restoreWorkspaceRoot = restoreConversationId
           ? workspaceRootForConversationRestore({ ...state, conversationId: restoreConversationId })
           : "";
-        awaitingSessionRestore = Boolean(hasConnectedOnce || restoreConversationId);
-        recoverySnapshotPending = awaitingSessionRestore;
+        const shouldRestoreSession = Boolean(hasConnectedOnce || restoreConversationId);
+        // OPEN only admits the socket. The manager may still be loading the
+        // original session; its sync/restore snapshot establishes readiness.
+        awaitingSessionRestore = true;
+        recoverySnapshotPending = true;
         recoveryReplayPending = false;
         recoverySwitchPending = false;
         recoverySwitchWillRefreshCatalog = false;
         bufferedRecoveryEvents = [];
         rendererObserver.start();
-        if (awaitingSessionRestore) {
-          textStreamBuffer.destroy();
-          thinkingStreamBuffer.destroy();
-          sendOrCoalesceCommand({
-            type: "session.restore",
-            ...(lastReceivedServerSeq > 0 ? { last_seq: lastReceivedServerSeq } : {}),
-            ...(restoreConversationId ? { last_conversation_id: restoreConversationId } : {}),
-            ...(restoreWorkspaceRoot ? { last_workspace_root: restoreWorkspaceRoot } : {}),
-          });
-        }
-        // A list snapshot can be generated before restore commits the canonical
-        // active owner. Serialize it behind restore so a late pre-restore list
-        // cannot remove restored state or activate an obsolete conversation.
-        if (!awaitingSessionRestore) {
-          sendOrCoalesceCommand({ type: "conversation.list" });
-        }
-
-        if (!awaitingSessionRestore) {
-          replayPendingClientCommands();
-          flushOfflineQueue();
-        }
-
-        sendOrCoalesceCommand({ type: "commands.list" });
-        // Composer mounts before this connection effect registers its sender,
-        // so its eager catalog request can legitimately be dropped. Refresh
-        // both catalogs from the transport lifecycle, which is also what keeps
-        // them current after a reconnect.
-        sendOrCoalesceCommand({ type: "skills.list" });
-        if (!awaitingSessionRestore) completeConnectionRecovery();
+        textStreamBuffer.destroy();
+        thinkingStreamBuffer.destroy();
+        sendOrCoalesceCommand({
+          type: shouldRestoreSession ? "session.restore" : "session.sync",
+          ...(lastReceivedServerSeq > 0 ? { last_seq: lastReceivedServerSeq } : {}),
+          ...(restoreConversationId ? { last_conversation_id: restoreConversationId } : {}),
+          ...(restoreWorkspaceRoot ? { last_workspace_root: restoreWorkspaceRoot } : {}),
+        });
 
         pingInterval = window.setInterval(() => {
           if (ws.readyState !== WebSocket.OPEN) return;
@@ -1036,6 +1018,7 @@ export const useWebSocketConnection = () => {
         // loop, while replaying a pre-restore command catalog request can
         // project the previous conversation's executable scope.
         discardBufferedCommandType("session.restore");
+        discardBufferedCommandType("session.sync");
         discardBufferedCommandType("conversation.list");
         if (!switchWillRefreshCatalog) {
           discardBufferedCommandType("commands.list");
@@ -1046,6 +1029,7 @@ export const useWebSocketConnection = () => {
         if (!switchWillRefreshCatalog) {
           sendOrCoalesceCommand({ type: "commands.list" });
         }
+        sendOrCoalesceCommand({ type: "skills.list" });
       };
 
       const finishSessionRecovery = (): void => {
@@ -1183,6 +1167,7 @@ export const useWebSocketConnection = () => {
           // Remove pre-snapshot catalog work before a following
           // conversation.switched handler queues its owner-correct refresh.
           discardBufferedCommandType("session.restore");
+          discardBufferedCommandType("session.sync");
           discardBufferedCommandType("conversation.list");
           discardBufferedCommandType("commands.list");
           recoverySnapshotPending = false;

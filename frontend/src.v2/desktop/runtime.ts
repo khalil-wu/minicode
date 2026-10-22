@@ -348,7 +348,8 @@ export interface OpenPreferredPathOptions {
   persistPreferredTargetPath?: string;
   column?: number;
 }
-export type ManagedSettingsTarget = { kind: "config" | "data"; workspaceRoot?: string }
+export type ManagedSettingsTarget = { kind: "config"; workspaceRoot?: string; scopeId?: "user" | "managed" }
+  | { kind: "data"; workspaceRoot?: string }
   | { kind: "hook"; hookKey: string; workspaceRoot?: string };
 
 export interface DesktopPreferences extends DictationPreferences {

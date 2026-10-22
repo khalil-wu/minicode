@@ -122,8 +122,9 @@ describe("AgentProcessSummary", () => {
       />,
     );
 
-    expect(screen.getByRole("status", { name: "处理失败 · 1秒" })).toBeTruthy();
-    expect(screen.getByText("处理失败 · 1秒")).toBeTruthy();
+    expect(screen.getByRole("status", { name: "已处理 1秒" })).toBeTruthy();
+    expect(screen.getByText("已处理 1秒")).toBeTruthy();
+    expect(screen.queryByText("处理失败")).toBeNull();
   });
 
   it("keeps the concrete failure visible even when work details are collapsible", () => {

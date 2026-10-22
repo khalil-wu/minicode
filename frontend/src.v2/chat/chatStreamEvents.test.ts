@@ -946,6 +946,16 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     }]);
   });
 
+  it("keeps the actual owned provider failure inline without duplicating it in a global toast", () => {
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream", message: "模型服务网络请求失败，请稍后重试。",
+      error_type: "api", provider_error_type: "network", recoverable: true } as ServerEvent);
+    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream", status: "failed" } as ServerEvent);
+    const errors = projectMessagesToTurns(useAppStore.getState().messages, false)[0].committedCells.filter(cell => cell.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: "模型服务网络请求失败，请稍后重试。", recoverable: true });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
   it("renders one terminal error after a recoverable error", () => {
     handle({
       type: "error",

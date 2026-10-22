@@ -493,14 +493,16 @@ def active_provider_reasoning_effort_levels(
     )
 
 
-def _update_settings_json(mutator: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
+def _update_settings_json(mutator: Callable[[dict[str, Any]], None], *, settings_file: Path | None = None) -> dict[str, Any]:
     """Apply one read-modify-write transaction to the user settings layer."""
 
     with _SETTINGS_WRITE_LOCK:
-        with file_mutation_locks([SETTINGS_FILE]):
-            settings_data = _load_settings_json()
+        target = settings_file if settings_file is not None else SETTINGS_FILE
+        with file_mutation_locks([target]):
+            target_args = {} if settings_file is None else {"settings_file": target}
+            settings_data = _load_settings_json(**target_args)
             mutator(settings_data)
-            _write_settings_json(settings_data)
+            _write_settings_json(settings_data, **target_args)
             return settings_data
 
 

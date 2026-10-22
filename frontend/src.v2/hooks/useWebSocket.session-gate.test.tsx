@@ -39,6 +39,7 @@ vi.hoisted(() => {
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { initialSessionSyncSnapshot } from "../../test/initial-session-sync";
 import type { ClientCommand } from "../protocol/events";
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { sendChatMessage } from "../chat/sendChatMessage";
@@ -206,6 +207,7 @@ describe("session gate replay", () => {
         case "commands.list":
         case "skills.list":
         case "session.restore":
+        case "session.sync":
           return; // the transport hook sends these itself
         case "conversation.create":
           pendingResults.push(
@@ -265,6 +267,7 @@ describe("session gate replay", () => {
       await act(async () => { await fn(); });
     };
     const replayConnection = async (captured: CapturedConnection, socket: MockWebSocket): Promise<void> => {
+      const earlyCatalogAcks: Wire[] = [];
       for (const [index, event] of captured.events.entries()) {
         for (const command of captured.commands) {
           if (command.sent_after_events === index) {
@@ -273,7 +276,25 @@ describe("session gate replay", () => {
             else await step(() => drive(command));
           }
         }
+        const ackedCommand = captured.commands.find(entry => entry.command.client_command_id === event.client_command_id)?.command;
+        if (usesLegacyPermissionOverride && event.type === "client.command.ack"
+          && (ackedCommand?.type === "commands.list" || ackedCommand?.type === "skills.list")
+          && !socket.sent.some(command => command.type === ackedCommand.type)) {
+          // The old client sent catalogs before restore. Current initialization
+          // requests them after the canonical snapshot; only move their pure
+          // transport ACKs until those actual requests exist, never durable data.
+          expect(event.previous_replay_seq).toBeUndefined();
+          earlyCatalogAcks.push(event);
+          continue;
+        }
         await step(() => socket.emitMessage(rekeyEvent(event, captured, socket, unmapped)));
+        for (const ack of [...earlyCatalogAcks]) {
+          const original = captured.commands.find(entry => entry.command.client_command_id === ack.client_command_id)!.command;
+          if (socket.sent.some(command => command.type === original.type)) {
+            await step(() => socket.emitMessage(rekeyEvent(ack, captured, socket, unmapped)));
+            earlyCatalogAcks.splice(earlyCatalogAcks.indexOf(ack), 1);
+          }
+        }
         // This named historical capture predates control command.result.
         // Its matching tool_result proves the request was semantically resolved,
         // unlike its admission ACK. Adapt only that legacy fixture's missing
@@ -291,6 +312,7 @@ describe("session gate replay", () => {
           }
         }
       }
+      expect(earlyCatalogAcks).toEqual([]);
       await step(() => vi.advanceTimersByTime(FLUSH_MS));
       for (const command of captured.commands) {
         if (command.sent_after_events >= captured.events.length) await step(() => drive(command));
@@ -301,6 +323,14 @@ describe("session gate replay", () => {
     await step(() => vi.advanceTimersByTime(0));
     const first = MockWebSocket.instances[0];
     await step(() => first.emit("open"));
+    if (usesLegacyPermissionOverride) {
+      // These named captures predate cold-start sync. Use their actual initial
+      // canonical session to answer the new handshake, then replay unchanged.
+      const session = c0.events.find(event => event.type === "conversation.list" && event.session)!.session;
+      const sync = first.sent.find(command => command.type === "session.sync")!;
+      await step(() => first.emitMessage(initialSessionSyncSnapshot(new URL(first.url).searchParams.get("session_id")!,
+        sync.client_command_id as string, session as Parameters<typeof initialSessionSyncSnapshot>[2])));
+    }
     await step(() => vi.advanceTimersByTime(0));
 
     await replayConnection(c0, first);

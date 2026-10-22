@@ -13,6 +13,7 @@ type SelectOption = {
 
 type SelectMenuProps = {
   value: string;
+  selectedLabel?: string;
   onValueChange: (value: string) => void;
   children: ReactNode;
   ariaLabel: string;
@@ -23,6 +24,7 @@ type SelectMenuProps = {
   className?: string;
   style?: CSSProperties;
   menuMaxHeight?: number;
+  menuWidth?: number;
   align?: "start" | "end";
   renderOptionIcon?: (value: string) => ReactNode;
   optionDescriptions?: Readonly<Record<string, string>>;
@@ -56,6 +58,7 @@ const optionsFromChildren = (children: ReactNode, group?: string, groupDisabled 
 
 export const SelectMenu = ({
   value,
+  selectedLabel,
   onValueChange,
   children,
   ariaLabel,
@@ -66,6 +69,7 @@ export const SelectMenu = ({
   className = "",
   style,
   menuMaxHeight = 280,
+  menuWidth,
   align = "start",
   renderOptionIcon,
   optionDescriptions,
@@ -80,6 +84,7 @@ export const SelectMenu = ({
   const options = useMemo(() => optionsFromChildren(children), [children]);
   const settingsSelect = className.split(/\s+/).includes("settings-select");
   const selected = options.find((option) => option.value === value);
+  const selectedText = selectedLabel ?? selected?.label;
   const enabledOptions = options.filter((option) => !option.disabled);
 
   useEffect(() => {
@@ -117,7 +122,7 @@ export const SelectMenu = ({
       const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
       // The portal keeps its intrinsic content width. A short trigger must not
       // constrain longer options, and a long label wraps only at the viewport.
-      const minWidth = Math.min(Math.max(rect.width, 220), window.innerWidth - 16);
+      const minWidth = Math.min(menuWidth ?? Math.max(rect.width, 220), window.innerWidth - 16);
       const width = Math.min(Math.max(menu.getBoundingClientRect().width, minWidth), window.innerWidth - 16);
       const left = align === "end" ? rect.right - width : rect.left;
       setPosition({ left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
@@ -128,7 +133,7 @@ export const SelectMenu = ({
     const observer = new ResizeObserver(place);
     observer.observe(triggerRef.current!); observer.observe(menuRef.current!);
     return () => observer.disconnect();
-  }, [open, menuMaxHeight, options, align, settingsSelect]);
+  }, [open, menuMaxHeight, menuWidth, options, align, settingsSelect]);
 
   useEffect(() => {
     if (!open) return;
@@ -225,6 +230,7 @@ export const SelectMenu = ({
         onChange={(event) => onValueChange(event.target.value)}
         className="mc-select-native-proxy"
       >
+        {!selected && selectedLabel !== undefined && <option value={value}>{selectedLabel}</option>}
         {children}
       </select>
       <button
@@ -232,19 +238,19 @@ export const SelectMenu = ({
         ref={triggerRef}
         type="button"
         className="mc-select-trigger"
-        aria-label={`${ariaLabel}，当前：${selected?.label || "未选择"}`}
+        aria-label={`${ariaLabel}，当前：${selectedText || "未选择"}`}
         aria-describedby={ariaDescribedBy}
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-controls={open ? menuId : undefined}
-        title={title || selected?.label || ariaLabel}
+        title={title || selectedText || ariaLabel}
         disabled={disabled}
         onClick={() => open ? setOpen(false) : openMenu()}
         onKeyDown={handleTriggerKeyDown}
       >
         <span className="mc-select-trigger-value">
           {selected && renderOptionIcon && <span className="mc-select-option-icon" aria-hidden="true">{renderOptionIcon(selected.value)}</span>}
-          <span className="mc-select-trigger-label">{selected?.label || "请选择"}</span>
+          <span className="mc-select-trigger-label">{selectedText || "请选择"}</span>
         </span>
         <ChevronDown size={15} aria-hidden="true" />
       </button>
@@ -257,7 +263,7 @@ export const SelectMenu = ({
           className={`mc-select-popover${className.split(/\s+/).includes("mc-select-menu-mono") ? " mc-select-menu-mono" : ""}`}
           data-placement={position.above ? "top" : "bottom"}
           data-settings-select={settingsSelect ? "true" : undefined}
-          style={{ left: position.left, top: position.top, minWidth: position.width, maxHeight: position.maxHeight }}
+          style={{ left: position.left, top: position.top, minWidth: position.width, width: menuWidth, maxHeight: position.maxHeight }}
         >
           {options.map((option) => {
             const showGroup = Boolean(option.group && option.group !== previousGroup);

@@ -14,6 +14,7 @@ vi.hoisted(() => {
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { initialSessionSyncSnapshot } from "../../test/initial-session-sync";
 import { buildUpdateActivitySnapshot } from "../desktop/updateActivityMirror";
 import { resetPendingUserMessagesForTests, sendChatMessage } from "../chat/sendChatMessage";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -57,6 +58,11 @@ it.each(["connected", "reconnect"])("replays the real backend tool stress sessio
   vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args.map((arg) => typeof arg === "object" ? JSON.stringify(arg) : String(arg)).join(" ")); });
   render(<Harness />); act(() => vi.advanceTimersByTime(0));
   let socket = WireSocket.instances[0]; act(() => socket.open());
+  if (!process.env.MINICODE_AUDIT_WIRE) {
+    // The checked-in stress capture predates cold-start session initialization.
+    const sync = socket.sent.find(command => command.type === "session.sync")!;
+    act(() => socket.emit(initialSessionSyncSnapshot(new URL(socket.url).searchParams.get("session_id")!, sync.client_command_id)));
+  }
   const lostAfter = fixture.connections[1].commands[0].command.last_seq;
   const connections = mode === "connected" ? fixture.connections.slice(0, 1) : fixture.connections;
   for (const [connectionIndex, connection] of connections.entries()) {

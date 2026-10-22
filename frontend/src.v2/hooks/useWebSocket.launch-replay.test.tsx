@@ -13,6 +13,8 @@ vi.hoisted(() => {
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { sendClientCommand } from "../protocol/ws-outbox";
+import type { ClientCommand } from "../protocol/events";
 import { getLastReceivedServerSeqForTests, resetPendingClientCommandAcksForTests, resetRecentInboundEventIdsForTests, useWebSocketConnection } from "./useWebSocket";
 
 type L = (e: Event | MessageEvent) => void;
@@ -45,16 +47,27 @@ describe("live launch replay", () => {
     vi.spyOn(console, "error").mockImplementation((...args) => { logs.push("ERR " + fmt(args)); });
     vi.spyOn(console, "warn").mockImplementation((...args) => { logs.push("WARN " + fmt(args)); });
     const events = JSON.parse(fs.readFileSync(path.join(__dirname, "__fixtures__launch.json"), "utf8")) as Array<Record<string, unknown>>;
+    // This captured launch restores an existing original owner and high cursor.
+    const initialRestore = events.find(event => event.type === "session.restored")!;
+    useAppStore.setState({ conversationId: String(initialRestore.active_conversation_id) });
     render(<Harness />); act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0]; act(() => socket.emit("open"));
+    const restore = socket.send.mock.calls.map(([raw]) => JSON.parse(raw)).find(command => command.type === "session.restore");
     for (const ev of events) {
-      act(() => socket.emitMessage(ev));
-      const s = useAppStore.getState();
-      console.log(`after seq=${ev.seq} ${ev.type}: cursor=${getLastReceivedServerSeqForTests()} active=${s.conversationId} convs=${s.conversations.length} closed=${socket.close.mock.calls.length}`);
+      if (ev.type === "client.command.ack" && (ev.command_type === "conversation.switch" || ev.command_type === "conversation.create")) {
+        // These captured user actions must own their later projections. The
+        // initialize request is no longer an untracked competing command.
+        const projection = events.find(event => event.type === "conversation.switched" && event.client_command_id === ev.client_command_id)!;
+        act(() => expect(sendClientCommand({ type: ev.command_type, conversation_id: projection.conversation_id,
+          client_command_id: ev.client_command_id } as ClientCommand)).toBe(true));
+      }
+      act(() => socket.emitMessage(ev.client_command_id === initialRestore.client_command_id
+        ? { ...ev, client_command_id: restore.client_command_id } : ev));
     }
-    console.log("LOGS:\n" + logs.map((l) => l.slice(0, 900)).join("\n"));
     const s = useAppStore.getState();
     expect(logs.filter((l) => l.startsWith("ERR"))).toEqual([]);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(getLastReceivedServerSeqForTests()).toBe(events.at(-1)!.seq);
     expect(s.conversationId).toBe(events.at(-1)!.conversation_id);
   });
 });

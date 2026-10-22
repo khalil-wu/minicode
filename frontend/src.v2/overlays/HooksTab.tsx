@@ -52,7 +52,9 @@ export function HooksTab({ active = true, toolbarHost }: { active?: boolean; too
     {!snapshot && !error && <p role="status">{t("正在加载钩子…")}</p>}
     {snapshot?.warnings.map(warning => <p key={warning} className="settings-page-note">{warning}</p>)}
     {needsTrust.length > 0 && <div className="settings-row"><span>{t("钩子在沙箱外运行，可能不安全。")}</span><button type="button" className="settings-action-button" disabled={busy} onClick={() => void update(needsTrust.map(hook => ({ key: hook.key, trusted_hash: hook.current_hash })))}>{t("全部信任")}</button></div>}
-    {snapshot?.hooks.length === 0 && <div className="settings-load-state"><div className="settings-load-state-copy"><strong>{t("未找到钩子")}</strong><span>{t("已配置的钩子将显示在这里。")}</span></div></div>}
+    {snapshot?.hooks.length === 0 && <div className="settings-card"><div className="settings-row"><div className="settings-row-copy">
+      <div className="settings-row-title">{t("未找到钩子")}</div><div className="settings-row-description">{t("已配置的钩子将显示在这里。")}</div>
+    </div></div></div>}
     {groups.filter(group => group.hooks.length > 0).map(group => <section className="settings-group" key={group.label}><h3 className="settings-group-title">{group.label}</h3><div className="settings-card">{group.hooks.map(hook => <details key={hook.key} className="settings-detail-block">
       <summary className="settings-row"><span className="settings-row-copy"><span className="settings-row-title">{hook.event}</span><span className="settings-row-description">{hook.command || hook.url || hook.handler_type}</span></span>
         <button type="button" className="settings-toggle" role="switch" aria-label={`${hook.event}: ${hook.command || hook.handler_type}`} disabled={busy || hook.is_managed || needsTrust.includes(hook)} title={hook.is_managed ? t("受管理的钩子始终开启。") : undefined} aria-checked={hook.enabled} data-active={hook.enabled} onClick={event => { event.preventDefault(); void update([{ key: hook.key, enabled: !hook.enabled }]); }}><span /></button>

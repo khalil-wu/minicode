@@ -839,11 +839,12 @@ def _select_custom_model(model: str, available_models: list[str]) -> str:
     return next((str(item).strip() for item in available_models if str(item).strip()), "")
 
 
-def _write_settings_json(data: dict[str, Any]) -> None:
+def _write_settings_json(data: dict[str, Any], *, settings_file: Path | None = None) -> None:
     with _SETTINGS_WRITE_LOCK:
-        with file_mutation_locks([SETTINGS_FILE]):
+        target = settings_file if settings_file is not None else SETTINGS_FILE
+        with file_mutation_locks([target]):
             atomic_write_text(
-                SETTINGS_FILE,
+                target,
                 json.dumps(data, ensure_ascii=False, indent=2) + "\n",
             )
 
@@ -1601,15 +1602,16 @@ def get_image_generation_settings(
 
 
 
-def _load_settings_json() -> dict:
+def _load_settings_json(*, settings_file: Path | None = None) -> dict:
     """Read the writable user layer without merging project or managed data."""
-    with file_mutation_locks([SETTINGS_FILE]):
-        if not SETTINGS_FILE.exists():
+    target = settings_file if settings_file is not None else SETTINGS_FILE
+    with file_mutation_locks([target]):
+        if not target.exists():
             return {}
-        with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+        with open(target, "r", encoding="utf-8") as f:
             value = json.load(f)
         if not isinstance(value, dict):
-            raise SettingsError(f"{SETTINGS_FILE} must contain a JSON object")
+            raise SettingsError(f"{target} must contain a JSON object")
         return value
 
 

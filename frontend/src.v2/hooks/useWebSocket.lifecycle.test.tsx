@@ -23,6 +23,8 @@ vi.hoisted(() => {
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn(), dismissToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { initialSessionSyncSnapshot } from "../../test/initial-session-sync";
+import { useSidebarSections } from "../protocol/thread-metadata";
 import { resetEditorDraftStorageForTests } from "../stores/editor-drafts";
 import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
@@ -111,6 +113,12 @@ const sentCommands = (socket: MockWebSocket): ClientCommand[] => socket.send.moc
   })
   .filter((command): command is ClientCommand => Boolean(command));
 
+const openWithInitialSync = (socket: MockWebSocket) => {
+  socket.emit("open");
+  const sync = sentCommands(socket).find(command => command.type === "session.sync");
+  if (sync) socket.emitMessage(initialSessionSyncSnapshot(new URL(socket.url).searchParams.get("session_id")!, sync.client_command_id));
+};
+
 const flushQueuedCommands = async () => act(async () => {
   await Promise.resolve();
   await Promise.resolve();
@@ -153,11 +161,57 @@ describe("useWebSocketConnection socket ownership", () => {
     vi.unstubAllGlobals();
   });
 
+  it("admits cold-start HTTP consumers only after the original session's model and sync snapshot are ready", async () => {
+    let registered = false;
+    const requests: { url: URL; registered: boolean }[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input)); requests.push({ url, registered });
+      return new Response(JSON.stringify(registered ? { sections: [{ id: "ready-section", name: "Original section", appearance: null, item_keys: [] }] }
+        : { detail: "The original session is not connected" }), { status: registered ? 200 : 404 });
+    });
+    vi.stubGlobal("fetch", fetch);
+    const SidebarHarness = () => {
+      useWebSocketConnection();
+      const { sections } = useSidebarSections();
+      return <div>{sections.map(section => section.name).join(",")}</div>;
+    };
+    useAppStore.setState({ currentModel: "", draft: "Original unsent draft", runtimeSession: null });
+    render(<SidebarHarness />);
+    expect(getWebSocket()).not.toBeNull();
+    expect(fetch).not.toHaveBeenCalled();
+    act(() => vi.advanceTimersByTime(0));
+    const socket = MockWebSocket.instances[0];
+    act(() => socket.emit("open"));
+    expect(useAppStore.getState()).toMatchObject({ isConnected: false, connectionPhase: "connecting", currentModel: "", draft: "Original unsent draft" });
+    expect(sentCommandTypes(socket)).toEqual(["session.sync"]);
+    const sync = sentCommands(socket)[0];
+    act(() => socket.emitMessage({ type: "client.command.ack", client_command_id: sync.client_command_id, command_type: "session.sync" }));
+    expect(useAppStore.getState().isConnected).toBe(false);
+    expect(fetch).not.toHaveBeenCalled();
+
+    registered = true;
+    const sessionId = new URL(socket.url).searchParams.get("session_id")!;
+    await act(async () => {
+      socket.emitMessage(initialSessionSyncSnapshot(sessionId, sync.client_command_id, {
+        active_conversation_id: null, active_stream_conversation_ids: [], selected_model: "initialized-model",
+      }));
+      await Promise.resolve(); await Promise.resolve();
+    });
+    expect(useAppStore.getState()).toMatchObject({ isConnected: true, connectionPhase: "connected", currentModel: "initialized-model", draft: "Original unsent draft" });
+    expect(requests).toHaveLength(1);
+    expect(requests[0].registered).toBe(true);
+    expect(requests[0].url.pathname).toBe("/api/thread-metadata/sections");
+    expect(requests[0].url.searchParams.get("session_id")).toBe(sessionId);
+    expect(screen.getByText("Original section")).toBeTruthy();
+    expect(sentCommandTypes(socket)).toEqual(["session.sync", "conversation.list", "commands.list", "skills.list"]);
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining("The original session is not connected"), "error");
+  });
+
   it("keeps realtime audio and RPC results out of replay while preserving the actual speech commit chain", async () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const first = MockWebSocket.instances[0];
-    act(() => first.emit("open"));
+    act(() => openWithInitialSync(first));
     const owner = { threadId: "voice-A", conversation_id: "voice-A" };
     const audio = { type: "thread/realtime/appendAudio" as const, ...owner,
       audio: { data: "AAAA", sampleRate: 24000, numChannels: 1 } };
@@ -182,7 +236,7 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(getWebSocket()!.send(audio)).toBe(false);
     act(() => vi.advanceTimersByTime(2000));
     const resumed = MockWebSocket.instances[1];
-    act(() => resumed.emit("open"));
+    act(() => openWithInitialSync(resumed));
     await flushQueuedCommands();
     expect(sentCommands(resumed).find(command => command.type === "session.restore")).toMatchObject({ last_seq: 4 });
     expect(getWebSocket()!.send(audio)).toBe(false);
@@ -198,14 +252,14 @@ describe("useWebSocketConnection socket ownership", () => {
     const firstRender = render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const firstSocket = MockWebSocket.instances[0];
-    act(() => firstSocket.emit("open"));
+    act(() => openWithInitialSync(firstSocket));
     expect(useAppStore.getState().isConnected).toBe(true);
 
     firstRender.unmount();
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const currentSocket = MockWebSocket.instances[1];
-    act(() => currentSocket.emit("open"));
+    act(() => openWithInitialSync(currentSocket));
 
     act(() => firstSocket.emit("close"));
     expect(useAppStore.getState().isConnected).toBe(true);
@@ -218,7 +272,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     getWebSocket()!.send({ type: "skills.list", client_command_id: "first-awaiting-request" });
     getWebSocket()!.send({ type: "skills.list", client_command_id: "second-awaiting-request" });
     await flushQueuedCommands();
@@ -231,7 +285,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
 
     act(() => vi.advanceTimersByTime(69_999));
     expect(socket.close).not.toHaveBeenCalled();
@@ -243,7 +297,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
 
     act(() => vi.advanceTimersByTime(30_000));
     act(() => socket.emitMessage({ type: "pong" }));
@@ -258,7 +312,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
 
     act(() => socket.emit("close", 1008));
     act(() => vi.advanceTimersByTime(600_001));
@@ -271,7 +325,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
 
     act(() => socket.emit("close", 1006));
     act(() => vi.advanceTimersByTime(1_500));
@@ -288,7 +342,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     vi.mocked(pushToast).mockClear();
     const message = "会话日志无法读取，请修复后重试。";
@@ -324,7 +378,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     act(() => socket.emitMessage({
       type: "error",
       message: "请求失败",
@@ -341,7 +395,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const firstSocket = MockWebSocket.instances[0];
-    act(() => firstSocket.emit("open"));
+    act(() => openWithInitialSync(firstSocket));
     expect(useAppStore.getState().connectionPhase).toBe("connected");
 
     act(() => firstSocket.emit("close", 1006));
@@ -356,7 +410,7 @@ describe("useWebSocketConnection socket ownership", () => {
 
     act(() => vi.advanceTimersByTime(3_000));
     const thirdSocket = MockWebSocket.instances[2];
-    act(() => thirdSocket.emit("open"));
+    act(() => openWithInitialSync(thirdSocket));
     expect(useAppStore.getState().connectionPhase).toBe("reconnecting");
     expect(useAppStore.getState().reconnectAttempt).toBe(2);
     expect(useAppStore.getState().isConnected).toBe(false);
@@ -383,7 +437,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     expect(useAppStore.getState().isConnected).toBe(false);
 
     await act(async () => {
@@ -412,7 +466,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const firstSocket = MockWebSocket.instances[0];
-    act(() => firstSocket.emit("open"));
+    act(() => openWithInitialSync(firstSocket));
     expect(useAppStore.getState().connectionPhase).toBe("connected");
 
     act(() => firstSocket.emit("close", 1006));
@@ -420,7 +474,7 @@ describe("useWebSocketConnection socket ownership", () => {
     act(() => vi.advanceTimersByTime(1_500));
 
     const reconnectSocket = MockWebSocket.instances[1];
-    act(() => reconnectSocket.emit("open"));
+    act(() => openWithInitialSync(reconnectSocket));
     expect(useAppStore.getState().connectionPhase).toBe("reconnecting");
     expect(useAppStore.getState().reconnectAttempt).toBe(1);
 
@@ -493,7 +547,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const first = MockWebSocket.instances[0];
-    act(() => first.emit("open"));
+    act(() => openWithInitialSync(first));
     act(() => first.emitMessage({ type: "session.restored", active_conversation_id: reader, conversation_switched_follows: false,
       last_seq: 0, current_seq: 0, replayed_events: 0, requested_last_seq: 0,
       session: { active_conversation_id: reader, active_stream_conversation_ids: [owner] } }));
@@ -501,7 +555,7 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(useAppStore.getState().conversationMessages[owner][0].isStreaming).toBe(true);
     act(() => vi.advanceTimersByTime(1_500));
     const recovered = MockWebSocket.instances[1];
-    act(() => recovered.emit("open"));
+    act(() => openWithInitialSync(recovered));
     act(() => recovered.emitMessage({ type: "session.restored", active_conversation_id: reader, conversation_switched_follows: false,
       last_seq: 0, current_seq: 2, replayed_events: 2, requested_last_seq: 0,
       session: { active_conversation_id: reader, active_task_id: null, active_stream_conversation_ids: [] } }));
@@ -527,7 +581,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     let socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
 
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       act(() => socket.emit("close", 1006));
@@ -538,7 +592,7 @@ describe("useWebSocketConnection socket ownership", () => {
       act(() => vi.advanceTimersByTime(40_000));
       expect(MockWebSocket.instances).toHaveLength(attempt + 1);
       socket = MockWebSocket.instances[attempt];
-      act(() => socket.emit("open"));
+      act(() => openWithInitialSync(socket));
       expect(useAppStore.getState().connectionPhase).toBe("reconnecting");
       expect(useAppStore.getState().reconnectAttempt).toBe(attempt);
     }
@@ -563,7 +617,7 @@ describe("useWebSocketConnection socket ownership", () => {
       messages: [{ id: "old-answer", turnId: "original-turn", role: "assistant", content: "working", artifacts: [], timestamp: 1, isStreaming: true },
         { id: "queued-user", role: "user", content: "queued direction", artifacts: [], timestamp: 2, queueState: "queued", queueMessageId: "queued-answer" }] });
     render(<><Harness /><QueuedMessageList /></>);
-    act(() => vi.advanceTimersByTime(0)); const first = MockWebSocket.instances[0]; act(() => first.emit("open"));
+    act(() => vi.advanceTimersByTime(0)); const first = MockWebSocket.instances[0]; act(() => openWithInitialSync(first));
     act(() => first.emitMessage({ type: "session.restored", active_conversation_id: owner, conversation_switched_follows: false,
       session: { active_conversation_id: owner, active_stream_conversation_ids: [owner] } }));
     fireEvent.click(screen.getByRole("button", { name: "引导" }));
@@ -574,7 +628,7 @@ describe("useWebSocketConnection socket ownership", () => {
     for (const command of submitted) expect(command).toMatchObject({ expected_turn_id: "original-turn" });
     act(() => first.emit("close", 1006));
     act(() => useAppStore.setState({ messages: [{ id: "new-answer", turnId: "new-current-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 3, isStreaming: true }] }));
-    act(() => vi.advanceTimersByTime(1500)); const recovered = MockWebSocket.instances[1]; act(() => recovered.emit("open"));
+    act(() => vi.advanceTimersByTime(1500)); const recovered = MockWebSocket.instances[1]; act(() => openWithInitialSync(recovered));
     act(() => recovered.emitMessage({ type: "session.restored", active_conversation_id: owner, conversation_switched_follows: false,
       session: { active_conversation_id: owner, active_stream_conversation_ids: [owner] } }));
     await flushQueuedCommands();
@@ -588,7 +642,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
 
     act(() => socket.emit("close", 1008));
     expect(useAppStore.getState().connectionPhase).toBe("failed");
@@ -605,7 +659,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     const result = sendPromptResponseCommand({ type: "control_response", request_id: "approval-awaiting",
       client_command_id: "control-awaiting", conversation_id: "conv-inline", response: { subtype: "success", response: { action: "approve" } } });
     const observed = vi.fn();
@@ -622,7 +676,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<ApprovalHarness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     act(() => {
       useAppStore.setState({ conversationId: "conv-inline", pendingApproval: null, approvalQueue: [],
         pendingDiffReview: null, diffReviewQueue: [], pendingAskUser: null, askUserQueue: [] });
@@ -653,7 +707,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     const result = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "approval-unconfirmed", client_command_id: "withdraw-control" });
     const failure = expect(result).rejects.toThrow("尚未确认");
     if (admitted) act(() => socket.emitMessage({ type: "client.command.ack", client_command_id: "withdraw-control", command_type: "control_cancel_request", accepted: true }));
@@ -661,7 +715,7 @@ describe("useWebSocketConnection socket ownership", () => {
     await failure;
     act(() => vi.advanceTimersByTime(2_000));
     const replacement = MockWebSocket.instances[1];
-    act(() => replacement.emit("open"));
+    act(() => openWithInitialSync(replacement));
     act(() => replacement.emitMessage({ type: "session.restored", active_conversation_id: null, conversation_switched_follows: false, session: { active_conversation_id: null } }));
     await flushQueuedCommands();
     expect(sentCommands(replacement).filter((command) => command.client_command_id === "withdraw-control")).toEqual([]);
@@ -671,7 +725,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     const result = sendPromptResponseCommand({ type: "control_cancel_request", request_id: "timed-out", client_command_id: "control-timed-out" });
     const expired = expect(result).rejects.toThrow("操作超时");
     act(() => vi.advanceTimersByTime(60_000));
@@ -679,7 +733,7 @@ describe("useWebSocketConnection socket ownership", () => {
     act(() => socket.emit("close", 1006));
     act(() => vi.advanceTimersByTime(2_000));
     const replacement = MockWebSocket.instances[1];
-    act(() => replacement.emit("open"));
+    act(() => openWithInitialSync(replacement));
     act(() => replacement.emitMessage({ type: "session.restored", active_conversation_id: null,
       conversation_switched_follows: false, session: { active_conversation_id: null } }));
     await flushQueuedCommands();
@@ -690,7 +744,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const before = sentCommandCount(socket, "commands.list");
 
@@ -709,7 +763,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const before = sentCommandCount(socket, "commands.list");
 
@@ -730,7 +784,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
 
     expect(sentCommandCount(socket, "session.restore")).toBe(1);
@@ -761,7 +815,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const restore = sentCommands(socket).find((command) => command.type === "session.restore")!;
 
@@ -790,7 +844,7 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(MockWebSocket.instances).toHaveLength(1);
     act(() => getWebSocket()?.reconnect());
     const resumed = MockWebSocket.instances[1];
-    act(() => resumed.emit("open"));
+    act(() => openWithInitialSync(resumed));
     await flushQueuedCommands();
     expect(sentCommandCount(resumed, "user_message")).toBe(0);
     act(() => resumed.emitMessage({ type: "session.restored", active_conversation_id: "conv-rejected-restore",
@@ -806,7 +860,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const pending = sendClientCommandAwaitResult({ type: command, client_command_id: "current-recovery" }, command);
     act(() => socket.emitMessage({ type: "command.result", command, level: "error", message: "projection failed",
@@ -824,7 +878,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const restore = sentCommands(socket).find((command) => command.type === "session.restore")!;
     act(() => {
@@ -846,7 +900,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const before = sentCommandCount(socket, "commands.list");
 
@@ -888,7 +942,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
 
     expect(sentCommandCount(socket, "session.restore")).toBe(1);
@@ -935,7 +989,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
 
     const observedTypes: string[] = [];
@@ -1004,7 +1058,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
 
     act(() => {
@@ -1098,7 +1152,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
     const observedTypes: string[] = [];
     const unsubscribe = getWebSocket()?.subscribe((event) => {
@@ -1170,7 +1224,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const firstSocket = MockWebSocket.instances[0];
-    act(() => firstSocket.emit("open"));
+    act(() => openWithInitialSync(firstSocket));
     await flushQueuedCommands();
 
     act(() => {
@@ -1199,7 +1253,7 @@ describe("useWebSocketConnection socket ownership", () => {
     act(() => firstSocket.emit("close", 1006));
     act(() => vi.advanceTimersByTime(2_000));
     const reconnectSocket = MockWebSocket.instances[1];
-    act(() => reconnectSocket.emit("open"));
+    act(() => openWithInitialSync(reconnectSocket));
     await flushQueuedCommands();
     expect(sentCommandCount(reconnectSocket, "session.restore")).toBe(1);
 
@@ -1239,7 +1293,7 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     let socket = MockWebSocket.instances[0];
-    act(() => socket.emit("open"));
+    act(() => openWithInitialSync(socket));
     useAppStore.setState({
       conversationId: "live-owner", isStreaming: true,
       messages: [{ id: "live-message", role: "assistant", content: "partial output", timestamp: 1, artifacts: [], isStreaming: true }],
@@ -1267,13 +1321,13 @@ describe("useWebSocketConnection socket ownership", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const first = MockWebSocket.instances[0];
-    act(() => first.emit("open"));
+    act(() => openWithInitialSync(first));
     commitProcessedInboundEvent({ type: "agent.progress", conversation_id: "owner", seq: 1, previous_replay_seq: 0 } as never);
     useAppStore.setState({ conversationId: "owner", workingDirectory: "C:/owned", conversations: [{ id: "owner", title: "Owned", workspaceRoot: "C:/owned", updatedAt: "2026-10-03" }] });
     act(() => first.emit("close", 1006));
     act(() => vi.advanceTimersByTime(2_000));
     const resumed = MockWebSocket.instances[1];
-    act(() => resumed.emit("open"));
+    act(() => openWithInitialSync(resumed));
     await flushQueuedCommands();
     act(() => resumed.emitMessage({ type: "future.durable", conversation_id: "owner", seq: 2, previous_replay_seq: 1 }));
     expect(getLastReceivedServerSeqForTests()).toBe(1);

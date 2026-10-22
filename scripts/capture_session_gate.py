@@ -188,7 +188,14 @@ async def capture(port: int, workspace: str, out: Path, prompts: dict[str, str])
     async with websockets.connect(uri, max_size=None, origin="file://") as ws:
         c0 = Connection(0, ws)
         connections.append(c0)
-        # Fresh renderer launch: no persisted conversation, so no session.restore.
+        # A cold renderer waits for the registered original session and its
+        # canonical runtime/model snapshot before reading owner-scoped APIs.
+        initial_sync = await c0.send({"type": "session.sync"})
+        assert await c0.recv_until(
+            lambda event: event.get("type") == "session.synced"
+            and event.get("client_command_id") == initial_sync,
+            timeout=20, label="initial session sync",
+        )
         await c0.send({"type": "conversation.list"})
         await c0.send({"type": "commands.list"})
         await c0.send({"type": "skills.list"})

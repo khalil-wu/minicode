@@ -2340,19 +2340,20 @@ button.diff-cell-file-path:hover {
 
 .error-cell.error-cell-notice {
   flex-direction: row;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 14px 16px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 16px;
-  color: var(--text-primary);
-  background: transparent;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 12px 16px 20px;
+  border: 0;
+  border-radius: 24px;
+  box-shadow: 0 0 0 .5px var(--border-strong), 0 0 2px 0 rgb(0 0 0 / 5%), 0 4px 6px 0 rgb(0 0 0 / 2%);
+  color: var(--text-secondary);
+  background: var(--surface-page);
   font-family: var(--font-ui);
   font-weight: var(--fw-regular);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.error-cell-notice > svg { flex: 0 0 auto; margin-top: 2px; }
+.error-cell-notice > svg { flex: 0 0 auto; }
 
 .error-cell-icon {
   flex-shrink: 0;

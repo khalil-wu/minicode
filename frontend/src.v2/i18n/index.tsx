@@ -36,10 +36,12 @@ import voiceEn from "./voice.en.json";
 import voiceZh from "./voice.zh-CN.json";
 import computerUseEn from "./computer-use.en.json";
 import computerUseZh from "./computer-use.zh-CN.json";
+import configurationEn from "./configuration.en.json";
+import configurationZh from "./configuration.zh-CN.json";
 import { resolveLocale, type Locale } from "./locale";
 
-const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn, ...appearanceEn, ...gitEn, ...navigationEn, ...projectsEn, ...goalsEn, ...localEnvironmentsEn, ...petsEn, ...pluginMarketplacesEn, ...generalExtraEn, ...appearanceSourceEn, ...voiceEn, ...computerUseEn };
-const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh, ...appearanceZh, ...gitZh, ...navigationZh, ...projectsZh, ...goalsZh, ...localEnvironmentsZh, ...petsZh, ...pluginMarketplacesZh, ...generalExtraZh, ...appearanceSourceZh, ...voiceZh, ...computerUseZh };
+const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn, ...appearanceEn, ...gitEn, ...navigationEn, ...projectsEn, ...goalsEn, ...localEnvironmentsEn, ...petsEn, ...pluginMarketplacesEn, ...generalExtraEn, ...appearanceSourceEn, ...voiceEn, ...computerUseEn, ...configurationEn };
+const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh, ...appearanceZh, ...gitZh, ...navigationZh, ...projectsZh, ...goalsZh, ...localEnvironmentsZh, ...petsZh, ...pluginMarketplacesZh, ...generalExtraZh, ...appearanceSourceZh, ...voiceZh, ...computerUseZh, ...configurationZh };
 export type TranslationKey = keyof typeof en;
 export type TranslationValues = Record<string, string | number>;
 export type Translate = (key: TranslationKey, values?: TranslationValues) => string;

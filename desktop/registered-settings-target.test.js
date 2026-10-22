@@ -19,11 +19,12 @@ async function settingsFixture(t) {
   const settingsPath = path.join(directory, "profile", "settings.json");
   const dataPath = path.join(directory, "profile", "data");
   const profileHook = path.join(directory, "profile", "audit.config.toml");
+  const managedConfig = path.join(directory, "managed-settings.json");
   const pluginHook = path.join(directory, "installed", "fixture-plugin", ".minicode-plugin", "plugin.json");
   fs.mkdirSync(workspace);
   fs.mkdirSync(dataPath, { recursive: true });
   fs.mkdirSync(path.dirname(pluginHook), { recursive: true });
-  for (const target of [settingsPath, profileHook, pluginHook]) fs.writeFileSync(target, "fixture");
+  for (const target of [settingsPath, profileHook, pluginHook, managedConfig]) fs.writeFileSync(target, "fixture");
   const hooks = new Map([["profile-key", profileHook], ["plugin-key", pluginHook]]);
   security.init({ initialRoots: [workspace], readOnlyRoots: [], userOutputRoots: [] });
   const requests = [];
@@ -42,7 +43,8 @@ async function settingsFixture(t) {
       return;
     }
     const kind = url.searchParams.get("kind");
-    const target = kind === "config" ? settingsPath : kind === "data" ? dataPath : hooks.get(url.searchParams.get("hook_key"));
+    const target = kind === "config" ? url.searchParams.get("scope_id") === "user" ? profileHook : url.searchParams.get("scope_id") === "managed" ? managedConfig : settingsPath
+      : kind === "data" ? dataPath : hooks.get(url.searchParams.get("hook_key"));
     if (!target) response.writeHead(404).end(JSON.stringify({ detail: "Hook is no longer registered; reload its configuration." }));
     else response.end(JSON.stringify({ path: target }));
   });
@@ -88,7 +90,7 @@ async function settingsFixture(t) {
     process: { env: {}, argv: [], contextIsolated: true, platform: "win32", arch: "x64" }, window: {}, console,
   });
   return { directory, workspace, settingsPath, dataPath, profileHook, pluginHook, hooks, requests, opened,
-    state, sender, record, window, runtimeOwners, open: request => runtime.desktop.settings.openTarget(request) };
+    managedConfig, state, sender, record, window, runtimeOwners, open: request => runtime.desktop.settings.openTarget(request) };
 }
 
 test("real preload opens registered profile and installed settings without granting generic roots or accepting renderer paths", async t => {
@@ -96,6 +98,8 @@ test("real preload opens registered profile and installed settings without grant
   const originalRoots = [...security.getTrustedWorkspaceRoots()];
   const cases = [
     [{ kind: "config", workspaceRoot: fixture.workspace }, fixture.settingsPath],
+    [{ kind: "config", scopeId: "user", workspaceRoot: fixture.workspace }, fixture.profileHook],
+    [{ kind: "config", scopeId: "managed", workspaceRoot: fixture.workspace }, fixture.managedConfig],
     [{ kind: "data" }, fixture.dataPath],
     [{ kind: "hook", hookKey: "profile-key", workspaceRoot: fixture.workspace }, fixture.profileHook],
     [{ kind: "hook", hookKey: "plugin-key" }, fixture.pluginHook],
@@ -110,6 +114,7 @@ test("real preload opens registered profile and installed settings without grant
     assert.equal(receipt.url.searchParams.get("workspace_root"), request.workspaceRoot ?? "");
     assert.equal(receipt.url.searchParams.get("kind"), request.kind);
     assert.equal(receipt.url.searchParams.get("hook_key"), request.hookKey ?? null);
+    assert.equal(receipt.url.searchParams.get("scope_id"), request.scopeId ?? null);
     assert.equal(receipt.url.searchParams.has("path"), false);
     assert.equal(receipt.url.searchParams.has("runtimeToken"), false);
     assert.equal(fixture.opened.at(-1), target);

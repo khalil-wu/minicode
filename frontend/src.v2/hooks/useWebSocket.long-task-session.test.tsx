@@ -10,6 +10,7 @@ vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable:
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn(), dismissToast: vi.fn() }));
 
 import { useAppStore } from "../stores";
+import { initialSessionSyncSnapshot } from "../../test/initial-session-sync";
 import { sendChatMessage, resetPendingUserMessagesForTests } from "../chat/sendChatMessage";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { projectMessagesToTurns } from "../chat/chatSurfaceState";
@@ -71,6 +72,9 @@ for (const { name, file, calibration } of replayCases) it(name, async () => {
   vi.setSystemTime(fixture.startedAtMs);
   render(<Harness />); act(() => vi.advanceTimersByTime(0));
   let socket = ReplaySocket.instances[0]; act(() => socket.open());
+  // These checked-in long-task captures predate the initial session sync.
+  const sync = socket.sent.find(command => command.type === "session.sync")!;
+  act(() => socket.message(initialSessionSyncSnapshot(new URL(socket.url).searchParams.get("session_id")!, sync.client_command_id)));
   const issue = async (command: Wire) => {
     if (command.type === "conversation.switch") useAppStore.getState().requestConversationSwitch(command.conversation_id);
     else if (command.type === "user_message") expect(sendChatMessage({ displayContent: command.content, backendContent: command.content,

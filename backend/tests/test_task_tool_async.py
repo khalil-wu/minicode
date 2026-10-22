@@ -104,6 +104,8 @@ def test_in_process_teammate_cannot_spawn_background_subagent() -> None:
 
 
 def test_child_runtime_callback_and_yield_keep_one_source_receipt(monkeypatch, tmp_path):
+    from backend.agent.progress import provider_stream_error_progress
+    from backend.agent.provider_attempt import ProviderAttempt, provider_progress_id
     from backend.agent.runtime_spans import runtime_span
 
     async def run() -> None:
@@ -112,25 +114,30 @@ def test_child_runtime_callback_and_yield_keep_one_source_receipt(monkeypatch, t
         async def emit(kind, data):
             emitted.append((kind, data))
 
+        progress_id = provider_progress_id("iteration-1", "child")
+        attempts = (
+            ProviderAttempt("iteration-1", 0, "provider:child:request-1", 1000, progress_id=progress_id, max_retries=2),
+            ProviderAttempt("iteration-1", 0, "provider:child:retry-restart", 2000, progress_id=progress_id, max_retries=2),
+        )
+
         async def replay_query(**kwargs):
             bridge = kwargs["session_context"].emit_event
-            source = AgentEvent.progress(
-                "连接中断，正在重连（第 1/2 次）", stage="status", status="running", phase="recover",
-                id="provider:child:iteration-1", provider_state="reconnecting", visibility="debug",
-                retry_attempt=1, max_retries=2, error_message="stream disconnected", retry_after_ms=200,
-            )
-            await bridge(source.type, source.data)
-            yield source
             # A new transport attempt may reuse the logical operation and
             # retry ordinal. Its separate request span must retain its failure.
-            started = runtime_span("provider.request.started", span_id="provider:child:retry-restart", phase="provider")
-            await bridge(started.type, started.data)
-            yield started
-            await bridge(source.type, source.data)
-            yield source
+            for attempt in attempts:
+                started = runtime_span("provider.request.started", span_id=attempt.span_id,
+                    iteration_id=attempt.iteration_id, started_at=attempt.started_at, phase="provider")
+                await bridge(started.type, started.data)
+                yield started
+                source = provider_stream_error_progress(
+                    "连接中断，正在重连（第 1/2 次）", attempt=attempt, progress_id=progress_id,
+                    retry_attempt=1, max_retries=2, error_message="stream disconnected", retry_after_ms=200,
+                )
+                await bridge(source.type, source.data)
+                yield source
             failed = AgentEvent.progress(
                 "提供商请求失败", stage="status", status="failed", phase="model",
-                id="provider:child:iteration-1", provider_state="failed", visibility="debug",
+                id=progress_id, operation_id=progress_id, provider_state="failed", visibility="debug",
                 retry_attempt=2, max_retries=2, error_message="upstream request_timeout after retries",
             )
             await bridge(failed.type, failed.data)
@@ -150,15 +157,24 @@ def test_child_runtime_callback_and_yield_keep_one_source_receipt(monkeypatch, t
         transcript = runtime.load_agent_transcript(done["subagent_id"])
         source_events = [event for event in transcript["events"] if event["payload"].get("lifecycle") == "provider_progress"]
         assert len(source_events) == 3
+        assert [event["payload"]["provider_span_id"] for event in source_events] == [attempts[0].span_id, attempts[1].span_id, attempts[1].span_id]
+        assert len({event["payload"]["id"] for event in source_events}) == 3
+        assert source_events[-1]["payload"]["visibility"] == "debug"
+        assert source_events[-1]["payload"]["status"] == "failed"
+        assert source_events[-1]["payload"]["error_message"] == "upstream request_timeout after retries"
+        started = [event["payload"] for event in transcript["events"] if event["payload"].get("event") == "provider.request.started"]
+        assert [event["span_id"] for event in started] == [attempt.span_id for attempt in attempts]
         retry_events = [data for kind, data in emitted if kind == "subagent.progress"
             and data.get("activity_kind") == "provider" and data.get("user_visible")]
-        assert len(retry_events) == 3
+        assert len(retry_events) == 2
         notices = [block for message in done["transcript_snapshot"]["messages"]
             for block in message.get("blocks", []) if block.get("type") == "progress"]
-        assert len(notices) == 3 and notices[0]["errorMessage"] == "stream disconnected"
-        assert len({notice["id"] for notice in notices}) == 3
-        assert notices[1]["errorMessage"] == "stream disconnected"
-        assert notices[2]["status"] == "failed" and notices[2]["errorMessage"] == "upstream request_timeout after retries"
+        assert len(notices) == 2
+        assert [notice["errorMessage"] for notice in notices] == ["stream disconnected", "stream disconnected"]
+        assert len({notice["id"] for notice in notices}) == 2
+        assert [notice["id"] for notice in notices] == [f"{progress_id}:error:{attempt.span_id}:reconnecting:1" for attempt in attempts]
+        assert [notice["retryAttempt"] for notice in notices] == [1, 1]
+        assert all(notice["maxRetries"] == 2 for notice in notices)
         assert done["transcript_snapshot"]["messages"][-1]["failure_message"] == "upstream request_timeout after retries"
 
     asyncio.run(run())

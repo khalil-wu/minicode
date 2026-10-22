@@ -27,18 +27,10 @@ export function AgentProcessSummary({
   const { t } = useI18n();
   const running = status === "running";
   const now = useSharedSecondTick(running && startedAt !== undefined);
-  const statusLabel = t(running
-    ? "处理中"
-    : status === "failed"
-      ? "处理失败"
-      : status === "partial"
-        ? "部分完成"
-        : status === "stopped"
-          ? "已停止"
-          : "已处理");
+  const statusLabel = t(running ? "处理中" : status === "stopped" ? "已停止" : "已处理");
   const durationLabel = formatElapsedSeconds(running && startedAt !== undefined ? Math.max(0, now - startedAt) : durationMs, t);
   const displayLabel = durationLabel
-    ? running || status === "completed" ? t("已处理 {duration}", { duration: durationLabel }) : `${statusLabel} · ${durationLabel}`
+    ? status !== "stopped" ? t("已处理 {duration}", { duration: durationLabel }) : `${statusLabel} · ${durationLabel}`
     : statusLabel;
   const normalizedFailure = status === "failed" ? failureMessage?.trim() : "";
   const summaryFailure = normalizedFailure && !processExpanded ? normalizedFailure : "";
@@ -47,9 +39,9 @@ export function AgentProcessSummary({
     : displayLabel || t("处理完成");
   const content = (
     <>
-      {!running && status !== "completed" && (
+      {status === "stopped" && (
         <span className="agent-loop-process-summary-icon" aria-hidden="true">
-          <CircleAlert size={14} className={status === "failed" ? "agent-loop-failed-icon" : undefined} />
+          <CircleAlert size={14} />
         </span>
       )}
       <span className="agent-loop-process-summary-body">

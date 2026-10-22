@@ -18,9 +18,13 @@ import { WorktreesTab } from "./WorktreesTab";
 import { SidebarLeft } from "../shell/SidebarLeft";
 
 const response = (value: unknown) => new Response(JSON.stringify(value), { status: 200 });
-const config = { path: "C:/settings.json", approval_policy: "on-request", sandbox_mode: "workspace-write", network_access: false, web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
+const configFields = { approval_policy: "on-request", sandbox_mode: "workspace-write", network_access: false, web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
+const config = { path: "C:/settings.json", ...configFields, effective: configFields, origins: {}, requirements: {},
+  scopes: [{ id: "user", kind: "user", path: "C:/settings.json", version: "user-v1", values: {}, readonly: false,
+    source: { type: "user", display: "user (C:/settings.json)" } }] };
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.fetch.mockReset().mockImplementation(async () => response({ sections: [] }));
   mocks.confirm.mockResolvedValue(true);
   useAppStore.setState({ settingsOpen: false, settingsTab: "general", workingDirectory: "", recentWorkspaces: [], conversations: [], isConnected: true, projectsOpen: false, projectEditTarget: null, appMode: "cowork", skillsMarketplaceOpen: false, shortcutsHelpOpen: false });
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -40,19 +44,23 @@ it("trusts the displayed hook hash and reloads the returned effective state", as
 });
 
 it("saves sandbox selection to the real configuration endpoint", async () => {
-  mocks.fetch.mockImplementation(async (_url, init) => response({ ...config, ...(init?.method === "PUT" ? JSON.parse(init.body) : {}) }));
+  mocks.fetch.mockImplementation(async (_url, init) => {
+    const patch = init?.method === "PUT" ? JSON.parse(init.body) : {};
+    return response({ ...config, ...patch, effective: { ...configFields, ...patch } });
+  });
   render(<ConfigTab active />);
   fireEvent.click(await screen.findByRole("button", { name: /^沙箱模式，当前：/ }));
-  fireEvent.click(screen.getByRole("option", { name: "只读" }));
-  await waitFor(() => expect(screen.getByRole("switch", { name: "允许网络访问" })).toHaveProperty("disabled", true));
+  fireEvent.click(screen.getByRole("option", { name: /^只读/ }));
+  await waitFor(() => expect(screen.queryByRole("switch", { name: "允许网络访问" })).toBeNull());
   const request = mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
   expect(new URL(request[0]).pathname).toBe("/api/settings/agent-config");
-  expect(JSON.parse(request[1].body)).toEqual({ workspace_root: "", sandbox_mode: "read-only" });
+  expect(JSON.parse(request[1].body)).toEqual({ workspace_root: "", scope_id: "user", expected_version: "user-v1", sandbox_mode: "read-only" });
 });
 
 it("does not replace another workspace's Config page with an earlier save response", async () => {
   let finish!: (response: Response) => void;
-  mocks.fetch.mockImplementation(async (url, init) => init?.method === "PUT" ? new Promise<Response>(resolve => { finish = resolve; }) : response({ ...config, network_access: new URL(url).searchParams.get("workspace_root") === "C:/B" }));
+  mocks.fetch.mockImplementation(async (url, init) => init?.method === "PUT" ? new Promise<Response>(resolve => { finish = resolve; }) : response({ ...config,
+    effective: { ...configFields, network_access: new URL(url).searchParams.get("workspace_root") === "C:/B" } }));
   useAppStore.setState({ workingDirectory: "C:/A" });
   render(<ConfigTab active />);
   fireEvent.click(await screen.findByRole("switch", { name: "允许网络访问" }));

@@ -13,6 +13,7 @@ from backend import config
 from backend.api import routes_llm
 from backend.config_layers import load_config_layers_state
 from backend.services import plugin_settings_service
+from backend.services import agent_config_settings_service
 from backend.workspace import trust
 
 
@@ -53,6 +54,7 @@ def registered_settings(monkeypatch, tmp_path):
         )
 
     monkeypatch.setattr(config, "load_config_layer_stack", load_stack)
+    monkeypatch.setattr(agent_config_settings_service, "load_config_layer_stack", load_stack)
     monkeypatch.setattr(plugin_settings_service, "get_plugin_snapshot", lambda **_kwargs: {
         "plugins_enabled": True,
         "plugins": [{"id": "fixture-plugin", "path": str(plugin), "enabled": True,
@@ -82,6 +84,15 @@ def test_global_target_ignores_forged_path_and_runtime_outside_workspace(registe
     assert response.headers["cache-control"] == "no-store"
     assert not trust.is_workspace_trusted(target.parent)
     assert fixture.trusted_file.read_bytes() == before
+
+
+def test_user_scope_opens_the_actual_active_profile_and_retains_the_legacy_global_action(registered_settings):
+    fixture = registered_settings
+    response = fixture.client.get("/api/settings/open-target", params={"kind": "config", "scope_id": "user", "workspace_root": str(fixture.workspace)})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"path": str(fixture.profile.resolve())}
+    assert fixture.client.get("/api/settings/open-target", params={"kind": "config"}).json() == {"path": str(fixture.settings.resolve())}
+    assert fixture.client.get("/api/settings/open-target", params={"kind": "config", "scope_id": "managed"}).status_code == 404
 
 
 @pytest.mark.parametrize("source", ["profile", "manifest"])

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { createServer as createPortServer } from "node:net";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,11 +16,13 @@ const evidence = path.join(root, "output/playwright/ui-alignment-current");
 const profile = await mkdtemp(path.join(tmpdir(), "minicode-ui-profile-"));
 const workspace = await mkdtemp(path.join(tmpdir(), "minicode-ui-work-"));
 await mkdir(path.join(profile, "data"));
+await mkdir(path.join(profile, "managed"));
 await mkdir(evidence, { recursive: true });
 await writeFile(path.join(profile, "desktop-preferences.json"), JSON.stringify({ localeOverride: "zh-CN", questionNotifications: false, turnCompletionNotifications: "never" }));
 await writeFile(path.join(profile, "data/active_workspace.json"), JSON.stringify({ root: workspace }));
 await writeFile(path.join(profile, "data/trusted_workspaces.json"), JSON.stringify({ version: 1, roots: [workspace] }));
-await writeFile(path.join(profile, "settings.json"), JSON.stringify({ agent: { code_mode_only: true, stream_max_attempts: 5 }, memory: { enabled: false } }));
+await writeFile(path.join(profile, "settings.json"), JSON.stringify({ agent: { code_mode_only: true, stream_max_attempts: 5 } }));
+await writeFile(path.join(profile, "managed/managed-settings.json"), JSON.stringify({ web_search: "disabled" }));
 
 const model = "ui-audit-loopback";
 const requests = [], wire = [], pageErrors = [], logs = [], captures = [], checks = [];
@@ -95,6 +97,7 @@ try {
   await page.setViewportSize({ width: 1800, height: 1000 });
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
   assert(page.url().includes("/dist/index.html"));
+  assert.equal(await page.getByRole("alert").count(), 0, "Initial ready state must not produce a disconnected-session error");
   await capture("01-current-build-idle");
   await page.evaluate(workspaceRoot => window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" }), workspace);
   await page.waitForFunction(() => Boolean(window.__zustandStore.getState().conversationId));
@@ -146,6 +149,9 @@ try {
   await page.locator(".error-cell-notice").waitFor({ timeout: 60000 });
   await page.waitForFunction(() => !window.__zustandStore.getState().isStreaming);
   assert.equal(await page.locator(".error-cell-notice").count(), 1);
+  const terminalError = wire.findLast(row => row.direction === "server" && row.message.type === "error" && row.message.provider_error_type).message;
+  assert.equal(await page.getByRole("alert").filter({ hasText: terminalError.message }).count(), 1, "The model failure belongs to its original turn without a duplicate global toast");
+  assert.equal(await page.getByText("处理失败", { exact: true }).count(), 0);
   assert(terminalAttempts > 1);
   await capture("06-actual-terminal-model-failure");
   checks.push("Actual exhausted provider retries retain their original Wi-Fi evidence and one standalone terminal notice");
@@ -188,6 +194,50 @@ try {
   const settingsPages = await page.locator(".settings-center-tab").evaluateAll(elements => elements.map(element => element.getAttribute("aria-label")));
   for (const [index, label] of settingsPages.entries()) {
     await page.locator(".settings-center-tab").filter({ hasText: label }).click();
+    if (label === "配置") {
+      const scope = page.getByRole("button", { name: /^配置作用域，当前：/ });
+      const verbosity = page.getByRole("button", { name: /^回复详细程度，当前：/ });
+      await scope.click();
+      assert.equal(await page.getByRole("option", { name: "管理员", exact: true }).count(), 1);
+      await capture("settings-06-config-scope-menu");
+      await page.getByRole("option", { name: "管理员", exact: true }).click();
+      assert.equal(await verbosity.isDisabled(), true);
+      await capture("settings-06-config-admin");
+      await scope.click();
+      await page.getByRole("option", { name: "用户", exact: true }).click();
+      assert.equal(await page.getByRole("button", { name: /^网页搜索，当前：/ }).isDisabled(), true);
+      await verbosity.click();
+      await capture("settings-06-config-verbosity-menu");
+      const [savedResponse] = await Promise.all([
+        page.waitForResponse(response => response.url().includes("/api/settings/agent-config") && response.request().method() === "PUT"),
+        page.getByRole("option", { name: "高", exact: true }).click(),
+      ]);
+      assert.equal(savedResponse.ok(), true);
+      const saved = await savedResponse.json();
+      assert.equal(saved.write.status, "applied");
+      assert.equal(saved.write.path, path.join(profile, "settings.json"));
+      assert.equal(JSON.parse(await readFile(saved.write.path, "utf8")).model_verbosity, "high");
+      await page.getByRole("button", { name: "回复详细程度，当前：高", exact: true }).waitFor();
+      await capture("settings-06-config-user-saved");
+      await verbosity.click();
+      const [unsetResponse] = await Promise.all([
+        page.waitForResponse(response => response.url().includes("/api/settings/agent-config") && response.request().method() === "PUT"),
+        page.getByRole("option", { name: "模型默认值", exact: true }).click(),
+      ]);
+      assert.equal(unsetResponse.ok(), true);
+      const unset = await unsetResponse.json();
+      assert.equal(unset.write.fields.model_verbosity.requested_value, null);
+      assert.equal(Object.hasOwn(JSON.parse(await readFile(unset.write.path, "utf8")), "model_verbosity"), false);
+      await page.getByRole("button", { name: "回复详细程度，当前：模型默认值", exact: true }).waitFor();
+      checks.push("Real User/Admin scope menu, managed field lock, actual User file write and explicit-null override removal");
+    }
+    if (label === "钩子") {
+      const emptyTitle = page.getByText("未找到钩子", { exact: true });
+      await emptyTitle.waitFor();
+      const copyWidth = await emptyTitle.evaluate(element => element.parentElement.getBoundingClientRect().width);
+      assert(copyWidth > 400, "The empty Hooks message must use the content column instead of the icon column");
+      checks.push({ scenario: "Actual empty Hooks row keeps its text horizontal", copyWidth });
+    }
     await capture(`settings-${String(index + 1).padStart(2, "0")}`, { settingsPage: label });
   }
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
