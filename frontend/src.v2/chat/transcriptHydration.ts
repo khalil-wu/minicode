@@ -658,6 +658,7 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
       const id = String(item.id ?? "").trim();
       const message = String(item.message ?? "").trim();
       if (!id || !message) continue;
+      const statusCode = item.statusCode ?? item.status_code;
       const rawProviderState = item.providerState ?? item.provider_state;
       const providerState = isAgentProgressProviderState(rawProviderState)
         ? rawProviderState
@@ -699,6 +700,8 @@ export const normalizeContentBlocks = (value: unknown): ContentBlock[] | undefin
         retryAttempt: nonNegativeNumberValue(item.retryAttempt ?? item.retry_attempt),
         maxRetries: nonNegativeNumberValue(item.maxRetries ?? item.max_retries),
         retryAfterMs: nonNegativeNumberValue(item.retryAfterMs ?? item.retry_after_ms),
+        statusCode: typeof statusCode === "number" && Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? statusCode : undefined,
+        providerErrorCode: stringValue(item.providerErrorCode ?? item.provider_error_code),
         errorMessage: stringValue(item.errorMessage ?? item.error_message),
         operationId: stringValue(item.operationId ?? item.operation_id),
         subagentId: stringValue(item.subagentId ?? item.subagent_id),

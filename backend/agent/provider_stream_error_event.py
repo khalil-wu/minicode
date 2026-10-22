@@ -29,6 +29,8 @@ from backend.llm.errors import (
     LLMErrorType,
     ProviderErrorType,
     classify_llm_error,
+    llm_error_raw,
+    llm_error_status_code,
 )
 from backend.secret_redaction import redact_secrets
 
@@ -45,7 +47,8 @@ async def committed_provider_error(failure, *, state, turn_kernel, provider_atte
         cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
         classification = classify_llm_error("timeout" if isinstance(cause, asyncio.TimeoutError) else cause)
         message = format_llm_error(cause) or "Provider request timed out"
-        failure_data = {}
+        failure_data = llm_error_raw(cause, provider="")
+        failure_data["status_code"] = llm_error_status_code(cause, allow_text=False)
     else:
         _, classification, failure_data = provider_error_details(failure)
         message = failure.content
@@ -64,6 +67,8 @@ async def committed_provider_error(failure, *, state, turn_kernel, provider_atte
     return provider_stream_error_progress(
         "模型连接中断，保留已完成的工具结果后继续。", attempt=provider_attempt, progress_id=progress_id,
         detail=message, error_message=message,
+        status_code=failure_data.get("status_code"),
+        provider_error_code=failure_data.get("provider_error_code", ""),
     )
 
 
@@ -328,6 +333,8 @@ async def handle_provider_error_event(
                     detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
                     retry_after_ms=max(0, int(round(retry_delay * 1000))),
                     error_message=classification_input[:320],
+                    status_code=provider_failure_data.get("status_code"),
+                    provider_error_code=provider_failure_data.get("provider_error_code", ""),
                 )
             elif not switched_transport:
                 attempt_label = (
@@ -344,6 +351,8 @@ async def handle_provider_error_event(
                     max_retries=effective_max_retries,
                     retry_after_ms=max(0, int(round(retry_delay * 1000))),
                     error_message=classification_input[:320],
+                    status_code=provider_failure_data.get("status_code"),
+                    provider_error_code=provider_failure_data.get("provider_error_code", ""),
                 )
             if classification.provider_error_type == "rate_limit":
                 yield AgentEvent.rate_limit(

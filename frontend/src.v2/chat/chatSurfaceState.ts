@@ -285,6 +285,8 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
         retryAttempt: item.progress.at(-1)?.retryAttempt,
         maxRetries: item.progress.at(-1)?.maxRetries,
         retryAfterMs: item.progress.at(-1)?.retryAfterMs,
+        statusCode: item.progress.at(-1)?.statusCode,
+        providerErrorCode: item.progress.at(-1)?.providerErrorCode,
         providerState: item.progress.at(-1)?.providerState,
         errorMessage: item.progress.at(-1)?.errorMessage,
         detail: item.progress.at(-1)?.detail,

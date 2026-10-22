@@ -1518,7 +1518,6 @@ const applyChatStreamEvent = (
         return true;
       }
       const message = normalizeAgentErrorMessage(rawMessage);
-      const transcriptMessage = normalizeAgentErrorMessage(rawMessage, { includeProviderDetails: false });
       if (isTransientCommandBacklogError(err, rawMessage)) {
         if (!replayed) pushToast(message, "warning", 3000);
         return true;
@@ -1530,14 +1529,14 @@ const applyChatStreamEvent = (
       if (err.error_code === "workspace_missing") {
         if (!replayed) clearMissingWorkspaceBinding(conversationId);
         s.finishAgentProgress(conversationId, "failed");
-        s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
+        s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, rawMessage, err.recoverable === true);
           return true;
       }
       if (err.error_code === "agent.busy") {
         s.removeEmptyStreamingAssistant(conversationId, target.messageId);
         if (target.messageId && hasStreamingAssistantForConversation(conversationId, target.messageId)) {
           s.finishAgentProgress(conversationId, "failed");
-          s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
+          s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, rawMessage, err.recoverable === true);
         } else {
           clearStreamingFlagIfNoLiveAssistant(conversationId);
         }
@@ -1561,11 +1560,11 @@ const applyChatStreamEvent = (
       // `done` event that always follows carries the real terminal status.
       // Sealing the turn here would drop any answer text emitted after it.
       if (err.recoverable === true && err.error_type !== "blocked" && err.error_type !== "billing") {
-        rememberRecoverableFailureText(conversationId, terminalMessageId || messageId, transcriptMessage);
+        rememberRecoverableFailureText(conversationId, terminalMessageId || messageId, rawMessage);
         return true;
       }
       s.finishAgentProgress(conversationId, "failed");
-      s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, transcriptMessage, err.recoverable === true);
+      s.finishStreaming(conversationId, undefined, "failed", terminalMessageId, rawMessage, err.recoverable === true);
       return true;
     }
     case "stream_resume": {

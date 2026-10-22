@@ -33,7 +33,7 @@ const rgb = (color: string): RGB => [1, 3, 5].map(index => parseInt(color.slice(
 const mix = (from: RGB, to: RGB, amount: number): RGB =>
   from.map((channel, index) => Math.round(channel + (to[index] - channel) * Math.min(1, Math.max(0, amount)))) as RGB;
 const solid = (color: RGB) => `rgb(${color.join(", ")})`;
-const alpha = (color: RGB, opacity: number) => `rgba(${color.join(", ")}, ${Math.min(1, Math.max(0, opacity))})`;
+const alpha = (color: RGB, opacity: number) => `rgba(${color.join(", ")}, ${Math.min(1, Math.max(0, opacity)).toFixed(3).replace(/0+$/, "").replace(/\.$/, "")})`;
 const luminance = (color: RGB) => color.map(channel => {
   const value = channel / 255;
   return value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4;
@@ -49,15 +49,18 @@ const onAccent = (color: RGB) => {
   return solid(luminance(color) > .179 ? black : white);
 };
 
-/** Source Pba/Bba/Iba/Rba/Vba/Fba at the reference app-initial theme cluster.
+/** Source Yos/Xos/Zos/$os at the reference app-initial theme cluster.
  * Theme selection/import also supplies contrast and semantic colors. Typography
  * and TextMate syntax stay owned by their existing consumers.
  */
 export function appearanceColorTokens(colors: AppearanceColorValues, variant: AppearanceVariant, theme?: AppearanceThemeSelection | null): Record<string, string> {
   const light = variant === "light";
-  const contrast = theme ? theme.contrast / 100 : light ? .45 : .6;
+  const baseline = light ? 45 : 60;
+  const authoredContrast = theme?.contrast ?? baseline;
+  const strength = authoredContrast / 100 + (authoredContrast - baseline) / 60 * .7;
+  const contrast = authoredContrast <= baseline ? strength : baseline / 100 + (strength - baseline / 100) * 2;
   const surface = rgb(colors.surface), ink = rgb(colors.ink), accent = rgb(colors.accent);
-  const under = solid(mix(surface, light ? ink : black, light ? .04 : .16));
+  const under = solid(mix(surface, light ? ink : black, (light ? .04 : .16) + (authoredContrast - baseline) * (light ? .0012 : .0015)));
   const control = solid(mix(surface, light ? white : ink, light ? .09 + contrast * .04 : .06 + contrast * .05));
   const elevated = solid(mix(surface, light ? white : ink, light ? .16 + contrast * .12 : .08 + contrast * .08));
   const secondary = solid(mix(surface, light ? white : ink, light ? .08 + contrast * .08 : .04 + contrast * .05));
@@ -93,6 +96,7 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
     "--text-muted": muted,
     "--text-disabled": alpha(ink, light ? .45 + contrast * .1 : .42 + contrast * .13),
     "--text-on-accent": onAccent(accent),
+    "--text-info": accentText,
     "--border-subtle": border,
     "--border-soft": borderLight,
     "--border-strong": borderHeavy,

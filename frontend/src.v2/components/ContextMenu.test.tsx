@@ -7,8 +7,8 @@ afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("ContextMenu keyboard navigation", () => {
   it("typeaheads and returns through a five-level submenu without selecting a different level", () => {
-    const action = vi.fn();
-    render(<ContextMenu position={{ x: 0, y: 0 }} onClose={vi.fn()} items={[
+    const action = vi.fn(), close = vi.fn();
+    render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={[
       { label: "Archive" }, { label: "Copy", submenu: [{ label: "Copy source", submenu: [{ label: "Files", submenu: [{ label: "Nested", submenu: [
         { label: "Unavailable", disabled: true }, { label: "Alpha" }, { label: "Beta", onClick: action },
       ] }] }] }] },
@@ -21,6 +21,11 @@ describe("ContextMenu keyboard navigation", () => {
     }
     fireEvent.keyDown(document.activeElement!, { key: "b" });
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Beta" }));
+    for (const shiftKey of [false, true]) {
+      expect(fireEvent.keyDown(document.activeElement!, { key: "Tab", shiftKey })).toBe(false);
+      expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Beta" }));
+      expect(close).not.toHaveBeenCalled();
+    }
     fireEvent.keyDown(document.activeElement!, { key: "ArrowLeft" });
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Nested" }));
     expect(action).not.toHaveBeenCalled();
@@ -46,7 +51,7 @@ describe("ContextMenu keyboard navigation", () => {
     expect(close).toHaveBeenCalledOnce();
     expect(choose).toHaveBeenCalledOnce();
   });
-  it("wraps through enabled items around separators and disabled actions", () => {
+  it("stops at the first and last enabled items while skipping separators and disabled actions", () => {
     render(<ContextMenu position={{ x: 0, y: 0 }} onClose={vi.fn()} items={[
       { label: "Unavailable", disabled: true }, { label: "First" },
       { label: "", separator: true }, { label: "Last" },
@@ -57,11 +62,26 @@ describe("ContextMenu keyboard navigation", () => {
     key("ArrowDown");
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Last" }));
     key("ArrowDown");
-    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "First" }));
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Last" }));
     key("End");
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Last" }));
     key("Home");
     expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "First" }));
+    key("ArrowUp");
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "First" }));
+  });
+
+  it("searches a multiword prefix without letting Space activate the focused native button", () => {
+    const select = vi.fn();
+    render(<ContextMenu position={{ x: 0, y: 0 }} onClose={vi.fn()} items={[
+      { label: "Copy project", onClick: select }, { label: "Copy source", onClick: select },
+    ]} />);
+    for (const key of ["c", "o", "p", "y", " "]) {
+      expect(fireEvent.keyDown(document.activeElement!, { key })).toBe(false);
+    }
+    fireEvent.keyDown(document.activeElement!, { key: "s" });
+    expect(document.activeElement).toBe(screen.getByRole("menuitem", { name: "Copy source" }));
+    expect(select).not.toHaveBeenCalled();
   });
 
   it("waits 200ms before hovering open and cancels a pending flyout on leaving or keyboard input", () => {
@@ -212,16 +232,39 @@ describe("ContextMenu keyboard navigation", () => {
     expect(document.activeElement).toBe(nextInput);
     view.unmount(); trigger.remove(); nextInput.remove();
   });
-  it("allows its own long menu to scroll but closes when the underlying pane scrolls", async () => {
+  it("keeps both menu levels anchored while the underlying pane scrolls without closing or stealing focus", async () => {
     const pane = document.createElement("div");
+    const trigger = document.createElement("button");
+    pane.appendChild(trigger);
     document.body.appendChild(pane);
+    let triggerTop = 100;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      if (this === trigger) return { left: 150, right: 250, top: triggerTop, bottom: triggerTop + 34, width: 100, height: 34 } as DOMRect;
+      if (this.getAttribute("role") === "menu") {
+        const left = Number.parseFloat(this.style.left), top = Number.parseFloat(this.style.top);
+        return { left, right: left + 180, top, bottom: top + 100, width: 180, height: 100 } as DOMRect;
+      }
+      const parent = this.closest<HTMLElement>('[role="menu"]')!;
+      const left = Number.parseFloat(parent.style.left) + 7, top = Number.parseFloat(parent.style.top) + 6;
+      return { left, right: left + 166, top, bottom: top + 34, width: 166, height: 34 } as DOMRect;
+    });
     const close = vi.fn();
-    const view = render(<ContextMenu position={{ x: 20, y: 20 }} onClose={close} items={[{ label: "Open" }]} />);
+    const view = render(<ContextMenu position={{ x: 20, y: 20 }} anchor={trigger} onClose={close} items={[{ label: "Open", submenu: [{ label: "Editor" }] }]} />);
     await act(async () => new Promise<void>((resolve) => window.setTimeout(resolve, 0)));
-    fireEvent.scroll(screen.getByRole("menu"));
+    const root = screen.getByRole("menu");
+    expect(root.style.top).toBe("140px");
+    fireEvent.click(screen.getByRole("menuitem", { name: "Open" }));
+    const child = screen.getByRole("menu", { name: "Open" });
+    expect(child.style.top).toBe("140px");
+    const focused = document.activeElement;
+    fireEvent.scroll(child);
     expect(close).not.toHaveBeenCalled();
+    triggerTop = 40;
     fireEvent.scroll(pane);
-    expect(close).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    expect(root.style.top).toBe("80px");
+    expect(child.style.top).toBe("80px");
+    expect(document.activeElement).toBe(focused);
     view.unmount(); pane.remove();
   });
 });

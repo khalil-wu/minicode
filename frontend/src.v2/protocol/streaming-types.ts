@@ -460,6 +460,8 @@ export interface AgentProgressEvent {
   /** Maximum provider retries (the initial request is not included). */
   max_retries?: number;
   retry_after_ms?: number;
+  status_code?: number;
+  provider_error_code?: string;
   error_message?: string;
   operation_id?: string;
   /** Typed provider lifecycle; present on provider retry progress rows. */

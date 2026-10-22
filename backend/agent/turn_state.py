@@ -433,6 +433,7 @@ class AgentTurnState:
             ('subagent_name', 'subagentName'),
             ('subagent_identity', 'subagentIdentity'),
             ('subagent_status', 'subagentStatus'),
+            ('provider_error_code', 'providerErrorCode'),
         ):
             if data.get(source_key):
                 progress[target_key] = str(data.get(source_key) or '')
@@ -449,6 +450,8 @@ class AgentTurnState:
                 progress[target_key] = max(0, _int_or(data.get(source_key), 0))
         if data.get('provider_state') is not None:
             progress['providerState'] = str(data.get('provider_state') or '').strip()
+        if data.get('status_code') is not None:
+            progress['statusCode'] = data['status_code']
         if data.get('error_message'):
             progress['errorMessage'] = str(data.get('error_message') or '')
         if data.get('operation_id'):

@@ -1411,7 +1411,10 @@ const hasValidSemanticPayload = (
           if (payload.lifecycle === "turn_started") return typeof payload.turn_id === "string";
           if (payload.lifecycle === "subagent_delegation_updated") return isBoundedString(payload.parent_message_id, 1_024)
             && isBoundedString(payload.parent_tool_call_id, 1_024) && isToolDelegations([payload.delegation]);
-          return payload.transcript_only === true || ["provider_progress", "turn_diff_updated", "error"].includes(String(payload.lifecycle));
+          if (payload.lifecycle === "provider_progress") return (!("status_code" in payload)
+            || isNonNegativeSafeInteger(payload.status_code) && Number(payload.status_code) >= 100 && Number(payload.status_code) <= 599)
+            && (!("provider_error_code" in payload) || isBoundedString(payload.provider_error_code, 256));
+          return payload.transcript_only === true || ["turn_diff_updated", "error"].includes(String(payload.lifecycle));
         });
     } else valid = valid && isRecord(delta)
       && isNonNegativeSafeInteger(delta.seq)
@@ -1528,6 +1531,8 @@ const hasValidSemanticPayload = (
       && (!("retry_attempt" in value) || !("max_retries" in value)
         || Number(value.retry_attempt) <= Number(value.max_retries))
       && (!("retry_after_ms" in value) || isNonNegativeSafeInteger(value.retry_after_ms))
+      && (!("status_code" in value) || (isNonNegativeSafeInteger(value.status_code) && Number(value.status_code) >= 100 && Number(value.status_code) <= 599))
+      && (!("provider_error_code" in value) || isBoundedString(value.provider_error_code, 256))
       && (!("error_message" in value) || isBoundedString(value.error_message, MAX_EVENT_SUMMARY_CHARS))
       && (!("operation_id" in value) || isBoundedString(value.operation_id, 1_024))
       && (!("provider_state" in value) || AGENT_PROGRESS_PROVIDER_STATE_SET.has(String(value.provider_state)))

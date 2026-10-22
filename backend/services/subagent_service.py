@@ -146,7 +146,7 @@ def project_subagent_transcript_events(events: list[dict[str, Any]]) -> list[dic
                     or payload.get("provider_state") not in {"reconnecting", "failed"}
                     or not payload.get("error_message")):
                 continue
-            public_payload = {key: payload[key] for key in ("lifecycle", "visibility", "operation_id", "provider_span_id", "provider_state", "retry_attempt", "max_retries", "retry_after_ms") if key in payload}
+            public_payload = {key: payload[key] for key in ("lifecycle", "visibility", "operation_id", "provider_span_id", "provider_state", "retry_attempt", "max_retries", "retry_after_ms", "status_code", "provider_error_code") if key in payload}
             for key in ("message", "summary", "detail", "error_message"):
                 if key in payload:
                     public_payload[key] = public_text(payload[key], max_chars=12_000)
@@ -461,6 +461,8 @@ def build_subagent_transcript_messages(
                 "detail": public_text(payload.get("detail"), max_chars=12_000),
                 "retryAttempt": retry, "maxRetries": int(payload.get("max_retries") or 0),
                 "retryAfterMs": int(payload.get("retry_after_ms") or 0), "timestamp": timestamp,
+                **({"statusCode": payload["status_code"]} if payload.get("status_code") is not None else {}),
+                **({"providerErrorCode": payload["provider_error_code"]} if payload.get("provider_error_code") else {}),
             })
             continue
 

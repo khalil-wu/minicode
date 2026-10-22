@@ -57,23 +57,15 @@ export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className
       if (!containsEvent(event)) closeMenu();
     };
     focusListenerRef.current = handleFocus;
-    const handleScroll = (event: Event) => {
-      if (!containsEvent(event)) {
-        closeMenu();
-        triggerRef.current?.focus({ preventScroll: true });
-      }
-    };
     // Use setTimeout so the current click event doesn't immediately fire
     const timer = window.setTimeout(() => {
       window.addEventListener("mousedown", handleMouseDown);
       window.addEventListener("focusin", handleFocus);
-      window.addEventListener("scroll", handleScroll, true);
     }, 0);
     return () => {
       window.clearTimeout(timer);
       window.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("focusin", handleFocus);
-      window.removeEventListener("scroll", handleScroll, true);
     };
   }, [onClose, anchor]);
 
@@ -178,9 +170,13 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
     if (submenu && (!items[submenu.index]?.submenu || items[submenu.index].disabled)) setSubmenu(null);
   }, [items, submenu]);
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    if (event.key === "Escape" || event.key === "Tab") {
+    if (event.key === "Tab") {
+      event.preventDefault(); event.stopPropagation();
+      return;
+    }
+    if (event.key === "Escape") {
       event.stopPropagation();
-      if (event.key === "Escape") event.preventDefault();
+      event.preventDefault();
       onDismiss();
       return;
     }
@@ -191,10 +187,13 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
       if (items[index]?.submenu && !items[index].disabled) { event.preventDefault(); event.stopPropagation(); openSubmenu(index, button, true); }
       return;
     }
-    if (event.key.length === 1 && event.key.trim() && !event.ctrlKey && !event.metaKey && !event.altKey
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey
       && !(event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || (event.target as HTMLElement).isContentEditable)) {
       const now = Date.now();
-      const value = `${now - typeahead.current.time < 1000 ? typeahead.current.value : ""}${event.key.toLocaleLowerCase()}`;
+      const previous = now - typeahead.current.time < 1000 ? typeahead.current.value : "";
+      if (event.key === " " && !previous) return;
+      if (event.key === " ") event.preventDefault();
+      const value = `${previous}${event.key.toLocaleLowerCase()}`;
       typeahead.current = { value, time: now };
       const query = [...value].every(char => char === value[0]) ? value[0] : value;
       const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('button[role^="menuitem"]:not(:disabled)'));
@@ -211,7 +210,7 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
     const current = buttons.findIndex(button => button === document.activeElement);
     const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
       : current < 0 ? (event.key === "ArrowDown" ? 0 : buttons.length - 1)
-      : (current + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length;
+      : Math.max(0, Math.min(buttons.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)));
     buttons[next]?.focus();
   };
 
@@ -239,13 +238,15 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
     place();
     const observer = new ResizeObserver(place);
     observer.observe(el);
+    const followScroll = (event: Event) => { if (!event.composedPath().includes(el)) place(); };
     window.addEventListener("resize", place);
-    return () => { surfaces.delete(el); observer.disconnect(); window.removeEventListener("resize", place); };
+    window.addEventListener("scroll", followScroll, true);
+    return () => { surfaces.delete(el); observer.disconnect(); window.removeEventListener("resize", place); window.removeEventListener("scroll", followScroll, true); };
   }, [position, anchor, trigger, side, surfaces, alignToParentBottom]);
 
   // Focus the menu so keyboard events work
   useEffect(() => {
-    if (!anchor || focusFirst) (focusFirst ? ref.current!.querySelector<HTMLElement>('button[role^="menuitem"]:not(:disabled)') ?? ref.current : ref.current)?.focus();
+    if (!anchor || focusFirst) (focusFirst ? ref.current!.querySelector<HTMLElement>('button[role^="menuitem"]:not(:disabled)') ?? ref.current : ref.current)?.focus({ preventScroll: true });
   }, [anchor, focusFirst]);
 
   return <>
@@ -348,6 +349,6 @@ function MenuSurface({ items, position, anchor, trigger, side, focusFirst = fals
       surfaceRef={submenuRef}
       alignToParentBottom={items[submenu.index].alignToParentBottom}
       maxHeight={items[submenu.index].submenuMaxHeight}
-      onBack={() => { const button = submenu.anchor; setSubmenu(null); button.focus(); }} />, document.body)}
+      onBack={() => { const button = submenu.anchor; setSubmenu(null); button.focus({ preventScroll: true }); }} />, document.body)}
   </>;
 }

@@ -27,7 +27,7 @@ const initial = () => applySubagentTranscriptEvents([], decode([{ event_id: "sta
   event_type: "system", payload: { lifecycle: "turn_started", turn_id: "child" } }], 0))!;
 
 it("keeps actual public retry evidence when debug lifecycle and context recovery arrive in the child delta", () => {
-  const first = applySubagentTranscriptEvents(initial(), decode([fact("retry", {})]))!;
+  const first = applySubagentTranscriptEvents(initial(), decode([fact("retry", { status_code: 429, provider_error_code: "controlled_busy" })]))!;
   const delta = decode([
     fact("context", { visibility: "debug", error_message: "Private request context" }),
     fact("lifecycle", { visibility: "debug", provider_state: "failed", error_message: "Private terminal lifecycle" }),
@@ -41,7 +41,16 @@ it("keeps actual public retry evidence when debug lifecycle and context recovery
   expect(next[0].failureMessage).toBe("The real terminal failure");
   expect(next[0].blocks).toEqual(first[0].blocks);
   expect(next[0].blocks?.[0]).toMatchObject({ id: `${operation}:error:original-span:reconnecting:1`,
-    visibility: "timeline", status: "info", errorMessage: "Actual stream interruption" });
+    visibility: "timeline", status: "info", errorMessage: "Actual stream interruption", statusCode: 429, providerErrorCode: "controlled_busy" });
+  const recovered = applySubagentTranscriptEvents(next, decode([fact("ordinary", { provider_span_id: "second-span", retry_attempt: 2,
+    status_code: 503, provider_error_code: "controlled_retry" }), fact("unclassified", { provider_span_id: "third-span", retry_attempt: 3 })], 7))!;
+  const restored = hydrateMessages([{ id: "restored-child", role: "assistant", content: "", timestamp: 1000,
+    blocks: JSON.parse(JSON.stringify(recovered[0].blocks)) }]);
+  const progress = restored[0].blocks?.filter(block => block.type === "progress");
+  expect(progress?.[0]).toMatchObject({ statusCode: 429, providerErrorCode: "controlled_busy" });
+  expect(progress?.[1]).toMatchObject({ statusCode: 503, providerErrorCode: "controlled_retry" });
+  expect(progress?.[2]?.statusCode).toBeUndefined();
+  expect(progress?.[2]?.providerErrorCode).toBeUndefined();
 });
 
 it("projects an explicit public child terminal failure into the existing neutral ErrorCell once", () => {

@@ -92,7 +92,7 @@ async def _first_error(adapter, *, wrapped: bool = False):
     return next(event for event in events if event.type.name == "ERROR")
 
 
-async def _drive(event, *, retry_state: StreamRetryState, attempt: int, waits: list[float], max_attempts: int = 3):
+async def _drive(event, *, retry_state: StreamRetryState, attempt: int, waits: list[float], max_attempts: int = 3, progress: list[dict] | None = None):
     settings = AgentSettings(stream_max_attempts=max_attempts, stream_retry_delay_seconds=0.5)
 
     async def noop(*args, **kwargs):
@@ -133,8 +133,40 @@ async def _drive(event, *, retry_state: StreamRetryState, attempt: int, waits: l
         query_source="user",
         retry_state=retry_state,
     ):
+        if progress is not None and getattr(item, "type", None) == "agent.progress":
+            progress.append(item.data)
         result = item
     return result
+
+
+@pytest.mark.parametrize("status,code", [(429, "controlled_retry"), (503, "server_is_overloaded"), (503, "controlled_retry")])
+def test_real_http_retry_preserves_status_and_provider_code(status, code):
+    async def scenario():
+        adapter, client = _openai("chat", lambda request: httpx.Response(status,
+            json={"error": {"code": code, "type": "server_error", "message": "Actual provider failure"}},
+            headers={"retry-after": "0"}))
+        async with client:
+            event = await _first_error(adapter, wrapped=True)
+        progress = []
+        result = await _drive(event, retry_state=StreamRetryState(), attempt=0, waits=[], progress=progress)
+        assert result.action == "retry"
+        notice = next(item for item in progress if item.get("visibility") == "timeline" and item.get("error_message"))
+        assert notice["status_code"] == status
+        assert notice["provider_error_code"] == code
+
+    asyncio.run(scenario())
+
+
+def test_error_prose_does_not_invent_public_http_status():
+    from backend.llm.anthropic_protocol import _anthropic_exception_error_event
+
+    error = RuntimeError("rate_limit: HTTP 429; status=429")
+    raw = llm_error_raw(error, "openai")
+    assert "status_code" not in raw
+    assert raw["provider_error_type"] == "rate_limit"
+    anthropic = _anthropic_exception_error_event(error, provider="anthropic")
+    assert "status_code" not in anthropic.raw
+    assert anthropic.raw["provider_error_type"] == "rate_limit"
 
 
 def test_connect_failure_from_a_real_adapter_takes_the_connect_track() -> None:

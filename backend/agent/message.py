@@ -1024,6 +1024,8 @@ class AgentEvent:
         retry_attempt: int | None = None,
         max_retries: int | None = None,
         retry_after_ms: int | None = None,
+        status_code: int | None = None,
+        provider_error_code: str = "",
         error_message: str = "",
         operation_id: str = "",
         provider_state: str | None = None,
@@ -1108,6 +1110,7 @@ class AgentEvent:
         optional_text_fields = (
             ("detail", detail, _MAX_EVENT_SUMMARY_CHARS),
             ("error_message", error_message, _MAX_EVENT_SUMMARY_CHARS),
+            ("provider_error_code", provider_error_code, 256),
             ("tool_call_id", tool_call_id, _MAX_EVENT_ID_CHARS),
             ("tool_name", tool_name, 1_024),
             ("group_id", group_id, _MAX_EVENT_ID_CHARS),
@@ -1146,6 +1149,10 @@ class AgentEvent:
                 retry_after_ms,
                 field_name="retry_after_ms",
             )
+        if status_code is not None:
+            payload["status_code"] = _non_negative_event_int(status_code, field_name="status_code")
+            if not 100 <= payload["status_code"] <= 599:
+                raise ValueError("status_code must be an HTTP status")
         if clean_provider_state:
             payload["provider_state"] = clean_provider_state
         return cls(type="agent.progress", data=payload)

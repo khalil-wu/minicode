@@ -338,6 +338,9 @@ def _upsert_activity_block(
                     or "providerState" in block
                 )
                 if retry_progress:
+                    for key in ("statusCode", "providerErrorCode"):
+                        if key not in block:
+                            merged.pop(key, None)
                     # Retry detail describes the current attempt. Retaining
                     # every previous transport error makes the row grow and
                     # hides the retry that is currently pending.
@@ -718,6 +721,8 @@ def apply_stream_event(
                 ("retry_attempt", "retryAttempt"),
                 ("max_retries", "maxRetries"),
                 ("retry_after_ms", "retryAfterMs"),
+                ("status_code", "statusCode"),
+                ("provider_error_code", "providerErrorCode"),
                 ("error_message", "errorMessage"),
                 ("operation_id", "operationId"),
                 ("provider_state", "providerState"),

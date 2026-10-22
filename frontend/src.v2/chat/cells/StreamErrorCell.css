@@ -1,7 +1,9 @@
 .stream-error-cell { min-width: 0; color: var(--text-muted); font: inherit; }
-.stream-error-summary { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 2px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.stream-error-summary { display: flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .stream-error-summary > svg { flex: 0 0 auto; }
-.stream-error-summary > span { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.stream-error-summary-content { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.stream-error-summary-content > svg { flex: 0 0 auto; }
+.stream-error-label { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
 .stream-error-summary:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; border-radius: 3px; }
 .stream-error-chevron { opacity: 0; }
 .stream-error-summary:hover .stream-error-chevron, .stream-error-summary:focus-visible .stream-error-chevron, .stream-error-summary[aria-expanded="true"] .stream-error-chevron { opacity: 1; }

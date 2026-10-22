@@ -482,6 +482,8 @@ class AgentProgressData(TypedDict, total=False):
     retry_attempt: int
     max_retries: int
     retry_after_ms: int
+    status_code: int
+    provider_error_code: str
     error_message: str
     operation_id: str
     provider_state: AgentProgressProviderState

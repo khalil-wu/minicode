@@ -462,6 +462,7 @@ const normalizeAgentProgressFromSnapshot = (value: unknown, conversationId: stri
       const phase = String(progress.phase ?? "") as NonNullable<AgentProgressEntry["phase"]>;
       if (!PROGRESS_STAGES.has(stage) || !PROGRESS_STATUSES.has(status)) return [];
       const rawProviderState = progress.providerState ?? progress.provider_state;
+      const statusCode = progress.statusCode ?? progress.status_code;
       const providerState = isAgentProgressProviderState(rawProviderState)
         ? rawProviderState
         : undefined;
@@ -493,6 +494,8 @@ const normalizeAgentProgressFromSnapshot = (value: unknown, conversationId: stri
           ? Number(progress.retryAfterMs ?? progress.retry_after_ms)
           : undefined,
         errorMessage: maybeString((progress.errorMessage ?? progress.error_message) as string | null | undefined),
+        statusCode: typeof statusCode === "number" && Number.isInteger(statusCode) && statusCode >= 100 && statusCode <= 599 ? statusCode : undefined,
+        providerErrorCode: maybeString((progress.providerErrorCode ?? progress.provider_error_code) as string | null | undefined),
         operationId: maybeString((progress.operationId ?? progress.operation_id) as string | null | undefined),
         subagentId: maybeString((progress.subagentId ?? progress.subagent_id) as string | null | undefined),
         subagentName: maybeString((progress.subagentName ?? progress.subagent_name) as string | null | undefined),

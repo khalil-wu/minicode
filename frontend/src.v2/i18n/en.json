@@ -552,6 +552,7 @@
   "正在恢复会话上下文、运行状态和工具记录…": "Restoring chat context, run state, and tool records…",
   "后端已连接": "Backend connected",
   "正在重连": "Reconnecting",
+  "服务器繁忙，正在重连": "Server is busy, reconnecting",
   "重连中": "Reconnecting",
   "正在重连 MiniCode 服务…": "Reconnecting to MiniCode…",
   "连接失败，请检查 MiniCode 服务或网络后重试。": "Connection failed. Check the MiniCode service or network and try again.",

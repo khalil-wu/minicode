@@ -152,6 +152,8 @@ export function applySubagentTranscriptEvents(messages: ChatMessage[], delta: Su
       const block: ContentBlock = { type: "progress", id, operationId: sourceId, stage: "status", phase: "recover",
         status: state === "failed" ? "failed" : "info", message: String(payload.message || payload.summary || ""), visibility: payload.visibility as "timeline" | "compact",
         providerState: state, errorMessage: String(payload.error_message),
+        statusCode: payload.status_code as number | undefined,
+        providerErrorCode: payload.provider_error_code as string | undefined,
         detail: payload.detail as string | undefined, retryAttempt: Number(payload.retry_attempt || 0), maxRetries: Number(payload.max_retries || 0),
         retryAfterMs: Number(payload.retry_after_ms || 0), timestamp: event.ts_ms };
       upsertBlock(block, previous => previous.type === "progress" && previous.id === id);

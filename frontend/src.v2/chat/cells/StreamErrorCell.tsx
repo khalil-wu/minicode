@@ -1,5 +1,4 @@
-import { ChevronRight } from "../../lib/icons";
-import { streamErrorIcon } from "../../lib/stream-error-icon";
+import { streamErrorChevronIcon, streamErrorIcon } from "../../lib/stream-error-icon";
 import { RollingNumber } from "../../components/RollingNumber";
 import { useI18n } from "../../i18n";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
@@ -16,15 +15,21 @@ export function StreamErrorCell({ cell }: { cell: ActivityCellState }) {
   const expanded = useTranscriptSearch() || preference;
   const disclosure = useProcessDisclosure(expanded);
   const numbered = (progress.retryAttempt ?? 0) > 0 && progress.maxRetries !== undefined;
+  const busy = progress.statusCode === 429 || progress.providerErrorCode === "server_is_overloaded";
+  const summary = busy ? t("服务器繁忙，正在重连") : numbered ? t("正在重连") : progress.text;
   const detail = progress.detail || progress.errorMessage!;
   return <div className="stream-error-cell" data-retry-attempt={progress.retryAttempt}>
     <button type="button" className="stream-error-summary" aria-expanded={expanded}
       onClick={() => { userToggled.current = true; setExpanded(value => !value); }}>
-      <svg width={16} height={16} viewBox={streamErrorIcon.viewBox} fill="currentColor" aria-hidden="true" data-source-icon="wifi-light-16">
-        {streamErrorIcon.paths.map((d, index) => <path key={index} d={d} />)}
+      <span className="stream-error-summary-content">
+        <svg width={16} height={16} viewBox={streamErrorIcon.viewBox} fill="currentColor" aria-hidden="true" data-source-icon="wifi-light-16">
+          {streamErrorIcon.paths.map((d, index) => <path key={index} d={d} />)}
+        </svg>
+        <span className="stream-error-label">{summary}{numbered && <> <span className="stream-error-counter"><RollingNumber value={progress.retryAttempt!} />/{progress.maxRetries}</span></>}</span>
+      </span>
+      <svg width={12} height={12} viewBox={streamErrorChevronIcon.viewBox} fill="currentColor" className="stream-error-chevron mc-process-disclosure" data-expanded={expanded} aria-hidden="true" data-source-icon="stream-error-chevron">
+        <path d={streamErrorChevronIcon.path} />
       </svg>
-      <span>{numbered ? <>{t("正在重连")} <span className="stream-error-counter"><RollingNumber value={progress.retryAttempt!} />/{progress.maxRetries}</span></> : progress.text}</span>
-      <ChevronRight size={14} className="stream-error-chevron mc-process-disclosure" data-expanded={expanded} aria-hidden="true" />
     </button>
     {disclosure.mounted && <div ref={disclosure.element} aria-hidden={!expanded} style={{ pointerEvents: expanded ? "auto" : "none" }}>
       <div className="stream-error-details">{detail}</div>

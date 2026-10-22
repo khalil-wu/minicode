@@ -435,6 +435,7 @@ def _project_block(value: Any) -> dict[str, Any] | None:
                 "id", "stage", "phase", "status", "message", "label", "summary", "visibility",
                 "detail", "toolCallId", "toolName", "groupId", "stepId", "iterationId",
                 "providerState", "retryAttempt", "maxRetries", "retryAfterMs", "errorMessage", "operationId",
+                "statusCode", "providerErrorCode",
                 "subagentId", "subagentName", "subagentIdentity", "subagentStatus",
             ),
         }[block_type]
@@ -448,6 +449,11 @@ def _project_block(value: Any) -> dict[str, Any] | None:
                 count = _nonnegative_int(raw)
                 if count is not None:
                     block[key] = count
+                continue
+            if key == "statusCode":
+                status_code = _nonnegative_int(raw)
+                if status_code is not None and 100 <= status_code <= 599:
+                    block[key] = status_code
                 continue
             text = public_text(raw, max_chars=50_000 if key in {"content", "message", "detail", "summary"} else 2_048)
             if text:

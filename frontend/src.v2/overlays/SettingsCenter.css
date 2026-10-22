@@ -2402,7 +2402,7 @@
 .settings-full-access-copy { display: flex; flex-direction: column; gap: 16px; color: var(--text-secondary); line-height: var(--leading-normal); }
 .settings-full-access-copy p { margin: 0; }
 .settings-full-access-copy a,
-.settings-full-access-learn-more { color: var(--accent-primary); text-decoration: none; }
+.settings-full-access-learn-more { color: var(--text-info); text-decoration: none; }
 .settings-full-access-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .settings-full-access-actions .settings-action-button { padding: 2px 8px; border-radius: var(--radius-full); border-color: transparent; font-size: var(--mc-font-body); line-height: 18px; gap: 4px; }
 .settings-full-access-actions [data-danger="true"] { background: color-mix(in oklch, var(--state-danger) 10%, transparent); color: var(--state-danger); }

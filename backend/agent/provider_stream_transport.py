@@ -31,6 +31,7 @@ from backend.llm.base import UsageInfo
 from backend.llm.errors import (
     classify_llm_error,
     is_connection_not_established,
+    llm_error_raw,
     llm_error_status_code,
     retry_after_seconds,
 )
@@ -259,6 +260,8 @@ async def handle_provider_transport_failure(
             max_retries=progress_max_retries,
             retry_after_ms=max(0, int(round(retry_delay * 1000))),
             error_message=error_message[:320],
+            status_code=llm_error_status_code(cause, allow_text=False),
+            provider_error_code=llm_error_raw(cause, provider="").get("provider_error_code", ""),
         )
         if close_stream is not None:
             await close_stream()

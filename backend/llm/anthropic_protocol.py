@@ -475,7 +475,7 @@ def _anthropic_exception_error_event(
     provider: str,
 ) -> StreamEvent:
     classification = classify_llm_error(exc)
-    status_code = llm_error_status_code(exc)
+    status_code = llm_error_status_code(exc, allow_text=False)
     code, schema_type = _anthropic_error_fields(exc)
     provider_message = _anthropic_error_message(exc)
     hint = _anthropic_error_hint(

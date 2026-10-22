@@ -16,6 +16,8 @@ def provider_stream_error_progress(
     retry_attempt: int | None = None,
     max_retries: int | None = None,
     retry_after_ms: int | None = None,
+    status_code: int | None = None,
+    provider_error_code: str = "",
 ) -> AgentEvent:
     """A retry failure is public evidence, separate from request liveness."""
     return AgentEvent.progress(
@@ -31,6 +33,8 @@ def provider_stream_error_progress(
         retry_attempt=retry_attempt,
         max_retries=max_retries,
         retry_after_ms=retry_after_ms,
+        status_code=status_code,
+        provider_error_code=provider_error_code,
         visibility="timeline",
     )
 

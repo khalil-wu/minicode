@@ -1,7 +1,7 @@
 import { CircleAlert, Lightbulb, ShieldAlert } from "lucide-react";
 import { Lexer } from "marked";
 import type { ErrorCellState } from "./cellTypes";
-import { normalizeAgentErrorMessage, purifyToolErrorText } from "../errorMessages";
+import { purifyToolErrorText } from "../errorMessages";
 import { openPreferredWebLink } from "../../lib/open-preferred-target";
 import "./cells.css";
 
@@ -10,7 +10,7 @@ function ErrorInlineLinks({ text, conversationId }: { text: string; conversation
     && /^https?:\/\//i.test(token.raw)
     && typeof token.href === "string"
     && URL.canParse(token.href)
-    ? <a key={index} href={token.href} className="md-text-link text-[var(--accent-primary)] no-underline" onClick={event => {
+    ? <a key={index} href={token.href} className="md-text-link text-[var(--text-info)] no-underline" onClick={event => {
       event.preventDefault();
       void openPreferredWebLink(token.href, conversationId, {
         ctrlKey: event.ctrlKey, metaKey: event.metaKey, altKey: event.altKey, shiftKey: event.shiftKey,
@@ -28,12 +28,7 @@ function ErrorInlineLinks({ text, conversationId }: { text: string; conversation
 export function ErrorCell({ cell, conversationId }: { cell: ErrorCellState; conversationId?: string }) {
   const isPermissionNotice = cell.source === "permission";
   const tone = isPermissionNotice ? "warning" : "danger";
-  const purifiedMessage = purifyToolErrorText(cell.message);
-  const displayMessage = purifiedMessage
-    ? cell.source === "agent" || cell.source === "network"
-      ? normalizeAgentErrorMessage(purifiedMessage, { includeProviderDetails: false })
-      : purifiedMessage
-    : "";
+  const displayMessage = purifyToolErrorText(cell.message);
   const ErrorIcon = isPermissionNotice ? ShieldAlert : CircleAlert;
 
   if (cell.source === "agent" || cell.source === "network") return <div className="error-cell error-cell-notice" role="alert">

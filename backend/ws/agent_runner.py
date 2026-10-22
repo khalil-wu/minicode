@@ -1163,6 +1163,8 @@ def _project_agent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict
         **({"retryAttempt": data.get("retry_attempt")} if isinstance(data.get("retry_attempt"), int) else {}),
         **({"maxRetries": data.get("max_retries")} if isinstance(data.get("max_retries"), int) else {}),
         **({"retryAfterMs": data.get("retry_after_ms")} if isinstance(data.get("retry_after_ms"), int) else {}),
+        **({"statusCode": data["status_code"]} if data.get("status_code") is not None else {}),
+        **({"providerErrorCode": data["provider_error_code"]} if data.get("provider_error_code") else {}),
         **({"errorMessage": str(data.get("error_message"))} if data.get("error_message") is not None else {}),
         **({"operationId": str(data.get("operation_id"))} if data.get("operation_id") is not None else {}),
         **({"providerState": str(incoming_provider_state).strip()} if incoming_provider_state is not None else {}),
@@ -1190,7 +1192,13 @@ def _project_agent_progress(state: dict[str, Any], data: dict[str, Any]) -> dict
                 entry[target_key] = max(previous_value, incoming_value)
         if isinstance(incoming_provider_state, str) and incoming_provider_state.strip():
             entry["providerState"] = incoming_provider_state.strip()
-    state["agentProgress"] = _upsert_by_id(list(state.get("agentProgress") or []), entry)[-80:]
+    merged_progress = _upsert_by_id(list(state.get("agentProgress") or []), entry)
+    if provider_retry_progress:
+        current = next(item for item in merged_progress if item["id"] == progress_id)
+        for key in ("statusCode", "providerErrorCode"):
+            if key not in entry:
+                current.pop(key, None)
+    state["agentProgress"] = merged_progress[-80:]
     return state
 
 

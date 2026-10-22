@@ -1125,6 +1125,25 @@ describe("provider progress ownership and recovery", () => {
     ]);
   });
 
+  it("keeps raw retry evidence through wire validation, queued ownership and a later unclassified attempt", () => {
+    const frame = (attempt: number, evidence: Record<string, unknown>) => normalizeInboundServerEvent(providerEvent({
+      id: "provider:connection:run-provider:iteration-1:error:request:reconnecting",
+      phase: "recover", status: "info", operation_id: "provider:connection:run-provider:iteration-1",
+      retry_attempt: attempt, error_message: "Original failure mentions HTTP 429", ...evidence,
+    }))!;
+    expect(handleRuntimeEvent(frame(1, { status_code: 429, provider_error_code: "controlled_busy" }))).toBe(true);
+    useAppStore.getState().resumeStreaming("conv-provider", [], "assistant-provider", "turn-provider");
+    expect(useAppStore.getState().messages[0].blocks?.[0]).toMatchObject({ statusCode: 429, providerErrorCode: "controlled_busy" });
+    expect(handleRuntimeEvent(frame(2, { status_code: 503, provider_error_code: "controlled_retry" }))).toBe(true);
+    expect(useAppStore.getState().agentProgress[0]).toMatchObject({ statusCode: 503, providerErrorCode: "controlled_retry" });
+    expect(handleRuntimeEvent(frame(3, {}))).toBe(true);
+    const block = useAppStore.getState().messages[0].blocks?.[0];
+    expect(block?.type === "progress" && block.statusCode).toBeUndefined();
+    expect(block?.type === "progress" && block.providerErrorCode).toBeUndefined();
+    expect(useAppStore.getState().agentProgress[0].statusCode).toBeUndefined();
+    expect(useAppStore.getState().agentProgress[0].providerErrorCode).toBeUndefined();
+  });
+
   it("does not cross-wire equal message ids between conversations or different messages", () => {
     expect(handleRuntimeEvent(providerEvent({
       conversation_id: "conv-one",

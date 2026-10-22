@@ -97,6 +97,8 @@ export interface ActivityCellState {
     retryAttempt?: number;
     maxRetries?: number;
     retryAfterMs?: number;
+    statusCode?: number;
+    providerErrorCode?: string;
     providerState?: ProgressContentBlock["providerState"];
     errorMessage?: string;
     detail?: string;

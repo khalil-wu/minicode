@@ -1288,6 +1288,8 @@ export interface ProgressContentBlock {
   retryAttempt?: number;
   maxRetries?: number;
   retryAfterMs?: number;
+  statusCode?: number;
+  providerErrorCode?: string;
   errorMessage?: string;
   operationId?: string;
   providerState?: AgentProgressProviderState;

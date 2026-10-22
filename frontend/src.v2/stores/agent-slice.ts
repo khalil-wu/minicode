@@ -109,6 +109,8 @@ function mergeProgressEntry(
   if (!lifecycleRegressed) {
     const detail = String(progress.detail ?? "").trim();
     if (isRetryProgress) {
+      if (progress.statusCode === undefined) delete entry.statusCode;
+      if (progress.providerErrorCode === undefined) delete entry.providerErrorCode;
       if (detail) entry.detail = detail;
       else delete entry.detail;
     } else {

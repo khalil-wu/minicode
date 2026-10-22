@@ -132,6 +132,8 @@ def test_child_runtime_callback_and_yield_keep_one_source_receipt(monkeypatch, t
                 source = provider_stream_error_progress(
                     "连接中断，正在重连（第 1/2 次）", attempt=attempt, progress_id=progress_id,
                     retry_attempt=1, max_retries=2, error_message="stream disconnected", retry_after_ms=200,
+                    status_code=429 if attempt is attempts[0] else 503,
+                    provider_error_code="controlled_busy" if attempt is attempts[0] else "controlled_retry",
                 )
                 await bridge(source.type, source.data)
                 yield source
@@ -175,6 +177,13 @@ def test_child_runtime_callback_and_yield_keep_one_source_receipt(monkeypatch, t
         assert [notice["id"] for notice in notices] == [f"{progress_id}:error:{attempt.span_id}:reconnecting:1" for attempt in attempts]
         assert [notice["retryAttempt"] for notice in notices] == [1, 1]
         assert all(notice["maxRetries"] == 2 for notice in notices)
+        assert [notice["statusCode"] for notice in notices] == [429, 503]
+        assert [notice["providerErrorCode"] for notice in notices] == ["controlled_busy", "controlled_retry"]
+        from backend.services.subagent_service import project_subagent_transcript_events
+        public_events = project_subagent_transcript_events(transcript["events"])
+        public_retries = [event["payload"] for event in public_events if event["payload"].get("lifecycle") == "provider_progress"]
+        assert [event["status_code"] for event in public_retries] == [429, 503]
+        assert [event["provider_error_code"] for event in public_retries] == ["controlled_busy", "controlled_retry"]
         assert done["transcript_snapshot"]["messages"][-1]["failure_message"] == "upstream request_timeout after retries"
 
     asyncio.run(run())

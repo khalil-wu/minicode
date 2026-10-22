@@ -11,6 +11,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { auditProjectConfig } from "./audit-project-config.mjs";
 import { auditImportFlow } from "./audit-import-flow.mjs";
+import { auditShellMenus } from "./audit-shell-menus.mjs";
+import { auditCustomThemeColors } from "./audit-custom-theme-colors.mjs";
 
 assert.equal(process.env.CI, "true", "Run this audit in isolated CI, never against a user's desktop profile");
 const auditStartedAt = Date.now();
@@ -44,8 +46,9 @@ for (let index = 0; index < 30; index++) await writeFile(path.join(sourceHome, "
 
 const model = "ui-audit-loopback";
 const requests = [], wire = [], pageErrors = [], logs = [], captures = [], checks = [];
-let attempts = 0, terminalAttempts = 0, heldResponse, acceptThirdRequest;
+let attempts = 0, terminalAttempts = 0, heldResponse, acceptThirdRequest, releaseSecondFailure;
 const thirdRequest = new Promise(resolve => { acceptThirdRequest = resolve; });
+const secondFailure = new Promise(resolve => { releaseSecondFailure = resolve; });
 const reply = response => {
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
   response.write(`data: ${JSON.stringify({ id: "ui-audit-reply", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: "HARNESS_RECONNECT_COMPLETE" }, finish_reason: null }] })}\n\n`);
@@ -70,8 +73,9 @@ const provider = createServer(async (request, response) => {
   if (!main) { reply(response); return; }
   attempts++;
   if (attempts < 3) {
-    response.writeHead(503, { "content-type": "application/json", "retry-after": "1" });
-    response.end(JSON.stringify({ error: { message: "Controlled provider stream interrupted", type: "server_error", code: "controlled_retry" } }));
+    if (attempts === 2) await secondFailure;
+    response.writeHead(attempts === 1 ? 429 : 503, { "content-type": "application/json", "retry-after": "1" });
+    response.end(JSON.stringify({ error: { message: "Controlled provider stream interrupted", type: attempts === 1 ? "rate_limit_error" : "server_error", code: "controlled_retry" } }));
   } else { heldResponse = response; acceptThirdRequest(); }
 });
 await new Promise(resolve => provider.listen(0, "127.0.0.1", resolve));
@@ -217,9 +221,28 @@ try {
   const composer = page.locator(".composer-input-region [data-composer-input]").first();
   await composer.fill("HARNESS_RECONNECT: Return the completed response after the two real provider failures.");
   await composer.press("Enter");
+  await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor({ timeout: 45000 });
+  assert.match(await page.locator(".stream-error-summary").innerText(), /繁忙.*1\/5/u);
+  const busyRetryReceipt = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
+    && row.message.retry_attempt === 1 && row.message.visibility === "timeline").message;
+  assert.equal(busyRetryReceipt.status_code, 429);
+  assert.equal(busyRetryReceipt.provider_error_code, "controlled_retry");
+  await capture("02-actual-provider-busy-reconnect-one");
+  await page.reload();
+  await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
+  await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor();
+  assert.match(await page.locator(".stream-error-summary").innerText(), /繁忙.*1\/5/u);
+  assert.equal(await page.locator(".stream-error-cell").count(), 1);
+  const restoredBusyRetry = await page.evaluate(id => window.__zustandStore.getState().getVisibleMessages(id)
+    .flatMap(message => message.blocks || []).find(block => block.type === "progress" && block.retryAttempt === 1 && block.visibility === "timeline"), owner);
+  assert.equal(restoredBusyRetry.statusCode, 429);
+  assert.equal(restoredBusyRetry.providerErrorCode, "controlled_retry");
+  await capture("02-reload-restores-busy-retry");
+  releaseSecondFailure();
   await page.locator('.stream-error-cell[data-retry-attempt="2"]').waitFor({ timeout: 45000 });
   await thirdRequest;
   assert.equal(await page.locator(".stream-error-cell").count(), 1);
+  assert.doesNotMatch(await page.locator(".stream-error-summary").innerText(), /繁忙/u);
   assert.equal(attempts, 3);
   assert.equal(await page.evaluate(() => window.__zustandStore.getState().isStreaming), true);
   await capture("02-actual-provider-reconnect-two");
@@ -227,8 +250,18 @@ try {
   await page.locator(".stream-error-details").waitFor();
   const retryReceipt = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
     && row.message.retry_attempt === 2 && row.message.visibility === "timeline").message;
+  assert.equal(retryReceipt.status_code, 503);
   assert((await page.locator(".stream-error-details").innerText()).includes(retryReceipt.error_message));
-  await capture("03-actual-reconnect-expanded");
+  assert.equal(await page.locator(".stream-error-details a, .stream-error-details code").count(), 0);
+  const retryGeometry = await page.locator(".stream-error-summary").evaluate(element => ({
+    outerGap: getComputedStyle(element).columnGap,
+    contentGap: getComputedStyle(element.querySelector(".stream-error-summary-content")).columnGap,
+    wifi: element.querySelector('[data-source-icon="wifi-light-16"]').getBoundingClientRect().width,
+    chevron: element.querySelector('[data-source-icon="stream-error-chevron"]').getBoundingClientRect().width,
+  }));
+  assert.deepEqual(retryGeometry, { outerGap: "4px", contentGap: "6px", wifi: 16, chevron: 12 });
+  await capture("03-actual-reconnect-expanded", { retryGeometry });
+  checks.push({ scenario: "Source retry aggregate uses 6px icon/summary gap, 4px disclosure gap, 16px Wi-Fi and 12px filled chevron; original details remain plain text", retryGeometry });
   await composer.fill("KEEP_A_DRAFT");
   await page.evaluate(workspaceRoot => window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" }), workspace);
   await page.waitForFunction(previous => window.__zustandStore.getState().conversationId !== previous, owner);
@@ -265,7 +298,7 @@ try {
   assert(wire.slice(returnToOtherAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
     && row.message.conversation_id === other && row.message.client_command_type === "conversation.switch"));
   assert.equal(await composer.innerText(), "KEEP_B_DRAFT");
-  checks.push("Actual provider 503 → retry 1/5 → retry 2/5 → live owner switch → session restore → final response, both drafts retained");
+  checks.push("Actual provider 429 → busy retry 1/5 → session restore → 503 → ordinary retry 2/5 → live owner switch → session restore → final response, both drafts retained");
 
   await page.evaluate(workspaceRoot => window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" }), workspace);
   await page.waitForFunction(previous => window.__zustandStore.getState().conversationId !== previous, other);
@@ -318,9 +351,11 @@ try {
   assert.equal(await importDialog.getByRole("button", { name: "导入主题", exact: true }).isDisabled(), true);
   await capture("09-theme-import-invalid");
   await themeInput.fill(await themeInput.getAttribute("placeholder"));
-  await importDialog.getByRole("button", { name: "导入主题", exact: true }).click();
+  assert.equal(await importDialog.getByRole("button", { name: "导入主题", exact: true }).isDisabled(), false);
+  await page.keyboard.press("Escape");
   await importDialog.waitFor({ state: "hidden" });
-  checks.push("Theme nested menu and actual import callback completed");
+  assert.equal(await page.evaluate(() => window.__zustandStore.getState().appearanceColors.light), null);
+  checks.push("Theme nested menu and invalid/valid import admission; dismissal retains the default palette before the later actual custom imports");
 
   // Current-build page baselines, separate from Source visual acceptance.
   const settingsPages = await page.locator(".settings-center-tab").evaluateAll(elements => elements.map(element => element.getAttribute("aria-label")));
@@ -428,6 +463,9 @@ try {
   await page.keyboard.press("Escape");
   await page.locator(".settings-center").waitFor({ state: "hidden" });
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
+  trace("shell:menus");
+  await auditShellMenus({ page, capture, checks });
+  assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
 
   // Relaunch only the isolated CI desktop with actual Chromium device scales.
   // These captures exclude OS decorations; Windows-native scaling is separate.
@@ -450,6 +488,10 @@ try {
     await page.getByRole("menuitem", { name: "Codex 主题", exact: true }).focus();
     await page.keyboard.press("ArrowRight");
     await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).waitFor();
+    await page.keyboard.type("VS ");
+    assert.equal(await page.getByRole("menu", { name: "Codex 主题", exact: true }).isVisible(), true);
+    await page.keyboard.type("Code");
+    assert.equal(await page.getByRole("menuitemradio", { name: "VS Code Plus", exact: true }).evaluate(element => document.activeElement === element), true);
     await capture(`dpi-${scale}-theme-submenu-focus`);
     const lastTheme = page.getByRole("menu", { name: "Codex 主题", exact: true }).getByRole("menuitemradio").last();
     const lastThemeText = await lastTheme.textContent();
@@ -472,6 +514,8 @@ try {
     }
     checks.push({ scenario: `Actual renderer scale ${scale}: Theme geometry and keyboard submenu, all settings-page baselines`, dpr, geometry });
   }
+  trace("appearance:custom-colors");
+  await auditCustomThemeColors({ page, capture, checks });
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
   success = true;
 } catch (error) {
@@ -479,6 +523,7 @@ try {
   if (page) await capture("failure-current-state");
   throw error;
 } finally {
+  releaseSecondFailure();
   await persistEvidence();
   trace("cleanup");
   await app?.close();

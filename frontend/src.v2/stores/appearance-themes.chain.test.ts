@@ -58,9 +58,11 @@ it("imports contrast and semantic colors, restores them on startup and never wri
   const selectedBackground = document.documentElement.style.getPropertyValue("--surface-base");
   applyAppearanceColors("dark", emptyAppearanceColors());
   expect(document.documentElement.dataset.codeTheme).toBeUndefined();
+  expect(document.documentElement.style.getPropertyValue("--text-info")).toBe("");
   applyTheme("dark", readAppearanceStorage());
   expect(document.documentElement.dataset.codeTheme).toBe("github");
   expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe(selectedBackground);
+  expect(document.documentElement.style.getPropertyValue("--text-info")).not.toBe("");
 });
 
 it("propagates a failed persistence write without claiming a committed import", async () => {

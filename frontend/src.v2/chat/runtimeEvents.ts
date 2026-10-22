@@ -819,6 +819,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           retryAttempt: ev.retry_attempt,
           maxRetries: ev.max_retries,
           retryAfterMs: ev.retry_after_ms,
+          statusCode: ev.status_code,
+          providerErrorCode: ev.provider_error_code,
           errorMessage: ev.error_message,
           operationId: ev.operation_id,
           providerState: ev.provider_state,

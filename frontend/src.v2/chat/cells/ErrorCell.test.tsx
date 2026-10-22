@@ -33,6 +33,16 @@ describe("ErrorCell", () => {
     expect(screen.getByRole("alert").textContent).toContain("The server is currently busy.");
   });
 
+  it.each(["agent", "network"] as const)("preserves the published %s error instead of replacing it with a category summary", (source) => {
+    const message = "HTTP 401 Unauthorized: the project Reader cannot access this model.\n  More: https://example.com/errors/401?ref=public.";
+    const view = render(<ErrorCell cell={base({ source, message: `<error>${message}</error>` })} />);
+    expect(screen.getByRole("alert").textContent).toBe(`Something failed${message}`);
+    expect(screen.getByRole("link").getAttribute("href")).toBe("https://example.com/errors/401?ref=public");
+    expect(screen.getByRole("link").className).toContain("text-[var(--text-info)]");
+    expect(view.container.querySelector(".error-cell-header")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
   it("links bare HTTP(S) tokens while preserving the exact notice text, punctuation and inline layout", () => {
     const message = "See HTTPS://example.com/help?a=1&b=2 and (http://localhost:8080/details).";
     const view = render(<ErrorCell cell={base({ source: "agent", message })} conversationId="original" />);

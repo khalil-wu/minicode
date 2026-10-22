@@ -73,6 +73,7 @@ export function NavigationRail() {
       {label:tr("设置"),icon:<MenuSourceIcon kind="settings" />,shortcut:formatShortcut(settingsShortcut),onClick:()=>showSettings("general")},
       {label:tr("帮助"),icon:<MenuSourceIcon kind="help" />,alignToParentBottom:true,submenu:[
         {label:tr("新增内容"),icon:<MenuSourceIcon kind="whats-new" />,onClick:()=>{void openPreferredWebLink("https://developers.openai.com/codex/changelog");}},
+        {label:"",separator:true},
         {label:tr("键盘快捷键"),icon:<MenuSourceIcon kind="shortcuts" />,onClick:()=>useAppStore.getState().toggleShortcutsHelp()},
         {label:tr("使用指南"),icon:<MenuSourceIcon kind="guide" />,onClick:()=>{void openPreferredWebLink("https://learn.chatgpt.com/docs/quickstart");}},
       ]},

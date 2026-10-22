@@ -996,7 +996,44 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(messages.filter((message) => message.role === "system")).toHaveLength(0);
     expect(messages[0]?.role).toBe("assistant");
     expect(messages[0]?.terminalStatus).toBe("failed");
-    expect(messages[0]?.failureMessage).toContain("API Key");
+    expect(messages[0]?.failureMessage).toBe("401 Unauthorized: invalid api key");
+    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("API Key"), "error", 6000);
+  });
+
+  it.each(["failed", "partial"])("retains the original published recoverable error when DONE commits %s", (status) => {
+    const failure = "Network error: the public gateway closed the response.\n  Retry details: https://example.com/request?id=public";
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream", message: failure,
+      error_type: "network", provider_error_type: "network", recoverable: true } as ServerEvent);
+    expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
+    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream", status } as ServerEvent);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ terminalStatus: status, failureMessage: failure });
+    const errors = projectMessagesToTurns(useAppStore.getState().messages, false)[0].committedCells.filter(cell => cell.kind === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toMatchObject({ message: failure, source: "agent" });
+    expect(pushToast).not.toHaveBeenCalled();
+  });
+
+  it("keeps A's public recoverable error after switching to B and clears B's error after recovery", () => {
+    const failureA = "401 Unauthorized: missing project role A.\n  https://example.com/failure-a";
+    const failureB = "Network error: public failure B.\n  https://example.com/failure-b";
+    handle({ type: "error", conversation_id: "conv-stream", message_id: "assistant-stream", message: failureA,
+      error_type: "auth", provider_error_type: "auth", recoverable: true } as ServerEvent);
+    const messagesA = useAppStore.getState().messages;
+    useAppStore.setState({ conversationId: "B", draft: "Keep B's unsent prompt", isStreaming: true,
+      messages: [{ id: "assistant-B", role: "assistant", content: "", blocks: [], artifacts: [], timestamp: 2, isStreaming: true }],
+      conversationMessages: { "conv-stream": messagesA }, conversationStreaming: { "conv-stream": true, B: true } });
+    handle({ type: "error", conversation_id: "B", message_id: "assistant-B", message: failureB,
+      error_type: "network", provider_error_type: "network", recoverable: true } as ServerEvent);
+    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream", status: "failed" } as ServerEvent);
+    expect(useAppStore.getState().conversationMessages["conv-stream"][0]).toMatchObject({ failureMessage: failureA, terminalStatus: "failed" });
+    expect(useAppStore.getState().messages[0]).toMatchObject({ id: "assistant-B", isStreaming: true });
+    expect(useAppStore.getState().messages[0].failureMessage).toBeUndefined();
+    handle({ type: "done", conversation_id: "B", message_id: "assistant-B", status: "completed" } as ServerEvent);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ id: "assistant-B", terminalStatus: "completed" });
+    expect(useAppStore.getState().messages[0].failureMessage).toBeUndefined();
+    expect(useAppStore.getState().conversationMessages["conv-stream"][0].failureMessage).toBe(failureA);
+    expect(useAppStore.getState().draft).toBe("Keep B's unsent prompt");
+    expect(pushToast).not.toHaveBeenCalled();
   });
 
   it("keeps recoverable errors scoped to the matching concurrent turn", () => {

@@ -439,8 +439,8 @@ def is_connection_not_established(message: str | BaseException | None) -> bool:
     return bool(names & _CONNECT_PHASE_ERROR_TYPES)
 
 
-def llm_error_status_code(message: str | BaseException | None) -> int | None:
-    """Return the first structured HTTP status carried by an LLM failure."""
+def llm_error_status_code(message: str | BaseException | None, *, allow_text: bool = True) -> int | None:
+    """Return the first HTTP status; projections can require structured evidence."""
 
     for item in _error_chain(message):
         for value in (
@@ -452,6 +452,8 @@ def llm_error_status_code(message: str | BaseException | None) -> int | None:
                     return int(value)
             except (TypeError, ValueError):
                 continue
+    if not allow_text:
+        return None
     codes = sorted(_extract_status_codes(message))
     return codes[0] if codes else None
 
@@ -665,7 +667,7 @@ def llm_error_raw(exc: BaseException, provider: str) -> dict[str, Any]:
     # connect-phase verdict must travel with it for the retry ladder.
     if is_connection_not_established(exc):
         raw["connect_phase"] = True
-    status = llm_error_status_code(exc)
+    status = llm_error_status_code(exc, allow_text=False)
     if status is not None:
         raw["status_code"] = status
     retry_after = retry_after_seconds(
