@@ -259,7 +259,7 @@
   margin-bottom: 32px;
 }
 .settings-page-heading-copy { display: grid; gap: 6px; min-width: 0; }
-.settings-learn-more { display: inline-flex; color: var(--accent-primary); text-decoration: none; }
+.settings-learn-more { display: inline-flex; color: var(--text-info); text-decoration: none; }
 .settings-page-heading-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
 .settings-page-heading-actions:empty { display: none; }
 .settings-center-content:has(.settings-tab-pane:not([hidden]) .settings-browser-history) > .settings-page-heading { display: none; }

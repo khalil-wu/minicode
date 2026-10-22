@@ -188,6 +188,17 @@ async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
   assert.equal(await button.getAttribute("aria-busy"), "false");
   checks.push({ scenario: `${name}: actual backend GETs complete, pending delivery disables refresh with the Source glyph; original responses restore the idle button`, actualReads });
 }
+async function assertSettingsInfoColor(expected) {
+  const actual = await page.locator(".settings-learn-more").evaluate(element => {
+    const context = document.createElement("canvas").getContext("2d");
+    context.fillStyle = getComputedStyle(element).color;
+    context.fillRect(0, 0, 1, 1);
+    return [...context.getImageData(0, 0, 1, 1).data].slice(0, 3);
+  });
+  assert.deepEqual(actual, expected);
+  checks.push({ scenario: "Source default desktop text-info is independent of the neutral control accent", actual });
+  return actual;
+}
 async function persistEvidence(extra = {}) {
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
     scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", ...extra }, null, 2));
@@ -378,6 +389,7 @@ try {
       await auditProjectConfig({ page, app, workspace, profile, capture, checks, wire, trace });
     }
     if (label === "钩子") {
+      await assertSettingsInfoColor([51, 156, 255]);
       const emptyTitle = page.getByText("未找到钩子", { exact: true });
       await emptyTitle.waitFor();
       const copyWidth = await emptyTitle.evaluate(element => element.parentElement.getBoundingClientRect().width);
@@ -398,6 +410,10 @@ try {
   await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
   trace("appearance:dark:select-mode");
   await page.getByRole("radio", { name: "深色", exact: true }).click();
+  await page.locator(".settings-center-tab").filter({ hasText: "钩子" }).click();
+  const darkInfoColor = await assertSettingsInfoColor([153, 206, 255]);
+  await capture("settings-12-dark-info-link", { darkInfoColor });
+  await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
   trace("appearance:dark:open-import");
   await page.getByRole("button", { name: "导入深色主题", exact: true }).click();
   const darkThemeDialog = page.getByRole("dialog", { name: "导入主题", exact: true });
