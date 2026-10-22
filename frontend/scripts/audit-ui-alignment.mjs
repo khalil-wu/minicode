@@ -124,23 +124,19 @@ async function capture(name, context = {}) {
       return { name: animation.animationName ?? animation.constructor.name, duration: String(timing?.duration),
         iterations: String(timing?.iterations), endTime: String(timing?.endTime), currentTime: String(animation.currentTime) };
     }) }));
-  trace(`capture:${name}:settle`, renderState);
-  await page.evaluate(async () => {
-    await document.fonts.ready;
-    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-    await Promise.allSettled(document.getAnimations().filter(animation => animation.playState === "running"
-      && animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished));
-  });
+  trace(`capture:${name}:render-state`, renderState);
   await writeFile(path.join(evidence, `${name}.aria.txt`), await page.locator("body").ariaSnapshot());
   const metrics = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio, url: location.href,
     theme: document.documentElement.dataset.theme, font: getComputedStyle(document.body).fontFamily }));
-  await page.screenshot({ path: path.join(evidence, `${name}.png`) });
-  captures.push({ name, ...context, metrics, boundary: "Electron renderer viewport; excludes native OS window decoration" });
+  trace(`capture:${name}:screenshot`);
+  await page.screenshot({ path: path.join(evidence, `${name}.png`), animations: "disabled" });
+  captures.push({ name, ...context, metrics,
+    boundary: "Static Electron renderer viewport; finite animations fast-forwarded and continuous animations temporarily reset; excludes natural-motion completion and native OS window decoration" });
   trace(`capture:${name}:complete`);
 }
 async function persistEvidence(extra = {}) {
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
-    scope: "Production backend and renderer; model replies and delivery of one actual completed import response controlled. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, not every OS/native state.", ...extra }, null, 2));
+    scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", ...extra }, null, 2));
   await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
   await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
   await writeFile(path.join(evidence, "desktop.log"), logs.join(""));
