@@ -19,11 +19,12 @@ def is_native_cua(config):
     return config.env.get("MINICODE_CUA_PROVIDER") == PROVIDER
 
 
-def build_native_bootstrap(*, python, app_access, native_source=None):
+def build_native_bootstrap(*, python, app_access, native_source=None, approval_home=None, python_module_root=None):
     source = native_source if native_source is not None else (ROOT / "native_cua_windows.py").read_text(encoding="utf-8")
     compressed = base64.b64encode(gzip.compress(source.encode(), mtime=0)).decode()
-    python_source = "import base64,gzip;exec(gzip.decompress(base64.b64decode('" + compressed + "')))"
-    options = {"python": python, "pythonSource": python_source, "appAccess": app_access}
+    prefix = "import sys;sys.path.insert(0," + repr(python_module_root) + ");" if python_module_root is not None else ""
+    python_source = prefix + "import base64,gzip;exec(gzip.decompress(base64.b64decode('" + compressed + "')))"
+    options = {"python": python, "pythonSource": python_source, "appAccess": app_access, "approvalHome": approval_home}
     sources = {"api": (ROOT / "native_cua_api.mjs").read_text(encoding="utf-8"),
         "bridge": (ROOT / "native_cua_bridge.mjs").read_text(encoding="utf-8"), "node": _SERVER}
     # Compress actual source together once. Nesting base64 module URLs before
@@ -52,7 +53,10 @@ def native_cua_config(selected, attachment, app_access):
             raise ValueError("MINICODE_CUA_PYTHON must be the absolute Python path on the receiving Windows host")
     else:
         python = sys.executable
-    bootstrap = build_native_bootstrap(python=python, app_access=app_access)
+    from backend.mcp.cua_approval_store import native_approval_home
+    bootstrap = build_native_bootstrap(python=python, app_access=app_access,
+        approval_home=str(native_approval_home()) if not attachment.is_remote else None,
+        python_module_root=str(ROOT.parent.parent) if not attachment.is_remote else None)
     env = {**selected.env, **({"ELECTRON_RUN_AS_NODE": "1"} if not attachment.is_remote else {})}
     return replace(selected, args=["--expose-internals", "--input-type=module", "--eval", bootstrap], env=env)
 

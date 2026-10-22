@@ -249,8 +249,8 @@ class WindowsDesktop:
 
 
 class NativeCuaSession:
-    def __init__(self, desktop):
-        self.desktop, self.targets = desktop, {}
+    def __init__(self, desktop, approval_store=None):
+        self.desktop, self.targets, self.approval_store = desktop, {}, approval_store
 
     def dispatch(self, method, args, owner):
         key = (owner["session_id"], owner["turn_id"])
@@ -258,12 +258,14 @@ class NativeCuaSession:
             raise ValueError("Native CUA requires its original thread and turn")
         if method == "list_windows":
             return self.desktop.windows()
+        if method == "lookup_app_approval":
+            return self.approval_store.get(args["app_id"]) if self.approval_store is not None else None
         if method == "select_window":
             hwnd = int(args["window_id"])
             identity = self.desktop.identity(hwnd)
             token = args["target"]
             self.desktop.pin(hwnd, token)
-            self.targets[token] = {"hwnd": hwnd, "identity": identity, "owner": key, "approved": False}
+            self.targets[token] = {"hwnd": hwnd, "identity": identity, "owner": key, "approved": False, "approval_scope": ""}
             return {**identity, "target": token, "window_id": str(hwnd), "title": self.desktop.title(hwnd),
                 "bounds": self.desktop.bounds(hwnd)}
         if method == "end_turn":
@@ -279,9 +281,20 @@ class NativeCuaSession:
             self.desktop.check_pin(target["hwnd"], args["target"])
             if self.desktop.identity(target["hwnd"]) != target["identity"]:
                 raise RuntimeError("The original window or process identity has changed")
+            if target["approval_scope"] == "always" and self.approval_store.get(target["identity"]["app_id"]) is None:
+                target["approved"] = False
+                raise PermissionError("Permanent Computer Use app approval was revoked")
         check_target()
+        if method == "grant_app_approval":
+            if self.approval_store is None:
+                raise RuntimeError("This receiving provider has no persistent app approval store")
+            return self.approval_store.grant(target["identity"])
         if method == "authorize":
+            scope = args.get("scope", "session")
+            if scope == "always" and (self.approval_store is None or self.approval_store.get(target["identity"]["app_id"]) is None):
+                raise PermissionError("The selected app has no persistent approval")
             target["approved"] = True
+            target["approval_scope"] = scope
             return None
         if not target["approved"]:
             raise PermissionError("The selected app has not been approved")
@@ -309,7 +322,12 @@ def main():
     cleanups = json.loads(sys.argv[1])
     for pin in cleanups:
         desktop.unpin(int(pin["window_id"]), pin["target"])
-    session = NativeCuaSession(desktop)
+    approval_store = None
+    if sys.argv[2]:
+        from backend.mcp.cua_approval_store import NativeAppApprovalStore
+        from pathlib import Path
+        approval_store = NativeAppApprovalStore(Path(sys.argv[2]))
+    session = NativeCuaSession(desktop, approval_store)
     print(json.dumps({"ready": True, "implementation": "minicode-win32", "platform": sys.platform,
         "cleanedTargetCount": len(cleanups)}), flush=True)
     try:

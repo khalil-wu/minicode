@@ -66,6 +66,9 @@ import { SourcePetsTab } from "./SourcePetsTab";
 import { createPetChat } from "../pets/createPetChat";
 import { SourcePetIcon } from "../pets/SourcePetIcon";
 import { usePluginsFeature } from "../hooks/usePluginsFeature";
+import { useComputerUseSettings } from "../hooks/useComputerUseSettings";
+import { ComputerUseSettings } from "./ComputerUseSettings";
+import { ComputerUseSourceIcon } from "../lib/computer-use-icons";
 
 export const SettingsCenter = () => {
   const { t: tr } = useI18n();
@@ -100,6 +103,7 @@ export const SettingsCenter = () => {
   const shortcutBindings = useAppStore((s) => s.shortcutBindings);
   const appMode = useAppStore((s) => s.appMode);
   const { enabled: pluginsEnabled } = usePluginsFeature();
+  const computerUse = useComputerUseSettings(settingsOpen);
   const mcpCount = useAppStore((s) => s.mcpServers.length);
   const [skillCount, setSkillCount] = useState<number>();
   useEffect(() => { setSkillCount(undefined); }, [workingDirectory]);
@@ -250,6 +254,7 @@ export const SettingsCenter = () => {
     { id: "marketplace" as const, group: tr("集成"), label: tr("插件市场"), description: tr("管理插件市场"), keywords: "marketplace git source upgrade", icon: <Puzzle /> },
     { id: "skills" as const, group: tr("集成"), label: tr("技能"), description: tr("查看任务工作流，并选择用于下一条消息。"), keywords: tr("SKILL.md 工作流 市场 安装"), icon: <BookOpenText /> },
     { id: "connectors" as const, group: tr("集成"), label: "MCP", description: tr("安装和管理外部工具服务、连接与认证状态。"), keywords: tr("stdio HTTP 服务 工具 市场"), icon: <Cable /> },
+    { id: "computerUse" as const, group: tr("集成"), label: tr("电脑操作"), description: tr("管理 MiniCode 如何使用电脑上的其他应用。"), keywords: "computer use apps approvals permissions 电脑 应用 授权", icon: <ComputerUseSourceIcon /> },
     { id: "browser" as const, group: tr("集成"), label: tr("浏览器"), description: tr("管理内置浏览器页面、下载与站点权限。"), keywords: tr("控制台 网络 下载 数据 网站"), icon: <Globe2 /> },
     { id: "hooks" as const, group: tr("编码"), label: tr("钩子"), description: tr("管理来自配置和已启用插件的生命周期钩子。"), keywords: "hooks lifecycle command", icon: <Webhook /> },
     { id: "connections" as const, group: tr("编码"), label: tr("连接"), description: tr("连接到远程设备。"), keywords: tr("SSH WSL 远程 设备"), icon: <Cable /> },
@@ -268,16 +273,23 @@ export const SettingsCenter = () => {
   const navigationTab = integrationOpen ? "plugins" : ["provider", "features"].includes(activeTab) ? "config" : activeTab;
   const activeTabMeta = tabs.find((tab) => tab.id === navigationTab)!;
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
+  const navigationTabs = tabs.filter(tab => !["connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id)
+    && (tab.id !== "computerUse" || computerUse.data?.navigation_visible));
   const visibleTabs = normalizedSettingsQuery
-    ? tabs.filter((tab) => !["connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id) && `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
-    : tabs.filter((tab) => !["connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id));
+    ? navigationTabs.filter(tab => `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
+    : navigationTabs;
 
   const searchableOptions = [...SETTINGS_OPTIONS.map((option) => ({ ...option, sourceTitle: option.title, title: tr(option.title), description: tr(option.description) })),
     ...SHORTCUT_DEFINITIONS.filter(shortcut => appMode === "code" || !isCodeShortcut(shortcut.id)).map((shortcut) => ({ tab: "shortcuts" as const, sourceTitle: shortcut.label, title: tr(shortcut.label), description: tr("快捷键绑定：{binding}", { binding: formatShortcut(shortcutBindings[shortcut.id]) || tr("未绑定") }), keywords: `${shortcut.action} ${formatShortcut(shortcutBindings[shortcut.id])}` })),
     ...Object.entries(FEATURE_FLAG_LABELS).map(([key, flag]) => ({ tab: "features" as const, sourceTitle: flag.title, title: tr(flag.title), description: tr(flag.description), keywords: key })),
   ];
   const matchingOptions = normalizedSettingsQuery ? searchableOptions.filter((option) =>
-    `${option.title} ${option.description} ${option.keywords}`.toLowerCase().includes(normalizedSettingsQuery)) : [];
+    (option.tab !== "computerUse" || computerUse.data?.navigation_visible)
+      && `${option.title} ${option.description} ${option.keywords}`.toLowerCase().includes(normalizedSettingsQuery)) : [];
+
+  useEffect(() => {
+    if (settingsOpen && activeTab === "computerUse" && computerUse.data && !computerUse.data.navigation_visible) setActiveTab("general");
+  }, [settingsOpen, activeTab, computerUse.data, setActiveTab]);
 
   const handleProviderChange = (id: ProviderId) => {
     setProvider(id);
@@ -351,6 +363,7 @@ export const SettingsCenter = () => {
               <div className="settings-page-heading-copy">
               <h2 id="settings-page-title">{activeTabMeta.label}</h2>
               {integrationOpen && <p>{tr("管理插件、技能和 MCP。")}</p>}
+              {activeTab === "computerUse" && <p>{tr("管理 MiniCode 如何使用电脑上的其他应用。")}</p>}
               </div>
               <div ref={setToolbarHost} className="settings-page-heading-actions">
                 {integrationOpen && <PluginSettingsToolbar
@@ -424,6 +437,7 @@ export const SettingsCenter = () => {
               )}
               {tab === "skills" && <SkillsTab active={settingsOpen && integrationOpen} search={integrationSearch} onSkillsChange={setSkillCount} />}
               {tab === "voice" && <VoiceSettings active={settingsOpen && tab === activeTab} />}
+              {tab === "computerUse" && <ComputerUseSettings model={computerUse} />}
               {tab === "connectors" && <ConnectorsTab search={integrationSearch} editorRequest={mcpEditorRequest}
                 onEditorChange={() => { if (contentRef.current && activeTab === "connectors") contentRef.current.scrollTop = 0; }} />}
               {tab === "connections" && <ConnectionsTab active={settingsOpen && tab === activeTab} />}

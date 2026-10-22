@@ -30,7 +30,7 @@ MiniCode 新增显式 `minicode-win32` provider，使用公开 Win32 API、Pillo
 - 枚举正在运行的可见窗口、选择原 HWND 和进程；每个目标属于原 thread/turn。
 - 单窗口 PNG、窗口状态、焦点、鼠标/滚动、Unicode 输入和组合键；不以全屏截图替代失败的目标窗口截图。
 - 截图返回前重新核对原窗口/进程；输入在 focus 后、SendInput 前核对目标及真实前台窗口。Win32 全局输入不被描述成原子 HWND 投递。
-- 默认 ask，捕获配置中的 deny 优先；仅现有真实 app elicitation 的 `accept + persist=session` 才建立会话授权。未知 provider、无法识别真实 app 的共享宿主及尚未支持的 signer 规则明确报错。
+- 默认 ask，捕获配置中的 deny 优先；现有真实 app elicitation 的 `accept + persist=session` 建立会话授权；后续设置批另接本地 `persist=always` 的真实store与撤销链。未知 provider、无法识别真实 app 的共享宿主及尚未支持的 signer 规则明确报错。
 - timeout、取消、reset、turn/thread 结束都回收原 helper；同步阻塞不能靠写 stdin 假称已关闭。保留原 PID、exit code、signal 和原因，并清理原窗口 nonce；不自动重试原动作。
 
 ## 验证
@@ -51,6 +51,8 @@ Windows harness已加入独立provider测试，并显式使用Node22，以持续
 
 ## 尚未交付的范围
 
-实际设备/窗口验收、accessibility tree、应用启动、音频、高级 signer、永久 always 授权管理、部分 UWP 真实窗口身份，以及 macOS/Linux adapter尚未完成。Source Sky 包确有三平台 adapter，但这不自动证明桌面每种 remote/Linux组合均开放；桌面门控与底层能力分开记录。
+实际设备/窗口验收、accessibility tree、应用启动、音频、高级 signer、远端与未确证installed-source版本的永久授权管理、部分 UWP 真实窗口身份，以及 macOS/Linux adapter尚未完成。Source Sky 包确有三平台 adapter，但这不自动证明桌面每种 remote/Linux组合均开放；桌面门控与底层能力分开记录。
 
-因此 **DIST-CUA1 为部分实现，不能整组删除**。Computer use 设置的读取/撤销及管理消费者另见 `2026-10-22-computer-use-settings-source-gap.md`。
+因此 **DIST-CUA1 为部分实现，不能整组删除**。Computer use 设置本地native授权消费者的后续交付见 `2026-10-22-computer-use-settings-delivery.md`；插件/扩展和未证实provider的边界仍见 `2026-10-22-computer-use-settings-source-gap.md`。
+
+本地native永久授权的后续集中验证为 **63/63 passed、0error/skip**（`ui-cua1-backend.xml`），包括完整生产源码SDK载荷、同store的新client消费、HTTP撤销后两个原活动目标拒绝操作及截图返回前撤销。生产bootstrap22,599字符，受控体23,199字符，SDK argv23,266字符；本地未调用真实Win32或GUI。这批仍需其提交自身CI，不继承0a6c64cb的通过结果。

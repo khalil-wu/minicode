@@ -1,0 +1,12 @@
+{
+  "电脑操作": "Computer use",
+  "管理 MiniCode 如何使用电脑上的其他应用。": "Manage how MiniCode uses other applications on your computer.",
+  "始终允许的应用": "Always-allowed apps",
+  "正在加载允许的应用…": "Loading allowed apps…",
+  "无法加载允许的应用。": "Unable to load allowed apps.",
+  "暂无": "None yet",
+  "要从始终允许的应用中移除“{displayName}”吗？": "Remove “{displayName}” from always allowed apps?",
+  "MiniCode 将在下次电脑操作会话中询问是否使用“{displayName}”。": "MiniCode will ask to use “{displayName}” in the next computer use session.",
+  "移除 {displayName}": "Remove {displayName}",
+  "已移除允许的应用": "Allowed app removed"
+}

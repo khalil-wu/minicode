@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from backend.mcp.native_cua_windows import NativeCuaSession
+from backend.mcp.cua_approval_store import NativeAppApprovalStore
 
 
 class FixtureDesktop:
@@ -48,7 +49,8 @@ class FixtureDesktop:
 
 
 def main():
-    session = NativeCuaSession(FixtureDesktop())
+    store = NativeAppApprovalStore(Path(sys.argv[2])) if sys.argv[2] else None
+    session = NativeCuaSession(FixtureDesktop(), store)
     log = Path(os.environ["MINICODE_CUA_FIXTURE_LOG"])
     cleanups = json.loads(sys.argv[1])
     with log.open("a", encoding="utf-8") as stream:

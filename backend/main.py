@@ -73,6 +73,7 @@ from backend.api.routes_agents import router as agents_router
 from backend.api.routes_replay import router as replay_router
 from backend.api.routes_health import router as health_router
 from backend.api.routes_mcp_apps import router as mcp_apps_router
+from backend.api.routes_computer_use import router as computer_use_router
 from backend.mcp.app_ui import is_app_sandbox_hostname, is_app_sandbox_origin
 from backend.api import _state
 
@@ -389,6 +390,7 @@ app.include_router(agents_router)
 app.include_router(replay_router)
 app.include_router(health_router)
 app.include_router(mcp_apps_router)
+app.include_router(computer_use_router)
 
 
 # ── Workspace router ──

@@ -36,6 +36,9 @@ export const SETTINGS_OPTIONS: SettingsOption[] = [
     ["听写词典", "编辑听写时应识别的词语或短语。", "语音 dictionary 词汇"],
     ["听写快捷键", "按住即可听写，双击可免提听写。", "dictation hold double tap global 单击 免提"],
   ]),
+  ...options("computerUse", [
+    ["始终允许的应用", "管理 MiniCode 如何使用电脑上的其他应用。", "computer use apps approvals always allow 电脑 应用 授权 始终允许"],
+  ]),
   ...options("personalization", [
     ["自定义指令", "编辑所有任务共用的 INSTRUCTIONS.md。", "用户 偏好 prompt 规则"],
     ["长期记忆生成", "控制当前任务是否生成长期记忆。", "记忆 摘要"],

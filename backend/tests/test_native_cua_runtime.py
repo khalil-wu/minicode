@@ -170,7 +170,7 @@ async def native_companion(tmp_path, monkeypatch, *, choice, app_access=None, bl
     runtime.cua_repl_companions = owner
     fixture = Path(__file__).parent / "fixtures/native_cua_receiving.py"
     source = "import sys;sys.path.insert(0," + repr(str(Path(__file__).parents[2])) + ")\n" + fixture.read_text(encoding="utf-8")
-    real_builder = module.build_native_bootstrap
+    real_builder = build_native_bootstrap
     monkeypatch.setattr(module, "build_native_bootstrap", lambda **kwargs: real_builder(**kwargs, native_source=source))
     log = tmp_path / "native-fixture.jsonl"
     selected = MCPServerConfig("cua_repl", command=shutil.which("node"), env={
@@ -220,7 +220,7 @@ async def test_real_mcp_approval_original_owner_images_turn_retirement_and_threa
         assert len(case.approvals) == 1
         approval = case.approvals[0]
         assert approval["_minicode_owner"] == request_owner
-        assert approval["_meta"]["connector_id"] == "computer-use" and approval["_meta"]["persist"] == ["session"]
+        assert approval["_meta"]["connector_id"] == "computer-use" and approval["_meta"]["persist"] == ["session", "always"]
         assert await case.client.host.request("closeActiveTurn", {"sessionId": "foreign", "turnId": "foreign"}) is False
         await CuaTurn(SimpleNamespace(client=case.client), OWNER["session_id"], OWNER["turn_id"]).finish_after(())
         stale = await case.client.call_tool("js", {"code": "await app.getState()"}, request_owner=request_owner)
@@ -299,7 +299,7 @@ nodeRepl.write(await heldOutcome);
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("choice", [{"action": "decline"}, {"action": "accept", "content": {}}, {"action": "accept", "content": {"persist": "always"}}])
+@pytest.mark.parametrize("choice", [{"action": "decline"}, {"action": "accept", "content": {}}, {"action": "accept", "content": {"persist": "unsupported"}}])
 async def test_real_mcp_unapproved_app_never_reaches_native_action(tmp_path, monkeypatch, choice):
     async with native_companion(tmp_path, monkeypatch, choice=choice) as case:
         result = await case.client.call_tool("js", {"code": "var app = await cua.getApp({window_id:'11'}); await app.click({x:1,y:1});"},

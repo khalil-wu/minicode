@@ -43,3 +43,15 @@
 本批继续读取 Electron **v43.4.0** 的实际 C++：`ElectronBrowserContext::GetBackgroundSyncController()` 返回 `nullptr`，没有注册 Chrome content-settings 的完整 profile服务；当前 Desktop **26.1016.6573.0** 仍使用 `permissionHandling:"browser"`、`setPermissionPromptHandler` 和原生 `chrome://settings/content` 页面。仅添加 React 行或允许一个未知 permission 无法启动缺失的浏览器服务。
 
 本批读取的固定版本源码和当前 ASAR 五份浏览器bundle位于 `output/native-browser-completion-20261021/`，没有执行其初始化器。BR-G1–G10 的完整原生边界仍以 `2026-10-21-browser-native-api-producer-audit.md` 为准，不把以上消费者修复扣作十项整组完成。
+
+## 已完成的本批整合 CI
+
+最终本批提交 `0a6c64cbb78a32305f76df6fe7946cbc99123e0f` 的 [run 39637592599](https://github.com/khalil-wu/minicode/actions/runs/39637592599) **9/9 jobs success**，完整原始收据及五组日志保存在 `output/native-browser-completion-20261021/ci-0a6c-*`。
+
+- Electron smoke：6 passed、0 failed、0 skipped，实际记录原DownloadItem暂停、恢复、精确字节及updater阻断/解除；Desktop非GUI单测399 passed、9个实际平台skip。
+- Windows harness：387 passed、15 skipped。
+- backend suite：7792 passed、162 skipped；root suite：1788 passed、52 skipped。
+- frontend：460文件、5203用例passed；构建、bundle及UI debt原预算通过。
+- 两个固定Source原生构建、Linux glibc2.31 wheel冷安装及Electron前端集成均success。
+
+这些计数存在跨job重复，不相加成不同用例数；平台skip保留，不计通过。先前`caccdeff`整轮cancelled保留，不用它替代本次精确HEAD的完整成功。后续Computer use设置和CEF原型仍在另一批工作区中，不能据此继承本次CI。

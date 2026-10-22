@@ -438,6 +438,7 @@ export type SettingsTab =
   | "marketplace"
   | "skills"
   | "connectors"
+  | "computerUse"
   | "connections"
   | "browser"
   | "scheduler"

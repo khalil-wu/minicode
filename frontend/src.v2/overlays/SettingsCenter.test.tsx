@@ -10,12 +10,15 @@ import { SettingsCenter } from "./SettingsCenter";
 import { SkillsMarketplace } from "./SkillsMarketplace";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { installAppThemeTokens } from "../../test/app-theme-tokens";
+import type { ComputerUseSettingsSnapshot } from "../protocol/computer-use-settings";
 
 let removeThemeTokens: () => void;
 beforeEach(() => { removeThemeTokens = installAppThemeTokens(); });
 afterEach(() => removeThemeTokens());
 const desktopPreferences = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }));
 const pluginsFeature = vi.hoisted(() => ({ enabled: true as boolean | undefined }));
+const computerUseFixture = vi.hoisted(() => ({ sessionId: null as string | null, data: null as ComputerUseSettingsSnapshot | null }));
+vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => computerUseFixture.sessionId ? { sessionId: computerUseFixture.sessionId } : null }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: desktopPreferences.value, error: "", update: vi.fn() }) }));
 vi.mock("../hooks/usePluginsFeature", () => ({ usePluginsFeature: () => ({ enabled: pluginsFeature.enabled, locked: false, error: "" }), setPluginsFeatureEnabled: vi.fn() }));
 
@@ -73,6 +76,8 @@ vi.mock("../desktop/runtime", () => ({
 
 describe("SettingsCenter reasoning effort visibility", () => {
   beforeEach(() => {
+    computerUseFixture.sessionId = null;
+    computerUseFixture.data = null;
     desktopPreferences.value = null;
     pluginsFeature.enabled = true;
     // Hidden integration inventories also load while testing MCP tabs. Keep
@@ -82,6 +87,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
       const path = new URL(String(input)).pathname;
       if (path === "/api/plugins") return new Response(JSON.stringify({ plugins: [] }), { status: 200 });
       if (path === "/api/plugins/marketplaces") return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
+      if (path === "/api/settings/computer-use") return new Response(JSON.stringify(computerUseFixture.data), { status: 200 });
       throw new Error(`Unexpected settings fixture request: ${input}`);
     }));
     skillsSettingsRequest.mockReset();
@@ -232,6 +238,37 @@ describe("SettingsCenter reasoning effort visibility", () => {
     vi.clearAllMocks();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("opens the actual provider-backed Computer use settings and search entry without changing the composer", async () => {
+    computerUseFixture.sessionId = "settings-owner";
+    computerUseFixture.data = { owner: { session_id: "settings-owner", conversation_id: "A", workspace_root: "C:/project" },
+      provider_id: "minicode-win32", selection_id: "native-current", navigation_visible: true, available: true, status: "ready", reason: null,
+      capabilities: { persistent_approvals: true, revoke_app_approval: true, persist_modes: ["session", "always"], sound_mode: false, locked_use: false },
+      approved_apps: [{ app_id: "actual-app", display_name: "Actual App", icon_data_url: null }], controls: [] };
+    useAppStore.setState({ isConnected: true, conversationId: "A", workingDirectory: "C:/project", draft: "Keep this draft" });
+    render(<SettingsCenter />);
+    fireEvent.click(await screen.findByRole("button", { name: "电脑操作" }));
+    expect(await screen.findByRole("heading", { name: "始终允许的应用" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "移除 Actual App" })).toBeTruthy();
+    expect(screen.queryByText("控制")).toBeNull();
+    expect(useAppStore.getState().draft).toBe("Keep this draft");
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
+    expect(screen.getByRole("button", { name: /电脑操作 \/ 始终允许的应用/ })).toBeTruthy();
+  });
+
+  it("hides unsupported provider management from navigation and search and redirects a hidden direct route", async () => {
+    computerUseFixture.sessionId = "settings-owner";
+    computerUseFixture.data = { owner: { session_id: "settings-owner", conversation_id: null, workspace_root: null },
+      provider_id: "installed-source", selection_id: "installed-current", navigation_visible: false, available: true, status: "ready", reason: "Persistent management is unavailable for the selected helper",
+      capabilities: { persistent_approvals: false, revoke_app_approval: false, persist_modes: ["session"], sound_mode: false, locked_use: false }, approved_apps: null, controls: [] };
+    useAppStore.setState({ isConnected: true, conversationId: null, workingDirectory: "", settingsTab: "computerUse" });
+    render(<SettingsCenter />);
+    await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("general"));
+    expect(screen.queryByRole("button", { name: "电脑操作" })).toBeNull();
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
+    expect(screen.queryByRole("button", { name: /电脑操作 \/ 始终允许的应用/ })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "始终允许的应用" })).toBeNull();
   });
 
   it("hides reasoning effort for DeepSeek chat completions because runtime will ignore it", async () => {

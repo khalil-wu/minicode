@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 
-export function createNativeCuaExtension({ send, python, pythonSource, apiModule, appAccess }) {
+export function createNativeCuaExtension({ send, python, pythonSource, apiModule, appAccess, approvalHome }) {
   if (appAccess.windows?.exes?.length) throw new Error('MiniCode native CUA does not implement Windows publisher/signer rules');
   const approvals = new Map(), kernelTurns = new Map(), grants = new Set(), cleanupPins = new Map();
+  const persistModes = approvalHome ? ['session', 'always'] : ['session'];
+  const publicMethods = new Set(['list_windows', 'select_window', 'get_state', 'screenshot', 'click', 'move', 'type_text', 'keypress', 'scroll', 'focus']);
   let helper, failure, closed = false, sequence = 0;
   const keyFor = owner => JSON.stringify([owner.session_id, owner.turn_id]);
   const ownerFor = metadata => {
@@ -17,7 +19,7 @@ export function createNativeCuaExtension({ send, python, pythonSource, apiModule
     let readyResolve, readyReject;
     const entry = { child: null, pins: new Map(), pending: new Map(), stopReason: null,
       ready: new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; }) };
-    const child = entry.child = spawn(python, ['-u', '-X', 'utf8', '-c', pythonSource, JSON.stringify(cleanups)],
+    const child = entry.child = spawn(python, ['-u', '-X', 'utf8', '-c', pythonSource, JSON.stringify(cleanups), approvalHome || ''],
       { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     const errors = [];
     child.stderr.on('data', chunk => errors.push(chunk));
@@ -102,7 +104,7 @@ export function createNativeCuaExtension({ send, python, pythonSource, apiModule
     send({ jsonrpc: '2.0', id, method: 'elicitation/create', params: {
       mode: 'form', message: 'Allow MiniCode to use ' + selected.name + '?', requestedSchema: {},
       _meta: { codex_approval_kind: 'mcp_tool_call', connector_id: 'computer-use', connector_name: 'Computer Use',
-        persist: ['session'], riskLevel: 'high', tool_params: { app: selected.app_id },
+        persist: persistModes, riskLevel: 'high', tool_params: { app: selected.app_id },
         tool_params_display: [{ name: 'app', display_name: 'App', value: selected.name }] },
     } });
   });
@@ -120,6 +122,7 @@ export function createNativeCuaExtension({ send, python, pythonSource, apiModule
       return true;
     },
     async request(message, signal) {
+      if (!publicMethods.has(message.method)) throw new Error('Computer Use worker cannot invoke a private native control method');
       const owner = ownerFor(message.requestMeta);
       signal?.throwIfAborted();
       const turns = kernelTurns.get(message.kernelId) || new Map();
@@ -130,13 +133,17 @@ export function createNativeCuaExtension({ send, python, pythonSource, apiModule
         const key = JSON.stringify([owner.session_id, result.app_id]);
         const policy = appAccess.windows?.aumids?.[result.aumid] ?? appAccess.default_app_access;
         if (policy === 'deny') throw new Error('Computer Use access to this app is denied by the captured configuration');
-        if (policy !== 'allow' && !grants.has(key)) {
+        let scope = policy === 'allow' ? 'policy' : grants.has(key) ? 'session' : '';
+        if (!scope && approvalHome && await native('lookup_app_approval', { app_id: result.app_id }, owner)) scope = 'always';
+        if (!scope) {
           const choice = await approve(result, message, signal);
-          if (choice?.action !== 'accept' || choice.content?.persist !== 'session') throw new Error('Computer Use app access was not approved');
+          if (choice?.action !== 'accept' || !persistModes.includes(choice.content?.persist)) throw new Error('Computer Use app access was not approved');
           signal?.throwIfAborted();
-          grants.add(key);
+          scope = choice.content.persist;
+          if (scope === 'always') await native('grant_app_approval', { target: result.target }, owner);
+          else grants.add(key);
         }
-        await native('authorize', { target: result.target }, owner);
+        await native('authorize', { target: result.target, scope }, owner);
       }
       signal?.throwIfAborted();
       return result;

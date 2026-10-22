@@ -1,5 +1,7 @@
 # UI-CUA1：Computer use 设置的真实消费者缺口
 
+后续交付：本文件保留为实现前的历史调查。2026-10-22已接通 native provider 的真实 always/store、读取、确认撤销、活 target 失效及前端目录消费者；证据和仍未覆盖的 installed-source/remote/plugin 分支见 [交付记录](2026-10-22-computer-use-settings-delivery.md)。这不将本组所有分支标成完成。
+
 当前参考为 Desktop `26.1016.6573.0`，仅静态读取 ASAR 和保留的 Codex 操作记录。MiniCode 当前没有该设置目录及完整 provider-aware 管理后端；这是**已确认的功能缺失**，不再仅列为“未做物理验收”。此前11组是已确认清单，并非全产品穷尽；本组使当前确认的未完成组增至12。
 
 ## 当前 Source 实际行为

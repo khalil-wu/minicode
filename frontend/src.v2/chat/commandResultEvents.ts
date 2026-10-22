@@ -124,6 +124,8 @@ const SETTINGS_TABS = new Map<string, Parameters<typeof openSettings>[0]>([
   ["connectors", "connectors"],
   ["mcp", "connectors"],
   ["browser", "browser"],
+  ["computer-use", "computerUse"],
+  ["computeruse", "computerUse"],
   ["scheduler", "scheduler"],
   ["automations", "scheduler"],
   ["workspacegit", "workspaceGit"],

@@ -170,7 +170,8 @@ class CuaReplMCPClient(NodeReplMCPClient):
         from backend.mcp.native_cua_runtime import is_native_cua
         self.native = is_native_cua(config)
         self.runtime = None if self.native else CuaRuntime.selected(config)
-        self.home = agent_runtime_root() / "computer-use"
+        from backend.mcp.cua_approval_store import native_approval_home
+        self.home = native_approval_home() if self.native else agent_runtime_root() / "computer-use"
         self.host = None
         super().__init__(config, attachment, network, on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
         self._startup_timeout = 120
