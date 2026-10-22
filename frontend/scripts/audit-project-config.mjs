@@ -31,13 +31,25 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
     return response.json();
   };
   const showConfig = async () => {
-    await page.evaluate(() => {
-      const state = window.__zustandStore.getState();
-      state.setSettingsTab("config");
-      if (!state.settingsOpen) state.toggleSettings();
-    });
+    const owner = await page.evaluate(() => window.__zustandStore.getState().workingDirectory);
+    const [request] = await Promise.all([
+      page.waitForRequest(request => {
+        const url = new URL(request.url());
+        return request.method() === "GET" && url.pathname === "/api/settings/agent-config"
+          && url.searchParams.get("workspace_root") === owner;
+      }),
+      page.evaluate(() => {
+        const state = window.__zustandStore.getState();
+        state.setSettingsTab("config");
+        if (!state.settingsOpen) state.toggleSettings();
+      }),
+    ]);
+    const response = await request.response();
+    assert(response);
+    assert.equal(await response.finished(), null);
+    assert.equal(response.status(), 200);
     await scope.waitFor();
-    await page.waitForFunction(() => !document.querySelector(".config-scope-select .mc-select-trigger").disabled);
+    await page.waitForFunction(() => !document.querySelector('[aria-label^="回复详细程度，当前："]').disabled);
   };
   const hideSettings = () => page.evaluate(() => {
     const state = window.__zustandStore.getState();
@@ -228,7 +240,25 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   try {
     await showConfig();
     await scope.click();
+    const reopened = page.getByRole("listbox", { name: "配置作用域", exact: true });
+    await page.waitForFunction(() => document.activeElement === document.querySelector('.mc-select-popover[aria-label="配置作用域"]'));
+    const initialScroll = await page.locator(".settings-center-main").evaluate(element => {
+      const before = element.scrollTop;
+      element.scrollTop += 40;
+      return { before, delta: element.scrollTop - before };
+    });
+    assert.equal(initialScroll.delta, 40);
+    await page.waitForFunction(() => {
+      const menu = document.querySelector('.mc-select-popover[aria-label="配置作用域"]');
+      const trigger = document.querySelector(".config-scope-select .mc-select-trigger");
+      return menu && Math.abs(menu.getBoundingClientRect().top - trigger.getBoundingClientRect().bottom - 2) <= 1;
+    });
+    assert.equal(await reopened.isVisible(), true);
+    await capture("settings-06-project-reopen-scrolled-menu", { initialScroll });
     await page.getByRole("option", { name: "用户", exact: true }).click();
+    await page.getByRole("button", { name: "配置作用域，当前：用户", exact: true }).waitFor();
+    await page.locator(".settings-center-main").evaluate((element, top) => { element.scrollTop = top; }, initialScroll.before);
+    checks.push("Reopening Configuration awaits its own real workspace GET and loaded controls; the mouse-open scope menu retains container focus, follows an actual 40px parent scroll and selects User without a retry");
   } finally {
     checks.push({ scenario: "Actual final Configuration reopen and scope selection event order",
       events: await page.evaluate(() => window.__finishConfigReopenAudit()) });

@@ -81,6 +81,7 @@ export const SelectMenu = ({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const openedByKeyboard = useRef(false);
   const typeahead = useRef({ value: "", time: 0 });
   const menuId = useId();
   const options = useMemo(() => optionsFromChildren(children), [children]);
@@ -102,14 +103,16 @@ export const SelectMenu = ({
     const closeOnViewportChange = () => setOpen(false);
     const closeOnScroll = (event: Event) => { if (!event.composedPath().includes(menuRef.current!)) setOpen(false); };
     document.addEventListener("pointerdown", close);
-    window.addEventListener("resize", closeOnViewportChange);
-    window.addEventListener("scroll", closeOnScroll, true);
+    if (!settingsSelect) {
+      window.addEventListener("resize", closeOnViewportChange);
+      window.addEventListener("scroll", closeOnScroll, true);
+    }
     return () => {
       document.removeEventListener("pointerdown", close);
       window.removeEventListener("resize", closeOnViewportChange);
       window.removeEventListener("scroll", closeOnScroll, true);
     };
-  }, [open]);
+  }, [open, settingsSelect]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -127,14 +130,27 @@ export const SelectMenu = ({
       const minWidth = Math.min(menuWidth ?? Math.max(rect.width, 220), window.innerWidth - 16);
       const width = Math.min(Math.max(menu.getBoundingClientRect().width, minWidth), window.innerWidth - 16);
       const left = align === "end" ? rect.right - width : rect.left;
+      const heightInView = Math.min(menu.scrollHeight, maxHeight);
+      const top = useAbove ? rect.top - sideOffset - heightInView : rect.bottom + sideOffset;
       setPosition({ left: Math.max(8, Math.min(left, window.innerWidth - width - 8)),
-        top: useAbove ? rect.top - sideOffset - Math.min(menu.scrollHeight, maxHeight) : rect.bottom + sideOffset,
+        top: settingsSelect ? Math.max(8, Math.min(top, window.innerHeight - heightInView - 8)) : top,
         width: minWidth, maxHeight, above: useAbove });
     };
     place();
     const observer = new ResizeObserver(place);
     observer.observe(triggerRef.current!); observer.observe(menuRef.current!);
-    return () => observer.disconnect();
+    // Source's nonmodal settings menus follow their anchor while ancestors
+    // scroll; scrolling is not an outside interaction that dismisses them.
+    const followScroll = (event: Event) => { if (!event.composedPath().includes(menuRef.current!)) place(); };
+    if (settingsSelect) {
+      window.addEventListener("resize", place);
+      window.addEventListener("scroll", followScroll, true);
+    }
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", followScroll, true);
+    };
   }, [open, menuMaxHeight, menuWidth, options, align, settingsSelect]);
 
   useEffect(() => {
@@ -144,13 +160,15 @@ export const SelectMenu = ({
       if (!active) return;
       const selectedOption = menuRef.current?.querySelector<HTMLButtonElement>('[role="option"][aria-selected="true"]:not(:disabled)');
       const first = menuRef.current?.querySelector<HTMLButtonElement>('[role="option"]:not(:disabled)');
-      (selectedOption ?? first)?.focus();
+      if (settingsSelect) (openedByKeyboard.current ? first ?? menuRef.current : menuRef.current)?.focus({ preventScroll: true });
+      else (selectedOption ?? first)?.focus();
     });
     return () => { active = false; };
-  }, [open]);
+  }, [open, settingsSelect]);
 
-  const openMenu = () => {
+  const openMenu = (keyboard = false) => {
     if (disabled) return;
+    openedByKeyboard.current = keyboard;
     typeahead.current = { value: "", time: 0 };
     setOpen(true);
   };
@@ -166,12 +184,15 @@ export const SelectMenu = ({
     if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       event.stopPropagation();
-      openMenu();
+      openMenu(true);
     }
   };
 
-  const handleOptionKeyDown = (event: KeyboardEvent<HTMLButtonElement>, option: SelectOption) => {
-    if (event.key === "Tab") { setOpen(false); triggerRef.current!.focus({ preventScroll: true }); return; }
+  const handleOptionKeyDown = (event: KeyboardEvent<HTMLElement>, option?: SelectOption) => {
+    if (event.key === "Tab") {
+      if (settingsSelect) { event.preventDefault(); return; }
+      setOpen(false); triggerRef.current!.focus({ preventScroll: true }); return;
+    }
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
@@ -179,7 +200,7 @@ export const SelectMenu = ({
       triggerRef.current!.focus({ preventScroll: true });
       return;
     }
-    if (event.key === "Enter" || (event.key === " " && (!typeahead.current.value || Date.now() - typeahead.current.time >= 1000))) {
+    if (option && (event.key === "Enter" || (event.key === " " && (!typeahead.current.value || Date.now() - typeahead.current.time >= 1000)))) {
       event.preventDefault();
       event.stopPropagation();
       selectValue(option.value);
@@ -192,23 +213,25 @@ export const SelectMenu = ({
       const value = `${now - typeahead.current.time < 1000 ? typeahead.current.value : ""}${event.key.toLocaleLowerCase()}`;
       typeahead.current = { value, time: now };
       const query = [...value].every(char => char === value[0]) ? value[0] : value;
-      const current = enabledOptions.findIndex(item => item.value === option.value);
-      const start = query.length === 1 ? current + 1 : current;
+      const current = enabledOptions.findIndex(item => item.value === option?.value);
+      const start = query.length === 1 ? current + 1 : Math.max(0, current);
       const ordered = [...enabledOptions.slice(start), ...enabledOptions.slice(0, start)];
       const match = ordered.find(item => item.label.toLocaleLowerCase().startsWith(query));
       if (match) Array.from(menuRef.current!.querySelectorAll<HTMLButtonElement>('[role="option"]'))
-        .find(item => item.dataset.value === match.value)!.focus({ preventScroll: true });
+        .find(item => item.dataset.value === match.value)!.focus({ preventScroll: !settingsSelect });
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
     event.preventDefault();
     event.stopPropagation();
-    const current = enabledOptions.findIndex((item) => item.value === option.value);
+    const current = enabledOptions.findIndex((item) => item.value === option?.value);
     const nextIndex = event.key === "Home"
       ? 0
       : event.key === "End"
         ? enabledOptions.length - 1
-        : (current + (event.key === "ArrowDown" ? 1 : -1) + enabledOptions.length) % enabledOptions.length;
+        : current === -1 ? event.key === "ArrowUp" ? enabledOptions.length - 1 : 0
+          : settingsSelect ? Math.max(0, Math.min(enabledOptions.length - 1, current + (event.key === "ArrowDown" ? 1 : -1)))
+            : (current + (event.key === "ArrowDown" ? 1 : -1) + enabledOptions.length) % enabledOptions.length;
     const nextValue = enabledOptions[nextIndex]?.value;
     Array.from(menuRef.current!.querySelectorAll<HTMLButtonElement>('[role="option"]'))
       .find((item) => item.dataset.value === nextValue)
@@ -247,7 +270,12 @@ export const SelectMenu = ({
         aria-controls={open ? menuId : undefined}
         title={title || selectedText || ariaLabel}
         disabled={disabled}
-        onClick={() => open ? setOpen(false) : openMenu()}
+        onPointerDown={event => {
+          if (!settingsSelect || event.button !== 0 || event.ctrlKey) return;
+          if (open) { setOpen(false); triggerRef.current!.focus({ preventScroll: true }); }
+          else { event.preventDefault(); openMenu(); }
+        }}
+        onClick={event => { if (!settingsSelect || event.detail === 0) open ? setOpen(false) : openMenu(); }}
         onKeyDown={handleTriggerKeyDown}
       >
         <span className="mc-select-trigger-value">
@@ -261,7 +289,9 @@ export const SelectMenu = ({
           ref={menuRef}
           id={menuId}
           role="listbox"
+          tabIndex={-1}
           aria-label={ariaLabel}
+          onKeyDown={event => { if (event.target === event.currentTarget) handleOptionKeyDown(event); }}
           className={`mc-select-popover${className.split(/\s+/).includes("mc-select-menu-mono") ? " mc-select-menu-mono" : ""}`}
           data-placement={position.above ? "top" : "bottom"}
           data-settings-select={settingsSelect ? "true" : undefined}

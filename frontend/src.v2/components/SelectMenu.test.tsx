@@ -48,6 +48,83 @@ describe("SelectMenu", () => {
     expect(document.activeElement).toBe(trigger);
   });
 
+  it("keeps an open settings menu anchored through parent scrolling and viewport changes", async () => {
+    let anchorTop = 100;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 400, right: 600, top: 100, bottom: 132, width: 200, height: 32 } as DOMRect);
+    const change = vi.fn();
+    const view = render(<section><SelectMenu ariaLabel="Scope" className="settings-select" value="user" onValueChange={change}>
+      <option value="project">Project</option><option value="user">User</option>
+    </SelectMenu><button>Outside</button></section>);
+    const trigger = screen.getByRole("button", { name: "Scope，当前：User" });
+    vi.spyOn(trigger, "getBoundingClientRect").mockImplementation(() => ({ left: 400, right: 600, top: anchorTop,
+      bottom: anchorTop + 32, width: 200, height: 32 } as DOMRect));
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("listbox");
+    await waitFor(() => expect(document.activeElement).toBe(menu));
+    expect(menu.style.top).toBe("134px");
+    anchorTop = 60;
+    fireEvent.scroll(view.container.firstElementChild!);
+    expect(screen.getByRole("listbox")).toBe(menu);
+    expect(menu.style.top).toBe("94px");
+    anchorTop = -100;
+    fireEvent.resize(window);
+    expect(screen.getByRole("listbox")).toBe(menu);
+    expect(menu.style.top).toBe("8px");
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Outside" }));
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it("opens settings on the menu with the mouse and on the first enabled item with the keyboard", async () => {
+    const change = vi.fn();
+    render(<SelectMenu ariaLabel="Scope" className="settings-select" value="user" onValueChange={change}>
+      <option value="locked" disabled>Locked</option><option value="project">Project</option><option value="user">User</option>
+    </SelectMenu>);
+    const trigger = screen.getByRole("button", { name: "Scope，当前：User" });
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    fireEvent.click(trigger);
+    const menu = screen.getByRole("listbox");
+    await waitFor(() => expect(document.activeElement).toBe(menu));
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+    expect(fireEvent.keyDown(menu, { key: "Tab" })).toBe(false);
+    expect(document.activeElement).toBe(menu);
+    expect(screen.getByRole("listbox")).toBe(menu);
+    fireEvent.keyDown(menu, { key: "End" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "User" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "User" }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(document.activeElement).toBe(trigger);
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "Project" })));
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Project" }));
+    fireEvent.keyDown(document.activeElement!, { key: "u" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "User" }));
+    expect(focus).toHaveBeenLastCalledWith({ preventScroll: false });
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(change).toHaveBeenCalledExactlyOnceWith("user");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("opens settings on primary pointer press and consumes its following click only once", async () => {
+    render(<SelectMenu ariaLabel="Scope" className="settings-select" value="user" onValueChange={vi.fn()}>
+      <option value="user">User</option>
+    </SelectMenu>);
+    const trigger = screen.getByRole("button", { name: "Scope，当前：User" });
+    fireEvent(trigger, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    const menu = screen.getByRole("listbox");
+    fireEvent.click(trigger, { detail: 1 });
+    expect(screen.getByRole("listbox")).toBe(menu);
+    await waitFor(() => expect(document.activeElement).toBe(menu));
+    fireEvent(trigger, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    fireEvent.click(trigger, { detail: 1 });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
   it("anchors an intrinsically wider option menu at the trigger end instead of the selected label width", () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
       return this.classList.contains("mc-select-popover")
