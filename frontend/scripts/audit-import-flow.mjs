@@ -4,7 +4,7 @@ import path from "node:path";
 
 // CI-only: real detection, filesystem migration and error. Only delivery of the
 // first completed HTTP response is held to inspect the renderer's pending state.
-export async function auditImportFlow({ page, profile, sourceHome, capture, checks }) {
+export async function auditImportFlow({ page, profile, sourceHome, capture, checks, trace }) {
   assert.equal(process.env.CI, "true");
   await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
   const importButton = page.getByRole("button", { name: "导入", exact: true });
@@ -156,8 +156,10 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
     });
     assert(failureGeometry.rowTop >= failureGeometry.viewportTop && failureGeometry.rowBottom <= failureGeometry.viewportBottom);
     await capture("import-07-real-destination-failure", { failureScroll, failureGeometry });
+    trace("import:failure:escape");
     await page.keyboard.press("Escape");
     await error.waitFor({ state: "hidden" });
+    trace("import:failure:closed");
     checks.push("Actual import destination write failure preserves the original item error, exposes no nonexistent file link and closes only after the real result");
   } finally {
     await chmod(destination, 0o755);

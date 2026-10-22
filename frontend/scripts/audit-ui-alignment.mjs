@@ -13,7 +13,12 @@ import { auditProjectConfig } from "./audit-project-config.mjs";
 import { auditImportFlow } from "./audit-import-flow.mjs";
 
 assert.equal(process.env.CI, "true", "Run this audit in isolated CI, never against a user's desktop profile");
-setTimeout(() => { throw new Error("Current UI audit exceeded its 180-second execution window"); }, 180000).unref();
+const auditStartedAt = Date.now();
+let phase = "setup";
+function trace(next, details = {}) {
+  phase = next;
+  console.log(JSON.stringify({ phase, elapsedMs: Date.now() - auditStartedAt, ...details }));
+}
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const evidence = path.join(root, "output/playwright/ui-alignment-current");
 const profile = await mkdtemp(path.join(tmpdir(), "minicode-ui-profile-"));
@@ -77,6 +82,12 @@ const backendPort = portServer.address().port;
 await new Promise(resolve => portServer.close(resolve));
 const { ELECTRON_RUN_AS_NODE: _nodeMode, ...environment } = process.env;
 let app, page, success = false;
+const deadline = setTimeout(async () => {
+  const error = "Current UI audit exceeded its 180-second execution window";
+  console.error(JSON.stringify({ phase, elapsedMs: Date.now() - auditStartedAt, error }));
+  await persistEvidence({ success: false, deadlineExceeded: true, error });
+  throw new Error(error);
+}, 180000).unref();
 const launchOptions = {
   executablePath: createRequire(path.join(root, "desktop/package.json"))("electron"),
   args: [path.join(root, "desktop/main.js")], cwd: path.join(root, "desktop"),
@@ -95,6 +106,7 @@ async function connectDesktop(scale = 1) {
   app.process().stdout.on("data", chunk => logs.push(String(chunk)));
   app.process().stderr.on("data", chunk => logs.push(String(chunk)));
   page = await app.firstWindow();
+  page.on("console", message => logs.push(`[renderer:${message.type()}] ${message.text()}\n`));
   page.on("pageerror", error => pageErrors.push(error.message));
   page.on("websocket", socket => {
     socket.on("framereceived", event => wire.push({ direction: "server", message: JSON.parse(String(event.payload)) }));
@@ -105,6 +117,14 @@ async function connectDesktop(scale = 1) {
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
 }
 async function capture(name, context = {}) {
+  trace(`capture:${name}:begin`);
+  const renderState = await page.evaluate(() => ({ theme: document.documentElement.dataset.theme, fonts: document.fonts.status,
+    animations: document.getAnimations().filter(animation => animation.playState === "running").map(animation => {
+      const timing = animation.effect?.getComputedTiming();
+      return { name: animation.animationName ?? animation.constructor.name, duration: String(timing?.duration),
+        iterations: String(timing?.iterations), endTime: String(timing?.endTime), currentTime: String(animation.currentTime) };
+    }) }));
+  trace(`capture:${name}:settle`, renderState);
   await page.evaluate(async () => {
     await document.fonts.ready;
     await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -116,6 +136,14 @@ async function capture(name, context = {}) {
     theme: document.documentElement.dataset.theme, font: getComputedStyle(document.body).fontFamily }));
   await page.screenshot({ path: path.join(evidence, `${name}.png`) });
   captures.push({ name, ...context, metrics, boundary: "Electron renderer viewport; excludes native OS window decoration" });
+  trace(`capture:${name}:complete`);
+}
+async function persistEvidence(extra = {}) {
+  await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
+    scope: "Production backend and renderer; model replies and delivery of one actual completed import response controlled. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, not every OS/native state.", ...extra }, null, 2));
+  await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
+  await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
+  await writeFile(path.join(evidence, "desktop.log"), logs.join(""));
 }
 try {
   await connectDesktop();
@@ -308,9 +336,12 @@ try {
     }
     await capture(`settings-${String(index + 1).padStart(2, "0")}`, { settingsPage: label });
   }
-  await auditImportFlow({ page, profile, sourceHome, capture, checks });
+  await auditImportFlow({ page, profile, sourceHome, capture, checks, trace });
+  trace("appearance:dark:navigate");
   await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
+  trace("appearance:dark:select-mode");
   await page.getByRole("radio", { name: "深色", exact: true }).click();
+  trace("appearance:dark:open-import");
   await page.getByRole("button", { name: "导入深色主题", exact: true }).click();
   const darkThemeDialog = page.getByRole("dialog", { name: "导入主题", exact: true });
   await darkThemeDialog.waitFor();
@@ -371,16 +402,15 @@ try {
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
   success = true;
 } catch (error) {
+  trace("failure", { error: String(error) });
   if (page) await capture("failure-current-state");
   throw error;
 } finally {
-  await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors,
-    scope: "Production backend and renderer; model replies and delivery of one actual completed import response controlled. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, not every OS/native state." }, null, 2));
-  await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
-  await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
-  await writeFile(path.join(evidence, "desktop.log"), logs.join(""));
+  await persistEvidence();
+  trace("cleanup");
   await app?.close();
   provider.closeAllConnections();
   await new Promise(resolve => provider.close(resolve));
+  clearTimeout(deadline);
 }
 console.log(JSON.stringify({ success, attempts, checks: checks.length, captures: captures.length }));
