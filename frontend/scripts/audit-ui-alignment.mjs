@@ -148,9 +148,10 @@ async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
   const held = new Promise(resolve => { release = resolve; });
   const ready = Promise.withResolvers();
   const actualReads = [];
+  const inFlight = [];
   const matcher = url => paths.includes(url.pathname);
-  const handler = async route => {
-    try {
+  const handler = route => {
+    const operation = (async () => {
       assert.equal(route.request().method(), "GET");
       const response = await route.fetch();
       assert.equal(response.status(), 200);
@@ -158,7 +159,11 @@ async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
       if (actualReads.length === paths.length) ready.resolve();
       await held;
       await route.fulfill({ response });
-    } catch (error) { ready.reject(error); throw error; }
+    })();
+    inFlight.push(operation);
+    // The scenario awaits the original operations below, including failures
+    // after readiness. Route callbacks only notify its readiness wait here.
+    return operation.catch(ready.reject);
   };
   await page.route(matcher, handler);
   try {
@@ -175,7 +180,9 @@ async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
     await capture(name, { idle, pending, actualReads });
   } finally {
     release();
+    await Promise.allSettled(inFlight);
     await page.unroute(matcher, handler);
+    await Promise.all(inFlight);
   }
   await page.waitForFunction(selector => !document.querySelector(selector).disabled, selector);
   assert.equal(await button.getAttribute("aria-busy"), "false");
