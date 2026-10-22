@@ -264,7 +264,9 @@ try {
     outerGap: getComputedStyle(element).columnGap,
     contentGap: getComputedStyle(element.querySelector(".stream-error-summary-content")).columnGap,
     wifi: element.querySelector('[data-source-icon="wifi-light-16"]').getBoundingClientRect().width,
-    chevron: element.querySelector('[data-source-icon="stream-error-chevron"]').getBoundingClientRect().width,
+    // The disclosure rotates on expansion; its painted bounding box grows
+    // mid-transition even though the Source icon keeps its 12px layout size.
+    chevron: Number.parseFloat(getComputedStyle(element.querySelector('[data-source-icon="stream-error-chevron"]')).width),
   }));
   assert.deepEqual(retryGeometry, { outerGap: "4px", contentGap: "6px", wifi: 16, chevron: 12 });
   await capture("03-actual-reconnect-expanded", { retryGeometry });
