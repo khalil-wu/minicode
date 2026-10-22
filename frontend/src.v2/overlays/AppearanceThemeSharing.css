@@ -14,6 +14,8 @@
   cursor: pointer;
 }
 .appearance-theme-share-button:hover { background: var(--surface-hover); }
+.appearance-theme-share-button:disabled { opacity: .4; cursor: default; }
+.appearance-theme-share-button:hover:disabled { background: transparent; }
 .appearance-theme-share-button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
 .appearance-theme-import-backdrop {
   position: fixed;
@@ -65,6 +67,7 @@
   cursor: pointer;
 }
 .appearance-theme-import-cancel { background: transparent; color: var(--text-primary); }
-.appearance-theme-import-cancel:hover { background: var(--surface-hover); }
+.appearance-theme-import-cancel:hover:not(:disabled) { background: var(--surface-hover); }
+.appearance-theme-import-cancel:disabled { opacity: .4; cursor: default; }
 .appearance-theme-import-submit { background: var(--text-primary); color: var(--surface-base); }
 .appearance-theme-import-submit:disabled { opacity: .4; cursor: default; }

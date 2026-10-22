@@ -7,7 +7,7 @@ import {
 } from "./content-blocks";
 import { isTerminalToolCallStatus, isToolCallExecuting, type ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
-import { isProviderRequestProgress, providerProgressLabel } from "./provider-progress";
+import { isProviderRequestProgress, isProviderStreamError, providerProgressLabel, providerRetryCounter } from "./provider-progress";
 import { codeModeOwnError, commandActionKind, getRecordOutputText, taskResultAgentIds } from "../chat/cells/activityCellHelpers";
 import {
   isProviderReasoning,
@@ -504,6 +504,18 @@ export function projectTurn(
       // Older persisted turns can contain an agent.progress mirror for a
       // typed tool call. The tool lifecycle is authoritative.
       if (block.toolCallId && typedToolIds.has(block.toolCallId)) return;
+      if (isProviderStreamError(block)) {
+        const item = { ...progressItem(block, segment), status: "info" as const, hasFailure: false };
+        const previous = activityItems.at(-1);
+        const previousProgress = previous?.progress?.at(-1);
+        // Source stream-error coalesces adjacent numbered retries, preserving
+        // the first row's identity and the latest attempt's original details.
+        if (previous?.segment === segment && isProviderStreamError(previousProgress)
+          && providerRetryCounter(previousProgress) && providerRetryCounter(block)) {
+          activityItems[activityItems.length - 1] = { ...item, id: previous.id };
+        } else activityItems.push(item);
+        return;
+      }
       // Codex keeps provider request/retry lifecycle in its transient status
       // surface, never as a transcript item. Keep the same boundary here;
       // typed tool activity (MCP/image) is not classified as this lifecycle.

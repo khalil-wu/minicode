@@ -21,6 +21,8 @@ const targets = [
   { id: "fileManager", label: "File Explorer", kind: "fileManager", icon: "apps/file-explorer.png" },
 ];
 
+const openSubmenu = (item: HTMLElement) => { item.focus(); fireEvent.keyDown(item, { key: "ArrowRight" }); };
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -36,7 +38,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 async function openTargets() {
   fireEvent.click(screen.getByRole("button", { name: "聊天操作" }));
-  fireEvent.mouseEnter(await screen.findByRole("menuitem", { name: "打开方式" }));
+  openSubmenu(await screen.findByRole("menuitem", { name: "打开方式" }));
   await screen.findByRole("menuitem", { name: "File Explorer" });
 }
 
@@ -71,7 +73,7 @@ it("does not attach late application discovery to a different conversation", asy
   mocks.preferences.mockImplementation(() => new Promise(resolve => { release = resolve; }));
   render(<ChatActionsButton />);
   fireEvent.click(screen.getByRole("button", { name: "聊天操作" }));
-  fireEvent.mouseEnter(await screen.findByRole("menuitem", { name: "打开方式" }));
+  openSubmenu(await screen.findByRole("menuitem", { name: "打开方式" }));
   expect(screen.getByRole("menuitem", { name: "正在加载可用应用…" })).toBeTruthy();
   act(() => useAppStore.setState({ conversationId: "B", conversations: [{ id: "B", title: "B", workspaceRoot: "C:/B", updatedAt: "today" }] }));
   await act(async () => release({ fileOpenTargets: targets }));
@@ -83,7 +85,7 @@ it("shows discovery failure using the source disabled menu message", async () =>
   mocks.preferences.mockRejectedValue(new Error("Native target discovery failed"));
   render(<ChatActionsButton />);
   fireEvent.click(screen.getByRole("button", { name: "聊天操作" }));
-  fireEvent.mouseEnter(await screen.findByRole("menuitem", { name: "打开方式" }));
+  openSubmenu(await screen.findByRole("menuitem", { name: "打开方式" }));
   const row = await screen.findByRole("menuitem", { name: "无法加载应用。请重新打开菜单以重试" });
   expect((row as HTMLButtonElement).disabled).toBe(true);
   expect(screen.queryByRole("menuitem", { name: "VS Code" })).toBeNull();

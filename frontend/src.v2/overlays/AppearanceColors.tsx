@@ -11,6 +11,7 @@ import { pushToast } from "./ToastContainer";
 import { AppearanceThemeSharing } from "./AppearanceThemeSharing";
 import { AppearanceCodeThemePicker } from "./AppearanceCodeThemePicker";
 import { AppearanceFonts } from "./AppearanceFonts";
+import { AppearanceAccentPicker } from "./AppearanceAccentPicker";
 import "./AppearanceColors.css";
 
 const WindowCapabilities = createContext(false);
@@ -122,7 +123,7 @@ export function AppearanceColors({ advanced = false, variant: requestedVariant, 
   const importTheme = useAppStore(state => state.importAppearanceTheme);
   const patchPreferences = useAppStore(state => state.patchAppearanceTheme);
   const effective = colors[variant] ?? (variant === resolved ? effectiveAppearanceColors() : defaultAppearanceColors[variant]);
-  const codeThemeId = selection?.codeThemeId ?? "vscode-plus";
+  const codeThemeId = selection?.codeThemeId ?? "codex";
   const { contrast, opaqueWindows, semanticColors } = selection ?? defaultThemePreferences(variant);
   const fonts = selection?.fonts;
   const snapshot = { codeThemeId, theme: { contrast, opaqueWindows, semanticColors, fonts, ...effective, accentSource: "custom" as const } };
@@ -155,8 +156,11 @@ export function AppearanceColors({ advanced = false, variant: requestedVariant, 
     </div></div>
     {roles.map(({ role, label, input }) => <div className="settings-row" key={role}>
       <div className="settings-row-copy"><div className="settings-row-title">{t(label)}</div></div>
-      <div className="settings-row-control"><ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}
-        value={effective[role]} onChange={value => setColor(variant, role, value)} /></div>
+      <div className="settings-row-control">
+        {role === "accent" && <AppearanceAccentPicker variant={variant} onCustomSelect={() => setColor(variant, "accent", effective.accent)} />}
+        <ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}
+          value={effective[role]} onChange={value => setColor(variant, role, value)} />
+      </div>
     </div>)}
     <AppearanceFonts variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} />
 

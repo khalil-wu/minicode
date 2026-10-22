@@ -27,8 +27,10 @@ const FOLLOW_UP_CHOICES = [
 
 export const GeneralTab = ({
   onOpenLicenses,
+  importSettings,
 }: {
   onOpenLicenses?: () => void;
+  importSettings?: ReactNode;
 }) => {
   const { t } = useI18n();
   const sendShortcut = useAppStore((s) => s.sendShortcut);
@@ -38,7 +40,7 @@ export const GeneralTab = ({
   const modifierSymbol = navigator.platform.startsWith("Mac") ? "⌘" : "^";
   return (
     <>
-      {isDesktop() && <DesktopGeneralPreferences onOpenLicenses={onOpenLicenses} />}
+      {isDesktop() ? <DesktopGeneralPreferences onOpenLicenses={onOpenLicenses} importSettings={importSettings} /> : importSettings && <SettingsGroup title={t("常规")}>{importSettings}</SettingsGroup>}
       <SettingsGroup title={t("输入框")}>
         <PlainTextComposerPreference />
         {isDesktop() && <ComposerContextUsagePreference />}
@@ -145,7 +147,7 @@ const SettingsRow = ({ title, description, children }: { title: string; descript
   </div>
 );
 
-const DesktopGeneralPreferences = ({ onOpenLicenses }: { onOpenLicenses?: () => void }) => {
+const DesktopGeneralPreferences = ({ onOpenLicenses, importSettings }: { onOpenLicenses?: () => void; importSettings?: ReactNode }) => {
   const { t } = useI18n();
   const { preferences, error, update } = useDesktopPreferences();
   const [fullAccessConfirmation, setFullAccessConfirmation] = useState(false);
@@ -217,6 +219,7 @@ const DesktopGeneralPreferences = ({ onOpenLicenses }: { onOpenLicenses?: () => 
           aria-checked={preferences.localHistoryCompression} data-active={preferences.localHistoryCompression}
           onClick={() => void update({ localHistoryCompression: !preferences.localHistoryCompression })}><span /></button>
       </SettingsRow>
+      {importSettings}
       <SettingsRow title={t("开源许可证")} description={t("已打包依赖的第三方声明。") }>
         <button type="button" className="settings-action-button" onClick={onOpenLicenses}>{t("查看")}</button>
       </SettingsRow>

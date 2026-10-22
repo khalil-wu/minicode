@@ -33,6 +33,7 @@ afterEach(() => { cleanup(); window.getSelection()!.removeAllRanges(); window.__
 
 function row() { return screen.getByText("Real code row", { exact: true }); }
 function openMenu() { fireEvent.contextMenu(row(), { clientX: 120, clientY: 160 }); }
+function openSubmenu(name: string) { const item = screen.getByRole("menuitem", { name, exact: true }); item.focus(); fireEvent.keyDown(item, { key: "ArrowRight" }); }
 function listener(handler: (location?: { side: "left" | "right"; line: number }) => void) {
   return function Listener() { useDiffRequestChanges(handler); return <span data-diff-line-number="73" data-diff-line-side="left">Real code row</span>; };
 }
@@ -72,20 +73,20 @@ describe("Source Diff file context menu", () => {
     render(<DiffFileContextMenu path="a.ts" workspaceRoot="C:/work" firstChangedLine={19} preferences={null}><Plain /></DiffFileContextMenu>);
     openMenu(); fireEvent.click(screen.getByRole("menuitem", { name: "请求更改" }));
     expect(request).toHaveBeenCalledWith(undefined);
-    openMenu(); fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "打开方式" }));
+    openMenu(); openSubmenu("打开方式");
     fireEvent.click(screen.getByRole("menuitem", { name: "新标签页" }));
     expect(opens.internal).toHaveBeenCalledWith("a.ts", "C:/work", 19);
   });
 
   it("keeps hidden catalog targets in Open with, persists only editor choices and adds no preferred checkmarks", () => {
     render(<DiffFileContextMenu path="src/a.ts" workspaceRoot="C:/work" preferences={prefs}><span>Real code row</span></DiffFileContextMenu>);
-    openMenu(); fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "打开方式" }));
+    openMenu(); openSubmenu("打开方式");
     const submenu = screen.getAllByRole("menu").find(menu => within(menu).queryByRole("menuitem", { name: "新标签页" }))!;
     expect(within(submenu).getAllByRole("menuitem").map(item => item.textContent)).toEqual(["新标签页", "MiniCode", "Cursor", "Default application", "Terminal"]);
     expect(screen.queryByRole("menuitemradio")).toBeNull();
     fireEvent.click(screen.getByRole("menuitem", { name: "MiniCode", exact: true }));
     expect(opens.preferred).toHaveBeenLastCalledWith("src/a.ts", "C:/work", 1, undefined, { targetId: "minicode", persistPreferredTargetPath: "C:/work" });
-    openMenu(); fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "打开方式" }));
+    openMenu(); openSubmenu("打开方式");
     fireEvent.click(screen.getByRole("menuitem", { name: "Terminal", exact: true }));
     expect(opens.preferred).toHaveBeenLastCalledWith("src/a.ts", "C:/work", 1, undefined, { targetId: "terminal" });
   });
@@ -112,7 +113,7 @@ describe("Source Diff file context menu", () => {
     window.__MINICODE_RUNTIME__ = { ...window.__MINICODE_RUNTIME__, remoteHost: { id: "remote", displayName: "Remote", kind: "ssh", platform: "linux", home: "/home/user", generation: "remote-one" } };
     const view = render(<DiffFileContextMenu path="a.ts" workspaceRoot="/repo" preferences={prefs}><span>Real code row</span></DiffFileContextMenu>);
     openMenu(); expect(screen.queryByRole("menuitem", { name: "在“Cursor”中打开" })).toBeNull();
-    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "打开方式" }));
+    openSubmenu("打开方式");
     expect(screen.queryByRole("menuitem", { name: "Cursor", exact: true })).toBeNull();
     fireEvent.click(screen.getByRole("menuitem", { name: "新标签页" }));
     expect(opens.internal).toHaveBeenCalledWith("a.ts", "/repo", 1);

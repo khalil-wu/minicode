@@ -2,7 +2,7 @@ import { useI18n } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { BookOpenText, Check, ChevronDown, Clock3, Puzzle, Search, Settings, SquarePen } from "../lib/icons";
+import { BookOpenText, Check, ChevronDown, Clock3, Puzzle, Search, SquarePen } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, visibleLeftSidebarWidth } from "../stores/shared-helpers";
 import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
@@ -13,6 +13,8 @@ import { openAutomations } from "../lib/automations-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useComposerPlugins } from "../composer/useComposerPlugins";
 import { selectSkillForComposer } from "../lib/select-skill-for-composer";
+import { MenuSourceIcon } from "../lib/menu-source-icons";
+import { formatShortcut } from "../lib/keyboard-shortcuts";
 
 export const SidebarLeft = ({
   embedded = false,
@@ -36,6 +38,7 @@ export const SidebarLeft = ({
   const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const toggleSettings = useAppStore((s) => s.toggleSettings);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const settingsShortcut = useAppStore(s => s.shortcutBindings.settings);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState>(null);
   const [profileMenu, setProfileMenu] = useState<{ x: number; y: number } | null>(null);
@@ -177,14 +180,14 @@ export const SidebarLeft = ({
         <button type="button" className="mc-sidebar-profile-button" aria-label={tr("打开个人资料菜单")} aria-haspopup="menu" aria-expanded={Boolean(profileMenu)} onClick={event => {
           const bounds = event.currentTarget.getBoundingClientRect();
           setProfileMenu(profileMenu ? null : { x: bounds.left, y: bounds.bottom - 154 });
-        }}><Settings size={17} /><span>MiniCode</span></button>
+        }}><MenuSourceIcon kind="settings" /><span>MiniCode</span></button>
       </div>}
       {profileMenu && <ContextMenu position={profileMenu} onClose={() => setProfileMenu(null)} items={[
-        { label: tr("设置"), icon: <Settings size={15} />, onClick: () => navigate(() => { useAppStore.getState().setSettingsTab("general"); toggleSettings(); }) },
-        { label: tr("帮助"), submenu: [
-          { label: tr("新增内容"), onClick: () => { void openPreferredWebLink("https://developers.openai.com/codex/changelog"); } },
-          { label: tr("键盘快捷键"), onClick: () => useAppStore.getState().toggleShortcutsHelp() },
-          { label: tr("使用指南"), onClick: () => { void openPreferredWebLink("https://learn.chatgpt.com/docs/quickstart"); } },
+        { label: tr("设置"), icon: <MenuSourceIcon kind="settings" />, shortcut: formatShortcut(settingsShortcut), onClick: () => navigate(() => { useAppStore.getState().setSettingsTab("general"); toggleSettings(); }) },
+        { label: tr("帮助"), icon: <MenuSourceIcon kind="help" />, alignToParentBottom: true, submenu: [
+          { label: tr("新增内容"), icon: <MenuSourceIcon kind="whats-new" />, onClick: () => { void openPreferredWebLink("https://developers.openai.com/codex/changelog"); } },
+          { label: tr("键盘快捷键"), icon: <MenuSourceIcon kind="shortcuts" />, onClick: () => useAppStore.getState().toggleShortcutsHelp() },
+          { label: tr("使用指南"), icon: <MenuSourceIcon kind="guide" />, onClick: () => { void openPreferredWebLink("https://learn.chatgpt.com/docs/quickstart"); } },
         ] },
       ]} />}
       </div>

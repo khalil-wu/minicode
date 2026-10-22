@@ -31,6 +31,7 @@ it("leaves default colors and typography alone, commits complete hex and restore
   localStorage.setItem(LS.textScale, fontValues.scale);
   const authoredPreferences = localStorage.getItem(LS.textScale);
   render(<AppearanceColors />);
+  expect(screen.getByRole("button", { name: "浅色代码主题" }).textContent).toContain("ChatGPT");
   expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe("");
   const background = screen.getByRole("textbox", { name: "浅色背景颜色" });
   fireEvent.change(background, { target: { value: "#ab" } });
@@ -72,6 +73,22 @@ it("uses a real accessible react-colorful popover with immediate keyboard edits 
   fireEvent.click(trigger);
   fireEvent.pointerDown(document.body);
   expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("keeps account accent choices unavailable while Custom edits the real local variant", () => {
+  render(<AppearanceColors />);
+  const trigger = screen.getByRole("button", { name: "浅色强调色" });
+  fireEvent.click(trigger);
+  const menu = screen.getByRole("menu", { name: "浅色强调色" });
+  const accountOptions = [...menu.querySelectorAll<HTMLButtonElement>('button[role="menuitemradio"]')].filter(option => option.textContent !== "自定义");
+  expect(accountOptions).toHaveLength(8);
+  expect(accountOptions.every(option => option.disabled)).toBe(true);
+  fireEvent.click(accountOptions[0]);
+  expect(localStorage.getItem(LS.appearanceLight)).toBeNull();
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "自定义" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "浅色强调色" }), { target: { value: "#123ABC" } });
+  expect(initialAppearanceColors()).toMatchObject({ light: { accent: "#123abc" }, dark: null });
+  expect(document.documentElement.style.getPropertyValue("--accent-primary")).toBe("#123abc");
 });
 
 it("keeps both variants and follows system changes without leaking the old variant's inline palette", () => {

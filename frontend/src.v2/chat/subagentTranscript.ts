@@ -143,12 +143,15 @@ export function applySubagentTranscriptEvents(messages: ChatMessage[], delta: Su
       }] }])[0].blocks![0];
       upsertBlock(block, previous => previous.type === "process" && previous.id === itemId);
     } else if (payload.lifecycle === "provider_progress") {
-      const state = String(payload.provider_state || "failed");
+      if (!["timeline", "compact"].includes(String(payload.visibility))
+        || !["reconnecting", "failed"].includes(String(payload.provider_state))
+        || !String(payload.error_message || "").trim()) continue;
+      const state = payload.provider_state as "reconnecting" | "failed";
       const sourceId = String(payload.operation_id || event.event_id);
       const id = `${sourceId}:error:${payload.provider_span_id || ""}:${state}:${payload.retry_attempt || 0}`;
       const block: ContentBlock = { type: "progress", id, operationId: sourceId, stage: "status", phase: "recover",
-        status: state === "failed" ? "failed" : "info", message: String(payload.message || payload.summary || ""), visibility: "timeline",
-        providerState: state as "failed", errorMessage: String(payload.error_message || payload.message || payload.summary || ""),
+        status: state === "failed" ? "failed" : "info", message: String(payload.message || payload.summary || ""), visibility: payload.visibility as "timeline" | "compact",
+        providerState: state, errorMessage: String(payload.error_message),
         detail: payload.detail as string | undefined, retryAttempt: Number(payload.retry_attempt || 0), maxRetries: Number(payload.max_retries || 0),
         retryAfterMs: Number(payload.retry_after_ms || 0), timestamp: event.ts_ms };
       upsertBlock(block, previous => previous.type === "progress" && previous.id === id);

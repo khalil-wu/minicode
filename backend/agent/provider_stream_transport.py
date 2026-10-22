@@ -13,6 +13,7 @@ from backend.agent.first_byte_waiter import ProviderStreamFailure
 from backend.agent.loop_preflight import PhaseDeadlineExceeded
 from backend.agent.loop_runtime_helpers import plan_stream_retry, sleep_or_cancel
 from backend.agent.message import AgentEvent
+from backend.agent.progress import provider_stream_error_progress
 from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.provider_stream_control import (
     ProviderRetryReset,
@@ -233,13 +234,11 @@ async def handle_provider_transport_failure(
         if connection_retry:
             # No ordinal: the wait is unbounded, so advertising N/M would claim
             # a budget that is not being spent.
-            progress_message = "无法连接提供商，正在等待网络恢复"
-            progress_summary = span_summary
+            progress_message = "正在重连，等待网络恢复"
             progress_retry_attempt = None
             progress_max_retries = None
         elif switched_transport:
             progress_message = "切换传输后正在连接提供商"
-            progress_summary = span_summary
             progress_retry_attempt = None
             progress_max_retries = None
         else:
@@ -249,26 +248,17 @@ async def handle_provider_transport_failure(
                 else f"第 {new_attempt} 次"
             )
             progress_message = f"连接中断，正在重连（{retry_label}）"
-            progress_summary = span_summary
             progress_retry_attempt = new_attempt
             progress_max_retries = effective_max_retries
-        yield AgentEvent.progress(
+        yield provider_stream_error_progress(
             progress_message,
-            stage="status",
-            status="running",
-            id=progress_id or provider_progress_id(iteration_id_value),
-            phase="recover",
-            label="provider",
-            count=None if connection_retry else new_attempt,
+            attempt=provider_attempt,
+            progress_id=progress_id or provider_progress_id(iteration_id_value),
             detail=f"{error_message[:320]} · {retry_delay:.1f} 秒后重试",
-            summary=progress_summary,
             retry_attempt=progress_retry_attempt,
             max_retries=progress_max_retries,
             retry_after_ms=max(0, int(round(retry_delay * 1000))),
             error_message=error_message[:320],
-            operation_id=progress_id,
-            provider_state="reconnecting",
-            visibility="debug",
         )
         if close_stream is not None:
             await close_stream()

@@ -22,7 +22,7 @@ import { acceptAttachmentConversationOwner, uploadComposerFiles } from "./upload
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
 import { TurnPlanProgress } from "../chat/components/TurnPlanProgress";
 import { MessageQuote } from "../chat/components/MessageQuote";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { buildContextNativeAttachments, buildContextPayload } from "./contextPayload";
@@ -207,8 +207,12 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const inputSelectionRef = useRef<ComposerSelection>({ start: draft.length, end: draft.length });
   const [selectionRequest, setSelectionRequest] = useState<ComposerSelection>();
-  const submittingRef = useRef<object | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(new Map<string, object>());
+  const [submittingOwners, setSubmittingOwners] = useState<ReadonlySet<string>>(() => new Set());
+  const submitting = submittingOwners.has(editorKey);
+  const stoppingRef = useRef(new Set<string>());
+  const [stoppingOwners, setStoppingOwners] = useState<ReadonlySet<string>>(() => new Set());
+  const isStopping = isStreaming && stoppingOwners.has(conversationId || "");
   const [menuFilter, setMenuFilter] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [selectedSlashCommand, setSelectedSlashCommand] = useState<string | null>(null);
@@ -372,7 +376,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const escapeInterrupt = useCallback((): boolean => {
     if (useAppStore.getState().queuedEdit) { void cancelQueuedMessageEdit(); return true; }
     if (!useAppStore.getState().isStreaming) return false;
-    stopRun();
+    void stopRun();
     return true;
   }, []);
 
@@ -477,16 +481,28 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     setSelectedSlashCommand(null);
   };
 
-  const stopRun = () => {
+  const stopRun = async () => {
     const state = useAppStore.getState();
     const command = buildInterruptCommand(state);
+    const owner = command.conversation_id || "";
+    if (stoppingRef.current.has(owner)) return;
+    stoppingRef.current.add(owner);
+    setStoppingOwners(new Set(stoppingRef.current));
     // Before agent.run.started binds a turn/message fence, the backend must
     // reject an unfenced interrupt rather than guessing which run to stop.
     // Finish the local optimistic state in that narrow window so Stop never
     // appears to do nothing; a fenced command still waits for the server's
     // authoritative terminal event.
     if (!hasInterruptFence(command)) state.interrupt();
-    sendClientCommand(command);
+    try {
+      const result = await sendClientCommandAwaitResult(command, "interrupt", { silent: true });
+      if (!commandResultSucceeded(result)) pushToast(result.message, "error", 4500);
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error", 4500);
+    } finally {
+      stoppingRef.current.delete(owner);
+      setStoppingOwners(new Set(stoppingRef.current));
+    }
   };
 
   const composerFingerprint = (state = useAppStore.getState(), comments = readDiffCommentState(
@@ -569,20 +585,24 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
   };
 
+  const completeSubmission = (owner: string, submission: object | undefined) => {
+    if (submission && submittingRef.current.get(owner) === submission) {
+      submittingRef.current.delete(owner);
+      setSubmittingOwners(new Set(submittingRef.current.keys()));
+    }
+  };
+
   const runSubmission = async (action: () => Promise<void>) => {
-    if (submittingRef.current) return;
+    if (submittingRef.current.has(editorKey)) return;
     const submission = {};
-    submittingRef.current = submission;
-    setSubmitting(true);
+    submittingRef.current.set(editorKey, submission);
+    setSubmittingOwners(new Set(submittingRef.current.keys()));
     try {
       await action();
     } catch (error) {
       pushToast(error instanceof Error ? error.message : tr("消息发送失败，请重试。"), "error", 4500);
     } finally {
-      if (submittingRef.current === submission) {
-        submittingRef.current = null;
-        setSubmitting(false);
-      }
+      completeSubmission(editorKey, submission);
     }
   };
 
@@ -707,7 +727,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const conversationAtSend = String(useAppStore.getState().conversationId || "").trim();
     const workspaceAtSend = useAppStore.getState().workingDirectory;
     const submittedUserMessageId = uniqueMessageId("u");
-    const submittedOperation = submittingRef.current;
+    const submittedOperation = submittingRef.current.get(editorKey);
     let admittedConversationId = conversationAtSend;
     const accepted: { result?: CommandResultEvent } = {};
     let draftClaim: ReturnType<typeof claimSubmittedDraft> | undefined;
@@ -742,10 +762,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
             userMessageId: submittedUserMessageId, selectedCommand: () => selectedSlashCommandRef.current });
           submittedDraftClaims.current.add(draftClaim);
         }
-        if (submittingRef.current === submittedOperation) {
-          submittingRef.current = null;
-          setSubmitting(false);
-        }
+        completeSubmission(editorKey, submittedOperation);
       },
       onRejected: () => {
         if (!draftClaim?.canRestore()) return;
@@ -783,7 +800,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const workspace = originalState.workingDirectory;
     const submittedComments = cloneDiffComments(readDiffCommentState(getDiffCommentScope(originalOwner, workspace)).comments);
     const userMessageId = uniqueMessageId("u");
-    const submittedOperation = submittingRef.current;
+    const submittedOperation = submittingRef.current.get(editorKey);
     let admittedOwner = originalOwner;
     let compactReceived = false;
     const accepted: { result?: CommandResultEvent } = {};
@@ -795,10 +812,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         if (!options.skipLocalAppend || parseRuntimeSlashInput(commandLine)?.command !== "/compact") return;
         compactReceived = true;
         clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
-        if (submittingRef.current === submittedOperation) {
-          submittingRef.current = null;
-          setSubmitting(false);
-        }
+        completeSubmission(editorKey, submittedOperation);
       }, onAdmission: event => {
         accepted.result = event;
         if (typeof event.data?.conversation_id === "string") admittedOwner = event.data.conversation_id;
@@ -1112,6 +1126,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onClose={() => setGuardianApprovalOwner(undefined)} onApproved={finishGuardianApproval} />}
       <FooterRow
         sendState={sendState}
+        isStopping={isStopping}
         onSend={sendState === "stop" ? stopRun : submit}
         onStop={stopRun}
         compact={codeLayout}

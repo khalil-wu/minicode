@@ -11,6 +11,7 @@ import { desktop, desktopNotificationConversationVisible, embeddedBrowserCloseCo
 import { sendPromptResponseCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { isReplayedEvent } from "../protocol/events";
+import { pendingPromptMatchesOwner } from "../lib/pending-prompts";
 
 const respondToResourceCleanup = async (event: ControlRequestEvent): Promise<void> => {
   if (event.request.subtype !== "conversation_resources_cleanup") return;
@@ -121,9 +122,10 @@ const updateReviewFile = (
   workspaceRoot: unknown = "",
 ): DiffReviewState | undefined => {
   if (!review || review.requestId !== event.tool_call_id || !event.path || !event.patch) return review;
-  const eventOwner = event as ApprovalFileDiffEvent & { conversation_id?: string; turn_id?: string };
+  const eventOwner = event as ApprovalFileDiffEvent & { conversation_id?: string; turn_id?: string; task_id?: string };
   if (review.conversationId && eventOwner.conversation_id !== review.conversationId) return review;
   if (review.turnId && eventOwner.turn_id !== review.turnId) return review;
+  if (review.taskId && eventOwner.task_id !== review.taskId) return review;
   const filePatch = {
     patch: event.patch,
     isLarge: event.is_large,
@@ -161,6 +163,7 @@ const applyApprovalRequest = (
     conversationId?: string;
     turnId?: string;
     messageId?: string;
+    taskId?: string;
     toolName: string;
     requestDigest?: string;
     command?: string[];
@@ -191,6 +194,7 @@ const applyApprovalRequest = (
       conversationId: request.conversationId,
       turnId: request.turnId,
       messageId: request.messageId,
+      taskId: request.taskId,
       toolName: request.toolName,
       requestDigest: request.requestDigest,
       command: request.command,
@@ -259,6 +263,7 @@ const applyApprovalRequest = (
     conversationId: request.conversationId,
     turnId: request.turnId,
     messageId: request.messageId,
+    taskId: request.taskId,
     toolName: request.toolName,
     sourceAgent: request.sourceAgent,
     sourceThread: request.sourceThread,
@@ -276,6 +281,7 @@ const applyApprovalRequest = (
     conversationId: request.conversationId,
     turnId: request.turnId,
     messageId: request.messageId,
+    taskId: request.taskId,
     sourceAgent: request.sourceAgent,
     sourceThread: request.sourceThread,
     sourceTool: request.sourceTool,
@@ -307,6 +313,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
           conversationId,
           turnId: ev.turn_id,
           messageId: ev.message_id,
+          taskId: ev.task_id,
           toolName: request.tool_name,
           args: request.input,
           sourceAgent: request.source_agent,
@@ -397,7 +404,7 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "approval.cancelled": {
-      const ev = e as unknown as { conversation_id?: string; request_ids?: string[]; reason?: string };
+      const ev = e as unknown as { conversation_id?: string; turn_id?: string; message_id?: string; task_id?: string; request_ids?: string[]; reason?: string };
       const conversationId = eventConversationId(e);
       // Cancellation is a conversation-owned terminal event.  An unowned
       // legacy payload must not clear every prompt in the renderer, because a
@@ -407,6 +414,8 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       if (requestIds.length === 0) return true;
       if (isDesktop()) for (const requestId of requestIds) void desktop()?.hideNotifications({ conversationId, requestId });
       const requested = new Set(requestIds);
+      const owner = { conversationId, ...(ev.turn_id ? { turnId: ev.turn_id } : {}),
+        ...(ev.message_id ? { messageId: ev.message_id } : {}), ...(ev.task_id ? { taskId: ev.task_id } : {}) };
       const owns = (prompt: { requestId?: string; conversationId?: string } | null | undefined) =>
         Boolean(prompt)
         && prompt?.conversationId === conversationId
@@ -421,11 +430,11 @@ export const handleControlEvent = (e: ServerEvent): boolean => {
       const askIds = [state.pendingAskUser, ...state.askUserQueue]
         .filter(owns)
         .map((prompt) => prompt!.requestId);
-      if (approvalIds.length > 0) s.clearApprovals(approvalIds);
-      if (diffIds.length > 0) s.clearDiffReviews(diffIds);
-      if (askIds.length > 0) s.clearAskUsers(askIds, conversationId);
+      if (approvalIds.length > 0) s.clearApprovals(approvalIds, owner);
+      if (diffIds.length > 0) s.clearDiffReviews(diffIds, owner);
+      if (askIds.length > 0) s.clearAskUsers(askIds, conversationId, ev.turn_id || ev.message_id || ev.task_id ? owner : undefined);
       useAppStore.setState((current) => ({
-        diffReview: owns(current.diffReview) ? null : current.diffReview,
+        diffReview: owns(current.diffReview) && pendingPromptMatchesOwner(current.diffReview, owner) ? null : current.diffReview,
       }));
       return true;
     }

@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { afterEach, beforeEach, expect, it } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { installAppThemeTokens } from "../../test/app-theme-tokens";
 import { applyAppearanceColors, emptyAppearanceColors } from "../lib/appearance-colors";
 import { emptyAppearanceThemes } from "../lib/appearance-themes";
@@ -16,6 +16,7 @@ beforeEach(() => {
   useAppStore.getState().setThemeMode("dark");
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   useAppStore.setState({ appearanceColors: emptyAppearanceColors(), appearanceThemes: emptyAppearanceThemes() });
   applyAppearanceColors("dark", emptyAppearanceColors());
   localStorage.clear(); removeTokens();
@@ -49,7 +50,7 @@ it("imports contrast and semantic colors, restores them on startup and never wri
   const snapshot = { codeThemeId: "github" as const, theme: { ...chromeSeed, contrast: 85, opaqueWindows: true } };
   const share = JSON.parse(exportThemeString(snapshot, "dark").slice(15));
   share.theme.fonts = { code: "Other code font", ui: "Other UI font" };
-  await useAppStore.getState().importAppearanceTheme("dark", parseThemeString(`codex-theme-v1:${JSON.stringify(share)}`, "dark"));
+  expect(await useAppStore.getState().importAppearanceTheme("dark", parseThemeString(`codex-theme-v1:${JSON.stringify(share)}`, "dark"))).toBe(true);
   expect(initialAppearanceThemes().dark).toMatchObject({ contrast: 85, opaqueWindows: true });
   expect(localStorage.getItem(LS.textScale)).toBeNull();
   expect(localStorage.getItem(LS.codeTextScale)).toBeNull();
@@ -60,6 +61,21 @@ it("imports contrast and semantic colors, restores them on startup and never wri
   applyTheme("dark", readAppearanceStorage());
   expect(document.documentElement.dataset.codeTheme).toBe("github");
   expect(document.documentElement.style.getPropertyValue("--surface-base")).toBe(selectedBackground);
+});
+
+it("propagates a failed persistence write without claiming a committed import", async () => {
+  const { chromeSeed } = await loadCodeTheme("github", "dark");
+  const failure = new Error("appearance storage write failed");
+  const original = Storage.prototype.setItem;
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+    if (key === LS.appearanceDark) throw failure;
+    original.call(this, key, value);
+  });
+  await expect(useAppStore.getState().importAppearanceTheme("dark", {
+    codeThemeId: "github", theme: { ...chromeSeed, contrast: 60, opaqueWindows: false },
+  })).rejects.toBe(failure);
+  expect(initialAppearanceThemes().dark).toBeNull();
+  expect(useAppStore.getState().appearanceThemes.dark).toBeNull();
 });
 
 it("lets content follow a chosen UI font, retains an explicit content face, and preserves the default typography on reset", async () => {

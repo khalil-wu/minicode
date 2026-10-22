@@ -5,6 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { NavigationRail } from "./NavigationRail";
 import { useAppStore } from "../stores";
 import type { DesktopPetState } from "../desktop/runtime";
+import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 
 const fixture = vi.hoisted(() => ({ available: true, getState: vi.fn(), update: vi.fn(), changed: vi.fn(), openLink: vi.fn(), toast: vi.fn() }));
 vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => fixture.available ? { pets: api } : null }));
@@ -26,6 +27,7 @@ beforeEach(() => {
   fixture.changed.mockImplementation(listener => { listeners.add(listener); return () => listeners.delete(listener); });
   fixture.update.mockReset().mockImplementation(async patch => { publish({ ...state, ...patch, miniOpen: patch.petVisible }); return state; });
   useAppStore.setState({ conversationId: "original-owner", pendingConversationSwitchId: null, settingsOpen: false, settingsTab: "general", appMode: "code",
+    shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS },
     skillsMarketplaceOpen: false, skillsMarketplaceTab: "skills", skillsMarketplaceReturnTarget: "app", projectsOpen: false,
     leftSidebarWidth: 0, leftSidebarExpandedWidth: 336, draft: "Original chat draft", workingDirectory: "C:/original-workspace",
     messages: [{ id: "original-message", role: "user", content: "Original message", timestamp: 1 }], conversationWorkbenchStates: {},
@@ -62,15 +64,31 @@ it("routes every global rail destination without borrowing the owner, expanding 
 it("keeps profile settings and the nested Help menu on the real source destinations", () => {
   fixture.available = false;
   render(<NavigationRail />); openProfile();
-  fireEvent.click(screen.getByRole("menuitem", { name: "设置", exact: true }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /^设置/ }));
   expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "general" });
   openProfile();
   const help = screen.getByRole("menuitem", { name: "帮助", exact: true });
+  expect(help.querySelector('[data-menu-source-icon="help"]')).toBeTruthy();
+  expect(help.querySelector('[data-menu-source-icon="submenu"]')).toBeTruthy();
   help.focus(); fireEvent.keyDown(help, { key: "ArrowRight" });
   expect(screen.getByRole("menuitem", { name: "新增内容" })).toBe(document.activeElement);
+  expect(screen.getByRole("menuitem", { name: "新增内容" }).querySelector('[data-menu-source-icon="whats-new"]')).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "键盘快捷键" }).querySelector('[data-menu-source-icon="shortcuts"]')).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "使用指南" }).querySelector('[data-menu-source-icon="guide"]')).toBeTruthy();
   fireEvent.click(screen.getByRole("menuitem", { name: "使用指南" }));
   expect(fixture.openLink).toHaveBeenCalledExactlyOnceWith("https://learn.chatgpt.com/docs/quickstart");
   expect(useAppStore.getState().draft).toBe("Original chat draft");
+});
+
+it("shows the configured Settings shortcut and updates it while the profile is open", () => {
+  fixture.available = false;
+  useAppStore.setState({ shortcutBindings: { ...useAppStore.getState().shortcutBindings, settings: ["Ctrl+Alt+S"] } });
+  render(<NavigationRail />); openProfile();
+  const settings = screen.getByRole("menuitem", { name: /^设置/ });
+  expect(settings.textContent).toBe("设置Ctrl + Alt + S");
+  expect(settings.querySelector('[data-menu-source-icon="settings"]')).toBeTruthy();
+  act(() => useAppStore.setState({ shortcutBindings: { ...useAppStore.getState().shortcutBindings, settings: [] } }));
+  expect(settings.textContent).toBe("设置");
 });
 
 it("shows and hides the pet from actual native window state rather than the saved visible preference alone", async () => {

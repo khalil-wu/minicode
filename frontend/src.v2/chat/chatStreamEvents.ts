@@ -33,6 +33,7 @@ import { isHiddenProviderReasoning } from "../lib/provider-reasoning";
 import { eventMessageId, stableTextHash } from "../lib/identity";
 import { adoptGeneratedConversation } from "./conversationAdoption";
 import { notifyCompletedTurn } from "./completionNotifications";
+import { pendingPromptMatchesOwner } from "../lib/pending-prompts";
 
 interface ChatStreamHandlers {
   textStreamBuffer: StreamBuffer;
@@ -1292,12 +1293,13 @@ const applyChatStreamEvent = (
     }
     case "done": {
       const messageId = eventMessageId(e);
+      const turnId = eventTurnId(e);
       if (!conversationId && !messageId) {
         console.warn("[ws] Ignoring unscoped done event", e);
         return true;
       }
       if (consumeKnownStaleTurnEvent(conversationId, messageId)) return true;
-      const target = resolveTerminalEventTarget(conversationId, messageId, eventTurnId(e), true);
+      const target = resolveTerminalEventTarget(conversationId, messageId, turnId, true);
       if (target.stale) return true;
       const terminalMessageId = terminalMessageIdForEvent(conversationId, target.messageId);
       const previousMessage = messagesForConversation(conversationId, terminalMessageId).find((item) => item.role === "assistant");
@@ -1387,40 +1389,36 @@ const applyChatStreamEvent = (
         String((e as unknown as { reason?: unknown }).reason || "").trim() || undefined,
       );
       if (metadataOnly) return true;
-      // approval.cancelled is authoritative, but DONE is the terminal fence
-      // for the turn. Clear prompts owned by this conversation as a fallback
-      // for cancellation races, reconnect gaps, or out-of-order delivery.
+      // DONE settles the original turn's prompts, including after reconnect.
       if (!replayed) {
         const latest = useAppStore.getState();
-        const promptTargetsConversation = (prompt: { conversationId?: string } | null | undefined) =>
-          Boolean(prompt) && (
-            prompt?.conversationId === conversationId ||
-            (!prompt?.conversationId && latest.conversationId === conversationId)
-          );
+        const owner = { conversationId, ...(turnId ? { turnId } : {}), ...(messageId ? { messageId } : {}),
+          ...((e as { task_id?: string }).task_id ? { taskId: (e as { task_id?: string }).task_id } : {}) };
+        const promptTargetsTurn = (prompt: Parameters<typeof pendingPromptMatchesOwner>[0]) => pendingPromptMatchesOwner(prompt, owner);
         const approvalIds = [latest.pendingApproval, ...latest.approvalQueue]
-          .filter(promptTargetsConversation)
+          .filter(promptTargetsTurn)
           .map((approval) => approval!.requestId);
         if (approvalIds.length > 0) {
-          latest.clearApprovals(approvalIds);
+          latest.clearApprovals(approvalIds, owner);
         }
         const diffReviewIds = [latest.pendingDiffReview, ...latest.diffReviewQueue]
-          .filter(promptTargetsConversation)
+          .filter(promptTargetsTurn)
           .map((review) => review!.requestId);
         if (diffReviewIds.length > 0) {
-          latest.clearDiffReviews(diffReviewIds);
+          latest.clearDiffReviews(diffReviewIds, owner);
         }
         const askUserIds = [latest.pendingAskUser, ...latest.askUserQueue]
-          .filter(promptTargetsConversation)
+          .filter(promptTargetsTurn)
           // A teammate plan review is answered by the teammate's own run, not
           // by this turn. Clearing it here would strand that teammate until its
           // deadline rejects the plan, so only turn-owned questions expire.
           .filter((prompt) => !prompt?.planReview)
           .map((prompt) => prompt!.requestId);
         if (askUserIds.length > 0) {
-          latest.clearAskUsers(askUserIds);
+          latest.clearAskUsers(askUserIds, conversationId, turnId || messageId || (e as { task_id?: string }).task_id ? owner : undefined);
         }
         useAppStore.setState((state) => ({
-          diffReview: promptTargetsConversation(state.diffReview)
+          diffReview: promptTargetsTurn(state.diffReview)
             ? null
             : state.diffReview,
         }));
@@ -1544,14 +1542,13 @@ const applyChatStreamEvent = (
       }
       const requestId = err.tool_call_id ?? err.request_id;
       if (requestId && !replayed) {
-        s.clearDiffReview(requestId);
-        s.clearAskUser(requestId);
+        const owner = { conversationId, ...(turnId ? { turnId } : {}), ...(messageId ? { messageId } : {}),
+          ...((e as { task_id?: string }).task_id ? { taskId: (e as { task_id?: string }).task_id } : {}) };
+        s.clearDiffReview(requestId, owner);
+        s.clearAskUsers([requestId], conversationId, turnId || messageId || (e as { task_id?: string }).task_id ? owner : undefined);
+        s.markApprovalError(requestId, message, owner);
         useAppStore.setState((state) => ({
-          pendingApproval: state.pendingApproval?.requestId === requestId
-            ? { ...state.pendingApproval, status: "error", error: message }
-            : state.pendingApproval,
-          approvalQueue: state.approvalQueue.filter((queued) => queued.requestId !== requestId),
-          diffReview: state.diffReview?.requestId === requestId
+          diffReview: state.diffReview?.requestId === requestId && pendingPromptMatchesOwner(state.diffReview, owner)
             ? { ...state.diffReview, status: "error", error: message }
             : state.diffReview,
         }));

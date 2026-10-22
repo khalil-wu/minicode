@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { AtSign, Clock3, Folder, House, MoreHorizontal, Settings } from "lucide-react";
+import { AtSign, Clock3, Folder, House, MoreHorizontal } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useAppStore } from "../stores";
 import { openAutomations } from "../lib/automations-navigation";
@@ -7,6 +7,8 @@ import { ContextMenu } from "../components/ContextMenu";
 import { openPreferredWebLink } from "../lib/open-preferred-target";
 import { desktop, type DesktopPetState } from "../desktop/runtime";
 import { SourcePetIcon } from "../pets/SourcePetIcon";
+import { MenuSourceIcon } from "../lib/menu-source-icons";
+import { formatShortcut } from "../lib/keyboard-shortcuts";
 import { pushToast } from "../overlays/ToastContainer";
 
 export function NavigationRail() {
@@ -16,6 +18,7 @@ export function NavigationRail() {
   const marketplaceOpen = useAppStore((state) => state.skillsMarketplaceOpen);
   const appMode = useAppStore((state) => state.appMode);
   const projectsOpen = useAppStore((state) => state.projectsOpen);
+  const settingsShortcut = useAppStore(state => state.shortcutBindings.settings);
   const [moreMenu, setMoreMenu] = useState<{ x: number; y: number } | null>(null);
   const [settingsMenu, setSettingsMenu] = useState<{ x: number; y: number } | null>(null);
   const pets = desktop()?.pets;
@@ -63,15 +66,15 @@ export function NavigationRail() {
     <button type="button" title={tr("打开个人资料菜单")} aria-label={tr("打开个人资料菜单")} className="mc-navigation-rail-settings" aria-haspopup="menu" aria-expanded={Boolean(settingsMenu)} aria-current={settingsOpen && settingsTab !== "scheduler" ? "page" : undefined} onClick={event => {
       const bounds = event.currentTarget.getBoundingClientRect(); setMoreMenu(null);
       setSettingsMenu(settingsMenu ? null : {x:bounds.right+4,y:bounds.bottom-120});
-    }}><Settings /></button>
+    }}><MenuSourceIcon kind="settings" /></button>
     {settingsMenu && <ContextMenu position={settingsMenu} onClose={()=>setSettingsMenu(null)} items={[
       ...(pets && petState ? [{ label: tr(petState.miniOpen ? "隐藏虚拟宠物" : "显示虚拟宠物"), icon: <SourcePetIcon active={petState.miniOpen} />,
         onClick: () => { void pets.update({ petVisible: !petState.miniOpen }).catch(error => pushToast(String(error), "error")); } }] : []),
-      {label:tr("设置"),icon:<Settings size={15} />,onClick:()=>showSettings("general")},
-      {label:tr("帮助"),submenu:[
-        {label:tr("新增内容"),onClick:()=>{void openPreferredWebLink("https://developers.openai.com/codex/changelog");}},
-        {label:tr("键盘快捷键"),onClick:()=>useAppStore.getState().toggleShortcutsHelp()},
-        {label:tr("使用指南"),onClick:()=>{void openPreferredWebLink("https://learn.chatgpt.com/docs/quickstart");}},
+      {label:tr("设置"),icon:<MenuSourceIcon kind="settings" />,shortcut:formatShortcut(settingsShortcut),onClick:()=>showSettings("general")},
+      {label:tr("帮助"),icon:<MenuSourceIcon kind="help" />,alignToParentBottom:true,submenu:[
+        {label:tr("新增内容"),icon:<MenuSourceIcon kind="whats-new" />,onClick:()=>{void openPreferredWebLink("https://developers.openai.com/codex/changelog");}},
+        {label:tr("键盘快捷键"),icon:<MenuSourceIcon kind="shortcuts" />,onClick:()=>useAppStore.getState().toggleShortcutsHelp()},
+        {label:tr("使用指南"),icon:<MenuSourceIcon kind="guide" />,onClick:()=>{void openPreferredWebLink("https://learn.chatgpt.com/docs/quickstart");}},
       ]},
     ]} />}
   </nav>;

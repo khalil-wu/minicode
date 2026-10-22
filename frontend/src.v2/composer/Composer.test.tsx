@@ -1160,13 +1160,13 @@ describe("Composer goal bar", () => {
     render(<Composer />);
     mocks.sendClientCommand.mockClear();
 
-    fireEvent.click(screen.getByRole("button", { name: "Stop" }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Stop" })));
 
-    expect(mocks.sendClientCommand).toHaveBeenCalledWith({
+    expect(mocks.sendClientCommandAwaitResult).toHaveBeenCalledWith({
       type: "interrupt",
       conversation_id: "conv-streaming-stop",
       message_id: "assistant-running",
-    });
+    }, "interrupt", { silent: true });
     expect(useAppStore.getState().isStreaming).toBe(true);
   });
 });

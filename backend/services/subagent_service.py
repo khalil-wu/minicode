@@ -142,9 +142,11 @@ def project_subagent_transcript_events(events: list[dict[str, Any]]) -> list[dic
             public_payload = {key: payload[key] for key in ("kind", "item_id", "source", "status", "visibility") if key in payload}
             public_payload.update(transcript_only=True, content=public_text(payload.get("content"), max_chars=262_144))
         elif event_type == "system" and payload.get("lifecycle") == "provider_progress":
-            if payload.get("provider_state") != "failed" and not payload.get("error_message"):
+            if (payload.get("visibility") not in {"timeline", "compact"}
+                    or payload.get("provider_state") not in {"reconnecting", "failed"}
+                    or not payload.get("error_message")):
                 continue
-            public_payload = {key: payload[key] for key in ("lifecycle", "operation_id", "provider_span_id", "provider_state", "retry_attempt", "max_retries", "retry_after_ms") if key in payload}
+            public_payload = {key: payload[key] for key in ("lifecycle", "visibility", "operation_id", "provider_span_id", "provider_state", "retry_attempt", "max_retries", "retry_after_ms") if key in payload}
             for key in ("message", "summary", "detail", "error_message"):
                 if key in payload:
                     public_payload[key] = public_text(payload[key], max_chars=12_000)
@@ -442,7 +444,8 @@ def build_subagent_transcript_messages(
         if event_type == "system" and payload.get("lifecycle") == "provider_progress":
             provider_state = str(payload.get("provider_state") or payload.get("providerState") or "")
             error = public_text(payload.get("error_message"), max_chars=12_000).strip()
-            if provider_state != "failed" and not error:
+            if (payload.get("visibility") not in {"timeline", "compact"}
+                    or provider_state not in {"reconnecting", "failed"} or not error):
                 continue
             message = public_text(payload.get("message") or payload.get("summary"), max_chars=12_000).strip()
             source_id = str(payload.get("operation_id") or payload.get("id") or event_id)
@@ -453,8 +456,8 @@ def build_subagent_transcript_messages(
                 "type": "progress", "id": f"{source_id}:error:{span_id}:{provider_state}:{retry}",
                 "operationId": source_id, "stage": "status", "phase": "recover",
                 "status": "failed" if provider_state == "failed" else "info",
-                "message": message, "visibility": "timeline",
-                "providerState": provider_state, "errorMessage": error or message,
+                "message": message, "visibility": payload["visibility"],
+                "providerState": provider_state, "errorMessage": error,
                 "detail": public_text(payload.get("detail"), max_chars=12_000),
                 "retryAttempt": retry, "maxRetries": int(payload.get("max_retries") or 0),
                 "retryAfterMs": int(payload.get("retry_after_ms") or 0), "timestamp": timestamp,

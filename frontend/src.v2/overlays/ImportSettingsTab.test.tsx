@@ -5,6 +5,8 @@ import { useAppStore } from "../stores";
 import { ImportSettingsTab } from "./ImportSettingsTab";
 
 const send = vi.hoisted(() => vi.fn());
+const openPreferredFile = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock("../lib/open-preferred-target", () => ({ openPreferredFile }));
 const runtime = vi.hoisted(() => {
   const value = { apiBaseUrl: "http://127.0.0.1:9187", wsBaseUrl: "ws://127.0.0.1:9187", runtimeToken: "isolated-import-runtime-token" };
   vi.stubGlobal("__MINICODE_RUNTIME__", value);
@@ -46,6 +48,62 @@ beforeEach(() => {
   }));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it("opens the General row's real two-step import and keeps no-data and hidden states truthful", async () => {
+  const view = render(<ImportSettingsTab variant="general-row" active={false} />);
+  expect(fetch).not.toHaveBeenCalled();
+  view.rerender(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
+  expect(screen.getByRole("dialog", { name: "从其他 AI 应用导入" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "继续" }));
+  expect(screen.getByRole("dialog", { name: "选择要导入的内容" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(selection).toEqual([]);
+  expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
+  await waitFor(() => expect(screen.getByRole("button", { name: "导入", exact: true })).toHaveProperty("disabled", false));
+  detectedItems = [];
+  view.rerender(<ImportSettingsTab variant="general-row" active={false} />);
+  view.rerender(<ImportSettingsTab variant="general-row" />);
+  expect(await screen.findByRole("button", { name: "未检测到数据" })).toHaveProperty("disabled", true);
+});
+
+it("shows actual completed result files and opens only a successful known file through the existing file action", async () => {
+  imported = true; selection = ["CLAUDE.md"];
+  useAppStore.setState({ settingsOpen: true });
+  render(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看导入的文件" }));
+  const dialog = screen.getByRole("dialog", { name: "已导入外部智能体配置" });
+  const path = within(dialog).getByRole("link", { name: "C:/target/CLAUDE.md" });
+  expect(within(dialog).getByText("用户配置")).toBeTruthy();
+  fireEvent.click(path);
+  expect(openPreferredFile).toHaveBeenCalledExactlyOnceWith("C:/target/CLAUDE.md");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/project", draft: "Keep the current chat draft" });
+});
+
+it("keeps skipped and failed history visible without labelling it as an imported setup or offering nonexistent files", async () => {
+  imported = true;
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  vi.mocked(fetch).mockImplementation(async (input, init) => {
+    const response = await fetcher(input, init);
+    if (new URL(String(input)).pathname !== "/api/settings/import" || init?.method !== "GET") return response;
+    const current = await response.json();
+    current.history = [{ id: "failed-import", completed_at: "2026-10-22T00:00:00Z", automatic: false, results: [
+      { ...item("CLAUDE.md", "instructions"), status: "skipped", message: "Destination contains local changes" },
+      { ...item("failed-command.md", "commands"), status: "error", message: "Actual write error" },
+    ] }];
+    return Response.json(current);
+  });
+  render(<ImportSettingsTab variant="general-row" />);
+  fireEvent.click(await screen.findByRole("button", { name: "查看导入的文件" }));
+  const dialog = screen.getByRole("dialog", { name: "导入失败" });
+  expect(screen.queryByText("已导入智能体配置")).toBeNull();
+  expect(within(dialog).getByText("已跳过")).toBeTruthy();
+  expect(within(dialog).getByText("Destination contains local changes")).toBeTruthy();
+  expect(within(dialog).getByText("Actual write error")).toBeTruthy();
+  expect(within(dialog).queryByRole("link")).toBeNull();
+  expect(openPreferredFile).not.toHaveBeenCalled();
+});
 
 it("detects compatible local sources and sends only selected detected identities to the real import route", async () => {
   render(<ImportSettingsTab />);

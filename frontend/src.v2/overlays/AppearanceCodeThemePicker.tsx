@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { ContextMenu } from "../components/ContextMenu";
-import { ChevronDown } from "../lib/icons";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import { useI18n } from "../i18n";
 import type { AppearanceColorValues, AppearanceVariant } from "../lib/appearance-colors";
 import { codeThemesForVariant, loadCodeThemeSeed, type CodeThemeId } from "../lib/code-themes";
@@ -61,16 +61,24 @@ export function AppearanceCodeThemePicker({ variant, colors, value, onSelect }: 
   const themeItem = (theme: typeof themes[number]) => ({ label: theme.label,
     icon: <CodeThemePreview id={theme.id} label={theme.label} variant={variant} colors={colors} />,
     checked: value === theme.id, checkType: "radio" as const, onClick: () => { void select(theme.id); } });
-  return <div className="mc-select-menu settings-select appearance-code-theme-picker">
+  return <div className="mc-select-menu settings-select appearance-code-theme-picker" data-open={Boolean(position)}>
     <button ref={trigger} type="button" className="mc-select-trigger" aria-label={t("{variant}代码主题", { variant: variantLabel })}
       aria-haspopup="menu" aria-expanded={Boolean(position)} onClick={() => {
         const bounds = trigger.current!.getBoundingClientRect();
         setPosition(position ? null : { x: bounds.right - 220, y: bounds.bottom + 4 });
+      }} onKeyDown={event => {
+        if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+        event.preventDefault();
+        const bounds = trigger.current!.getBoundingClientRect();
+        setPosition({ x: bounds.right - 220, y: bounds.bottom + 4 });
       }}>
-      <CodeThemePreview id={value} label={themes.find(theme => theme.id === value)!.label} variant={variant} colors={colors} />
-      <span className="mc-select-trigger-label">{themes.find(theme => theme.id === value)!.label}</span><ChevronDown size={14} />
+      <span className="mc-select-trigger-value">
+        <CodeThemePreview id={value} label={themes.find(theme => theme.id === value)!.label} variant={variant} colors={colors} />
+        <span className="mc-select-trigger-label">{themes.find(theme => theme.id === value)!.label}</span>
+      </span>
+      <SettingsSourceIcon icon="chevronDown" size={14} />
     </button>
-    {position && <ContextMenu position={position} onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
+    {position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-code-theme-menu" onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
       ariaLabel={t("{variant}代码主题", { variant: variantLabel })} items={[
         themeItem(themes.find(theme => theme.id === "codex")!),
         { label: t("Codex 主题"), submenuMaxHeight: 480, submenu: themes.filter(theme => theme.id !== "codex").map(themeItem) },

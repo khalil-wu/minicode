@@ -806,6 +806,18 @@
   cursor: not-allowed;
 }
 
+.composer-send-btn:disabled[aria-busy="true"] {
+  background: var(--text-primary) !important;
+  color: var(--surface-base) !important;
+  opacity: 0.5 !important;
+  cursor: default;
+}
+
+.composer-stop-current-btn[aria-busy="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* Per-message stop chip (distinct from the send button, polish does not
  * style it). */
 .composer-stop-current-btn {

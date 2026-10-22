@@ -23,6 +23,7 @@ import "./goal.css";
 
 interface Props {
   sendState: SendButtonState;
+  isStopping?: boolean;
   onSend: () => void | Promise<void>;
   onStop?: () => void;
   compact?: boolean;
@@ -58,7 +59,7 @@ const KNOWN_EFFORT_OPTIONS: Record<string, { label: TranslationKey | "Ultra"; de
   ultra: { label: "Ultra", description: "Ultra 推理强度" },
 };
 
-export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, minimal = false }: Props) => {
+export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, compact = false, minimal = false }: Props) => {
   const { t: tr } = useI18n();
   const { preferences } = useDesktopPreferences();
   const permissionMode = useAppStore((s) => s.permissionMode);
@@ -631,17 +632,20 @@ export const FooterRow = memo(({ sendState, onSend, onStop, compact = false, min
         </div>
 
         {sendState === "queue" && onStop ? (
-          <button
+          <Button
             type="button"
+            variant="ghost"
+            loading={isStopping}
+            aria-disabled={isStopping || undefined}
             onClick={onStop}
              title={tr("停止当前回复")}
              aria-label={tr("停止当前回复")}
             className="composer-stop-current-btn w-7 h-7 border-0 inline-flex items-center justify-center"
-          >
-            <Square size={14} fill="currentColor" className="anim-icon-swap" />
-          </button>
+            style={{ padding: 0 }}
+            icon={<Square size={14} fill="currentColor" className="anim-icon-swap" />}
+          />
         ) : null}
-         <RealtimeComposerActions sendButton={<SendIconBtn sendState={sendState} onSend={onSend} disabledReason={disabledReason} />} />
+         <RealtimeComposerActions sendButton={<SendIconBtn sendState={sendState} isStopping={isStopping} onSend={onSend} disabledReason={disabledReason} />} />
       </div>
     </div>
   );
@@ -1002,9 +1006,10 @@ const dropdownItem: React.CSSProperties = {
   borderRadius: "var(--radius-sm, 6px)",
 };
 
-const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: SendButtonState; onSend: () => void; disabledReason?: string }) => {
+const SendIconBtn = memo(({ sendState, isStopping, onSend, disabledReason }: { sendState: SendButtonState; isStopping: boolean; onSend: () => void; disabledReason?: string }) => {
   const { t: tr } = useI18n();
   const disabled = sendState === "disabled";
+  const loading = sendState === "sending" || sendState === "stop" && isStopping;
   const label = sendState === "stop"
     ? tr("停止当前回复")
     : sendState === "queue"
@@ -1013,14 +1018,15 @@ const SendIconBtn = memo(({ sendState, onSend, disabledReason }: { sendState: Se
          ? tr("连接恢复后发送")
          : tr("发送");
   return (
-    <button onClick={onSend} disabled={disabled} title={disabledReason || label} aria-label={label} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}>
-      {sendState === "stop" ? <Square size={14} fill="currentColor" className="anim-icon-swap" /> : <ArrowUp size={16} strokeWidth={1.8} className="anim-icon-swap" />}
-    </button>
+    <Button variant="ghost" onClick={onSend} disabled={disabled} loading={loading} aria-disabled={disabled || loading || undefined}
+      title={disabledReason || label} aria-label={label} className="btn-send composer-send-btn w-7 h-7 border-0 inline-flex items-center justify-center" style={sendIconButtonStyle(sendState, disabled)}
+      icon={sendState === "stop" ? <Square size={14} fill="currentColor" className="anim-icon-swap" /> : <ArrowUp size={16} strokeWidth={1.8} className="anim-icon-swap" />} />
   );
 });
 SendIconBtn.displayName = "SendIconBtn";
 
 const sendIconButtonStyle = (sendState: SendButtonState, disabled: boolean): React.CSSProperties => ({
+  padding: 0,
   borderRadius: "var(--radius-full)",
   background: sendState === "stop" ? "var(--text-primary)" : disabled ? "var(--surface-active)" : "var(--accent-primary)",
   color: disabled ? "var(--text-muted)" : "var(--text-on-accent)",

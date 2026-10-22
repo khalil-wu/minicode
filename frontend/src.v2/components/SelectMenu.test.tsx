@@ -147,6 +147,41 @@ describe("SelectMenu", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
+  it("typeaheads through actual enabled labels, cycles repeated letters and uses the hovered option for keyboard navigation", async () => {
+    const change = vi.fn();
+    render(<SelectMenu ariaLabel="Open target" value="alpha" onValueChange={change}>
+      <option value="alpha">Alpha</option><option value="archive">Archive</option>
+      <optgroup label="Unavailable" disabled><option value="disabled-beta">Beta unavailable</option></optgroup>
+      <option value="beta">Beta</option><option value="bravo">Bravo</option>
+    </SelectMenu>);
+    fireEvent.click(screen.getByRole("button", { name: "Open target，当前：Alpha" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "Alpha" })));
+    fireEvent.keyDown(document.activeElement!, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Beta", exact: true }));
+    fireEvent.keyDown(document.activeElement!, { key: "b" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Bravo" }));
+    fireEvent.mouseMove(screen.getByRole("option", { name: "Archive" }));
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Archive" }));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Beta", exact: true }));
+    fireEvent.keyDown(document.activeElement!, { key: "Escape" });
+    expect(change).not.toHaveBeenCalled();
+  });
+
+  it("matches a multiword label incrementally without selecting on its space", async () => {
+    const change = vi.fn();
+    render(<SelectMenu ariaLabel="Target" value="file" onValueChange={change}>
+      <option value="file">File Explorer</option><option value="visual-code">Visual Code</option><option value="visual-studio">Visual Studio</option>
+    </SelectMenu>);
+    fireEvent.click(screen.getByRole("button", { name: "Target，当前：File Explorer" }));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("option", { name: "File Explorer" })));
+    for (const key of "visual s") fireEvent.keyDown(document.activeElement!, { key });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "Visual Studio" }));
+    expect(change).not.toHaveBeenCalled();
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(change).toHaveBeenCalledExactlyOnceWith("visual-studio");
+  });
+
   it("closes when focus leaves or the select becomes disabled", async () => {
     const view = render(<><ControlledSelect /><button>Next</button></>);
     fireEvent.click(screen.getByRole("button", { name: "推理强度，当前：自动" }));

@@ -41,6 +41,7 @@ import { purifyToolErrorText } from "./errorMessages";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import { canonicalArtifactKind, isExecutionResultArtifact, recordHasImageArtifact } from "../lib/artifact-projection";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
+import { isProviderStreamError } from "../lib/provider-progress";
 
 type CommittedCellState = Exclude<
   HistoryCellState,
@@ -350,6 +351,12 @@ const projectProcessItem = (
   item: TurnActivityItem,
   message: ChatMessage,
 ): ProcessItemProjection => {
+  const providerFailure = item.progress?.at(-1);
+  if (providerFailure?.providerState === "failed" && providerFailure.errorMessage?.trim()
+    && (providerFailure.visibility === "timeline" || providerFailure.visibility === "compact")) return { cells: [{ kind: "error", id: item.id,
+      title: "请求失败", message: providerFailure.errorMessage, source: "agent", recoverable: false,
+      rawError: providerFailure.detail,
+      createdAt: providerFailure.timestamp }] };
   if (item.kind === "guardianReview" && item.review) return { cells: [{ kind: "guardian_review", id: item.id,
     review: item.review, status: item.status === "running" ? "running" : "done", createdAt: item.startedAt ?? message.timestamp,
     segment: item.segment, segmentClosed: item.segmentClosed }] };
@@ -431,6 +438,7 @@ const processCells = (
     entries.set(item.id, { item, messageId: message.id, timestamp: message.timestamp, workspaceRoot, images, projection });
     processItemCache.set(anchor, entries);
     cells.push(...projection.cells.map(cell => {
+      if (cell.kind === "error" && cell.source === "agent") return { ...cell, recoverable: message.failureRecoverable ?? false };
       if (!item.automaticApprovalReviews || (cell.kind !== "exec" && cell.kind !== "activity")) return cell;
       const guardianDeclined = item.records?.some(record => record.errorKind === "approval_rejected")
         && item.automaticApprovalReviews.some(review => review.status === "denied");
@@ -774,8 +782,8 @@ function buildTurn(
     // failure unless it carries that exact terminal message.
     && !committedCells.some((cell) => {
       const failure = assistantMessage.failureMessage?.trim();
+      if (cell.kind === "error") return !failure || cell.message.trim() === failure;
       if (!failure) return false;
-      if (cell.kind === "error") return cell.message.trim() === failure;
       if (cell.kind === "exec" && cell.status === "failed") return cell.stderrFull?.trim() === failure || cell.stdoutFull?.trim() === failure;
       return cell.kind === "activity" && cell.status === "failed" && (
         cell.progress?.errorMessage?.trim() === failure
@@ -967,6 +975,8 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
       if (index === -1) return null;
       if (index !== undefined) replaceCell(index, { ...base.committedCells[index], content: block.content } as ThinkingCellState);
     } else if (kind === "progress" && block.type === "progress") {
+      // Several retry facts can project into one stable stream-error row.
+      if (isProviderStreamError(block)) return null;
       const index = positions.get(block.id);
       if (index === -1) return null;
       if (index === undefined && block.status === "failed" && block.errorMessage?.trim()) return null;

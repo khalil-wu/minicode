@@ -13,6 +13,8 @@ vi.mock("../overlays/DialogService", () => ({ showPrompt: mocks.prompt, showConf
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: mocks.toast }));
 vi.mock("../lib/clipboard", () => ({ copyText: mocks.copy }));
 
+const openSubmenu = (item: HTMLElement) => { item.focus(); fireEvent.keyDown(item, { key: "ArrowRight" }); };
+
 beforeEach(() => {
   vi.resetAllMocks();
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -42,7 +44,7 @@ it("renames the captured canonical conversation even if selection changes while 
 it("copies the actual captured chat as source Markdown and exposes no export-tree action", async () => {
   render(<ChatActionsButton />); open();
   expect(screen.queryByRole("menuitem", { name: "导出会话树" })).toBeNull();
-  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "复制" }));
+  openSubmenu(screen.getByRole("menuitem", { name: "复制" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "复制为 Markdown" }));
   await waitFor(() => expect(mocks.copy).toHaveBeenCalledWith("# Chat A\n\n> Inspect project A\n", "复制为 Markdown"));
   expect(mocks.send).not.toHaveBeenCalled();
@@ -84,17 +86,17 @@ it("submits blank rename values to the actual rename boundary rather than silent
 
 it("copies the source deeplink and working directory through the Copy submenu", () => {
   render(<ChatActionsButton />); open();
-  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "复制" }));
+  openSubmenu(screen.getByRole("menuitem", { name: "复制" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "复制深度链接" }));
   expect(mocks.copy).toHaveBeenCalledWith("minicode://conversation?conversation_id=A", "复制深度链接");
-  open(); fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "复制" }));
+  open(); openSubmenu(screen.getByRole("menuitem", { name: "复制" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "复制工作目录" }));
   expect(mocks.copy).toHaveBeenCalledWith("C:/A", "工作区路径");
 });
 
 it("uses the current full-history endpoint for Fork and lets the canonical switched event activate it", async () => {
   render(<ChatActionsButton />); open();
-  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "分叉" }));
+  openSubmenu(screen.getByRole("menuitem", { name: "分叉" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "创建聊天分支" }));
   await waitFor(() => expect(mocks.send).toHaveBeenCalledWith({ type: "context.fork", conversation_id: "A", workspace_root: "C:/A",
     message_id: "a-user", create_branch: false, activate: true }, "context.fork"));
@@ -105,7 +107,7 @@ it("uses the current full-history endpoint for Fork and lets the canonical switc
 it("presents the Work continuation labels and only exposes new-worktree Fork for a known repository", async () => {
   useAppStore.setState({ appMode: "cowork", conversations: [{ id: "A", title: "Worktree A", updatedAt: "today", workspaceRoot: "C:/repo", executionCwd: "C:/worktree", worktreePath: "C:/worktree", gitIsolated: true }] });
   render(<ChatActionsButton />); open();
-  fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "继续" }));
+  openSubmenu(screen.getByRole("menuitem", { name: "继续" }));
   expect(screen.getByRole("menuitem", { name: "在同一工作树中继续" })).toBeTruthy();
   fireEvent.click(screen.getByRole("menuitem", { name: "在新工作树中继续" }));
   await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: "context.fork", workspace_root: "C:/worktree", create_branch: true, activate: true }), "context.fork"));

@@ -590,7 +590,7 @@ def test_provider_stream_settlement_marks_eof_without_done_as_failed() -> None:
                 retry_budget_boundary=None,
                 budget_runtime=Budget(),
                 turn_kernel=kernel,
-                provider_attempt=object(),
+                provider_attempt=SimpleNamespace(span_id="provider-error"),
                 finish_reason="",
                 provider_stream_steered=False,
                 rebuild_context_and_retry=False,
@@ -675,7 +675,7 @@ def test_provider_error_uses_structured_429_and_retry_after_metadata_without_tur
                 state=SimpleNamespace(),
                 context_builder=SimpleNamespace(),
                 turn_kernel=turn_kernel,
-                provider_attempt=object(),
+                provider_attempt=SimpleNamespace(span_id="provider-error"),
                 stream_state=StreamAttemptState(),
                 stream_text=StreamTextState(iteration_id="iter:error"),
                 pending_tool_calls=[],
@@ -710,8 +710,10 @@ def test_provider_error_uses_structured_429_and_retry_after_metadata_without_tur
         "error_type": "api",
     }
     assert updates[0].type == "agent.progress"
-    assert updates[0].data["id"] == "provider:connection:iter:1"
-    assert updates[0].data["status"] == "running"
+    assert updates[0].data["id"] == "provider:connection:iter:1:error:provider-error:reconnecting"
+    assert updates[0].data["operation_id"] == "provider:connection:iter:1"
+    assert updates[0].data["status"] == "info"
+    assert updates[0].data["visibility"] == "timeline"
     assert updates[0].data["retry_attempt"] == 1
     assert updates[0].data["max_retries"] == 10
     assert updates[0].data["retry_after_ms"] == 7000
@@ -777,7 +779,7 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
                 state=SimpleNamespace(),
                 context_builder=SimpleNamespace(),
                 turn_kernel=TurnKernel(),
-                provider_attempt=object(),
+                provider_attempt=SimpleNamespace(span_id="provider-error"),
                 stream_state=StreamAttemptState(),
                 stream_text=StreamTextState(iteration_id="iter:error"),
                 pending_tool_calls=[],
@@ -802,8 +804,9 @@ def test_provider_error_retries_structured_525_instead_of_finishing(
     assert 0.18 <= sleeps[0] <= 0.22
     assert len(updates) == 2
     assert updates[0].type == "agent.progress"
-    assert updates[0].data["id"] == "provider:connection:iter:525"
-    assert updates[0].data["status"] == "running"
+    assert updates[0].data["id"] == "provider:connection:iter:525:error:provider-error:reconnecting"
+    assert updates[0].data["status"] == "info"
+    assert updates[0].data["visibility"] == "timeline"
     assert isinstance(updates[-1], ProviderErrorEventResult)
     assert updates[-1].action == "retry"
 
@@ -857,7 +860,7 @@ def test_provider_protocol_conversion_failure_is_fatal_and_never_enters_retry_bu
                 state=SimpleNamespace(),
                 context_builder=ContextBuilder(),
                 turn_kernel=kernel,
-                provider_attempt=object(),
+                provider_attempt=SimpleNamespace(span_id="provider-error"),
                 stream_state=StreamAttemptState(),
                 stream_text=SimpleNamespace(
                     full_text="",
@@ -940,7 +943,7 @@ def test_provider_retry_uses_stream_budget_instead_of_turn_recovery_budget() -> 
                 state=SimpleNamespace(),
                 context_builder=SimpleNamespace(),
                 turn_kernel=kernel,
-                provider_attempt=object(),
+                provider_attempt=SimpleNamespace(span_id="provider-error"),
                 stream_state=StreamAttemptState(),
                 stream_text=StreamTextState(iteration_id="iter:error"),
                 pending_tool_calls=[],

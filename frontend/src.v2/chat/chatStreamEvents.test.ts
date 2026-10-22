@@ -1597,26 +1597,27 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     });
   });
 
-  it("clears prompts owned by the terminal conversation", () => {
+  it("clears prompts owned by the terminal turn", () => {
+    const owner = { conversationId: "conv-stream", turnId: "turn-prompts", messageId: "assistant-stream" };
     useAppStore.setState({
-      pendingApproval: { requestId: "approval-done", conversationId: "conv-stream", toolName: "run_command", args: {} },
+      pendingApproval: { requestId: "approval-done", ...owner, toolName: "run_command", args: {} },
       approvalQueue: [
-        { requestId: "approval-done-queued", conversationId: "conv-stream", toolName: "write_file", args: {} },
+        { requestId: "approval-done-queued", ...owner, toolName: "write_file", args: {} },
         { requestId: "approval-other", conversationId: "conv-other", toolName: "read_file", args: {} },
       ],
-      pendingDiffReview: { requestId: "diff-done", conversationId: "conv-stream", diff: "patch" },
+      pendingDiffReview: { requestId: "diff-done", ...owner, diff: "patch" },
       diffReviewQueue: [
-        { requestId: "diff-done-queued", conversationId: "conv-stream", diff: "queued patch" },
+        { requestId: "diff-done-queued", ...owner, diff: "queued patch" },
         { requestId: "diff-other", conversationId: "conv-other", diff: "other patch" },
       ],
-      pendingAskUser: { requestId: "ask-done", conversationId: "conv-stream", question: "Continue?" },
+      pendingAskUser: { requestId: "ask-done", ...owner, question: "Continue?" },
       askUserQueue: [
-        { requestId: "ask-done-queued", conversationId: "conv-stream", question: "Still continue?" },
+        { requestId: "ask-done-queued", ...owner, question: "Still continue?" },
         { requestId: "ask-other", conversationId: "conv-other", question: "Other?" },
       ],
     });
 
-    handle({ type: "done", conversation_id: "conv-stream", message_id: "assistant-stream" } as ServerEvent);
+    handle({ type: "done", conversation_id: owner.conversationId, turn_id: owner.turnId, message_id: owner.messageId } as ServerEvent);
 
     const state = useAppStore.getState();
     expect(state.pendingApproval?.requestId).toBe("approval-other");

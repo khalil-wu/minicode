@@ -1,0 +1,44 @@
+# Desktop UI and lifecycle alignment — 2026-10-22
+
+Reference: current installed Codex Desktop 26.1016.6573.0 assets, recorded desktop screenshots, and `.tmp/codex-src` at `822e58cc3d666166c7446c5b1ea2e52f5d09594c`. Existing MiniCode screenshots are not acceptance evidence for this change. No local desktop automation, application reload, user-profile cleanup, or draft migration is part of this work.
+
+## Confirmed differences
+
+| Trigger | Incorrect behavior | Change |
+| --- | --- | --- |
+| Appearance → Theme | A two-column trigger contains three independent children; its arrow wraps onto a second line. | Wrap preview and label in the existing value slot; retain the reference's 176 CSS-pixel width and actual source glyphs. |
+| First use without a saved theme | Theme picker and chat syntax highlighting disagree with the reference's ChatGPT default. | Use the Codex theme only when no saved selection exists. Preserve saved themes, colors, fonts and editor defaults. |
+| Model stream fails and retries | Actual failures are emitted as debug liveness, filtered from the main transcript, and overwritten by subsequent request state. | Emit a public error fact with the original request operation and attempt identity; retain it through live stream restore and durable turn persistence. |
+| Consecutive model retries | Generic activity rendering lacks the reference's Wi-Fi item and numbered retry coalescing. | Use the source Wi-Fi asset, original error disclosure and rolling count; adjacent numbered errors retain the first row's identity and latest failure details. |
+| Terminal model failure | Red generic heading differs from the reference's standalone neutral notice. | Render agent/network terminal errors using a neutral notice; keep the actual failure message. |
+| Equal approval IDs in different conversations, turns or tasks | Queue deduplication, late responses, errors and cancellation can affect another request. | Consume the original conversation/turn/message/task owner throughout the queue and response chain. |
+| Submit approval → switch away → return | Component-local submitting state disappears and enables duplicate responses. | Consume the existing submitted/error state from the owning queue; preserve drafts and response failures. |
+| Send A → switch to B before admission | A single sending boolean both lacks a loading projection and blocks an unrelated conversation. | Keep the original submission operation per composer owner, release it only from its own acknowledgement/failure, and reuse the existing button loading state. |
+| Stop → await actual cancellation result | The button remains clickable and does not display the actual pending interrupt. | Await the existing fenced interrupt command result; retain the pending conversation until its real result and keep the original button and draft. |
+| Child work record → context recovery / history reload | The bridge and history/delta readers discard debug visibility and publish internal liveness as errors. | Preserve raw journal facts; only public error facts enter the public projection. Public terminal failures reuse the neutral error notice and exact-message deduplication. |
+| Shared submenu interactions | Disabled rows can open children; hover timing, diagonal movement and keyboard focus differ. | Match the actual 200 ms flyout consumer, disabled behavior, 300 ms pointer grace and keyboard navigation through five levels. |
+| General → Import | Forced standalone navigation differs from the recorded two-step General entry. | Reuse real detection, provider/item selection and import results; successful file results use the existing opener. |
+| Theme import awaits font loading/storage | No pending boundary; a superseded write can be reported as successful. | Carry the actual write result to the dialog; disable the in-flight controls and retain rejected/superseded input. |
+
+Additional audits and exact source excerpts are in `output/ui-flow-alignment-20261022/{chat,settings,shell-menus}.md`. Their unverified state columns are intentional: component contracts do not prove every real page's visual state.
+
+## Verification boundaries
+
+- Targeted backend retry/transport/accounting tests passed before the subsequent child-visibility work.
+- The first frontend batch passed: 20 files, 337 tests (retry projection, actual disclosures, shared menus, affected shell and diff consumers).
+- Approval/event tests initially exposed two invalid fixtures; corrected real wire fields and owner identities passed in the affected 2 files / 61 tests. Production ownership matching was not weakened.
+- Settings tests initially exposed five assertions that treated the first HTTP request as a mutation. General now performs a real import-status GET. Endpoint/method-specific assertions and the subsequent actual-commit changes passed in the final affected 7-file / 141-test batch (includes retry projection checks).
+- Send/stop and admission checks passed in 4 files / 188 tests. The child visibility and terminal-error additions passed in 2 targeted backend cases and 2 frontend cases. These scopes overlap other runs and must not be summed into a project test total.
+- Final TypeScript/Vite production build passed after the public-error evidence fix; existing hashed assets were retained for the user's open renderer. Protocol/kernel boundary checks passed. CI must independently validate the committed build and capture its actual rendered states.
+
+`frontend/scripts/audit-ui-alignment.mjs` runs only in isolated CI. It launches the production Electron desktop and backend against a controlled model endpoint, triggers two real HTTP failures, verifies retry projection, switches conversations, reloads the renderer, verifies drafts and completion, then exhausts a separate real retry budget and captures its terminal notice, Theme and current settings-page baselines. It does not inject transcript/store fixtures. Public product actions initiate conversation/settings navigation. Settings-page baselines alone are not full visual parity acceptance. Captures record viewport/DPR and exclude native OS decorations.
+
+## Remaining acceptance work
+
+- Inspect the final current-build captures against the corresponding reference, including normal, hover, focus, disabled, pending, failure, nested-menu and narrow-window states. Missing reference/current captures remain unverified.
+- Configuration's User/Admin scope still lacks the complete effective-versus-original layer projection; adding a frontend-only scope selector would misrepresent the backend.
+- Source's feature-gated guided diagnostics (`d$e → p$e → GQe`) are not fully implemented. Public original failure details remain readable in the existing error body and raw records; no diagnostic button or successful diagnosis is fabricated.
+- Account-owned accent choices remain unavailable under the project's explicit account-service exclusion. Local Custom, imported colors and saved typography remain functional; no theme-seed reset is mislabeled as an account default.
+- The current source checkout and installed desktop are different releases. A source warning notification is not sufficient evidence to invent a desktop control or visible warning; its actual installed desktop consumer must also be checked.
+
+This record is not a completion percentage and does not certify all pages or all multi-level states.

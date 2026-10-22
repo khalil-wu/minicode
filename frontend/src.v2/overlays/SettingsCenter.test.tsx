@@ -88,6 +88,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
       if (path === "/api/plugins") return new Response(JSON.stringify({ plugins: [] }), { status: 200 });
       if (path === "/api/plugins/marketplaces") return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
       if (path === "/api/settings/computer-use") return new Response(JSON.stringify(computerUseFixture.data), { status: 200 });
+      if (path === "/api/settings/import/detect") return Response.json({ detection_id: "empty-general", items: [], issues: [] });
+      if (path === "/api/settings/import") return Response.json({ providers: [], history: [], sync: { enabled: false, item_types: [] }, connected_provider_ids: [], item_types: [], running_import: null });
       throw new Error(`Unexpected settings fixture request: ${input}`);
     }));
     skillsSettingsRequest.mockReset();
@@ -484,7 +486,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("radio", { name: "使用规划模式" })).toBeNull();
   });
 
-  it("opens the standalone Import navigation and search results while preserving the existing workspace draft", async () => {
+  it("opens General import and keeps management search available while preserving the existing workspace draft", async () => {
     useAppStore.setState({ workingDirectory: "C:/existing-project", recentWorkspaces: [], draft: "Unsaved workspace draft" });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
@@ -500,15 +502,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<SettingsCenter />);
     const navigation = screen.getByRole("navigation", { name: "设置分类" });
-    const importNavigation = within(navigation).getByRole("button", { name: "导入", exact: true });
-    expect(screen.getAllByRole("button", { name: "导入", exact: true })).toEqual([importNavigation]);
-    expect(screen.queryByText("从其他 AI 应用导入")).toBeNull();
+    expect(within(navigation).queryByRole("button", { name: "导入", exact: true })).toBeNull();
+    expect(screen.getByText("从其他 AI 应用导入")).toBeTruthy();
     expect(within(navigation).queryByRole("button", { name: "连接", exact: true })).toBeNull();
-    expect(fetchMock).not.toHaveBeenCalled();
-    fireEvent.click(importNavigation);
-    expect(useAppStore.getState().settingsTab).toBe("import");
-    expect(screen.getByRole("heading", { name: "导入", level: 2 })).toBeTruthy();
-    fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+    fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
+    expect(useAppStore.getState().settingsTab).toBe("general");
     expect(screen.getByRole("switch", { name: "Claude Code" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     expect(screen.getByRole("dialog", { name: "选择要导入的内容" })).toBeTruthy();
@@ -1289,8 +1287,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.change(displayNameInput, { target: { value: "Work gateway" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")).toBe(true));
+    const saveCall = fetchMock.mock.calls.find(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")!;
+    const body = JSON.parse(String(saveCall[1]!.body));
     expect(body.custom.display_name).toBe("Work gateway");
     expect(body.custom.api_key).toBeUndefined();
     expect(body.custom.wire_api).toBe("responses");
@@ -1509,8 +1508,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByText("模型能力")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")).toBe(true));
+    const saveCall = fetchMock.mock.calls.find(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")!;
+    const body = JSON.parse(String(saveCall[1]!.body));
     expect(body.provider).toBeUndefined();
     expect(body.custom.display_name).toBe("Work gateway");
     expect(body.custom.base_url).toBe("https://api.bbe.to/v1");
@@ -1553,8 +1553,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.click(screen.getByRole("button", { name: /删除已保存的提供商 OpenRouter/i }));
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const [url, init] = fetchMock.mock.calls[0];
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/llm/provider-history" && init?.method === "DELETE")).toBe(true));
+    const [url, init] = fetchMock.mock.calls.find(([input, init]) => new URL(String(input)).pathname === "/api/llm/provider-history" && init?.method === "DELETE")!;
     expect(String(url)).toContain("/api/llm/provider-history");
     expect(init?.method).toBe("DELETE");
     expect(JSON.parse(String(init?.body))).toMatchObject({
@@ -1621,8 +1621,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.change(screen.getByLabelText("API 格式"), { target: { value: "chat" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")).toBe(true));
+    const saveCall = fetchMock.mock.calls.find(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")!;
+    const body = JSON.parse(String(saveCall[1]!.body));
     expect(body.openai.wire_api).toBe("chat");
     expect(sendClientCommand).not.toHaveBeenCalledWith({
       type: "runtime.capabilities.inspect",
@@ -1631,9 +1632,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("discovers models without running the auth check", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("/api/llm/models/refresh")) {
+      if (url.includes("/api/llm/models/refresh") && init?.method === "POST") {
         return new Response(JSON.stringify({
           provider: "custom",
           provider_id: "deepseek",
@@ -1661,7 +1662,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(discoveredModelSelect.tagName).toBe("SELECT");
     fireEvent.change(discoveredModelSelect, { target: { value: "deepseek-v4-pro" } });
     expect(screen.getByDisplayValue("deepseek-v4-pro")).toBeTruthy();
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/llm/models/refresh");
+    expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/llm/models/refresh" && init?.method === "POST")).toBe(true);
     expect(useAppStore.getState().availableModels).toEqual(["deepseek-v4-flash"]);
   });
 

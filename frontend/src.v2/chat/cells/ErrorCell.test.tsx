@@ -20,6 +20,13 @@ const base = (overrides: Partial<ErrorCellState> = {}): ErrorCellState => ({
 });
 
 describe("ErrorCell", () => {
+  it("renders actual terminal model failures as the Source neutral standalone notice", () => {
+    const view = render(<ErrorCell cell={base({ source: "agent", title: "请求失败", message: "The server is currently busy." })} />);
+    expect(screen.getByRole("alert").className).toContain("error-cell-notice");
+    expect(view.container.querySelector(".error-cell-danger")).toBeNull();
+    expect(view.container.querySelector(".error-cell-header")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("The server is currently busy.");
+  });
   it("strips model-facing <tool_use_error> / <error> markup from the message", () => {
     render(
       <ErrorCell

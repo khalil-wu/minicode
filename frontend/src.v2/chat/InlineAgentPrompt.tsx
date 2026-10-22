@@ -30,7 +30,7 @@ import type {
   PendingSubagentPlanReview,
   SubagentState,
 } from "../stores/types";
-import { pendingPromptTargetsConversation } from "../lib/pending-prompts";
+import { pendingPromptKey, pendingPromptMatchesOwner, pendingPromptTargetsConversation } from "../lib/pending-prompts";
 import { promptDraftKey } from "../stores/prompt-drafts";
 import { summarizeArgs, humanizeKey } from "./toolUtils";
 import { readableToolLabel } from "./toolDisplayName";
@@ -88,29 +88,30 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
 
   return (
     <div className="inline-agent-prompt" aria-label={tr("Agent 正在等待输入")}>
-      {visibleDiffReview && <DiffApprovalCard key={visibleDiffReview.requestId} request={visibleDiffReview} />}
-      {visiblePlanApproval && <PlanApprovalCard key={visiblePlanApproval.requestId} request={visiblePlanApproval} />}
+      {visibleDiffReview && <DiffApprovalCard key={pendingPromptKey(visibleDiffReview)} request={visibleDiffReview} />}
+      {visiblePlanApproval && <PlanApprovalCard key={pendingPromptKey(visiblePlanApproval)} request={visiblePlanApproval} />}
       {visibleGenericApproval && (visibleGenericApproval.permissionRequest
-        ? <PermissionsApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} />
-        : visibleGenericApproval.networkApprovalContext ? <NetworkApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} />
-        : <ToolApprovalCard key={visibleGenericApproval.requestId} request={visibleGenericApproval} queue={queuedGenericApprovals} />)}
+        ? <PermissionsApprovalCard key={pendingPromptKey(visibleGenericApproval)} request={visibleGenericApproval} />
+        : visibleGenericApproval.networkApprovalContext ? <NetworkApprovalCard key={pendingPromptKey(visibleGenericApproval)} request={visibleGenericApproval} />
+        : <ToolApprovalCard key={pendingPromptKey(visibleGenericApproval)} request={visibleGenericApproval} queue={queuedGenericApprovals} />)}
       {visibleAskUser && (visibleAskUser.planReview
-        ? <SubagentPlanReviewCard key={visibleAskUser.requestId} request={visibleAskUser} review={visibleAskUser.planReview} />
+        ? <SubagentPlanReviewCard key={pendingPromptKey(visibleAskUser)} request={visibleAskUser} review={visibleAskUser.planReview} />
         : visibleAskUser.requestUserInput ? <RequestUserInputCard key={JSON.stringify([visibleAskUser.conversationId, visibleAskUser.requestId,
             visibleAskUser.turnId, visibleAskUser.messageId, visibleAskUser.taskId])}
             request={{ ...visibleAskUser, requestUserInput: visibleAskUser.requestUserInput }} />
         : isComputerUseApproval(visibleAskUser) ? <ComputerUseApprovalCard key={JSON.stringify([visibleAskUser.conversationId,
             visibleAskUser.requestId, visibleAskUser.turnId, visibleAskUser.messageId, visibleAskUser.taskId])} request={visibleAskUser} />
-        : visibleAskUser.elicitation?.mode === "url" ? <McpUrlElicitationCard key={`${visibleAskUser.conversationId}:${visibleAskUser.requestId}`}
+        : visibleAskUser.elicitation?.mode === "url" ? <McpUrlElicitationCard key={pendingPromptKey(visibleAskUser)}
             request={{ ...visibleAskUser, elicitation: visibleAskUser.elicitation }} />
-        : <AskUserCard key={visibleAskUser.requestId} request={visibleAskUser} />)}
+        : <AskUserCard key={pendingPromptKey(visibleAskUser)} request={visibleAskUser} />)}
     </div>
   );
 };
 
 const PermissionsApprovalCard = ({ request }: { request: PendingApproval }) => {
   const { t: tr, locale } = useI18n();
-  const [responding, setResponding] = useState(false);
+  const [localResponding, setResponding] = useState(false);
+  const responding = localResponding || request.status === "submitted";
   const subagents = useAppStore((s) => s.subagents);
   const profile = request.permissionRequest!.permissions;
   const actor = approvalSourceLabel(tr, request, subagents) || "MiniCode";
@@ -132,14 +133,15 @@ const PermissionsApprovalCard = ({ request }: { request: PendingApproval }) => {
   }
   const respond = async (allowed: boolean, scope: "turn" | "session" = "turn") => {
     setResponding(true);
+    useAppStore.getState().markApprovalSubmitted(request.requestId, request);
     try {
       const result = await sendPromptResponseCommand(buildPermissionsResponseCommand(request.requestId,
         allowed ? profile : {}, allowed ? scope : "turn",
-        { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId }));
+        request));
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("审批未被后端接受"));
-      useAppStore.getState().clearApproval(request.requestId);
+      useAppStore.getState().clearApproval(request.requestId, request);
     } catch (error) {
-      useAppStore.getState().markApprovalError(request.requestId, error instanceof Error ? error.message : tr("审批提交失败"));
+      useAppStore.getState().markApprovalError(request.requestId, error instanceof Error ? error.message : tr("审批提交失败"), request);
       setResponding(false);
     }
   };
@@ -157,7 +159,8 @@ const PermissionsApprovalCard = ({ request }: { request: PendingApproval }) => {
 
 const NetworkApprovalCard = ({ request }: { request: PendingApproval }) => {
   const { t: tr } = useI18n();
-  const [responding, setResponding] = useState(false);
+  const [localResponding, setResponding] = useState(false);
+  const responding = localResponding || request.status === "submitted";
   const subagents = useAppStore((s) => s.subagents);
   const context = request.networkApprovalContext!;
   const choices = request.availableDecisions!;
@@ -168,13 +171,14 @@ const NetworkApprovalCard = ({ request }: { request: PendingApproval }) => {
   const [titleBefore, titleAfter] = tr("允许 {actor} 与 {destination} 建立连接？", { actor, destination: "{destination}" }).split("{destination}");
   const respond = async (decision: NetworkApprovalDecision) => {
     setResponding(true);
+    useAppStore.getState().markApprovalSubmitted(request.requestId, request);
     try {
       const result = await sendPromptResponseCommand(buildNetworkApprovalResponseCommand(request.requestId, decision,
-        { requestDigest: request.requestDigest, owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId } }));
+        { requestDigest: request.requestDigest, owner: request }));
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("审批未被后端接受"));
-      useAppStore.getState().clearApproval(request.requestId);
+      useAppStore.getState().clearApproval(request.requestId, request);
     } catch (error) {
-      useAppStore.getState().markApprovalError(request.requestId, error instanceof Error ? error.message : tr("审批提交失败"));
+      useAppStore.getState().markApprovalError(request.requestId, error instanceof Error ? error.message : tr("审批提交失败"), request);
       setResponding(false);
     }
   };
@@ -187,7 +191,7 @@ const NetworkApprovalCard = ({ request }: { request: PendingApproval }) => {
       <div className="inline-prompt-subtitle">{tr("{host} 不在当前网络允许列表中", { host: context.host })}</div>
       {request.status === "error" && request.error && <div role="alert" className="inline-prompt-error">{request.error}</div>}
     </div>
-    <ApprovalActions sourceCommand responding={responding} onDeny={() => void respond("abort")}
+    <ApprovalActions responding={responding} onDeny={() => void respond("abort")}
       onAllow={choices.includes("approved") ? () => void respond("approved") : undefined}
       nativeScopeApproval={choices.includes("approved_for_session") ? { label: tr("允许此对话"), onAllow: () => void respond("approved_for_session") } : undefined}
       leadingApproval={amendment ? { label: tr("始终允许"), onAllow: () => void respond(amendment) } : undefined} />
@@ -196,7 +200,8 @@ const NetworkApprovalCard = ({ request }: { request: PendingApproval }) => {
 
 const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue: PendingApproval[] }) => {
   const { t: tr } = useI18n();
-  const [responding, setResponding] = useState(false);
+  const [localResponding, setResponding] = useState(false);
+  const responding = localResponding || request.status === "submitted";
   const subagents = useAppStore((s) => s.subagents);
   const collaborationTool = ["task", "spawn_agent", "task_status", "task_stop", "interrupt_agent", "send_message", "followup_task"].includes(request.toolName);
   const collaborationArgs = request.toolName === "task" && Array.isArray(request.args.parallel_tasks)
@@ -229,6 +234,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const respond = async (allowed: boolean, rememberForSession = false, rememberForFuture = false, execPolicyAmendment?: string[]) => {
     if (responding) return;
     setResponding(true);
+    useAppStore.getState().markApprovalSubmitted(request.requestId, request);
     try {
       const command = buildApprovalResponseCommand(
         request.requestId,
@@ -239,16 +245,16 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
           requestDigest: request.requestDigest,
           sourceCommandDecision: request.availableDecisions ? allowed ? "approved" : "abort" : undefined,
           execPolicyAmendment,
-          owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId },
+          owner: request,
         },
       );
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("审批未被后端接受"));
-      useAppStore.getState().clearApproval(request.requestId);
+      useAppStore.getState().clearApproval(request.requestId, request);
     } catch (error) {
       useAppStore.getState().markApprovalError(
         request.requestId,
-        error instanceof Error ? error.message : tr("审批提交失败"),
+        error instanceof Error ? error.message : tr("审批提交失败"), request,
       );
       setResponding(false);
     }
@@ -279,7 +285,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
         {request.status === "error" && request.error && <div role="alert" className="inline-prompt-error">{request.error}</div>}
       </div>
       <NativeCommandApprovalPreview command={request.displayCommand!} />
-      <ApprovalActions sourceCommand responding={responding} onDeny={() => void respond(false)} onAllow={() => void respond(true)}
+      <ApprovalActions responding={responding} onDeny={() => void respond(false)} onAllow={() => void respond(true)}
         prefixApproval={prefixDecision && prefixLabel !== null ? {
           onAllow: () => void respond(true, false, false, prefixDecision.approved_execpolicy_amendment.proposed_execpolicy_amendment),
           prefixLabel,
@@ -464,7 +470,7 @@ const NativeApprovalScopeMenu = ({ responding, onAllow, scopedAction }: {
 };
 
 const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation, onAllowFuture,
-  denyLabel, allowLabel, prefixApproval, nativeScopeApproval, leadingApproval, sourceCommand = false,
+  denyLabel, allowLabel, prefixApproval, nativeScopeApproval, leadingApproval,
 }: {
   responding: boolean;
   onDeny: () => void;
@@ -476,7 +482,6 @@ const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation, onA
   leadingApproval?: { label: string; onAllow: () => void };
   denyLabel?: string;
   allowLabel?: string;
-  sourceCommand?: boolean;
 }) => {
   const { t: tr } = useI18n();
   const actionsRef = useRef<HTMLDivElement>(null);
@@ -499,10 +504,10 @@ const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation, onA
     {leadingApproval && <Button variant="secondary" size="sm" className="inline-approval-leading" disabled={responding}
       onClick={leadingApproval.onAllow}>{leadingApproval.label}</Button>}
     <Button variant="secondary" size="sm" onClick={onDeny} disabled={responding} aria-label={denyLabel ?? tr("拒绝使用工具")}
-      className="inline-approval-deny">{tr("拒绝")}{(!sourceCommand || !responding) && <kbd>Esc</kbd>}</Button>
+      className="inline-approval-deny">{tr("拒绝")}{!responding && <kbd>Esc</kbd>}</Button>
     {(onAllow || nativeScopeApproval) && <div className="inline-approval-allow-group">
-      {onAllow && <Button variant="primary" size="sm" onClick={onAllow} disabled={responding} loading={sourceCommand && responding} aria-label={allowLabel ?? tr("允许使用工具")}
-        className="inline-approval-allow">{responding && !sourceCommand ? tr("正在提交…") : tr("允许一次")}{(!sourceCommand || !responding) && <kbd>↵</kbd>}</Button>}
+      {onAllow && <Button variant="primary" size="sm" onClick={onAllow} disabled={responding} loading={responding} aria-label={allowLabel ?? tr("允许使用工具")}
+        className="inline-approval-allow">{tr("允许一次")}{!responding && <kbd>↵</kbd>}</Button>}
       {prefixApproval || nativeScopeApproval ? <NativeApprovalScopeMenu responding={responding} onAllow={onAllow}
         scopedAction={prefixApproval ? { label: tr("允许类似命令"), onAllow: prefixApproval.onAllow,
           tooltip: tr("允许在此对话中使用以 {command} 开头的命令", { command: prefixApproval.prefixLabel }) } : nativeScopeApproval!} />
@@ -532,7 +537,8 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   const updatePlanDraft = (patch: Partial<NonNullable<typeof draft>>) => updatePromptDraft(request, {
     initialPlan, plan, editing, planExpanded, rejecting, rejectionFeedback, ...patch,
   });
-  const [responding, setResponding] = useState(false);
+  const [localResponding, setResponding] = useState(false);
+  const responding = localResponding || request.status === "submitted";
   const planWasEdited = plan !== initialPlan;
   const isLongPlan = plan.length > 1200 || plan.split("\n").length > 14;
   const planDocumentId = useId();
@@ -544,6 +550,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   const respond = async (allowed: boolean) => {
     if (responding) return;
     setResponding(true);
+    useAppStore.getState().markApprovalSubmitted(request.requestId, request);
     try {
       const command = buildApprovalResponseCommand(
         request.requestId,
@@ -552,16 +559,16 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
           ...(allowed && planWasEdited ? { plan } : {}),
           ...(allowed && commandPrompts.length > 0 ? { commandPrompts } : {}),
           ...(!allowed && rejectionFeedback.trim() ? { feedback: rejectionFeedback } : {}),
-          owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId },
+          owner: request,
         },
       );
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("计划审批未被后端接受"));
-      useAppStore.getState().clearApproval(request.requestId);
+      useAppStore.getState().clearApproval(request.requestId, request);
     } catch (error) {
       useAppStore.getState().markApprovalError(
         request.requestId,
-        error instanceof Error ? error.message : tr("计划审批提交失败"),
+        error instanceof Error ? error.message : tr("计划审批提交失败"), request,
       );
       setResponding(false);
     }
@@ -707,7 +714,7 @@ export const SubagentPlanReviewCard = (
       if (agent?.activePlanRequestId === request.requestId) {
         store.updateSubagent(agent.id, { awaitingPlanApproval: false, activePlanRequestId: "" }, request.conversationId);
       }
-      store.clearAskUser(request.requestId, request.conversationId);
+      store.clearAskUser(request.requestId, request.conversationId, request);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : tr("计划审批提交失败，请重试。");
       setError(message);
@@ -805,39 +812,29 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   const diffReview = useAppStore((s) => s.diffReview);
   const stats = useMemo(() => diffStats(request.diff), [request.diff]);
   const expiry = useApprovalExpiry(request.expiresAt);
-  const [responding, setResponding] = useState(false);
+  const [localResponding, setResponding] = useState(false);
+  const responding = localResponding || request.reviewState?.status === "submitted";
   const [error, setError] = useState("");
+  const displayedError = error || request.reviewState?.error;
 
   const respond = async (allowed: boolean) => {
     if (responding) return;
     setResponding(true);
     setError("");
+    useAppStore.getState().updateDiffReviewStatus(request.requestId, { status: "submitted", error: undefined }, request);
     try {
       const command = buildApprovalResponseCommand(
         request.requestId,
         allowed ? "approve" : "reject",
-        { owner: { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId } },
+        { owner: request },
       );
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("审批未被后端接受"));
-      const current = useAppStore.getState().diffReview;
-      if (current?.requestId === request.requestId) {
-        useAppStore.getState().setDiffReviewState({
-          ...current,
-          status: allowed ? "approved" : "rejected",
-        });
-      }
-      useAppStore.getState().clearDiffReview(request.requestId);
+      useAppStore.getState().updateDiffReviewStatus(request.requestId, { status: allowed ? "approved" : "rejected", error: undefined }, request);
+      useAppStore.getState().clearDiffReview(request.requestId, request);
     } catch (error) {
       setError(error instanceof Error ? error.message : tr("审批提交失败"));
-      const current = useAppStore.getState().diffReview;
-      if (current?.requestId === request.requestId) {
-        useAppStore.getState().setDiffReviewState({
-          ...current,
-          status: "error",
-          error: error instanceof Error ? error.message : tr("审批提交失败"),
-        });
-      }
+      useAppStore.getState().updateDiffReviewStatus(request.requestId, { status: "error", error: error instanceof Error ? error.message : tr("审批提交失败") }, request);
       setResponding(false);
     }
   };
@@ -862,7 +859,7 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
           <div className="inline-prompt-subtitle">
             {request.filePath
               || request.reviewState?.toolName
-              || (diffReview?.requestId === request.requestId ? diffReview.toolName : "")
+              || (diffReview?.requestId === request.requestId && pendingPromptMatchesOwner(diffReview, request) ? diffReview.toolName : "")
               || tr("工具编辑")} · <span className="chat-change-added">+{stats.plus}</span>{" "}
             <span className="chat-change-deleted">-{stats.minus}</span>
             {expiry.label && (
@@ -882,7 +879,7 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
         )) : <span className="inline-prompt-context">{tr("打开差异面板检查拟议更改。")}</span>}
       </div>
 
-      {error && <div role="alert" className="inline-prompt-error">{error}</div>}
+      {displayedError && <div role="alert" className="inline-prompt-error">{displayedError}</div>}
       <div className="inline-prompt-actions inline-prompt-button-row">
         <Button variant="ghost" size="sm" onClick={openDiff}>
           <ExternalLink size={14} />{tr("打开差异")}</Button>
@@ -961,13 +958,13 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
     setResponding(true);
     setError("");
     try {
-      const owner = { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId };
+      const owner = request;
       if (structured && formContent.error) throw new Error(formContent.error);
       const command = structured ? buildElicitationResponseCommand(request.requestId, "accept", formContent.content, owner)
         : buildAskUserResponseCommand(request.requestId, text, owner);
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("回答未被后端接受"));
-      useAppStore.getState().clearAskUser(request.requestId, request.conversationId);
+      useAppStore.getState().clearAskUser(request.requestId, request.conversationId, request);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : tr("回答发送失败，请重试。");
       setError(message);
@@ -982,16 +979,17 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
     setError("");
     try {
       const command = structured ? buildElicitationResponseCommand(request.requestId, "cancel", undefined,
-        { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId }) : {
+        request) : {
         type: "control_cancel_request" as const,
         request_id: request.requestId,
         ...(request.conversationId ? { conversation_id: request.conversationId } : {}),
         ...(request.turnId ? { turn_id: request.turnId } : {}),
         ...(request.messageId ? { message_id: request.messageId } : {}),
+        ...(request.taskId ? { task_id: request.taskId } : {}),
       };
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("取消请求未被后端接受"));
-      useAppStore.getState().clearAskUser(request.requestId, request.conversationId);
+      useAppStore.getState().clearAskUser(request.requestId, request.conversationId, request);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : tr("取消发送失败，请重试。");
       setError(message);

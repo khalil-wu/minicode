@@ -258,6 +258,7 @@ export interface DiffReviewState {
   conversationId?: string;
   turnId?: string;
   messageId?: string;
+  taskId?: string;
   previewReturnTarget?: { conversationId: string; tab: "browser" | "preview"; url?: string; targetId?: string };
   toolName?: string;
   sourceAgent?: string;
@@ -530,7 +531,7 @@ export interface UISlice {
   setThemeMode: (m: ThemeMode) => void;
   setAppearanceColor: (variant: AppearanceVariant, role: AppearanceColorRole, value: string) => void;
   setCodeThemeId: (variant: AppearanceVariant, id: CodeThemeId) => Promise<void>;
-  importAppearanceTheme: (variant: AppearanceVariant, snapshot: CodeThemeAppearance) => Promise<void>;
+  importAppearanceTheme: (variant: AppearanceVariant, snapshot: CodeThemeAppearance) => Promise<boolean>;
   setTextScale: (s: number) => void;
   setCodeTextScale: (s: number) => void;
   setReducedMotion: (reduced: boolean) => void;
@@ -1878,6 +1879,7 @@ export interface PendingApproval {
   conversationId?: string;
   turnId?: string;
   messageId?: string;
+  taskId?: string;
   toolName: string;
   requestDigest?: string;
   command?: string[];
@@ -1911,6 +1913,7 @@ export interface PendingDiffReview {
   conversationId?: string;
   turnId?: string;
   messageId?: string;
+  taskId?: string;
   diff: string;
   filePath?: string;
   sourceAgent?: string;
@@ -2004,16 +2007,17 @@ export interface ApprovalSlice {
   pendingAskUser: PendingAskUser | null;
   askUserQueue: PendingAskUser[];
   setApproval: (a: PendingApproval) => void;
-  markApprovalSubmitted: (requestId: string) => void;
-  markApprovalError: (requestId: string, error: string) => void;
-  clearApproval: (requestId?: string) => void;
-  clearApprovals: (requestIds: string[]) => void;
+  markApprovalSubmitted: (requestId: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
+  markApprovalError: (requestId: string, error: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
+  clearApproval: (requestId?: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
+  clearApprovals: (requestIds: string[], owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   setDiffReview: (d: PendingDiffReview) => void;
-  clearDiffReview: (requestId?: string) => void;
-  clearDiffReviews: (requestIds: string[]) => void;
+  updateDiffReviewStatus: (requestId: string, patch: Pick<DiffReviewState, "status" | "error">, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
+  clearDiffReview: (requestId?: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
+  clearDiffReviews: (requestIds: string[], owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   setAskUser: (a: PendingAskUser) => void;
   clearAskUser: (requestId?: string, conversationId?: string, inputOwner?: AgentPromptDraft["inputOwner"]) => void;
-  clearAskUsers: (requestIds: string[], conversationId?: string) => void;
+  clearAskUsers: (requestIds: string[], conversationId?: string, inputOwner?: AgentPromptDraft["inputOwner"]) => void;
 }
 
 // ── Control-plane projection slice ───────────────────────────────

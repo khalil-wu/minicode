@@ -14,7 +14,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); mocks.toast.mockClear(); });
 it("uses the registered English mode label while keeping actual theme names", () => {
   render(<LanguageProvider locale="en-US"><AppearanceCodeThemePicker variant="dark" value="github" colors={colors} onSelect={vi.fn()} /></LanguageProvider>);
   const trigger = screen.getByRole("button", { name: /^Dark code theme/ });
-  fireEvent.click(trigger);
+  fireEvent.keyDown(trigger, { key: "ArrowDown" });
   const root = screen.getByRole("menu", { name: "Dark code theme" });
   expect(within(root).getByRole("menuitemradio", { name: "ChatGPT" })).toBeTruthy();
   fireEvent.click(within(root).getByRole("menuitem", { name: "Codex themes" }));

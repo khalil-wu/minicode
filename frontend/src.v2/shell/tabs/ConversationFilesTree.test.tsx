@@ -29,6 +29,8 @@ const show = () => render(<ConversationFilesTree owner={owner} browserRoot={brow
 const selectAction = (name: string, action: string) => { fireEvent.contextMenu(screen.getByText(name), { clientX: 20, clientY: 20 }); fireEvent.click(screen.getByRole("menuitem", { name: action })); };
 const fileText = (file: File) => new Promise<string>((resolve) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.readAsText(file); });
 
+const openSubmenu = (item: HTMLElement) => { item.focus(); fireEvent.keyDown(item, { key: "ArrowRight" }); };
+
 beforeEach(() => {
   Object.values(mocks).forEach((mock) => { if (typeof mock === "function" && "mockReset" in mock) mock.mockReset(); });
   mocks.target = "minicode";
@@ -54,14 +56,14 @@ describe("read-only conversation Files tree", () => {
     selectAction("note.txt", "在 VS Code 中打开");
     await waitFor(() => expect(mocks.openPreferred).toHaveBeenCalledWith(`${browserRoot}/note.txt`, undefined, { workspaceRoot: owner.executionCwd }));
     fireEvent.contextMenu(screen.getByText("note.txt"));
-    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "打开方式" }));
+    openSubmenu(screen.getByRole("menuitem", { name: "打开方式" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Cursor" }));
     await waitFor(() => expect(mocks.openPreferred).toHaveBeenLastCalledWith(`${browserRoot}/note.txt`, undefined, { workspaceRoot: owner.executionCwd, targetId: "cursor" }));
     expect(mocks.perPath[owner.executionCwd]).toBe("vscode");
     expect(useAppStore.getState().draft).toBe("authored draft");
     fireEvent.contextMenu(screen.getByText("photo.png"));
     expect(screen.getByRole("menuitem", { name: "在 默认应用 中打开" })).toBeTruthy();
-    fireEvent.mouseEnter(screen.getByRole("menuitem", { name: "打开方式" }));
+    openSubmenu(screen.getByRole("menuitem", { name: "打开方式" }));
     expect(screen.queryByRole("menuitem", { name: "VS Code" })).toBeNull();
     expect(screen.queryByRole("menuitem", { name: "Cursor" })).toBeNull();
     fireEvent.click(screen.getByRole("menuitem", { name: "File Explorer" }));

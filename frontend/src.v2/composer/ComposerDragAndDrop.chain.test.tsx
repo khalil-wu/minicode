@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
@@ -7,12 +7,14 @@ const mocks = vi.hoisted(() => {
     configurable: true,
     value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
   });
-  return { send: vi.fn(() => true), upload: vi.fn() };
+  return { send: vi.fn(() => true), upload: vi.fn(),
+    awaitResult: vi.fn(async () => ({ type: "command.result", command: "interrupt", level: "success", message: "", data: {} })) };
 });
 
 vi.mock("../protocol/ws-outbox", async (original) => ({
   ...await original<typeof import("../protocol/ws-outbox")>(),
   sendClientCommand: mocks.send,
+  sendClientCommandAwaitResult: mocks.awaitResult,
 }));
 vi.mock("./uploads", () => ({
   uploadComposerFiles: mocks.upload,
@@ -36,6 +38,7 @@ import { Composer } from "./Composer";
 beforeEach(() => {
   localStorage.clear();
   mocks.send.mockClear();
+  mocks.awaitResult.mockClear();
   mocks.upload.mockClear();
   useAppStore.setState({
     conversationId: "drop-owner",
@@ -169,7 +172,7 @@ describe("composer drag lifecycle", () => {
     expect(mocks.upload).not.toHaveBeenCalled();
   });
 
-  it("cancels a file drag with Escape without interrupting the turn, then restores normal Escape", () => {
+  it("cancels a file drag with Escape without interrupting the turn, then restores normal Escape", async () => {
     useAppStore.setState({
       isStreaming: true,
       messages: [{
@@ -192,13 +195,13 @@ describe("composer drag lifecycle", () => {
     expect(mocks.send).not.toHaveBeenCalled();
     expect(useAppStore.getState().isStreaming).toBe(true);
 
-    fireEvent.keyDown(input, { key: "Escape" });
+    await act(async () => fireEvent.keyDown(input, { key: "Escape" }));
 
-    expect(mocks.send).toHaveBeenCalledExactlyOnceWith({
+    expect(mocks.awaitResult).toHaveBeenCalledExactlyOnceWith({
       type: "interrupt",
       conversation_id: "drop-owner",
       turn_id: "stream-turn",
       message_id: "stream-message",
-    });
+    }, "interrupt", { silent: true });
   });
 });

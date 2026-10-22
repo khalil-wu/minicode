@@ -1377,14 +1377,13 @@ kbd {
   white-space: nowrap;
 }
 
-/* Context menu items: CSS hover with transition (replaces per-item
-   onMouseEnter/Leave style mutation) plus keyboard-focus highlight. */
+/* Source menu rows keep the focused item and open flyout trigger highlighted. */
 .mc-menu-item {
-  transition: background-color var(--transition-fast), color var(--transition-fast) !important;
+  transition: none !important;
 }
 
 .mc-menu-item:hover:not(:disabled),
-.mc-menu-item:focus-visible {
+.mc-menu-item:focus:not(:disabled),
+.mc-menu-item[aria-expanded="true"]:not(:disabled) {
   background: var(--surface-hover) !important;
-  color: var(--text-primary) !important;
 }

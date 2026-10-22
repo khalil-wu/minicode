@@ -487,7 +487,7 @@ describe("SidebarLeft session status", () => {
     expect(profile.closest(".mc-sidebar-footer")).toBeTruthy();
     fireEvent.click(profile);
     expect(useAppStore.getState().settingsOpen).toBe(false);
-    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^设置/ }));
     expect(useAppStore.getState().settingsOpen).toBe(true);
   });
 
@@ -496,7 +496,7 @@ describe("SidebarLeft session status", () => {
     expect(screen.queryByRole("button", { name: "切换到浅色模式" })).toBeNull();
     expect(screen.queryByRole("button", { name: "切换到深色模式" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开个人资料菜单" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^设置/ }));
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "general" });
     expect(useAppStore.getState().themeMode).toBe("dark");
   });

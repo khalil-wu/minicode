@@ -1478,6 +1478,48 @@ async def test_child_text_stream_uses_deltas_between_durable_snapshots(startup_c
 
 
 @pytest.mark.asyncio
+async def test_child_provider_bridge_keeps_debug_recovery_in_journal_and_publishes_actual_retry_once(startup_case, monkeypatch):
+    from backend.agent.message import AgentEvent
+    from backend.agent.provider_attempt import ProviderAttempt
+    from backend.agent.progress import provider_stream_error_progress
+    from backend.agent.query_engine import QueryEngine
+
+    async def submit(self, submission):
+        emit = submission.runtime.emit_event
+        await emit("runtime.span", {"event": "provider.request.started", "span_id": "original-span", "status": "running"})
+        await emit("agent.progress", {"id": "provider:connection:child:iteration-1", "provider_state": "reconnecting",
+            "stage": "status", "phase": "recover", "status": "running", "message": "Private context recovery",
+            "error_message": "Private request detail", "visibility": "debug"})
+        yield provider_stream_error_progress("Reconnecting 1/2",
+            attempt=ProviderAttempt("iteration-1", 0, "original-span", 1000),
+            progress_id="provider:connection:child:iteration-1", error_message="Actual stream interruption",
+            retry_attempt=1, max_retries=2)
+        await emit("agent.progress", {"id": "provider:connection:child:iteration-1", "provider_state": "failed",
+            "stage": "status", "phase": "model", "status": "failed", "message": "Internal attempt failed",
+            "error_message": "Private attempt detail", "visibility": "debug"})
+        submission.state.reply = "Completed after reconnect"
+        yield AgentEvent.done(status="completed", reason="success")
+
+    monkeypatch.setattr(QueryEngine, "submit", submit)
+    child_id, result = await _launch(startup_case, "foreground")
+    assert not result.is_error, result.content
+    progress = [data for kind, data in startup_case.events if kind == "subagent.progress"
+                and data.get("source_event_type") == "agent.progress"]
+    assert [data["current_activity"] for data in progress if data.get("user_visible")] == ["Reconnecting 1/2"]
+    assert all(data.get("user_visible") is False for data in progress if data.get("current_activity") != "Reconnecting 1/2")
+    terminal = next(data for kind, data in reversed(startup_case.events) if kind == "subagent.done")
+    message = terminal["transcript_snapshot"]["messages"][-1]
+    notices = [block for block in message["blocks"] if block["type"] == "progress"]
+    assert [block["errorMessage"] for block in notices] == ["Actual stream interruption"]
+    assert notices[0]["id"] == "provider:connection:child:iteration-1:error:original-span:reconnecting:1"
+    assert terminal["status"] == "completed"
+    assert not message.get("failure_message")
+    raw = [event.payload for event in startup_case.runtime.execution_journal(child_id).read_events()]
+    assert any(payload.get("error_message") == "Private request detail" for payload in raw)
+    assert any(payload.get("error_message") == "Private attempt detail" for payload in raw)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("provider_wire", ["fixture_items", "responses_wire", "anonymous_parts", "responses_parts"])
 async def test_multiple_final_items_preserve_the_same_blocks_in_deltas_and_terminal_snapshot(startup_case, provider_wire, monkeypatch):
     from backend.services.subagent_service import project_subagent_transcript_events

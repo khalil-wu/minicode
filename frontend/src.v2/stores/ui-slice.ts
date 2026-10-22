@@ -294,15 +294,16 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     // A newer local edit or another window owns the latest value while the
     // highlighter is loading; its configuration must not be overwritten.
     if (revision !== themeEditRevision[variant]
-      || JSON.stringify(previous) !== JSON.stringify(readAppearanceVariant(variant))) return;
+      || JSON.stringify(previous) !== JSON.stringify(readAppearanceVariant(variant))) return false;
     const { accent, surface, ink, contrast, opaqueWindows, semanticColors } = snapshot.theme;
     applySavedAppearance(writeAppearanceVariant(variant, { colors: { accent, surface, ink }, theme: {
       codeThemeId: snapshot.codeThemeId, contrast, opaqueWindows, semanticColors, fonts,
     } }));
+    return true;
   };
   const commitAppearanceTheme: UISlice["importAppearanceTheme"] = async (variant, snapshot) => {
     const revision = ++themeEditRevision[variant];
-    await saveAppearanceTheme(variant, snapshot, revision, readAppearanceVariant(variant));
+    return saveAppearanceTheme(variant, snapshot, revision, readAppearanceVariant(variant));
   };
   return ({
   contextCardCollapsed: true,
@@ -425,7 +426,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   patchAppearanceTheme: async (variant, patch) => {
     const revision = ++themeEditRevision[variant];
     const previous = readAppearanceVariant(variant);
-    const theme = { codeThemeId: "vscode-plus" as const, ...defaultThemePreferences(variant), ...previous.theme, ...patch };
+    const theme = { codeThemeId: "codex" as const, ...defaultThemePreferences(variant), ...previous.theme, ...patch };
     await prepareThemeFonts(theme.fonts);
     if (revision !== themeEditRevision[variant] || JSON.stringify(previous) !== JSON.stringify(readAppearanceVariant(variant))) return;
     const colors = previous.colors ?? (patch.contrast !== undefined
@@ -840,13 +841,10 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   submitDiffReviewWithComments: async () => {
     const s = get();
     if (!s.diffReview) return;
-    const { requestId, lineComments, conversationId, turnId, messageId } = s.diffReview;
+    const { requestId, lineComments, conversationId, turnId, messageId, taskId } = s.diffReview;
+    const owner = { conversationId, turnId, messageId, taskId };
     const comments = lineComments ?? [];
-    set((state) => ({
-      diffReview: state.diffReview?.requestId === requestId
-        ? { ...state.diffReview, status: "submitted", error: undefined }
-        : state.diffReview,
-    }));
+    get().updateDiffReviewStatus(requestId, { status: "submitted", error: undefined }, owner);
     const feedbackComments: DiffComment[] = comments.map(comment => ({ type: "comment",
       content: [{ content_type: "text", text: comment.content }], position: comment.position,
       localDiffHunk: comment.localDiffHunk, localWorkspaceRoot: comment.localWorkspaceRoot }));
@@ -856,24 +854,21 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     const command = buildApprovalResponseCommand(
       requestId,
       comments.length > 0 ? "reject" : "approve",
-      { feedback, owner: { conversationId, turnId, messageId } },
+      { feedback, owner },
     );
     try {
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
-      get().clearDiffReview(requestId);
+      get().clearDiffReview(requestId, owner);
     } catch (error) {
-      set((state) => ({
-        diffReview: state.diffReview?.requestId === requestId
-          ? { ...state.diffReview, status: "error", error: error instanceof Error ? error.message : "审批提交失败" }
-          : state.diffReview,
-      }));
+      get().updateDiffReviewStatus(requestId, { status: "error", error: error instanceof Error ? error.message : "审批提交失败" }, owner);
     }
   },
   submitPartialApproval: async () => {
     const s = get();
     if (!s.diffReview) return;
-    const { requestId, fileDecisions, files, conversationId, turnId, messageId } = s.diffReview;
+    const { requestId, fileDecisions, files, conversationId, turnId, messageId, taskId } = s.diffReview;
+    const owner = { conversationId, turnId, messageId, taskId };
     const approved = files
       .filter((file) => diffFileDecisionForPath(fileDecisions, file.path, s.workingDirectory) === "approved")
       .map((file) => file.path);
@@ -890,26 +885,18 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       : rejected.length > 0
         ? `Do not modify these rejected files: ${rejected.join(", ")}.`
         : undefined;
-    set((state) => ({
-      diffReview: state.diffReview?.requestId === requestId
-        ? { ...state.diffReview, status: "submitted", error: undefined }
-        : state.diffReview,
-    }));
+    get().updateDiffReviewStatus(requestId, { status: "submitted", error: undefined }, owner);
     const command = buildApprovalResponseCommand(
       requestId,
       action,
-      { feedback, owner: { conversationId, turnId, messageId } },
+      { feedback, owner },
     );
     try {
       const result = await sendPromptResponseCommand(command);
       if (!commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
-      get().clearDiffReview(requestId);
+      get().clearDiffReview(requestId, owner);
     } catch (error) {
-      set((state) => ({
-        diffReview: state.diffReview?.requestId === requestId
-          ? { ...state.diffReview, status: "error", error: error instanceof Error ? error.message : "审批提交失败" }
-          : state.diffReview,
-      }));
+      get().updateDiffReviewStatus(requestId, { status: "error", error: error instanceof Error ? error.message : "审批提交失败" }, owner);
     }
   },
   setPreviewArtifact: (artifact) =>

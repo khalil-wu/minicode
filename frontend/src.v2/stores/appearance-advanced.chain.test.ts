@@ -70,6 +70,7 @@ it("preserves local family and face choices through color-theme import/export an
   const fonts = { ui: '"Authored UI"', content: null, code: '"Authored Code"',
     uiFace: { family: "Authored UI", fullName: "Authored UI Condensed", postscriptName: "AuthoredUI-Condensed" } };
   await useAppStore.getState().patchAppearanceTheme("dark", { fonts });
+  expect(readAppearanceVariant("dark").theme).toMatchObject({ codeThemeId: "codex", fonts });
   expect(useAppStore.getState().appearanceColors.dark).toBeNull();
   const snapshot = { codeThemeId: "github" as const, theme: { ...defaultThemePreferences("dark"), accent: "#2468ac", surface: "#101010", ink: "#eeeeee" } };
   const exported = JSON.parse(exportThemeString({ ...snapshot, theme: { ...snapshot.theme, fonts } }, "dark").slice(15));

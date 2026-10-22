@@ -3313,7 +3313,9 @@ class TaskTool(BaseTool):
                 provider_state = str(data.get("provider_state") or data.get("providerState") or "")
                 message = _user_visible_progress_text(data.get("message") or data.get("summary"))
                 failure_notice = provider_progress and (
-                    provider_state == "failed" or bool(data.get("error_message"))
+                    data.get("visibility") in {"timeline", "compact"}
+                    and provider_state in {"reconnecting", "failed"}
+                    and bool(data.get("error_message"))
                 )
                 if provider_span and runtime_event not in {"provider.request.started", "recovery.retry.started"}:
                     return True

@@ -54,8 +54,10 @@ import {
 } from "../../lib/artifact-projection";
 import {
   isProviderRequestProgress,
+  isProviderStreamError,
   type ProviderProgressSnapshot,
 } from "../../lib/provider-progress";
+import { StreamErrorCell } from "./StreamErrorCell";
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "../tool-calls/renderers/ToolTextRenderer";
@@ -272,6 +274,7 @@ export const ActivityCell = memo(function ActivityCell({
         : "activity-cell-completed";
 
   if (isProviderRequest && !progressError && !(isFailed && progressDetail)) return null;
+  if (isProviderStreamError(providerProgress)) return <StreamErrorCell cell={cell} />;
   if (hasRecords && records.every(isCodeModeRecord) && !records.some(record =>
     getRecordOutputText(record).trim() || record.userSummary || record.errorInfo?.user_message || record.errorInfo?.user_summary
   )) return null;

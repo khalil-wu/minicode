@@ -7,7 +7,7 @@ import type { ResolvedTheme } from "../../stores/types";
 interface Props { children: string; hasLanguage: boolean; language: string; resolvedTheme: ResolvedTheme }
 
 export default function CodeThemeHighlighter({ children, hasLanguage, language, resolvedTheme }: Props) {
-  const id = useAppStore(state => state.appearanceThemes[resolvedTheme]?.codeThemeId ?? "vscode-plus");
+  const id = useAppStore(state => state.appearanceThemes[resolvedTheme]?.codeThemeId ?? "codex");
   const [result, setResult] = useState<{ code: string; language: string; id: string; variant: string; lines: ThemedToken[][] }>();
   useEffect(() => {
     let current = true;

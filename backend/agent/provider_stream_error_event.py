@@ -16,6 +16,7 @@ from backend.agent.loop_runtime_helpers import (
 )
 from backend.agent.policies.stream_retry import plan_connection_retry
 from backend.agent.message import AgentEvent
+from backend.agent.progress import provider_stream_error_progress
 from backend.agent.first_byte_waiter import ProviderStreamFailure
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.provider_attempt import provider_progress_id
@@ -60,9 +61,8 @@ async def committed_provider_error(failure, *, state, turn_kernel, provider_atte
             provider_error_type=classification.provider_error_type)
     state.mark_transition("provider_stream_after_tools", error_type=classification.error_type,
         provider_error_type=classification.provider_error_type, error_message=message)
-    return AgentEvent.progress(
-        "模型连接中断，保留已完成的工具结果后继续。", stage="status", status="running",
-        phase="recover", label="provider", provider_state="reconnecting", id=progress_id,
+    return provider_stream_error_progress(
+        "模型连接中断，保留已完成的工具结果后继续。", attempt=provider_attempt, progress_id=progress_id,
         detail=message, error_message=message,
     )
 
@@ -321,21 +321,13 @@ async def handle_provider_error_event(
                     data=span_data,
                 )
             if connection_retry:
-                yield AgentEvent.progress(
-                    f"无法连接到模型服务，等待网络恢复（第 {retry_state.connection_retries} 次）",
-                    stage="status",
-                    status="running",
-                    id=progress_id or provider_progress_id(iteration_id_value),
-                    phase="recover",
-                    label="provider",
-                    count=retry_state.connection_retries,
+                yield provider_stream_error_progress(
+                    "正在重连，等待网络恢复",
+                    attempt=provider_attempt,
+                    progress_id=progress_id or provider_progress_id(iteration_id_value),
                     detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
-                    summary="Provider unreachable; waiting for network",
                     retry_after_ms=max(0, int(round(retry_delay * 1000))),
                     error_message=classification_input[:320],
-                    operation_id=progress_id,
-                    provider_state="reconnecting",
-                    visibility="debug",
                 )
             elif not switched_transport:
                 attempt_label = (
@@ -343,23 +335,15 @@ async def handle_provider_error_event(
                     if effective_max_retries > 0
                     else f"第 {new_attempt} 次"
                 )
-                yield AgentEvent.progress(
+                yield provider_stream_error_progress(
                     f"连接失败，正在重连（{attempt_label}）",
-                    stage="status",
-                    status="running",
-                    id=progress_id or provider_progress_id(iteration_id_value),
-                    phase="recover",
-                    label="provider",
-                    count=new_attempt,
+                    attempt=provider_attempt,
+                    progress_id=progress_id or provider_progress_id(iteration_id_value),
                     detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
-                    summary="Provider stream interrupted; retrying",
                     retry_attempt=new_attempt,
                     max_retries=effective_max_retries,
                     retry_after_ms=max(0, int(round(retry_delay * 1000))),
                     error_message=classification_input[:320],
-                    operation_id=progress_id,
-                    provider_state="reconnecting",
-                    visibility="debug",
                 )
             if classification.provider_error_type == "rate_limit":
                 yield AgentEvent.rate_limit(

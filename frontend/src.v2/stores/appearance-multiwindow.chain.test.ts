@@ -55,7 +55,7 @@ it("does not let an old asynchronous theme import overwrite a newer peer edit", 
   await vi.waitFor(() => expect(highlighting.prepare).toHaveBeenCalled());
   writeAppearanceVariant("light", { colors, theme });
   notify(keys.light);
-  finish(); await importing;
+  finish(); expect(await importing).toBe(false);
   expect(readAppearanceVariant("light")).toEqual({ colors, theme });
   expect(useAppStore.getState().appearanceThemes.light).toEqual(theme);
 });
@@ -67,7 +67,7 @@ it("keeps a later local color edit when an earlier import finishes", async () =>
     theme: { ...colors, ...theme, accentSource: "custom" } });
   await vi.waitFor(() => expect(highlighting.prepare).toHaveBeenCalled());
   useAppStore.getState().setAppearanceColor("light", "accent", "#998877");
-  finish(); await importing;
+  finish(); expect(await importing).toBe(false);
   expect(readAppearanceVariant("light").colors?.accent).toBe("#998877");
   expect(readAppearanceVariant("light").theme).toBeNull();
 });

@@ -5256,8 +5256,9 @@ class SessionAgentRunnerMixin:
                 await _persist_partial_turn(force=True)
             if event_type == "agent.item" or (
                 event_type == "agent.progress"
-                and str(payload.get("status") or "").strip().lower()
-                in {"completed", "failed", "partial", "cancelled", "interrupted"}
+                and (str(payload.get("status") or "").strip().lower()
+                    in {"completed", "failed", "partial", "cancelled", "interrupted"}
+                    or payload.get("error_message") and payload.get("visibility") == "timeline")
             ):
                 await _persist_partial_turn(force=True)
             await self.send_event(AgentEvent(type=event_type, data=payload))
@@ -5863,7 +5864,8 @@ class SessionAgentRunnerMixin:
                     "request_user_input",
                     "guardian_assessment",
                     "guardian_warning",
-                }:
+                } or (event.type == "agent.progress" and event.data.get("error_message")
+                      and event.data.get("visibility") == "timeline"):
                     await _persist_partial_turn(force=True)
                 elif event.type in {"agent_message.delta", "tool_output_delta", "agent.item.delta"}:
                     await _persist_partial_turn()

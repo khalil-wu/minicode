@@ -1,16 +1,17 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useAppStore } from "../../stores";
 import { hydrateMessages } from "../transcriptHydration";
 import { projectMessagesToTurns } from "../chatSurfaceState";
 import { ActivityCell } from "./ActivityCell";
+import { HistoryCellRenderer } from "../components/ChatTurn";
 
 beforeEach(() => useAppStore.setState({ conversationId: "child-parent", workingDirectory: "C:/workspace" }));
 afterEach(cleanup);
 
 describe("child provider failure evidence", () => {
-  it("retains HTTP failure evidence from the persisted child record through the real disclosure", () => {
+  it("retains public HTTP failure evidence in the standalone child error notice without an extra control", () => {
     const detail = "HTTP=400 · code=controlled_fixture · type=invalid_request_error";
     const messages = hydrateMessages([{
       id: "failed-child", role: "assistant", content: "", timestamp: 1000, terminal_status: "failed",
@@ -18,12 +19,14 @@ describe("child provider failure evidence", () => {
         status: "failed", providerState: "failed", message: "提供商请求失败", visibility: "timeline",
         errorMessage: "提供商请求失败", detail }],
     }]);
-    const activity = projectMessagesToTurns(messages, false)[0].committedCells.find(cell => cell.kind === "activity")!;
-    const view = render(<ActivityCell cell={activity} conversationId="child-parent" />);
+    const cells = projectMessagesToTurns(messages, false)[0].committedCells;
+    expect(cells).toHaveLength(1);
+    expect(cells[0]).toMatchObject({ kind: "error", message: "提供商请求失败", rawError: detail });
+    const view = render(<HistoryCellRenderer cell={cells[0]} conversationId="child-parent" />);
     expect(view.container.textContent).toContain("提供商请求失败");
-    expect(view.container.textContent).not.toContain("HTTP=400");
-    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
     expect(view.container.textContent).toContain(detail);
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("hydrates and renders the actual retry error while excluding normal provider handshakes", () => {
@@ -43,10 +46,10 @@ describe("child provider failure evidence", () => {
     const activities = turn.committedCells.filter(cell => cell.kind === "activity");
     expect(activities).toHaveLength(1);
     const activity = activities[0];
-    expect(activity.title).toBe(retryMessage);
+    expect(activity.title).toBe("Reconnecting 1/2");
     expect(activity.progress).toMatchObject({ phase: "recover", retryAttempt: 1, maxRetries: 2, errorMessage: error });
     const view = render(<ActivityCell cell={{ ...activity, collapsed: false }} conversationId="child-parent" />);
-    expect(view.container.textContent).toContain(retryMessage);
+    expect(view.container.textContent).toContain("正在重连 1/2");
     expect(view.container.textContent).toContain("stream closed before response.completed");
     expect(view.container.textContent).not.toContain("已连接，模型正在响应");
   });

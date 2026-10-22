@@ -13,7 +13,7 @@ describe("providerProgressLabel", () => {
       message: "连接中断，正在重连（第 1/2 次）", errorMessage: "stream closed before response.completed",
     };
     expect(isProviderRequestProgress(notice)).toBe(false);
-    expect(providerProgressLabel(notice)).toBeUndefined();
+    expect(providerProgressLabel(notice)).toBe("Reconnecting 1/2");
     expect(isProviderRequestProgress({ ...notice, errorMessage: undefined, phase: "model", status: "running" })).toBe(true);
   });
   it("uses the reconnect ladder only while the provider is reconnecting", () => {

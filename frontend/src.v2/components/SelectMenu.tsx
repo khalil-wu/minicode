@@ -75,6 +75,7 @@ export const SelectMenu = ({
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const typeahead = useRef({ value: "", time: 0 });
   const menuId = useId();
   const options = useMemo(() => optionsFromChildren(children), [children]);
   const settingsSelect = className.split(/\s+/).includes("settings-select");
@@ -143,6 +144,7 @@ export const SelectMenu = ({
 
   const openMenu = () => {
     if (disabled) return;
+    typeahead.current = { value: "", time: 0 };
     setOpen(true);
   };
 
@@ -170,10 +172,25 @@ export const SelectMenu = ({
       triggerRef.current!.focus({ preventScroll: true });
       return;
     }
-    if (event.key === "Enter" || event.key === " ") {
+    if (event.key === "Enter" || (event.key === " " && (!typeahead.current.value || Date.now() - typeahead.current.time >= 1000))) {
       event.preventDefault();
       event.stopPropagation();
       selectValue(option.value);
+      return;
+    }
+    if (event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      event.stopPropagation();
+      const now = Date.now();
+      const value = `${now - typeahead.current.time < 1000 ? typeahead.current.value : ""}${event.key.toLocaleLowerCase()}`;
+      typeahead.current = { value, time: now };
+      const query = [...value].every(char => char === value[0]) ? value[0] : value;
+      const current = enabledOptions.findIndex(item => item.value === option.value);
+      const start = query.length === 1 ? current + 1 : current;
+      const ordered = [...enabledOptions.slice(start), ...enabledOptions.slice(0, start)];
+      const match = ordered.find(item => item.label.toLocaleLowerCase().startsWith(query));
+      if (match) Array.from(menuRef.current!.querySelectorAll<HTMLButtonElement>('[role="option"]'))
+        .find(item => item.dataset.value === match.value)!.focus({ preventScroll: true });
       return;
     }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
@@ -258,6 +275,7 @@ export const SelectMenu = ({
                   title={option.label}
                   className="mc-select-option"
                   disabled={option.disabled}
+                  onMouseMove={event => { if (!option.disabled) event.currentTarget.focus({ preventScroll: true }); }}
                   onClick={() => selectValue(option.value)}
                   onKeyDown={(event) => handleOptionKeyDown(event, option)}
                 >

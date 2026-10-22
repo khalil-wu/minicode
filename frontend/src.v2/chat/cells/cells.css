@@ -2338,6 +2338,22 @@ button.diff-cell-file-path:hover {
   min-width: 0;
 }
 
+.error-cell.error-cell-notice {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 16px;
+  color: var(--text-primary);
+  background: transparent;
+  font-family: var(--font-ui);
+  font-weight: var(--fw-regular);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.error-cell-notice > svg { flex: 0 0 auto; margin-top: 2px; }
+
 .error-cell-icon {
   flex-shrink: 0;
 }

@@ -3,6 +3,36 @@ from __future__ import annotations
 from typing import Any
 
 from backend.agent.message import AgentEvent
+from backend.agent.provider_attempt import ProviderAttempt
+
+
+def provider_stream_error_progress(
+    message: str,
+    *,
+    attempt: ProviderAttempt,
+    progress_id: str,
+    error_message: str,
+    detail: str = "",
+    retry_attempt: int | None = None,
+    max_retries: int | None = None,
+    retry_after_ms: int | None = None,
+) -> AgentEvent:
+    """A retry failure is public evidence, separate from request liveness."""
+    return AgentEvent.progress(
+        message,
+        stage="status",
+        status="info",
+        id=f"{progress_id}:error:{attempt.span_id}:reconnecting",
+        operation_id=progress_id,
+        phase="recover",
+        provider_state="reconnecting",
+        error_message=error_message,
+        detail=detail,
+        retry_attempt=retry_attempt,
+        max_retries=max_retries,
+        retry_after_ms=retry_after_ms,
+        visibility="timeline",
+    )
 
 
 def short_text(value: Any, limit: int = 72) -> str:

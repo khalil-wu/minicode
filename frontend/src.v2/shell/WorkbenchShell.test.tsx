@@ -252,7 +252,7 @@ describe("WorkbenchShell narrow navigation", () => {
     const { container } = render(<WorkbenchShell />);
 
     expect(screen.getByRole("button", { name: "命令面板" }).querySelector("svg.lucide-search")).toBeTruthy();
-    expect(within(screen.getByRole("banner")).queryByRole("button", { name: "设置" })).toBeNull();
+    expect(within(screen.getByRole("banner")).queryByRole("button", { name: /^设置/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
     expect(screen.getByRole("button", { name: "打开个人资料菜单" })).toBeTruthy();
     expect(screen.getByRole("img", { name: "后端已连接" }).textContent).toBe("");
@@ -460,7 +460,7 @@ describe("WorkbenchShell narrow navigation", () => {
     const input = screen.getByRole("textbox", { name: "主对话输入" }) as HTMLTextAreaElement;
     fireEvent.change(input, { target: { value: "Unsent settings round-trip draft" } });
     fireEvent.click(screen.getByRole("button", { name: "打开个人资料菜单" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "设置" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^设置/ }));
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "general", conversationId: "conversation-1" });
     expect(useAppStore.getState().messages[0].id).toBe("message-1");
     expect(screen.getByText("Code workspace")).toBe(workspace);

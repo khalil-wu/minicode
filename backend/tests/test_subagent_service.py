@@ -9,6 +9,42 @@ from backend.services.subagent_service import (
 )
 
 
+def test_subagent_provider_errors_preserve_visibility_and_original_span_in_public_and_restored_history(tmp_path) -> None:
+    journal = ExecutionJournal("child-provider-visibility", base_dir=tmp_path / "sidechains")
+    journal.append("user_prompt", {"content": "Continue the real task"})
+    operation = "provider:connection:child:iteration-1"
+    common = {"lifecycle": "provider_progress", "operation_id": operation,
+              "provider_span_id": "original-span", "provider_state": "reconnecting",
+              "retry_attempt": 1, "max_retries": 2, "message": "Reconnecting 1/2",
+              "error_message": "The provider disconnected", "visibility": "timeline"}
+    first = journal.append("system", common)
+    for visibility in ("debug", "hidden", "internal", "redacted", None):
+        journal.append("system", {**common, "visibility": visibility, "message": "Rebuilding private request context",
+                                  "error_message": "Private recovery detail"})
+    journal.append("system", {**common, "provider_state": "failed", "error_message": "", "message": "Internal lifecycle"})
+    terminal_error = journal.append("system", {**common, "provider_state": "failed", "visibility": "compact",
+        "message": "Request failed", "error_message": "The real terminal failure"})
+    journal.append("system", {"lifecycle": "error", "message": "The real terminal failure"})
+    journal.append("terminal", {"status": "failed"})
+    raw_events = [event.to_dict() for event in journal.read_events()]
+
+    public = project_subagent_transcript_events(raw_events)
+    errors = [event for event in public if event["payload"].get("lifecycle") == "provider_progress"]
+    assert [event["event_id"] for event in errors] == [first.event_id, terminal_error.event_id]
+    assert [event["payload"]["visibility"] for event in errors] == ["timeline", "compact"]
+    assert all(event["payload"]["provider_span_id"] == "original-span" for event in errors)
+    restored = build_subagent_transcript_messages({"events": raw_events})[-1]
+    blocks = [block for block in restored["blocks"] if block["type"] == "progress"]
+    assert [block["id"] for block in blocks] == [
+        f"{operation}:error:original-span:reconnecting:1", f"{operation}:error:original-span:failed:1",
+    ]
+    assert [block["errorMessage"] for block in blocks] == ["The provider disconnected", "The real terminal failure"]
+    assert restored["failure_message"] == "The real terminal failure"
+    assert restored["terminal_status"] == "failed"
+    assert "Private recovery detail" not in str(public) + str(restored)
+    assert any(event["payload"].get("error_message") == "Private recovery detail" for event in raw_events)
+
+
 def test_subagent_status_uses_snapshot_summary_not_internal_result_envelope() -> None:
     event = build_subagent_status_event(
         "subagent-weather",

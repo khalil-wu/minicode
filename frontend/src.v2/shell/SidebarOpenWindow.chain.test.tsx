@@ -18,6 +18,8 @@ let anchor: HTMLButtonElement;
 const menuProps = () => ({ anchor, menuId: "sidebar-source", conversationId: "background-original", workspaceRoot: "C:/execution/worktree",
   archived: false, isIsolated: true, canCopy: true, canHandoff: true, onRename: vi.fn(), onCopy: vi.fn(), onCopyLink: vi.fn(),
   onCopyMarkdown: vi.fn(), onHandoff: vi.fn(), onArchive: vi.fn(), onClose: vi.fn(), onPin: vi.fn(), onReadState: vi.fn(), onProjectChange: vi.fn() });
+const openSubmenu = (item: HTMLElement) => { item.focus(); fireEvent.keyDown(item, { key: "ArrowRight" }); };
+
 beforeEach(() => {
   vi.clearAllMocks();
   native.platform = "win32"; native.git.mockResolvedValue({ is_git_repo: true });
@@ -31,7 +33,7 @@ afterEach(() => { cleanup(); anchor.remove(); vi.unstubAllGlobals(); });
 
 it("opens the clicked background execution root through the shared real target consumer without moving the reader", async () => {
   render(<ConversationMenu {...menuProps()} />);
-  fireEvent.mouseEnter(await screen.findByRole("menuitem", { name: "打开方式" }));
+  openSubmenu(await screen.findByRole("menuitem", { name: "打开方式" }));
   await screen.findByRole("menuitem", { name: "VS Code" });
   expect(screen.queryByRole("menuitem", { name: "MiniCode" })).toBeNull();
   fireEvent.click(screen.getByRole("menuitem", { name: "VS Code" }));
@@ -43,7 +45,7 @@ it("opens the clicked background execution root through the shared real target c
 
 it("uses the same Source Work-mode target filter in the sidebar", async () => {
   useAppStore.setState({ appMode: "cowork" }); render(<ConversationMenu {...menuProps()} />);
-  fireEvent.mouseEnter(await screen.findByRole("menuitem", { name: "打开方式" }));
+  openSubmenu(await screen.findByRole("menuitem", { name: "打开方式" }));
   await screen.findByRole("menuitem", { name: "File Explorer" });
   expect(screen.queryByRole("menuitem", { name: "VS Code" })).toBeNull(); expect(screen.queryByRole("menuitem", { name: "Terminal" })).toBeNull();
 });

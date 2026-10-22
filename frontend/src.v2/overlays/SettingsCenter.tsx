@@ -1,26 +1,12 @@
 import { useI18n } from "../i18n";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  Archive,
-  Cable,
   CalendarClock,
   Cpu,
   FlaskConical,
-  GitBranch,
-  Globe2,
-  Keyboard,
-  Mic,
-  Settings,
-  Puzzle,
   Search,
   ServerOff,
-  Sun,
-  BookOpenText,
-  SquareTerminal,
-  UserRoundCog,
-  Download,
 } from "../lib/icons";
-import { HardDrive, FileCog, Webhook, FolderGit2 } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { visibleLeftSidebarWidth } from "../stores/shared-helpers";
 import { fetchLLMSettings } from "../protocol/api";
@@ -69,6 +55,7 @@ import { usePluginsFeature } from "../hooks/usePluginsFeature";
 import { useComputerUseSettings } from "../hooks/useComputerUseSettings";
 import { ComputerUseSettings } from "./ComputerUseSettings";
 import { ComputerUseSourceIcon } from "../lib/computer-use-icons";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
 
 export const SettingsCenter = () => {
   const { t: tr } = useI18n();
@@ -239,30 +226,30 @@ export const SettingsCenter = () => {
   }, [activeTab, settingsOpen]);
 
   const tabs = [
-    { id: "general" as const, group: tr("个人"), label: tr("常规"), description: tr("设置工作方式、消息跟进、过程展示与内容加载。"), keywords: "permissions composer notifications terminal updates", icon: <Settings /> },
-    { id: "import" as const, group: tr("个人"), label: tr("导入"), description: tr("将其他 AI 应用的配置、项目和聊天导入 MiniCode"), keywords: "Claude Code Cursor", icon: <Download /> },
-    { id: "appearance" as const, group: tr("个人"), label: tr("外观"), description: tr("调整界面主题、字号与显示密度。"), keywords: tr("系统 浅色 深色 紧凑 字号"), icon: <Sun /> },
-    { id: "archived" as const, group: tr("个人"), label: tr("已归档聊天"), description: tr("存放已归档任务及消息，并可恢复到任务列表。"), keywords: tr("会话 消息 恢复 隐藏"), icon: <Archive /> },
-    { id: "voice" as const, group: tr("个人"), label: tr("语音"), description: tr("设置麦克风与听写服务，录音转成可编辑草稿。"), keywords: tr("听写 录音 转录 麦克风 词汇"), icon: <Mic /> },
-    { id: "storage" as const, group: tr("个人"), label: tr("存储"), description: tr("管理保存在这台电脑上的聊天和工作树。"), keywords: "disk storage cleanup", icon: <HardDrive /> },
-    { id: "config" as const, group: tr("个人"), label: tr("配置"), description: tr("为新聊天配置权限、网络访问和智能体回复。"), keywords: "config model permissions", icon: <FileCog /> },
-    { id: "personalization" as const, group: tr("个人"), label: tr("个性化"), description: tr("管理影响模型行为的指令、任务记忆与来源。"), keywords: tr("INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则"), icon: <UserRoundCog /> },
+    { id: "general" as const, group: tr("个人"), label: tr("常规"), description: tr("设置工作方式、消息跟进、过程展示与内容加载。"), keywords: "permissions composer notifications terminal updates", icon: <SettingsSourceIcon icon="general" /> },
+    { id: "import" as const, group: tr("个人"), label: tr("导入"), description: tr("将其他 AI 应用的配置、项目和聊天导入 MiniCode"), keywords: "Claude Code Cursor", icon: <SettingsSourceIcon icon="import" /> },
+    { id: "appearance" as const, group: tr("个人"), label: tr("外观"), description: tr("调整界面主题、字号与显示密度。"), keywords: tr("系统 浅色 深色 紧凑 字号"), icon: <SettingsSourceIcon icon="appearance" /> },
+    { id: "archived" as const, group: tr("个人"), label: tr("已归档聊天"), description: tr("存放已归档任务及消息，并可恢复到任务列表。"), keywords: tr("会话 消息 恢复 隐藏"), icon: <SettingsSourceIcon icon="archived" /> },
+    { id: "voice" as const, group: tr("个人"), label: tr("语音"), description: tr("设置麦克风与听写服务，录音转成可编辑草稿。"), keywords: tr("听写 录音 转录 麦克风 词汇"), icon: <SettingsSourceIcon icon="voice" /> },
+    { id: "storage" as const, group: tr("个人"), label: tr("存储"), description: tr("管理保存在这台电脑上的聊天和工作树。"), keywords: "disk storage cleanup", icon: <SettingsSourceIcon icon="storage" /> },
+    { id: "config" as const, group: tr("个人"), label: tr("配置"), description: tr("为新聊天配置权限、网络访问和智能体回复。"), keywords: "config model permissions", icon: <SettingsSourceIcon icon="config" /> },
+    { id: "personalization" as const, group: tr("个人"), label: tr("个性化"), description: tr("管理影响模型行为的指令、任务记忆与来源。"), keywords: tr("INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则"), icon: <SettingsSourceIcon icon="personalization" /> },
     { id: "pets" as const, group: tr("个人"), label: tr("Mini 与宠物"), description: tr("Mini 管理聊天并显示需要关注的事项"), keywords: "mini pets avatar sprite hatch", icon: <SourcePetIcon active={activeTab === "pets"} /> },
-    { id: "shortcuts" as const, group: tr("个人"), label: tr("快捷键"), description: tr("查看当前可用的键盘操作。"), keywords: tr("命令面板 终端 侧栏 发送 换行"), icon: <Keyboard /> },
+    { id: "shortcuts" as const, group: tr("个人"), label: tr("快捷键"), description: tr("查看当前可用的键盘操作。"), keywords: tr("命令面板 终端 侧栏 发送 换行"), icon: <SettingsSourceIcon icon="shortcuts" /> },
     { id: "provider" as const, group: tr("个人"), label: tr("模型"), description: tr("配置提供商、接口、认证与默认模型。"), keywords: tr("API 密钥 Base URL 推理 供应商"), icon: <Cpu /> },
-    { id: "plugins" as const, group: tr("集成"), label: tr("插件"), description: tr("管理插件、技能和 MCP。"), keywords: tr("导入 Zip 验证 打包 Hook App MCP 技能 服务"), icon: <Puzzle /> },
-    { id: "marketplace" as const, group: tr("集成"), label: tr("插件市场"), description: tr("管理插件市场"), keywords: "marketplace git source upgrade", icon: <Puzzle /> },
-    { id: "skills" as const, group: tr("集成"), label: tr("技能"), description: tr("查看任务工作流，并选择用于下一条消息。"), keywords: tr("SKILL.md 工作流 市场 安装"), icon: <BookOpenText /> },
-    { id: "connectors" as const, group: tr("集成"), label: "MCP", description: tr("安装和管理外部工具服务、连接与认证状态。"), keywords: tr("stdio HTTP 服务 工具 市场"), icon: <Cable /> },
+    { id: "plugins" as const, group: tr("集成"), label: tr("插件"), description: tr("管理插件、技能和 MCP。"), keywords: tr("导入 Zip 验证 打包 Hook App MCP 技能 服务"), icon: <SettingsSourceIcon icon="plugins" /> },
+    { id: "marketplace" as const, group: tr("集成"), label: tr("插件市场"), description: tr("管理插件市场"), keywords: "marketplace git source upgrade", icon: <SettingsSourceIcon icon="plugins" /> },
+    { id: "skills" as const, group: tr("集成"), label: tr("技能"), description: tr("查看任务工作流，并选择用于下一条消息。"), keywords: tr("SKILL.md 工作流 市场 安装"), icon: <SettingsSourceIcon icon="skills" /> },
+    { id: "connectors" as const, group: tr("集成"), label: "MCP", description: tr("安装和管理外部工具服务、连接与认证状态。"), keywords: tr("stdio HTTP 服务 工具 市场"), icon: <SettingsSourceIcon icon="mcp" /> },
     { id: "computerUse" as const, group: tr("集成"), label: tr("电脑操作"), description: tr("管理 MiniCode 如何使用电脑上的其他应用。"), keywords: "computer use apps approvals permissions 电脑 应用 授权", icon: <ComputerUseSourceIcon /> },
-    { id: "browser" as const, group: tr("集成"), label: tr("浏览器"), description: tr("管理内置浏览器页面、下载与站点权限。"), keywords: tr("控制台 网络 下载 数据 网站"), icon: <Globe2 /> },
-    { id: "hooks" as const, group: tr("编码"), label: tr("钩子"), description: tr("管理来自配置和已启用插件的生命周期钩子。"), keywords: "hooks lifecycle command", icon: <Webhook /> },
-    { id: "connections" as const, group: tr("编码"), label: tr("连接"), description: tr("连接到远程设备。"), keywords: tr("SSH WSL 远程 设备"), icon: <Cable /> },
+    { id: "browser" as const, group: tr("集成"), label: tr("浏览器"), description: tr("管理内置浏览器页面、下载与站点权限。"), keywords: tr("控制台 网络 下载 数据 网站"), icon: <SettingsSourceIcon icon="browser" /> },
+    { id: "hooks" as const, group: tr("编码"), label: tr("钩子"), description: tr("管理来自配置和已启用插件的生命周期钩子。"), keywords: "hooks lifecycle command", icon: <SettingsSourceIcon icon="hooks" /> },
+    { id: "connections" as const, group: tr("编码"), label: tr("连接"), description: tr("连接到远程设备。"), keywords: tr("SSH WSL 远程 设备"), icon: <SettingsSourceIcon icon="connections" /> },
     { id: "scheduler" as const, group: tr("集成"), label: tr("已安排"), description: tr("管理自动运行的任务与最近记录。"), keywords: tr("计划 Cron 时区 Worktree 自动"), icon: <CalendarClock /> },
-    { id: "workspaceGit" as const, group: tr("编码"), label: "Git", description: tr("查看当前工作区的变更、分支与工作树。"), keywords: tr("diff 状态 文件 提交"), icon: <GitBranch /> },
+    { id: "workspaceGit" as const, group: tr("编码"), label: "Git", description: tr("查看当前工作区的变更、分支与工作树。"), keywords: tr("diff 状态 文件 提交"), icon: <SettingsSourceIcon icon="workspaceGit" /> },
     { id: "features" as const, group: tr("编码"), label: tr("实验功能"), description: tr("启用或停用当前运行时支持的实验能力。"), keywords: tr("开关 运行时 SDK 预览"), icon: <FlaskConical /> },
-    { id: "advanced" as const, group: tr("编码"), label: tr("环境"), description: tr("本地环境用于配置项目工作树的设置脚本和操作。"), keywords: "environment setup cleanup actions worktree", icon: <SquareTerminal /> },
-    { id: "worktrees" as const, group: tr("编码"), label: tr("工作树"), description: tr("查看工作副本，并选择保留多少个旧工作树。"), keywords: "worktree root upstream cleanup", icon: <FolderGit2 /> },
+    { id: "advanced" as const, group: tr("编码"), label: tr("环境"), description: tr("本地环境用于配置项目工作树的设置脚本和操作。"), keywords: "environment setup cleanup actions worktree", icon: <SettingsSourceIcon icon="advanced" /> },
+    { id: "worktrees" as const, group: tr("编码"), label: tr("工作树"), description: tr("查看工作副本，并选择保留多少个旧工作树。"), keywords: "worktree root upstream cleanup", icon: <SettingsSourceIcon icon="worktrees" /> },
   ];
   const integrationOpen = ["plugins", "skills", "connectors", "marketplace"].includes(activeTab);
   useEffect(() => {
@@ -273,7 +260,7 @@ export const SettingsCenter = () => {
   const navigationTab = integrationOpen ? "plugins" : ["provider", "features"].includes(activeTab) ? "config" : activeTab;
   const activeTabMeta = tabs.find((tab) => tab.id === navigationTab)!;
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
-  const navigationTabs = tabs.filter(tab => !["connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id)
+  const navigationTabs = tabs.filter(tab => !["import", "connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id)
     && (tab.id !== "computerUse" || computerUse.data?.navigation_visible));
   const visibleTabs = normalizedSettingsQuery
     ? navigationTabs.filter(tab => `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
@@ -402,6 +389,7 @@ export const SettingsCenter = () => {
               {tab === "general" && (
                 <><div hidden={licensesOpen}><GeneralTab
                   onOpenLicenses={() => { generalBeforeLicenses.current = contentRef.current?.scrollTop || 0; setLicensesOpen(true); }}
+                  importSettings={<ImportSettingsTab variant="general-row" active={settingsOpen && activeTab === "general" && !licensesOpen} />}
                 /></div>{licensesOpen && <OpenSourceLicenses onBack={() => setLicensesOpen(false)} />}</>
               )}
               {tab === "provider" && (

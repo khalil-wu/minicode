@@ -20,14 +20,14 @@ import { MessageList } from "../chat/MessageList";
 import { acknowledgeClientCommand } from "../hooks/useWebSocket";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { buildContextNativeAttachments } from "./contextPayload";
-import type { ClientCommand, CommandResultEvent, ServerEvent, UserMessageCommand, UserMessageQueueUpdatedEvent } from "../protocol/events";
+import type { ClientCommand, CommandResultEvent, InterruptCommand, ServerEvent, UserMessageCommand, UserMessageQueueUpdatedEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
 import { clearDiffCommentScope, getDiffCommentScope, readDiffCommentState, setDiffComments } from "../lib/diff-comment-storage";
 import { hydrateMessages } from "../chat/transcriptHydration";
 import { createCodeReview } from "../protocol/code-review";
 
-const wire = vi.hoisted(() => ({ commands: [] as UserMessageCommand[], accepted: true, toast: vi.fn() }));
+const wire = vi.hoisted(() => ({ commands: [] as UserMessageCommand[], interrupts: [] as InterruptCommand[], accepted: true, toast: vi.fn() }));
 vi.hoisted(() => Object.defineProperty(window, "matchMedia", { configurable: true,
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }));
 vi.mock("../hooks/useWebSocket", async load => ({ ...await load<typeof import("../hooks/useWebSocket")>(), getWebSocket: () => ({ sessionId: "draft-admission-session", send: (command: ClientCommand) => {
@@ -97,7 +97,7 @@ const queueFact = (command: UserMessageCommand, status: UserMessageQueueUpdatedE
 beforeEach(async () => {
   await waitComposerDraftRecovery();
   vi.stubGlobal("File", NativeFile);
-  wire.commands = []; wire.accepted = true; wire.toast.mockClear(); resetPendingUserMessagesForTests();
+  wire.commands = []; wire.interrupts = []; wire.accepted = true; wire.toast.mockClear(); resetPendingUserMessagesForTests();
   clearDiffCommentScope("main"); clearDiffCommentScope("other"); clearDiffCommentScope(getDiffCommentScope(null, root));
   window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: "main", workingDirectory: root,
@@ -112,6 +112,7 @@ beforeEach(async () => {
     slashPanelOpen: false, mentionPanelOpen: false, sendShortcut: "enter", followUpBehavior: "queue" });
   registerWebSocketSender(command => {
     if (command.type === "user_message") wire.commands.push(command);
+    if (command.type === "interrupt") wire.interrupts.push(command);
     if (command.type === "conversation.create") handleCommandResultEvent({ type: "command.result", command: "conversation.create",
       client_command_id: command.client_command_id, level: "success", message: "", data: { conversation_id: command.conversation_id } });
     return wire.accepted;
@@ -444,6 +445,101 @@ describe("actual composer durable admission boundary", () => {
     await act(async () => handleCommandResultEvent(receipt(first, { admitted: false }, "error")));
     expect(useAppStore.getState().draft).toBe("");
     await act(async () => handleCommandResultEvent(receipt(second, { admitted: false, queued: true })));
+  });
+
+  it("shows actual send waiting only on its original composer and releases only the received input", async () => {
+    useAppStore.setState({ draft: "A original input" });
+    render(<Composer />); submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const first = wire.commands[0];
+    let send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    expect(send.getAttribute("aria-busy")).toBe("true");
+    expect(send.querySelector("svg.animate-spin")).not.toBeNull();
+    expect(useAppStore.getState().draft).toBe("A original input");
+    fireEvent.click(send);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Enter", code: "Enter" });
+    expect(wire.commands).toHaveLength(1);
+
+    act(() => useAppStore.setState({ conversationId: "other", draft: "B original input", messages: [], isStreaming: false }));
+    send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+    expect(send.getAttribute("aria-busy")).toBeNull();
+    submit(); await waitFor(() => expect(wire.commands).toHaveLength(2));
+    const second = wire.commands[1];
+    expect(second.conversation_id).toBe("other");
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBe("true");
+
+    act(() => received(first));
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBe("true");
+    expect(useAppStore.getState().draft).toBe("B original input");
+    await act(async () => handleCommandResultEvent(receipt(first, { admitted: false }, "error")));
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBe("true");
+    expect(useAppStore.getState().draft).toBe("B original input");
+    act(() => received(second));
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBeNull();
+    await act(async () => handleCommandResultEvent(receipt(second, { admitted: true })));
+  });
+
+  it("keeps fenced Stop waiting on its original conversation through ACK, hot switches and a late refusal", async () => {
+    const a = { id: "stop-message-A", turnId: "stop-turn-A", role: "assistant" as const, content: "Actual A work", artifacts: [], timestamp: 1, isStreaming: true };
+    const b = { ...a, id: "stop-message-B", turnId: "stop-turn-B", content: "Actual B work" };
+    useAppStore.setState({ messages: [a], isStreaming: true, conversationStreaming: { main: true, other: true }, conversationMessages: { other: [b] } });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "停止当前回复" }));
+    const first = wire.interrupts[0];
+    expect(first).toMatchObject({ type: "interrupt", conversation_id: "main", turn_id: a.turnId, message_id: a.id, client_command_id: expect.any(String) });
+    let stop = screen.getByRole("button", { name: "停止当前回复" }) as HTMLButtonElement;
+    expect(stop.disabled).toBe(true);
+    expect(stop.getAttribute("aria-busy")).toBe("true");
+    expect(stop.querySelector("svg.animate-spin")).not.toBeNull();
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: first.client_command_id, command_type: "interrupt" } as ServerEvent));
+    expect(stop.getAttribute("aria-busy")).toBe("true");
+    fireEvent.click(stop);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Escape" });
+    expect(wire.interrupts).toHaveLength(1);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "A unsent follow-up" } });
+    expect((screen.getByRole("button", { name: "将消息加入队列" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: "停止当前回复" }).getAttribute("aria-busy")).toBe("true");
+    act(() => useAppStore.setState({ conversationId: "other", draft: "", messages: [b], conversationMessages: { main: [a] }, isStreaming: true }));
+    stop = screen.getByRole("button", { name: "停止当前回复" }) as HTMLButtonElement;
+    expect(stop.disabled).toBe(false);
+    expect(stop.getAttribute("aria-busy")).toBeNull();
+    fireEvent.click(stop);
+    const second = wire.interrupts[1];
+    expect(second).toMatchObject({ conversation_id: "other", turn_id: b.turnId, message_id: b.id });
+
+    act(() => useAppStore.setState({ conversationId: "main", draft: "A unsent follow-up", messages: [a], conversationMessages: { other: [b] }, isStreaming: true }));
+    expect(screen.getByRole("button", { name: "停止当前回复" }).getAttribute("aria-busy")).toBe("true");
+    await act(async () => handleCommandResultEvent({ type: "command.result", command: "interrupt", client_command_id: first.client_command_id,
+      level: "success", message: "", data: { conversation_id: "main" } }));
+    expect(screen.getByRole("button", { name: "停止当前回复" }).getAttribute("aria-busy")).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ isStreaming: true, draft: "A unsent follow-up" });
+    act(() => useAppStore.setState({ conversationId: "other", draft: "B unsent follow-up", messages: [b], conversationMessages: { main: [a] }, isStreaming: true }));
+    expect(screen.getByRole("button", { name: "停止当前回复" }).getAttribute("aria-busy")).toBe("true");
+    await act(async () => handleCommandResultEvent({ type: "command.result", command: "interrupt", client_command_id: second.client_command_id,
+      level: "error", message: "Actual B cancellation refused", data: { conversation_id: "other" } }));
+    expect(screen.getByRole("button", { name: "停止当前回复" }).getAttribute("aria-busy")).toBeNull();
+    expect(wire.toast).toHaveBeenCalledWith("Actual B cancellation refused", "error", 4500);
+    expect(useAppStore.getState()).toMatchObject({ isStreaming: true, draft: "B unsent follow-up" });
+  });
+
+  it("uses actual terminal state when done arrives before the original Stop receipt", async () => {
+    const message = { id: "stop-before-receipt", turnId: "stop-before-receipt-turn", role: "assistant" as const, content: "Actual work", artifacts: [], timestamp: 1, isStreaming: true };
+    useAppStore.setState({ messages: [message], isStreaming: true, conversationStreaming: { main: true } });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "停止当前回复" }));
+    const command = wire.interrupts[0];
+    act(() => stream({ type: "done", conversation_id: "main", message_id: message.id, turn_id: message.turnId,
+      status: "interrupted", usage: {} } as ServerEvent));
+    expect(useAppStore.getState().isStreaming).toBe(false);
+    expect(screen.queryByRole("button", { name: "停止当前回复" })).toBeNull();
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBeNull();
+    await act(async () => handleCommandResultEvent({ type: "command.result", command: "interrupt", client_command_id: command.client_command_id,
+      level: "success", message: "", data: { conversation_id: "main" } }));
+    expect(useAppStore.getState().messages[0].terminalStatus).toBe("interrupted");
   });
 
   it.each(["offline", "refused"] as const)("retains %s input and original File bytes through a cold reopen", async mode => {

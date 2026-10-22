@@ -6,9 +6,8 @@ import "./cells.css";
 /**
  * ErrorCell — dedicated error display.
  *
- * Shows: title + message + recoverability + suggested action.
- * Original diagnostics belong in Inspector, not transcript disclosures.
- * Never hidden inside activity details.
+ * Source turn failures are neutral, standalone notices. Permission and tool
+ * notices retain their own presentation and original diagnostics.
  */
 export function ErrorCell({ cell }: { cell: ErrorCellState }) {
   const isPermissionNotice = cell.source === "permission";
@@ -20,6 +19,12 @@ export function ErrorCell({ cell }: { cell: ErrorCellState }) {
       : purifiedMessage
     : "";
   const ErrorIcon = isPermissionNotice ? ShieldAlert : CircleAlert;
+
+  if (cell.source === "agent" || cell.source === "network") return <div className="error-cell error-cell-notice" role="alert">
+    <CircleAlert size={16} strokeWidth={1.75} aria-hidden="true" />
+    {displayMessage && <span className="sr-only">{cell.title}</span>}
+    <span>{displayMessage || cell.title}{cell.rawError && cell.rawError.trim() !== cell.message.trim() && <><br />{cell.rawError}</>}</span>
+  </div>;
 
   return (
     <div className={`error-cell error-cell-${tone}`}>
