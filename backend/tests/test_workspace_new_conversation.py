@@ -52,7 +52,9 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
     assert switched["conversation"]["workspace_root"] == str(new_root)
     assert switched["conversation"]["execution_cwd"] == str(new_root)
     assert session.emit_command_result.await_args.args[0] == command
-    session.load_active_conversation_snapshot.assert_called_once_with(created.id, {}, notify=True, defer_start=True)
+    session.load_active_conversation_snapshot.assert_called_once_with(
+        created.id, {}, snapshot_revision=created.revision, notify=True, defer_start=True,
+    )
 
 
 def test_failed_workspace_initialization_keeps_previous_owner(monkeypatch, tmp_path):

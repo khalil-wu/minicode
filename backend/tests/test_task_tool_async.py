@@ -8,6 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from backend.agent.message import AgentEvent
 from backend.agent.context import ContextBuilder
 from backend.agent.runtime import AgentRuntime
@@ -2791,6 +2793,64 @@ async def _test_task_status_lists_and_waits_for_background_subagents(tmp_path):
 
     assert waited.status == "completed"
     assert "Runtime inspected." in waited.content
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_task_status_waits_for_selected_completion_despite_pending_and_new_mail(tmp_path, monkeypatch, batch):
+    from backend.agent.message import UserCommand
+    from backend.agent.turn_input import TurnInputQueue
+
+    async def run():
+        runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+        runtime.start_run(run_id="parent", conversation_id="wait-owner")
+        selected = ["selected", "still-running"] if batch else ["selected"]
+        for child_id in [*selected, "unrelated"]:
+            runtime.start_subagent(subagent_id=child_id, parent_run_id="parent", agent_type="default", background=True)
+        runtime.store_subagent_result("unrelated", status="completed", content="Unrelated completed result",
+            **_subagent_fence(runtime, "unrelated"))
+        runtime.complete_subagent("unrelated", **_subagent_fence(runtime, "unrelated"))
+        queue = TurnInputQueue()
+        queue.begin_turn("parent")
+        queue.enqueue_command(UserCommand(type="user_message", data={"content": "A queued instruction",
+            "user_message_id": "queued", "conversation_id": "wait-owner"}))
+        assert queue.deliver_message_board_notification("A queued channel update", expected_turn_id="parent")
+        context = ToolExecutionContext(permission=PermissionContext(), conversation_id="wait-owner",
+            metadata={"run_id": "parent"}, run_context=RunContext(agent_runtime=runtime, turn_input_queue=queue))
+        subscribed = asyncio.Event()
+        original = runtime.wait_for_agent_activity
+
+        async def observe(*args, **kwargs):
+            subscribed.set()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(runtime, "wait_for_agent_activity", observe)
+        waiting = asyncio.create_task(TaskStatusTool().execute({
+            **({"subagent_ids": selected} if batch else {"subagent_id": "selected"}), "wait_seconds": 30}, context))
+        try:
+            await asyncio.wait_for(subscribed.wait(), timeout=1)
+            runtime.send_swarm_message(sender_id="selected", recipient_id="parent", content="Progress while selected is running",
+                conversation_id="wait-owner", sender_mailbox_epoch=runtime.get_subagent("selected").mailbox_epoch,
+                delivery_mode="queue_only", notify_parent=False)
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(waiting), timeout=0.03)
+            runtime.store_subagent_result("selected", status="completed", content="Selected task result",
+                **_subagent_fence(runtime, "selected"))
+            runtime.complete_subagent("selected", **_subagent_fence(runtime, "selected"))
+            result = await waiting
+            assert result.status == ("running" if batch else "completed")
+            assert "Selected task result" in result.content
+            assert queue.pending_count() == 1 and queue.has_message_board_notifications()
+            assert any(notification["subagent_id"] == "unrelated" for notification in
+                runtime.list_parent_notifications(parent_run_id="parent", conversation_id="wait-owner", status="pending"))
+            claims = runtime.claim_swarm_messages(participant_id="parent", mailbox_epoch=0, conversation_id="wait-owner")
+            assert [claim.message.content for claim in claims] == ["Progress while selected is running"]
+        finally:
+            if not waiting.done():
+                waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+            await runtime.aclose(release_lease=True)
+
+    asyncio.run(run())
 
 
 async def _test_task_status_returns_summary_first_for_long_retained_results(tmp_path):

@@ -36,13 +36,16 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
     cursor = control.activity_cursor()
     queue = context.run_context.turn_input_queue
     queue_cursor = queue.activity_cursor() if queue is not None else 0
-    if queue is not None and queue.pending_count():
-        return {"kind": "steer"}
-    if queue is not None and queue.has_message_board_notifications():
-        return {"kind": "message"}
-    if await to_thread_cancel_safe(control.runtime.has_pending_agent_input,
-        agent_id=control.actor_id, conversation_id=control.conversation_id):
-        return {"kind": "message"}
+    # Source V2 waits for input activity; legacy targeted status waits finish
+    # only when one of their selected agents reaches a terminal status.
+    if not agent_ids:
+        if queue is not None and queue.pending_count():
+            return {"kind": "steer"}
+        if queue is not None and queue.has_message_board_notifications():
+            return {"kind": "message"}
+        if await to_thread_cancel_safe(control.runtime.has_pending_agent_input,
+            agent_id=control.actor_id, conversation_id=control.conversation_id):
+            return {"kind": "message"}
     if agent_ids and any((control.subagent_snapshot(agent_id, include_result=False) or {}).get("status") not in {"pending", "running"} for agent_id in agent_ids):
         return {"kind": "completed"}
     async def incoming_activity():
@@ -51,7 +54,7 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
         while time.monotonic() < deadline:
             event = await control.wait_for_activity(list(agent_ids), after_seq=after_seq,
                 timeout_seconds=deadline - time.monotonic(),
-                kinds=("message", "completed", "cancel_requested") if agent_ids else ("message", "completed"))
+                kinds=("completed",) if agent_ids else ("message", "completed"))
             if event is None:
                 return None
             after_seq = event["seq"]
@@ -70,7 +73,7 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
     waiters = {asyncio.create_task(incoming_activity()): "agent"}
     if agent_ids:
         waiters[asyncio.create_task(control.wait_for_any(list(agent_ids), timeout_seconds=timeout_seconds))] = "completion"
-    if queue is not None:
+    if queue is not None and not agent_ids:
         waiters[asyncio.create_task(queue.wait_for_activity(after_seq=queue_cursor, timeout=timeout_seconds))] = "input"
     if context.cancel_event is not None:
         waiters[asyncio.create_task(context.cancel_event.wait())] = "cancel"

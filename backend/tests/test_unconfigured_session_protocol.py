@@ -62,6 +62,7 @@ async def test_archive_publishes_fallback_without_waiting_for_provider_history(
 
     socket = ProtocolSocket("session_archive_paged_fallback")
     release_history = threading.Event()
+    history_started = threading.Event()
     async with main.lifespan(main.app):
         task = asyncio.create_task(main.websocket_endpoint(socket))
         try:
@@ -77,10 +78,18 @@ async def test_archive_publishes_fallback_without_waiting_for_provider_history(
 
             def blocked_history(identity):
                 if identity == fallback.id:
-                    assert release_history.wait(5)
+                    history_started.set()
+                    assert release_history.wait(10)
                 return read_history(identity)
 
             monkeypatch.setattr(session.conversation_repo, "get_conversation", blocked_history)
+            publish_inventory = session.send_conversation_list
+
+            async def publish_while_history_is_blocked(**options):
+                assert await asyncio.to_thread(history_started.wait, 5)
+                return await publish_inventory(**options)
+
+            monkeypatch.setattr(session, "send_conversation_list", publish_while_history_is_blocked)
             read_inventory = session.conversation_repo.list_conversations_with_revision
             inventory_reads = []
 
@@ -93,12 +102,19 @@ async def test_archive_publishes_fallback_without_waiting_for_provider_history(
             await socket.command("conversation.archive", conversation_id=archived.id)
             result = await socket.until("command.result", command="conversation.archive")
             assert result["level"] == "success"
+            assert result["data"]["projection_errors"] == []
             assert len(inventory_reads) == 1
             assert session.active_conversation_id == fallback.id
             assert session.conversation_repo.get_conversation_summary(archived.id).archived
             switched = next(event for event in socket.sent if event.get("type") == "conversation.switched"
                 and event.get("conversation_id") == fallback.id)
             assert switched["is_hydrating"] and switched["conversation"]["transcript_page"]["total_messages"] == 120
+            inventory = next(event for event in socket.sent if event.get("type") == "conversation.list"
+                and event.get("active_conversation_id") == fallback.id)
+            assert inventory["conversation_id"] == inventory["session"]["active_conversation_id"] == fallback.id
+            assert inventory["active_conversation"]["id"] == fallback.id
+            assert inventory["active_conversation"]["transcript_page"]["total_messages"] == 120
+            assert not release_history.is_set() and not session.conversation_runtime._hydration_task.done()
             release_history.set()
             await socket.until("conversation.switched", conversation_id=fallback.id, is_hydrating=False)
         finally:

@@ -144,6 +144,7 @@ def test_memory_reset_handler_clears_memory_and_refreshes_active_context(tmp_pat
     session.load_active_conversation_snapshot.assert_called_once_with(
         conversation.id,
         restored.context_snapshot,
+        snapshot_revision=restored.revision,
     )
     session.send_conversation_list.assert_awaited_once()
     assert session.emit_command_result.await_args.args[0] == "memory.reset"

@@ -349,8 +349,16 @@ class ConversationRepository:
             return summary
 
     def get_conversation_for_resume(self, conversation_id: str) -> ConversationRecord | None:
-        """Read the resume context and recover its Plan within the same mutation."""
-        from backend.agent.plans import ensure_plan_file_for_resume
+        """Read resume context, locking a mutation only when a Plan needs recovery."""
+        from backend.agent.plans import (
+            PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY, PLAN_SLUG_KEY, ensure_plan_file_for_resume,
+        )
+
+        record = self.get_conversation(conversation_id)
+        if record is None or not any(
+            key in record.context_snapshot for key in (PLAN_SLUG_KEY, PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY)
+        ):
+            return record
 
         with self._store_lock(conversation_id):
             record = self.get_conversation(conversation_id)

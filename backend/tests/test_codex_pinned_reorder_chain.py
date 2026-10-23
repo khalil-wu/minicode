@@ -9,6 +9,7 @@ import pytest
 
 from backend.conversations.repository import ConversationRepository
 from backend.ws.handler import WebSocketSession
+from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.handlers.sidebar import handle_pin_reorder
 from backend.ws.payload_contracts import validate_session_projection_payload
 
@@ -139,6 +140,8 @@ def test_real_inventory_producer_projects_pinned_order_and_revision_after_cold_r
     repository.reorder_pinned_conversations(bravo, alpha, [alpha, bravo])
     session = object.__new__(WebSocketSession)
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
+    session.session_lifecycle = SessionLifecycle(session)
+    session.ws_manager = None
     session.runtime_snapshot = lambda: {"session_id": "real-inventory"}
     session.send_payload = AsyncMock(return_value=True)
     session.conversation_repo = ConversationRepository(repository.storage_root)

@@ -11,6 +11,7 @@ from backend.conversations.repository import ConversationRepository
 from backend.conversations.sidebar_order import project_key
 from backend.workspace.recent_projects import RecentProjectStore
 from backend.ws.handler import WebSocketSession
+from backend.ws.session_lifecycle import SessionLifecycle
 from backend.ws.handlers.sidebar import handle_project_reorder, handle_project_thread_reorder, handle_recent_reorder, handle_sort_mode
 
 
@@ -199,6 +200,8 @@ def test_actual_inventory_producer_restores_saved_project_order_and_common_mode(
     repository.reorder_sidebar_threads(str(project), bravo, alpha, [alpha, bravo])
     session = object.__new__(WebSocketSession)
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
+    session.session_lifecycle = SessionLifecycle(session)
+    session.ws_manager = None
     session.runtime_snapshot = lambda: {"session_id": "real-sidebar-inventory"}
     session.send_payload = AsyncMock(return_value=True)
     session.conversation_repo = ConversationRepository(repository.storage_root)
