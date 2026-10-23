@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { Profiler } from "react";
 import { useAppStore } from "../../stores";
 import { TurnPlanProgress } from "./TurnPlanProgress";
 
@@ -33,6 +34,23 @@ describe("TurnPlanProgress", () => {
     const { container } = render(<TurnPlanProgress />);
 
     expect(container.firstChild).toBeNull();
+  });
+
+  it("keeps the visible plan stable across 32 answer frames while publishing real plan changes", () => {
+    useAppStore.setState({ conversationId: "plan-perf-owner", isStreaming: true,
+      messages: [{ id: "plan-perf-answer", turnId: "plan-perf-turn", role: "assistant", content: "", timestamp: 1, isStreaming: true }],
+      plan: { threadId: "plan-perf-owner", turnId: "plan-perf-turn", plan: [{ step: "Inspect", status: "in_progress" }] } });
+    let commits = 0;
+    render(<Profiler id="plan-performance" onRender={() => { commits += 1; }}><TurnPlanProgress /></Profiler>);
+    commits = 0;
+    for (let index = 0; index < 32; index++) act(() => {
+      useAppStore.getState().appendAgentMessageDelta("plan-perf-text", ` frame-${index}`, "plan-perf-owner", "plan-perf-answer");
+    });
+    console.info("PERF", JSON.stringify({ scenario: "visible-turn-plan", frames: 32, planCommits: commits }));
+    expect(commits).toBe(0);
+    act(() => useAppStore.setState({ plan: { threadId: "plan-perf-owner", turnId: "plan-perf-turn",
+      plan: [{ step: "Inspect", status: "completed" }] } }));
+    expect(screen.getByRole("button", { name: "已完成 1 / 1 项" })).toBeTruthy();
   });
 
   it("renders the current-turn plan without projecting file diffs", () => {

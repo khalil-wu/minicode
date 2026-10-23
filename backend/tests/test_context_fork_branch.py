@@ -275,7 +275,7 @@ def test_context_fork_command_reaches_registered_websocket_route(tmp_path: Path)
                 context_snapshot=context.export_snapshot(),
             )
             session.active_conversation_id = parent.id
-            session.load_active_conversation_snapshot(parent.id, parent.context_snapshot)
+            session.load_active_conversation_snapshot(parent.id, parent.context_snapshot, snapshot_revision=parent.revision)
             await session.command_dispatcher._handle_command(
                 UserCommand(
                     type="context.fork",

@@ -82,7 +82,8 @@ async def test_cancelled_compaction_reloads_the_committed_repository_snapshot(mo
         self.append_user("Committed summary")
         return "Committed summary"
     monkeypatch.setattr(ContextBuilder, "compact", compact)
-    repo = SimpleNamespace(get_conversation=lambda _owner: current, commit_compaction=commit)
+    repo = SimpleNamespace(get_conversation=lambda _owner: current, get_context_snapshot_revision=lambda _owner: current.revision,
+                           get_conversation_for_resume=lambda _owner: current, commit_compaction=commit)
     projection_lock = asyncio.Lock()
     runtime = ConversationRuntime(conversation_repo=repo, context_builder=builder, build_summary_from_transcript=lambda _items: "",
                                   projection_lock_for=lambda _owner: projection_lock)

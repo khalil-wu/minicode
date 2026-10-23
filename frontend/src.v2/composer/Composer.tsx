@@ -182,14 +182,14 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const goalMode = useAppStore((s) => s.goalMode);
   const currentModel = useAppStore((s) => s.currentModel);
   const conversationId = useAppStore(state => state.conversationId);
-  const messages = useAppStore(state => state.messages);
+  const planMessages = useAppStore(state => state.agentMode === "plan" && !state.isStreaming ? state.messages : null);
   const agentMode = useAppStore(state => state.agentMode);
   const promptDrafts = useAppStore(state => state.promptDrafts);
   const planImplementation = useMemo(() => {
-    if (!conversationId || pendingConversationSwitchId) return null;
-    const plan = pendingPlanImplementation(messages, agentMode, isStreaming);
+    if (!conversationId || pendingConversationSwitchId || !planMessages) return null;
+    const plan = pendingPlanImplementation(planMessages, agentMode, isStreaming);
     return plan && !promptDrafts[promptDraftKey({ conversationId, requestId: `implement-plan:${plan.turnId || plan.messageId}` })]?.planImplementationSettled ? plan : null;
-  }, [conversationId, pendingConversationSwitchId, messages, agentMode, isStreaming, promptDrafts]);
+  }, [conversationId, pendingConversationSwitchId, planMessages, agentMode, isStreaming, promptDrafts]);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const editorOwner = useRef({ conversationId, workingDirectory, document: richDraft,
     key: conversationId || composerWorkspaceKey(workingDirectory) });

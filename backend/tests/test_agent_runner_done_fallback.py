@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -70,6 +71,71 @@ class _NoopLLM(LLMAdapter):
 
     async def simple_chat(self, messages):
         return ""
+
+
+@pytest.mark.parametrize("navigation", ["unchanged", "owner", "generation"])
+def test_terminal_resume_reads_committed_context_without_replacing_new_navigation(tmp_path, monkeypatch, navigation):
+    events = []
+    session = _Session(tmp_path, events)
+    other = session.conversation_repo.create_conversation()
+    repo = session.conversation_repo
+    commit = repo.commit_turn_projection
+    read_context = repo.get_projection_context
+    terminal_committed, entered, release = threading.Event(), threading.Event(), threading.Event()
+    loaded = []
+
+    def commit_projection(owner, **options):
+        result = commit(owner, **options)
+        if not options.get("partial", False):
+            repo.patch_context_snapshot(owner, {"resume_owner_marker": "actual persisted context"})
+            terminal_committed.set()
+        return result
+
+    def hold_committed_context(owner):
+        result = read_context(owner)
+        if terminal_committed.is_set() and not entered.is_set():
+            entered.set()
+            assert release.wait(5), "terminal context read was never released"
+        return result
+
+    def load_snapshot(owner, snapshot, *, snapshot_revision, **_options):
+        loaded.append((owner, snapshot, snapshot_revision))
+        return False
+
+    monkeypatch.setattr(repo, "commit_turn_projection", commit_projection)
+    monkeypatch.setattr(repo, "get_projection_context", hold_committed_context)
+    monkeypatch.setattr(session, "load_active_conversation_snapshot", load_snapshot)
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
+
+    async def exercise():
+        running = asyncio.create_task(session._run_agent_locked(
+            "Complete this actual turn", conversation_id="conv_runnerdone",
+            metadata={"agent_runtime": default_runtime(), "assistant_message_id": "terminal-owner-answer",
+                      "user_message_id": "terminal-owner-user"},
+        ))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            if navigation != "unchanged":
+                owner = other.id if navigation == "owner" else "conv_runnerdone"
+                session.active_conversation_id = session.conversation_runtime.active_conversation_id = owner
+                session.conversation_runtime.defer_repository_hydration(owner, on_hydration_complete=None)
+                session.context_builder.append_user("new navigation context")
+        finally:
+            release.set()
+            await asyncio.wait_for(running, 5)
+        if navigation == "unchanged":
+            revision, snapshot = read_context("conv_runnerdone")
+            assert loaded == [("conv_runnerdone", snapshot, revision)]
+            assert loaded[0][1]["resume_owner_marker"] == "actual persisted context"
+        else:
+            assert not loaded
+            assert [message.content for message in session.context_builder._history] == ["new navigation context"]
+        assert any(event["type"] == "done" and event.get("status") == "completed" for event in events)
+
+    _run_session_scenario(session, exercise())
 
 
 def test_only_provider_reasoning_summary_is_persistent() -> None:
@@ -381,7 +447,7 @@ class _Session(SessionAgentRunnerMixin, SessionApprovalRuntimeMixin):
     def permission_context_for_conversation(self, conversation, source="agent.run"):
         return self.permission_checker.build_context(mode="bypass", source=source)
 
-    def load_active_conversation_snapshot(self, conversation_id, snapshot, notify=False):
+    def load_active_conversation_snapshot(self, conversation_id, snapshot, *, snapshot_revision, notify=False):
         return False
 
     def sync_permission_mode_with_active_conversation(self, source=""):

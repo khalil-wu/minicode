@@ -127,9 +127,8 @@ def test_modern_utf8_literals_survive_repository_reload(tmp_path):
 @pytest.mark.asyncio
 async def test_failed_hydration_is_observed_and_closes_loading_projection(monkeypatch):
     context = SimpleNamespace(load_snapshot_partial=lambda snapshot, **kwargs: [{"role": "user", "content": "old"}])
-    repository = SimpleNamespace(get_conversation=lambda owner: SimpleNamespace(revision=1))
+    repository = SimpleNamespace(get_context_snapshot_revision=lambda owner: 1)
     runtime = ConversationRuntime(conversation_repo=repository, context_builder=context, build_summary_from_transcript=lambda *args: "")
-    runtime._restore_plan_snapshot = lambda owner, snapshot: snapshot
     runtime.active_conversation_id = "conv_probe"
     notified = []
     async def complete(owner):
@@ -137,7 +136,7 @@ async def test_failed_hydration_is_observed_and_closes_loading_projection(monkey
     def fail(history):
         raise ValueError("decode failed")
     monkeypatch.setattr(ContextBuilder, "deserialize_snapshot_history", fail)
-    runtime.load_active_conversation_snapshot("conv_probe", {}, notify=True, on_hydration_complete=complete)
+    runtime.load_active_conversation_snapshot("conv_probe", {}, snapshot_revision=1, notify=True, on_hydration_complete=complete)
     await asyncio.gather(runtime._hydration_task, return_exceptions=True)
     with pytest.raises(RuntimeError, match="hydration failed"):
         await runtime.wait_for_hydration("conv_probe")

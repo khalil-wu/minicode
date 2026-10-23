@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { createElement } from "react";
 import type { ChatMessage } from "../stores/types";
 import { useAppStore } from "../stores";
@@ -35,6 +35,25 @@ const message = (overrides: Partial<ChatMessage> = {}): ChatMessage => ({
 });
 
 describe("LiveArtifacts projection", () => {
+  it("does not collect a closed gallery across 32 frames and reads the current history when opened", () => {
+    let reads = 0;
+    const messages = Array.from({ length: 256 }, (_, index) => {
+      const entry = message({ id: `gallery-perf-${index}`, blocks: [] });
+      Object.defineProperty(entry, "artifacts", { get: () => { reads += 1; return []; } });
+      return entry;
+    });
+    useAppStore.setState({ liveArtifactsOpen: false, conversationId: "gallery-perf-owner", messages });
+    render(createElement(LiveArtifacts));
+    for (let index = 0; index < 32; index++) act(() => {
+      useAppStore.setState({ messages: [...messages, message({ id: "gallery-tail", content: `frame-${index}`, blocks: [] })] });
+    });
+    console.info("PERF", JSON.stringify({ scenario: "closed-artifact-gallery", historyMessages: 256, frames: 32, closedArtifactReads: reads }));
+    expect(reads).toBe(0);
+    act(() => useAppStore.setState({ liveArtifactsOpen: true }));
+    expect(reads).toBeGreaterThanOrEqual(256);
+    expect(screen.getByRole("dialog")).toBeTruthy();
+  });
+
   it("does not retain an empty execution-output filter in the normal gallery", () => {
     useAppStore.setState({ liveArtifactsOpen: true, conversationId: "owner", messages: [], isConnected: false });
     render(createElement(LiveArtifacts));

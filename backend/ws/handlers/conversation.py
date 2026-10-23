@@ -5,7 +5,7 @@ import copy
 import json
 import logging
 import secrets
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -777,6 +777,7 @@ async def handle_conversation_create(
             session.load_active_conversation_snapshot(
                 created.id,
                 created.context_snapshot,
+                snapshot_revision=created.revision,
                 notify=True,
                 defer_start=True,
             )
@@ -881,7 +882,7 @@ async def handle_conversation_clone(session: "WebSocketSession", data: dict[str,
         session.active_conversation_id = clone.id
         if await session.switch_workspace_for_conversation(clone, announce=False):
             is_hydrating = session.load_active_conversation_snapshot(
-                clone.id, clone.context_snapshot, notify=True, defer_start=True,
+                clone.id, clone.context_snapshot, snapshot_revision=clone.revision, notify=True, defer_start=True,
             )
             session.sync_permission_mode_with_active_conversation(source="conversation.clone")
             await session.send_payload(
@@ -976,6 +977,7 @@ async def handle_conversation_merge(session: "WebSocketSession", data: dict[str,
         is_hydrating = session.load_active_conversation_snapshot(
             updated_target.id,
             updated_target.context_snapshot,
+            snapshot_revision=updated_target.revision,
             notify=True,
             defer_start=True,
         )
@@ -1123,15 +1125,21 @@ async def _publish_conversation_switch(
         if data.get("_reconcile_agent_state", True):
             await session.reconcile_persisted_ui_agent_state(owner)
         session.refresh_llm_selection()
-        current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
-        if current_view is not None:
-            current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
-        if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation or not session.session_lifecycle.foreground_navigation_is_current():
-            return
-        await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
-                                    "conversation": current_view, "is_hydrating": False,
-                                    "session": session.runtime_snapshot(),
-                                    "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")
+        boundary = session.ws_manager.conversation_stream_lock(owner) if session.ws_manager is not None else nullcontext()
+        async with boundary:
+            current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+            if current_view is not None:
+                current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
+            if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation or not session.session_lifecycle.foreground_navigation_is_current():
+                return
+            runtime_snapshot = session.runtime_snapshot()
+            if owner != session.active_conversation_id:
+                return
+            await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
+                                        "conversation": current_view, "is_hydrating": False,
+                                        "session": runtime_snapshot,
+                                        "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")},
+                                       log_context="conversation.switched", wait_for_delivery=False)
         if data.get("_reemit_pending", True):
             await session.reemit_pending_state(conversation_id=owner)
 
@@ -2877,14 +2885,15 @@ async def handle_conversation_clear(session: "WebSocketSession", data: dict[str,
             if not owner_session.is_connected or request.conversation_id != owner_session.active_conversation_id:
                 continue
             _clear_context_builder(owner_session, reason="conversation.clear")
-            owner_session.load_active_conversation_snapshot(
-                request.conversation_id,
-                retained_plan_snapshot,
-            )
             current = owner_session.conversation_repo.get_conversation(request.conversation_id)
             if current is None:
                 cleanup_errors.append(f"{owner_session.session_id}:reload")
                 continue
+            owner_session.load_active_conversation_snapshot(
+                request.conversation_id,
+                current.context_snapshot,
+                snapshot_revision=current.revision,
+            )
             await owner_session.send_payload(
                 await asyncio.to_thread(build_conversation_switched_payload,
                     current,
@@ -3011,7 +3020,7 @@ async def _handle_conversation_truncate_claimed(
         current = owner_session.conversation_repo.get_conversation(request.conversation_id)
         if current is None:
             continue
-        owner_session.load_active_conversation_snapshot(current.id, current.context_snapshot)
+        owner_session.load_active_conversation_snapshot(current.id, current.context_snapshot, snapshot_revision=current.revision)
         owner_session.sync_permission_mode_with_active_conversation(source="conversation.truncate")
         await owner_session.send_payload(
             await asyncio.to_thread(build_conversation_switched_payload,
@@ -3279,6 +3288,7 @@ async def _handle_memory_reset_impl(session: "WebSocketSession", data: dict[str,
                 owner_session.load_active_conversation_snapshot(
                     active_id,
                     refreshed.context_snapshot,
+                    snapshot_revision=refreshed.revision,
                 )
         await owner_session.send_conversation_list()
 
@@ -4496,7 +4506,7 @@ async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any])
                         else:
                             session.active_conversation_id = branch.id
                             is_hydrating = bool(session.load_active_conversation_snapshot(
-                                branch.id, branch.context_snapshot, notify=True, defer_start=True,
+                                branch.id, branch.context_snapshot, snapshot_revision=branch.revision, notify=True, defer_start=True,
                             ))
                             session.sync_permission_mode_with_active_conversation(source="context.fork")
                             switched_payload["is_hydrating"] = is_hydrating
@@ -4522,6 +4532,7 @@ async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any])
                             session.load_active_conversation_snapshot(
                                 previous_active.id,
                                 previous_active.context_snapshot,
+                                snapshot_revision=previous_active.revision,
                             )
                             session.sync_permission_mode_with_active_conversation(
                                 source="context.fork.rollback"

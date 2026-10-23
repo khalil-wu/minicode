@@ -180,7 +180,8 @@ async def test_real_provider_step_uses_captured_model_resource_messages_in_code_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sandbox_capability", [False, True])
-async def test_restricted_selected_root_uses_real_sandbox_rpc_and_failed_partial_catalogs_are_not_success_cache(tmp_path, sandbox_capability):
+@pytest.mark.parametrize("catalog_state", ["warning", "permanent_error", "transient"])
+async def test_restricted_selected_root_caches_diagnostics_and_retries_transport_failure(tmp_path, monkeypatch, sandbox_capability, catalog_state):
     from backend.sandbox.policy import FileSystemSandboxPolicy, NetworkSandboxPolicy
 
     discoveries = []
@@ -201,8 +202,8 @@ async def test_restricted_selected_root_uses_real_sandbox_rpc_and_failed_partial
                 [root] = message["params"]["roots"]
                 assert root["sandbox"] is not None and root["sandbox"]["permissions"]["type"] == "managed"
                 result = {"roots": [{"id": root["id"], "path": root["path"], "skills": [],
-                    "warnings": ["actual partial scan"] if len(discoveries) == 2 else [],
-                    "error": "actual first failure" if len(discoveries) == 1 else None}]}
+                    "warnings": ["actual partial scan"] if catalog_state == "warning" else [],
+                    "error": "actual permanent failure" if catalog_state == "permanent_error" else None}]}
             else:
                 raise AssertionError(f"Unexpected executor method {method}")
             await socket.send(json.dumps({"id": message["id"], "result": result}))
@@ -218,20 +219,36 @@ async def test_restricted_selected_root_uses_real_sandbox_rpc_and_failed_partial
             EnvironmentConfigState.ready(config))),))
         snapshot = await owner.snapshot()
         prepared = []
+        environment = snapshot.turn_environments()[0].environment
+        original_info = environment.info
+        info_calls = 0
+
+        async def read_info():
+            nonlocal info_calls
+            info_calls += 1
+            if sandbox_capability and catalog_state == "transient" and info_calls == 1:
+                raise TimeoutError("actual discovery transport timeout")
+            return await original_info()
+
+        monkeypatch.setattr(environment, "info", read_info)
         try:
-            for _ in range(4 if sandbox_capability else 1):
+            for _ in range(4):
                 current = await prepare_environment_capabilities(turn_environments=snapshot, host_skill_manager=None, host_mcp_manager=None,
                     feature_flags=FeatureFlags({"executor_capability_discovery": False}), thread_id="sandbox-owner", turn_id="sandbox-turn",
                     session_source="sdk", isolated=True, environment_manager=manager, local_cwd=tmp_path.as_uri(),
                     previous=prepared[-1] if prepared else None)
                 prepared.append(current)
-            assert len(discoveries) == (3 if sandbox_capability else 0)
+            assert len(discoveries) == (1 if sandbox_capability else 0)
+            assert info_calls == (2 if sandbox_capability and catalog_state == "transient" else 1)
             if sandbox_capability:
-                assert "actual first failure" in str(prepared[0].warnings)
-                assert "actual partial scan" in str(prepared[1].warnings)
-                assert not prepared[-1].warnings
+                if catalog_state == "transient":
+                    assert "actual discovery transport timeout" in str(prepared[0].warnings)
+                    assert all(not current.warnings for current in prepared[1:])
+                else:
+                    diagnostic = "actual partial scan" if catalog_state == "warning" else "actual permanent failure"
+                    assert all(diagnostic in str(current.warnings) for current in prepared)
             else:
-                assert "does not support sandboxed capability discovery" in str(prepared[0].warnings)
+                assert all("does not support sandboxed capability discovery" in str(current.warnings) for current in prepared)
         finally:
             for current in prepared:
                 await current.aclose()

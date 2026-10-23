@@ -348,6 +348,37 @@ class ConversationRepository:
                     self._summary_index_stamps[conversation_id] = stamp
             return summary
 
+    def get_conversation_for_resume(self, conversation_id: str) -> ConversationRecord | None:
+        """Read the resume context and recover its Plan within the same mutation."""
+        from backend.agent.plans import ensure_plan_file_for_resume
+
+        with self._store_lock(conversation_id):
+            record = self.get_conversation(conversation_id)
+            if record is None:
+                return None
+            snapshot = dict(record.context_snapshot)
+            ensure_plan_file_for_resume(snapshot, record.transcript, record.workspace_root or None)
+            if snapshot != record.context_snapshot:
+                record.context_snapshot = snapshot
+                record.updated_at = utc_now_iso()
+                self._commit_record(record)
+                self._cache_record(record)
+            return record
+
+    def get_context_snapshot_revision(self, conversation_id: str) -> int | None:
+        """Read the existing checkpoint/overlay boundary without copying history."""
+        with self._store_lock(conversation_id):
+            summary = self.get_conversation_summary(conversation_id)
+            if summary is None:
+                return None
+            manifest = self._read_manifest(conversation_id)
+            if manifest is None:
+                return summary.revision
+            # A recovered readable generation may precede a damaged current
+            # checkpoint. Its summary is the source actually used for resume.
+            checkpoint_revision = int(manifest.get("projection_revision") or manifest["current_generation"])
+            return min(summary.revision, checkpoint_revision)
+
     def get_transcript_page(
         self, conversation_id: str, *, limit: int = 80, before_message_id: str = "",
     ) -> dict[str, Any] | None:

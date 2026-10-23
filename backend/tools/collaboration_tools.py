@@ -7,6 +7,7 @@ import time
 from dataclasses import replace
 
 from backend.agents.source_roles import source_agent_options
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.llm.responses_input import agent_message_response_item
 from backend.tools.agent_control_plane import AgentControlPlane, CHILD_AGENT_OPTIONS_METADATA_KEY, normalize_agent_fork_turns, normalize_agent_task_name
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -32,11 +33,15 @@ def source_agent_status(record, control):
 
 async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()):
     control = AgentControlPlane(context, source_v2=True)
-    cursor = context.metadata.get("_agent_wait_cursor", control.activity_cursor())
+    cursor = control.activity_cursor()
     queue = context.run_context.turn_input_queue
+    queue_cursor = queue.activity_cursor() if queue is not None else 0
     if queue is not None and queue.pending_count():
         return {"kind": "steer"}
     if queue is not None and queue.has_message_board_notifications():
+        return {"kind": "message"}
+    if await to_thread_cancel_safe(control.runtime.has_pending_agent_input,
+        agent_id=control.actor_id, conversation_id=control.conversation_id):
         return {"kind": "message"}
     if agent_ids and any((control.subagent_snapshot(agent_id, include_result=False) or {}).get("status") not in {"pending", "running"} for agent_id in agent_ids):
         return {"kind": "completed"}
@@ -45,13 +50,20 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             event = await control.wait_for_activity(list(agent_ids), after_seq=after_seq,
-                timeout_seconds=deadline - time.monotonic(), kinds=("message", "completed", "cancel_requested"))
+                timeout_seconds=deadline - time.monotonic(),
+                kinds=("message", "completed", "cancel_requested") if agent_ids else ("message", "completed"))
             if event is None:
                 return None
             after_seq = event["seq"]
             root_delivery = not control.actor_is_subagent and any(
                 (record := control.runtime.get_run(recipient)) is not None and record.conversation_id == control.conversation_id
                 for recipient in event.get("recipient_ids", ()))
+            if event["kind"] == "completed" and not agent_ids:
+                completed = [control.runtime.get_subagent(agent_id) for agent_id in event.get("agent_ids", ())]
+                if not any(record is not None and (record.parent_run_id == control.actor_id or
+                    (not control.actor_is_subagent and control.runtime.get_subagent(record.parent_run_id) is None))
+                    for record in completed):
+                    continue
             if event["kind"] != "message" or not event.get("recipient_ids") or control.actor_id in event["recipient_ids"] or root_delivery:
                 return event
         return None
@@ -59,7 +71,7 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
     if agent_ids:
         waiters[asyncio.create_task(control.wait_for_any(list(agent_ids), timeout_seconds=timeout_seconds))] = "completion"
     if queue is not None:
-        waiters[asyncio.create_task(queue.wait_for_activity(after_seq=queue.activity_cursor(), timeout=timeout_seconds))] = "steer"
+        waiters[asyncio.create_task(queue.wait_for_activity(after_seq=queue_cursor, timeout=timeout_seconds))] = "input"
     if context.cancel_event is not None:
         waiters[asyncio.create_task(context.cancel_event.wait())] = "cancel"
     try:
@@ -67,6 +79,10 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
         for waiter in done:
             outcome = waiter.result()
             if outcome:
+                if waiters[waiter] == "cancel":
+                    raise asyncio.CancelledError
+                if waiters[waiter] == "input":
+                    return {"kind": "steer" if queue.pending_count() else "message"}
                 return outcome if waiters[waiter] == "agent" else {"kind": "completed" if waiters[waiter] == "completion" else waiters[waiter]}
         return None
     finally:
@@ -74,7 +90,6 @@ async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()
             if not waiter.done():
                 waiter.cancel()
         await asyncio.gather(*waiters, return_exceptions=True)
-        context.metadata["_agent_wait_cursor"] = control.activity_cursor()
 
 
 class CollaborationTool(BaseTool):
@@ -159,7 +174,9 @@ class ListAgentsTool(CollaborationTool):
             return self._error_result("Current agent cannot inspect this task tree")
         prefix = args.get("path_prefix", "")
         records = control.select_agents(scope="tree", path_prefix=prefix)
-        agents = [{"agent_name": control.public_tree_path(record), "agent_status": source_agent_status(record, control)} for record in records]
+        paths = control.public_tree_paths()
+        agents = [{"agent_name": paths[record["subagent_id"]], "agent_status": source_agent_status(record, control)}
+            for record in sorted(records, key=lambda record: paths[record["subagent_id"]])]
         if not prefix or "/root".startswith(prefix):
             root = control.root_tree_record()
             if root is not None:
@@ -189,8 +206,11 @@ class WaitAgentTool(CollaborationTool):
         requested = args.get("timeout_ms", self.options["default_wait_timeout_ms"])
         if requested > self.options["max_wait_timeout_ms"]:
             return self._error_result(f"timeout_ms must be at most {self.options['max_wait_timeout_ms']}")
-        outcome = await wait_for_coordination(context, timeout_seconds=max(requested, self.options["min_wait_timeout_ms"]) / 1000)
+        timeout = max(requested, self.options["min_wait_timeout_ms"])
+        outcome = await wait_for_coordination(context, timeout_seconds=timeout / 1000)
         message = "Wait timed out." if outcome is None else "Wait interrupted by new input." if outcome["kind"] == "steer" else "Wait completed."
+        if requested < timeout:
+            message += f"\n\nRequested timeout of {requested}ms was clamped to the minimum of {timeout}ms."
         return ToolResult(content=json.dumps({"message": message, "timed_out": outcome is None}), result_kind="subagent")
 
 

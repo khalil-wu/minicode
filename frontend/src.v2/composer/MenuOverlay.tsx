@@ -46,6 +46,7 @@ const MENTION_SEARCH_DEBOUNCE_MS = 150;
 const MENTION_CACHE_LIMIT = 80;
 const SLASH_MENU_LIMIT = 18;
 const ROOT_SLASH_SKILL_PREVIEW_LIMIT = 6;
+const NO_GUARDIAN_MESSAGES = [] as const;
 
 const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
   if (!cache.has(key) && cache.size >= MENTION_CACHE_LIMIT) {
@@ -66,7 +67,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
   const searchSequenceRef = useRef(0);
   const storeCommands = useAppStore((s) => s.slashCommands);
   const guardianOwner = useAppStore(s => s.conversationId ?? "");
-  const guardianMessages = useAppStore(s => s.messages);
+  const guardianMessages = useAppStore(s => open ? s.messages : NO_GUARDIAN_MESSAGES);
   const guardianState = useGuardianApprovalState(guardianOwner);
   const hasGuardianDenials = guardianMessages.length > 0 && recentGuardianDenials(guardianOwner, guardianState.approved).length > 0;
   const availableSkills = useAppStore((s) => s.availableSkills);

@@ -11,6 +11,7 @@ import type {
   ProgressContentBlock,
   SkillContextRef,
   DiffCommentContextRef,
+  InspectorEntry,
 } from "./types";
 import { canonicalWorkspacePath } from "../lib/workspace-display";
 import { workspaceRootsEqual } from "../lib/workspace-path";
@@ -914,11 +915,12 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       };
     });
     const hydrated = get().getVisibleMessages(id);
+    const inspectorEntries: InspectorEntry[] = [];
     for (const message of hydrated) {
       if (message.role === "assistant") {
         get().flushPendingProviderProgress(id, message.id);
         if (message.failureMessage || message.terminalStatus === "failed") {
-          get().addInspectorEntry({
+          inspectorEntries.push({
             targetKind: "message",
             targetId: `error:${id}:${message.id}:transcript`,
             payload: {
@@ -936,6 +938,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         }
       }
     }
+    get().addInspectorEntries(inspectorEntries);
   },
   recordTurnUserInput: (message, conversationId, assistantMessageId) => {
     set((state) => updateMessagesForConversation(state, conversationId, (messages) => {

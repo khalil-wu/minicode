@@ -1442,6 +1442,57 @@ class FileSwarmStore:
                     (_json(record), epoch_ms(), subagent_id))
         return record, result
 
+    def _claimable_message_rows(
+        self, connection: sqlite3.Connection, *, participant_id: str, mailbox_epoch: int,
+        conversation_id: str, since_seq: int, now_ms: int, trigger_turn_only: bool = False,
+        excluded_message_kinds: tuple[str, ...] = (),
+    ) -> Iterator[tuple[sqlite3.Row, dict[str, Any]]]:
+        clauses = ["(m.recipient_id = ? OR m.recipient_id IN ('all', '*'))",
+            "COALESCE(d.status, '') != 'acked'",
+            "(COALESCE(d.status, '') != 'claimed' OR d.lease_expires_at <= ?)",
+            "(m.recipient_id IN ('all', '*') OR COALESCE(json_extract(m.payload_json, '$.recipient_mailbox_epoch'), 0) = ?"
+            " OR (? <= 1 AND COALESCE(json_extract(m.payload_json, '$.recipient_mailbox_epoch'), 0) = 0))"]
+        values: list[Any] = [participant_id, now_ms, mailbox_epoch, mailbox_epoch]
+        if trigger_turn_only:
+            clauses.append("(COALESCE(json_extract(m.payload_json, '$.delivery_mode'), 'trigger_turn') = 'trigger_turn' OR m.message_kind = 'shutdown_request')")
+        if excluded_message_kinds:
+            clauses.append(f"m.message_kind NOT IN ({','.join('?' for _ in excluded_message_kinds)})")
+            values.extend(excluded_message_kinds)
+        if conversation_id:
+            clauses.append("m.conversation_id = ?")
+            values.append(conversation_id)
+        if since_seq > 0:
+            clauses.append("m.seq > ?")
+            values.append(since_seq)
+        cursor_key = None
+        while True:
+            page_clauses, page_values = list(clauses), list(values)
+            if cursor_key is not None:
+                page_clauses.append("(m.seq, m.created_at, m.message_id) > (?, ?, ?)")
+                page_values.extend(cursor_key)
+            rows = connection.execute(f"""
+                SELECT m.message_id, m.payload_json, m.seq, m.created_at
+                FROM messages m LEFT JOIN mailbox_deliveries d
+                  ON d.message_id = m.message_id AND d.participant_id = ? AND d.mailbox_epoch = ?
+                WHERE {' AND '.join(page_clauses)}
+                ORDER BY m.seq ASC, m.created_at ASC, m.message_id ASC LIMIT 1000
+            """, (participant_id, mailbox_epoch, *page_values)).fetchall()
+            for row in rows:
+                cursor_key = (row["seq"], row["created_at"], row["message_id"])
+                message = json.loads(row["payload_json"])
+                if self._message_targets_incarnation(message, participant_id=participant_id, mailbox_epoch=mailbox_epoch):
+                    yield row, message
+            if len(rows) < 1000:
+                return
+
+    def has_pending_messages(self, *, participant_id: str, mailbox_epoch: int,
+        conversation_id: str, excluded_message_kinds: tuple[str, ...] = ()) -> bool:
+        """Read pending input without consuming a claim or waking another turn."""
+        with closing(self._connect()) as connection:
+            return next(self._claimable_message_rows(connection, participant_id=participant_id,
+                mailbox_epoch=mailbox_epoch, conversation_id=conversation_id, since_seq=0, now_ms=epoch_ms(),
+                excluded_message_kinds=excluded_message_kinds), None) is not None
+
     def claim_messages(
         self,
         *,
@@ -1469,77 +1520,15 @@ class FileSwarmStore:
         now = int(now_ms if now_ms is not None else epoch_ms())
         expires_at = now + max(1_000, int(lease_ms))
         bounded_limit = max(1, min(int(limit or 100), 100))
-        clauses = ["(recipient_id = ? OR recipient_id IN ('all', '*'))"]
-        if trigger_turn_only:
-            # Shutdown is a fenced lifecycle action, not a request to start a
-            # model turn. An idle task must still be able to stop.
-            clauses.append("(COALESCE(json_extract(payload_json, '$.delivery_mode'), 'trigger_turn') = 'trigger_turn' OR message_kind = 'shutdown_request')")
-        values: list[Any] = [participant]
-        if conversation_id:
-            clauses.append("conversation_id = ?")
-            values.append(str(conversation_id))
-        if since_seq > 0:
-            clauses.append("seq > ?")
-            values.append(max(0, int(since_seq)))
-
         claimed: list[dict[str, Any]] = []
         with self._write() as connection:
-            # Do not apply the old LIMIT 1000 once and then filter epochs in
-            # Python: a broadcast can leave an arbitrarily long prefix of
-            # stale-incarnation rows and permanently hide the current row.
-            # Keyset pages keep the ordering stable without OFFSET scans while
-            # allowing us to walk past that stale prefix in the same write
-            # transaction that creates the claims.
-            cursor_key: tuple[int, int, str] | None = None
-            while len(claimed) < bounded_limit:
-                page_clauses = list(clauses)
-                page_values = list(values)
-                if cursor_key is not None:
-                    page_clauses.append("(seq, created_at, message_id) > (?, ?, ?)")
-                    page_values.extend(cursor_key)
-                page_where = " AND ".join(page_clauses)
-                rows = connection.execute(
-                    f"""
-                    SELECT message_id, payload_json, seq, created_at
-                    FROM messages
-                    WHERE {page_where}
-                    ORDER BY seq ASC, created_at ASC, message_id ASC
-                    LIMIT 1000
-                    """,
-                    tuple(page_values),
-                ).fetchall()
-                if not rows:
-                    break
-                for row in rows:
-                    cursor_key = (
-                        int(row["seq"] or 0),
-                        int(row["created_at"] or 0),
-                        str(row["message_id"] or ""),
-                    )
-                    message = json.loads(row["payload_json"])
-                    if not self._message_targets_incarnation(
-                        message,
-                        participant_id=participant,
-                        mailbox_epoch=epoch,
-                    ):
-                        continue
-                    delivery = connection.execute(
-                        """
-                        SELECT status, claim_owner, claim_token, lease_expires_at
-                        FROM mailbox_deliveries
-                        WHERE message_id = ? AND participant_id = ? AND mailbox_epoch = ?
-                        """,
-                        (row["message_id"], participant, epoch),
-                    ).fetchone()
-                    if delivery is not None:
-                        status = str(delivery["status"] or "")
-                        if status == "acked":
-                            continue
-                        if status == "claimed" and int(delivery["lease_expires_at"] or 0) > now:
-                            continue
-
-                    claim_token = _new_id("claim")
-                    connection.execute(
+            # Filter the ledger before decoding payloads. Already consumed
+            # history must not add one JSON decode and one query per turn.
+            for row, message in self._claimable_message_rows(connection, participant_id=participant,
+                mailbox_epoch=epoch, conversation_id=str(conversation_id), since_seq=max(0, int(since_seq)),
+                now_ms=now, trigger_turn_only=trigger_turn_only):
+                claim_token = _new_id("claim")
+                connection.execute(
                         """
                         INSERT INTO mailbox_deliveries(
                             message_id, participant_id, mailbox_epoch, status,
@@ -1557,18 +1546,16 @@ class FileSwarmStore:
                             row["message_id"], participant, epoch, owner,
                             claim_token, now, expires_at,
                         ),
-                    )
-                    claimed.append({
+                )
+                claimed.append({
                         "message": message,
                         "participant_id": participant,
                         "mailbox_epoch": epoch,
                         "claim_owner": owner,
                         "claim_token": claim_token,
                         "lease_expires_at": expires_at,
-                    })
-                    if len(claimed) >= bounded_limit:
-                        break
-                if len(rows) < 1000:
+                })
+                if len(claimed) >= bounded_limit:
                     break
         return claimed
 

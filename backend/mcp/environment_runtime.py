@@ -316,8 +316,7 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
         cache = {entry.root.id: entry for entry in previous.discoveries} if previous is not None and previous.thread_id == thread_id else {}
         selected = tuple(roots.values())
         missing = tuple(root for root in selected if root.id not in cache or cache[root.id].root != root
-            or cache[root.id].retryable or cache[root.id].bundle.get("error") is not None
-            or cache[root.id].bundle.get("warnings") or not high_level)
+            or cache[root.id].retryable or not high_level)
         discovered = await discover_executor_roots(missing)
         cache.update((entry.root.id, entry) for entry in discovered)
         discoveries = tuple(cache[root.id] for root in selected)

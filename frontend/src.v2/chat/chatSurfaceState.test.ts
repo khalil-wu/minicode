@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatMessage, ContentBlock } from "../stores/types";
-import { inheritMessageTopology, recordStreamingToolUpdate, streamingMessageUpdate } from "../lib/message-changes";
+import { inheritMessageTopology, recordStreamingTextUpdate, recordStreamingToolUpdate, streamingMessageUpdate } from "../lib/message-changes";
 import {
   createRecentTurnProjectionCache,
   projectMessagesToTurns,
@@ -23,6 +23,61 @@ const message = (
 });
 
 describe("chat surface explicit projection", () => {
+  it("does not rescan 512 unchanged tool blocks for input references on each of 64 text frames", () => {
+    let reads = 0;
+    const tools: ContentBlock[] = Array.from({ length: 512 }, (_, index) => {
+      const block: ContentBlock = { type: "tool_call", record: { id: `perf-tool-${index}`, name: "read_file",
+        args: { path: `file-${index}.ts` }, status: "success", outputPreview: "done", startedAt: 1, finishedAt: 2 } };
+      Object.defineProperty(block, "type", { get: () => { reads += 1; return "tool_call"; } });
+      return block;
+    });
+    const text: Extract<ContentBlock, { type: "text" }> = { type: "text", itemId: "perf-answer", content: "seed",
+      status: "in_progress", source: "model_final", isStreaming: true };
+    let assistant = message("perf-assistant", "assistant", [...tools, text], { isStreaming: true });
+    const user = message("perf-user", "user", [], { content: "inspect" });
+    // The previous pre-cache path made these three reference passes per frame.
+    const baselineStarted = performance.now();
+    for (let frame = 0; frame < 64; frame++) {
+      const blocks = assistant.blocks!;
+      blocks.flatMap(block => block.type === "user_input" ? [block.userMessageId] : []);
+      blocks.flatMap(block => block.type === "user_input" ? [block.userMessageId] : []);
+      blocks.some(block => block.type === "user_input");
+    }
+    const legacyReads = reads;
+    const baselineMs = performance.now() - baselineStarted;
+    projectMessagesToTurns([user, assistant], true);
+    reads = 0;
+    const started = performance.now();
+    for (let frame = 0; frame < 64; frame++) {
+      const previousText = assistant.blocks!.at(-1) as typeof text;
+      const next = { ...assistant, blocks: [...tools, { ...previousText, content: previousText.content + ` frame-${frame}` }] };
+      recordStreamingTextUpdate(assistant, next, tools.length);
+      assistant = next;
+      const turn = projectMessagesToTurns([user, assistant], true)[0];
+      expect(turn.activeCell?.kind).toBe("streaming_assistant_tail");
+    }
+    console.info("PERF", JSON.stringify({ scenario: "streaming-tool-turn-input-references", toolBlocks: 512, frames: 64,
+      legacyBlockReads: legacyReads, currentBlockReads: reads, baselineMs, elapsedMs: performance.now() - started }));
+    expect(legacyReads).toBe(512 * 64 * 3);
+    expect(reads).toBeLessThan(legacyReads / 10);
+  });
+
+  it("rebuilds input references on a new boundary and keeps changed authored input current", () => {
+    const user = message("input-owner", "user", [], { content: "original" });
+    const steer = message("input-steer", "user", [], { content: "first steering input" });
+    const assistant = message("input-answer", "assistant", [{ type: "text", content: "working", itemId: "input-text" }]);
+    expect(projectMessagesToTurns([user, assistant, steer], false)).toHaveLength(2);
+    const admitted = { ...assistant, blocks: [...assistant.blocks!, { type: "user_input" as const, userMessageId: steer.id }] };
+    const first = projectMessagesToTurns([user, admitted, steer], false);
+    expect(first).toHaveLength(1);
+    const edited = { ...steer, content: "corrected steering input" };
+    expect(projectMessagesToTurns([user, admitted, edited], false)[0].workItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "user", id: steer.id, cell: expect.objectContaining({ content: edited.content }) }),
+    ]));
+    const replaced = { ...admitted, blocks: [...assistant.blocks!] };
+    expect(projectMessagesToTurns([user, replaced, edited], false)).toHaveLength(2);
+  });
+
   it("rebuilds current tool image ownership across streamed results and output receipts", () => {
     const record = { id: "image-tool", name: "browser_control", args: { action: "screenshot" }, status: "running" as const, startedAt: 1 };
     const block: ContentBlock = { type: "tool_call", record };

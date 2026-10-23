@@ -2206,6 +2206,7 @@ export interface InspectorSlice {
   inspectorEntries: InspectorEntry[];
   inspectorFocus: { kind: string; id: string; conversationId?: string } | null;
   addInspectorEntry: (entry: InspectorEntry) => void;
+  addInspectorEntries: (entries: InspectorEntry[]) => void;
   setInspectorFocus: (focus: InspectorSlice["inspectorFocus"]) => void;
   clearInspector: () => void;
 }

@@ -403,7 +403,9 @@ class TurnIterationRuntime:
                 order = accepted_input.get("_guardian_acceptance_order")
                 if order is None:
                     order = evidence.reserve_order()
-                if not goal_steering and admitted_message.is_user_input:
+                # Native agent_message input has its own attribution. Other
+                # builders still commit admitted input with its actual origin.
+                if not goal_steering and not any(item.get("type") == "agent_message" for item in admitted_message.provider_items):
                     self.context.record_admitted_user_input(admitted_message,
                         text=boundary_input.content, turn_id=str(self.metadata["turn_id"]),
                         message_id=accepted_id, acceptance_order=order)

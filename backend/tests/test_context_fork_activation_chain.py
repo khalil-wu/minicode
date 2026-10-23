@@ -40,7 +40,7 @@ async def _connected_fork_session(tmp_path, monkeypatch, history_length=2):
         model_selection={"provider": "openai", "model": "fixture-model", "reasoning_effort": "high"},
     )
     session.active_conversation_id = parent.id
-    session.load_active_conversation_snapshot(parent.id, parent.context_snapshot)
+    session.load_active_conversation_snapshot(parent.id, parent.context_snapshot, snapshot_revision=parent.revision)
     await session.conversation_runtime.wait_for_hydration(parent.id)
     session.session_lifecycle.workspace_context = WorkspaceContext(workspace)
     session.session_lifecycle.workspace_root = workspace

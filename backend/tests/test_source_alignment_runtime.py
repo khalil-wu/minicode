@@ -109,6 +109,8 @@ def test_agent_wait_wakes_on_mail_and_steer_without_consuming_input(tmp_path):
         await asyncio.sleep(0)
         runtime.send_swarm_message(sender_id=child.subagent_id, recipient_id="parent", content="Need one detail", conversation_id="owner", sender_mailbox_epoch=child.mailbox_epoch)
         assert (await pending)["kind"] == "message"
+        claims = runtime.claim_swarm_messages(participant_id="parent", mailbox_epoch=0, conversation_id="owner")
+        assert runtime.ack_swarm_message_claims(claims) == 1
         pending = asyncio.create_task(wait_for_coordination(context, timeout_seconds=2))
         await asyncio.sleep(0)
         queue.enqueue_command(UserCommand(type="user_message", data={"content": "Use module A", "user_message_id": "answer", "conversation_id": "owner"}))

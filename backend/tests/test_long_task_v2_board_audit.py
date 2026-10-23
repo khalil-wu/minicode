@@ -41,7 +41,8 @@ async def test_namespace_preflight_uses_real_source_schema_result_and_exact_wire
         assert len(tools[0]["tools"]) == 15
         assert functions["create_channel"]["parameters"]["required"] == ["channel_name"]
         assert functions["post"]["parameters"]["required"] == ["text"]
-        assert functions["spawn_agent"]["parameters"]["required"] == ["message", "task_name"]
+        assert functions["spawn_agent"]["parameters"]["required"] == ["task_name", "message"]
+        assert functions["spawn_agent"]["parameters"]["properties"]["message"]["encrypted"] is True
         assert "agent_type" not in functions["spawn_agent"]["parameters"]["properties"]
         assert f"{tool_namespace}.list_agents" in body["input"][0]["content"]
         if rejected:
@@ -78,7 +79,10 @@ async def test_namespace_preflight_uses_real_source_schema_result_and_exact_wire
     assert len(requests) == (1 if rejected else 2)
     assert receipt["namespace"] == tool_namespace
     assert receipt["tool_names"] == sorted(SOURCE_V2_COORDINATION_TOOLS | SOURCE_MESSAGE_BOARD_TOOLS)
-    if not rejected:
+    if rejected:
+        assert receipt["responses"][0]["status"] == 400
+        assert "[redacted] rejected the namespace" in receipt["provider_error_body"]
+    else:
         assert receipt["actual_tool_result"]["agents"][0]["agent_name"] == "/root"
         assert receipt["native_call"]["namespace"] == tool_namespace
 

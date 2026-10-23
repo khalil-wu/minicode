@@ -284,6 +284,8 @@ def _conversation_list_session(versioned_listing: Any) -> WebSocketSession:
     )
     session.runtime_snapshot = lambda: {"session_id": "session-list"}
     session.send_payload = AsyncMock(return_value=True)
+    session.ws_manager = None
+    session.session_lifecycle = SimpleNamespace(foreground_navigation_is_current=lambda: True)
     session.conversation_repo = SimpleNamespace(
         list_conversations_with_revision=lambda: versioned_listing,
         get_pinned_order=lambda _summaries: {"pinned_conversation_ids": [], "pinned_sort_mode": "manual"},

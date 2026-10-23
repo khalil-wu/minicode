@@ -207,6 +207,7 @@ class AgentControlPlane:
         payload = self.runtime.list_runs(
             conversation_id=self.conversation_id,
             include_subagents=True,
+            include_swarm=False,
         )
         return dict(payload) if isinstance(payload, Mapping) else {}
 
@@ -230,6 +231,7 @@ class AgentControlPlane:
         payload = self.runtime.list_runs(
             conversation_id="",
             include_subagents=True,
+            include_swarm=False,
         )
         return [
             dict(item)
@@ -388,10 +390,10 @@ class AgentControlPlane:
     def public_tree_paths(self) -> dict[str, str]:
         """Project opaque runtime paths onto canonical ``/root/...`` names."""
 
-        root_run_id = self.root_run_id()
         items = self.tree_agents()
         if self.source_v2:
             return {_agent_id(item): AgentPath.parse(item["agent_path"]).logical_name for item in items}
+        root_run_id = self.root_run_id()
         by_id = {_agent_id(item): item for item in items if _agent_id(item)}
         cache: dict[str, str] = {}
 
@@ -546,6 +548,7 @@ class AgentControlPlane:
         if bounded_limit == 0:
             return []
         prefix = str(path_prefix or "").strip().casefold()
+        public_paths = self.public_tree_paths() if prefix else {}
         selected: list[dict[str, Any]] = []
         for item in self.agents_for_scope(scope):
             status = str(item.get("status") or "running")
@@ -555,7 +558,7 @@ class AgentControlPlane:
                 continue
             if prefix:
                 labels = (
-                    self.public_tree_path(item).casefold(),
+                    public_paths.get(_agent_id(item), "").casefold(),
                     str(item.get("agent_path") or "").casefold(),
                     str(item.get("task_name") or "").casefold(),
                     str(item.get("task_id") or "").casefold(),

@@ -48,10 +48,12 @@ interface ArtifactEntry extends ArtifactPreview {
  * conversation into one scrollable gallery. Opening an entry routes it to the
  * preview panel (same path as ArtifactCard) and closes the overlay.
  */
+const NO_MESSAGES: ChatMessage[] = [];
+
 export const LiveArtifacts = () => {
   const liveArtifactsOpen = useAppStore((s) => s.liveArtifactsOpen);
   const toggleLiveArtifacts = useAppStore((s) => s.toggleLiveArtifacts);
-  const messages = useAppStore((s) => s.messages);
+  const messages = useAppStore((s) => s.liveArtifactsOpen ? s.messages : NO_MESSAGES);
   const conversationId = useAppStore((s) => s.conversationId);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");

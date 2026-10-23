@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Profiler } from "react";
 
 const mocks = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -167,6 +168,33 @@ describe("Composer goal bar", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it.each(["build", "plan"] as const)("keeps the %s composer out of 32 transcript frame updates", async (agentMode) => {
+    const history = Array.from({ length: 256 }, (_, index) => ({ id: `perf-history-${index}`,
+      role: "assistant" as const, content: "settled ".repeat(512), timestamp: index, terminalStatus: "completed" as const }));
+    useAppStore.setState({ conversationId: "perf-owner", workingDirectory: "", agentMode, isStreaming: true,
+      messages: [...history, { id: "perf-answer", role: "assistant", content: "", timestamp: 300, isStreaming: true,
+        blocks: [{ type: "text", itemId: "perf-text", content: "seed", source: "model_final", status: "in_progress", isStreaming: true }] }],
+      draft: "KEEP_PERF_DRAFT", richDraft: undefined, promptDrafts: {}, attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false, isConnected: true, currentModel: "gpt-5", activeGoal: null });
+    let commits = 0;
+    render(<Profiler id="composer-performance" onRender={() => { commits += 1; }}><Composer /></Profiler>);
+    await act(async () => Promise.resolve());
+    commits = 0;
+    let legacyTranscriptNotifications = 0;
+    const stop = useAppStore.subscribe(state => state.messages, () => { legacyTranscriptNotifications += 1; });
+    const started = performance.now();
+    try {
+      for (let index = 0; index < 32; index++) await act(async () => {
+        useAppStore.getState().appendAgentMessageDelta("perf-text", ` frame-${index}`, "perf-owner", "perf-answer", "model_final");
+      });
+      console.info("PERF", JSON.stringify({ scenario: `composer-${agentMode}`, historyMessages: 256, frames: 32,
+        legacyTranscriptNotifications, composerCommits: commits, elapsedMs: performance.now() - started }));
+      expect(legacyTranscriptNotifications).toBe(32);
+      expect(commits).toBe(0);
+      expect(useAppStore.getState().draft).toBe("KEEP_PERF_DRAFT");
+    } finally { stop(); }
   });
 
   it.each(["old draft", "/permissions auto"])("does not start preparing or dispatching %s while switching owners", async (draft) => {

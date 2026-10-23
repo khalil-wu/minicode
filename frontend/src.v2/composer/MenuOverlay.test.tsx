@@ -2,6 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Profiler } from "react";
 
 const fsListTree = vi.fn();
 const fsSearchFiles = vi.fn();
@@ -55,6 +56,20 @@ describe("MenuOverlay mentions", () => {
     cleanup();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+
+  it("does not recompute a closed menu on 32 answer frames", async () => {
+    useAppStore.setState({ conversationId: "menu-perf-owner", isStreaming: true,
+      messages: [{ id: "menu-perf-answer", role: "assistant", content: "", timestamp: 1, isStreaming: true }] });
+    let commits = 0;
+    render(<Profiler id="menu-performance" onRender={() => { commits += 1; }}><MenuOverlay open={false} kind="slash" onSelect={vi.fn()} /></Profiler>);
+    await act(async () => Promise.resolve());
+    commits = 0;
+    for (let index = 0; index < 32; index++) act(() => {
+      useAppStore.getState().appendAgentMessageDelta("menu-perf-text", ` frame-${index}`, "menu-perf-owner", "menu-perf-answer");
+    });
+    console.info("PERF", JSON.stringify({ scenario: "closed-composer-menu", frames: 32, menuCommits: commits }));
+    expect(commits).toBe(0);
   });
 
   it.each(["C:/foreign-owner", ""])("requests plugin enablement for its explicit owner root '%s'", async (root) => {

@@ -1,7 +1,8 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Profiler } from "react";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -56,6 +57,21 @@ describe("QueuedMessageList", () => {
   });
 
   afterEach(async () => { cleanup(); await Promise.resolve(); await Promise.resolve(); resetQueuedMessageHistoryForTests(); });
+
+  it("keeps an unchanged queue out of 32 answer frame commits while retaining real queue edits", () => {
+    let commits = 0;
+    render(<Profiler id="queue-performance" onRender={() => { commits += 1; }}><QueuedMessageList /></Profiler>);
+    commits = 0;
+    for (let index = 0; index < 32; index++) act(() => {
+      useAppStore.getState().appendAgentMessageDelta("perf-output", ` frame-${index}`, "conv-queue", "assistant-active");
+    });
+    console.info("PERF", JSON.stringify({ scenario: "queued-input-frames", frames: 32, queueCommits: commits }));
+    expect(commits).toBe(0);
+    act(() => useAppStore.setState(state => ({ messages: state.messages.map(message => message.id === "user-two"
+      ? { ...message, content: "edited queued request" } : message) })));
+    expect(screen.getByText("edited queued request")).toBeTruthy();
+    expect(commits).toBe(1);
+  });
 
   it.each(["", "original authored request"])("summarizes real comments for queued input %j without replacing its normal steer identity", content => {
     const refs: DiffCommentContextRef[] = ["src/one.ts", "src/two.ts"].map(path => ({

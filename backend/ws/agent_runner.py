@@ -6274,7 +6274,20 @@ class SessionAgentRunnerMixin:
                         elif pending_ui_state is not None:
                             self.ui_agent_state_store.cache.pop(conversation.id, None)
                         if conversation.id == self.active_conversation_id:
-                            self.load_active_conversation_snapshot(conversation.id, saved_snapshot)
+                            hydration_generation = self.conversation_runtime._hydration_generation
+                            committed_context = await asyncio.to_thread(
+                                self.conversation_repo.get_projection_context, conversation.id,
+                            )
+                            if (
+                                conversation.id == self.active_conversation_id
+                                and hydration_generation == self.conversation_runtime._hydration_generation
+                            ):
+                                if committed_context is None:
+                                    raise RuntimeError("conversation disappeared after terminal commit")
+                                committed_revision, committed_snapshot = committed_context
+                                self.load_active_conversation_snapshot(
+                                    conversation.id, committed_snapshot, snapshot_revision=committed_revision,
+                                )
                         if updated_conversation is not None:
                             conversation_summary_payload = {
                                 "type": "conversation.summary.updated",

@@ -351,7 +351,7 @@ async def test_failed_fork_activation_reports_partial_branch_and_real_rollback(t
         if conversation.id != parent.id:
             # Simulate the actual host loading a child before reporting that
             # its workspace could not be activated.
-            session.load_active_conversation_snapshot(conversation.id, conversation.context_snapshot)
+            session.load_active_conversation_snapshot(conversation.id, conversation.context_snapshot, snapshot_revision=conversation.revision)
             raise RuntimeError("Actual child activation failed")
         if restore_fails:
             raise RuntimeError("Actual parent workspace restoration failed")

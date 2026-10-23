@@ -3713,6 +3713,19 @@ class AgentRuntime:
             ))
         return claims
 
+    def has_pending_agent_input(self, *, agent_id: str, conversation_id: str) -> bool:
+        from backend.agent.mailbox_delivery import _STRUCTURED_PROTOCOL_TYPES
+
+        record = self.get_subagent(agent_id)
+        if self._swarm_store.has_pending_messages(participant_id=agent_id if record is not None else "parent",
+            mailbox_epoch=record.mailbox_epoch if record is not None else 0, conversation_id=conversation_id,
+            excluded_message_kinds=tuple(_STRUCTURED_PROTOCOL_TYPES)):
+            return True
+        return any(item["status"] in {"pending", "failed"} and item["kind"] != "mailbox_wake"
+            and self.accepts_parent_notification(subagent_id=item["subagent_id"],
+                mailbox_epoch=item["mailbox_epoch"], parent_run_id=agent_id)
+            for item in self.list_parent_notifications(parent_run_id=agent_id, conversation_id=conversation_id))
+
     def ack_swarm_message_claims(self, claims: list[MailboxMessageClaim]) -> int:
         return self._swarm_store.ack_message_claims(
             [claim.claim_ref() for claim in claims],
@@ -4219,7 +4232,8 @@ class AgentRuntime:
                 "background_commands": len(live_commands), "background_code": bool(session.code_store.pending_tasks())}
         return [active[subagent_id] for subagent_id in sorted(active)]
 
-    def list_runs(self, *, conversation_id: str = "", include_subagents: bool = False) -> dict[str, Any]:
+    def list_runs(self, *, conversation_id: str = "", include_subagents: bool = False,
+        include_swarm: bool = True) -> dict[str, Any]:
         """Return a lightweight runtime snapshot for UI/debug panels."""
         runs = [
             record.public_dict()
@@ -4294,18 +4308,19 @@ class AgentRuntime:
                 )
             )
             payload["subagents"] = subagents
-            payload["swarm_messages"] = [
-                record.public_dict()
-                for record in self.list_swarm_messages(conversation_id=conversation_id, limit=20)
-            ]
-            payload["swarm_tasks"] = [
-                record.public_dict()
-                for record in self.list_swarm_tasks(conversation_id=conversation_id, limit=50)
-            ]
-            payload["swarm_teams"] = [
-                record.public_dict()
-                for record in self.list_swarm_teams(conversation_id=conversation_id, limit=50)
-            ]
+            if include_swarm:
+                payload["swarm_messages"] = [
+                    record.public_dict()
+                    for record in self.list_swarm_messages(conversation_id=conversation_id, limit=20)
+                ]
+                payload["swarm_tasks"] = [
+                    record.public_dict()
+                    for record in self.list_swarm_tasks(conversation_id=conversation_id, limit=50)
+                ]
+                payload["swarm_teams"] = [
+                    record.public_dict()
+                    for record in self.list_swarm_teams(conversation_id=conversation_id, limit=50)
+                ]
         return payload
 
 

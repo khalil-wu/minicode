@@ -87,7 +87,7 @@ class ConversationRuntime:
     def create_fresh_active_conversation(self) -> None:
         created = self._conversation_repo.create_conversation()
         self.active_conversation_id = created.id
-        self.load_active_conversation_snapshot(created.id, created.context_snapshot)
+        self.load_active_conversation_snapshot(created.id, created.context_snapshot, snapshot_revision=created.revision)
 
     def ensure_active_conversation(self, preferred_id: str | None = None) -> None:
         """确保有活跃对话，优先使用已存在的对话"""
@@ -96,13 +96,13 @@ class ConversationRuntime:
         if self.active_conversation_id and not preferred_id:
             current = self._conversation_repo.get_conversation(self.active_conversation_id)
             if current is not None and not current.archived and getattr(current, "conversation_type", "main") == "main":
-                self.load_active_conversation_snapshot(current.id, current.context_snapshot)
+                self.load_active_conversation_snapshot(current.id, current.context_snapshot, snapshot_revision=current.revision)
                 return
 
         if not preferred_id:
             active = self._conversation_repo.create_conversation()
             self.active_conversation_id = active.id
-            self.load_active_conversation_snapshot(active.id, active.context_snapshot)
+            self.load_active_conversation_snapshot(active.id, active.context_snapshot, snapshot_revision=active.revision)
             return
 
         # 1. 优先使用 preferred_id
@@ -116,20 +116,43 @@ class ConversationRuntime:
             active = self._conversation_repo.create_conversation()
 
         self.active_conversation_id = active.id
-        self.load_active_conversation_snapshot(active.id, active.context_snapshot)
+        self.load_active_conversation_snapshot(active.id, active.context_snapshot, snapshot_revision=active.revision)
 
     def load_active_conversation_snapshot(
         self,
         conversation_id: str,
         snapshot: dict[str, Any] | None,
         *,
+        snapshot_revision: int,
         notify: bool = False,
         on_hydration_complete: Callable[[str], Any] | None = None,
         defer_start: bool = False,
     ) -> bool:
-        snapshot = self._restore_plan_snapshot(conversation_id, snapshot)
-        current = self._conversation_repo.get_conversation(conversation_id)
-        expected_revision = max(0, int(getattr(current, "revision", 0) or 0))
+        from backend.agent.plans import PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY, PLAN_SLUG_KEY
+
+        current_revision = self._conversation_repo.get_context_snapshot_revision(conversation_id)
+        if current_revision is None:
+            raise LookupError(f"Conversation disappeared during hydration: {conversation_id}")
+        normalized = dict(snapshot or {})
+        if current_revision > snapshot_revision or any(
+            key in normalized for key in (PLAN_SLUG_KEY, PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY)
+        ):
+            self.defer_repository_hydration(
+                conversation_id,
+                on_hydration_complete=on_hydration_complete if notify else None,
+            )
+            if not defer_start:
+                self.start_hydration(conversation_id)
+            return True
+        return self._load_prepared_snapshot(
+            conversation_id, normalized, snapshot_revision,
+            notify=notify, on_hydration_complete=on_hydration_complete, defer_start=defer_start,
+        )
+
+    def _load_prepared_snapshot(
+        self, conversation_id: str, snapshot: dict[str, Any], snapshot_revision: int, *,
+        notify: bool, on_hydration_complete: Callable[[str], Any] | None, defer_start: bool,
+    ) -> bool:
         nested_phase = self._hydration_task is not None and not self._hydration_task.done() and self._hydration_task is asyncio.current_task()
         if self._hydration_task and not self._hydration_task.done() and not nested_phase:
             previous = self._hydration_task
@@ -154,7 +177,7 @@ class ConversationRuntime:
             self._pending_hydration = (
                 conversation_id,
                 generation,
-                expected_revision,
+                snapshot_revision,
                 pending_history,
                 notify,
                 on_hydration_complete,
@@ -165,7 +188,7 @@ class ConversationRuntime:
         task = self._create_hydration_task(
             conversation_id=conversation_id,
             generation=generation,
-            expected_revision=expected_revision,
+            expected_snapshot_revision=snapshot_revision,
             pending_history=pending_history,
             notify=notify,
             on_hydration_complete=on_hydration_complete,
@@ -176,7 +199,7 @@ class ConversationRuntime:
         return True
 
     def defer_repository_hydration(
-        self, conversation_id: str, *, on_hydration_complete: Callable[[str], Any],
+        self, conversation_id: str, *, on_hydration_complete: Callable[[str], Any] | None,
     ) -> None:
         """Reserve context ownership before publishing a disk-backed UI page."""
         if self._hydration_task and not self._hydration_task.done():
@@ -195,11 +218,11 @@ class ConversationRuntime:
         if pending is None or pending[0] != conversation_id:
             return False
         self._pending_hydration = None
-        pending_id, generation, expected_revision, history, notify, callback = pending
+        pending_id, generation, snapshot_revision, history, notify, callback = pending
         task = self._create_hydration_task(
             conversation_id=pending_id,
             generation=generation,
-            expected_revision=expected_revision,
+            expected_snapshot_revision=snapshot_revision,
             pending_history=history,
             notify=notify,
             on_hydration_complete=callback,
@@ -214,7 +237,7 @@ class ConversationRuntime:
         *,
         conversation_id: str,
         generation: int,
-        expected_revision: int,
+        expected_snapshot_revision: int,
         pending_history: list[dict[str, Any]] | None,
         notify: bool,
         on_hydration_complete: Callable[[str], Any] | None,
@@ -225,7 +248,7 @@ class ConversationRuntime:
             self._hydrate_snapshot(
                 conversation_id=conversation_id,
                 generation=generation,
-                expected_revision=expected_revision,
+                expected_snapshot_revision=expected_snapshot_revision,
                 pending_history=pending_history,
                 notify=notify,
                 on_hydration_complete=on_hydration_complete,
@@ -266,29 +289,6 @@ class ConversationRuntime:
                 f"Conversation history hydration failed for {requested_id}"
             ) from exc
 
-    def _restore_plan_snapshot(
-        self,
-        conversation_id: str,
-        snapshot: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        """Rebind/recover MiniCode's conversation-owned Plan before hydration."""
-
-        normalized = dict(snapshot or {})
-        conversation = self._conversation_repo.get_conversation(conversation_id)
-        if conversation is None:
-            return normalized
-        from backend.agent.plans import ensure_plan_file_for_resume
-
-        before = dict(normalized)
-        ensure_plan_file_for_resume(
-            normalized,
-            list(getattr(conversation, "transcript", []) or []),
-            getattr(conversation, "workspace_root", "") or None,
-        )
-        if normalized != before:
-            self._conversation_repo.save_context_snapshot(conversation_id, normalized)
-        return normalized
-
     async def shutdown(self) -> bool:
         """Cancel hydration while retaining every task until bounded drain."""
 
@@ -311,7 +311,7 @@ class ConversationRuntime:
         *,
         conversation_id: str,
         generation: int,
-        expected_revision: int,
+        expected_snapshot_revision: int,
         pending_history: list[dict[str, Any]],
         notify: bool,
         on_hydration_complete: Callable[[str], Any] | None,
@@ -342,8 +342,8 @@ class ConversationRuntime:
             raise
 
         async with self._projection_lock_for(conversation_id):
-            current = await asyncio.to_thread(
-                self._conversation_repo.get_conversation,
+            current_revision = await asyncio.to_thread(
+                self._conversation_repo.get_context_snapshot_revision,
                 conversation_id,
             )
             if (
@@ -351,33 +351,38 @@ class ConversationRuntime:
                 or conversation_id != self.active_conversation_id
             ):
                 return
-            if current is None:
+            if current_revision is None:
                 return
-            current_revision = max(0, int(getattr(current, "revision", 0) or 0))
-            if current_revision != expected_revision:
-                self._context_builder.load_snapshot(
-                    deepcopy(dict(getattr(current, "context_snapshot", {}) or {}))
-                )
-            else:
+            changed = current_revision > expected_snapshot_revision
+            if not changed:
                 self._context_builder.prepend_history_messages(parsed_history)
+        if changed:
+            await self._hydrate_repository(conversation_id, generation,
+                on_hydration_complete if notify else None)
+            return
         if notify and on_hydration_complete is not None:
             await on_hydration_complete(conversation_id)
 
     async def _hydrate_repository(self, conversation_id: str, generation: int, callback: Callable[[str], Any] | None) -> None:
         try:
-            record = await asyncio.to_thread(self._conversation_repo.get_conversation, conversation_id)
-            async with self._projection_lock_for(conversation_id):
-                if generation != self._hydration_generation or conversation_id != self.active_conversation_id:
-                    return
-                if record is None:
-                    raise LookupError(f"Conversation disappeared during hydration: {conversation_id}")
-                try:
-                    pending = self.load_active_conversation_snapshot(
-                        conversation_id, record.context_snapshot, notify=True,
-                        on_hydration_complete=callback, defer_start=True,
-                    )
-                finally:
-                    generation = self._hydration_generation
+            while True:
+                record = await asyncio.to_thread(self._conversation_repo.get_conversation_for_resume, conversation_id)
+                async with self._projection_lock_for(conversation_id):
+                    current_revision = await asyncio.to_thread(self._conversation_repo.get_context_snapshot_revision, conversation_id)
+                    if generation != self._hydration_generation or conversation_id != self.active_conversation_id:
+                        return
+                    if record is None or current_revision is None:
+                        raise LookupError(f"Conversation disappeared during hydration: {conversation_id}")
+                    if current_revision > record.revision:
+                        continue
+                    try:
+                        pending = self._load_prepared_snapshot(
+                            conversation_id, record.context_snapshot, record.revision, notify=True,
+                            on_hydration_complete=callback, defer_start=True,
+                        )
+                    finally:
+                        generation = self._hydration_generation
+                    break
         except asyncio.CancelledError:
             raise
         except Exception as exc:

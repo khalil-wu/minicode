@@ -185,6 +185,7 @@ async def test_actual_spawn_send_followup_preserve_native_input_and_cold_checkpo
         builder = runtime.subagent_session(child_id).context_builder
         carriers = [message for message in builder._history if message.provider_items and message.input_origin == "agent"]
         assert len(carriers) == 4 and all(message.content == "" and not message.is_user_input for message in carriers)
+        assert all(message.accepted_input is None for message in carriers)
         assert not any(value in message.content for value in (initial, queued, followup) for message in model.calls[1])
         assert not any(entry.kind == "user" and entry.text in (initial, queued, followup)
             for entry in builder.guardian_evidence.transcript)

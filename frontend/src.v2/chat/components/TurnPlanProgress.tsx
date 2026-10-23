@@ -1,5 +1,5 @@
 import { Check, Circle, LoaderCircle } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useAppStore } from "../../stores";
 import type { TurnPlanStep } from "../../protocol/events";
 import type { ChatMessage, PlanState } from "../../stores/types";
@@ -18,14 +18,14 @@ interface TurnPlanProgressProps {
  */
 export function TurnPlanProgress({ wide = false }: TurnPlanProgressProps = {}) {
   const plan = useAppStore((state) => state.plan);
-  const messages = useAppStore((state) => state.messages);
+  const currentTurnId = useAppStore((state) => state.isStreaming && state.plan?.threadId === state.conversationId
+    ? streamingTurnId(state.messages) : undefined);
   const isStreaming = useAppStore((state) => state.isStreaming);
   const conversationId = useAppStore((state) => state.conversationId);
   const [expanded, setExpanded] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const listId = useId();
 
-  const currentTurnId = useMemo(() => streamingTurnId(messages), [messages]);
   const livePlan = isStreaming && planBelongsToCurrentTurn(plan, conversationId, currentTurnId)
     ? plan
     : null;

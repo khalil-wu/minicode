@@ -40,6 +40,7 @@ import type {
   SubagentState,
   TodoItem,
   ProviderOAuthFlowProjection,
+  InspectorEntry,
 } from "../stores/types";
 import { toConversationGoal } from "../stores/types";
 import { fromBackendPermissionMode } from "../protocol/permissions";
@@ -989,6 +990,7 @@ const restoreProviderInspectorFromTranscript = (
   conversationId: string,
   messages: ChatMessage[],
 ) => {
+  const entries: InspectorEntry[] = [];
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const [blockIndex, block] of (message.blocks ?? []).entries()) {
@@ -1016,7 +1018,7 @@ const restoreProviderInspectorFromTranscript = (
         payload.trace_id
         || `${message.id}:${block.itemId || blockIndex}:provider:transcript`,
       );
-      useAppStore.getState().addInspectorEntry({
+      entries.push({
         targetKind: "provider",
         targetId,
         payload: {
@@ -1029,6 +1031,7 @@ const restoreProviderInspectorFromTranscript = (
       });
     }
   }
+  useAppStore.getState().addInspectorEntries(entries);
 };
 
 const mergeHydratedWithStreamingAssistants = (

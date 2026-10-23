@@ -6,6 +6,7 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { CSS } from "@dnd-kit/utilities";
 import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
+import { useShallow } from "zustand/react/shallow";
 import type { ChatMessage } from "../stores/types";
 import { captureSteerTurnId } from "../lib/steer-command";
 import { pushToast } from "../overlays/ToastContainer";
@@ -14,7 +15,8 @@ const NO_MESSAGES: ChatMessage[] = [];
 
 export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { wide?: boolean; minimal?: boolean; ownerId?: string }) => {
   const { t: tr } = useI18n();
-  const messages = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.messages ?? NO_MESSAGES : state.messages);
+  const queuedMessages = useAppStore(useShallow((state) => (ownerId ? state.sideChats[ownerId]?.messages ?? NO_MESSAGES : state.messages)
+    .filter((message) => message.role === "user" && message.queueState === "queued")));
   const conversationId = useAppStore((state) => ownerId ?? state.conversationId);
   const isStreaming = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.isStreaming : state.isStreaming);
   const [menuFor, setMenuFor] = useState<string | null>(null);
@@ -30,10 +32,9 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
     }
   }), [ownerId]);
   const queued = useMemo(
-    () => messages
-      .filter((message) => message.role === "user" && message.queueState === "queued")
+    () => [...queuedMessages]
       .sort((left, right) => (left.queuePosition ?? Number.MAX_SAFE_INTEGER) - (right.queuePosition ?? Number.MAX_SAFE_INTEGER)),
-    [messages],
+    [queuedMessages],
   );
 
   useEffect(() => {

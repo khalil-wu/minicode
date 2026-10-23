@@ -939,11 +939,24 @@ type TurnCacheEntry = {
 };
 
 const EMPTY_INPUT_MESSAGES: ReadonlyMap<string, ChatMessage> = new Map();
-const EMPTY_INPUT_ROWS: ChatMessage[] = [];
+type InputReferenceBlock = Extract<ContentBlock, { type: "user_input" }>;
+const inputReferences = new WeakMap<ChatMessage, InputReferenceBlock[]>();
+
+const inputReferencesForMessage = (message: ChatMessage): InputReferenceBlock[] => {
+  const cached = inputReferences.get(message);
+  if (cached) return cached;
+  const update = streamingMessageUpdate(message);
+  // Store receipts describe text/thinking/progress/tool changes only. Their
+  // user-input references retain the same identities as the projected base.
+  const references = update ? inputReferencesForMessage(update.base)
+    : getContentBlocks(message).filter((block): block is InputReferenceBlock => block.type === "user_input");
+  inputReferences.set(message, references);
+  return references;
+};
 
 const referencedInputMessages = (messages: ChatMessage[]): Map<string, ChatMessage> => {
   const ids = new Set(messages.flatMap((message) => message.role === "assistant"
-    ? getContentBlocks(message).flatMap((block) => block.type === "user_input" ? [block.userMessageId] : []) : []));
+    ? inputReferencesForMessage(message).map((block) => block.userMessageId) : []));
   return new Map(messages.filter((message) => message.role === "user" && ids.has(message.id)).map((message) => [message.id, message]));
 };
 
@@ -1030,10 +1043,10 @@ function buildTurnMemoized(
   workspaceRoot: string,
   inputMessages: ReadonlyMap<string, ChatMessage> = EMPTY_INPUT_MESSAGES,
 ): ChatTurnState {
-  const inputRows = assistantMessage
-    ? getContentBlocks(assistantMessage).flatMap((block) => block.type === "user_input" && inputMessages.has(block.userMessageId)
-      ? [inputMessages.get(block.userMessageId)!] : []) : EMPTY_INPUT_ROWS;
-  const hasInputBoundary = Boolean(assistantMessage && getContentBlocks(assistantMessage).some((block) => block.type === "user_input"));
+  const references = assistantMessage ? inputReferencesForMessage(assistantMessage) : [];
+  const inputRows = references.flatMap((block) => inputMessages.has(block.userMessageId)
+    ? [inputMessages.get(block.userMessageId)!] : []);
+  const hasInputBoundary = references.length > 0;
   const anchor = (assistantMessage ?? userMessage) as object | null;
   if (anchor) {
     const entries = turnProjectionCache.get(anchor) ?? [];

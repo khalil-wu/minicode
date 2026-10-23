@@ -24,6 +24,34 @@ describe("inspector entries", () => {
     registerWebSocketSender(null);
   });
 
+  it("restores 500 scoped records with one notification and the same retained diagnostics", () => {
+    const entries = Array.from({ length: 500 }, (_, index) => ({ targetKind: "provider" as const,
+      targetId: `trace-${index % 80}`, conversationId: `owner-${index % 3}`, payload: { index, error: `actual-error-${index}` }, timestamp: index }));
+    let notifications = 0;
+    const stop = useAppStore.subscribe(state => state.inspectorEntries, () => { notifications += 1; });
+    const state = useAppStore.getState();
+    const baselineStarted = performance.now();
+    entries.forEach(state.addInspectorEntry);
+    const baselineMs = performance.now() - baselineStarted;
+    const legacyNotifications = notifications;
+    const expected = useAppStore.getState().inspectorEntries;
+    useAppStore.setState({ inspectorEntries: [] });
+    notifications = 0;
+    const started = performance.now();
+    try {
+      state.addInspectorEntries(entries);
+      console.info("PERF", JSON.stringify({ scenario: "inspector-history-restore", records: 500, legacyNotifications,
+        currentNotifications: notifications, baselineMs, elapsedMs: performance.now() - started }));
+      expect(legacyNotifications).toBe(500);
+      expect(notifications).toBe(1);
+      expect(useAppStore.getState().inspectorEntries).toEqual(expected);
+      expect(expected).toHaveLength(50);
+      expect(expected.at(-1)?.payload.error).toBe("actual-error-499");
+      state.addInspectorEntries([]);
+      expect(notifications).toBe(1);
+    } finally { stop(); }
+  });
+
   it("records inspector payloads without opening or switching a panel", () => {
     addInspectorPayload("provider", "trace-1", { diagnostics_deferred: true });
 

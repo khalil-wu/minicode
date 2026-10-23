@@ -1565,12 +1565,14 @@ class WebSocketSession(
         conversation_id: str,
         snapshot: dict[str, Any] | None,
         *,
+        snapshot_revision: int,
         notify: bool = False,
         defer_start: bool = False,
     ) -> bool:
         hydrating = self.conversation_runtime.load_active_conversation_snapshot(
             conversation_id,
             snapshot,
+            snapshot_revision=snapshot_revision,
             notify=notify,
             defer_start=defer_start,
             on_hydration_complete=self._on_conversation_hydration_complete,
@@ -1685,35 +1687,51 @@ class WebSocketSession(
             for item in summaries
             if getattr(item, "conversation_type", "main") == "main"
         ]
-        snapshot_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-        active = await asyncio.to_thread(self.conversation_repo.get_conversation_view, self.active_conversation_id) if self.active_conversation_id else None
-        if active is not None and (
-            active.get("archived", False)
-            or active.get("conversation_type", "main") != "main"
-        ):
-            active = None
-            self.active_conversation_id = None
-        payload = {
-            "type": "conversation.list",
-            "conversation_id": self.active_conversation_id,
-            "active_conversation_id": self.active_conversation_id,
-            "conversations": conversations,
-            "active_conversation": active,
-            "session": self.runtime_snapshot(),
-            "snapshot_at": snapshot_at,
-            **await asyncio.to_thread(self.conversation_repo.get_pinned_order, summaries),
-            **await asyncio.to_thread(self.conversation_repo.get_sidebar_order, summaries),
-            "sidebar_sections": await asyncio.to_thread(self.conversation_repo.thread_sections.list),
-        }
-        if inventory_instance_id is not None and inventory_revision is not None:
-            payload["inventory_instance_id"] = inventory_instance_id
-            payload["inventory_revision"] = inventory_revision
-        if archive_navigation is not None:
-            payload["archive_navigation"] = archive_navigation
-        return await self.send_payload(
-            payload,
-            log_context="conversation.list",
+        pinned_order, sidebar_order, sidebar_sections = await asyncio.gather(
+            asyncio.to_thread(self.conversation_repo.get_pinned_order, summaries),
+            asyncio.to_thread(self.conversation_repo.get_sidebar_order, summaries),
+            asyncio.to_thread(self.conversation_repo.thread_sections.list),
         )
+        while True:
+            if not self.session_lifecycle.foreground_navigation_is_current():
+                return False
+            owner = self.active_conversation_id
+            boundary = self.ws_manager.conversation_stream_lock(owner) if self.ws_manager is not None and owner else nullcontext()
+            async with boundary:
+                active = await asyncio.to_thread(self.conversation_repo.get_conversation_view, owner) if owner else None
+                if owner != self.active_conversation_id:
+                    continue
+                if not self.session_lifecycle.foreground_navigation_is_current():
+                    return False
+                if active is not None and (
+                    active.get("archived", False)
+                    or active.get("conversation_type", "main") != "main"
+                ):
+                    active = None
+                    self.active_conversation_id = owner = None
+                runtime_snapshot = self.runtime_snapshot()
+                if owner != self.active_conversation_id:
+                    continue
+                payload = {
+                    "type": "conversation.list",
+                    "conversation_id": owner,
+                    "active_conversation_id": owner,
+                    "conversations": conversations,
+                    "active_conversation": active,
+                    "session": runtime_snapshot,
+                    "snapshot_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    **pinned_order,
+                    **sidebar_order,
+                    "sidebar_sections": sidebar_sections,
+                }
+                if inventory_instance_id is not None and inventory_revision is not None:
+                    payload["inventory_instance_id"] = inventory_instance_id
+                    payload["inventory_revision"] = inventory_revision
+                if archive_navigation is not None:
+                    payload["archive_navigation"] = archive_navigation
+                return await self.send_payload(
+                    payload, log_context="conversation.list", wait_for_delivery=False,
+                )
 
     async def send_event(self, event: AgentEvent) -> None:
         # Broadcast paths may hand the same AgentEvent instance to multiple

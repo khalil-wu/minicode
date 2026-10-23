@@ -340,6 +340,28 @@ describe("handleSessionEvent", () => {
     expect(sendClientCommand).not.toHaveBeenCalled();
   });
 
+  it("restores 300 durable provider traces as one scoped batch", () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ inspectorEntries: [] });
+    let inspectorNotifications = 0;
+    const stop = useAppStore.subscribe(state => state.inspectorEntries, () => { inspectorNotifications += 1; });
+    const started = performance.now();
+    try {
+      const transcript = Array.from({ length: 300 }, (_, index) => ({ id: `restore-answer-${index}`, role: "assistant", content: "done",
+        blocks: [{ type: "text", itemId: `restore-item-${index}`, content: "done", status: "completed", finishReason: "completed",
+          providerRaw: { provider: "openai_responses", model: "synthetic-model", event_type: "response.completed",
+            trace_id: `restore-trace-${index}`, diagnostics_deferred: true, diagnostics_ref: `restore-ref-${index}` } }] }));
+      handleSessionEvent({ type: "conversation.switched", conversation_id: "restore-perf-owner",
+        conversation: { id: "restore-perf-owner", title: "Restore fixture", updated_at: "2026-10-23T00:00:00Z", messages: transcript } } as unknown as ServerEvent, buffers);
+      console.info("PERF", JSON.stringify({ scenario: "session-provider-restore", records: 300,
+        inspectorNotifications, elapsedMs: performance.now() - started }));
+      expect(inspectorNotifications).toBeLessThanOrEqual(2); // Clear old owner, then publish the restored batch.
+      expect(useAppStore.getState().inspectorEntries).toHaveLength(50);
+      expect(useAppStore.getState().inspectorEntries.at(-1)).toMatchObject({ targetId: "restore-trace-299", conversationId: "restore-perf-owner" });
+      expect(useAppStore.getState().messages).toHaveLength(300);
+    } finally { stop(); }
+  });
+
   it("rehydrates Provider Inspector traces from the durable transcript", () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
     useAppStore.setState({
