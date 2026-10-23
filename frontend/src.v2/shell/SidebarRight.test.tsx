@@ -243,6 +243,9 @@ describe("SidebarRight activity", () => {
     const panelA = await screen.findByRole("tabpanel");
     const promptA = await within(panelA).findByPlaceholderText("要运行的提示词");
     fireEvent.change(promptA, { target: { value: "Unsaved A heartbeat" } });
+    fireEvent.change(within(panelA).getByLabelText("任务名称"), { target: { value: "A scheduled task draft" } });
+    expect(screen.getByRole("tab", { name: "打开A scheduled task draft" })).toBeTruthy();
+    expect(panelA.querySelector(".thread-automation-footer")?.parentElement?.classList.contains("thread-automation-panel")).toBe(true);
     act(() => {
       useAppStore.setState({ conversationId: ownerB.id, workingDirectory: ownerB.workspaceRoot, draft: "Main B draft" });
       openThreadAutomationEditor(ownerB);

@@ -5,6 +5,7 @@ schedule_cron returns a job ID; schedule_cron_delete cancels a job by that ID.
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from backend.permissions.context import ToolExecutionContext
@@ -28,7 +29,7 @@ class _SchedulerTool(BaseTool):
 
 
 class ScheduleCronTool(_SchedulerTool):
-    """Register a recurring prompt task on a cron schedule."""
+    """Register a recurring prompt task on a Cron or RFC 5545 schedule."""
 
     name = "schedule_cron"
     result_kind = "status"
@@ -39,8 +40,10 @@ class ScheduleCronTool(_SchedulerTool):
     read_only = False
     permission = PermissionLevel.CONFIRM
     description = (
-        "Schedule a recurring background task on a cron expression. The task fires the given prompt "
-        "at the schedule (min hour day-of-month month day-of-week, e.g. '0 9 * * 1-5' = 9am weekdays). "
+        "Schedule a recurring background task using a 5-field Cron expression or an RFC 5545 RRULE. "
+        "The task fires the given prompt at that schedule, e.g. '0 9 * * 1-5' for weekday mornings or "
+        "'RRULE:FREQ=MINUTELY;INTERVAL=30' for every 30 minutes. Full DTSTART/TZID text is preserved; "
+        "a rule without an explicit start uses the task's stable creation minute in the local timezone. "
         "Use for periodic checks/devops. Returns a job ID you can pass to schedule_cron_delete. "
         "Tasks scheduled here expire after 7 days; tell the user so they can recreate it from "
         "the scheduler if it should keep running."
@@ -55,7 +58,7 @@ class ScheduleCronTool(_SchedulerTool):
                 "properties": {
                     "name": {"type": "string", "description": "Short task name."},
                     "prompt": {"type": "string", "description": "Prompt to run on each fire."},
-                    "cron": {"type": "string", "description": "5-field cron expression, e.g. '0 9 * * 1-5'."},
+                    "cron": {"type": "string", "description": "5-field Cron or original RFC 5545 RRULE/DTSTART text, e.g. '0 9 * * 1-5' or 'RRULE:FREQ=MINUTELY;INTERVAL=30'."},
                 },
                 "required": ["name", "prompt", "cron"],
             },
@@ -69,12 +72,10 @@ class ScheduleCronTool(_SchedulerTool):
             return self._error_result("name, prompt, and cron are all required")
         permission_mode = "confirm"
 
-        # Validate the cron expression via the scheduler's parser before registering.
-        from backend.tasks.scheduler import _parse_cron_expression
-        if _parse_cron_expression(cron) is None:
-            return self._error_result(f"Invalid cron expression: {cron}")
-
         try:
+            from backend.tasks.scheduler import validate_schedule
+
+            validate_schedule(cron, timezone="", dtstart=datetime.now(UTC))
             scheduler = self._scheduler()
             workspace_root = str(getattr(context, "workspace_root", "") or "") if context else ""
             if not workspace_root:
@@ -93,7 +94,7 @@ class ScheduleCronTool(_SchedulerTool):
 
         return self._success_result(
             content=(
-                f"Scheduled '{name}' on cron '{cron}' (mode={permission_mode}).\n"
+                f"Scheduled '{name}' on '{cron}' (mode={permission_mode}).\n"
                 f"Job ID: {task.id}\n"
                 "This task expires automatically after 7 days."
             ),
@@ -111,7 +112,7 @@ class ScheduleCronListTool(_SchedulerTool):
     mutates_workspace = False
     read_only = True
     permission = PermissionLevel.AUTO
-    description = "List all cron jobs scheduled via schedule_cron for the active workspace."
+    description = "List all Cron and RFC 5545 jobs scheduled via schedule_cron for the active workspace."
 
     def get_schema(self) -> ToolSchema:
         return ToolSchema(
@@ -141,7 +142,7 @@ class ScheduleCronListTool(_SchedulerTool):
             status = "enabled" if row.get("enabled", True) else "disabled"
             next_run = row.get("next_run_at") or "n/a"
             lines.append(
-                f"- {row.get('id')}: name={row.get('name')!r} cron={row.get('schedule')!r} "
+                f"- {row.get('id')}: name={row.get('name')!r} schedule={row.get('schedule')!r} "
                 f"status={status} next_run={next_run}"
             )
         return self._success_result(

@@ -759,6 +759,11 @@ export interface ScheduledTaskEntry {
   name: string;
   prompt: string;
   schedule: string;
+  execution_workspace_root?: string | null;
+  projectless_base?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
   timezone?: string;
   isolation?: "worktree" | "workspace";
   conversation_id?: string;
@@ -784,6 +789,7 @@ export interface ScheduledTaskRunEntry {
   status: "pending" | "running" | "completed" | "failed" | "cancelled" | string;
   conversation_id?: string;
   workspace_root?: string;
+  execution_workspace_root?: string | null;
   result_summary?: string;
   message_id?: string;
   completion_notification?: CompletionNotification | null;

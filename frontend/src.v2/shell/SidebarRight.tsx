@@ -162,7 +162,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
     ...automationEditors.filter(editor => editor.open && editor.owner.id === conversationId).map(editor => ({
-      id: `automation:${editor.id}` as const, label: editor.task?.name || editor.owner.title,
+      id: `automation:${editor.id}` as const, label: editor.title ?? editor.task?.name ?? editor.owner.title,
       icon: <span aria-hidden="true" style={{ display: "inline-block", width: 16, height: 16, background: "currentColor",
         mask: `url(${import.meta.env.BASE_URL}apps/thread-scheduled-task.svg) center / contain no-repeat` }} />,
     })),
@@ -742,9 +742,9 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         return <div key={panelTab} className="mc-sidebar-panel-view flex-1 overflow-hidden text-sm flex flex-col"
           id={`right-panel-${panelTab}`} role="tabpanel" aria-labelledby={`right-tab-${panelTab}`} hidden={!active}
           style={{ display: active ? "flex" : "none" }}>
-          <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel>
+          <Suspense fallback={<PanelSkeleton kind="inspector" />}>
             <LazySchedulerTab editor={editor} active={visible && rightPanelOpen && active} onClose={() => closeOpenTab(panelTab as StackTab)} />
-          </ScrollablePanel></Suspense>
+          </Suspense>
         </div>;
       })}
     </aside>

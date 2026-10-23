@@ -7,7 +7,8 @@ import type { ClientCommand, CommandResultEvent, ServerEvent } from "../protocol
 import { registerWebSocketSender, resolveClientCommandResult, rejectAllPendingCommandResults } from "../protocol/ws-outbox";
 import { handlePeripheralEvent } from "../chat/peripheralEvents";
 import { ChatActionsButton } from "../shell/ChatActionsButton";
-import { closeThreadAutomationEditor, loadThreadAutomations } from "./automations-navigation";
+import { closeThreadAutomationEditor, loadThreadAutomations, openThreadAutomationEditor, renameThreadAutomationEditor,
+  removeThreadAutomationEditor, useThreadAutomationEditors } from "./automations-navigation";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable: true, writable: true,
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
@@ -63,4 +64,24 @@ it("returns the captured list ACK after switching to B without replacing B's glo
   expect(await pending).toEqual([task]);
   expect(useAppStore.getState()).toMatchObject({ conversationId: "B", workingDirectory: "C:/B",
     draft: "Retain B draft", scheduledTasks: [otherTask] });
+});
+
+it("reopens the same task from its new target chat while retaining its local draft title and management root", () => {
+  const crossTask = { ...task, id: "cross-target-task", conversation_id: "B" };
+  const State = () => <output data-testid="automation-state">{JSON.stringify(useThreadAutomationEditors().filter(editor => editor.id === crossTask.id))}</output>;
+  render(<State />);
+  act(() => {
+    openThreadAutomationEditor(owner, crossTask);
+    renameThreadAutomationEditor(crossTask.id, "Retain this unsaved task title");
+    closeThreadAutomationEditor(crossTask.id);
+    useAppStore.setState({ conversationId: "B", workingDirectory: "C:/B", draft: "Retain B main draft" });
+    openThreadAutomationEditor({ id: "B", title: "Chat B", workspaceRoot: "C:/B", permissionMode: "confirm" }, crossTask);
+  });
+  const editors = JSON.parse(screen.getByTestId("automation-state").textContent!);
+  expect(editors).toHaveLength(1);
+  expect(editors[0]).toMatchObject({ id: crossTask.id, open: true, title: "Retain this unsaved task title",
+    owner: { id: "B", workspaceRoot: "C:/B" }, task: { id: crossTask.id, workspace_root: executionRoot, conversation_id: "B", name: task.name } });
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "B", workingDirectory: "C:/B", draft: "Retain B main draft",
+    rightStackTab: `automation:${crossTask.id}` });
+  act(() => removeThreadAutomationEditor(crossTask.id));
 });

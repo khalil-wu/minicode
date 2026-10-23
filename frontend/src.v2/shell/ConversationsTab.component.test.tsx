@@ -176,7 +176,7 @@ describe('ConversationsTab project navigation', () => {
     expect(screen.queryByRole('menuitem', { name: '导出会话树' })).toBeNull()
     expect(screen.queryByRole('menuitem', { name: '清理工作区' })).toBeNull()
     fireEvent.click(screen.getByRole('menuitem', { name: '复制', exact: true }))
-    expect(screen.getAllByRole('menuitem').filter(item => item.closest('[role="menu"]')?.getAttribute('aria-label') === '复制').map(item => item.textContent))
+    expect(screen.getAllByRole('menuitem').filter(item => item.closest('[role="menu"]')?.getAttribute('aria-label') === '复制').map(item => item.querySelector('.mc-menu-content')!.textContent))
       .toEqual(['复制深度链接', '复制为 Markdown', '复制工作目录'])
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled()
     readerUnchanged()

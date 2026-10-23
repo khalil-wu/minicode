@@ -29,6 +29,10 @@ from backend.services.workspace_service import git_branch_for, main_worktree_roo
 HEARTBEAT_TERMINAL_WAIT_SECONDS = 600
 
 
+def _conversation_execution_root(conversation: Any) -> str:
+    return str(conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root or "").strip()
+
+
 def heartbeat_block_reason(task: Any, *, bootstrap: Any = None, manual: bool = False) -> str | None:
     """Read the actual local thread owner before the scheduler consumes a fire."""
     guards = conversation_query_guards()
@@ -41,11 +45,12 @@ def heartbeat_block_reason(task: Any, *, bootstrap: Any = None, manual: bool = F
     conversation = repository.get_conversation(task.conversation_id)
     if conversation is None or conversation.archived:
         return "thread_missing"
+    execution_root = _conversation_execution_root(conversation)
     if manager is not None:
         if manager.conversation_delete_fence(conversation.id):
             return "thread_missing"
         if not manual:
-            manager.request_heartbeat_renderer_state(conversation.id, workspace_root=task.workspace_root)
+            manager.request_heartbeat_renderer_state(conversation.id, workspace_root=execution_root)
             renderer = manager.heartbeat_renderer_block_reason(conversation.id)
             if renderer is not None:
                 return renderer
@@ -61,7 +66,7 @@ def heartbeat_block_reason(task: Any, *, bootstrap: Any = None, manual: bool = F
         return "turn_in_progress"
     from backend.config import load_config
 
-    config = getattr(bootstrap, "config", None) or load_config(cwd=Path(task.workspace_root))
+    config = load_config(cwd=Path(execution_root))
     if not (conversation.model_selection.get("model") or config.llm.model):
         return "missing_collaboration_mode"
     return None
@@ -76,15 +81,7 @@ async def run_scheduled_task(
 ) -> dict[str, Any]:
     """Run one task and persist a self-contained conversation transcript."""
 
-    workspace_root_text = str(getattr(task, "workspace_root", "") or "").strip()
-    workspace_root = Path(workspace_root_text).expanduser() if workspace_root_text else None
-    if workspace_root is None or not workspace_root.exists() or not workspace_root.is_dir():
-        return {
-            "status": "failed",
-            "workspace_root": workspace_root_text,
-            "error": "Scheduled task workspace is unavailable. Open the project and update the task.",
-        }
-
+    management_root = str(getattr(task, "workspace_root", "") or "").strip()
     repository = ConversationRepository()
     from backend.services.scheduler_service import scheduled_permission_mode
 
@@ -96,25 +93,48 @@ async def run_scheduled_task(
         or ""
     ).strip()
     conversation = repository.get_conversation(requested_conversation_id) if requested_conversation_id else None
+    configured_execution_root = task.execution_workspace_root
+    workspace_root_text = management_root if configured_execution_root is None else configured_execution_root
     invalid_conversation_reason = ""
     if requested_conversation_id and conversation is None:
         invalid_conversation_reason = "The heartbeat conversation no longer exists."
     if conversation is not None:
-        bound_text = str(getattr(conversation, "execution_cwd", "") or getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "") or "").strip()
+        bound_text = _conversation_execution_root(conversation)
         bound_root = Path(bound_text).expanduser() if bound_text else None
-        if bound_root is None or main_worktree_root(bound_root) != main_worktree_root(workspace_root):
+        if bound_root is None or (task.kind != "heartbeat" and workspace_root_text
+                and main_worktree_root(bound_root) != main_worktree_root(Path(workspace_root_text).expanduser())):
             invalid_conversation_reason = "The heartbeat conversation belongs to another project."
             conversation = None
         elif getattr(conversation, "archived", False):
             invalid_conversation_reason = "The heartbeat conversation is archived."
             conversation = None
+        else:
+            workspace_root_text = bound_text
     if requested_conversation_id and conversation is None:
         return {
             "status": "failed",
-            "workspace_root": str(workspace_root.resolve()),
+            "workspace_root": management_root,
+            "execution_workspace_root": workspace_root_text,
             "conversation_id": requested_conversation_id,
             "error": invalid_conversation_reason or "The heartbeat conversation is unavailable.",
         }
+    if conversation is None and configured_execution_root == "":
+        projectless_base = task.projectless_base
+        if not projectless_base:
+            raise ValueError("A projectless scheduled task requires its configured task directory.")
+        conversation = repository.create_conversation(
+            title=f"定时任务：{str(getattr(task, 'name', '') or '未命名任务')}", workspace_root="",
+            projectless_base=projectless_base, initial_prompt=task.prompt,
+            permission_mode=permission_mode, thread_source="automation",
+        )
+        workspace_root_text = conversation.execution_cwd
+    workspace_root = Path(workspace_root_text).expanduser() if workspace_root_text else None
+    if workspace_root is None or not workspace_root.exists() or not workspace_root.is_dir():
+        return {
+            "status": "failed", "workspace_root": management_root, "execution_workspace_root": workspace_root_text,
+            "error": "Scheduled task workspace is unavailable. Open the project and update the task.",
+        }
+    run.execution_workspace_root = str(workspace_root.resolve())
     if conversation is None:
         conversation = repository.create_conversation(
             title=f"定时任务：{str(getattr(task, 'name', '') or '未命名任务')}",
@@ -132,7 +152,8 @@ async def run_scheduled_task(
     manager = getattr(bootstrap, "ws_manager", None)
     if manager is not None and (manager._shutting_down or manager.conversation_delete_fence(conversation.id)):
         return {"status": "failed", "conversation_id": conversation.id,
-            "workspace_root": str(workspace_root.resolve()), "error": "The heartbeat execution host is closing."}
+            "workspace_root": management_root, "execution_workspace_root": run.execution_workspace_root,
+            "error": "The heartbeat execution host is closing."}
     run_context = RunContext(turn_input_queue=TurnInputQueue())
     run_context.prepare_turn_owner()
     if run.start_receipt is not None:
@@ -169,12 +190,12 @@ async def run_scheduled_task(
                 await owner.wait_for_turn_release()
         except TimeoutError:
             return {"status": "running", "conversation_id": conversation.id,
-                "workspace_root": str(workspace_root.resolve()),
+                "workspace_root": management_root, "execution_workspace_root": run.execution_workspace_root,
                 "_turn_terminal_receipt": owner.turn_terminal_receipt,
                 "_turn_owner": owner}
         return {
             "status": result["status"], "conversation_id": conversation.id,
-            "workspace_root": str(workspace_root.resolve()), "summary": result["reply"],
+            "workspace_root": management_root, "execution_workspace_root": run.execution_workspace_root, "summary": result["reply"],
             "message_id": result.get("assistant_message_id", ""),
             "actual_turn_id": result.get("turn_id", result["run_id"]),
             "error": result.get("error") or (result["reason"] if result["status"] != "completed" else ""),
@@ -183,7 +204,7 @@ async def run_scheduled_task(
     if submission.mode == "not_submitted":
         return {
             "status": "failed",
-            "workspace_root": str(workspace_root.resolve()),
+            "workspace_root": management_root, "execution_workspace_root": run.execution_workspace_root,
             "conversation_id": conversation.id,
             "error": "The heartbeat conversation already has an active turn." if submission.reason == "active_owner_unavailable" else submission.reason,
         }
@@ -200,7 +221,7 @@ async def run_scheduled_task(
         conversation = repository.get_conversation(conversation.id)
         if conversation is None:
             raise RuntimeError("The scheduled conversation disappeared before admission.")
-        return await _run_scheduled_task_owned(
+        result = await _run_scheduled_task_owned(
             task,
             run,
             bootstrap=bootstrap,
@@ -211,6 +232,7 @@ async def run_scheduled_task(
             query_claim=query_claim,
             run_context=run_context,
         )
+        return {**result, "workspace_root": management_root, "execution_workspace_root": run.execution_workspace_root}
     except asyncio.CancelledError:
         interrupted = True
         raise
@@ -251,7 +273,7 @@ async def _run_scheduled_task_owned(
 ) -> dict[str, Any]:
     execution_root = workspace_root.resolve()
     isolation = str(getattr(task, "isolation", "worktree") or "worktree").strip().lower()
-    if isolation == "worktree":
+    if isolation == "worktree" and task.execution_workspace_root != "":
         existing_worktree_text = str(getattr(conversation, "worktree_path", "") or "").strip()
         existing_worktree = Path(existing_worktree_text).expanduser() if existing_worktree_text else None
         existing_matches_project = False
@@ -299,6 +321,7 @@ async def _run_scheduled_task_owned(
                 }
             conversation = updated
             execution_root = Path(creation.workspace_root).resolve()
+    run.execution_workspace_root = str(execution_root)
 
     from backend.agent.plans import merge_plan_constraints, plan_path_for_snapshot
     from backend.permissions.checker import clamp_permission_mode
@@ -378,6 +401,9 @@ async def _run_scheduled_task_owned(
         automation_kind=task.kind,
         notification_policy=task.notification_policy,
         turn_trigger=run.turn_trigger,
+        model_selection=({key: value.strip() for key, value in {
+            "provider": task.provider, "model": task.model, "reasoning_effort": task.reasoning_effort,
+        }.items() if value is not None and value.strip()} if task.kind != "heartbeat" else None),
     )
     if not conversation_query_guards().owns(query_claim):
         return {

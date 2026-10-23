@@ -16,6 +16,7 @@ export type ThreadAutomationOwner = Pick<ThreadActionOwner, "id" | "title" | "wo
 export interface ThreadAutomationEditor {
   id: string;
   owner: ThreadAutomationOwner;
+  title?: string;
   task?: ScheduledTaskEntry;
   open: boolean;
 }
@@ -49,10 +50,13 @@ export async function loadThreadAutomations(owner: ThreadAutomationOwner): Promi
 export function openThreadAutomationEditor(owner: ThreadAutomationOwner, task?: ScheduledTaskEntry) {
   const existing = editors.find(editor => task ? editor.task?.id === task.id : !editor.task && editor.owner.id === owner.id);
   const id = existing?.id ?? task?.id ?? `draft:${owner.id}`;
-  publish(existing ? editors.map(editor => editor.id === id ? { ...editor, open: true } : editor)
-    : [...editors, { id, owner: { id: owner.id, title: owner.title, workspaceRoot: owner.workspaceRoot, permissionMode: owner.permissionMode }, task, open: true }]);
+  const capturedOwner = { id: owner.id, title: owner.title, workspaceRoot: owner.workspaceRoot, permissionMode: owner.permissionMode };
+  publish(existing ? editors.map(editor => editor.id === id ? { ...editor, owner: capturedOwner, task, open: true } : editor)
+    : [...editors, { id, owner: capturedOwner, task, open: true }]);
   useAppStore.getState().setRightStackTab(`automation:${id}`);
 }
 
 export const closeThreadAutomationEditor = (id: string) => publish(editors.map(editor => editor.id === id ? { ...editor, open: false } : editor));
+export const removeThreadAutomationEditor = (id: string) => publish(editors.filter(editor => editor.id !== id));
+export const renameThreadAutomationEditor = (id: string, title: string) => publish(editors.map(editor => editor.id === id ? { ...editor, title } : editor));
 export const saveThreadAutomationEditor = (id: string, task: ScheduledTaskEntry) => publish(editors.map(editor => editor.id === id ? { ...editor, task } : editor));

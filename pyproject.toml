@@ -28,6 +28,7 @@ dependencies = [
   "packaging>=24.2,<27.0",
   "tzdata>=2025.2",
   "tzlocal>=5.2,<6.0",
+  "python-dateutil>=2.9,<3.0",
   "defusedxml>=0.7,<1.0",
   "keyring>=25,<26",
   "filelock>=3.16,<4.0",

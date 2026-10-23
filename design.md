@@ -312,7 +312,7 @@ MiniCode 的主要交付形态是本地桌面应用，当前安装包配置以 W
 | 配置字段 | 含义与当前约束 |
 | --- | --- |
 | `name / prompt` | 用户可识别名称和可独立执行的任务说明 |
-| `schedule` | 五字段 cron 表达式，需能计算下一次触发 |
+| `schedule` | 五字段 Cron 或完整 RFC 5545 RRULE/DTSTART 原文；RRULE 使用任务创建分钟作为默认稳定起点，显式 DTSTART/TZID 优先 |
 | `timezone` | IANA 时区；前台创建的服务入口缺省使用 UTC，显式选择 `Asia/Shanghai` 才按上海时间解释 |
 | `workspace_root` | 任务绑定项目，切换前台项目不改变绑定 |
 | `conversation_id` | 指定关联会话时使用该会话；不存在、已归档或归属错误需要明确失败 |

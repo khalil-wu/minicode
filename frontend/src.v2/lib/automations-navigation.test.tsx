@@ -23,7 +23,11 @@ beforeEach(() => {
   useAppStore.setState({ conversationId: "settings-B", workingDirectory: "C:/settings-B", draft: "B main draft",
     isConnected: true, settingsOpen: false, scheduledTasks: [], scheduledTaskRuns: [] });
 });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(async () => {
+  cleanup();
+  if (vi.isFakeTimers()) await vi.runAllTimersAsync();
+  vi.useRealTimers();
+});
 
 it("opens the captured task's settings, uses that list ACK instead of B's inventory, and clears the intent on ordinary navigation", async () => {
   vi.useFakeTimers();
@@ -50,7 +54,8 @@ it("opens the captured task's settings, uses that list ACK instead of B's invent
   expect(screen.getByLabelText("任务名称")).toHaveProperty("value", "A task");
   expect(screen.getByRole("button", { name: "编辑 A sibling" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "编辑 B only" })).toBeNull();
-  expect(send).toHaveBeenCalledWith({ type: "scheduler.list", owner_conversation_id: owner.id, workspace_root: owner.workspaceRoot }, "scheduler.list");
+  expect(send).toHaveBeenCalledWith({ type: "scheduler.list", owner_conversation_id: owner.id, workspace_root: owner.workspaceRoot,
+    task_workspace_root: owner.workspaceRoot }, "scheduler.list");
   fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "A settings draft" } });
   await act(async () => { await vi.advanceTimersByTimeAsync(900); });
   expect(send.mock.calls.some(([command]) => command.type === "scheduler.update")).toBe(false);

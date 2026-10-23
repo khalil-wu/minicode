@@ -5,7 +5,8 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   const owner = await page.evaluate(() => {
     const state = window.__zustandStore.getState();
     const conversation = state.conversations.find(item => item.id === state.conversationId);
-    return { id: conversation.id, pinned: Boolean(conversation.pinned), draft: state.draft, viewWorkspace: state.workingDirectory,
+    return { id: conversation.id, title: conversation.title, pinned: Boolean(conversation.pinned), draft: state.draft, viewWorkspace: state.workingDirectory,
+      model: state.currentModel, models: state.availableModels,
       workspace: conversation.executionCwd || conversation.worktreePath || conversation.workspaceRoot || state.workingDirectory };
   });
   const composer = page.locator(".composer-input-region [data-composer-input]").first();
@@ -24,7 +25,11 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
     assert.equal(receipt.level, "info");
     assert.equal(receipt.data.conversation_id, owner.id);
     assert.equal(receipt.data.workspace_root, owner.workspace);
-    return { request, receipt };
+    assert.deepEqual([request.owner_conversation_id, request.workspace_root], [owner.id, owner.workspace]);
+    const snapshots = messages("server", "scheduler.list", since).filter(snapshot => snapshot.request_id === request.client_command_id);
+    assert.equal(snapshots.length, 1);
+    assert.deepEqual([snapshots[0].conversation_id, snapshots[0].workspace_root], [owner.id, owner.workspace]);
+    return { request, receipt, snapshot: snapshots[0] };
   };
   for (const pinned of [!owner.pinned, owner.pinned]) {
     const since = wire.length;
@@ -46,14 +51,89 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   await page.getByRole("menuitem", { name: "添加定时任务…", exact: true }).click();
   const panel = page.locator(`[id="right-panel-automation:draft:${owner.id}"]`);
   await panel.waitFor();
-  const name = `UI heartbeat ${owner.id}`;
-  const prompt = "Preserve the captured chat and workspace for the scheduled follow-up.";
+  const geometry = async () => {
+    const actual = await panel.locator(".thread-automation-panel").evaluate(element => {
+      const scroll = element.querySelector(".thread-automation-scroll"), footer = element.querySelector(".thread-automation-footer");
+      const paneStyle = getComputedStyle(element), scrollStyle = getComputedStyle(scroll), footerStyle = getComputedStyle(footer);
+      return { display: paneStyle.display, direction: paneStyle.flexDirection, overflow: scrollStyle.overflowY, minHeight: scrollStyle.minHeight,
+        separateFooter: footer.parentElement === element && !scroll.contains(footer), shrink: footerStyle.flexShrink,
+        padding: [footerStyle.paddingTop, footerStyle.paddingRight, footerStyle.paddingBottom, footerStyle.paddingLeft],
+        border: footerStyle.borderTopWidth, gap: footerStyle.gap, align: footerStyle.justifyContent,
+        bottomGap: element.getBoundingClientRect().bottom - footer.getBoundingClientRect().bottom,
+        paneGap: element.closest('[role="tabpanel"]').getBoundingClientRect().bottom - element.getBoundingClientRect().bottom };
+    });
+    // Source vt: independent flex scroll, shrink-0 footer with border-t/gap-2/p-panel.
+    // app-shared-295ec67e1c5d.css: Electron p-panel = spacing(.25rem) * 3 = 12px.
+    assert.deepEqual({ ...actual, bottomGap: 0, paneGap: 0 }, { display: "flex", direction: "column", overflow: "auto", minHeight: "0px",
+      separateFooter: true, shrink: "0", padding: ["12px", "12px", "12px", "12px"], border: "1px", gap: "8px", align: "flex-end", bottomGap: 0, paneGap: 0 });
+    assert(Math.abs(actual.bottomGap) <= 1 && Math.abs(actual.paneGap) <= 1);
+    return actual;
+  };
+  await panel.locator(".thread-automation-footer").waitFor();
+  assert.deepEqual((await panel.locator(".thread-automation-footer").getByRole("button").allTextContents()).map(text => text.trim()), ["取消", "创建定时任务"]);
+  const draftAt = wire.length;
+  const target = panel.getByRole("button", { name: "定时任务目标", exact: true });
+  await target.click();
+  const targets = page.getByRole("dialog", { name: "搜索聊天", exact: true });
+  await targets.waitFor();
+  await expect(targets.getByRole("button", { name: owner.title, exact: true })).toBeEnabled({ timeout: 30000 });
+  assert.equal(await targets.getByRole("button", { name: owner.title, exact: true }).getAttribute("aria-pressed"), "true");
+  await capture("thread-04-automation-targets", { owner: owner.id });
+  await targets.getByRole("button", { name: "每次新建聊天", exact: true }).click();
+  assert.equal(await target.getAttribute("title"), "每次新建聊天");
+  const project = panel.getByRole("button", { name: /^定时任务项目，当前：/u });
+  await project.click();
+  const projects = page.getByRole("listbox", { name: "定时任务项目", exact: true });
+  await projects.waitFor();
+  assert.equal(await projects.getByRole("option", { name: "不在项目中工作", exact: true }).count(), 1);
+  assert.equal(await projects.locator('[role="option"][aria-selected="true"]').count(), 1);
+  const projectOptions = await projects.getByRole("option").allTextContents();
+  await page.keyboard.press("Escape");
+  await projects.waitFor({ state: "hidden" });
+  const model = panel.getByRole("button", { name: /^定时任务模型，当前：/u });
+  await model.click();
+  const models = page.getByRole("listbox", { name: "定时任务模型", exact: true });
+  await models.waitFor();
+  const modelValues = await model.evaluate(element => [...element.closest(".mc-select-menu").querySelectorAll("select option")].map(option => option.value));
+  assert(modelValues.includes(owner.model));
+  assert(modelValues.filter(Boolean).every(value => [...owner.models, owner.model].includes(value)));
+  assert.equal(await models.locator('[role="option"][aria-selected="true"]').count(), 1);
+  await capture("thread-05-automation-standalone-model", { owner: owner.id, projectOptions, modelValues, boundary: "Unsaved standalone branch only; no task or model execution" });
+  await page.keyboard.press("Escape");
+  await models.waitFor({ state: "hidden" });
+  await target.click();
+  await targets.getByRole("textbox", { name: "搜索聊天", exact: true }).fill(owner.title);
+  await targets.getByRole("button", { name: owner.title, exact: true }).click();
+  assert.equal(await target.getAttribute("title"), owner.title);
+  assert.equal(await project.count(), 0);
+  assert.equal(await model.count(), 0);
+  assert.equal(wire.slice(draftAt).filter(row => row.direction === "client" && ["scheduler.add", "scheduler.update", "scheduler.toggle", "scheduler.remove"].includes(row.message.type)).length, 0);
+  const name = `UI heartbeat ${owner.id}`, prompt = "Preserve the captured chat and workspace for the scheduled follow-up.";
+  const nextRun = Date.UTC(new Date().getUTCFullYear() + 1, 0, 1);
+  assert(nextRun > Date.now() + 180000);
+  const schedule = `DTSTART:${new Date(nextRun).toISOString().replace(/[-:]/g, "").replace(".000", "")}\nRRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1;BYHOUR=0;BYMINUTE=0;BYSECOND=0`;
   await panel.getByRole("textbox", { name: "任务名称", exact: true }).fill(name);
-  await panel.getByPlaceholder("要运行的提示词", { exact: true }).fill(prompt);
-  await panel.getByRole("button", { name: "运行频率，当前：每小时", exact: true }).click();
-  await page.getByRole("listbox", { name: "运行频率", exact: true }).getByRole("option", { name: "自定义 Cron", exact: true }).click();
-  await panel.getByPlaceholder("Cron 表达式（例如 0 9 * * 1-5）", { exact: true }).fill("0 0 1 1 *");
-  await capture("thread-02-automation-draft", { owner: owner.id, workspace: owner.workspace });
+  await panel.getByRole("textbox", { name: "提示词", exact: true }).fill(prompt);
+  await panel.getByRole("button", { name: /^重复计划，当前：/u }).click();
+  const repeats = page.getByRole("listbox", { name: "重复计划", exact: true });
+  await repeats.waitFor();
+  assert.deepEqual((await repeats.getByRole("option").allTextContents()).map(text => text.trim()), ["间隔", "每天", "工作日", "每周", "自定义"]);
+  await repeats.getByRole("option", { name: "自定义", exact: true }).click();
+  await panel.getByRole("button", { name: "编辑计划规则", exact: true }).click();
+  const ruleDialog = page.getByRole("dialog", { name: "编辑计划规则", exact: true });
+  await ruleDialog.getByRole("textbox", { name: "RRULE", exact: true }).fill(schedule);
+  await capture("thread-06-automation-custom-rrule", { schedule, nextRun: new Date(nextRun).toISOString() });
+  await ruleDialog.getByRole("button", { name: "保存", exact: true }).click();
+  await ruleDialog.waitFor({ state: "hidden" });
+  await panel.getByRole("button", { name: /^通知，当前：/u }).click();
+  const notifications = page.getByRole("listbox", { name: "通知", exact: true });
+  await notifications.waitFor();
+  assert.deepEqual((await notifications.getByRole("option").allTextContents()).map(text => text.trim()), ["重要更新", "仅失败运行"]);
+  assert.equal(await notifications.getByRole("option", { name: "重要更新", exact: true }).getAttribute("aria-selected"), "true");
+  await capture("thread-07-automation-notifications", { owner: owner.id });
+  await notifications.getByRole("option", { name: "仅失败运行", exact: true }).click();
+  const draftGeometry = await geometry();
+  await capture("thread-02-automation-draft", { owner: owner.id, workspace: owner.workspace, draftGeometry });
   const addedAt = wire.length;
   await panel.getByRole("button", { name: "创建定时任务", exact: true }).click();
   const added = await mutation("scheduler.add", addedAt);
@@ -62,9 +142,12 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   assert.equal(task.conversation_id, owner.id);
   assert.equal(task.workspace_root, owner.workspace);
   assert.deepEqual([task.name, task.prompt, task.isolation], [name, prompt, "workspace"]);
-  assert.equal(task.schedule, "0 0 1 1 *");
+  assert.equal(task.schedule, schedule);
   assert.equal(task.kind, "heartbeat");
-  assert(Date.parse(task.next_run_at) > Date.now() + 180000);
+  assert.equal(task.enabled, true);
+  assert.equal(task.notification_policy, "failed_runs_only");
+  assert.equal(Date.parse(task.next_run_at), nextRun);
+  assert.deepEqual(added.snapshot.tasks.filter(item => item.conversation_id === owner.id), [task]);
   assert.deepEqual([added.request.owner_conversation_id, added.request.conversation_id, added.request.workspace_root], [owner.id, owner.id, owner.workspace]);
   await page.getByRole("button", { name: `关闭${name}标签页`, exact: true }).click();
   await panel.waitFor({ state: "hidden" });
@@ -73,22 +156,76 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   await page.getByRole("menuitem", { name: "编辑定时任务…", exact: true }).click();
   await panel.waitFor();
   assert.equal(await panel.getByRole("textbox", { name: "任务名称", exact: true }).inputValue(), name);
+  assert.equal(await panel.getByRole("textbox", { name: "提示词", exact: true }).inputValue(), prompt);
+  assert.equal(await panel.getByRole("button", { name: "通知，当前：仅失败运行", exact: true }).count(), 1);
+  await panel.getByRole("button", { name: "打开设置", exact: true }).waitFor();
+  assert.deepEqual((await panel.locator(".thread-automation-footer").getByRole("button").allTextContents()).map(text => text.trim()), ["打开设置"]);
   const updatedAt = wire.length;
-  await panel.getByPlaceholder("要运行的提示词", { exact: true }).fill(`${prompt} Updated.`);
+  await panel.getByRole("textbox", { name: "提示词", exact: true }).fill(`${prompt} Updated.`);
   const updated = await mutation("scheduler.update", updatedAt);
   assert.equal(updated.request.task_id, task.id);
   assert.deepEqual([updated.request.owner_conversation_id, updated.request.conversation_id, updated.request.workspace_root], [owner.id, owner.id, owner.workspace]);
   assert.equal(updated.receipt.data.task.id, task.id);
   assert.equal(updated.receipt.data.task.name, name);
   assert.deepEqual([updated.receipt.data.task.conversation_id, updated.receipt.data.task.workspace_root, updated.receipt.data.task.prompt], [owner.id, owner.workspace, `${prompt} Updated.`]);
-  assert.equal(updated.receipt.data.task.schedule, "0 0 1 1 *");
-  assert(Date.parse(updated.receipt.data.task.next_run_at) > Date.now() + 180000);
+  assert.equal(updated.receipt.data.task.schedule, schedule);
+  assert.equal(updated.receipt.data.task.notification_policy, "failed_runs_only");
+  assert.equal(Date.parse(updated.receipt.data.task.next_run_at), nextRun);
   assert.equal(messages("client", "scheduler.add", addedAt).length, 1);
-  assert.equal(messages("server", "scheduler.list", updatedAt).at(-1).tasks.filter(item => item.conversation_id === owner.id).length, 1);
-  await capture("thread-03-automation-updated", { owner: owner.id, task: updated.receipt.data.task });
-  await page.getByRole("button", { name: `关闭${name}标签页`, exact: true }).click();
+  assert.deepEqual(updated.snapshot.tasks.filter(item => item.conversation_id === owner.id), [updated.receipt.data.task]);
+  const savedGeometry = await geometry();
+  await capture("thread-03-automation-updated", { owner: owner.id, task: updated.receipt.data.task, savedGeometry });
+  const operations = panel.getByRole("button", { name: "定时任务操作", exact: true });
+  const operationMenu = page.getByRole("menu", { name: "定时任务操作", exact: true });
+  const toggles = [];
+  for (const [label, enabled, nextLabel] of [["暂停", false, "恢复"], ["恢复", true, "暂停"]]) {
+    await operations.click();
+    await operationMenu.waitFor();
+    assert.deepEqual((await operationMenu.getByRole("menuitem").allTextContents()).map(text => text.trim()), [label, "删除"]);
+    assert.equal(await operationMenu.getByRole("separator").count(), 0);
+    const since = wire.length;
+    await operationMenu.getByRole("menuitem", { name: label, exact: true }).click();
+    const toggled = await mutation("scheduler.toggle", since);
+    assert.deepEqual([toggled.request.task_id, toggled.request.enabled, toggled.receipt.data.task_id, toggled.receipt.data.enabled], [task.id, enabled, task.id, enabled]);
+    assert.deepEqual([toggled.receipt.data.task.id, toggled.receipt.data.task.conversation_id, toggled.receipt.data.task.workspace_root, toggled.receipt.data.task.enabled], [task.id, owner.id, owner.workspace, enabled]);
+    assert.deepEqual(toggled.snapshot.tasks.filter(item => item.conversation_id === owner.id), [toggled.receipt.data.task]);
+    assert.equal(toggled.receipt.data.task.schedule, schedule);
+    if (enabled) assert.equal(Date.parse(toggled.receipt.data.task.next_run_at), nextRun);
+    toggles.push(toggled.receipt.data);
+    await operations.click();
+    await operationMenu.getByRole("menuitem", { name: nextLabel, exact: true }).waitFor();
+    if (!enabled) await capture("thread-08-automation-paused-menu", { owner: owner.id, task: toggled.receipt.data.task });
+    await page.keyboard.press("Escape");
+    await operationMenu.waitFor({ state: "hidden" });
+  }
+  const cancelledAt = wire.length;
+  await operations.click();
+  await operationMenu.getByRole("menuitem", { name: "删除", exact: true }).click();
+  const deletion = page.getByRole("dialog", { name: `删除 ${name}？`, exact: true });
+  await deletion.getByText("这将永久删除定时任务并停止后续运行。", { exact: true }).waitFor();
+  await capture("thread-09-automation-delete-confirmation", { owner: owner.id, taskId: task.id });
+  await deletion.getByRole("button", { name: "取消", exact: true }).click();
+  await deletion.waitFor({ state: "hidden" });
+  assert.equal(messages("client", "scheduler.remove", cancelledAt).length, 0);
+  assert.equal(await panel.isVisible(), true);
+  assert.equal(await page.evaluate(id => window.__zustandStore.getState().scheduledTasks.some(task => task.id === id), task.id), true);
+  assert.equal(await composer.innerText(), owner.draft);
+  await operations.click();
+  await operationMenu.getByRole("menuitem", { name: "删除", exact: true }).click();
+  const removedAt = wire.length;
+  await deletion.getByRole("button", { name: "删除定时任务", exact: true }).click();
+  const removed = await mutation("scheduler.remove", removedAt);
+  assert.deepEqual([removed.request.task_id, removed.receipt.data.task_id], [task.id, task.id]);
+  assert.equal(removed.snapshot.tasks.some(item => item.id === task.id), false);
+  assert.equal(messages("client", "scheduler.remove", cancelledAt).length, 1);
+  assert.equal(messages("client", "scheduler.add", addedAt).length, 1);
+  await deletion.waitFor({ state: "hidden" });
   await panel.waitFor({ state: "hidden" });
+  await actions.click();
+  await page.getByRole("menuitem", { name: "添加定时任务…", exact: true }).waitFor();
+  await page.keyboard.press("Escape");
   assert.equal(await composer.innerText(), owner.draft);
   assert.deepEqual(await page.evaluate(() => { const state = window.__zustandStore.getState(); return [state.conversationId, state.workingDirectory, state.draft]; }), [owner.id, owner.viewWorkspace, owner.draft]);
-  checks.push({ scenario: "Header creates a real owned heartbeat, reopens the right automation tab and updates the ACK task ID without duplicate add; closing preserves the main draft", owner: owner.id, added: added.receipt.data.task, updated: updated.receipt.data.task });
+  checks.push({ scenario: "Source task editor preserves its owner and main draft across unsaved standalone controls, real future RRULE creation, same-ID autosave, pause/resume and cancelled/confirmed deletion", owner: owner.id, added: task, updated: updated.receipt.data.task, toggles, removed: removed.receipt.data, draftGeometry, savedGeometry,
+    boundary: "Standalone Project/Model controls were inspected before creation; no standalone run or alternate-project model execution is claimed" });
 }

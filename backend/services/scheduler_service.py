@@ -44,7 +44,20 @@ def get_scheduler_from_bootstrap() -> Any:
     return get_global_scheduler()
 
 
-def list_scheduled_tasks(scheduler: Any, *, workspace_root: str | None = None) -> SchedulerOperationResult:
+def list_scheduled_tasks(scheduler: Any, *, workspace_root: str | None = None, target_conversation_id: str | None = None) -> SchedulerOperationResult:
+    if target_conversation_id is not None and workspace_root is not None:
+        from backend.tasks.scheduler import _normalize_workspace_root
+
+        root = _normalize_workspace_root(workspace_root)
+        tasks = list(scheduler.list_tasks())
+        extra = [task for task in tasks if task["workspace_root"] != root
+            and task["kind"] == "heartbeat" and task["conversation_id"] == target_conversation_id]
+        visible = [task for task in tasks if task["workspace_root"] == root or task in extra]
+        runs = list(scheduler.list_runs(workspace_root=workspace_root))
+        for task in extra:
+            runs.extend(scheduler.list_runs(task_id=task["id"], workspace_root=task["workspace_root"]))
+        runs.sort(key=lambda run: run["started_at"] or run["scheduled_at"], reverse=True)
+        return SchedulerOperationResult(visible, runs[:100])
     return SchedulerOperationResult(
         tasks=list(scheduler.list_tasks(workspace_root=workspace_root)),
         runs=list(scheduler.list_runs(workspace_root=workspace_root)),
@@ -52,7 +65,7 @@ def list_scheduled_tasks(scheduler: Any, *, workspace_root: str | None = None) -
 
 
 def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
-    from backend.tasks.scheduler import is_valid_timezone, next_run_after
+    from backend.tasks.scheduler import is_rrule_schedule, is_valid_timezone, next_run_after, validate_schedule
 
     name = _required_field(data.get("name"), "Task name is required")
     prompt = str(data.get("prompt") or "")
@@ -64,7 +77,11 @@ def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
     isolation = str(data.get("isolation") or "worktree").strip().lower()
     if not is_valid_timezone(timezone):
         raise SchedulerServiceError(f"Unknown timezone '{timezone}'")
-    if next_run_after(schedule, datetime.now(UTC), timezone=timezone) is None:
+    try:
+        validate_schedule(schedule, timezone=timezone, dtstart=datetime.now(UTC))
+    except ValueError as exc:
+        raise SchedulerServiceError(str(exc)) from exc
+    if not is_rrule_schedule(schedule) and next_run_after(schedule, datetime.now(UTC), timezone=timezone) is None:
         raise SchedulerServiceError("Task schedule must be a valid 5-field cron expression")
     if isolation not in {"worktree", "workspace"}:
         raise SchedulerServiceError("Task isolation must be 'worktree' or 'workspace'")
@@ -80,6 +97,9 @@ def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
         if data["notification_policy"] not in {None, "failed_runs_only"}:
             raise SchedulerServiceError("Unknown scheduled task notification policy")
         configuration["notification_policy"] = data["notification_policy"]
+    for key in ("execution_workspace_root", "projectless_base", "provider", "model", "reasoning_effort"):
+        if key in data:
+            configuration[key] = data[key]
     return configuration
 
 
@@ -127,14 +147,16 @@ def remove_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_roo
     return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
 
 
-def toggle_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:
+def toggle_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerTaskMutationResult:
     task_id = _task_id_from_payload(data)
     enabled = data.get("enabled", True)
     if not isinstance(enabled, bool):
         raise SchedulerServiceError("Task enabled must be a boolean")
     if not scheduler.toggle_task(task_id, enabled, workspace_root=workspace_root):
         raise SchedulerServiceError(f"Task '{task_id}' not found")
-    return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+    snapshot = list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+    task = next(task for task in snapshot.tasks if task["id"] == task_id)
+    return SchedulerTaskMutationResult(snapshot.tasks, snapshot.runs, task)
 
 
 async def run_scheduled_task_now(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None = None) -> SchedulerOperationResult:

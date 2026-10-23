@@ -336,8 +336,8 @@ export interface SchedulerListEvent {
   conversation_id: string;
   workspace_root: string;
   request_id?: string;
-  tasks?: { id: string; name: string; prompt: string; schedule: string; timezone?: string; isolation?: "worktree" | "workspace"; conversation_id?: string; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string; workspace_root?: string; last_run_id?: string | null; last_run_status?: string | null; last_error?: string | null }[];
-  runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; result_summary?: string; error?: string; message_id?: string; completion_notification?: CompletionNotification | null }[];
+  tasks?: { id: string; name: string; prompt: string; schedule: string; execution_workspace_root?: string | null; projectless_base?: string | null; provider?: string | null; model?: string | null; reasoning_effort?: string | null; timezone?: string; isolation?: "worktree" | "workspace"; conversation_id?: string; kind?: "cron" | "heartbeat"; notification_policy?: "failed_runs_only" | null; permission_mode: string; enabled: boolean; last_run_at?: string | null; next_run_at?: string | null; created_at?: string; workspace_root?: string; last_run_id?: string | null; last_run_status?: string | null; last_error?: string | null }[];
+  runs?: { id: string; task_id: string; scheduled_at: string; started_at?: string; finished_at?: string | null; status: string; conversation_id?: string; workspace_root?: string; execution_workspace_root?: string | null; result_summary?: string; error?: string; message_id?: string; completion_notification?: CompletionNotification | null }[];
 }
 
 export interface HeartbeatRendererStateRequestEvent {
@@ -793,6 +793,7 @@ export interface McpProjectDecisionCommand {
 
 export interface SchedulerListCommand extends WorkspaceOwnedCommand {
   type: "scheduler.list";
+  task_workspace_root?: string;
 }
 
 export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
@@ -802,6 +803,11 @@ export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
   name: string;
   prompt: string;
   schedule: string;
+  execution_workspace_root?: string | null;
+  projectless_base?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  reasoning_effort?: string | null;
   timezone?: string;
   isolation?: "worktree" | "workspace";
   permission_mode?: string;
@@ -810,10 +816,12 @@ export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
 export interface SchedulerUpdateCommand extends Omit<SchedulerAddCommand, "type"> {
   type: "scheduler.update";
   task_id: string;
+  task_workspace_root?: string;
 }
 
 export interface SchedulerHistoryCommand extends WorkspaceOwnedCommand {
   type: "scheduler.history";
+  task_workspace_root?: string;
   task_id?: string;
   offset?: number;
   limit?: number;
@@ -821,27 +829,32 @@ export interface SchedulerHistoryCommand extends WorkspaceOwnedCommand {
 
 export interface SchedulerRemoveCommand extends WorkspaceOwnedCommand {
   type: "scheduler.remove";
+  task_workspace_root?: string;
   task_id: string;
 }
 
 export interface SchedulerToggleCommand extends WorkspaceOwnedCommand {
   type: "scheduler.toggle";
+  task_workspace_root?: string;
   task_id: string;
   enabled: boolean;
 }
 
 export interface SchedulerRunNowCommand extends WorkspaceOwnedCommand {
   type: "scheduler.run_now";
+  task_workspace_root?: string;
   task_id: string;
 }
 
 export interface SchedulerRetryCommand extends WorkspaceOwnedCommand {
   type: "scheduler.retry";
+  task_workspace_root?: string;
   run_id: string;
 }
 
 export interface SchedulerCancelCommand extends WorkspaceOwnedCommand {
   type: "scheduler.cancel";
+  task_workspace_root?: string;
   run_id: string;
 }
 

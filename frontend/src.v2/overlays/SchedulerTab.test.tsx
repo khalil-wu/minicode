@@ -236,28 +236,21 @@ describe("SchedulerTab", () => {
     expect(toast.mock.calls.every(([, tone]) => tone === "error")).toBe(true);
   });
 
-  it("keeps invalid and normalized-equivalent drafts without sending an automatic update", async () => {
+  it("keeps normalized-equivalent titles and invalid interval drafts without automatic updates", async () => {
     vi.useFakeTimers();
     const task = { id: "valid-draft", name: "Check", prompt: "Original", schedule: "0 * * * *", timezone: "UTC",
       isolation: "workspace" as const, permission_mode: "auto", enabled: true, conversation_id: "draft-owner" };
     render(<SchedulerTab editor={{ id: task.id, owner: { id: "draft-owner", title: "Draft", workspaceRoot: "C:/draft", permissionMode: "auto" }, task, open: true }} />);
     fireEvent.change(screen.getByLabelText("任务名称"), { target: { value: "  Check  " } });
-    fireEvent.change(screen.getByLabelText("运行频率"), { target: { value: "custom" } });
-    fireEvent.change(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）"), { target: { value: "0   *  * * *" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(900); });
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("运行频率"), { target: { value: "daily" } });
-    fireEvent.change(screen.getByLabelText("运行时间"), { target: { value: "" } });
+    fireEvent.change(screen.getByLabelText("重复间隔"), { target: { value: "" } });
+    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "Keep this invalid interval draft" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(900); });
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("运行频率"), { target: { value: "custom" } });
-    fireEvent.change(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）"), { target: { value: "90 25 * * *" } });
-    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "Keep this invalid schedule draft" } });
-    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
-    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
-    expect(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）")).toHaveProperty("value", "90 25 * * *");
+    expect(screen.getByLabelText("重复间隔")).toHaveProperty("value", "");
     fireEvent.change(screen.getByLabelText("任务名称"), { target: { value: " " } });
-    fireEvent.change(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）"), { target: { value: "0 10 * * 1-5" } });
+    fireEvent.change(screen.getByLabelText("重复间隔"), { target: { value: "1" } });
     await act(async () => { await vi.advanceTimersByTimeAsync(900); });
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
     expect(screen.getByLabelText("任务名称")).toHaveProperty("value", " ");

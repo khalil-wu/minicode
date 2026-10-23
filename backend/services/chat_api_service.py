@@ -216,6 +216,7 @@ async def run_owned_rest_chat(
     automation_kind: str | None = None,
     notification_policy: str | None = None,
     turn_trigger: str | None = None,
+    model_selection: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if conversation_id:
         active_claim = conversation_query_guards().active_claim(conversation_id)
@@ -266,6 +267,11 @@ async def run_owned_rest_chat(
     if owner is not None and automation_kind == "heartbeat" and owner.model_selection:
         selection = {key: value for key, value in owner.model_selection.items() if key in {"provider", "model", "reasoning_effort"}}
         config = replace(config, llm=replace(config.llm, **selection))
+    elif automation_kind == "cron" and model_selection:
+        config = replace(config, llm=replace(config.llm, **model_selection))
+        owner = repository.update_model_selection(owner.id, provider=config.llm.provider, model=config.llm.model,
+            reasoning_effort=config.llm.reasoning_effort, selection_mode="model")
+        run_context.conversation_revision = owner.revision
     run_context.active_final_output_json_schema = config.model_request_policy.final_output_json_schema if config.model_request_policy is not None else None
 
     artifact_store = ArtifactStore()

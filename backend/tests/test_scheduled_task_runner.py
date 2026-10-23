@@ -32,6 +32,7 @@ class _Repository:
             archived=False,
             thread_source=kwargs["thread_source"],
             workspace_root=kwargs["workspace_root"],
+            execution_cwd=kwargs["workspace_root"],
             worktree_path="",
             git_isolated=False,
             context_snapshot={},
@@ -73,6 +74,11 @@ def _task(workspace: Path, **overrides):
         "permission_mode": "auto_approve",
         "isolation": "workspace",
         "notification_policy": None,
+        "execution_workspace_root": None,
+        "projectless_base": None,
+        "provider": None,
+        "model": None,
+        "reasoning_effort": None,
     }
     values.update(overrides)
     values.setdefault("kind", "heartbeat" if values["conversation_id"] else "cron")
@@ -223,6 +229,7 @@ def test_scheduled_retry_uses_the_prior_run_conversation(monkeypatch, tmp_path) 
         id="conv_retry",
         archived=False,
         workspace_root=str(tmp_path),
+        execution_cwd=str(tmp_path),
         worktree_path="",
         git_isolated=False,
         context_snapshot={"history": [{"role": "user", "content": "Prior work"}]},
@@ -297,6 +304,7 @@ def test_scheduled_runner_rejects_busy_conversation_before_side_effects(monkeypa
         id="conv_busy",
         archived=False,
         workspace_root=str(tmp_path),
+        execution_cwd=str(tmp_path),
         worktree_path="",
         git_isolated=False,
     )

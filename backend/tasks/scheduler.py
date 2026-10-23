@@ -1,4 +1,4 @@
-"""Cron-like scheduled task runner.
+"""Cron and RFC 5545 scheduled task runner.
 
 Stores task definitions in `.minicode/scheduled_tasks.json` and fires them
 on schedule by creating new agent sessions with the configured prompt.
@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from dateutil.rrule import rrulestr
+from tzlocal import get_localzone
 
 from backend.async_cleanup import cancel_and_drain, cancel_and_drain_receipt
 from backend.atomic_io import atomic_write_text
@@ -64,7 +66,7 @@ class ScheduledTask:
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     name: str = ""
     prompt: str = ""
-    schedule: str = "0 * * * *"  # cron expression (min hour dom month dow)
+    schedule: str = "0 * * * *"  # Five-field Cron or the original RFC 5545 RRULE/DTSTART text.
     permission_mode: str = "confirm"
     # cc schedules cron in the process-local timezone by default (cron.ts).
     timezone: str = ""
@@ -80,6 +82,11 @@ class ScheduledTask:
     # binding on the task makes the process-wide scheduler safe when a user
     # switches projects between two ticks.
     workspace_root: str = ""
+    execution_workspace_root: str | None = None
+    projectless_base: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    reasoning_effort: str | None = None
     conversation_id: str = ""
     kind: str = "cron"
     notification_policy: str | None = None
@@ -121,6 +128,7 @@ class ScheduledTaskRun:
     status: str = "pending"
     conversation_id: str = ""
     workspace_root: str = ""
+    execution_workspace_root: str = ""
     result_summary: str = ""
     message_id: str = ""
     actual_turn_id: str = ""
@@ -250,20 +258,48 @@ def cron_matches(expression: str, dt: datetime, *, timezone: str = "UTC") -> boo
     return _cron_parts_match(parts, aware.astimezone(_schedule_timezone(timezone)))
 
 
+def is_rrule_schedule(expression: str) -> bool:
+    return bool(re.search(r"(?:^|\n)(?:RRULE:|DTSTART[;:]|RDATE[;:]|EXRULE:)|(?:^|;)FREQ=", expression, re.I))
+
+
+def _parse_rrule_schedule(expression: str, anchor: datetime, timezone: str):
+    zone = _schedule_timezone(timezone) or get_localzone()
+    start = anchor.astimezone(zone).replace(second=0, microsecond=0)
+    # An explicit floating DTSTART has floating UNTIL/EXDATE semantics. Query
+    # that rule in local wall time, then bind its result to the task's zone.
+    floating = bool(re.search(r"(?:^|\n)DTSTART(?:;VALUE=DATE(?:-TIME)?)?:[^\r\nZ]+(?:\r?\n|$)", expression, re.I))
+    rule = rrulestr(expression, dtstart=start.replace(tzinfo=None) if floating else start,
+        tzids=lambda name: ZoneInfo(name.strip('"')), unfold=True)
+    return rule, zone, floating
+
+
+def validate_schedule(expression: str, *, timezone: str, dtstart: datetime) -> None:
+    if is_rrule_schedule(expression):
+        _parse_rrule_schedule(expression, dtstart, timezone)
+    elif _parse_cron_expression(expression) is None:
+        raise ValueError("Task schedule must be a valid 5-field Cron expression or RFC 5545 RRULE")
+
+
 def next_run_after(
     expression: str,
     dt: datetime,
     *,
     timezone: str = "UTC",
     max_days: int = 366,
+    dtstart: datetime | None = None,
 ) -> datetime | None:
-    """Return the next minute matching a cron expression after dt."""
+    """Evaluate RRULE directly, or find the next minute in the Cron grammar."""
+    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    if is_rrule_schedule(expression):
+        rule, zone, floating = _parse_rrule_schedule(expression, dtstart or aware, timezone)
+        query = aware.astimezone(zone).replace(tzinfo=None) if floating else aware
+        result = rule.after(query, inc=False)
+        return (result.replace(tzinfo=zone) if floating else result).astimezone(UTC) if result is not None else None
     if max_days <= 0:
         return None
     parts = _parse_cron_expression(expression)
     if not parts:
         return None
-    aware = dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
     current = aware.astimezone(UTC).replace(second=0, microsecond=0) + timedelta(minutes=1)
     deadline = current + timedelta(days=max_days)
     zone = _schedule_timezone(timezone)
@@ -295,7 +331,11 @@ def _stored_next_run(task: ScheduledTask) -> datetime | None:
     anchor = _parse_last_run_at(task.last_run_at) or _parse_last_run_at(task.created_at)
     if anchor is None:
         return None
-    return next_run_after(task.schedule, anchor, timezone=task.timezone)
+    return _next_task_run_after(task, anchor)
+
+
+def _next_task_run_after(task: ScheduledTask, after: datetime) -> datetime | None:
+    return next_run_after(task.schedule, after, timezone=task.timezone, dtstart=_parse_last_run_at(task.created_at))
 
 
 def _missed_schedule_points(task: ScheduledTask, now: datetime) -> list[datetime]:
@@ -411,8 +451,7 @@ class TaskScheduler:
                     # Stored timestamps do not validate the configuration that
                     # produced them. Validate disk-loaded schedules once here.
                     _schedule_timezone(task.timezone)
-                    if _parse_cron_expression(task.schedule) is None:
-                        raise ValueError(f"Invalid cron expression: {task.schedule}")
+                    validate_schedule(task.schedule, timezone=task.timezone, dtstart=_parse_last_run_at(task.created_at))
                     next_run = _stored_next_run(task)
                 except (ZoneInfoNotFoundError, ValueError) as exc:
                     # A stored task whose schedule can no longer be computed
@@ -615,6 +654,11 @@ class TaskScheduler:
         auto_expire: bool = False,
         kind: str | None = None,
         notification_policy: str | None = None,
+        execution_workspace_root: str | None = None,
+        projectless_base: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> ScheduledTask:
         existing = self.list_tasks()
         if len([t for t in existing if t.get("status") != "deleted"]) >= MAX_SCHEDULED_JOBS:
@@ -632,6 +676,9 @@ class TaskScheduler:
             schedule=schedule,
             permission_mode=permission_mode,
             workspace_root=_normalize_workspace_root(workspace_root),
+            execution_workspace_root=execution_workspace_root,
+            projectless_base=projectless_base,
+            provider=provider, model=model, reasoning_effort=reasoning_effort,
             conversation_id=conversation_id,
             kind=kind or ("heartbeat" if conversation_id else "cron"),
             notification_policy=notification_policy,
@@ -640,7 +687,7 @@ class TaskScheduler:
             recurring=bool(recurring),
             auto_expire=bool(auto_expire),
         )
-        next_run = next_run_after(task.schedule, datetime.now(UTC), timezone=task.timezone)
+        next_run = _next_task_run_after(task, datetime.now(UTC))
         task.next_run_at = next_run.isoformat() if next_run else None
         self._tasks[task.id] = task
         self._save()
@@ -651,6 +698,9 @@ class TaskScheduler:
         timezone: str, isolation: str, conversation_id: str,
         permission_mode: str, workspace_root: str | None = None,
         kind: str | None = None, notification_policy: str | None | object = ...,
+        execution_workspace_root: str | None | object = ...,
+        projectless_base: str | None | object = ...,
+        provider: str | None | object = ..., model: str | None | object = ..., reasoning_effort: str | None | object = ...,
     ) -> bool:
         task = self._tasks.get(task_id)
         if task is None or task.deleted_at is not None or not self._workspace_matches(task.workspace_root, workspace_root):
@@ -664,8 +714,11 @@ class TaskScheduler:
         task.kind = kind or ("heartbeat" if conversation_id else "cron")
         if notification_policy is not ...:
             task.notification_policy = notification_policy
+        for key, value in (("execution_workspace_root", execution_workspace_root), ("projectless_base", projectless_base), ("provider", provider), ("model", model), ("reasoning_effort", reasoning_effort)):
+            if value is not ...:
+                setattr(task, key, value)
         task.permission_mode = permission_mode
-        next_run = next_run_after(schedule, datetime.now(UTC), timezone=timezone) if task.enabled else None
+        next_run = _next_task_run_after(task, datetime.now(UTC)) if task.enabled else None
         task.next_run_at = next_run.isoformat() if next_run else None
         self._unusable_schedule_ids.discard(task_id)
         self._save()
@@ -694,7 +747,7 @@ class TaskScheduler:
         self._unusable_schedule_ids.discard(task_id)
         task.enabled = enabled
         if enabled:
-            next_run = next_run_after(task.schedule, datetime.now(UTC), timezone=task.timezone)
+            next_run = _next_task_run_after(task, datetime.now(UTC))
             task.next_run_at = next_run.isoformat() if next_run else None
         else:
             task.next_run_at = None
@@ -980,7 +1033,7 @@ class TaskScheduler:
     def _defer_heartbeat(self, task: ScheduledTask, now: datetime, *, until: datetime | None = None) -> None:
         # Kn changes only the next check, never the last fire or run history.
         if until is None:
-            nominal = next_run_after(task.schedule, now, timezone=task.timezone)
+            nominal = _next_task_run_after(task, now)
             until = min(nominal, now + timedelta(seconds=60)) if nominal else now + timedelta(seconds=60)
         previous = task.next_run_at
         task.next_run_at = until.isoformat()
@@ -1096,7 +1149,7 @@ class TaskScheduler:
             task.next_run_at = None
             task.deleted_at = claimed_at.isoformat()
         elif consume_schedule or task.kind == "heartbeat":
-            next_run = next_run_after(task.schedule, claimed_at, timezone=task.timezone)
+            next_run = _next_task_run_after(task, claimed_at)
             task.next_run_at = next_run.isoformat() if next_run else None
         task.last_run_id = run.id
         task.last_run_status = "pending"
@@ -1175,6 +1228,7 @@ class TaskScheduler:
     def _apply_run_result(self, task: ScheduledTask, run: ScheduledTaskRun, result: dict[str, Any]) -> None:
         run.status = str(result.get("status") or "completed")
         run.conversation_id = str(result.get("conversation_id") or run.conversation_id)
+        run.execution_workspace_root = str(result.get("execution_workspace_root") or "")
         reported_workspace = _normalize_workspace_root(result.get("workspace_root"))
         # The task binding owns persistence and notification routing even
         # when the real turn executes in its existing nested worktree.

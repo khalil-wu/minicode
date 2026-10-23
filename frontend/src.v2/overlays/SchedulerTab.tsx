@@ -1,5 +1,5 @@
 import { useI18n, type Translate } from "../i18n";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CalendarClock, History, MessageSquareText, Play, Plus, RotateCcw, Square, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -10,8 +10,10 @@ import { showConfirm } from "./DialogService";
 import { SelectMenu } from "../components/SelectMenu";
 import { reportCommandFailure } from "./commandFeedback";
 import { workspaceRootsEqual } from "../lib/workspace-path";
-import { openThreadAutomationSettings, saveThreadAutomationEditor, useAutomationSettingsIntent, type ThreadAutomationEditor } from "../lib/automations-navigation";
+import { openAutomations, useAutomationSettingsIntent, useThreadAutomationEditors, type ThreadAutomationEditor } from "../lib/automations-navigation";
 import type { ScheduledTaskEntry, ScheduledTaskRunEntry } from "../stores/types";
+import { ThreadAutomationPanel } from "./ThreadAutomationPanel";
+import { parseAutomationRRule } from "../lib/automation-schedule";
 import "./SettingsCenter.css";
 
 type SchedulePreset = "hourly" | "daily" | "weekdays" | "custom";
@@ -50,74 +52,51 @@ const runStatusLabel = (tr: Translate, status: string) => ({
 const operationError = (tr: Translate, error: unknown): string =>
   error instanceof Error ? error.message : String(error || tr("未知错误"));
 
-const normalizeSchedule = (schedule: string) => schedule.trim().replace(/\s+/g, " ");
-// Match the scheduler's bounded five-field grammar at the editable draft boundary.
-const validSchedule = (schedule: string): boolean => {
-  const fields = normalizeSchedule(schedule).split(" ");
-  const bounds = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
-  return fields.length === 5 && fields.every((field, index) => field.split(",").every(part => {
-    const wildcard = /^\*(?:\/(\d+))?$/.exec(part);
-    if (wildcard) return wildcard[1] === undefined || Number(wildcard[1]) > 0;
-    const range = /^(\d+)-(\d+)(?:\/(\d+))?$/.exec(part);
-    if (range) return Number(range[1]) >= bounds[index][0] && Number(range[2]) <= bounds[index][1]
-      && Number(range[1]) <= Number(range[2]) && (range[3] === undefined || Number(range[3]) > 0);
-    return /^\d+$/.test(part) && Number(part) >= bounds[index][0] && Number(part) <= bounds[index][1];
-  }));
-};
-const normalizedTaskFields = (task: ScheduledTaskEntry) => ({
-  name: task.name.trim(), prompt: task.prompt.trim(), schedule: normalizeSchedule(task.schedule),
-  timezone: task.timezone || localTimezone, isolation: task.isolation || "workspace",
-  permission_mode: task.permission_mode, conversation_id: task.conversation_id || "",
-});
-
-export const SchedulerTab = ({
-  title,
-  description = "",
-  active = true,
-  editor,
-  onClose,
-}: {
+interface SchedulerTabProps {
   title?: string;
   description?: string;
   active?: boolean;
   editor?: ThreadAutomationEditor;
   onClose?: () => void;
-}) => {
+}
+export const SchedulerTab = ({ editor, onClose, ...props }: SchedulerTabProps) => editor
+  ? <ThreadAutomationPanel editor={editor} onClose={onClose} />
+  : <SchedulerSettingsTab {...props} />;
+
+const SchedulerSettingsTab = ({ title, description = "", active = true }: Omit<SchedulerTabProps, "editor" | "onClose">) => {
   const { t: tr } = useI18n();
   const taskInventory = useAppStore((s) => s.scheduledTasks);
   const runInventory = useAppStore((s) => s.scheduledTaskRuns);
   const selectedConversationId = useAppStore((s) => s.conversationId);
   const selectedWorkingDirectory = useAppStore((s) => s.workingDirectory);
   const settingsIntent = useAutomationSettingsIntent();
-  const target = editor ?? settingsIntent;
+  const threadEditors = useThreadAutomationEditors();
+  const target = settingsIntent;
   const conversationId = target?.owner.id ?? selectedConversationId;
   const workingDirectory = target?.owner.workspaceRoot ?? selectedWorkingDirectory;
   const scopeKey = JSON.stringify([conversationId, workingDirectory]);
   const [settingsSnapshot, setSettingsSnapshot] = useState<{ scopeKey: string; tasks: ScheduledTaskEntry[]; runs: ScheduledTaskRunEntry[] } | null>(null);
   const scopedSnapshot = settingsSnapshot?.scopeKey === scopeKey ? settingsSnapshot : null;
-  const scheduledTasks = !editor && settingsIntent ? scopedSnapshot?.tasks ?? [settingsIntent.task] : taskInventory;
-  const scheduledTaskRuns = !editor && settingsIntent ? scopedSnapshot?.runs ?? [] : runInventory;
+  const scheduledTasks = settingsIntent ? scopedSnapshot?.tasks ?? [settingsIntent.task] : taskInventory;
+  const scheduledTaskRuns = settingsIntent ? scopedSnapshot?.runs ?? [] : runInventory;
   const isConnected = useAppStore((s) => s.isConnected);
   const requestConversationSwitch = useAppStore((s) => s.requestConversationSwitch);
-  const [newTaskName, setNewTaskName] = useState(target?.task?.name ?? editor?.owner.title ?? "");
+  const [newTaskName, setNewTaskName] = useState(target?.task?.name ?? "");
   const [newTaskPrompt, setNewTaskPrompt] = useState(target?.task?.prompt ?? "");
   const [newTaskSchedule, setNewTaskSchedule] = useState(target?.task?.schedule ?? "0 * * * *");
   const [schedulePreset, setSchedulePreset] = useState<SchedulePreset>(scheduleParts(target?.task?.schedule ?? "0 * * * *").preset);
   const [scheduleTime, setScheduleTime] = useState(scheduleParts(target?.task?.schedule ?? "0 * * * *").time);
   const [timezone, setTimezone] = useState(target?.task?.timezone ?? localTimezone);
   const currentTimezoneOptions = Array.from(new Set([...timezoneOptions, timezone]));
-  const [isolation, setIsolation] = useState<"worktree" | "workspace">(target?.task?.isolation ?? (editor ? "workspace" : "worktree"));
-  const [taskMode, setTaskMode] = useState<"standalone" | "heartbeat">(editor || target?.task?.conversation_id ? "heartbeat" : "standalone");
+  const [isolation, setIsolation] = useState<"worktree" | "workspace">(target?.task?.isolation ?? "worktree");
+  const [taskMode, setTaskMode] = useState<"standalone" | "heartbeat">(target?.task?.conversation_id ? "heartbeat" : "standalone");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(target?.task?.id ?? null);
-  const [taskConversationId, setTaskConversationId] = useState(target?.task?.conversation_id ?? editor?.owner.id ?? "");
+  const [taskConversationId, setTaskConversationId] = useState(target?.task?.conversation_id ?? "");
   const [taskPermissionMode, setTaskPermissionMode] = useState(target?.task?.permission_mode ?? "auto");
   const [addingTask, setAddingTask] = useState(false);
-  const [savedEditorTask, setSavedEditorTask] = useState(editor?.task);
-  const [failedEditorPatch, setFailedEditorPatch] = useState<string | null>(null);
-  const [editorSaveError, setEditorSaveError] = useState("");
   const [pendingTaskActions, setPendingTaskActions] = useState<Record<string, string>>({});
   const [pendingRunActions, setPendingRunActions] = useState<Record<string, string>>({});
-  const [listState, setListState] = useState<"idle" | "loading" | "ready" | "error">(editor ? "ready" : "idle");
+  const [listState, setListState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [listError, setListError] = useState("");
   const [refreshVersion, setRefreshVersion] = useState(0);
   const editorRef = useRef<HTMLDivElement>(null);
@@ -129,14 +108,6 @@ export const SchedulerTab = ({
     () => presetSchedule(schedulePreset, scheduleTime, newTaskSchedule),
     [newTaskSchedule, schedulePreset, scheduleTime],
   );
-  const editorFields = useMemo(() => ({
-    name: newTaskName.trim(), prompt: newTaskPrompt.trim(), schedule: normalizeSchedule(effectiveSchedule),
-    timezone, isolation, permission_mode: taskPermissionMode, conversation_id: taskConversationId || conversationId || "",
-  }), [newTaskName, newTaskPrompt, effectiveSchedule, timezone, isolation, taskPermissionMode, taskConversationId, conversationId]);
-  const editorPatch = JSON.stringify(editorFields);
-  const savedEditorPatch = savedEditorTask ? JSON.stringify(normalizedTaskFields(savedEditorTask)) : null;
-  const editorCanSave = Boolean(editorFields.name && editorFields.prompt && validSchedule(editorFields.schedule)
-    && (schedulePreset !== "daily" && schedulePreset !== "weekdays" || /^\d{2}:\d{2}$/.test(scheduleTime)) && conversationId && workingDirectory);
   const ownerScope = {
     owner_conversation_id: conversationId ?? undefined,
     workspace_root: workingDirectory,
@@ -175,11 +146,11 @@ export const SchedulerTab = ({
     editorRef.current?.scrollIntoView?.({ block: "nearest" });
   };
   useLayoutEffect(() => {
-    if (!editor && settingsIntent) {
+    if (settingsIntent) {
       setSettingsSnapshot(current => current?.scopeKey === scopeKey ? current : { scopeKey, tasks: [settingsIntent.task], runs: [] });
       editTask(settingsIntent.task);
     }
-  }, [editor, settingsIntent]);
+  }, [settingsIntent]);
   const createTask = () => {
     applyDraft(scopedDrafts.current.get(scopeKey)?.drafts.get("new") || emptyDraft);
     setHistoryPage(null); setHistoryCount(8); setHistoryError("");
@@ -193,6 +164,7 @@ export const SchedulerTab = ({
     const requestedTask = editingTaskId;
     try {
       const result = await sendClientCommandAwaitResult({ type: "scheduler.history", task_id: editingTaskId || undefined,
+        task_workspace_root: editingTaskId ? scheduledTasks.find(task => task.id === editingTaskId)?.workspace_root : undefined,
         offset: historyPage?.next_offset ?? localRuns.length, limit: 50, ...ownerScope }, "scheduler.history");
       if (reportCommandFailure(result, tr("读取运行历史"))) return;
       if (draftScope.current !== scopeKey || draftRef.current.editingTaskId !== requestedTask) return;
@@ -207,7 +179,7 @@ export const SchedulerTab = ({
     return current.conversationId === conversationId && workspaceRootsEqual(current.workingDirectory, workingDirectory);
   };
   useEffect(() => {
-    if (!active || editor) return;
+    if (!active) return;
     let cancelled = false;
     if (!conversationId) {
       setListState("idle");
@@ -222,6 +194,7 @@ export const SchedulerTab = ({
     setListState("loading");
     setListError("");
     void sendClientCommandAwaitResult({ type: "scheduler.list",
+      ...(settingsIntent ? { task_workspace_root: settingsIntent.task.workspace_root } : {}),
       owner_conversation_id: conversationId, workspace_root: workingDirectory }, "scheduler.list").then((result) => {
       if (cancelled) return;
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法读取定时任务。"));
@@ -236,41 +209,7 @@ export const SchedulerTab = ({
       setListError(operationError(tr, error));
     });
     return () => { cancelled = true; };
-  }, [active, conversationId, workingDirectory, isConnected, refreshVersion, editor, settingsIntent]);
-
-  const saveEditor = useCallback(async () => {
-    if (!editor || !editorCanSave || addingTask) return;
-    const requestedPatch = editorPatch;
-    setAddingTask(true);
-    setFailedEditorPatch(null);
-    setEditorSaveError("");
-    try {
-      const configuration = { ...editorFields, owner_conversation_id: editor.owner.id, workspace_root: editor.owner.workspaceRoot };
-      const result = await sendClientCommandAwaitResult(editingTaskId
-        ? { type: "scheduler.update", task_id: editingTaskId, ...configuration }
-        : { type: "scheduler.add", ...configuration }, editingTaskId ? "scheduler.update" : "scheduler.add");
-      if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法保存定时任务"));
-      const saved = (result.data as unknown as { task: ScheduledTaskEntry }).task;
-      setSavedEditorTask(saved);
-      setEditingTaskId(saved.id);
-      saveThreadAutomationEditor(editor.id, saved);
-    } catch (error) {
-      const message = operationError(tr, error);
-      setFailedEditorPatch(requestedPatch);
-      setEditorSaveError(message);
-      pushToast(`${tr("无法保存定时任务")}：${message}`, "error");
-    } finally { setAddingTask(false); }
-  }, [editor, editorCanSave, addingTask, editorFields, editorPatch, editingTaskId, tr]);
-  useEffect(() => {
-    setFailedEditorPatch(null);
-    setEditorSaveError("");
-  }, [editorPatch]);
-  useEffect(() => {
-    if (!editor || !editingTaskId || !editorCanSave || addingTask
-      || editorPatch === savedEditorPatch || editorPatch === failedEditorPatch) return;
-    const timeout = window.setTimeout(() => { void saveEditor(); }, 600);
-    return () => window.clearTimeout(timeout);
-  }, [editor, editingTaskId, editorCanSave, addingTask, editorPatch, savedEditorPatch, failedEditorPatch, saveEditor]);
+  }, [active, conversationId, workingDirectory, isConnected, refreshVersion, settingsIntent]);
 
   const addTask = async () => {
     const name = newTaskName.trim();
@@ -291,7 +230,7 @@ export const SchedulerTab = ({
         conversation_id: taskMode === "heartbeat" ? taskConversationId || conversationId || undefined : editingTaskId ? "" : undefined,
       };
       const result = await sendClientCommandAwaitResult(editingTaskId
-        ? { type: "scheduler.update", task_id: editingTaskId, ...configuration }
+        ? { type: "scheduler.update", task_id: editingTaskId, task_workspace_root: scheduledTasks.find(task => task.id === editingTaskId)?.workspace_root, ...configuration }
         : { type: "scheduler.add", ...configuration },
       editingTaskId ? "scheduler.update" : "scheduler.add");
       if (reportCommandFailure(result, editingTaskId ? tr("保存定时任务") : tr("添加定时任务"))) return;
@@ -302,7 +241,7 @@ export const SchedulerTab = ({
       }
       if (draftScope.current === scopeKey && (Object.keys(submittedDraft) as Array<keyof typeof submittedDraft>).every((key) =>
         draftRef.current[key] === submittedDraft[key])) {
-        if (!editingTaskId && !editor) { setNewTaskName(""); setNewTaskPrompt(""); }
+        if (!editingTaskId) { setNewTaskName(""); setNewTaskPrompt(""); }
       }
       pushToast(tr("{v0}定时任务：{v1}", { v0: editingTaskId ? tr("已保存") : tr("已添加"), v1: name }), "success");
     } catch (error) {
@@ -324,7 +263,7 @@ export const SchedulerTab = ({
     setPendingTaskActions((current) => ({ ...current, [taskId]: expectedCommand }));
     try {
       if (confirmation && !await showConfirm(confirmation)) return;
-      if (!scopeIsCurrent()) return;
+      if (!settingsIntent && !scopeIsCurrent()) return;
       const result = await sendClientCommandAwaitResult(command, expectedCommand);
       if (!reportCommandFailure(result, action)) pushToast(successMessage, "success");
     } catch (error) {
@@ -340,7 +279,7 @@ export const SchedulerTab = ({
 
   const removeTask = (taskId: string, name: string) => runTaskAction(
     taskId,
-    { type: "scheduler.remove", task_id: taskId, ...ownerScope },
+    { type: "scheduler.remove", task_id: taskId, task_workspace_root: scheduledTasks.find(task => task.id === taskId)?.workspace_root, ...ownerScope },
     "scheduler.remove",
     tr("删除定时任务"),
     tr("已删除定时任务：{v0}", { v0: name }),
@@ -370,9 +309,17 @@ export const SchedulerTab = ({
     }
   };
 
+  // The thread editor's directed Settings route keeps its RRULE and heartbeat controls.
+  // The ordinary scheduler still owns the existing manual Cron form and history.
+  if (settingsIntent && (settingsIntent.task.kind === "heartbeat" || parseAutomationRRule(settingsIntent.task.schedule))) {
+    const threadEditor = threadEditors.find(editor => editor.task?.id === settingsIntent.task.id);
+    return <ThreadAutomationPanel key={`settings:${settingsIntent.owner.id}:${settingsIntent.task.id}`} inSettings onClose={openAutomations}
+      editor={{ id: threadEditor?.id ?? `settings:${settingsIntent.task.id}`, owner: settingsIntent.owner,
+        task: threadEditor?.task ?? scopedSnapshot?.tasks.find(task => task.id === settingsIntent.task.id) ?? settingsIntent.task, open: true }} />;
+  }
+
   return (
-    <Section title={editor ? editor.task?.name || editor.owner.title : title ?? tr("已安排")} description={description}>
-      {!editor && <>
+    <Section title={title ?? tr("已安排")} description={description}>
       {listState === "loading" && <p role="status">{tr("正在读取定时任务…")}</p>}
       {listError && <div role="alert" className="settings-page-note">
         {listState === "error" ? tr("读取定时任务失败：") : ""}{listError}
@@ -398,7 +345,7 @@ export const SchedulerTab = ({
               <button
                 onClick={() => void runTaskAction(
                   t.id,
-                  { type: "scheduler.toggle", task_id: t.id, enabled: !t.enabled, ...ownerScope },
+                  { type: "scheduler.toggle", task_id: t.id, task_workspace_root: t.workspace_root, enabled: !t.enabled, ...ownerScope },
                   "scheduler.toggle",
                   t.enabled ? tr("停用定时任务") : tr("启用定时任务"),
                   tr("{v0}定时任务：{v1}", { v0: t.enabled ? tr("已停用") : tr("已启用"), v1: t.name }),
@@ -412,7 +359,7 @@ export const SchedulerTab = ({
               <button
                 onClick={() => void runTaskAction(
                   t.id,
-                  { type: "scheduler.run_now", task_id: t.id, ...ownerScope },
+                  { type: "scheduler.run_now", task_id: t.id, task_workspace_root: t.workspace_root, ...ownerScope },
                   "scheduler.run_now",
                   tr("立即运行定时任务"),
                   tr("已开始运行：{v0}", { v0: t.name }),
@@ -473,7 +420,7 @@ export const SchedulerTab = ({
                   <button
                     onClick={() => void runHistoryAction(
                       run.id,
-                      { type: "scheduler.cancel", run_id: run.id, ...ownerScope },
+                      { type: "scheduler.cancel", run_id: run.id, task_workspace_root: run.workspace_root, ...ownerScope },
                       "scheduler.cancel",
                       tr("取消运行"),
                       tr("运行已取消"),
@@ -487,7 +434,7 @@ export const SchedulerTab = ({
                   <button
                     onClick={() => void runHistoryAction(
                       run.id,
-                      { type: "scheduler.retry", run_id: run.id, ...ownerScope },
+                      { type: "scheduler.retry", run_id: run.id, task_workspace_root: run.workspace_root, ...ownerScope },
                       "scheduler.retry",
                       tr("重试运行"),
                       tr("已开始重试"),
@@ -506,10 +453,9 @@ export const SchedulerTab = ({
           {historyError && <p role="alert">{historyError}</p>}
         </div>
       )}
-      </>}
       <div className="scheduler-editor" ref={editorRef}>
-        <div className="scheduler-editor-heading"><strong>{editingTaskId ? tr("编辑定时任务") : tr("添加定时任务")}</strong><span>{tr("设置提示词、频率和运行工作区。")}{!editor && (newTaskName || newTaskPrompt) && <span className="settings-unsaved">{tr("草稿会保留")}</span>}</span>
-          {editingTaskId && !editor && <button type="button" className="settings-action-button" onClick={createTask}>{tr("返回新建任务")}</button>}
+        <div className="scheduler-editor-heading"><strong>{editingTaskId ? tr("编辑定时任务") : tr("添加定时任务")}</strong><span>{tr("设置提示词、频率和运行工作区。")}{(newTaskName || newTaskPrompt) && <span className="settings-unsaved">{tr("草稿会保留")}</span>}</span>
+          {editingTaskId && <button type="button" className="settings-action-button" onClick={createTask}>{tr("返回新建任务")}</button>}
         </div>
         <input
           placeholder={tr("任务名称")}
@@ -546,7 +492,7 @@ export const SchedulerTab = ({
             {currentTimezoneOptions.map((item) => <option value={item} key={item}>{item}</option>)}
           </SelectMenu>
         )}
-        {!editor && <div className="scheduler-schedule-row grid grid-cols-2 gap-1.5">
+        <div className="scheduler-schedule-row grid grid-cols-2 gap-1.5">
           <SelectMenu className="settings-select settings-select-regular" align="end" value={isolation} onValueChange={(value) => setIsolation(value as "worktree" | "workspace")} ariaLabel={tr("运行工作区")}>
             <option value="worktree">{tr("独立 Worktree")}</option>
             <option value="workspace">{tr("当前项目")}</option>
@@ -555,7 +501,7 @@ export const SchedulerTab = ({
             <option value="standalone">{tr("每次新建对话")}</option>
             <option value="heartbeat" disabled={!conversationId}>{editingTaskId && taskConversationId && taskConversationId !== conversationId ? tr("继续原任务对话") : tr("继续当前对话")}</option>
           </SelectMenu>
-        </div>}
+        </div>
         <div className="scheduler-schedule-row flex gap-1.5 items-center">
           {schedulePreset === "custom" ? (
             <input
@@ -566,32 +512,17 @@ export const SchedulerTab = ({
               style={inputStyle}
             />
           ) : <span className="flex-1 text-[11px]" style={{ color: "var(--text-muted)", fontSize: "var(--mc-font-caption)" }}>{scheduleLabel(tr, effectiveSchedule)} · {timezone}</span>}
-          {!editor && <button
+          <button
             onClick={() => void addTask()}
             disabled={!newTaskName.trim() || !newTaskPrompt.trim() || !effectiveSchedule.trim() || addingTask || !conversationId || !workingDirectory}
             style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}
           >
             <Plus size={14} /> {addingTask ? tr("正在保存…") : editingTaskId ? tr("保存修改") : tr("添加")}
-          </button>}
+          </button>
         </div>
         <SelectMenu className="settings-select settings-select-regular" align="end" value={taskPermissionMode} onValueChange={setTaskPermissionMode} ariaLabel={tr("任务权限模式")}><option value="auto">{tr("正常自动权限")}</option><option value="confirm">{tr("需要确认")}</option></SelectMenu>
         <details className="scheduler-cron-detail"><summary>{tr("查看 Cron 表达式")}</summary><code>{effectiveSchedule}</code></details>
         {editingTaskId && <p className="settings-page-note">{tr("修改将用于下一次运行，已开始的运行继续使用启动时的配置。")}</p>}
-        {editor && <div className="flex justify-end gap-2 border-t pt-3">
-          {savedEditorTask ? <>
-            {editorCanSave && failedEditorPatch === editorPatch && <button type="button" style={secondaryActionStyle}
-              title={editorSaveError} disabled={addingTask} onClick={() => void saveEditor()}>{tr("重试保存")}</button>}
-            <button type="button" style={{ ...secondaryActionStyle, display: "inline-flex", alignItems: "center", gap: 7 }}
-              onClick={() => openThreadAutomationSettings(editor.owner, savedEditorTask)}>{tr("打开设置")}
-              <span aria-hidden="true" style={{ width: 14, height: 14, background: "currentColor",
-                mask: `url(${import.meta.env.BASE_URL}apps/open-in.svg) center / contain no-repeat` }} />
-            </button>
-          </> : <>
-            <button type="button" style={secondaryActionStyle} onClick={onClose}>{tr("取消")}</button>
-            <button type="button" style={secondaryActionStyle} disabled={!editorCanSave || addingTask}
-              onClick={() => void saveEditor()}>{addingTask ? tr("正在保存…") : tr("创建定时任务")}</button>
-          </>}
-        </div>}
       </div>
     </Section>
   );

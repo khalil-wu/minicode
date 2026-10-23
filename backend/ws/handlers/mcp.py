@@ -5,6 +5,7 @@ import logging
 import math
 import time
 import uuid
+from dataclasses import replace
 from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
@@ -957,12 +958,18 @@ def _scheduler_snapshot_payload(result: Any, scope: Any) -> dict[str, Any]:
     return scope.apply({"type": "scheduler.list", "tasks": result.tasks, "runs": result.runs})
 
 
-async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, *, scope: Any) -> SchedulerOperationResult:
+def _scheduler_storage_root(scope: Any, data: Mapping[str, Any]) -> str:
+    return str(data["task_workspace_root"] or "").strip() if "task_workspace_root" in data else scope.workspace_root
+
+
+async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, *, scope: Any, storage_root: str | None = None) -> SchedulerOperationResult:
     from backend.services.scheduler_service import list_scheduled_tasks
 
-    result = list_scheduled_tasks(scheduler, workspace_root=scope.workspace_root)
+    projection = scope if storage_root is None else replace(scope, workspace_root=storage_root)
+    result = list_scheduled_tasks(scheduler, workspace_root=projection.workspace_root,
+        target_conversation_id=scope.conversation_id if storage_root is None else None)
     await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
+        _scheduler_snapshot_payload(result, projection),
         log_context="scheduler.list",
     )
     return result
@@ -975,7 +982,8 @@ async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any
     except ValueError as exc:
         await emit_command_error(session, "scheduler.list", exc)
         return True
-    result = await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    result = await _send_scheduler_snapshot(session, scheduler, scope=scope,
+        storage_root=_scheduler_storage_root(scope, data) if "task_workspace_root" in data else None)
     await session.send_event(
         AgentEvent.command_result("scheduler.list", "", level="success", data=scope.apply({"tasks": result.tasks, "runs": result.runs}))
     )
@@ -992,10 +1000,7 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.add", exc)
         return True
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
-        log_context="scheduler.list",
-    )
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
         AgentEvent.command_result("scheduler.add", "", data=scope.apply({"name": result.task["name"], "task": result.task}))
     )
@@ -1008,11 +1013,11 @@ async def handle_scheduler_update(session: "WebSocketSession", data: dict[str, A
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = update_scheduled_task(scheduler, data, workspace_root=scope.workspace_root)
+        result = update_scheduled_task(scheduler, data, workspace_root=_scheduler_storage_root(scope, data))
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.update", exc)
         return True
-    await session.send_payload(_scheduler_snapshot_payload(result, scope), log_context="scheduler.list")
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(AgentEvent.command_result("scheduler.update", "", data=scope.apply({"task_id": result.task["id"], "task": result.task})))
     return True
 
@@ -1022,7 +1027,7 @@ async def handle_scheduler_history(session: "WebSocketSession", data: dict[str, 
 
     try:
         scope = _scheduler_command_scope(session, data)
-        result = scheduled_run_history(_get_scheduler(session), data, workspace_root=scope.workspace_root)
+        result = scheduled_run_history(_get_scheduler(session), data, workspace_root=_scheduler_storage_root(scope, data))
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.history", exc)
         return True
@@ -1070,19 +1075,17 @@ async def handle_scheduler_remove(session: "WebSocketSession", data: dict[str, A
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = remove_scheduled_task(scheduler, data, workspace_root=scope.workspace_root)
+        remove_scheduled_task(scheduler, data, workspace_root=_scheduler_storage_root(scope, data))
+        task_id = str(data.get("task_id") or data.get("id") or "").strip()
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.remove", exc)
         return True
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
-        log_context="scheduler.list",
-    )
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.remove",
             "",
-            data={"task_id": str(data.get("task_id", "")).strip()},
+            data=scope.apply({"task_id": task_id}),
         )
     )
     return True
@@ -1094,22 +1097,16 @@ async def handle_scheduler_toggle(session: "WebSocketSession", data: dict[str, A
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = toggle_scheduled_task(scheduler, data, workspace_root=scope.workspace_root)
+        result = toggle_scheduled_task(scheduler, data, workspace_root=_scheduler_storage_root(scope, data))
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.toggle", exc)
         return True
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
-        log_context="scheduler.list",
-    )
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.toggle",
             "",
-            data={
-                "task_id": str(data.get("task_id", "")).strip(),
-                "enabled": data.get("enabled", True),
-            },
+            data=scope.apply({"task_id": result.task["id"], "enabled": result.task["enabled"], "task": result.task}),
         )
     )
     return True
@@ -1267,19 +1264,16 @@ async def handle_scheduler_run_now(session: "WebSocketSession", data: dict[str, 
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = await run_scheduled_task_now(scheduler, data, workspace_root=scope.workspace_root)
+        await run_scheduled_task_now(scheduler, data, workspace_root=_scheduler_storage_root(scope, data))
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.run_now", exc)
         return True
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
-        log_context="scheduler.list",
-    )
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.run_now",
             "",
-            data={"task_id": str(data.get("task_id", "")).strip()},
+            data=scope.apply({"task_id": str(data.get("task_id", "")).strip()}),
         )
     )
     return True
@@ -1291,19 +1285,16 @@ async def handle_scheduler_retry(session: "WebSocketSession", data: dict[str, An
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = await retry_scheduled_task_run(scheduler, data, workspace_root=scope.workspace_root)
+        await retry_scheduled_task_run(scheduler, data, workspace_root=_scheduler_storage_root(scope, data))
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.retry", exc)
         return True
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
-        log_context="scheduler.list",
-    )
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.retry",
             "",
-            data={"run_id": str(data.get("run_id", "")).strip()},
+            data=scope.apply({"run_id": str(data.get("run_id", "")).strip()}),
         )
     )
     return True
@@ -1315,19 +1306,16 @@ async def handle_scheduler_cancel(session: "WebSocketSession", data: dict[str, A
     scheduler = _get_scheduler(session)
     try:
         scope = _scheduler_command_scope(session, data)
-        result = cancel_scheduled_task_run(scheduler, data, workspace_root=scope.workspace_root)
+        cancel_scheduled_task_run(scheduler, data, workspace_root=_scheduler_storage_root(scope, data))
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.cancel", exc)
         return True
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, scope),
-        log_context="scheduler.list",
-    )
+    await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.cancel",
             "",
-            data={"run_id": str(data.get("run_id", "")).strip()},
+            data=scope.apply({"run_id": str(data.get("run_id", "")).strip()}),
         )
     )
     return True
