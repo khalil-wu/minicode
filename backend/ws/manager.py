@@ -913,10 +913,7 @@ class WebSocketManager:
                         await asyncio.shield(persistence_task)
                     logger.info("Session %s cleaned up after disconnect timeout", session_id)
             except asyncio.CancelledError:
-                logger.info(
-                    "Session %s cleanup cancelled due to successful reconnection",
-                    session_id,
-                )
+                logger.info("Session %s disconnect cleanup cancelled", session_id)
             finally:
                 if self._disconnect_tasks.get(session_id) is asyncio.current_task():
                     self._disconnect_tasks.pop(session_id, None)
@@ -924,6 +921,7 @@ class WebSocketManager:
         old_task = self._disconnect_tasks.pop(session_id, None)
         if old_task and not old_task.done():
             old_task.cancel()
+            logger.info("Cancelled disconnect cleanup task for session %s due to newer disconnect", session_id)
         self._disconnect_tasks[session_id] = asyncio.create_task(delayed_cleanup())
 
     async def _retire_session_transport(self, session: WebSocketSession, *, reason: str) -> None:
@@ -961,6 +959,7 @@ class WebSocketManager:
             return False
         if disconnect_task is not None and not disconnect_task.done():
             disconnect_task.cancel()
+            logger.info("Cancelled disconnect cleanup task for session %s due to %s", clean_id, reason)
         session.mark_disconnected()
         self._remove_transport_subscriptions(session)
         _invalidate_runtime_status_cache()
@@ -1011,6 +1010,7 @@ class WebSocketManager:
         if retiring is not None and not retiring.done():
             if self._sessions.get(session_id) is session:
                 retiring.cancel()
+                logger.info("Cancelled disconnect cleanup task for session %s due to %s", session_id, reason)
             await asyncio.gather(retiring, return_exceptions=True)
         if self._sessions.get(session_id) is session:
             self._sessions.pop(session_id)
@@ -1101,6 +1101,7 @@ class WebSocketManager:
         for session_id, task in cleanup_tasks.items():
             if session_id in self._sessions and not task.done():
                 task.cancel()
+                logger.info("Cancelled disconnect cleanup task for session %s due to %s", session_id, reason)
         if cleanup_tasks:
             cleanup_results = await asyncio.shield(asyncio.gather(*cleanup_tasks.values(), return_exceptions=True))
             errors.extend(result for result in cleanup_results if isinstance(result, Exception))

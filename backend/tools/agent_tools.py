@@ -22,6 +22,7 @@ from uuid import uuid4
 from backend.agent.context import ContextBuilder
 from backend.agent.mailbox_delivery import (
     _run_is_conversation_leader, format_subagent_mailbox_injection, is_structured_protocol_message,
+    mailbox_agent_input_messages,
 )
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.atomic_io import await_task_despite_cancellation
@@ -690,7 +691,7 @@ class TaskTool(BaseTool):
             return self._error_result(str(exc))
         if not description:
             return self._error_result("Missing description argument")
-        if not prompt:
+        if not prompt and not parent_metadata.get(CHILD_AGENT_OPTIONS_METADATA_KEY, {}).get("agent_input_messages"):
             return self._error_result("Missing prompt argument")
         runtime = require_runtime_from_context(context)
         conversation_id = str(getattr(context, "conversation_id", "") or "").strip()
@@ -780,6 +781,8 @@ class TaskTool(BaseTool):
             CHILD_AGENT_OPTIONS_METADATA_KEY
         )
         if isinstance(internal_child_options, dict):
+            if "agent_input_messages" in internal_child_options:
+                child_metadata["_agent_input_messages"] = internal_child_options["agent_input_messages"]
             raw_profile = internal_child_options.get("execution_profile")
             if isinstance(raw_profile, AgentExecutionProfile):
                 child_metadata["_execution_profile"] = raw_profile
@@ -1291,6 +1294,8 @@ class TaskTool(BaseTool):
             "task_name": _normalize_child_task_name((subagent_metadata or {}).get("_task_name")),
             "fork_turns": _normalize_fork_turns((subagent_metadata or {}).get("_fork_turns", "none")),
             "legacy_role_alias": (subagent_metadata or {}).get("_legacy_role_alias"),
+            **({"agent_input_messages": subagent_metadata["_agent_input_messages"]}
+                if "_agent_input_messages" in (subagent_metadata or {}) else {}),
             "permission_context": {
                 "mode": child_permission.mode, "approval_policy": child_permission.approval_policy,
                 "tool_deny_rules": child_permission.tool_deny_rules,
@@ -1553,9 +1558,11 @@ class TaskTool(BaseTool):
             lifecycle = [claim for claim in claims if is_structured_protocol_message(claim.message)]
             runtime.ack_swarm_message_claims(lifecycle)
             model_claims = [claim for claim in claims if claim not in lifecycle]
+            messages = [claim.message for claim in model_claims]
             await self.resume_background_subtask(
                 subagent_id=subagent_id,
-                prompt=format_subagent_mailbox_injection([claim.message for claim in model_claims]),
+                prompt="" if any(message.author_agent_path for message in messages)
+                    else format_subagent_mailbox_injection(messages),
                 context=resume_context, mailbox_claims=model_claims,
             )
 
@@ -1763,6 +1770,9 @@ class TaskTool(BaseTool):
             subagent_metadata["_task_name"] = persisted_task_name
         if mailbox_claims:
             subagent_metadata["_resume_mailbox_claims"] = mailbox_claims
+            if any(claim.message.author_agent_path for claim in mailbox_claims):
+                subagent_metadata["_agent_input_messages"] = mailbox_agent_input_messages([
+                    claim.message for claim in mailbox_claims])
         if continuation_resource is not None:
             subagent_metadata["_resume_worktree_continuation"] = continuation_resource
         if resume_workspace_root is not None:
@@ -2232,6 +2242,8 @@ class TaskTool(BaseTool):
                     "source_role_name": llm_resolution.source_role_name,
                     "source_spawn_version": subagent_config["source_spawn_version"],
                     "legacy_role_alias": subagent_config["legacy_role_alias"],
+                    **({"agent_input_messages": subagent_metadata["_agent_input_messages"]}
+                        if "_agent_input_messages" in (subagent_metadata or {}) else {}),
                 },
                 teammate_name=str(subagent_config.get("teammate_name") or ""),
                 team_name=str(subagent_config.get("team_name") or ""),
@@ -2777,7 +2789,8 @@ class TaskTool(BaseTool):
                 raise RuntimeError(start_hook_message)
 
             source_agent_role = llm_resolution.source_role_name is not None or execution_agent_type in {"default", "explorer", "worker"}
-            delegated_prompt = prompt if source_agent_role else self._build_subagent_prompt(
+            agent_input_messages = (subagent_metadata or {}).get("_agent_input_messages")
+            delegated_prompt = prompt if source_agent_role or agent_input_messages else self._build_subagent_prompt(
                 execution_agent_type,
                 prompt,
                 workspace_root=(
@@ -2789,11 +2802,11 @@ class TaskTool(BaseTool):
                 getattr(start_hook_result, "additional_context", "") or ""
             ).strip()
             if hook_context:
-                delegated_prompt = (
-                    f"{delegated_prompt}\n\n"
-                    "Additional context from the SubagentStart hook:\n"
-                    f"{hook_context}"
-                )
+                hook_text = "Additional context from the SubagentStart hook:\n" + hook_context
+                if agent_input_messages:
+                    agent_input_messages = [{"content": hook_text, "provider_items": []}, *agent_input_messages]
+                else:
+                    delegated_prompt = f"{delegated_prompt}\n\n{hook_text}"
             effective_user_prompt = prompt if resume_snapshot else delegated_prompt
             if team_mode and not resume_snapshot:
                 effective_user_prompt = _format_teammate_message(
@@ -2878,6 +2891,8 @@ class TaskTool(BaseTool):
                 subject=description,
             )
             sub_state.user_message = effective_user_prompt
+            if agent_input_messages:
+                sub_state.prompt_context["agent_input_messages"] = agent_input_messages
             # The prompt/runtime surface is derived from the execution profile;
             # ordinary children remain non-delegating while hierarchical profiles
             # may opt into child delegation.

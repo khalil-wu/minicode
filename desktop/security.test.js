@@ -168,7 +168,11 @@ test("first absolute editor read restores only its approved root before any tree
   security.init({ initialRoots: [], trustedRootsFile });
 
   assert.equal(security.isWithinTrustedWorkspace(target), false);
-  assert.throws(() => security.assertReadablePath(rejected), /outside the trusted workspace/);
+  assert.throws(() => security.assertReadablePath(rejected), (error) => {
+    assert.match(error.message, /outside the trusted workspace/);
+    assert.equal(error.message.endsWith(`Target: ${path.resolve(rejected)}`), true);
+    return true;
+  });
   assert.throws(() => security.assertReadablePath("index.html"), /outside the trusted workspace/);
   assert.equal(security.assertReadablePath(target), fs.realpathSync.native(target));
   assert.equal(security.isWithinTrustedWorkspace(target), true);

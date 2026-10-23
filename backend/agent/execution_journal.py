@@ -77,6 +77,7 @@ _TOOL_USE_OPTIONAL_FIELDS = (
     "native_type",
     "native_namespace",
     "native_name",
+    "encrypted_function_args",
     "private_model_only",
     "command_actions",
     "streaming_announcement",

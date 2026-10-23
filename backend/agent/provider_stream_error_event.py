@@ -9,7 +9,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from backend.agent.loop_runtime_helpers import (
-    format_llm_error,
     plan_stream_retry,
     sleep_or_cancel,
     terminal_reason_from_error_type,
@@ -31,6 +30,7 @@ from backend.llm.errors import (
     classify_llm_error,
     llm_error_raw,
     llm_error_status_code,
+    sanitize_llm_error_message,
 )
 from backend.secret_redaction import redact_secrets
 
@@ -46,9 +46,11 @@ async def committed_provider_error(failure, *, state, turn_kernel, provider_atte
     if isinstance(failure, BaseException):
         cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
         classification = classify_llm_error("timeout" if isinstance(cause, asyncio.TimeoutError) else cause)
-        message = format_llm_error(cause) or "Provider request timed out"
         failure_data = llm_error_raw(cause, provider="")
         failure_data["status_code"] = llm_error_status_code(cause, allow_text=False)
+        message = sanitize_llm_error_message(cause, classification, include_provider_details=False,
+            provider_error_message=failure_data.get("provider_error_message", ""),
+            status_code=failure_data.get("status_code"))
     else:
         _, classification, failure_data = provider_error_details(failure)
         message = failure.content
@@ -464,7 +466,9 @@ async def handle_provider_error_event(
             error_message=(
                 "模型开始生成工具调用，但工具参数流没有完整结束。请重试本轮请求。"
                 if incomplete_tool_stream
-                else format_llm_error(classification_input)
+                else sanitize_llm_error_message(classification_input, classification, include_provider_details=False,
+                    provider_error_message=provider_failure_data.get("provider_error_message", ""),
+                    status_code=provider_failure_data.get("status_code"))
             ),
             error_type=(
                 "incomplete_tool_stream"

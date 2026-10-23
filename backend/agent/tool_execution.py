@@ -2040,6 +2040,11 @@ def tool_context_with_live_output(
     )
     call_metadata = dict(tool_ctx.metadata)
     call_metadata[_STREAMED_TOOL_OUTPUT_IDS_KEY] = shared_streamed_ids
+    call_metadata.pop("source_agent_message_encrypted", None)
+    if tc.native_namespace and tc.native_name in {"spawn_agent", "send_message", "followup_task"}:
+        call_metadata["source_agent_message_encrypted"] = not (
+            tc.native_namespace == "collaboration" and tc.encrypted_function_args == []
+        )
     from backend.permissions.grants import permission_context_with_grants
 
     call_context = replace(

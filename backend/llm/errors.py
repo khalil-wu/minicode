@@ -809,9 +809,15 @@ def sanitize_llm_error_message(
     classification: LLMErrorClassification | None = None,
     *,
     include_provider_details: bool = True,
+    provider_error_message: str = "",
+    status_code: int | None = None,
 ) -> str:
     """Return user-facing model error text without leaking provider internals."""
     kind = (classification or classify_llm_error(message)).provider_error_type
+    # This message has already been bounded and redacted at the provider
+    # boundary. Source retains the actual reason for an ordinary bad request.
+    if kind == "unknown" and status_code == 400 and provider_error_message:
+        return f"模型请求被拒绝（HTTP 400）：{provider_error_message}"
     suffix = _safe_provider_error_suffix(message, kind) if include_provider_details else ""
     if kind in {"busy", "rate_limit"}:
         return "\u6a21\u578b\u6682\u65f6\u7e41\u5fd9\u6216\u8fbe\u5230\u5e76\u53d1\u9650\u5236\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5\u6216\u5207\u6362\u6a21\u578b\u3002" + suffix

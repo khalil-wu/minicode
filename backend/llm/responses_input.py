@@ -6,6 +6,17 @@ from typing import Any
 from backend.llm.base import LLMMessage
 
 
+def agent_message_response_item(*, author: str, recipient: str, content: str = "",
+    encrypted_content: str | None = None, trigger_turn: bool) -> dict[str, Any]:
+    """Render Source's attributed agent input, preserving opaque content."""
+    message_type = "NEW_TASK" if trigger_turn else "MESSAGE"
+    header = f"Message Type: {message_type}\nTask name: {recipient}\nSender: {author}\nPayload:\n"
+    parts = ([{"type": "input_text", "text": header},
+        {"type": "encrypted_content", "encrypted_content": encrypted_content}]
+        if encrypted_content is not None else [{"type": "input_text", "text": header + content}])
+    return {"type": "agent_message", "author": author, "recipient": recipient, "content": parts}
+
+
 def admitted_response_items(message: LLMMessage, item: dict[str, Any]) -> list[dict[str, Any]]:
     facts = message.accepted_input
     goal_kind = (facts or {}).get("kind")

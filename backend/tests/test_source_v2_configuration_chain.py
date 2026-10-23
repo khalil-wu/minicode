@@ -11,7 +11,7 @@ from backend.agent.codex_prompts import codex_multi_agent_mode, codex_multi_agen
 from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
-from backend.agent.tool_execution import run_tool, toolset_policy_guard_reason
+from backend.agent.tool_execution import run_tool, tool_context_with_live_output, toolset_policy_guard_reason
 from backend.agent.tool_schema_derivation import effective_toolset_policy
 from backend.agents.source_roles import source_agent_options
 from backend.artifact.store import ArtifactStore
@@ -55,6 +55,10 @@ def test_default_v2_namespace_exposure_and_old_executor_identity_stay_separate(t
     assert "task" not in direct
     assert direct["spawn_agent"]["_minicode_namespace"]["name"] == "collaboration"
     assert "agent_type" not in direct["spawn_agent"]["function"]["parameters"]["properties"]
+    assert "pattern" not in direct["spawn_agent"]["function"]["parameters"]["properties"]["task_name"]
+    assert direct["spawn_agent"]["function"]["parameters"]["required"] == ["task_name", "message"]
+    wait_timeout = direct["wait_agent"]["function"]["parameters"]["properties"]["timeout_ms"]
+    assert wait_timeout["type"] == "number" and "maximum" not in wait_timeout
     assert direct["spawn_agent"]["_minicode_output_schema"]["required"] == ["task_name"]
     nested = replace(policy, nested_surface=True, code_mode_only=False)
     assert not SOURCE_V2_COORDINATION_TOOLS.intersection(
@@ -293,7 +297,7 @@ async def test_real_spawn_keeps_actual_agent_id_in_runtime_metadata_and_source_m
             multi_agent_version="v2"), metadata={"run_id": "parent", ACTIVE_TOOLSET_POLICY_METADATA_KEY: policy})
     try:
         result = await run_tool(ToolCallEvent("spawn-real", "spawn_agent", {"task_name": "worker", "message": "Complete the isolated child task.", "fork_turns": "none"},
-            native_namespace="collaboration", native_name="spawn_agent"), registry, context)
+            native_namespace="collaboration", native_name="spawn_agent", encrypted_function_args=[]), registry, context)
         assert not result.is_error, result.content
         output = json.loads(result.content)
         assert output == ({"task_name": "/root/worker"} if hide else {"task_name": "/root/worker", "nickname": None})
@@ -323,3 +327,65 @@ async def test_child_developer_layer_inherits_or_replaces_parent_from_actual_con
     assert child.role_overrides["developer_instructions"] == expected
     assert child.config.config_layer_stack.effective_config()["developer_instructions"] == expected
     assert config.config_layer_stack.effective_config()["developer_instructions"] == "Parent instructions"
+
+
+def test_v2_catalog_parameters_retain_source_encrypted_transport_markers(tmp_path, caplog):
+    _config, registry, _snapshot, policy = v2_case(tmp_path)
+    for name in ("spawn_agent", "send_message", "followup_task"):
+        original = registry.get_tool_schema(name, toolset_policy=policy)
+        assert original["function"]["parameters"]["properties"]["message"]["encrypted"] is True
+        override = replace(policy, model_messages={"tools": {"multi_agent": {name: {
+            "parameters": json.dumps({"type": "object", "properties": {"message": {"type": "string"}}}),
+        }}}})
+        projected = registry.get_tool_schema(name, toolset_policy=override)
+        assert projected["function"]["parameters"]["properties"]["message"]["encrypted"] is True
+        invalid = replace(policy, model_messages={"tools": {"multi_agent": {name: {
+            "parameters": json.dumps({"type": "object", "properties": {"other": {"type": "string"}}}),
+        }}}})
+        assert registry.get_tool_schema(name, toolset_policy=invalid) == original
+    assert "schema omits an encrypted parameter" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", [None, [], ["message"]])
+async def test_native_agent_wire_marker_survives_complete_item_execution_and_replay(tmp_path, marker):
+    _config, registry, snapshot, policy = v2_case(tmp_path)
+    item = {"type": "function_call", "id": "item-followup", "call_id": "call-followup", "name": "followup_task",
+        "namespace": "collaboration", "arguments": json.dumps({"target": "/root/worker", "message": "opaque-transport"}),
+        "status": "completed", **({"encrypted_function_args": marker} if marker is not None else {})}
+    # Encryption metadata may arrive on the completed item, after argument JSON.
+    added = {key: value for key, value in item.items() if key != "encrypted_function_args"}
+    wire = [{"type": "response.output_item.added", "output_index": 0, "item": {**added, "arguments": "", "status": "in_progress"}},
+        {"type": "response.function_call_arguments.done", "item_id": item["id"], "arguments": item["arguments"]},
+        {"type": "response.output_item.done", "output_index": 0, "item": item},
+        {"type": "response.completed", "response": {"id": "response", "status": "completed", "output": [item]}}]
+
+    async def respond(request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+            content="".join("data: " + json.dumps(event) + "\n\n" for event in wire).encode(), request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        adapter = OpenAIAdapter(LLMSettings(api_key="fixture", wire_api="responses", base_url="https://test.invalid/v1"), http_client=http)
+        try:
+            events = [event async for event in adapter.stream_chat([LLMMessage(role="user", content="Read the source call")],
+                registry.get_schemas(toolset_policy=policy))]
+            assert not any(event.type == StreamEventType.ERROR for event in events), events
+            calls = [call for event in events for call in event.tool_calls]
+            assert calls and all(call.encrypted_function_args == marker for call in calls)
+            call = calls[-1]
+            context = ToolExecutionContext(permission=PermissionContext(mode="confirm"), model_execution=snapshot,
+                metadata={ACTIVE_TOOLSET_POLICY_METADATA_KEY: policy, "source_agent_message_encrypted": True})
+            dispatched = tool_context_with_live_output(call, context, registry)
+            assert dispatched.metadata["source_agent_message_encrypted"] is (marker != [])
+            legacy = tool_context_with_live_output(ToolCallEvent("legacy", "send_message", {}), dispatched, registry)
+            assert "source_agent_message_encrypted" not in legacy.metadata
+            replay = adapter._build_responses_input([LLMMessage(role="assistant", tool_calls=[call])])[0]
+            assert replay.get("encrypted_function_args") == marker
+            assert ("encrypted_function_args" in replay) is (marker is not None)
+            opaque = {"type": "agent_message", "author": "/root", "recipient": "/root/worker", "content": [
+                {"type": "input_text", "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "opaque-transport"},
+            ]}
+            assert adapter._build_responses_input([LLMMessage(role="user", input_origin="agent", provider_items=[opaque])]) == [opaque]
+        finally:
+            await adapter.aclose()

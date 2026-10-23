@@ -260,6 +260,9 @@ class SwarmMessageRecord:
     sender_id: str
     recipient_id: str
     content: str
+    encrypted_content: str | None = None
+    author_agent_path: str = ""
+    recipient_agent_path: str = ""
     conversation_id: str = ""
     team_name: str = ""
     task_id: str = ""
@@ -441,6 +444,9 @@ def _swarm_message_from_dict(data: dict[str, Any]) -> SwarmMessageRecord:
         sender_id=str(data.get("sender_id") or ""),
         recipient_id=str(data.get("recipient_id") or ""),
         content=str(data.get("content") or ""),
+        encrypted_content=data.get("encrypted_content"),
+        author_agent_path=str(data.get("author_agent_path") or ""),
+        recipient_agent_path=str(data.get("recipient_agent_path") or ""),
         conversation_id=str(data.get("conversation_id") or ""),
         team_name=str(data.get("team_name") or ""),
         task_id=str(data.get("task_id") or ""),

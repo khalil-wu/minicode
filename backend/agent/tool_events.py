@@ -260,6 +260,8 @@ def tool_call_start_event(
         value = getattr(tc, field)
         if value:
             event.data[field] = value
+    if tc.encrypted_function_args is not None:
+        event.data["encrypted_function_args"] = list(tc.encrypted_function_args)
     if projection.private_model_only:
         event.data["private_model_only"] = True
     return event

@@ -169,7 +169,7 @@ function clearWindowStateSaveTimer(window = null) {
 // ---------------------------------------------------------------------------
 
 function attachRendererDiagnostics(window, label) {
-  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+  window.webContents.on("console-message", ({ level, message, lineNumber: line, sourceId }) => {
     appendDesktopLog(`[renderer:console][${label}] level=${level} ${sourceId}:${line} ${message}`);
   });
   window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {

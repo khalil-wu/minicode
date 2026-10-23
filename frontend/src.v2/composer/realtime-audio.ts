@@ -1,4 +1,5 @@
 import type { RealtimeAudioChunk } from "../protocol/realtime-types";
+import captureWorkletUrl from "./realtime-capture.worklet.js?url&no-inline";
 
 export const encodeRealtimePcm = (samples: Float32Array): string => {
   const bytes = new Uint8Array(samples.length * 2);
@@ -30,7 +31,7 @@ export class RealtimeAudio {
     this.stream = stream;
     const context = new AudioContext({ sampleRate, latencyHint: "interactive" });
     this.context = context;
-    await context.audioWorklet.addModule(new URL("./realtime-capture.worklet.js", import.meta.url).href);
+    await context.audioWorklet.addModule(captureWorkletUrl);
     if (this.closed) return;
     this.output = context.createGain();
     this.output.connect(context.destination);

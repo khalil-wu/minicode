@@ -11,6 +11,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.state import AgentState
 from backend.agent.agent_identity import coordination_agent_id
+from backend.llm.responses_input import agent_message_response_item
 from backend.tools.base import truncate_tool_result
 from backend.permissions.checker import normalize_permission_mode_token
 
@@ -434,6 +435,27 @@ def format_subagent_mailbox_injection(messages: list[Any]) -> str:
     return "\n".join(lines)
 
 
+def mailbox_agent_input_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    """Keep Source agent inputs native and legacy mailbox text in delivery order."""
+    inputs = []
+    legacy = []
+    for message in messages:
+        if getattr(message, "author_agent_path", ""):
+            if legacy:
+                inputs.append({"content": format_subagent_mailbox_injection(legacy), "provider_items": []})
+                legacy = []
+            item = agent_message_response_item(author=message.author_agent_path,
+                recipient=message.recipient_agent_path, content=message.content,
+                encrypted_content=message.encrypted_content,
+                trigger_turn=message.delivery_mode == "trigger_turn")
+            inputs.append({"content": "", "provider_items": [item]})
+        else:
+            legacy.append(message)
+    if legacy:
+        inputs.append({"content": format_subagent_mailbox_injection(legacy), "provider_items": []})
+    return inputs
+
+
 async def inject_subagent_mailbox_updates(
     *,
     ctx: ContextBuilder,
@@ -576,7 +598,11 @@ async def inject_subagent_mailbox_updates(
     try:
         if before_inject is not None:
             before_inject()
-        ctx.append_user(format_subagent_mailbox_injection(messages))
+        for model_input in mailbox_agent_input_messages(messages):
+            if model_input["provider_items"]:
+                ctx.append_agent_input_messages([model_input])
+            else:
+                ctx.append_user(model_input["content"])
     except Exception:
         release_claims = getattr(runtime, "release_swarm_message_claims", None)
         if claims and callable(release_claims):

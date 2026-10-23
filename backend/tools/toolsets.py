@@ -510,12 +510,19 @@ class ToolsetPolicy:
                     if not isinstance(parameters, dict) or parameters.get("type") != "object":
                         raise ValueError("schema must declare an object type")
                     parameters = _catalog_parameter_schema(parameters)
+                    if name in {"spawn_agent", "send_message", "followup_task"} and "message" not in parameters.get("properties", {}):
+                        raise ValueError("schema omits an encrypted parameter")
                 except (ValueError, TypeError) as error:
                     # multi_agent_tool.rs keeps the bundled declaration and reports
                     # malformed model-owned schemas at this catalog boundary.
                     logging.getLogger(__name__).warning("Invalid catalog tool parameters for %s; using bundled parameters: %s", name, error)
                 else:
                     schema = replace(schema, parameters=parameters)
+        if name in {"spawn_agent", "send_message", "followup_task"}:
+            properties = schema.parameters["properties"]
+            schema = replace(schema, parameters={**schema.parameters, "properties": {
+                **properties, "message": {**properties["message"], "encrypted": True},
+            }})
         if name == "spawn_agent" and options["usage_hint_text"] is not None:
             schema = replace(schema, description=schema.description + "\n\n" + options["usage_hint_text"])
         return schema

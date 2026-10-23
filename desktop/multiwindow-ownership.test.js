@@ -109,6 +109,17 @@ test("new windows own distinct instances, captured callbacks and reusable persis
   assert.equal(manager.getWindowForSender(primary.webContents), primary);
 });
 
+test("renderer diagnostics retain the current Electron console event fields", async (t) => {
+  const { manager } = windowFixture(t);
+  const logs = [];
+  manager.init({ appendDesktopLog: (message) => logs.push(message) });
+  const window = await manager.createMainWindow();
+  const record = manager.getWindowRecord(window);
+  window.webContents.emit("console-message", { level: "error", message: "AudioWorklet registration blocked",
+    lineNumber: 33, sourceId: "file:///workspace/assets/realtime-audio.js" });
+  assert.equal(logs.at(-1), `[renderer:console][primary/${record.windowInstanceId}] level=error file:///workspace/assets/realtime-audio.js:33 AudioWorklet registration blocked`);
+});
+
 test("a remote window retains its actual runtime and a separate persistent storage partition", async (t) => {
   const { manager } = windowFixture(t);
   const local = await manager.createMainWindow();

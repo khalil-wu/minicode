@@ -121,6 +121,53 @@ async function connectDesktop(scale = 1) {
   else await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 900));
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
 }
+async function auditRealtimeWorklet() {
+  trace("realtime:worklet:begin");
+  const entries = await page.locator('script[type="module"][src]').evaluateAll(scripts =>
+    scripts.map(script => script.src).filter(url => /\/assets\/index-[^/]+\.js$/.test(url)));
+  assert.equal(entries.length, 1, "The current production page must identify its built entry");
+  const queue = [entries[0]], visited = new Set();
+  let audioUrl;
+  while (queue.length && !audioUrl) {
+    const url = queue.shift();
+    if (visited.has(url)) continue;
+    visited.add(url);
+    const source = await readFile(fileURLToPath(url), "utf8");
+    const imports = /\b(?:import\s*(?:\(\s*)?|from\s*)(["'`])(\.{1,2}\/[^"'`\s$]+\.js)\1/g;
+    for (const match of source.matchAll(imports)) {
+      const dependency = new URL(match[2], url).href;
+      if (/\/realtime-audio-[A-Za-z0-9_-]+\.js$/.test(dependency)) {
+        audioUrl = dependency;
+        break;
+      }
+      if (!visited.has(dependency)) queue.push(dependency);
+    }
+  }
+  assert(audioUrl, "The current entry's module graph must reach its production realtime audio chunk");
+  const audio = await readFile(fileURLToPath(audioUrl), "utf8");
+  const workletAssets = [...new Set(audio.match(/realtime-capture\.worklet-[A-Za-z0-9_-]+\.js/g) ?? [])];
+  assert.equal(workletAssets.length, 1, "Realtime capture must use an independent production worklet asset");
+  const moduleUrl = new URL(workletAssets[0], audioUrl).href;
+  assert.equal(new URL(moduleUrl).protocol, "file:");
+  const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  assert.match(csp, /(?:^|;)\s*script-src 'self';/);
+  const loaded = await page.evaluate(async url => {
+    const context = new AudioContext({ sampleRate: 24000 });
+    try {
+      await context.audioWorklet.addModule(url);
+      const capture = new AudioWorkletNode(context, "minicode-realtime-capture");
+      capture.port.close();
+      capture.disconnect();
+    } finally {
+      await context.close();
+    }
+    return { moduleUrl: url, sampleRate: context.sampleRate, contextState: context.state };
+  }, moduleUrl);
+  assert.equal(loaded.contextState, "closed");
+  checks.push({ scenario: "The current production realtime capture worklet loads and registers in an actual AudioContext under script-src self", entryUrl: entries[0], audioUrl, ...loaded, csp,
+    boundary: "Module loading and processor registration only; no microphone permission, audio capture, transcription or realtime model request" });
+  trace("realtime:worklet:complete", loaded);
+}
 async function capture(name, context = {}) {
   trace(`capture:${name}:begin`);
   const renderState = await page.evaluate(() => ({ theme: document.documentElement.dataset.theme, fonts: document.fonts.status,
@@ -206,7 +253,7 @@ async function assertSettingsInfoColor(expected) {
 }
 async function persistEvidence(extra = {}) {
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
-    scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", ...extra }, null, 2));
+    scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, production AudioWorklet module loading under packaged CSP, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", ...extra }, null, 2));
   await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
   await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
   await writeFile(path.join(evidence, "desktop.log"), logs.join(""));
@@ -215,6 +262,7 @@ try {
   await connectDesktop();
   assert(page.url().includes("/dist/index.html"));
   assert.equal(await page.getByRole("alert").count(), 0, "Initial ready state must not produce a disconnected-session error");
+  await auditRealtimeWorklet();
   await capture("01-current-build-idle");
   await page.evaluate(workspaceRoot => window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" }), workspace);
   await page.waitForFunction(() => Boolean(window.__zustandStore.getState().conversationId));

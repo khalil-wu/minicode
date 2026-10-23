@@ -55,6 +55,22 @@ async def test_host_shutdown_closes_admission_before_real_cleanup_completion_can
     assert not manager.execution_contexts.retained_hosts()
 
 
+@pytest.mark.asyncio
+async def test_application_shutdown_records_its_actual_cleanup_cancellation_reason(tmp_path, caplog):
+    caplog.set_level("INFO", logger="backend.ws.manager")
+    manager = WebSocketManager()
+    session, generation = await manager.connect(**_connection(tmp_path))
+    manager.disconnect(session.session_id, connection_generation=generation)
+    await asyncio.sleep(0)
+    try:
+        await manager.shutdown()
+        assert "Cancelled disconnect cleanup task for session cold-session due to application_shutdown" in caplog.messages
+        assert not any("reconnection" in message for message in caplog.messages)
+        assert not manager._disconnect_tasks
+    finally:
+        await manager.shutdown(reason="test_cleanup")
+
+
 @asynccontextmanager
 async def _closing_session(tmp_path, monkeypatch, *, initiator="session", short_drain=False):
     manager = WebSocketManager()

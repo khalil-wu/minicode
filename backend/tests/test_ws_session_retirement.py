@@ -175,7 +175,8 @@ async def test_retirement_waits_for_writer_after_bounded_drain_timeout(
 
 
 @pytest.mark.asyncio
-async def test_reconnect_before_grace_deadline_reuses_session(tmp_path):
+async def test_reconnect_before_grace_deadline_reuses_session(tmp_path, caplog):
+    caplog.set_level("INFO", logger="backend.ws.manager")
     manager = WebSocketManager()
     session, generation = await manager.connect(**_connection(tmp_path / "first"))
     manager.disconnect("cold-session", connection_generation=generation)
@@ -187,5 +188,7 @@ async def test_reconnect_before_grace_deadline_reuses_session(tmp_path):
         assert generation == 2
         assert session.is_connected
         assert not manager._disconnect_tasks
+        assert "Cancelled disconnect cleanup task for session cold-session due to reconnection" in caplog.messages
+        assert not any("successful reconnection" in message for message in caplog.messages)
     finally:
         await _release_session(session)

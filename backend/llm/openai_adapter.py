@@ -642,10 +642,9 @@ def _provider_error_hint(exc: Exception) -> str:
 def _adapter_error_content(prefix: str, exc: Exception) -> str:
     hint = _provider_error_hint(exc)
     suffix = f" ({hint})" if hint else ""
-    message = _safe_provider_diagnostic_text(_clean_error_message(exc), limit=240)
-    if not message:
-        body_details = _provider_error_body_details(_provider_response_body(exc))
-        message = str(body_details.get("message") or "provider request failed")
+    body_details = _provider_error_body_details(_provider_response_body(exc))
+    message = str(body_details.get("message") or
+        _safe_provider_diagnostic_text(_clean_error_message(exc), limit=240) or "provider request failed")
     return f"{prefix}: {message}{suffix}"
 
 
@@ -1272,6 +1271,7 @@ def _responses_function_call_input_item(tc: ToolCallEvent) -> dict[str, Any]:
         "call_id": tc.id,
         "name": tc.native_name or tc.name,
         **({"namespace": tc.native_namespace} if tc.native_namespace else {}),
+        **({"encrypted_function_args": list(tc.encrypted_function_args)} if tc.encrypted_function_args is not None else {}),
         "arguments": _responses_normalize_function_arguments(tc.arguments),
     }
 
@@ -1496,6 +1496,9 @@ def _responses_provider_item_from_output(item: Any) -> dict[str, Any] | None:
         namespace = _get_attr_or_item(item, "namespace", None)
         if namespace is not None:
             result["namespace"] = namespace
+        encrypted_function_args = _get_attr_or_item(item, "encrypted_function_args", None)
+        if item_type == "function_call" and encrypted_function_args is not None:
+            result["encrypted_function_args"] = deepcopy(encrypted_function_args)
         if status and item_type == "function_call":
             result["status"] = status
         return result
@@ -1563,6 +1566,7 @@ def _responses_tool_calls_from_provider_items(
                 arguments=arguments,
                 arguments_repaired=arguments_repaired,
                 native_namespace=namespace, native_name=name,
+                encrypted_function_args=deepcopy(item.get("encrypted_function_args")),
             )
         )
     return tool_calls
@@ -3597,7 +3601,7 @@ class OpenAIAdapter(LLMAdapter):
         except LifecycleStaleError:
             raise
         except Exception as exc:
-            logger.error("Responses API 调用失败: %s", exc)
+            logger.error("%s", _adapter_error_content("Responses API 调用失败", exc))
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content=_adapter_error_content("LLM API 调用失败", exc),
@@ -3746,7 +3750,17 @@ class OpenAIAdapter(LLMAdapter):
                 )
 
             native_namespace = _get_attr_or_item(value, "namespace", "") or slot.get("namespace", "")
+            encrypted_function_args = deepcopy(_get_attr_or_item(
+                value, "encrypted_function_args", slot.get("encrypted_function_args")))
             runtime_name = f"{native_namespace}__{name}" if native_namespace and native_namespace != "functions" else name
+            if event_type == "response.function_call_arguments.done" and native_namespace and name in {
+                "spawn_agent", "send_message", "followup_task",
+            }:
+                # The completed native item owns its encrypted-argument marker.
+                # Argument deltas alone cannot decide how an agent receives it.
+                slot["arguments"] = arguments_value
+                slot["encrypted_function_args"] = encrypted_function_args
+                return None, None
             shape = (runtime_name, _json_fingerprint(arguments))
             keys = [key for key in (call_id, item_id) if key]
             existing_shapes = {
@@ -3780,6 +3794,7 @@ class OpenAIAdapter(LLMAdapter):
                     "name": name,
                     "namespace": native_namespace,
                     "arguments": arguments_value,
+                    "encrypted_function_args": encrypted_function_args,
                 }
             )
             response_tool_items[call_id] = slot
@@ -3793,6 +3808,7 @@ class OpenAIAdapter(LLMAdapter):
                     arguments_repaired=arguments_repaired,
                     native_type="tool_search_call" if is_search else "",
                     native_namespace=native_namespace, native_name=name,
+                    encrypted_function_args=encrypted_function_args,
                 ),
                 None,
             )
@@ -4738,6 +4754,7 @@ class OpenAIAdapter(LLMAdapter):
                                 "item_id": item_id,
                                 "name": name or slot.get("name", ""),
                                 "namespace": _get_attr_or_item(item, "namespace", "") or "",
+                                "encrypted_function_args": deepcopy(_get_attr_or_item(item, "encrypted_function_args", None)),
                                 "started": "true",
                             }
                         )
@@ -5208,7 +5225,7 @@ class OpenAIAdapter(LLMAdapter):
         except LifecycleStaleError:
             raise
         except Exception as exc:
-            logger.error("Responses API 流式解析异常: %s", exc)
+            logger.error("%s", _adapter_error_content("Responses API 流式解析异常", exc))
             yield StreamEvent(
                 type=StreamEventType.ERROR,
                 content=_adapter_error_content("LLM 流式响应异常", exc),
@@ -5595,6 +5612,9 @@ class OpenAIAdapter(LLMAdapter):
             elif role == "developer":
                 result.append({"role": "developer", "content": _message_content_text(msg.content)})
             elif role == "user":
+                if msg.input_origin == "agent" and msg.provider_items:
+                    result.extend(deepcopy(msg.provider_items))
+                    continue
                 text_parts = msg.user_text_parts()
                 if msg.images or msg.documents or len(text_parts) > 1:
                     parts: list[dict[str, Any]] = []

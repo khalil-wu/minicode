@@ -381,6 +381,8 @@ class TurnIterationRuntime:
                     # A newly admitted input owns its provenance even when it
                     # steers a turn originally started by a heartbeat/worker.
                     origin = boundary_input.consumed_steer.input_origin
+                elif admitted_message.input_origin == "agent":
+                    origin = "agent"
                 elif "input_origin" in self.metadata:
                     origin = self.metadata["input_origin"]
                 else:
@@ -401,7 +403,7 @@ class TurnIterationRuntime:
                 order = accepted_input.get("_guardian_acceptance_order")
                 if order is None:
                     order = evidence.reserve_order()
-                if not goal_steering:
+                if not goal_steering and admitted_message.is_user_input:
                     self.context.record_admitted_user_input(admitted_message,
                         text=boundary_input.content, turn_id=str(self.metadata["turn_id"]),
                         message_id=accepted_id, acceptance_order=order)

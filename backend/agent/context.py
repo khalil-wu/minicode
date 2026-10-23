@@ -281,6 +281,7 @@ def _sanitize_provider_items(raw_items: Any) -> list[dict[str, Any]]:
                 sanitized.append(safe)
             continue
         if item_type not in {
+            "agent_message",
             "reasoning",
             "function_call",
             "tool_search_call",
@@ -1232,6 +1233,16 @@ class ContextBuilder:
         """Render and store one model-visible user turn."""
         user_message = str(user_message or "")
         self._sync_realtime_world_state()
+        agent_inputs = state.prompt_context.get("agent_input_messages")
+        if agent_inputs:
+            workspace_root = self._workspace_root_for_state(state)
+            await self._ensure_git_status_context(workspace_root)
+            prompt_parts = self._build_prompt_parts(state, workspace_root)
+            admitted_message = self.append_agent_input_messages(agent_inputs)
+            state.prompt_context.pop("agent_input_messages")
+            self._prepared_prompt_parts = prompt_parts
+            self._prepared_prompt_state = state
+            return admitted_message
         if not user_message.strip() and not state.attachments:
             return
         invoked_paths = []
@@ -2539,6 +2550,13 @@ class ContextBuilder:
             LLMMessage(role="user", content=content_text),
             raw_content=content,
         )
+
+    def append_agent_input_messages(self, inputs: list[dict[str, Any]]) -> LLMMessage:
+        for item in inputs:
+            message = LLMMessage(role="user", content=item["content"], input_origin="agent",
+                provider_items=deepcopy(item["provider_items"]))
+            self._history_store.append(message, raw_content=message.content)
+        return message
 
     def append_assistant(
         self,
@@ -4339,6 +4357,8 @@ class ContextBuilder:
                         "native_type": tool_call.native_type,
                         "native_namespace": tool_call.native_namespace,
                         "native_name": tool_call.native_name,
+                        **({"encrypted_function_args": list(tool_call.encrypted_function_args)}
+                            if tool_call.encrypted_function_args is not None else {}),
                     }
                     for tool_call in (message.tool_calls or [])
                 ],
@@ -4688,6 +4708,7 @@ class ContextBuilder:
                             native_type=str(tool_call.get("native_type") or ""),
                             native_namespace=str(tool_call.get("native_namespace") or ""),
                             native_name=str(tool_call.get("native_name") or ""),
+                            encrypted_function_args=deepcopy(tool_call.get("encrypted_function_args")),
                         )
                     )
                 if not parsed_tool_calls:

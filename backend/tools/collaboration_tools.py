@@ -7,7 +7,8 @@ import time
 from dataclasses import replace
 
 from backend.agents.source_roles import source_agent_options
-from backend.tools.agent_control_plane import AgentControlPlane, normalize_agent_fork_turns, normalize_agent_task_name
+from backend.llm.responses_input import agent_message_response_item
+from backend.tools.agent_control_plane import AgentControlPlane, CHILD_AGENT_OPTIONS_METADATA_KEY, normalize_agent_fork_turns, normalize_agent_task_name
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY
@@ -105,17 +106,32 @@ class SpawnAgentTool(CollaborationTool):
         task = self.task_tool.get_schema().parameters["properties"]
         return ToolSchema(name=self.name, description=self.description, parameters={"type": "object",
             "properties": {"message": {"type": "string", "description": "Complete task instructions."},
-                "task_name": {"type": "string", "pattern": "^[a-z0-9_]+$", "description": "Canonical child task name."},
+                "task_name": {"type": "string", "description": "Canonical child task name."},
                 "fork_turns": {"type": "string", "description": "all (default), none, or a positive integer string."},
                 **{name: task[name] for name in ("agent_type", "model", "reasoning_effort")}},
-            "required": ["message", "task_name"], "additionalProperties": False})
+            "required": ["task_name", "message"], "additionalProperties": False})
 
     async def execute(self, args, context=None):
         task_name = normalize_agent_task_name(args["task_name"], required=True)
         fork = normalize_agent_fork_turns(args.get("fork_turns"), default="all")
-        result = await self.task_tool.execute({"description": task_name, "prompt": args["message"],
+        child_context = context
+        prompt = args["message"]
+        if "source_agent_message_encrypted" in context.metadata:
+            if not prompt.strip():
+                return self._error_result("Missing message argument")
+            author = AgentControlPlane(context, source_v2=True).actor_public_tree_path()
+            encrypted = context.metadata["source_agent_message_encrypted"]
+            item = agent_message_response_item(author=author, recipient=f"{author}/{task_name}",
+                content="" if encrypted else prompt, encrypted_content=prompt if encrypted else None,
+                trigger_turn=True)
+            child_context = replace(context, metadata={**context.metadata, CHILD_AGENT_OPTIONS_METADATA_KEY: {
+                **context.metadata.get(CHILD_AGENT_OPTIONS_METADATA_KEY, {}),
+                "agent_input_messages": [{"content": "", "provider_items": [item]}],
+            }})
+            prompt = ""
+        result = await self.task_tool.execute({"description": task_name, "prompt": prompt,
             "task_name": task_name, "fork_turns": fork, "run_in_background": True,
-            **{name: args[name] for name in ("agent_type", "model", "reasoning_effort") if name in args}}, context)
+            **{name: args[name] for name in ("agent_type", "model", "reasoning_effort") if name in args}}, child_context)
         if result.is_error:
             return result
         agent_id = result.runtime_metadata["subagent_id"]
@@ -161,7 +177,9 @@ class WaitAgentTool(CollaborationTool):
 
     def get_schema(self):
         return ToolSchema(name=self.name, description=self.description, parameters={"type": "object",
-            "properties": {"timeout_ms": {"type": "integer", "maximum": self.options["max_wait_timeout_ms"]}},
+            "properties": {"timeout_ms": {"type": "number", "description":
+                f"Timeout in milliseconds. Defaults to {self.options['default_wait_timeout_ms']}, "
+                f"min {self.options['min_wait_timeout_ms']}, max {self.options['max_wait_timeout_ms']}."}},
             "additionalProperties": False})
 
     async def execute(self, args, context=None):

@@ -381,7 +381,7 @@ function assertReadablePath(targetPath, label = "Path") {
     || candidates.find((candidate) => isReadablePath(candidate))
     || path.resolve(rawPath);
   if (!isReadablePath(resolved)) {
-    throw new Error(`${label} is outside the trusted workspace, MiniCode read-only data, and safe user output folders.`);
+    throw new Error(`${label} is outside the trusted workspace, MiniCode read-only data, and safe user output folders. Target: ${resolved}`);
   }
   return resolved;
 }

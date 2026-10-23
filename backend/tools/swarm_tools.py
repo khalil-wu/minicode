@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any
 
 from backend.agent.runtime import AgentRuntime, SwarmTaskStatus
-from backend.agent.agent_identity import coordination_agent_id
+from backend.agent.agent_identity import AgentPath, coordination_agent_id
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.permissions.context import ToolExecutionContext
 from backend.tools.agent_control_plane import AgentControlPlane
@@ -268,15 +268,21 @@ class SendMessageTool(_AgentCoordinationTool):
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
         recipient = str(args.get("target") or args.get("recipient") or "").strip()
-        message = str(args.get("message") or "").strip()
+        native_message = context is not None and "source_agent_message_encrypted" in context.metadata
+        encrypted = native_message and context.metadata["source_agent_message_encrypted"]
+        message = str(args.get("message") or "")
+        if not native_message:
+            message = message.strip()
         if not recipient:
             return self._error_result("Missing recipient argument")
         if not message.strip():
             return self._error_result("Missing message argument")
-        try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
-            payload = None
+        payload = None
+        if not encrypted:
+            try:
+                payload = json.loads(message)
+            except json.JSONDecodeError:
+                pass
         if isinstance(payload, dict) and payload.get("type") in _HOST_APPROVAL_MESSAGE_TYPES:
             return self._error_result(
                 "Plan and permission approval messages are produced by the host review flow. "
@@ -293,6 +299,8 @@ class SendMessageTool(_AgentCoordinationTool):
         if self.delivery_mode == "trigger_turn" and not control.can_use_operation("followup"):
             return self._error_result("The current agent cannot start a follow-up turn.")
         if recipient in {"*", "all"}:
+            if native_message:
+                return self._error_result("Recipient is not part of the current task tree")
             recipient = "*"
             if control.actor_is_subagent:
                 return self._error_result("Only the leader can broadcast to the whole team")
@@ -324,7 +332,7 @@ class SendMessageTool(_AgentCoordinationTool):
                 known_name = str(resolve(recipient) if callable(resolve) else "").strip()
                 if known_record is not None or known_name:
                     return self._error_result("Recipient is not part of the current task tree")
-                if not control.can_queue_unknown_message_target(recipient):
+                if native_message or not control.can_queue_unknown_message_target(recipient):
                     return self._error_result("Recipient is not part of the current task tree")
         derived_sender = _actor_id(context)
         explicit_sender = str(args.get("sender") or "").strip()
@@ -380,7 +388,11 @@ class SendMessageTool(_AgentCoordinationTool):
                 "send_swarm_message",
                 sender_id=sender,
                 recipient_id=recipient,
-                content=message,
+                content="" if encrypted else message,
+                encrypted_content=message if encrypted else None,
+                author_agent_path=control.actor_public_tree_path() if native_message else "",
+                recipient_agent_path=("/root" if recipient == "parent" else
+                    AgentPath.parse(recipient_record.agent_path).logical_name) if native_message else "",
                 conversation_id=conversation_id,
                 team_name=team_name,
                 task_id=str(args.get("task_id") or "").strip(),

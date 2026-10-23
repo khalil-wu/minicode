@@ -410,6 +410,9 @@ class ToolCallEvent:
     native_type: str = ""
     native_namespace: str = ""
     native_name: str = ""
+    # Source distinguishes an absent encryption marker from an explicit empty
+    # list: only the latter declares plaintext direct collaboration arguments.
+    encrypted_function_args: list[str] | None = None
 
 
 @dataclass
