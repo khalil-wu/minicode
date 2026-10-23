@@ -536,7 +536,7 @@ def test_side_chat_create_does_not_steal_active_conversation(monkeypatch, tmp_pa
         )
         main = session.conversation_repo.create_conversation(conversation_id="conv_main123", title="Main")
         session.active_conversation_id = main.id
-        session.load_active_conversation_snapshot(main.id, main.context_snapshot)
+        session.load_active_conversation_snapshot(main.id, main.context_snapshot, snapshot_revision=main.revision)
 
         await session.command_dispatcher._handle_command(UserCommand(
             type="conversation.create",
@@ -581,7 +581,7 @@ def test_user_message_routes_to_explicit_conversation_without_switching_active(m
         main = session.conversation_repo.create_conversation(conversation_id="conv_main123", title="Main")
         other = session.conversation_repo.create_conversation(conversation_id="conv_other123", title="Other")
         session.active_conversation_id = main.id
-        session.load_active_conversation_snapshot(main.id, main.context_snapshot)
+        session.load_active_conversation_snapshot(main.id, main.context_snapshot, snapshot_revision=main.revision)
 
         await session.command_dispatcher._handle_command(UserCommand(
             type="user_message",
@@ -647,7 +647,7 @@ def test_active_run_context_is_isolated_from_conversation_switch(monkeypatch, tm
             context_snapshot={"history": [{"role": "user", "content": "second history"}]},
         )
         session.active_conversation_id = first.id
-        session.load_active_conversation_snapshot(first.id, first.context_snapshot)
+        session.load_active_conversation_snapshot(first.id, first.context_snapshot, snapshot_revision=first.revision)
         engine = CapturingQueryEngine()
         session.query_engine = engine
 

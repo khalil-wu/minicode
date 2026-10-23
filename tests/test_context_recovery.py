@@ -131,7 +131,7 @@ def test_compaction_waits_for_complete_hydration_before_summarizing(
         runtime = session.conversation_runtime
         assert isinstance(runtime, _GateHydrationRuntime)
         runtime.active_conversation_id = record.id
-        assert runtime.load_active_conversation_snapshot(record.id, snapshot) is True
+        assert runtime.load_active_conversation_snapshot(record.id, snapshot, snapshot_revision=record.revision) is True
         await runtime.hydration_started.wait()
 
         compact_task = asyncio.create_task(
@@ -182,7 +182,7 @@ def test_compaction_does_not_publish_into_builder_after_conversation_switch(
         assert isinstance(runtime, _GateHydrationRuntime)
         runtime.active_conversation_id = first.id
         assert (
-            runtime.load_active_conversation_snapshot(first.id, first_snapshot) is True
+            runtime.load_active_conversation_snapshot(first.id, first_snapshot, snapshot_revision=first.revision) is True
         )
         await runtime.hydration_started.wait()
 
@@ -195,7 +195,7 @@ def test_compaction_does_not_publish_into_builder_after_conversation_switch(
         )
         await asyncio.sleep(0)
         runtime.active_conversation_id = second.id
-        runtime.load_active_conversation_snapshot(second.id, second_snapshot)
+        runtime.load_active_conversation_snapshot(second.id, second_snapshot, snapshot_revision=second.revision)
         committed = await compact_task
         return builder, committed.after_snapshot
 
@@ -274,7 +274,7 @@ def test_hydration_revision_fence_reloads_latest_snapshot_and_clears_token_floor
         assert isinstance(runtime, _GateHydrationRuntime)
         runtime.active_conversation_id = record.id
         assert (
-            runtime.load_active_conversation_snapshot(record.id, old_snapshot) is True
+            runtime.load_active_conversation_snapshot(record.id, old_snapshot, snapshot_revision=record.revision) is True
         )
         builder.record_actual_usage(UsageInfo(input_tokens=90_000, output_tokens=1))
         await runtime.hydration_started.wait()
