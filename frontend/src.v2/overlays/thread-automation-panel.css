@@ -78,7 +78,7 @@
 .automation-chat-options button:hover:not(:disabled) { background: var(--surface-hover); }
 .automation-chat-options button:disabled { opacity: .45; cursor: default; }
 .automation-chat-group, .automation-chat-options p { margin: 0; padding: 7px 8px; color: var(--text-tertiary); font-size: var(--mc-font-caption); }
-.mc-dialog-backdrop.automation-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; align-items: center; justify-content: center; padding: 0; background: #0002; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.mc-dialog-backdrop.automation-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; align-items: center; justify-content: center; padding: 0; background: #0002; backdrop-filter: none; }
 .mc-dialog-panel.automation-dialog { position: relative; box-sizing: border-box; width: 520px; max-width: 92vw; padding: 20px; border: 0; border-radius: 20px; background: var(--surface-base); box-shadow: 0 0 0 .5px var(--border-subtle), var(--shadow-strong); color: var(--text-primary); font-family: var(--font-ui); font-size: var(--mc-font-body); outline: none; }
 .mc-dialog-panel.automation-rule-dialog { width: 420px; }
 .automation-dialog-heading { display: flex; flex-direction: column; gap: 4px; }
