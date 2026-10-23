@@ -31,6 +31,7 @@ from backend.ws.command_results import emit_command_error
 from backend.ws.mcp_projection import send_mcp_projection
 
 if TYPE_CHECKING:
+    from backend.services.scheduler_service import SchedulerOperationResult
     from backend.ws.handler import WebSocketSession
 
 logger = logging.getLogger(__name__)
@@ -956,7 +957,7 @@ def _scheduler_snapshot_payload(result: Any, scope: Any) -> dict[str, Any]:
     return scope.apply({"type": "scheduler.list", "tasks": result.tasks, "runs": result.runs})
 
 
-async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, *, scope: Any) -> None:
+async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, *, scope: Any) -> SchedulerOperationResult:
     from backend.services.scheduler_service import list_scheduled_tasks
 
     result = list_scheduled_tasks(scheduler, workspace_root=scope.workspace_root)
@@ -964,6 +965,7 @@ async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, 
         _scheduler_snapshot_payload(result, scope),
         log_context="scheduler.list",
     )
+    return result
 
 
 async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -973,9 +975,9 @@ async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any
     except ValueError as exc:
         await emit_command_error(session, "scheduler.list", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    result = await _send_scheduler_snapshot(session, scheduler, scope=scope)
     await session.send_event(
-        AgentEvent.command_result("scheduler.list", "", level="success", data=scope.apply({}))
+        AgentEvent.command_result("scheduler.list", "", level="success", data=scope.apply({"tasks": result.tasks, "runs": result.runs}))
     )
     return True
 
@@ -995,7 +997,7 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
         log_context="scheduler.list",
     )
     await session.send_event(
-        AgentEvent.command_result("scheduler.add", "", data={"name": str(data.get("name", "")).strip()})
+        AgentEvent.command_result("scheduler.add", "", data=scope.apply({"name": result.task["name"], "task": result.task}))
     )
     return True
 
@@ -1011,7 +1013,7 @@ async def handle_scheduler_update(session: "WebSocketSession", data: dict[str, A
         await emit_command_error(session, "scheduler.update", exc)
         return True
     await session.send_payload(_scheduler_snapshot_payload(result, scope), log_context="scheduler.list")
-    await session.send_event(AgentEvent.command_result("scheduler.update", "", data=scope.apply({"task_id": data["task_id"]})))
+    await session.send_event(AgentEvent.command_result("scheduler.update", "", data=scope.apply({"task_id": result.task["id"], "task": result.task})))
     return True
 
 

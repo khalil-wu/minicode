@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
@@ -115,6 +115,7 @@ import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTe
 import { SidebarRight } from "./SidebarRight";
 import type { ChatMessage } from "../stores/types";
 import { useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
+import { openThreadAutomationEditor } from "../lib/automations-navigation";
 
 const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "role">): ChatMessage => ({
   content: "",
@@ -229,6 +230,40 @@ describe("SidebarRight activity", () => {
   afterEach(() => {
     cleanup();
     window.__MINICODE_RUNTIME__ = undefined;
+  });
+
+  it("keeps separate heartbeat drafts across owner switches and closing a right-panel tab", async () => {
+    const ownerA = { id: "automation-owner-A", title: "Thread A", workspaceRoot: "C:/automation-A", permissionMode: "auto" as const };
+    const ownerB = { id: "automation-owner-B", title: "Thread B", workspaceRoot: "C:/automation-B", permissionMode: "confirm" as const };
+    useAppStore.setState({ conversationId: ownerA.id, workingDirectory: ownerA.workspaceRoot, rightPanelOpen: false,
+      rightStackTab: "tasks", appMode: "cowork", draft: "Main A draft", isConnected: true,
+      conversations: [ownerA, ownerB].map(owner => ({ id: owner.id, title: owner.title, workspaceRoot: owner.workspaceRoot, updatedAt: "today" })) });
+    render(<SidebarRight />);
+    act(() => openThreadAutomationEditor(ownerA));
+    const panelA = await screen.findByRole("tabpanel");
+    const promptA = await within(panelA).findByPlaceholderText("要运行的提示词");
+    fireEvent.change(promptA, { target: { value: "Unsaved A heartbeat" } });
+    act(() => {
+      useAppStore.setState({ conversationId: ownerB.id, workingDirectory: ownerB.workspaceRoot, draft: "Main B draft" });
+      openThreadAutomationEditor(ownerB);
+    });
+    const panelB = await screen.findByRole("tabpanel");
+    fireEvent.change(await within(panelB).findByPlaceholderText("要运行的提示词"), { target: { value: "Unsaved B heartbeat" } });
+    act(() => {
+      useAppStore.setState({ conversationId: ownerA.id, workingDirectory: ownerA.workspaceRoot, draft: "Main A draft" });
+      openThreadAutomationEditor(ownerA);
+    });
+    expect(within(screen.getByRole("tabpanel")).getByPlaceholderText("要运行的提示词")).toHaveProperty("value", "Unsaved A heartbeat");
+    fireEvent.click(within(screen.getByRole("tabpanel")).getByRole("button", { name: "取消" }));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: ownerA.id, workingDirectory: ownerA.workspaceRoot,
+      draft: "Main A draft", rightPanelOpen: false });
+    act(() => openThreadAutomationEditor(ownerA));
+    expect(within(await screen.findByRole("tabpanel")).getByPlaceholderText("要运行的提示词")).toHaveProperty("value", "Unsaved A heartbeat");
+    act(() => {
+      useAppStore.setState({ conversationId: ownerB.id, workingDirectory: ownerB.workspaceRoot, draft: "Main B draft" });
+      openThreadAutomationEditor(ownerB);
+    });
+    expect(within(await screen.findByRole("tabpanel")).getByPlaceholderText("要运行的提示词")).toHaveProperty("value", "Unsaved B heartbeat");
   });
 
   it("uses the actual mixed tab order for native next, previous and close actions", async () => {

@@ -3,8 +3,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ChatActionsButton } from "./ChatActionsButton";
+import { DEFAULT_SHORTCUT_BINDINGS, formatShortcut } from "../lib/keyboard-shortcuts";
+import type { ScheduledTaskEntry } from "../stores/types";
+import { handleSessionEvent } from "../chat/sessionEvents";
+import type { ServerEvent } from "../protocol/events";
 
-const mocks = vi.hoisted(() => ({ send: vi.fn(), prompt: vi.fn(), confirm: vi.fn(), toast: vi.fn(), copy: vi.fn() }));
+const mocks = vi.hoisted(() => ({ send: vi.fn(), prompt: vi.fn(), confirm: vi.fn(), toast: vi.fn(), copy: vi.fn(), inventory: vi.fn() }));
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable: true, writable: true,
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 }));
@@ -12,6 +16,7 @@ vi.mock("../protocol/ws-outbox", async (load) => ({ ...await load<typeof import(
 vi.mock("../overlays/DialogService", () => ({ showPrompt: mocks.prompt, showConfirm: mocks.confirm }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: mocks.toast }));
 vi.mock("../lib/clipboard", () => ({ copyText: mocks.copy }));
+vi.mock("../lib/automations-navigation", async load => ({ ...await load<typeof import("../lib/automations-navigation")>(), loadThreadAutomations: mocks.inventory }));
 
 const openSubmenu = (item: HTMLElement) => { item.focus(); fireEvent.keyDown(item, { key: "ArrowRight" }); };
 
@@ -21,8 +26,10 @@ beforeEach(() => {
   mocks.send.mockResolvedValue({ type: "command.result", level: "success", data: {} });
   mocks.copy.mockResolvedValue(true);
   mocks.confirm.mockResolvedValue(true);
+  mocks.inventory.mockResolvedValue([]);
   useAppStore.setState({ conversationId: "A", pendingConversationSwitchId: null, workingDirectory: "C:/A", sideChatOpen: false, activeSideChatId: null, sideChats: {}, appMode: "code",
-    rightPanelOpen: false, commandPaletteOpen: false, isStreaming: true,
+    rightPanelOpen: false, commandPaletteOpen: false, isStreaming: true, isConnected: true,
+    shortcutBindings: structuredClone(DEFAULT_SHORTCUT_BINDINGS), scheduledTasks: [],
     conversations: [{ id: "A", title: "Chat A", workspaceRoot: "C:/A", updatedAt: "today" }, { id: "B", title: "Chat B", workspaceRoot: "C:/B", updatedAt: "today" }],
     messages: [{ id: "a-user", role: "user", content: "Inspect project A", timestamp: 1 }],
   });
@@ -53,6 +60,24 @@ it.each([false, true])("sends the real header pin operation for pinned=%s and wa
   await act(async () => finish({ type: "command.result", level: "success", data: {} }));
   expect(useAppStore.getState().conversations[0].pinned).toBe(pinned);
   expect(useAppStore.getState().draft).toBe("Keep the current draft");
+});
+
+it("updates an open menu from the same owner's pin inventory without repeating its automation lookup", async () => {
+  useAppStore.setState({ isStreaming: false, draft: "Keep the pin projection draft", conversationInventoryInstanceId: null, conversationInventoryRevision: 0 });
+  render(<ChatActionsButton />); open();
+  await screen.findByRole("menuitem", { name: "添加定时任务…" });
+  expect(mocks.inventory).toHaveBeenCalledTimes(1);
+  act(() => handleSessionEvent({ type: "conversation.list", conversation_id: "A", active_conversation_id: "A",
+    inventory_instance_id: "b".repeat(32), inventory_revision: 1, conversations: [
+      { id: "A", title: "Current A", updated_at: "today", workspace_root: "C:/A", pinned: true },
+      { id: "B", title: "Chat B", updated_at: "today", workspace_root: "C:/B" },
+    ] } as ServerEvent, { textStreamBuffer: { push: vi.fn(), flush: vi.fn(), destroy: vi.fn() },
+      thinkingStreamBuffer: { push: vi.fn(), flush: vi.fn(), destroy: vi.fn() } }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "取消固定", exact: true }));
+  await waitFor(() => expect(mocks.send).toHaveBeenCalledWith({ type: "conversation.pin.set", conversation_id: "A", pinned: false }, "conversation.pin.set"));
+  expect(mocks.inventory).toHaveBeenCalledTimes(1);
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "A", draft: "Keep the pin projection draft" });
+  expect(useAppStore.getState().conversations.find(chat => chat.id === "A")?.pinned).toBe(true);
 });
 
 it("pins remote chats through the same canonical header command", async () => {
@@ -154,4 +179,61 @@ it("cannot act on a pending title that has not become the canonical owner", () =
   render(<ChatActionsButton />);
   expect(screen.getByRole("button", { name: "聊天操作" })).toHaveProperty("disabled", true);
   expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("shows configured bindings and removes a cleared binding without changing the menu labels", () => {
+  const bindings = { ...structuredClone(DEFAULT_SHORTCUT_BINDINGS), renameThread: ["Mod+Alt+Digit8"], copyDeeplink: [] };
+  useAppStore.setState({ shortcutBindings: bindings });
+  render(<ChatActionsButton />); open();
+  expect(screen.getByRole("menuitem", { name: "重命名", exact: true }).textContent).toContain(formatShortcut(bindings.renameThread));
+  expect(screen.getByRole("menuitem", { name: "固定", exact: true }).textContent).toContain(formatShortcut(bindings.toggleThreadPin));
+  expect(screen.getByRole("menuitem", { name: "归档", exact: true }).textContent).toContain(formatShortcut(bindings.archiveThread));
+  expect(screen.getByRole("menuitem", { name: "打开侧边聊天", exact: true }).textContent).toContain(formatShortcut(bindings.openSideChat));
+  openSubmenu(screen.getByRole("menuitem", { name: "复制", exact: true }));
+  expect(screen.getByRole("menuitem", { name: "复制深度链接", exact: true }).textContent).toBe("复制深度链接");
+  expect(screen.getByRole("menuitem", { name: "复制工作目录", exact: true }).textContent).toContain(formatShortcut(bindings.copyWorkingDirectory));
+});
+
+it("shows the real scheduled-task lookup state and retains the original lookup error", async () => {
+  let reject!: (error: Error) => void;
+  mocks.inventory.mockReturnValue(new Promise((_, fail) => { reject = fail; }));
+  useAppStore.setState({ isStreaming: false });
+  render(<ChatActionsButton />); open();
+  expect(screen.getByRole("menuitem", { name: "正在加载定时任务…" })).toHaveProperty("disabled", true);
+  expect(mocks.inventory).toHaveBeenCalledWith(expect.objectContaining({ id: "A", workspaceRoot: "C:/A" }));
+  await act(async () => reject(new Error("scheduler store is unavailable")));
+  const unavailable = screen.getByRole("menuitem", { name: "定时任务不可用" });
+  expect(unavailable).toHaveProperty("disabled", true);
+  expect(unavailable.title).toBe("scheduler store is unavailable");
+});
+
+it("opens a new heartbeat editor in the right panel for the captured chat", async () => {
+  useAppStore.setState({ isStreaming: false, draft: "Keep the original main draft", settingsOpen: false });
+  render(<ChatActionsButton />); open();
+  fireEvent.click(await screen.findByRole("menuitem", { name: "添加定时任务…" }));
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "A", workingDirectory: "C:/A", settingsOpen: false,
+    rightPanelOpen: true, rightStackTab: "automation:draft:A", draft: "Keep the original main draft" });
+});
+
+it("disables a new scheduled task for an actual in-progress turn and can still edit its paused heartbeat", async () => {
+  useAppStore.setState({ messages: [{ id: "active-turn", role: "assistant", content: "Working", timestamp: 1,
+    turnId: "turn-A", isStreaming: true }] });
+  const view = render(<ChatActionsButton />); open();
+  expect(await screen.findByRole("menuitem", { name: "添加定时任务…" })).toHaveProperty("disabled", true);
+  view.unmount();
+  const task: ScheduledTaskEntry = { id: "paused-A", name: "Check A", prompt: "Inspect A", schedule: "0 * * * *",
+    enabled: false, permission_mode: "confirm", conversation_id: "A", kind: "heartbeat", workspace_root: "C:/A" };
+  mocks.inventory.mockResolvedValue([task]);
+  render(<ChatActionsButton />); open();
+  const edit = await screen.findByRole("menuitem", { name: "编辑定时任务…" });
+  expect(edit).toHaveProperty("disabled", false);
+  fireEvent.click(edit);
+  expect(useAppStore.getState().rightStackTab).toBe("automation:paused-A");
+});
+
+it("does not request a local heartbeat inventory for a remote chat", () => {
+  useAppStore.setState({ conversations: [{ id: "A", title: "Remote A", workspaceRoot: "C:/A", updatedAt: "today", environment: "remote" }] });
+  render(<ChatActionsButton />); open();
+  expect(mocks.inventory).not.toHaveBeenCalled();
+  expect(screen.queryByRole("menuitem", { name: /定时任务/ })).toBeNull();
 });

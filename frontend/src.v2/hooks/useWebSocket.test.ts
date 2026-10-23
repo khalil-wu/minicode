@@ -670,6 +670,32 @@ describe("useWebSocket server sequence tracking", () => {
     expect(getLastReceivedServerSeqForTests()).toBe(6);
   });
 
+  it("admits recovery control projections across the real 143 gap without admitting later business frames", () => {
+    commitProcessedInboundEvent({ type: "session.restored", seq: 125, last_seq: 0, current_seq: 124, replayed_events: 0 } as ServerEvent);
+    const failed = { type: "skills.list", conversation_id: "owner", seq: 143, previous_replay_seq: 127,
+      event_id: "d6:143", skills: [], workspace_root: "/workspace" } as ServerEvent;
+    expect(() => assertInboundReplayCursorContinuity(failed)).toThrow("Durable event does not continue the active replay chain.");
+    markInboundEventFailed(failed);
+
+    for (const type of ["session.restored", "session.synced", "conversation.switched", "session.replay"] as const) {
+      expect(shouldProcessInboundEvent({ type, seq: 170, event_id: `recovery:${type}` } as ServerEvent)).toBe(true);
+    }
+    const later = { type: "done", conversation_id: "owner", seq: 162, previous_replay_seq: 161 } as ServerEvent;
+    expect(shouldProcessInboundEvent(later)).toBe(false);
+    expect(shouldProcessInboundEvent({ type: "stream_resume", seq: 169 } as ServerEvent)).toBe(false);
+    commitProcessedInboundEvent({ type: "session.restored", seq: 170, last_seq: 124, current_seq: 164, replayed_events: 18 } as ServerEvent);
+    expect(getLastReceivedServerSeqForTests()).toBe(124);
+    expect(shouldProcessInboundEvent(later)).toBe(false);
+
+    commitProcessedInboundEvent({ type: "command.result", command: "skills.list", level: "info", message: "", data: {},
+      conversation_id: "owner", seq: 127, previous_replay_seq: 124, replayed: true } as ServerEvent);
+    expect(shouldProcessInboundEvent(failed)).toBe(true);
+    commitProcessedInboundEvent({ ...failed, replayed: true } as ServerEvent);
+    expect(getLastReceivedServerSeqForTests()).toBe(143);
+    expect(shouldProcessInboundEvent(later)).toBe(true);
+    expect(() => assertInboundReplayCursorContinuity(later)).toThrow("active replay chain");
+  });
+
   it("exposes replay cursor classification for restore contract tests", () => {
     expect(shouldAdvanceReplayCursor({ type: "pong", seq: 4 } as ServerEvent)).toBe(false);
     expect(shouldAdvanceReplayCursor({

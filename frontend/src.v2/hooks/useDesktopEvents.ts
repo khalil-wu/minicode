@@ -12,6 +12,8 @@ import { consumeDictationProviderSettings } from "../lib/dictation-preferences";
 import { pushToast } from "../overlays/ToastContainer";
 import { routeQueuedMessageHistory } from "../composer/queued-message-undo";
 import { installDesktopVoiceControl } from "../desktop/voice-control";
+import { captureThreadActionOwner, executeThreadAction, THREAD_ACTION_EVENTS, THREAD_ACTION_IDS } from "../lib/thread-actions";
+import { isModalTarget, isTopLevelModalOpen } from "../lib/shortcut-context";
 
 const markViewedConversationRead = (isWindowFocused: boolean) => {
   const state = useAppStore.getState();
@@ -70,6 +72,11 @@ export const useDesktopEvents = () => {
       window.dispatchEvent(new Event(editor ? `editor:${action}` : action === "find" ? "chat:request-search" : `chat:${action}`));
     };
     const handlers: Record<string, (event: Event) => void> = {
+      ...Object.fromEntries(THREAD_ACTION_IDS.map(action => [THREAD_ACTION_EVENTS[action], () => {
+        if (isTopLevelModalOpen(useAppStore.getState()) || isModalTarget(document.activeElement)) return;
+        const owner = captureThreadActionOwner();
+        if (owner) void executeThreadAction(action, owner);
+      }])),
       "undo-app-action": () => {
         if (routeQueuedMessageHistory("undo") === "native") void window.__MINICODE_RUNTIME__!.desktop!.menu.execute("nativeTextUndo");
       },

@@ -9,6 +9,8 @@ import { useWorkspaceOpenMenu } from "./useWorkspaceOpenMenu";
 import type { ConversationMeta } from "../stores/types";
 import { desktop, type DesktopPetState } from "../desktop/runtime";
 import { pushToast } from "../overlays/ToastContainer";
+import { useAppStore } from "../stores";
+import { formatShortcut } from "../lib/keyboard-shortcuts";
 
 // ── Small shared components ────────────────────────────────────────────
 
@@ -141,6 +143,7 @@ export const ConversationMenu = ({
   onClose: () => void;
 }) => {
   const { t: tr } = useI18n();
+  const shortcutBindings = useAppStore(state => state.shortcutBindings);
   const [miniMuted, setMiniMuted] = useState(false);
   useEffect(() => {
     const pets = desktop()?.pets;
@@ -164,8 +167,8 @@ export const ConversationMenu = ({
     returnFocusTo={anchor!}
     position={{ x: bounds.right - 236, y: bounds.bottom + 6 }} onClose={onClose} items={[
       ...(!archived ? [
-        { label: tr("重命名"), icon: threadMenuIcon("rename"), onClick: onRename },
-        { label: tr(pinned ? "取消固定" : "固定"), icon: threadMenuIcon(pinned ? "unpin" : "pin"), onClick: onPin },
+        { label: tr("重命名"), icon: threadMenuIcon("rename"), shortcut: formatShortcut(shortcutBindings.renameThread), onClick: onRename },
+        { label: tr(pinned ? "取消固定" : "固定"), icon: threadMenuIcon(pinned ? "unpin" : "pin"), shortcut: formatShortcut(shortcutBindings.toggleThreadPin), onClick: onPin },
         { label: tr(hasUnreadTurn ? "标记为已读" : "标记为未读"), icon: threadMenuIcon("read"), onClick: onReadState },
         ...(onNewSection ? [{ label: tr("分组"), icon: threadMenuIcon("section"), submenu: [
           ...sectionOptions.map(section => ({ label: section.name, checked: section.id === currentSection, checkType: "checkbox" as const,
@@ -180,9 +183,9 @@ export const ConversationMenu = ({
         { label: "", separator: true },
       ] : []),
       { label: tr("复制"), icon: threadMenuIcon("copy"), submenu: [
-        { label: tr("复制深度链接"), icon: threadMenuIcon("copy"), onClick: onCopyLink },
+        { label: tr("复制深度链接"), icon: threadMenuIcon("copy"), shortcut: formatShortcut(shortcutBindings.copyDeeplink), onClick: onCopyLink },
         { label: tr("复制为 Markdown"), icon: threadMenuIcon("copy"), onClick: onCopyMarkdown },
-        { label: tr("复制工作目录"), icon: threadMenuIcon("copy"), disabled: !canCopy, onClick: onCopy },
+        { label: tr("复制工作目录"), icon: threadMenuIcon("copy"), shortcut: formatShortcut(shortcutBindings.copyWorkingDirectory), disabled: !canCopy, onClick: onCopy },
       ] },
       ...(windowItems.length || canHandoff ? [{ label: "", separator: true }] : []),
       ...windowItems,
@@ -192,7 +195,7 @@ export const ConversationMenu = ({
         { label: tr("取消静音聊天"), onClick: () => { void desktop()!.pets.setNotificationMuted({ conversationId, muted: false }).catch(error => pushToast(String(error), "error")); } },
       ] : []),
       { label: "", separator: true },
-      { label: archived ? tr("取消归档") : tr("归档"), icon: archived ? <RotateCcw size={14} /> : threadMenuIcon("archive"), onClick: onArchive },
+      { label: archived ? tr("取消归档") : tr("归档"), icon: archived ? <RotateCcw size={14} /> : threadMenuIcon("archive"), shortcut: archived ? undefined : formatShortcut(shortcutBindings.archiveThread), onClick: onArchive },
     ]} />;
 };
 

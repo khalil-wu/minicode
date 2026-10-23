@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { SchedulerTab } from "./SchedulerTab";
+import { openAutomations } from "../lib/automations-navigation";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -21,10 +22,12 @@ vi.hoisted(() => {
   });
 });
 
-const { sendClientCommand, sendClientCommandAwaitResult } = vi.hoisted(() => ({
+const { sendClientCommand, sendClientCommandAwaitResult, toast } = vi.hoisted(() => ({
   sendClientCommand: vi.fn(),
   sendClientCommandAwaitResult: vi.fn(),
+  toast: vi.fn(),
 }));
+vi.mock("./ToastContainer", () => ({ pushToast: toast }));
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand,
@@ -35,17 +38,19 @@ vi.mock("../protocol/ws-outbox", () => ({
 describe("SchedulerTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    openAutomations();
     sendClientCommandAwaitResult.mockImplementation(async (command: { type: string }) => ({ type: "command.result", command: command.type, level: "info", message: "", data: {} }));
     useAppStore.setState({
       conversationId: "conv_current",
       workingDirectory: "C:/A",
       isConnected: true,
+      settingsOpen: false,
       scheduledTasks: [],
       scheduledTaskRuns: [],
     });
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
 
   it("creates a timezone-aware isolated heartbeat task", async () => {
     render(<SchedulerTab />);
@@ -159,5 +164,102 @@ describe("SchedulerTab", () => {
     expect(view.container.querySelector(".scheduler-task-next")?.textContent).toContain(`${formatted(next)} · ${zone}`);
     expect(view.container.querySelector(".scheduler-task-last")?.textContent).toContain(`${formatted(last)} · ${zone}`);
     expect(view.container.querySelector(".scheduler-run-date")?.textContent).toContain(`${formatted(last)} · ${zone}`);
+  });
+
+  it("creates explicitly, then auto-saves the captured heartbeat after 600ms without switching the main owner", async () => {
+    vi.useFakeTimers();
+    const editor = { id: "draft:captured-A", owner: { id: "captured-A", title: "Captured A", workspaceRoot: "C:/captured-A", permissionMode: "bypass" as const }, open: true };
+    sendClientCommandAwaitResult.mockImplementation(async (command: { type: string; name: string; prompt: string }) => {
+      const task = { id: "saved-A", name: command.name,
+        prompt: command.prompt, schedule: "0 * * * *", permission_mode: "auto", enabled: true,
+        kind: "heartbeat", conversation_id: "captured-A", workspace_root: "C:/captured-A" };
+      return { type: "command.result", command: command.type, level: "success", message: "", data: { task } };
+    });
+    render(<SchedulerTab editor={editor} />);
+    expect(screen.getByLabelText("任务名称")).toHaveProperty("value", "Captured A");
+    expect(screen.queryByLabelText("对话模式")).toBeNull();
+    expect(screen.queryByText("暂无定时任务")).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "Continue captured A" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    const taskB = { id: "task-B", name: "B task", prompt: "B only", schedule: "0 * * * *", permission_mode: "auto", enabled: true, conversation_id: "new-main-B" };
+    act(() => useAppStore.setState({ conversationId: "new-main-B", workingDirectory: "C:/B", draft: "Keep B's main draft", scheduledTasks: [taskB] }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "创建定时任务" })); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({
+      type: "scheduler.add", name: "Captured A", prompt: "Continue captured A", conversation_id: "captured-A",
+      owner_conversation_id: "captured-A", workspace_root: "C:/captured-A", isolation: "workspace", permission_mode: "auto",
+    }), "scheduler.add");
+    expect(screen.queryByRole("button", { name: "保存修改" })).toBeNull();
+    expect(screen.getByRole("button", { name: "打开设置" })).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "Revise the saved heartbeat" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(599); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({
+      type: "scheduler.update", task_id: "saved-A", prompt: "Revise the saved heartbeat", conversation_id: "captured-A",
+      owner_conversation_id: "captured-A", workspace_root: "C:/captured-A",
+    }), "scheduler.update");
+    expect(sendClientCommandAwaitResult.mock.calls.filter(([command]) => command.type === "scheduler.add")).toHaveLength(1);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "new-main-B", workingDirectory: "C:/B", draft: "Keep B's main draft" });
+    expect(useAppStore.getState().scheduledTasks).toEqual([taskB]);
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("keeps a failed paused-task patch without a retry loop and retries only after an explicit action or draft change", async () => {
+    vi.useFakeTimers();
+    const task = { id: "paused-owner", name: "Paused check", prompt: "Original paused prompt", schedule: "20 8 * * 1-5",
+      timezone: "Asia/Shanghai", isolation: "workspace" as const, permission_mode: "confirm", enabled: false,
+      conversation_id: "paused-chat", workspace_root: "C:/paused" };
+    sendClientCommandAwaitResult.mockResolvedValue({ type: "command.result", command: "scheduler.update", level: "error", message: "original scheduler write failure" });
+    render(<SchedulerTab editor={{ id: task.id, owner: { id: "paused-chat", title: "Paused chat", workspaceRoot: "C:/paused", permissionMode: "auto" }, task, open: true }} />);
+    expect(screen.getByLabelText("运行时间")).toHaveProperty("value", "08:20");
+    expect(screen.queryByRole("button", { name: "保存修改" })).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "Unsaved paused edits" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({
+      type: "scheduler.update", task_id: "paused-owner", prompt: "Unsaved paused edits", schedule: "20 8 * * 1-5",
+      permission_mode: "confirm", conversation_id: "paused-chat", owner_conversation_id: "paused-chat", workspace_root: "C:/paused",
+    }), "scheduler.update");
+    expect(screen.getByPlaceholderText("要运行的提示词")).toHaveProperty("value", "Unsaved paused edits");
+    expect(screen.getByRole("button", { name: "重试保存" }).title).toBe("original scheduler write failure");
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "重试保存" })); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(2);
+    sendClientCommandAwaitResult.mockResolvedValue({ type: "command.result", command: "scheduler.update", level: "success",
+      data: { task: { ...task, prompt: "User revised the failed patch" } } });
+    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "User revised the failed patch" } });
+    expect(screen.queryByRole("button", { name: "重试保存" })).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(3);
+    expect(screen.queryByRole("button", { name: "重试保存" })).toBeNull();
+    expect(toast.mock.calls.every(([, tone]) => tone === "error")).toBe(true);
+  });
+
+  it("keeps invalid and normalized-equivalent drafts without sending an automatic update", async () => {
+    vi.useFakeTimers();
+    const task = { id: "valid-draft", name: "Check", prompt: "Original", schedule: "0 * * * *", timezone: "UTC",
+      isolation: "workspace" as const, permission_mode: "auto", enabled: true, conversation_id: "draft-owner" };
+    render(<SchedulerTab editor={{ id: task.id, owner: { id: "draft-owner", title: "Draft", workspaceRoot: "C:/draft", permissionMode: "auto" }, task, open: true }} />);
+    fireEvent.change(screen.getByLabelText("任务名称"), { target: { value: "  Check  " } });
+    fireEvent.change(screen.getByLabelText("运行频率"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）"), { target: { value: "0   *  * * *" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("运行频率"), { target: { value: "daily" } });
+    fireEvent.change(screen.getByLabelText("运行时间"), { target: { value: "" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("运行频率"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）"), { target: { value: "90 25 * * *" } });
+    fireEvent.change(screen.getByPlaceholderText("要运行的提示词"), { target: { value: "Keep this invalid schedule draft" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）")).toHaveProperty("value", "90 25 * * *");
+    fireEvent.change(screen.getByLabelText("任务名称"), { target: { value: " " } });
+    fireEvent.change(screen.getByPlaceholderText("Cron 表达式（例如 0 9 * * 1-5）"), { target: { value: "0 10 * * 1-5" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(900); });
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("任务名称")).toHaveProperty("value", " ");
   });
 });

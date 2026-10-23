@@ -300,7 +300,12 @@ export const shouldProcessInboundEvent = (event: ServerEvent): boolean => {
   ) {
     return false;
   }
-  if (Number.isFinite(seq) && failedReplaySeqs.size > 0 && seq > Math.min(...failedReplaySeqs)) {
+  // A failed durable event blocks later business delivery, including live
+  // deltas. The recovery snapshot, canonical owner projection and replay
+  // envelope must still enter; each replayed member keeps the same barrier.
+  const recoveryProjection = event.type === "session.restored" || event.type === "session.synced"
+    || event.type === "conversation.switched" || event.type === "session.replay";
+  if (!recoveryProjection && Number.isFinite(seq) && failedReplaySeqs.size > 0 && seq > Math.min(...failedReplaySeqs)) {
     return false;
   }
   const eventId = event.event_id;

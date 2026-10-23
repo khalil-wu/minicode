@@ -6,6 +6,7 @@ import { ChatActionsButton } from "./ChatActionsButton";
 
 const mocks = vi.hoisted(() => ({ preferences: vi.fn(), open: vi.fn(), git: vi.fn() }));
 vi.mock("../protocol/workspace", async load => ({ ...await load<typeof import("../protocol/workspace")>(), fetchWorkspaceGitStatus: mocks.git }));
+vi.mock("../lib/automations-navigation", async load => ({ ...await load<typeof import("../lib/automations-navigation")>(), loadThreadAutomations: async () => [] }));
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable: true,
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 }));

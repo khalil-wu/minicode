@@ -24,6 +24,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -45,6 +46,7 @@ import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { buildInterruptCommand } from "../lib/interrupt-command";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
+import { projectMessagesToTurns } from "../chat/chatSurfaceState";
 import {
   getLastReceivedServerSeqForTests,
   resetPendingClientCommandAcksForTests,
@@ -183,6 +185,67 @@ describe("session gate replay", () => {
     });
   });
   afterEach(() => { cleanup(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it("recovers the captured d6 skills gap through completed snapshot 170 and the full replay 172", () => {
+    const fixture = JSON.parse(gunzipSync(fs.readFileSync(path.resolve(__dirname,
+      "../../test/fixtures/ui-reconnect-d6b825b3-20261023.json.gz"))).toString("utf8")) as {
+      before_failure: Wire[]; recovery: Wire[];
+    };
+    const initial = fixture.before_failure[0];
+    const recovered = fixture.recovery[0];
+    const owner = String(initial.active_conversation_id);
+    const root = String(initial.working_directory);
+    const errors: unknown[][] = [];
+    vi.spyOn(console, "error").mockImplementation((...args) => { errors.push(args); });
+    useAppStore.setState({ conversationId: owner, workingDirectory: root, draft: "Retain recovery draft", appMode: "cowork",
+      pendingConversationSwitchId: null, pendingConversationCreateId: null, conversationHistoryPages: {}, conversationAgentStates: {},
+      conversations: [{ id: owner, title: "Reconnect owner", workspaceRoot: root, updatedAt: "today" }] });
+    render(<Harness />);
+    act(() => vi.advanceTimersByTime(0));
+    const first = MockWebSocket.instances[0];
+    act(() => first.emit("open"));
+    const firstRestore = first.sent.find(command => command.type === "session.restore")!;
+    const rekey = (event: Wire, snapshot: Wire, command: Wire) => event.client_command_id === snapshot.client_command_id
+      ? { ...event, client_command_id: command.client_command_id } : event;
+    for (const event of fixture.before_failure) {
+      act(() => first.emitMessage(rekey(event, initial, firstRestore)));
+    }
+    expect(getLastReceivedServerSeqForTests()).toBe(124);
+    expect(first.close).toHaveBeenCalledWith(4002, "event replay required");
+    expect(errors).toHaveLength(1);
+    expect(errors[0][1]).toMatchObject({ type: "skills.list", seq: 143,
+      error: { message: "Durable event does not continue the active replay chain.", stack: expect.stringContaining("assertInboundReplayCursorContinuity") } });
+    expect(useAppStore.getState().isStreaming).toBe(true);
+
+    act(() => first.emit("close", 4002));
+    act(() => vi.advanceTimersByTime(1_250));
+    const second = MockWebSocket.instances[1];
+    act(() => second.emit("open"));
+    const secondRestore = second.sent.find(command => command.type === "session.restore")!;
+    expect(secondRestore).toMatchObject({ last_seq: 124, last_conversation_id: owner, last_workspace_root: root });
+    const replay = fixture.recovery.find(event => event.type === "session.replay")!;
+    const replayEvents = replay.events as Wire[];
+    expect(replayEvents.map(event => event.seq)).toEqual([127, 143, 145, 146, 147, 149, 150, 151, 153, 155, 156, 157, 158, 159, 160, 161, 162, 164]);
+    // A completion from the retired connection must still be fenced out.
+    act(() => first.emitMessage(replayEvents.find(event => event.seq === 160)));
+    expect(getLastReceivedServerSeqForTests()).toBe(124);
+    expect(useAppStore.getState().messages.find(message => message.role === "assistant")?.content).not.toBe("HARNESS_RECONNECT_COMPLETE");
+    for (const event of fixture.recovery) {
+      act(() => second.emitMessage(rekey(event, recovered, secondRestore)));
+    }
+
+    const state = useAppStore.getState();
+    expect(errors).toHaveLength(1);
+    expect(second.close).not.toHaveBeenCalled();
+    expect(getLastReceivedServerSeqForTests()).toBe(164);
+    expect(state).toMatchObject({ conversationId: owner, draft: "Retain recovery draft", isStreaming: false, isConnected: true });
+    expect(state.availableSkills.map(skill => skill.name)).toEqual(["browser", "code-review", "plugin-creator", "skill-creator", "verify"]);
+    const turns = projectMessagesToTurns(state.messages, state.isStreaming, root);
+    expect(turns.at(-1)?.finalAnswerCell?.markdownSource).toBe("HARNESS_RECONNECT_COMPLETE");
+    const assistant = state.messages.find(message => message.role === "assistant");
+    expect(assistant).toMatchObject({ terminalStatus: "completed" });
+    expect(assistant?.isStreaming).not.toBe(true);
+  });
 
   it.each(process.env.MINICODE_SESSION_GATE_FIXTURE
     ? [process.env.MINICODE_SESSION_GATE_FIXTURE]

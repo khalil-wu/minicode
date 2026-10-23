@@ -28,6 +28,11 @@ class SchedulerOperationResult:
     runs: list[dict[str, Any]]
 
 
+@dataclass
+class SchedulerTaskMutationResult(SchedulerOperationResult):
+    task: dict[str, Any]
+
+
 def get_scheduler_from_bootstrap() -> Any:
     from backend.api import _state as api_state
 
@@ -78,26 +83,29 @@ def _task_configuration(data: dict[str, Any]) -> dict[str, Any]:
     return configuration
 
 
-def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerOperationResult:
+def add_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerTaskMutationResult:
     configuration = _task_configuration(data)
     # ``None`` is reserved for embedded/legacy API callers that do not expose
     # a workspace accessor. A real WebSocket session passes an empty string
     # when no folder is open and is rejected below.
     if workspace_root == "":
         raise SchedulerServiceError("Open a workspace before creating a scheduled task")
-    scheduler.add_task(
+    task = scheduler.add_task(
         **configuration,
         workspace_root=workspace_root or "",
     )
-    return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+    snapshot = list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+    return SchedulerTaskMutationResult(snapshot.tasks, snapshot.runs, task.to_dict())
 
 
-def update_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerOperationResult:
+def update_scheduled_task(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> SchedulerTaskMutationResult:
     configuration = _task_configuration(data)
     task_id = _task_id_from_payload(data)
     if not scheduler.update_task(task_id, workspace_root=workspace_root, **configuration):
         raise SchedulerServiceError(f"Task '{task_id}' not found")
-    return list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+    snapshot = list_scheduled_tasks(scheduler, workspace_root=workspace_root)
+    task = next(task for task in snapshot.tasks if task["id"] == task_id)
+    return SchedulerTaskMutationResult(snapshot.tasks, snapshot.runs, task)
 
 
 def scheduled_run_history(scheduler: Any, data: dict[str, Any], *, workspace_root: str | None) -> dict[str, Any]:

@@ -749,6 +749,12 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
           click: () => send("minicode:menu:new-project"),
         },
         hidden("New Chat", "Ctrl+Shift+O", () => send("minicode:menu:new-chat")),
+        hidden(label("重命名聊天", "Rename Chat"), "CommandOrControl+Alt+R", () => send("minicode:menu:rename-thread")),
+        hidden(label("切换聊天固定状态", "Toggle Chat Pin"), "CommandOrControl+Alt+P", () => send("minicode:menu:toggle-thread-pin")),
+        hidden(label("归档聊天", "Archive Chat"), "CommandOrControl+Shift+A", () => send("minicode:menu:archive-thread")),
+        hidden(label("复制深度链接", "Copy Deeplink"), "CommandOrControl+Alt+L", () => send("minicode:menu:copy-deeplink")),
+        hidden(label("复制工作目录", "Copy Working Directory"), "CommandOrControl+Shift+C", () => send("minicode:menu:copy-working-directory")),
+        hidden(label("侧边聊天", "Open Side Chat"), "CommandOrControl+Alt+S", () => send("minicode:menu:open-side-chat")),
         ...editorWorkspace ? [{ type: "separator" }] : [],
         {
           label: label("打开文件夹…", "Open Folder…"), accelerator: "Ctrl+O",
@@ -921,6 +927,9 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
     ["zoomIn", ["放大", "Zoom In"]], ["zoomOut", ["缩小", "Zoom Out"]], ["zoomReset", ["实际大小", "Actual Size"]],
     ["fullScreen", ["切换全屏", "Toggle Full Screen"]], ["commandPalette", ["Open command menu"]], ["globalSearch", ["Search Files…"]],
     ["shortcutHelp", ["显示键盘快捷键", "Keyboard Shortcuts"]],
+    ["renameThread", ["重命名聊天", "Rename Chat"]], ["toggleThreadPin", ["切换聊天固定状态", "Toggle Chat Pin"]],
+    ["archiveThread", ["归档聊天", "Archive Chat"]], ["copyDeeplink", ["复制深度链接", "Copy Deeplink"]],
+    ["copyWorkingDirectory", ["复制工作目录", "Copy Working Directory"]], ["openSideChat", ["侧边聊天", "Open Side Chat"]],
   ];
   const commandByLabel = new Map(commands.flatMap(([action, labels]) => labels.map(title => [title, action])));
   const assigned = new Set();

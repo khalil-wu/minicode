@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { auditProjectConfig } from "./audit-project-config.mjs";
 import { auditImportFlow } from "./audit-import-flow.mjs";
 import { auditShellMenus } from "./audit-shell-menus.mjs";
+import { auditThreadControls } from "./audit-thread-controls.mjs";
 import { auditCustomThemeColors } from "./audit-custom-theme-colors.mjs";
 
 assert.equal(process.env.CI, "true", "Run this audit in isolated CI, never against a user's desktop profile");
@@ -504,6 +505,7 @@ try {
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
   trace("shell:menus");
   await auditShellMenus({ page, capture, checks });
+  await auditThreadControls({ page, app, wire, capture, checks });
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
 
   // Relaunch only the isolated CI desktop with actual Chromium device scales.

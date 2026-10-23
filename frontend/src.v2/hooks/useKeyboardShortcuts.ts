@@ -11,19 +11,12 @@ import { buildInterruptCommand } from "../lib/interrupt-command";
 import { numberedShortcut } from "../lib/shortcut-navigation";
 import { SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
 import { queueHistoryShortcutIsStandard, routeQueuedMessageHistory } from "../composer/queued-message-undo";
+import { captureThreadActionOwner, executeThreadAction, THREAD_ACTION_IDS } from "../lib/thread-actions";
+import { isModalTarget, isTopLevelModalOpen } from "../lib/shortcut-context";
 
 const announceViewMode = (mode: string) => {
   pushToast(`View mode: ${mode.charAt(0).toUpperCase()}${mode.slice(1)}`, "info", 1200);
 };
-
-const isModalTarget = (target: EventTarget | null): boolean =>
-  target instanceof HTMLElement
-  && Boolean(target.closest("[role='dialog'], .modal-content, .overlay-backdrop, .settings-workspace"));
-
-const isTopLevelModalOpen = (state: ReturnType<typeof useAppStore.getState>): boolean =>
-  state.commandPaletteOpen || state.quickOpenVisible || state.settingsOpen
-  || state.shortcutsHelpOpen || state.liveArtifactsOpen
-  || (state.agentEditorOpen && capabilityFeatureEnabled(state.runtimeCapabilities, "agent_editor", true));
 
 export const useKeyboardShortcuts = () => {
   useEffect(() => {
@@ -62,13 +55,15 @@ export const useKeyboardShortcuts = () => {
         return;
       }
       // Frameless renderer input uses the same owned command as a native menu click.
+      const modalOpen = isTopLevelModalOpen(s);
+      const threadAction = THREAD_ACTION_IDS.find(match);
       const nativeAction = nativeShortcutAction(e, s.shortcutBindings, s.appMode === "code");
       if (window.__MINICODE_RUNTIME__?.desktop?.menu && nativeAction) {
+        if (threadAction && (modalOpen || isModalTarget(e.target))) return;
         e.preventDefault();
         void window.__MINICODE_RUNTIME__.desktop.menu.execute(nativeAction);
         return;
       }
-      const modalOpen = isTopLevelModalOpen(s);
       const routeToComposer = (action: () => void) => {
         window.dispatchEvent(new Event("composer:focus"));
         if (s.skillsMarketplaceOpen) useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app" });
@@ -123,6 +118,13 @@ export const useKeyboardShortcuts = () => {
         window.dispatchEvent(new CustomEvent(numbered.target === "tabs" ? "select-numbered-tab" : "select-numbered-chat", {
           detail: { index: numbered.index, conversationId: s.conversationId },
         }));
+        return;
+      }
+
+      if (threadAction) {
+        e.preventDefault();
+        const owner = captureThreadActionOwner();
+        if (owner) void executeThreadAction(threadAction, owner);
         return;
       }
 

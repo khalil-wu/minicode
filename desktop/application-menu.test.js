@@ -213,6 +213,51 @@ test("renderer keyboard execution reaches the owned native command and preserves
   assert.equal(h.native.at(-1).action, "reload");
 });
 
+test("chat accelerators reach their owning renderer through the real hidden menu and preload bridge", () => {
+  const h = applicationMenuHarness();
+  const listeners = new Map(), dispatched = [];
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "preload.js"), "utf8"), {
+    require: () => ({ ipcRenderer: { on: (channel, callback) => listeners.set(channel, callback), sendSync: () => ({}) },
+      contextBridge: { exposeInMainWorld() {} } }),
+    process: { env: {}, argv: [], contextIsolated: true, platform: "win32", arch: "x64" },
+    window: { dispatchEvent: event => dispatched.push(event.type) },
+    Event: class { constructor(type) { this.type = type; } }, console,
+  });
+  h.setBrowser(true);
+  h.setFocusedWindow({ isDestroyed: () => false });
+  for (const [action, event, accelerator] of [
+    ["renameThread", "rename-thread", "CommandOrControl+Alt+R"],
+    ["toggleThreadPin", "toggle-thread-pin", "CommandOrControl+Alt+P"],
+    ["archiveThread", "archive-thread", "CommandOrControl+Shift+A"],
+    ["copyDeeplink", "copy-deeplink", "CommandOrControl+Alt+L"],
+    ["copyWorkingDirectory", "copy-working-directory", "CommandOrControl+Shift+C"],
+    ["openSideChat", "open-side-chat", "CommandOrControl+Alt+S"],
+  ]) {
+    const item = submenu(h, "file").find(item => item.id === "minicode-shortcut-" + action);
+    assert.equal(item.visible, false);
+    assert.equal(item.acceleratorWorksWhenHidden, true);
+    assert.equal(item.accelerator, accelerator);
+    assert.equal(h.executeApplicationMenuAction(h.owner, action), true);
+    const delivery = h.events.at(-1);
+    assert.equal(delivery.window, h.owner);
+    assert.equal(delivery.channel, "minicode:menu:" + event);
+    listeners.get(delivery.channel)({});
+    assert.equal(dispatched.at(-1), event);
+  }
+  assert.equal(dispatched.length, 6);
+  assert.equal(h.native.length, 0);
+  h.setFocusedWindow(h.owner);
+  h.setApplicationMenuState(h.owner, { accelerators: { renameThread: "CommandOrControl+Shift+Y" },
+    acceleratorBindings: { renameThread: ["CommandOrControl+Shift+Y", "CommandOrControl+Alt+Y"] },
+    shortcutOverrides: ["renameThread"], shortcutRecording: false });
+  assert.equal(submenu(h, "file").find(item => item.id === "minicode-shortcut-renameThread").accelerator, "CommandOrControl+Shift+Y");
+  assert.equal(submenu(h, "file").some(item => item.accelerator === "CommandOrControl+Alt+R"), false);
+  assert.equal(submenu(h, "file").filter(item => item.accelerator === "CommandOrControl+Alt+Y").length, 1);
+  h.setApplicationMenuState(h.owner, { accelerators: { renameThread: null }, acceleratorBindings: { renameThread: [] },
+    shortcutOverrides: ["renameThread"], shortcutRecording: false });
+  assert.equal(submenu(h, "file").find(item => item.id === "minicode-shortcut-renameThread").accelerator, undefined);
+});
+
 test("zoom targets the native page or the owner window, and help opens the actual Source destinations", () => {
   const h = applicationMenuHarness();
   const zoom = submenu(h, "view").find(item => item.label === "Zoom In");

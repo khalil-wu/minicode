@@ -329,7 +329,8 @@ function MenuSurface({ items, position, anchor, trigger, side, align = "end", al
             </span>
             {item.shortcut && (
               <span
-                className="shrink-0"
+                aria-hidden="true"
+                className="mc-menu-shortcut shrink-0"
                 style={{
                   color: "var(--text-muted)",
                   marginLeft: 8,

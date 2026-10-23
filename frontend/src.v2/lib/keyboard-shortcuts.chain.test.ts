@@ -15,6 +15,22 @@ describe("Source shortcut settings and native accelerator contract", () => {
     expect(isCodeShortcut("browserReload")).toBe(false);
   });
 
+  it("registers the six Source chat commands in every mode and routes their real native consumers", () => {
+    expect(DEFAULT_SHORTCUT_BINDINGS).toMatchObject({ renameThread: ["Mod+Alt+R"], toggleThreadPin: ["Mod+Alt+P"],
+      archiveThread: ["Mod+Shift+A"], copyDeeplink: ["Mod+Alt+L"], copyWorkingDirectory: ["Mod+Shift+C"], openSideChat: ["Mod+Alt+S"] });
+    for (const action of ["renameThread", "toggleThreadPin", "archiveThread", "copyDeeplink", "copyWorkingDirectory", "openSideChat"] as const) {
+      expect(isCodeShortcut(action)).toBe(false);
+    }
+    expect(nativeShortcutAction(new KeyboardEvent("keydown", { code: "KeyR", key: "r", ctrlKey: true, altKey: true }), DEFAULT_SHORTCUT_BINDINGS, false)).toBe("renameThread");
+    expect(isCodeShortcut("sideChat")).toBe(true);
+    expect(DEFAULT_SHORTCUT_BINDINGS.sideChat).toEqual([]);
+  });
+
+  it("preserves older custom chords when the new Source chat defaults are introduced", () => {
+    localStorage.setItem(LS.shortcutBindings, JSON.stringify({ modelMenu: ["Mod+Alt+R"], terminal: ["Mod+Alt+S"] }));
+    expect(initialShortcutBindings()).toMatchObject({ modelMenu: ["Mod+Alt+R"], terminal: ["Mod+Alt+S"], renameThread: [], openSideChat: [] });
+  });
+
   it("preserves saved user chords and leaves new conflicting commands unbound", () => {
     localStorage.setItem(LS.shortcutBindings, JSON.stringify({ terminal: "Mod+J", closeEditor: "Mod+W", leftSidebar: "Mod+B", promptHistory: "Alt+H" }));
     expect(initialShortcutBindings()).toMatchObject({ terminal: ["Mod+J"], closeEditor: ["Mod+W"], leftSidebar: ["Mod+B"], promptHistory: ["Alt+H"], bottomPanel: [], closeTab: ["Mod+F4"] });
@@ -64,5 +80,19 @@ describe("Source shortcut settings and native accelerator contract", () => {
     expect(nativeMenuAccelerators(restored).newConversation).toBe("CommandOrControl+Alt+Y");
     expect(nativeShortcutAction(new KeyboardEvent("keydown", { key: "y", code: "KeyY", ctrlKey: true, altKey: true }), restored, false)).toBe("newConversation");
     expect(nativeShortcutAction(new KeyboardEvent("keydown", { key: "o", code: "KeyO", ctrlKey: true, shiftKey: true }), restored, false)).toBeUndefined();
+  });
+
+  it("persists and exports each configured chat binding, including an explicit removal", () => {
+    useAppStore.setState({ shortcutBindings: { ...DEFAULT_SHORTCUT_BINDINGS } });
+    const actions = ["renameThread", "toggleThreadPin", "archiveThread", "copyDeeplink", "copyWorkingDirectory", "openSideChat"] as const;
+    actions.forEach((action, index) => useAppStore.getState().setShortcutBinding(action, `Mod+Alt+F${index + 1}`));
+    const restored = initialShortcutBindings();
+    actions.forEach((action, index) => {
+      expect(restored[action]).toEqual([`Mod+Alt+F${index + 1}`]);
+      expect(nativeMenuBindings(restored)[action]).toEqual([`CommandOrControl+Alt+F${index + 1}`]);
+    });
+    useAppStore.getState().setShortcutBinding("archiveThread", "");
+    expect(initialShortcutBindings().archiveThread).toEqual([]);
+    expect(nativeMenuAccelerators(initialShortcutBindings()).archiveThread).toBeNull();
   });
 });

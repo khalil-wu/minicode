@@ -31,6 +31,7 @@ import { ContextMenu } from "../components/ContextMenu";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import type { BrowserTabSummary } from "../panels/BrowserPanel";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
+import { closeThreadAutomationEditor, useThreadAutomationEditors } from "../lib/automations-navigation";
 import { projectAgentViews } from "../lib/agent-view-model";
 import { mcpServerNeedsAttention } from "../lib/mcp-status";
 import { PanelSkeleton } from "./PanelSkeleton";
@@ -85,6 +86,7 @@ const LazyInspectorTab = lazy(() =>
 const LazyDiagnosticsTab = lazy(() =>
   import("./tabs/DiagnosticsTab").then((module) => ({ default: module.DiagnosticsTab })),
 );
+const LazySchedulerTab = lazy(() => import("../overlays/SchedulerTab").then(module => ({ default: module.SchedulerTab })));
 
 export const SidebarRight = ({ embedded = false, visible = true, initialTab }: SidebarRightProps) => {
   const { t: tr } = useI18n();
@@ -92,6 +94,9 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const rightStackTab = useAppStore((s) => s.rightStackTab);
   const conversationId = useAppStore((s) => s.conversationId);
   const mcpAppEntries = useMcpAppSurfaces(s => s.entries);
+  const automationEditors = useThreadAutomationEditors();
+  const mountedAutomationEditors = useRef(new Set<string>());
+  for (const editor of automationEditors) if (editor.open && editor.owner.id === conversationId) mountedAutomationEditors.current.add(editor.id);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
   const rightPanelExpanded = useAppStore((s) => s.rightPanelExpanded);
   const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
@@ -138,7 +143,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const normalizedRequestedTab = requestedActiveTab === "plan" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
   const expanded = initialTab === undefined && rightPanelExpanded;
-  const canExpand = initialTab === undefined && (["browser", "preview", "diff", "artifacts", "terminal", "sidechat", "files", "subagents", "goal"].includes(activeTab) || activeTab.startsWith("mcp-app:"));
+  const canExpand = initialTab === undefined && (["browser", "preview", "diff", "artifacts", "terminal", "sidechat", "files", "subagents", "goal"].includes(activeTab) || activeTab.startsWith("mcp-app:") || activeTab.startsWith("automation:"));
   const setActiveTab = initialTab === undefined ? setRightStackTab : setLocalTab;
   useEffect(() => {
     if (!visible) { setOpenedPanelPosition(null); }
@@ -156,6 +161,11 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     ?? new Set([...gitChanges.workingTree.map(file => file.path), ...gitChanges.staged.map(file => file.path), ...gitChanges.untracked]).size;
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
+    ...automationEditors.filter(editor => editor.open && editor.owner.id === conversationId).map(editor => ({
+      id: `automation:${editor.id}` as const, label: editor.task?.name || editor.owner.title,
+      icon: <span aria-hidden="true" style={{ display: "inline-block", width: 16, height: 16, background: "currentColor",
+        mask: `url(${import.meta.env.BASE_URL}apps/thread-scheduled-task.svg) center / contain no-repeat` }} />,
+    })),
     ...mcpAppEntries.filter(entry => entry.scopeId === conversationId && entry.panelOpen).map(entry => ({
       id: mcpAppTabId(entry.app.id), label: entry.app.title, icon: <Layers {...sidebarIconProps} />,
     })),
@@ -275,10 +285,11 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     const tabIndex = openTabIds.indexOf(tab);
     if (tabIndex < 0) return;
     if (tab.startsWith("mcp-app:")) closeMcpAppPanel(tab.slice("mcp-app:".length));
+    if (tab.startsWith("automation:")) closeThreadAutomationEditor(tab.slice("automation:".length));
     const requested = initialTab === undefined ? useAppStore.getState().rightStackTab : activeTab;
     const liveTabs = requested !== tab && !openTabIds.includes(requested) && useAppStore.getState().rightPanelOpen
       ? [...openTabIds, requested] : openTabIds;
-    const nextTabs = liveTabs.filter((id) => id !== tab);
+    const nextTabs = liveTabs.filter(id => id !== tab && (!id.startsWith("automation:") || tabById.has(id)));
     setOpenTabIds(nextTabs);
     if (tab === "browser") setBrowserTabs([]);
     if (tab === "sidechat") closeSideChat();
@@ -296,7 +307,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     setActiveTab(fallbackTab);
     if (initialTab === undefined && !panelWasOpen && useAppStore.getState().rightPanelOpen) toggleRightPanel();
     if (adjacent) scheduleTabActivation(adjacent.key);
-  }, [activeTab, setActiveTab, openTabIds, orderedTabs, closeSideChat, rightPanelOpen, toggleRightPanel, initialTab]);
+  }, [activeTab, setActiveTab, openTabIds, orderedTabs, tabById, closeSideChat, rightPanelOpen, toggleRightPanel, initialTab]);
   const closeGoalEditor = useCallback(() => closeOpenTab("goal"), [closeOpenTab]);
   useEffect(() => {
     const close = (event: Event) => {
@@ -667,7 +678,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           onClick: () => activateSharedTab(tab.key),
         }))}
       />}
-      {openedTabs.map(({ id: panelTab }) => <div
+      {openedTabs.filter(({ id }) => !id.startsWith("automation:")).map(({ id: panelTab }) => <div
         key={panelTab}
         className="mc-sidebar-panel-view flex-1 overflow-hidden text-sm flex flex-col"
         id={`right-panel-${panelTab}`}
@@ -725,6 +736,17 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {panelTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="diagnostics" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
         </div>
       </div>)}
+      {automationEditors.filter(editor => mountedAutomationEditors.current.has(editor.id)).map(editor => {
+        const panelTab = `automation:${editor.id}`;
+        const active = editor.open && editor.owner.id === conversationId && activeTab === panelTab;
+        return <div key={panelTab} className="mc-sidebar-panel-view flex-1 overflow-hidden text-sm flex flex-col"
+          id={`right-panel-${panelTab}`} role="tabpanel" aria-labelledby={`right-tab-${panelTab}`} hidden={!active}
+          style={{ display: active ? "flex" : "none" }}>
+          <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel>
+            <LazySchedulerTab editor={editor} active={visible && rightPanelOpen && active} onClose={() => closeOpenTab(panelTab as StackTab)} />
+          </ScrollablePanel></Suspense>
+        </div>;
+      })}
     </aside>
   );
 };

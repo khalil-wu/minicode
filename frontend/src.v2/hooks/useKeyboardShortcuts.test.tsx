@@ -31,6 +31,8 @@ import { ComposerTextarea } from "../composer/ComposerTextarea";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
+  sendClientCommandAwaitResult: vi.fn(async () => ({ type: "command.result", level: "success", data: {} })),
+  commandResultSucceeded: (result: { level: string }) => result.level === "success",
 }));
 
 vi.mock("../overlays/ToastContainer", () => ({

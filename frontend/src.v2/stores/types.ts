@@ -33,7 +33,7 @@ export type ViewMode = "normal" | "verbose" | "summary";
 export type AppMode = "chat" | "code" | "cowork";
 export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
-export type RightStackTab = "preview" | "browser" | "files" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "goal" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}`;
+export type RightStackTab = "preview" | "browser" | "files" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "goal" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}` | `automation:${string}`;
 export type EffortLevel =
   | "off"
   | "minimal"

@@ -39,13 +39,27 @@ export async function auditShellMenus({ page, capture, checks }) {
 
   const actions = page.getByRole("button", { name: "聊天操作", exact: true });
   await actions.click();
+  const shortcuts = {};
+  for (const [label, expected] of [["重命名", "Ctrl + Alt + R"], ["打开侧边聊天", "Ctrl + Alt + S"], ["归档", "Ctrl + Shift + A"]]) {
+    const actual = await page.getByRole("menuitem", { name: label, exact: true }).locator(".mc-menu-shortcut").innerText();
+    assert.equal(actual, expected);
+    shortcuts[label] = actual;
+  }
+  const pinHint = await page.getByRole("menuitem", { name: /^(固定|取消固定)$/ }).locator(".mc-menu-shortcut").innerText();
+  assert.equal(pinHint, "Ctrl + Alt + P");
+  shortcuts.pin = pinHint;
   await capture("shell-04-chat-actions-menu");
   const copy = page.getByRole("menuitem", { name: "复制", exact: true });
   await copy.focus();
   await page.keyboard.press("ArrowRight");
   const copyMenu = page.getByRole("menu", { name: "复制", exact: true });
   await copyMenu.waitFor();
-  assert.deepEqual(await copyMenu.getByRole("menuitem").allTextContents(), ["复制深度链接", "复制为 Markdown", "复制工作目录"]);
+  assert.deepEqual(await copyMenu.locator(".mc-menu-content").allTextContents(), ["复制深度链接", "复制为 Markdown", "复制工作目录"]);
+  for (const [label, expected] of [["复制深度链接", "Ctrl + Alt + L"], ["复制工作目录", "Ctrl + Shift + C"]]) {
+    const actual = await copyMenu.getByRole("menuitem", { name: label, exact: true }).locator(".mc-menu-shortcut").innerText();
+    assert.equal(actual, expected);
+    shortcuts[label] = actual;
+  }
   await page.keyboard.press("Home");
   await page.keyboard.press("ArrowUp");
   assert.equal(await copyMenu.getByRole("menuitem").first().evaluate(element => document.activeElement === element), true);
@@ -57,4 +71,5 @@ export async function auditShellMenus({ page, capture, checks }) {
   await page.getByRole("menu").waitFor({ state: "hidden" });
   assert.equal(await actions.evaluate(element => document.activeElement === element), true);
   checks.push({ scenario: "Actual profile/Help and chat Copy menus retain Source separators, opaque Help surface, parent-bottom alignment, non-looping focus, trapped Tab and original trigger focus on dismissal", helpGeometry });
+  checks.push({ scenario: "All six actual thread menu accelerators display their registered Source bindings", shortcuts });
 }
