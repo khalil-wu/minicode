@@ -14,7 +14,7 @@
 .automation-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .automation-title {
   width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent;
-  color: var(--text-primary); font-family: inherit; font-size: var(--text-lg); font-weight: var(--fw-semibold); line-height: 1.4;
+  color: var(--text-primary); font-family: inherit; font-size: var(--text-lg); font-weight: inherit; line-height: 1.25;
 }
 .automation-title:focus-visible { box-shadow: 0 1px var(--border-strong); }
 .automation-heading > button { flex-shrink: 0; }
@@ -61,6 +61,7 @@
 .thread-automation-footer button, .automation-dialog-actions button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-base); color: var(--text-primary); font: inherit; cursor: pointer; }
 .thread-automation-footer button:hover:not(:disabled), .automation-dialog-actions button:hover:not(:disabled) { background: var(--surface-hover); }
 .thread-automation-footer button:disabled, .automation-dialog-actions button:disabled { opacity: .5; cursor: default; }
+.thread-automation-footer .automation-ghost-button { border-color: transparent; background: transparent; }
 .thread-automation-footer .automation-primary-button, .automation-dialog-actions .automation-primary-button { color: var(--surface-base); background: var(--text-primary); border-color: var(--text-primary); }
 .thread-automation-footer .automation-primary-button:hover:not(:disabled), .automation-dialog-actions .automation-primary-button:hover:not(:disabled) { opacity: .85; background: var(--text-primary); }
 .automation-target-picker { position: relative; min-width: 0; max-width: 72%; }

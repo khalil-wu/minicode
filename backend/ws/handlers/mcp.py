@@ -949,9 +949,9 @@ def _get_scheduler(session):
 
 
 def _scheduler_command_scope(session: "WebSocketSession", data: dict[str, Any]):
-    from backend.ws.command_scope import resolve_command_scope
+    from backend.ws.command_scope import resolve_resource_command_scope
 
-    return resolve_command_scope(session, data)
+    return resolve_resource_command_scope(session, data)
 
 
 def _scheduler_snapshot_payload(result: Any, scope: Any) -> dict[str, Any]:

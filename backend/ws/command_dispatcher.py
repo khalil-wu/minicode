@@ -90,7 +90,9 @@ def _normalize_command_owner(command: UserCommand) -> None:
     # These are the existing explicit-owner spellings. Normalize once before
     # lifecycle locking and routing so a later reader cannot reinterpret them.
     owner = command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
-    if owner:
+    # Scheduler conversation_id is the heartbeat target; its caller remains
+    # in the explicit resource-owner field throughout admission and replay.
+    if owner and not command.type.startswith("scheduler."):
         command.data["conversation_id"] = str(owner).strip()
     if command.type.startswith("thread/realtime/") and "conversation_id" not in command.data:
         command.data["conversation_id"] = command.data.get("threadId", "")
@@ -335,6 +337,12 @@ class SessionCommandDispatcher:
         # These commands establish a conversation or address a target rather
         # than requiring it to be the current command scope.
         if command.type in {"session.restore", "session.sync", "user_message", "thread/approveGuardianDeniedAction"} or command.type.startswith("conversation."):
+            return True
+        if command.type.startswith("scheduler.") and (
+            command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
+        ):
+            # Resource commands validate their saved owner and cwd in the
+            # handler; restoring an unrelated reader cannot retarget them.
             return True
         owner = str(command.data.get("owner_conversation_id")
             or command.data.get("ownerConversationId") or command.data.get("conversation_id") or "").strip()

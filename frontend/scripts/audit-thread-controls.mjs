@@ -55,22 +55,30 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
     const actual = await panel.locator(".thread-automation-panel").evaluate(element => {
       const scroll = element.querySelector(".thread-automation-scroll"), footer = element.querySelector(".thread-automation-footer");
       const paneStyle = getComputedStyle(element), scrollStyle = getComputedStyle(scroll), footerStyle = getComputedStyle(footer);
+      const titleStyle = getComputedStyle(element.querySelector('[aria-label="任务名称"]'));
       return { display: paneStyle.display, direction: paneStyle.flexDirection, overflow: scrollStyle.overflowY, minHeight: scrollStyle.minHeight,
+        titleWeight: titleStyle.fontWeight, titleLeading: Number.parseFloat(titleStyle.lineHeight) / Number.parseFloat(titleStyle.fontSize),
         separateFooter: footer.parentElement === element && !scroll.contains(footer), shrink: footerStyle.flexShrink,
         padding: [footerStyle.paddingTop, footerStyle.paddingRight, footerStyle.paddingBottom, footerStyle.paddingLeft],
         border: footerStyle.borderTopWidth, gap: footerStyle.gap, align: footerStyle.justifyContent,
         bottomGap: element.getBoundingClientRect().bottom - footer.getBoundingClientRect().bottom,
         paneGap: element.closest('[role="tabpanel"]').getBoundingClientRect().bottom - element.getBoundingClientRect().bottom };
     });
+    const { titleWeight, titleLeading, ...layout } = actual;
+    assert.equal(titleWeight, "400");
+    assert(Math.abs(titleLeading - 1.25) < .01);
     // Source vt: independent flex scroll, shrink-0 footer with border-t/gap-2/p-panel.
     // app-shared-295ec67e1c5d.css: Electron p-panel = spacing(.25rem) * 3 = 12px.
-    assert.deepEqual({ ...actual, bottomGap: 0, paneGap: 0 }, { display: "flex", direction: "column", overflow: "auto", minHeight: "0px",
+    assert.deepEqual({ ...layout, bottomGap: 0, paneGap: 0 }, { display: "flex", direction: "column", overflow: "auto", minHeight: "0px",
       separateFooter: true, shrink: "0", padding: ["12px", "12px", "12px", "12px"], border: "1px", gap: "8px", align: "flex-end", bottomGap: 0, paneGap: 0 });
     assert(Math.abs(actual.bottomGap) <= 1 && Math.abs(actual.paneGap) <= 1);
     return actual;
   };
   await panel.locator(".thread-automation-footer").waitFor();
   assert.deepEqual((await panel.locator(".thread-automation-footer").getByRole("button").allTextContents()).map(text => text.trim()), ["取消", "创建定时任务"]);
+  assert.equal(await panel.getByRole("button", { name: "取消", exact: true }).evaluate(element => getComputedStyle(element).borderTopColor), "rgba(0, 0, 0, 0)");
+  assert.equal(await panel.getByRole("button", { name: "创建定时任务", exact: true }).evaluate(element => getComputedStyle(element).color),
+    await panel.locator(".thread-automation-panel").evaluate(element => getComputedStyle(element).color));
   const draftAt = wire.length;
   const target = panel.getByRole("button", { name: "定时任务目标", exact: true });
   await target.click();

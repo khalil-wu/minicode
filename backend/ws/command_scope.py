@@ -47,6 +47,29 @@ def bind_execution_command_scope(session_id: str, scope: CommandScope) -> Iterat
         _execution_command_scope.reset(token)
 
 
+def resolve_resource_command_scope(session: Any, data: Mapping[str, Any]) -> CommandScope:
+    """Resolve an explicitly addressed resource without navigating its reader."""
+    owner = str(data.get("owner_conversation_id") or data.get("ownerConversationId") or "").strip()
+    if not owner or owner == str(session.active_conversation_id or "").strip():
+        return resolve_command_scope(session, data)
+
+    conversation = session.conversation_repo.get_conversation(owner)
+    if conversation is None:
+        raise ValueError(f"Conversation '{owner}' was not found")
+    from backend.services.workspace_service import conversation_execution_path
+
+    workspace_root = conversation_execution_path(conversation)
+    if workspace_root and not workspace_root.startswith("file:"):
+        workspace_root = str(Path(workspace_root).expanduser().resolve())
+    for key in ("execution_cwd", "workspace_root", "workspace"):
+        requested_root = str(data.get(key) or "").strip()
+        if requested_root and (not workspace_root or not _same_workspace(requested_root, workspace_root)):
+            raise ValueError("Command workspace does not match the conversation workspace")
+    return CommandScope(owner, workspace_root, str(
+        data.get("request_id") or data.get("requestId") or data.get("client_command_id") or ""
+    ).strip())
+
+
 def resolve_command_scope(
     session: Any,
     data: Mapping[str, Any],

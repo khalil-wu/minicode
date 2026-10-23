@@ -241,7 +241,7 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
       {savedTask ? <>
         {canSave && failedPatch === patch && <button type="button" title={saveError} disabled={Boolean(pending)} onClick={() => void save()}>{tr("重试保存")}</button>}
         {!inSettings && <button type="button" onClick={() => openThreadAutomationSettings(editor.owner, savedTask)}>{tr("打开设置")}<span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/open-in.svg)` }} /></button>}
-      </> : <><button type="button" disabled={Boolean(pending)} onClick={onClose}>{tr("取消")}</button><button type="button" className="automation-primary-button" disabled={!canSave || Boolean(pending)} onClick={() => void save()}>{pending === "save" ? tr("正在保存…") : tr("创建定时任务")}</button></>}
+      </> : <><button type="button" className="automation-ghost-button" disabled={Boolean(pending)} onClick={onClose}>{tr("取消")}</button><button type="button" disabled={!canSave || Boolean(pending)} onClick={() => void save()}>{pending === "save" ? tr("正在保存…") : tr("创建定时任务")}</button></>}
     </div>}
     {actionMenu && savedTask && <ContextMenu anchor={actionMenu} position={{ x: actionMenu.getBoundingClientRect().right, y: actionMenu.getBoundingClientRect().bottom }} onClose={() => setActionMenu(null)} ariaLabel={tr("定时任务操作")} items={[
       { label: savedTask.enabled ? tr("暂停") : tr("恢复"), icon: sourceIcon(savedTask.enabled ? "pause" : "resume"), onClick: () => { void toggle(); } },
