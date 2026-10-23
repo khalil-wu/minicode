@@ -81,7 +81,13 @@ describe("ThreadAutomationPanel", () => {
     expect(within(picker).getByRole("button", { name: "Occupied chat" })).toHaveProperty("disabled", true);
     expect(within(picker).getByRole("button", { name: "Chat B" })).toHaveProperty("disabled", false);
     fireEvent.click(within(picker).getByRole("button", { name: "每次新建聊天" }));
-    change("定时任务项目", "project-B"); change("定时任务模型", "model-two"); change("定时任务思考强度", "xhigh");
+    change("定时任务项目", "project-B");
+    fireEvent.click(screen.getByRole("button", { name: "定时任务模型，当前：选择模型" }));
+    const models = screen.getByRole("listbox", { name: "定时任务模型" });
+    expect(within(models).getAllByRole("option").map(option => option.textContent?.trim())).toEqual(["model-one", "Model Two"]);
+    expect(within(models).queryByRole("option", { name: "默认" })).toBeNull();
+    fireEvent.click(within(models).getByRole("option", { name: "Model Two" }));
+    change("定时任务思考强度", "xhigh");
     expect(screen.getByLabelText("定时任务权限详情")).toBeTruthy();
     expect(Array.from((screen.getByLabelText("定时任务思考强度") as HTMLSelectElement).options).map(option => option.value)).toEqual(["", "medium", "xhigh"]);
     change("通知", "failed_runs_only"); change("提示词", "Run in project B");
@@ -115,8 +121,12 @@ describe("ThreadAutomationPanel", () => {
     render(<ThreadAutomationPanel editor={editor(makeTask({ schedule: original, notification_policy: "failed_runs_only" }))} />);
     expect(screen.getByLabelText("重复计划")).toHaveProperty("value", "custom");
     expect(screen.queryByRole("dialog", { name: "编辑计划规则" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "频率" }).closest(".automation-section-heading")!.contains(screen.getByRole("button", { name: "编辑计划规则" }))).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "编辑计划规则" }));
     let dialog = screen.getByRole("dialog", { name: "编辑计划规则" });
+    expect(within(dialog).getByText("使用 RRULE 定义自定义计划")).toBeTruthy();
+    expect(within(dialog).getByText("RRULE", { selector: "label" }).getAttribute("for")).toBe(within(dialog).getByLabelText("RRULE").id);
+    expect(within(dialog).getByRole("button", { name: "关闭" })).toBeTruthy();
     expect(within(dialog).getByLabelText("RRULE")).toHaveProperty("value", original);
     fireEvent.change(within(dialog).getByLabelText("RRULE"), { target: { value: "RRULE:FREQ=UNKNOWN" } });
     expect(within(dialog).getByRole("button", { name: "保存" })).toHaveProperty("disabled", true);
@@ -151,12 +161,14 @@ describe("ThreadAutomationPanel", () => {
     fireEvent.click(screen.getByRole("button", { name: "定时任务操作" }));
     expect(screen.getByRole("menuitem", { name: "恢复" })).toBeTruthy(); fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
     let dialog = screen.getByRole("dialog", { name: "删除 Morning check？" });
+    expect(within(dialog).getByRole("button", { name: "关闭" })).toBeTruthy();
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
     expect(screen.queryByRole("dialog")).toBeNull(); expect(screen.getByTestId("automation-inventory").textContent).toBe("present");
     change("提示词", "An unsaved patch before deletion");
     fireEvent.click(screen.getByRole("button", { name: "定时任务操作" })); fireEvent.click(screen.getByRole("menuitem", { name: "删除" }));
     dialog = screen.getByRole("dialog", { name: "删除 Morning check？" }); fireEvent.click(within(dialog).getByRole("button", { name: "删除定时任务" }));
     expect(within(dialog).getByRole("button", { name: "取消" })).toHaveProperty("disabled", true);
+    expect(within(dialog).queryByRole("button", { name: "关闭" })).toBeNull();
     fireEvent.keyDown(dialog, { key: "Escape" }); expect(screen.getByRole("dialog")).toBeTruthy();
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(mocks.send.mock.calls.map(([command]) => command.type)).toEqual(["scheduler.toggle", "scheduler.remove"]);
@@ -223,7 +235,7 @@ describe("ThreadAutomationPanel", () => {
     expect(Array.from((screen.getByLabelText("定时任务思考强度") as HTMLSelectElement).options).map(option => option.value)).toEqual(["", "low", "xhigh"]);
     act(() => useAppStore.setState({ conversationId: "pane-B", workingDirectory: "C:/B", currentModel: "B-model", availableModels: ["B-model"],
       availableModelOptions: [{ model: "B-model", reasoningEffortLevels: ["medium"], defaultReasoningEffort: "medium" }] }));
-    expect(options()).toEqual(["", "late-model"]);
+    expect(options()).toEqual(["late-model"]);
     expect((screen.getByLabelText("定时任务模型") as HTMLSelectElement).value).toBe("late-model");
   });
 });

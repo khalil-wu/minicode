@@ -74,6 +74,28 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
     assert(Math.abs(actual.bottomGap) <= 1 && Math.abs(actual.paneGap) <= 1);
     return actual;
   };
+  const dialogGeometry = async (dialog, width) => {
+    assert.equal(await dialog.getByRole("button", { name: "关闭", exact: true }).count(), 1);
+    const actual = await dialog.evaluate(element => {
+      const style = getComputedStyle(element), overlay = getComputedStyle(element.parentElement);
+      const title = getComputedStyle(element.querySelector("h2")), subtitle = getComputedStyle(element.querySelector(".automation-dialog-heading p"));
+      const heading = getComputedStyle(element.querySelector(".automation-dialog-heading")), actions = element.querySelector(".automation-dialog-actions");
+      const footer = getComputedStyle(actions), close = element.querySelector(".automation-dialog-close"), closeStyle = getComputedStyle(close);
+      return { overlay: overlay.backgroundColor, blur: overlay.backdropFilter, filter: overlay.filter,
+        width: Number.parseFloat(style.width), padding: style.padding, border: style.borderTopWidth, radius: style.borderRadius,
+        title: [title.fontSize, title.lineHeight, title.fontWeight], subtitle: [subtitle.fontSize, subtitle.lineHeight], headingGap: heading.gap,
+        footer: [footer.gap, footer.paddingTop], buttons: [...actions.querySelectorAll("button")].map(button => {
+          const style = getComputedStyle(button);
+          return [Number.parseFloat(style.height), style.padding, style.fontSize, style.lineHeight, style.borderRadius];
+        }), close: [Number.parseFloat(closeStyle.width), Number.parseFloat(closeStyle.height), closeStyle.top, closeStyle.right,
+          Number.parseFloat(getComputedStyle(close.querySelector("svg")).width)] };
+    });
+    // Source Swn/Ewn/Gwn and Electron cascade: automation-dialog-geometry-evidence.json.
+    assert.deepEqual(actual, { overlay: "rgba(0, 0, 0, 0.133)", blur: "none", filter: "none", width, padding: "20px", border: "0px", radius: "20px",
+      title: ["18px", "28px", "600"], subtitle: ["14px", "21px"], headingGap: "4px", footer: ["12px", "12px"],
+      buttons: [[32, "6px 16px", "14px", "18px", "10px"], [32, "6px 16px", "14px", "18px", "10px"]], close: [22, 22, "16px", "16px", 14] });
+    return actual;
+  };
   await panel.locator(".thread-automation-footer").waitFor();
   assert.deepEqual((await panel.locator(".thread-automation-footer").getByRole("button").allTextContents()).map(text => text.trim()), ["取消", "创建定时任务"]);
   assert.equal(await panel.getByRole("button", { name: "取消", exact: true }).evaluate(element => getComputedStyle(element).borderTopColor), "rgba(0, 0, 0, 0)");
@@ -99,13 +121,15 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   await page.keyboard.press("Escape");
   await projects.waitFor({ state: "hidden" });
   const model = panel.getByRole("button", { name: /^定时任务模型，当前：/u });
+  assert.equal(await model.getAttribute("aria-label"), "定时任务模型，当前：选择模型");
   await model.click();
   const models = page.getByRole("listbox", { name: "定时任务模型", exact: true });
   await models.waitFor();
-  const modelValues = await model.evaluate(element => [...element.closest(".mc-select-menu").querySelectorAll("select option")].map(option => option.value));
+  const modelValues = await models.getByRole("option").evaluateAll(elements => elements.map(element => element.getAttribute("data-value")));
   assert(modelValues.includes(owner.model));
-  assert(modelValues.filter(Boolean).every(value => [...owner.models, owner.model].includes(value)));
-  assert.equal(await models.locator('[role="option"][aria-selected="true"]').count(), 1);
+  assert(modelValues.every(value => value && [...owner.models, owner.model].includes(value)));
+  assert.equal(await models.getByRole("option", { name: "默认", exact: true }).count(), 0);
+  assert.equal(await models.locator('[role="option"][aria-selected="true"]').count(), 0);
   await capture("thread-05-automation-standalone-model", { owner: owner.id, projectOptions, modelValues, boundary: "Unsaved standalone branch only; no task or model execution" });
   await page.keyboard.press("Escape");
   await models.waitFor({ state: "hidden" });
@@ -127,10 +151,30 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   await repeats.waitFor();
   assert.deepEqual((await repeats.getByRole("option").allTextContents()).map(text => text.trim()), ["间隔", "每天", "工作日", "每周", "自定义"]);
   await repeats.getByRole("option", { name: "自定义", exact: true }).click();
-  await panel.getByRole("button", { name: "编辑计划规则", exact: true }).click();
+  const gear = panel.getByRole("button", { name: "编辑计划规则", exact: true });
+  await panel.getByRole("heading", { name: "频率", exact: true }).hover();
+  const gearGeometry = await gear.evaluate(element => {
+    const style = getComputedStyle(element), header = element.closest(".automation-section-heading"), heading = header.querySelector("h3");
+    const bounds = element.getBoundingClientRect(), headingBounds = heading.getBoundingClientRect();
+    return { heading: heading.textContent, action: heading.nextElementSibling === element, text: element.textContent.trim(),
+      width: bounds.width, height: bounds.height, padding: style.padding, radius: style.borderRadius, opacity: style.opacity,
+      background: style.backgroundColor, border: style.borderTopColor, icon: element.querySelector(".automation-source-icon").getBoundingClientRect().width,
+      afterHeading: bounds.left >= headingBounds.right, centerOffset: bounds.y + bounds.height / 2 - headingBounds.y - headingBounds.height / 2 };
+  });
+  assert.deepEqual({ ...gearGeometry, centerOffset: 0 }, { heading: "频率", action: true, text: "", width: 28, height: 28, padding: "4px", radius: "8px", opacity: "0.75",
+    background: "rgba(0, 0, 0, 0)", border: "rgba(0, 0, 0, 0)", icon: 16, afterHeading: true, centerOffset: 0 });
+  assert(Math.abs(gearGeometry.centerOffset) <= 1);
+  await gear.click();
   const ruleDialog = page.getByRole("dialog", { name: "编辑计划规则", exact: true });
+  await ruleDialog.getByText("使用 RRULE 定义自定义计划", { exact: true }).waitFor();
+  await expect(ruleDialog.locator("label").filter({ hasText: /^RRULE$/ })).toBeVisible({ timeout: 30000 });
+  assert.equal(await ruleDialog.getByRole("textbox", { name: "RRULE", exact: true }).evaluate(element => element.labels.length === 1 && element.labels[0].htmlFor === element.id), true);
   await ruleDialog.getByRole("textbox", { name: "RRULE", exact: true }).fill(schedule);
-  await capture("thread-06-automation-custom-rrule", { schedule, nextRun: new Date(nextRun).toISOString() });
+  const ruleDialogGeometry = await dialogGeometry(ruleDialog, 420);
+  assert.deepEqual(await ruleDialog.getByRole("button", { name: "取消", exact: true }).evaluate(element => {
+    const style = getComputedStyle(element); return [style.borderTopColor, style.backgroundColor];
+  }), ["rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)"]);
+  await capture("thread-06-automation-custom-rrule", { schedule, nextRun: new Date(nextRun).toISOString(), gearGeometry, ruleDialogGeometry });
   await ruleDialog.getByRole("button", { name: "保存", exact: true }).click();
   await ruleDialog.waitFor({ state: "hidden" });
   await panel.getByRole("button", { name: /^通知，当前：/u }).click();
@@ -211,7 +255,8 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   await operationMenu.getByRole("menuitem", { name: "删除", exact: true }).click();
   const deletion = page.getByRole("dialog", { name: `删除 ${name}？`, exact: true });
   await deletion.getByText("这将永久删除定时任务并停止后续运行。", { exact: true }).waitFor();
-  await capture("thread-09-automation-delete-confirmation", { owner: owner.id, taskId: task.id });
+  const deleteDialogGeometry = await dialogGeometry(deletion, 520);
+  await capture("thread-09-automation-delete-confirmation", { owner: owner.id, taskId: task.id, deleteDialogGeometry });
   await deletion.getByRole("button", { name: "取消", exact: true }).click();
   await deletion.waitFor({ state: "hidden" });
   assert.equal(messages("client", "scheduler.remove", cancelledAt).length, 0);
@@ -220,9 +265,25 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   assert.equal(await composer.innerText(), owner.draft);
   await operations.click();
   await operationMenu.getByRole("menuitem", { name: "删除", exact: true }).click();
+  const pendingDeletion = await deletion.evaluateHandle(element => {
+    const evidence = [];
+    const observer = new MutationObserver(() => {
+      const confirm = element.querySelector(".automation-danger-button");
+      if (confirm.disabled) {
+        evidence.push({ closeCount: element.querySelectorAll(".automation-dialog-close").length, confirmDisabled: confirm.disabled,
+          cancelDisabled: element.querySelector(".automation-dialog-actions button:not(.automation-danger-button)").disabled });
+        observer.disconnect();
+      }
+    });
+    observer.observe(element, { attributes: true, childList: true, subtree: true });
+    return evidence;
+  });
   const removedAt = wire.length;
   await deletion.getByRole("button", { name: "删除定时任务", exact: true }).click();
   const removed = await mutation("scheduler.remove", removedAt);
+  await expect.poll(() => pendingDeletion.jsonValue(), { timeout: 30000 }).toEqual([{ closeCount: 0, confirmDisabled: true, cancelDisabled: true }]);
+  const pendingDeletionGeometry = await pendingDeletion.jsonValue();
+  await pendingDeletion.dispose();
   assert.deepEqual([removed.request.task_id, removed.receipt.data.task_id], [task.id, task.id]);
   assert.equal(removed.snapshot.tasks.some(item => item.id === task.id), false);
   assert.equal(messages("client", "scheduler.remove", cancelledAt).length, 1);
@@ -234,6 +295,6 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
   await page.keyboard.press("Escape");
   assert.equal(await composer.innerText(), owner.draft);
   assert.deepEqual(await page.evaluate(() => { const state = window.__zustandStore.getState(); return [state.conversationId, state.workingDirectory, state.draft]; }), [owner.id, owner.viewWorkspace, owner.draft]);
-  checks.push({ scenario: "Source task editor preserves its owner and main draft across unsaved standalone controls, real future RRULE creation, same-ID autosave, pause/resume and cancelled/confirmed deletion", owner: owner.id, added: task, updated: updated.receipt.data.task, toggles, removed: removed.receipt.data, draftGeometry, savedGeometry,
+  checks.push({ scenario: "Source task editor preserves its owner and main draft across unsaved standalone controls, real future RRULE creation, same-ID autosave, pause/resume and cancelled/confirmed deletion", owner: owner.id, added: task, updated: updated.receipt.data.task, toggles, removed: removed.receipt.data, draftGeometry, savedGeometry, gearGeometry, ruleDialogGeometry, deleteDialogGeometry, pendingDeletionGeometry,
     boundary: "Standalone Project/Model controls were inspected before creation; no standalone run or alternate-project model execution is claimed" });
 }

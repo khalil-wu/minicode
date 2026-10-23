@@ -36,6 +36,7 @@
   "自定义重复单位": "Custom repeat frequency",
   "自定义重复间隔": "Custom repeat interval",
   "请输入有效的 RRULE": "Enter a valid RRULE",
+  "使用 RRULE 定义自定义计划": "Use an RRULE to define a custom schedule",
   "重复": "Repeat",
   "重复单位": "Repeats",
   "重复日期": "Repeat on",

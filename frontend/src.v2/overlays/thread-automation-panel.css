@@ -53,9 +53,8 @@
 .automation-month-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin: 4px 0; }
 .automation-weekdays button, .automation-month-days button { min-width: 27px; min-height: 28px; padding: 4px; border: 1px solid var(--border-subtle); border-radius: 6px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
 .automation-weekdays button[aria-pressed="true"], .automation-month-days button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-base); border-color: var(--text-primary); }
-.automation-rule-row { display: flex; justify-content: flex-end; margin-top: 2px; }
-.automation-rule-button { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 6px; padding: 5px 6px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
-.automation-rule-button:hover { background: var(--surface-hover); }
+.automation-rule-button { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid transparent; border-radius: 8px; padding: 4px; background: transparent; color: var(--text-primary); opacity: .75; cursor: pointer; }
+.automation-rule-button:hover { background: var(--surface-hover); opacity: 1; }
 .automation-source-icon { display: inline-block; width: 16px; height: 16px; flex-shrink: 0; background: currentColor; mask-position: center; mask-size: contain; mask-repeat: no-repeat; }
 .thread-automation-footer { display: flex; flex-shrink: 0; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px; border-top: 1px solid var(--border-subtle); }
 .thread-automation-footer button, .automation-dialog-actions button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-base); color: var(--text-primary); font: inherit; cursor: pointer; }
@@ -79,11 +78,23 @@
 .automation-chat-options button:hover:not(:disabled) { background: var(--surface-hover); }
 .automation-chat-options button:disabled { opacity: .45; cursor: default; }
 .automation-chat-group, .automation-chat-options p { margin: 0; padding: 7px 8px; color: var(--text-tertiary); font-size: var(--mc-font-caption); }
-.automation-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; align-items: center; justify-content: center; padding: 20px; background: rgb(0 0 0 / .3); }
-.automation-dialog { width: min(480px, 100%); padding: 20px; border: 1px solid var(--border-subtle); border-radius: 14px; background: var(--surface-base); box-shadow: var(--shadow-strong); color: var(--text-primary); font-family: var(--font-ui); font-size: var(--mc-font-body); outline: none; }
-.automation-dialog h2 { margin: 0 0 12px; font-size: var(--text-lg); font-weight: var(--fw-semibold); }
-.automation-dialog p { color: var(--text-secondary); line-height: 1.5; }
+.mc-dialog-backdrop.automation-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; align-items: center; justify-content: center; padding: 0; background: #0002; backdrop-filter: none; -webkit-backdrop-filter: none; }
+.mc-dialog-panel.automation-dialog { position: relative; box-sizing: border-box; width: 520px; max-width: 92vw; padding: 20px; border: 0; border-radius: 20px; background: var(--surface-base); box-shadow: 0 0 0 .5px var(--border-subtle), var(--shadow-strong); color: var(--text-primary); font-family: var(--font-ui); font-size: var(--mc-font-body); outline: none; }
+.mc-dialog-panel.automation-rule-dialog { width: 420px; }
+.automation-dialog-heading { display: flex; flex-direction: column; gap: 4px; }
+.automation-dialog h2 { margin: 0; font-size: 18px; font-weight: var(--fw-semibold); line-height: 28px; }
+.automation-dialog-heading p { margin: 0; color: var(--text-tertiary); font-size: var(--mc-font-body); line-height: 1.5; }
+.automation-dialog-section { display: flex; flex-direction: column; gap: 8px; padding-top: 12px; }
+.automation-rrule-label { color: var(--text-primary); font-size: var(--mc-font-secondary); font-weight: 500; }
 .automation-rrule { display: block; width: 100%; min-height: 130px; resize: vertical; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px; background: var(--surface-page); color: var(--text-primary); font-family: var(--font-mono); font-size: var(--mc-font-body); line-height: 1.5; }
-.automation-dialog .automation-field-error { font-size: var(--mc-font-caption); color: var(--text-secondary); }
-.automation-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
-.automation-dialog-actions .automation-danger-button { color: var(--text-on-accent); background: var(--state-danger); border-color: var(--state-danger); }
+.automation-dialog .automation-field-error { margin: 0; font-size: var(--mc-font-secondary); color: var(--state-danger); line-height: 1.5; }
+.automation-dialog-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; padding-top: 12px; }
+.automation-dialog-actions button { box-sizing: border-box; min-height: 32px; height: 32px; gap: 4px; padding: 6px 16px; border-radius: 10px; font-size: var(--mc-font-body); line-height: 18px; }
+.automation-dialog-actions button:disabled { opacity: .4; }
+.automation-dialog-actions .automation-ghost-button { color: var(--text-tertiary); border-color: transparent; background: transparent; }
+.automation-dialog-actions .automation-primary-button { border-color: var(--border-subtle); }
+.automation-dialog-actions .automation-primary-button:hover:not(:disabled) { opacity: 1; background: color-mix(in srgb, var(--text-primary) 80%, transparent); }
+.automation-dialog-actions .automation-danger-button { color: var(--state-danger); background: color-mix(in srgb, var(--state-danger) 10%, transparent); border-color: transparent; }
+.automation-dialog-actions .automation-danger-button:hover:not(:disabled) { background: color-mix(in srgb, var(--state-danger) 20%, transparent); }
+.automation-dialog-close { position: absolute; top: 16px; right: 16px; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: 4px; padding: 4px; color: color-mix(in srgb, var(--text-primary) 80%, transparent); background: transparent; cursor: pointer; }
+.automation-dialog-close:hover { background: var(--surface-hover); }

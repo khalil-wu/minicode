@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useI18n, type Translate } from "../i18n";
 import { SelectMenu } from "../components/SelectMenu";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { X } from "../lib/icons";
 import {
   AUTOMATION_WEEKDAYS, parseAutomationRRule,
   type AutomationScheduleDraft, type AutomationScheduleMode, type AutomationWeekday,
@@ -49,7 +50,11 @@ export function AutomationFrequencySection({ draft, custom, onChange, onCustomCh
   const update = (patch: Partial<AutomationScheduleDraft>) => onChange({ ...draft, ...patch });
   const updateCustom = (patch: Partial<CustomScheduleDraft>) => onCustomChange({ ...custom!, ...patch });
   return <section className="automation-section">
-    <h3>{tr("频率")}</h3>
+    <div className="automation-section-heading"><h3>{tr("频率")}</h3>
+      {draft.mode === "custom" && <button type="button" className="automation-rule-button" onClick={() => setRuleOpen(true)} aria-label={tr("编辑计划规则")} title={tr("编辑计划规则")}>
+        <span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/automation-edit-rule.svg)` }} />
+      </button>}
+    </div>
     <div className="automation-detail-row"><span>{tr("重复")}</span>
       <SelectMenu className="automation-select" value={draft.mode} onValueChange={mode => update({ mode: mode as AutomationScheduleMode })} ariaLabel={tr("重复计划")} align="end">
         <option value="hourly">{tr("间隔")}</option><option value="daily">{tr("每天")}</option><option value="weekdays">{tr("工作日")}</option>
@@ -93,9 +98,6 @@ export function AutomationFrequencySection({ draft, custom, onChange, onCustomCh
           value={custom.minute} aria-label={tr("整点后的分钟")} onChange={event => updateCustom({ minute: event.target.value })} /></div>
           : <div className="automation-detail-row"><span>{tr("开始时间")}</span><TimePicker value={custom.time} onChange={time => updateCustom({ time })} /></div>}
       </>}
-      <div className="automation-rule-row"><button type="button" className="automation-rule-button" onClick={() => setRuleOpen(true)} aria-label={tr("编辑计划规则")}>
-        <span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/automation-edit-rule.svg)` }} />{tr("编辑计划规则")}
-      </button></div>
     </>}
     {afterScheduleRows}
     {ruleOpen && <AutomationRuleDialog initialValue={draft.customRrule} onClose={() => setRuleOpen(false)} onSave={value => { onRuleSave(value); setRuleOpen(false); }} />}
@@ -109,13 +111,16 @@ function AutomationRuleDialog({ initialValue, onClose, onSave }: { initialValue:
   const [value, setValue] = useState(initialValue);
   const valid = Boolean(parseAutomationRRule(value));
   return createPortal(<div className="mc-dialog-backdrop automation-dialog-backdrop" role="presentation" onClick={onClose}>
-    <div ref={ref} className="mc-dialog-panel automation-dialog" role="dialog" aria-modal="true" aria-labelledby={id} tabIndex={-1}
+    <div ref={ref} className="mc-dialog-panel automation-dialog automation-rule-dialog" role="dialog" aria-modal="true" aria-labelledby={id} aria-describedby={`${id}-description`} tabIndex={-1}
       onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
-      <h2 id={id}>{tr("编辑计划规则")}</h2>
-      <textarea aria-label="RRULE" className="automation-rrule" value={value} onChange={event => setValue(event.target.value)} rows={5}
+      <div className="automation-dialog-heading"><h2 id={id}>{tr("编辑计划规则")}</h2><p id={`${id}-description`}>{tr("使用 RRULE 定义自定义计划")}</p></div>
+      <div className="automation-dialog-section"><label className="automation-rrule-label" htmlFor={`${id}-rrule`}>RRULE</label>
+      <textarea id={`${id}-rrule`} className="automation-rrule" value={value} onChange={event => setValue(event.target.value)} rows={5} spellCheck={false}
         placeholder="RRULE:FREQ=MONTHLY;BYMONTHDAY=1;BYHOUR=9;BYMINUTE=0" aria-invalid={!valid} aria-describedby={!valid ? `${id}-error` : undefined} />
       {!valid && <p id={`${id}-error`} className="automation-field-error" role="alert">{tr("请输入有效的 RRULE")}</p>}
-      <div className="automation-dialog-actions"><button type="button" onClick={onClose}>{tr("取消")}</button><button type="button" className="automation-primary-button" disabled={!valid} onClick={() => onSave(value)}>{tr("保存")}</button></div>
+      </div>
+      <div className="automation-dialog-actions"><button type="button" className="automation-ghost-button" onClick={onClose}>{tr("取消")}</button><button type="button" className="automation-primary-button" disabled={!valid} onClick={() => onSave(value)}>{tr("保存")}</button></div>
+      <button type="button" className="automation-dialog-close" aria-label={tr("关闭")} onClick={onClose}><X size={14} aria-hidden="true" /></button>
     </div>
   </div>, document.body);
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Info, MoreHorizontal, Search } from "../lib/icons";
+import { Check, ChevronDown, Info, MoreHorizontal, Search, X } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import type { ConversationMeta, ScheduledTaskEntry } from "../stores/types";
@@ -217,11 +217,10 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
             {!selectedProject && root !== "" && <option value="__owner__">{workspaceDisplayName(root)}</option>}
             {projects.map(project => <option key={project.path} value={project.path}>{project.name || workspaceDisplayName(project.path)}</option>)}
           </SelectMenu></DetailRow>
-          <DetailRow label={tr("模型")}><SelectMenu className="automation-select" value={model ?? ""} ariaLabel={tr("定时任务模型")} align="end" onValueChange={value => {
+          <DetailRow label={tr("模型")}><SelectMenu className="automation-select" value={model ?? ""} selectedLabel={model ? undefined : tr("选择模型")} ariaLabel={tr("定时任务模型")} align="end" onValueChange={value => {
             setModel(value || null); setProvider(value ? catalog.provider : null);
             setEffort(value ? catalog.options.find(option => option.model === value)?.defaultReasoningEffort ?? null : null);
           }}>
-            <option value="">{tr("默认")}</option>
             {model && !selectableModels.includes(model) && <option value={model} disabled>{model}</option>}
             {selectableModels.map(value => <option key={value} value={value}>{catalog.labels[value] || value}</option>)}
           </SelectMenu></DetailRow>
@@ -329,10 +328,11 @@ function AutomationDeleteDialog({ name, pending, onClose, onConfirm }: { name: s
   const id = useId();
   const ref = useFocusTrap(true);
   return createPortal(<div className="mc-dialog-backdrop automation-dialog-backdrop" role="presentation" onClick={onClose}>
-    <div ref={ref} className="mc-dialog-panel automation-dialog" role="dialog" aria-modal="true" aria-labelledby={id} aria-describedby={`${id}-description`} tabIndex={-1}
+    <div ref={ref} className="mc-dialog-panel automation-dialog automation-delete-dialog" role="dialog" aria-modal="true" aria-labelledby={id} aria-describedby={`${id}-description`} tabIndex={-1}
       onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
-      <h2 id={id}>{tr("删除 {name}？", { name })}</h2><p id={`${id}-description`}>{tr("这将永久删除定时任务并停止后续运行。")}</p>
+      <div className="automation-dialog-heading"><h2 id={id}>{tr("删除 {name}？", { name })}</h2><p id={`${id}-description`}>{tr("这将永久删除定时任务并停止后续运行。")}</p></div>
       <div className="automation-dialog-actions"><button type="button" disabled={pending} onClick={onClose}>{tr("取消")}</button><button type="button" className="automation-danger-button" disabled={pending} onClick={onConfirm}>{pending ? tr("正在删除…") : tr("删除定时任务")}</button></div>
+      {!pending && <button type="button" className="automation-dialog-close" aria-label={tr("关闭")} onClick={onClose}><X size={14} aria-hidden="true" /></button>}
     </div>
   </div>, document.body);
 }
