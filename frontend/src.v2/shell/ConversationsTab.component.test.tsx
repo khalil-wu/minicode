@@ -363,8 +363,9 @@ describe('ConversationsTab project navigation', () => {
     expect(row('Completed EEG').querySelector('.session-status-spinner')).toBeNull()
   })
 
-  it('removes a workspace through its context menu while retaining conversations across reopen', async () => {
+  it('removes a project while keeping its chats projectless after the same folder is added again', async () => {
     showConfirmMock.mockResolvedValueOnce(true)
+    useAppStore.setState({ draft: 'Keep removed project draft' })
     const { unmount } = render(<ConversationsTab conversationId="conv-represented" onSetConfirmDialog={vi.fn()} />)
     const folder = screen.getByRole('button', { name: 'Represented', exact: true })
     const actions = screen.getByRole('button', { name: '项目操作：Represented' })
@@ -380,10 +381,13 @@ describe('ConversationsTab project navigation', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: '移除项目' }))
     expect(actions.getAttribute('aria-expanded')).toBe('false')
     await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith({
-      type: 'workspace.recent.remove', path: 'C:\\Represented', preserve_history: true,
+      type: 'workspace.recent.remove', path: 'C:\\Represented',
     }, 'workspace.recent.remove'))
     const workspaces = useAppStore.getState().recentWorkspaces
-    act(() => useAppStore.getState().setRecentWorkspaces(workspaces.filter(item => item.path !== 'C:\\Represented')))
+    act(() => {
+      useAppStore.setState({ conversations: useAppStore.getState().conversations.map(chat => ({ ...chat, projectId: '' })) })
+      useAppStore.getState().setRecentWorkspaces(workspaces.filter(item => item.path !== 'C:\\Represented'))
+    })
     expect(screen.queryByRole('region', { name: '工作区 Represented' })).toBeNull()
     expect(useAppStore.getState().conversations[0].archived).toBeUndefined()
     expect(sendConversationDeleteCommand).not.toHaveBeenCalled()
@@ -392,7 +396,9 @@ describe('ConversationsTab project navigation', () => {
     expect(screen.queryByRole('region', { name: '工作区 Represented' })).toBeNull()
     expect(within(screen.getByRole('region', { name: '最近' })).getByText('Existing workspace task')).toBeTruthy()
     act(() => useAppStore.getState().setRecentWorkspaces(workspaces))
-    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).getByText('Existing workspace task')).toBeTruthy()
+    expect(within(screen.getByRole('region', { name: '工作区 Represented' })).queryByText('Existing workspace task')).toBeNull()
+    expect(within(screen.getByRole('region', { name: '最近' })).getByText('Existing workspace task')).toBeTruthy()
+    expect(useAppStore.getState()).toMatchObject({ conversationId: 'conv-represented', workingDirectory: 'C:\\Represented', draft: 'Keep removed project draft' })
   })
 
   it('keeps the workspace visible if preserving history fails', async () => {

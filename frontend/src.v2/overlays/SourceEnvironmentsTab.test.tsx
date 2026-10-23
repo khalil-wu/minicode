@@ -98,7 +98,8 @@ it("shows the real project load before its empty state and opens project creatio
 it("retries an actual project-list failure without making the error into an empty list", async () => {
   fetchSettings.mockRejectedValueOnce(new Error("Project registry unavailable"));
   render(<SourceEnvironmentsTab />);
-  expect((await screen.findByRole("alert")).textContent).toBe("无法加载项目");
+  expect((await screen.findByRole("alert")).textContent).toContain("Error: Project registry unavailable");
+  expect(screen.getByText("无法加载项目")).toBeTruthy();
   expect(screen.getByText("Error: Project registry unavailable")).toBeTruthy();
   expect(screen.queryByText("尚无项目。添加项目以配置本地环境。")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
