@@ -3,7 +3,6 @@ import { createPortal } from "react-dom";
 import { useI18n, type Translate } from "../i18n";
 import { SelectMenu } from "../components/SelectMenu";
 import { useFocusTrap } from "../hooks/useFocusTrap";
-import { X } from "../lib/icons";
 import {
   AUTOMATION_WEEKDAYS, parseAutomationRRule,
   type AutomationScheduleDraft, type AutomationScheduleMode, type AutomationWeekday,
@@ -120,7 +119,7 @@ function AutomationRuleDialog({ initialValue, onClose, onSave }: { initialValue:
       {!valid && <p id={`${id}-error`} className="automation-field-error" role="alert">{tr("请输入有效的 RRULE")}</p>}
       </div>
       <div className="automation-dialog-actions"><button type="button" className="automation-ghost-button" onClick={onClose}>{tr("取消")}</button><button type="button" className="automation-primary-button" disabled={!valid} onClick={() => onSave(value)}>{tr("保存")}</button></div>
-      <button type="button" className="automation-dialog-close" aria-label={tr("关闭")} onClick={onClose}><X size={14} aria-hidden="true" /></button>
+      <button type="button" className="automation-dialog-close" aria-label={tr("关闭")} onClick={onClose}><span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/thread-project-remove.svg)` }} /></button>
     </div>
   </div>, document.body);
 }

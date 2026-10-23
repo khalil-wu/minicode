@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Check, ChevronDown, Info, MoreHorizontal, Search, X } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import type { ConversationMeta, ScheduledTaskEntry } from "../stores/types";
@@ -30,6 +29,32 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const taskKind = (task?: ScheduledTaskEntry) => task?.kind ?? (task && !task.conversation_id ? "cron" : "heartbeat");
 const sourceIcon = (name: string) => <span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/automation-${name}.svg)` }} />;
 const DetailRow = ({ label, children }: { label: string; children: ReactNode }) => <div className="automation-detail-row"><span>{label}</span>{children}</div>;
+
+// Exact glyphs used by this installed Source panel: st→CH/RIt, Ye→OH/JIt,
+// Qe→ZSt/pts, and st→J.Input/Flt→Tk/Gxn. Their canvases differ from the
+// general menu controls and from the approval info asset.
+function AutomationPanelSourceGlyph({ icon }: { icon: "check" | "chevronDown" | "info" | "search" }) {
+  switch (icon) {
+    case "check":
+      return <svg className="automation-panel-source-glyph" width={16} height={16} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M11.5624 4.0338C11.7255 3.79403 12.0522 3.73111 12.2919 3.89415C12.5314 4.05717 12.5933 4.38398 12.4306 4.62364L7.539 11.818C7.30083 12.1681 6.80219 12.215 6.50286 11.9156L3.62786 9.03478C3.4231 8.82953 3.42363 8.4964 3.62884 8.29161C3.8341 8.08683 4.16722 8.08733 4.372 8.29259L6.92474 10.8512L11.5624 4.0338Z" fill="currentColor" />
+      </svg>;
+    case "chevronDown":
+      return <svg className="automation-panel-source-glyph" width={12} height={12} viewBox="0 0 12 12" fill="none" aria-hidden="true">
+        <path d="M8.71677 4.71677C8.87298 4.56056 9.12696 4.56056 9.28317 4.71677C9.43938 4.87298 9.43938 5.12696 9.28317 5.28317L6.45993 8.10642C6.20609 8.36023 5.79384 8.36023 5.54001 8.10642L2.71677 5.28317C2.56056 5.12696 2.56056 4.87298 2.71677 4.71677C2.87298 4.56056 3.12696 4.56056 3.28317 4.71677L5.99997 7.43356L8.71677 4.71677Z" fill="currentColor" />
+      </svg>;
+    case "info":
+      return <svg className="automation-panel-source-glyph" width={18} height={18} viewBox="0 0 21 21" fill="none" aria-hidden="true">
+        <path d="M10.6 9.70459C11.0142 9.70461 11.35 10.0404 11.35 10.4546V13.7876C11.35 14.2018 11.0142 14.5376 10.6 14.5376C10.1858 14.5376 9.84998 14.2018 9.84998 13.7876V10.4546C9.84998 10.0404 10.1858 9.70459 10.6 9.70459Z" fill="currentColor" />
+        <path d="M10.6 6.2876C11.1292 6.28762 11.558 6.71732 11.558 7.24658C11.5578 7.77569 11.1291 8.20457 10.6 8.20459C10.0708 8.20459 9.64215 7.7757 9.64197 7.24658C9.64197 6.71731 10.0707 6.2876 10.6 6.2876Z" fill="currentColor" />
+        <path fillRule="evenodd" clipRule="evenodd" d="M10.6 2.53955C14.9713 2.53955 18.515 6.08326 18.515 10.4546C18.515 14.8259 14.9713 18.3696 10.6 18.3696C6.22864 18.3696 2.68494 14.8259 2.68494 10.4546C2.68494 6.08326 6.22864 2.53955 10.6 2.53955ZM10.6 3.86963C6.96318 3.86963 4.01501 6.81779 4.01501 10.4546C4.01501 14.0914 6.96318 17.0396 10.6 17.0396C14.2368 17.0396 17.1849 14.0914 17.1849 10.4546C17.1849 6.81779 14.2368 3.86963 10.6 3.86963Z" fill="currentColor" />
+      </svg>;
+    case "search":
+      return <svg className="automation-panel-source-glyph" width={14} height={14} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path fillRule="evenodd" clipRule="evenodd" d="M7.33057 1.98535C10.2484 1.98535 12.6136 4.3508 12.6138 7.26855C12.6138 8.58031 12.1346 9.77942 11.3433 10.7031L13.9897 13.3496C14.1655 13.5253 14.1655 13.8106 13.9897 13.9863C13.814 14.1621 13.5288 14.1621 13.353 13.9863L10.7017 11.335C9.78678 12.0942 8.61243 12.5518 7.33057 12.5518C4.41281 12.5516 2.04736 10.1864 2.04736 7.26855C2.04754 4.35091 4.41292 1.98553 7.33057 1.98535ZM7.33057 2.88574C4.90998 2.88592 2.94793 4.84796 2.94775 7.26855C2.94775 9.68929 4.90987 11.6522 7.33057 11.6523C9.75141 11.6523 11.7144 9.6894 11.7144 7.26855C11.7142 4.84786 9.75131 2.88574 7.33057 2.88574Z" fill="currentColor" />
+      </svg>;
+  }
+}
 
 export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: { editor: ThreadAutomationEditor; onClose?: () => void; inSettings?: boolean }) {
   const { t: tr } = useI18n();
@@ -196,7 +221,7 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
       <div className="automation-heading"><input className="automation-title" value={name} aria-label={tr("任务名称")} placeholder={tr("任务名称")}
         onChange={event => { setName(event.target.value); renameThreadAutomationEditor(editor.id, event.target.value); }} />
         {savedTask && <button type="button" className="mc-icon-button" aria-label={tr("定时任务操作")} title={tr("定时任务操作")} aria-haspopup="menu" aria-expanded={Boolean(actionMenu)}
-          disabled={Boolean(pending)} onClick={event => setActionMenu(event.currentTarget)}><MoreHorizontal size={16} /></button>}
+          disabled={Boolean(pending)} onClick={event => setActionMenu(event.currentTarget)}><span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/sidebar-options.svg)` }} /></button>}
       </div>
       <textarea className="automation-prompt" aria-label={tr("提示词")} placeholder={tr("要运行的提示词")} value={prompt} rows={3} onChange={event => setPrompt(event.target.value)} />
       <section className="automation-section"><div className="automation-section-heading"><h3>{tr("详情")}</h3>
@@ -205,7 +230,7 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
           : fields.permission_mode === "confirm"
             ? tr("此定时任务使用需要确认的权限设置。需要授权的操作会等待你的确认。")
             : tr("此定时任务使用正常自动权限。每次新建聊天时会继承任务配置的权限规则。") }>
-          <button type="button" className="mc-icon-button automation-permission-info" aria-label={tr("定时任务权限详情")}><Info size={16} /></button>
+          <button type="button" className="mc-icon-button automation-permission-info" aria-label={tr("定时任务权限详情")}><AutomationPanelSourceGlyph icon="info" /></button>
         </Tip>}
       </div>
         <DetailRow label={tr("运行于")}><AutomationTargetPicker editor={editor} taskId={savedTask?.id} value={kind === "cron" ? "" : targetId} label={kind === "cron" ? tr("每次新建聊天") : targetLabel}
@@ -300,7 +325,7 @@ function AutomationTargetPicker({ editor, taskId, value, label, onChange }: {
   const groupOrder = [tr("已固定"), ...projects.map(project => project.name || workspaceDisplayName(project.path)), tr("其他聊天")];
   return <div className="automation-target-picker" ref={root}>
     <button ref={trigger} type="button" className="automation-target-trigger" aria-label={tr("定时任务目标")} title={label} aria-haspopup="dialog" aria-expanded={open}
-      onClick={() => { setOpen(current => !current); setQuery(""); }}><span>{label}</span><ChevronDown size={14} /></button>
+      onClick={() => { setOpen(current => !current); setQuery(""); }}><span>{label}</span><AutomationPanelSourceGlyph icon="chevronDown" /></button>
     {open && <div className="mc-dropdown-menu automation-target-menu" role="dialog" aria-label={tr("搜索聊天")} onKeyDown={event => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
       if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) || event.target instanceof HTMLInputElement && event.key !== "ArrowDown") return;
@@ -309,13 +334,13 @@ function AutomationTargetPicker({ editor, taskId, value, label, onChange }: {
       const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
       buttons[event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length].focus();
     }}>
-      <label className="automation-chat-search"><Search size={15} /><input ref={search} value={query} onChange={event => setQuery(event.target.value)} aria-label={tr("搜索聊天")} placeholder={tr("搜索聊天")} /></label>
+      <label className="automation-chat-search"><AutomationPanelSourceGlyph icon="search" /><input ref={search} value={query} onChange={event => setQuery(event.target.value)} aria-label={tr("搜索聊天")} placeholder={tr("搜索聊天")} /></label>
       <div className="automation-chat-options">
-        <button type="button" aria-pressed={!value} onClick={() => { onChange(""); close(); }}><span>{tr("每次新建聊天")}</span>{!value && <Check size={14} />}</button>
+        <button type="button" aria-pressed={!value} onClick={() => { onChange(""); close(); }}><span>{tr("每次新建聊天")}</span>{!value && <AutomationPanelSourceGlyph icon="check" />}</button>
         {[...groups].sort(([left], [right]) => groupOrder.indexOf(left) - groupOrder.indexOf(right)).map(([group, chats]) => <div key={group} role="group" aria-label={group}><div className="automation-chat-group">{group}</div>{chats.map(conversation => <button key={conversation.id} type="button" aria-pressed={value === conversation.id}
           disabled={loading || Boolean(error) || !Boolean(conversation.executionCwd || conversation.worktreePath || conversation.workspaceRoot || conversation.id === editor.owner.id) || occupied.has(conversation.id)} title={occupied.has(conversation.id) ? tr("此聊天已有运行中的定时任务") : conversation.title}
-          onClick={() => { onChange(conversation.id, conversation.title); close(); }}><span>{conversation.title}</span>{value === conversation.id && <Check size={14} />}</button>)}</div>)}
-        {value && !conversations.some(conversation => conversation.id === value) && <button type="button" disabled aria-pressed="true"><span>{label}</span><Check size={14} /></button>}
+          onClick={() => { onChange(conversation.id, conversation.title); close(); }}><span>{conversation.title}</span>{value === conversation.id && <AutomationPanelSourceGlyph icon="check" />}</button>)}</div>)}
+        {value && !conversations.some(conversation => conversation.id === value) && <button type="button" disabled aria-pressed="true"><span>{label}</span><AutomationPanelSourceGlyph icon="check" /></button>}
         {!filtered.length && <p>{tr("没有匹配的聊天")}</p>}
         {loading && <p role="status">{tr("正在读取定时任务…")}</p>}{error && <p role="alert">{error}</p>}
       </div>
@@ -332,7 +357,7 @@ function AutomationDeleteDialog({ name, pending, onClose, onConfirm }: { name: s
       onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); } }}>
       <div className="automation-dialog-heading"><h2 id={id}>{tr("删除 {name}？", { name })}</h2><p id={`${id}-description`}>{tr("这将永久删除定时任务并停止后续运行。")}</p></div>
       <div className="automation-dialog-actions"><button type="button" disabled={pending} onClick={onClose}>{tr("取消")}</button><button type="button" className="automation-danger-button" disabled={pending} onClick={onConfirm}>{pending ? tr("正在删除…") : tr("删除定时任务")}</button></div>
-      {!pending && <button type="button" className="automation-dialog-close" aria-label={tr("关闭")} onClick={onClose}><X size={14} aria-hidden="true" /></button>}
+      {!pending && <button type="button" className="automation-dialog-close" aria-label={tr("关闭")} onClick={onClose}><span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/thread-project-remove.svg)` }} /></button>}
     </div>
   </div>, document.body);
 }

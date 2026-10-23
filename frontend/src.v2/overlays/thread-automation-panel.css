@@ -56,6 +56,7 @@
 .automation-rule-button { display: inline-flex; flex-shrink: 0; align-items: center; justify-content: center; width: 28px; height: 28px; border: 1px solid transparent; border-radius: 8px; padding: 4px; background: transparent; color: var(--text-primary); opacity: .75; cursor: pointer; }
 .automation-rule-button:hover { background: var(--surface-hover); opacity: 1; }
 .automation-source-icon { display: inline-block; width: 16px; height: 16px; flex-shrink: 0; background: currentColor; mask-position: center; mask-size: contain; mask-repeat: no-repeat; }
+.automation-panel-source-glyph { flex-shrink: 0; }
 .thread-automation-footer { display: flex; flex-shrink: 0; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px; border-top: 1px solid var(--border-subtle); }
 .thread-automation-footer button, .automation-dialog-actions button { display: inline-flex; justify-content: center; align-items: center; gap: 6px; min-height: 32px; padding: 6px 10px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-base); color: var(--text-primary); font: inherit; cursor: pointer; }
 .thread-automation-footer button:hover:not(:disabled), .automation-dialog-actions button:hover:not(:disabled) { background: var(--surface-hover); }
@@ -98,3 +99,4 @@
 .automation-dialog-actions .automation-danger-button:hover:not(:disabled) { background: color-mix(in srgb, var(--state-danger) 20%, transparent); }
 .automation-dialog-close { position: absolute; top: 16px; right: 16px; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 0; border-radius: 4px; padding: 4px; color: color-mix(in srgb, var(--text-primary) 80%, transparent); background: transparent; cursor: pointer; }
 .automation-dialog-close:hover { background: var(--surface-hover); }
+.automation-dialog-close > .automation-source-icon { width: 14px; height: 14px; }

@@ -81,6 +81,7 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
       const title = getComputedStyle(element.querySelector("h2")), subtitle = getComputedStyle(element.querySelector(".automation-dialog-heading p"));
       const heading = getComputedStyle(element.querySelector(".automation-dialog-heading")), actions = element.querySelector(".automation-dialog-actions");
       const footer = getComputedStyle(actions), close = element.querySelector(".automation-dialog-close"), closeStyle = getComputedStyle(close);
+      const closeGlyph = getComputedStyle(close.querySelector(":scope > span.automation-source-icon"));
       return { overlay: overlay.backgroundColor, blur: overlay.backdropFilter, filter: overlay.filter,
         width: Number.parseFloat(style.width), padding: style.padding, border: style.borderTopWidth, radius: style.borderRadius,
         title: [title.fontSize, title.lineHeight, title.fontWeight], subtitle: [subtitle.fontSize, subtitle.lineHeight], headingGap: heading.gap,
@@ -88,12 +89,15 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
           const style = getComputedStyle(button);
           return [Number.parseFloat(style.height), style.padding, style.fontSize, style.lineHeight, style.borderRadius];
         }), close: [Number.parseFloat(closeStyle.width), Number.parseFloat(closeStyle.height), closeStyle.top, closeStyle.right,
-          Number.parseFloat(getComputedStyle(close.querySelector("svg")).width)] };
+          Number.parseFloat(closeGlyph.width), Number.parseFloat(closeGlyph.height)],
+        closeMask: closeGlyph.maskImage, expectedCloseMask: `url("${new URL("apps/thread-project-remove.svg", document.baseURI).href}")` };
     });
     // Source Swn/Ewn/Gwn and Electron cascade: automation-dialog-geometry-evidence.json.
-    assert.deepEqual(actual, { overlay: "rgba(0, 0, 0, 0.133)", blur: "none", filter: "none", width, padding: "20px", border: "0px", radius: "20px",
+    const { closeMask, expectedCloseMask, ...layout } = actual;
+    assert.equal(closeMask, expectedCloseMask);
+    assert.deepEqual(layout, { overlay: "rgba(0, 0, 0, 0.133)", blur: "none", filter: "none", width, padding: "20px", border: "0px", radius: "20px",
       title: ["18px", "28px", "600"], subtitle: ["14px", "21px"], headingGap: "4px", footer: ["12px", "12px"],
-      buttons: [[32, "6px 16px", "14px", "18px", "10px"], [32, "6px 16px", "14px", "18px", "10px"]], close: [22, 22, "16px", "16px", 14] });
+      buttons: [[32, "6px 16px", "14px", "18px", "10px"], [32, "6px 16px", "14px", "18px", "10px"]], close: [22, 22, "16px", "16px", 14, 14] });
     return actual;
   };
   await panel.locator(".thread-automation-footer").waitFor();
