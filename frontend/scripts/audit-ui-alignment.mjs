@@ -250,6 +250,7 @@ async function observeDraftLifecycle() {
 }
 async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
   const button = page.locator(selector);
+  await button.waitFor({ state: "visible" });
   await page.waitForFunction(selector => !document.querySelector(selector).disabled, selector);
   const idle = await button.evaluate(element => ({ width: element.getBoundingClientRect().width,
     height: element.getBoundingClientRect().height, border: getComputedStyle(element).borderTopColor,
