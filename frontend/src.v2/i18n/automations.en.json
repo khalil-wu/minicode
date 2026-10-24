@@ -69,5 +69,22 @@
   "聊天不可用": "Chat unavailable",
   "运行于": "Runs in",
   "这将永久删除定时任务并停止后续运行。": "This will permanently delete the scheduled task and stop future runs",
-  "重要更新": "Important updates"
+  "重要更新": "Important updates",
+  "所有任务": "All tasks",
+  "每 {minutes} 分钟": "Every {minutes} minutes",
+  "每 {weeks} 周": "Every {weeks} weeks",
+  "已安排任务文件夹": "Scheduled task folders",
+  "搜索定时任务": "Search scheduled tasks",
+  "即将执行": "Upcoming",
+  "筛选任务": "Filter tasks",
+  "已安排任务操作": "Scheduled task actions",
+  "安排任务": "Schedule tasks",
+  "MiniCode 可以帮你处理持续性任务，让你不必亲自动手。": "MiniCode can help with ongoing tasks so you don’t have to do them yourself.",
+  "设置定时任务": "Set up scheduled task",
+  "说明…": "Instructions…",
+  "每次运行时都开启新聊天": "Start a new chat on each run",
+  "关闭对话框": "Close dialog",
+  "运行历史": "Run history",
+  "定时任务操作未完成。": "The scheduled task action could not be completed.",
+  "无法创建定时任务聊天。": "Could not create the scheduled task chat."
 }

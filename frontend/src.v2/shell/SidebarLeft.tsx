@@ -9,7 +9,7 @@ import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
 import { ConversationsTab } from "./ConversationsTab";
 import { ContextMenu } from "../components/ContextMenu";
 import { openPreferredWebLink } from "../lib/open-preferred-target";
-import { openAutomations } from "../lib/automations-navigation";
+import { closeAutomations, openAutomations } from "../lib/automations-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useComposerPlugins } from "../composer/useComposerPlugins";
 import { selectSkillForComposer } from "../lib/select-skill-for-composer";
@@ -50,7 +50,7 @@ export const SidebarLeft = ({
   const sidebarRef = useRef<HTMLElement>(null);
   const [shellWidth, setShellWidth] = useState(window.innerWidth);
   const visibleSidebarWidth = visibleLeftSidebarWidth(leftSidebarWidth, shellWidth);
-  const resizeRef = useRef<{ x: number; width: number; didMove: boolean } | null>(null);
+  const resizeRef = useRef<{ x: number; width: number; nextWidth: number; didMove: boolean; frame: number | null } | null>(null);
   useEffect(() => { sidebarRef.current!.inert = !isOpen; }, [isOpen]);
   useEffect(() => {
     const resized = () => setShellWidth(window.innerWidth);
@@ -68,15 +68,17 @@ export const SidebarLeft = ({
   useEffect(() => () => finishResize(), []);
 
   const finishResize = () => {
-    if (!resizeRef.current) return;
-    if (resizeRef.current.didMove) setLeftSidebarWidth(useAppStore.getState().leftSidebarWidth);
+    const drag = resizeRef.current;
+    if (!drag) return;
+    if (drag.frame !== null) cancelAnimationFrame(drag.frame);
+    if (drag.didMove) setLeftSidebarWidth(drag.nextWidth);
     resizeRef.current = null;
     document.body.classList.remove("layout-dragging");
   };
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
-    resizeRef.current = { x: event.clientX, width: visibleSidebarWidth, didMove: false };
+    resizeRef.current = { x: event.clientX, width: visibleSidebarWidth, nextWidth: visibleSidebarWidth, didMove: false, frame: null };
     event.currentTarget.setPointerCapture(event.pointerId);
     document.body.classList.add("layout-dragging");
   };
@@ -85,7 +87,11 @@ export const SidebarLeft = ({
     if (!drag) return;
     drag.didMove ||= event.clientX !== drag.x;
     const width = drag.width + event.clientX - drag.x;
-    setLeftSidebarWidth(width < LEFT_SIDEBAR_MIN_WIDTH / 2 ? 0 : width, { persist: false });
+    drag.nextWidth = width < LEFT_SIDEBAR_MIN_WIDTH / 2 ? 0 : width;
+    if (drag.frame === null) drag.frame = requestAnimationFrame(() => {
+      drag.frame = null;
+      setLeftSidebarWidth(drag.nextWidth, { persist: false });
+    });
   };
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 40 : 10;
@@ -109,6 +115,7 @@ export const SidebarLeft = ({
     onNavigate?.();
   };
   const leaveMarketplace = () => {
+    closeAutomations();
     useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", projectsOpen: false });
   };
   const navigateToContent = () => {
@@ -136,8 +143,7 @@ export const SidebarLeft = ({
         boxSizing: "border-box",
         borderRight: embedded || !isOpen ? 0 : "1px solid color-mix(in oklch, var(--border-subtle) 55%, transparent)",
         width: sidebarWidth,
-        minWidth: sidebarWidth,
-        maxWidth: sidebarWidth,
+        minWidth: 0,
         background: "var(--surface-sidebar)",
         opacity: isOpen ? 1 : 0,
         pointerEvents: isOpen ? "auto" : "none",
@@ -163,6 +169,7 @@ export const SidebarLeft = ({
         </div>
         {!withGlobalRail && <SidebarAction icon={<Clock3 />} label={tr("已安排")} onClick={openAutomationsPanel} />}
         {!withGlobalRail && <SidebarAction icon={<Puzzle />} label={tr("插件")} active={skillsMarketplaceOpen} onClick={() => navigate(() => {
+          closeAutomations();
           if (skillsMarketplaceOpen) useAppStore.setState({ skillsMarketplaceTab: "plugins" });
           else toggleSkillsMarketplace("app", "plugins");
         })} />}

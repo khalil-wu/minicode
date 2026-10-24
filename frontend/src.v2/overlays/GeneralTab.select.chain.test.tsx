@@ -30,6 +30,7 @@ beforeEach(() => {
     defaultTaskDirectory: "C:/QA/long-real-original-task-directory", taskDirectoryOverride: null, defaultPermissionMode: "confirm", showFullAccess: true,
     localeOverride: "zh-CN", systemLocale: "en-US", confirmBeforeClose: "keyboardOnly", turnCompletionNotifications: "onlyWhenUnfocused",
     permissionNotifications: true, questionNotifications: true, autoArchiveAfterDays: 0, localHistoryCompression: false, notificationSound: "default", showBottomPanel: true,
+    defaultWorkspaceFullView: false, popoutWindowShortcut: null, popoutWindowProjectlessDefault: false, confettiEnabled: false,
     urlOpenTarget: "external-browser", localUrlOpenTarget: "in-app-browser",
     showFullUrl: false, annotationScreenshotsMode: "always",
   };
@@ -79,7 +80,10 @@ it("publishes the actual available shell id and retains complete preference labe
 
 it("keeps every General preference on the shared menu and preserves the real task path title", () => {
   const view = render(<GeneralTab />);
-  expect(view.container.querySelectorAll(".settings-row-control > .mc-select-menu.settings-select")).toHaveLength(9);
+  const menus = [...view.container.querySelectorAll(".settings-row-control > .mc-select-menu.settings-select")];
+  expect(menus.map(menu => menu.querySelector("button")!.getAttribute("aria-label")!.split("，当前：")[0])).toEqual([
+    "默认文件打开位置", "集成终端 Shell", "语言", "关闭窗口前确认", "自动归档闲置聊天", "发送快捷键", "任务完成通知", "通知声音",
+  ]);
   expect(view.container.querySelectorAll(".settings-row-control > select:not(.mc-select-native-proxy)")).toHaveLength(0);
   const taskPath = view.container.querySelector(".settings-general-task-path")!;
   expect(taskPath.textContent).toBe(native.preferences!.defaultTaskDirectory);
@@ -95,7 +99,7 @@ it("changes the actual composer choices and keeps unrelated stored media prefere
   expect(useAppStore.getState().sendShortcut).toBe("mod-enter");
   fireEvent.click(screen.getByRole("radio", { name: "引导" }));
   expect(useAppStore.getState().followUpBehavior).toBe("steer");
-  fireEvent.click(screen.getByText("高级", { selector: "summary" }));
+  expect(screen.queryByText("高级", { selector: "summary" })).toBeNull();
   expect(screen.queryByRole("button", { name: /远程 Markdown 图片/ })).toBeNull();
   expect(screen.queryByRole("button", { name: "清除列表" })).toBeNull();
   expect(useAppStore.getState()).toMatchObject({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });

@@ -57,3 +57,16 @@ it("retains the last primary owner during actual application startup rather than
   initializeWindowNavigation();
   expect(conversationIdForSessionRestore({})).toBe("primary-last-task");
 });
+
+it("reopens the stable Popout owner without replacing its saved conversation or another window's draft", () => {
+  localStorage.setItem("minicode.conversation.active-id", "primary-current");
+  window.__MINICODE_RUNTIME__ = { windowOwnerId: "popout", initialNavigation: { conversationId: null, popout: true,
+    workspaceRoot: "C:/Project", restoreLastConversation: true }, desktop: driver };
+  writeLS(LS.conversation.activeId, "popout-current");
+  localStorage.setItem("authored-popout-draft", "Unsent text");
+  initializeWindowNavigation();
+  expect(conversationIdForSessionRestore({})).toBe("popout-current");
+  expect(localStorage.getItem("minicode.conversation.active-id")).toBe("primary-current");
+  expect(localStorage.getItem("authored-popout-draft")).toBe("Unsent text");
+  expect(consume).toHaveBeenCalledOnce();
+});

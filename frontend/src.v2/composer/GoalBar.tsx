@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Pause, Pencil, Play, Target, X } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { useI18n, type TranslationKey } from "../i18n";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { pushToast } from "../overlays/ToastContainer";
 import { prepareGoalEditor, toggleGoalEditor, updateGoalEditor, updateThreadGoal, useGoalEditor } from "./goal-state";
 import "./goal.css";
@@ -12,16 +13,17 @@ const labels: Record<string, TranslationKey> = { active: "追求目标", paused:
 export function GoalBar() {
   const { t: tr, locale } = useI18n();
   const goal = useAppStore(state => state.activeGoal);
+  const enabled = useAppStore(state => capabilityFeatureEnabled(state.runtimeCapabilities, "goals"));
   const owner = useAppStore(state => state.conversationId) || "";
   const disabled = useAppStore(state => !state.isConnected || Boolean(state.pendingConversationSwitchId));
   const editor = useGoalEditor(owner);
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    if (goal?.status !== "active") return;
+    if (!enabled || goal?.status !== "active") return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [goal?.status]);
-  if (!goal) return null;
+  }, [enabled, goal?.status]);
+  if (!enabled || !goal) return null;
   const busy = Boolean(editor?.busy);
   const targetStatus = goal.status === "active" ? "pause" : ["paused", "blocked", "usage_limited"].includes(goal.status) ? "resume" : null;
   const elapsed = Math.max(0, Math.floor((goal.timeUsedSeconds ?? 0) + (goal.status === "active" && goal.updatedAt ? (now - Date.parse(goal.updatedAt)) / 1000 : 0)));

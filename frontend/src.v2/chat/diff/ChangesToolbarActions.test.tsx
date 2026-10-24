@@ -15,6 +15,16 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("Source Changes toolbar actions", () => {
+  it("invokes the selected patch copy action through the options menu in both layouts", () => {
+    const copy = vi.fn();
+    const view = render(<ChangesToolbarActions {...props({ onCopyGitApplyCommand: copy })} />);
+    fireEvent.click(screen.getByRole("button", { name: "“变更”选项" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制 git apply 命令" }));
+    expect(copy).toHaveBeenCalledOnce();
+    view.rerender(<ChangesToolbarActions {...props({ width: 800, onCopyGitApplyCommand: copy, copyGitApplyDisabled: true })} />);
+    fireEvent.click(screen.getByRole("button", { name: "“变更”选项" }));
+    expect((screen.getByRole("menuitem", { name: "复制 git apply 命令" }) as HTMLButtonElement).disabled).toBe(true);
+  });
   it("keeps jump and files visible while moving all wide actions into the compact options menu", () => {
     const callbacks = props({ onRefresh: vi.fn() });
     render(<ChangesToolbarActions {...callbacks} />);

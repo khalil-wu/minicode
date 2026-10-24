@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Archive, ArrowLeft, ChevronDown, ChevronRight, Folder, ListFilter, MoreHorizontal, Search, Trash2 } from "lucide-react";
 import { useAppStore } from "../stores";
@@ -16,6 +16,9 @@ import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { hydrateMessages } from "../chat/transcriptHydration";
 import { UserMessageCell } from "../chat/cells/UserMessageCell";
 import { AssistantMarkdownCell } from "../chat/cells/AssistantMarkdownCell";
+import { useConversationSearch } from "../hooks/useConversationSearch";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { searchResultConversation } from "../protocol/conversation-search";
 import "./ArchivedTab.css";
 
 type ArchiveMenu = { anchor: HTMLButtonElement; kind: "filter" | "project"; project?: string };
@@ -24,7 +27,8 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
   const { t, locale } = useI18n();
   const conversations = useAppStore(state => state.conversations);
   const workspaces = useAppStore(state => state.recentWorkspaces);
-  const archived = conversations.filter(conversation => conversation.archived);
+  const runtimeCapabilities = useAppStore(state => state.runtimeCapabilities);
+  const archived = conversations.filter(conversation => conversation.archived && conversation.conversationType !== "side_chat");
   const [restoringIds, setRestoringIds] = useState<Record<string, boolean>>({});
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
@@ -34,12 +38,29 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
   const [menu, setMenu] = useState<ArchiveMenu | null>(null);
   const [projectMenu, setProjectMenu] = useState<HTMLButtonElement | null>(null);
   const [previewConversation, setPreviewConversation] = useState<ConversationMeta | null>(null);
+  const bodySearch = useConversationSearch({ query, enabled: active && capabilityFeatureEnabled(runtimeCapabilities, "global_search", true),
+    archived: true, project, sort });
+  const searchEnd = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const target = searchEnd.current;
+    if (!target || !bodySearch.hasMore || bodySearch.loading || bodySearch.error) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) bodySearch.loadMore();
+    }, { root: target.closest(".settings-center-content"), rootMargin: "120px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [bodySearch.hasMore, bodySearch.loading, bodySearch.error, bodySearch.loadMore, previewConversation]);
   const projectRoot = (conversation: ConversationMeta) => conversation.projectId || conversation.workspaceRoot || conversation.worktreePath || "";
   const projectName = (root: string) => workspaces.find(workspace => canonicalWorkspacePath(workspace.path) === canonicalWorkspacePath(root))?.name || workspaceDisplayName(root, t("本机"));
   const projects = [...new Map([...workspaces.map(workspace => workspace.path), ...archived.map(projectRoot)].map(root => [canonicalWorkspacePath(root), root])).values()];
-  const matching = archived.filter(conversation => {
+  const contentMatches = bodySearch.results.filter(result => result.conversation.archived
+    && result.conversation.conversation_type !== "side_chat"
+    && !conversations.some(c => c.id === result.conversation.id && !c.archived));
+  const bodyIds = new Set(contentMatches.map(result => result.conversation.id));
+  const candidates = [...new Map([...contentMatches.map(searchResultConversation), ...archived].map(c => [c.id, c])).values()];
+  const matching = candidates.filter(conversation => {
     const root = projectRoot(conversation);
-    return `${conversation.title} ${root} ${projectName(root)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+    return (bodyIds.has(conversation.id) || `${conversation.title} ${root} ${projectName(root)}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
       && (project === null || canonicalWorkspacePath(root) === canonicalWorkspacePath(project));
   }).sort((a, b) => sort === "alphabetical" ? a.title.localeCompare(b.title, locale)
     : sort === "created" ? (b.createdAt || "").localeCompare(a.createdAt || "") : b.updatedAt.localeCompare(a.updatedAt));
@@ -103,7 +124,11 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
         <div className="settings-archive-actions"><button type="button" className="settings-icon-button" aria-label={t("删除 {v0}", { v0: conversation.title || t("未命名任务") })} disabled={busy} onClick={() => void deleteConversations([conversation], "single")}><Trash2 size={16} /></button><button type="button" className="settings-action-button" aria-label={t("恢复 {v0}", { v0: conversation.title || t("未命名任务") })} disabled={busy} onClick={() => void restoreConversation(conversation)}>{restoringIds[conversation.id] ? t("恢复中…") : t("取消归档")}</button></div>
       </div>)}</div>
     </section>)}</div>
-    {matching.length === 0 && <div className="settings-archive-empty"><Archive aria-hidden="true" /><strong>{archived.length ? t("没有匹配的任务") : t("没有已归档任务")}</strong><span>{archived.length ? t("试试其他标题或项目。") : t("从会话菜单归档的任务会显示在这里。")}</span></div>}
+    <div ref={searchEnd} className="settings-archive-search-status">
+      {bodySearch.loading && <p role="status">{t("正在搜索…")}</p>}
+      {bodySearch.error && <p role="alert">{bodySearch.error}</p>}
+    </div>
+    {matching.length === 0 && !bodySearch.loading && !bodySearch.error && <div className="settings-archive-empty"><Archive aria-hidden="true" /><strong>{archived.length ? t("没有匹配的任务") : t("没有已归档任务")}</strong><span>{archived.length ? t("试试其他标题或项目。") : t("从会话菜单归档的任务会显示在这里。")}</span></div>}
     {menu && <ContextMenu position={{ x: menu.anchor.getBoundingClientRect().right - 220, y: menu.anchor.getBoundingClientRect().bottom + 6 }} anchor={menu.anchor} onClose={() => setMenu(null)} items={menuItems} />}
     {projectMenu && <ContextMenu position={{ x: projectMenu.getBoundingClientRect().right - 240, y: projectMenu.getBoundingClientRect().bottom + 6 }} anchor={projectMenu} onClose={() => setProjectMenu(null)} items={[
       { label: t("全部项目"), checked: project === null, onClick: () => setProject(null) },

@@ -122,6 +122,27 @@ def reduce_hook_executions(
         if execution.backgrounded:
             continue
 
+        if event_key == "interrupt":
+            summaries[-1].update(stdout=stdout, stderr=stderr)
+            invalid = bool(stdout) and (
+                json_result is None or bool(set(json_result) - {"systemMessage"})
+                or json_result.get("systemMessage") is not None
+                and not isinstance(json_result["systemMessage"], str)
+            )
+            if execution.execution_failed or exit_code != 0 or invalid:
+                failed = True
+                summaries[-1]["status"] = "failed"
+                errors.append(
+                    stderr or (
+                        f"hook exited with code {exit_code}" if exit_code != 0
+                        else "hook returned invalid Interrupt hook JSON output"
+                        if stdout.startswith(("{", "[")) else "Interrupt hook returned non-JSON stdout"
+                    )
+                )
+            elif json_result is not None and json_result.get("systemMessage"):
+                system_messages.append(json_result["systemMessage"])
+            continue
+
         if execution.execution_failed:
             # A launcher/runtime failure is visible but does not silently block
             # the operation. Only exit 2 or a valid JSON block/deny decision can
@@ -332,6 +353,10 @@ def execution_succeeded_for_once(
         return False
     if execution.exit_code != 0:
         return False
+    if str(getattr(event, "value", event) or "") == "interrupt":
+        return not reduce_hook_executions(
+            event, [execution], expected_event_name=expected_event_name,
+        ).failed
     payload = execution.json_output
     if payload is None:
         return True

@@ -319,6 +319,28 @@ async def handle_diff_git_review_options(session: "WebSocketSession", data: dict
     return True
 
 
+async def handle_diff_git_review_patch(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.diff.review_patch import review_patch
+
+    scope = None
+    identity: dict[str, Any] = {}
+    try:
+        scope = _resolve_git_scope(session, data, require_conversation=True)
+        source = data["source"]
+        if source not in {"branch", "commit", "unstaged", "staged", "uncommitted"}:
+            raise ValueError("Unknown Git review source")
+        if source == "commit" and not data.get("commit_sha"):
+            raise ValueError("Commit review requires commit_sha")
+        async with _git_execution(session, scope, data, identity) as service:
+            patch = await review_patch(scope.workspace_root, source, service=service,
+                base_branch=data.get("base_branch"), commit_sha=data.get("commit_sha"))
+        await session.emit_command_result("diff.git_review_patch", "", level="success",
+            data=scope.apply({**identity, "unified_diff": patch}))
+    except Exception as error:
+        await _emit_git_error(session, "diff.git_review_patch", error, scope=scope, identity=identity)
+    return True
+
+
 HANDLERS: dict[str, Any] = {
     "diff.git_working_tree": handle_diff_git_working_tree,
     "diff.git_staged": handle_diff_git_staged,
@@ -331,4 +353,5 @@ HANDLERS: dict[str, Any] = {
     "diff.git_revert_patch": handle_diff_git_revert_patch,
     "diff.git_file_contents": handle_diff_git_file_contents,
     "diff.git_review_options": handle_diff_git_review_options,
+    "diff.git_review_patch": handle_diff_git_review_patch,
 }

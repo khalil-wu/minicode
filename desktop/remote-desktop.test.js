@@ -332,6 +332,7 @@ for (const transport of ["connected", "closed"]) {
     const drainCode = source.slice(source.indexOf("async function drainDesktopResources()"), source.indexOf("async function prepareAutomaticRollback()"));
     const events = [], logs = [];
     const context = { module: { exports: {} }, Promise, RealtimeVoiceManager, remoteDesktop: remote, EMBEDDED_BROWSER_TOKEN: "local-lifecycle",
+      popoutWindow: { dispose() { events.push("popout-stopped"); } },
       dictationHotkeys: { async dispose() { events.push("dictation-stopped"); } },
       generalMaintenance: null, petManager: null, petInitialization: null,
       appendDesktopLog: message => logs.push(message),
@@ -350,6 +351,7 @@ for (const transport of ["connected", "closed"]) {
     const failure = (await first).error;
     assert.match(failure.message, /HTTP 503.*actual release rejected/);
     await assert.rejects(lifecycle.drainDesktopResources(), error => error === failure);
+    assert.equal(events.filter(event => event === "popout-stopped").length, 1, "Popout shortcuts stop even when an owned remote cleanup rejects");
     assert.equal(requests.length, 2, "the first failed shutdown does not retry");
     assert.equal(events.includes("backend-stopped"), false);
     assert.equal(lifecycle.windowCleanupTasks.size, 1);
@@ -366,6 +368,7 @@ for (const transport of ["connected", "closed"]) {
       assert.deepEqual(await retried, { value: { pending: false } });
     }
     assert.equal((await draining).error, undefined);
+    assert.equal(events.filter(event => event === "popout-stopped").length, 2, "the explicit retry drains Popout ownership again");
     assert.equal(lifecycle.windowCleanupTasks.size, 0);
     assert.equal(host.closed, true);
     assert.equal(events.includes("backend-stopped"), true);

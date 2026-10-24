@@ -87,6 +87,7 @@ it("opens exact Skill contents and keeps disabled entries visible, readable and 
   const dialog = await screen.findByRole("dialog", { name: "Review notes" });
   expect(await within(dialog).findByRole("heading", { name: "Complete instructions" })).toBeTruthy();
   expect(within(dialog).getByText("Final body paragraph.")).toBeTruthy();
+  expect(within(dialog).queryByRole("button", { name: "卸载", exact: true })).toBeNull();
   expect(within(dialog).getAllByRole("heading", { name: "Review notes" }).length).toBe(1);
   fireEvent.click(within(dialog).getByRole("switch", { name: "停用 Review notes" }));
   await within(dialog).findByRole("switch", { name: "启用 Review notes" });
@@ -279,6 +280,7 @@ it("reads a disabled plugin's real Skill inventory without exposing invocation o
   const dialog = screen.getByRole("dialog", { name: "Review notes" });
   expect(await within(dialog).findByText("Final body paragraph.")).toBeTruthy();
   expect(within(dialog).queryByRole("button", { name: "立即试用" })).toBeNull();
+  expect(within(dialog).queryByRole("button", { name: "卸载", exact: true })).toBeNull();
   expect(within(dialog).queryByRole("switch")).toBeNull();
   expect(within(dialog).queryByRole("button", { name: "更多操作" })).toBeNull();
   fireEvent.click(within(dialog).getByRole("button", { name: "关闭", exact: true }));

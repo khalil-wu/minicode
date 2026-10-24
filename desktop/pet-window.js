@@ -2,6 +2,10 @@
 const sprite = document.getElementById("pet");
 const activity = document.getElementById("activity");
 const error = document.getElementById("error");
+const miniBar = document.getElementById("mini-bar");
+const miniOpen = document.getElementById("mini-open");
+const miniMenu = document.getElementById("mini-menu");
+const miniCount = document.getElementById("mini-count");
 const media = window.matchMedia("(prefers-reduced-motion: reduce)");
 let state;
 let spriteKey = "";
@@ -107,7 +111,7 @@ function draw(row, column) {
 }
 function animate() {
   clearTimeout(timer);
-  if (!state || !state.petVisible || !state.miniOpen) return;
+  if (!state || state.selectedPetId === null || !state.petVisible || !state.miniOpen) return;
   const animation = drag ? drag.direction : hover ? "jumping" : state.activity.waiting ? "waiting" : state.activity.running ? "running" : state.activity.failed ? "failed" : state.activity.review ? "review" : "idle";
   const reduced = state.reducedMotion || media.matches;
   if (currentAnimation !== animation) { currentAnimation = animation; frame = 0; }
@@ -123,13 +127,23 @@ function animate() {
 }
 async function apply(next) {
   state = next;
-  if (!state.miniOpen) { drag = null; hover = false; sprite.dataset.dragging = "false"; pointerInteraction(false); }
+  if (!state.miniOpen) { drag = null; hover = false; sprite.dataset.dragging = "false"; miniBar.dataset.dragging = "false"; pointerInteraction(false); }
   const actionIds = new Set(state.activity.tasks.flatMap(task => (task.actions ?? []).map(action => action.id)));
   for (const id of actionErrors.keys()) if (!actionIds.has(id)) actionErrors.delete(id);
   document.documentElement.lang = next.locale;
   sprite.style.width = `${state.size}px`;
   sprite.style.height = `${state.size * 208 / 192}px`;
   renderActivity();
+  miniBar.hidden = state.selectedPetId !== null || !state.petVisible || !state.miniOpen;
+  miniCount.hidden = state.activity.tasks.length === 0;
+  miniCount.textContent = String(state.activity.tasks.length);
+  miniOpen.setAttribute("aria-label", /^zh/i.test(state.locale) ? "打开 MiniCode" : "Open MiniCode");
+  miniMenu.setAttribute("aria-label", /^zh/i.test(state.locale) ? "Mini 菜单" : "Mini menu");
+  if (state.selectedPetId === null) {
+    spriteKey = ""; sprite.hidden = true;
+    if (spriteFailed) { error.hidden = true; spriteFailed = false; }
+    animate(); return;
+  }
   const selected = state.pets.find(pet => pet.id === state.selectedPetId);
   if (!selected) { showSpriteError(`Selected pet is unavailable: ${state.selectedPetId}`); return; }
   sprite.setAttribute("aria-label", selected.displayName);
@@ -148,12 +162,13 @@ async function apply(next) {
 }
 sprite.addEventListener("pointerenter", () => { hover = true; animate(); });
 sprite.addEventListener("pointerleave", () => { hover = false; animate(); });
-sprite.addEventListener("pointerdown", event => {
+function startDrag(event) {
   if (event.button !== 0) return;
-  drag = { id: event.pointerId, x: event.screenX, y: event.screenY, startX: event.screenX, startY: event.screenY, moved: false, direction: "running-right" }; sprite.dataset.dragging = "true"; sprite.setPointerCapture(event.pointerId);
+  const element = event.currentTarget;
+  drag = { element, id: event.pointerId, x: event.screenX, y: event.screenY, startX: event.screenX, startY: event.screenY, moved: false, direction: "running-right" }; element.dataset.dragging = "true"; element.setPointerCapture(event.pointerId);
   act("drag-start", { x: event.screenX, y: event.screenY }); animate();
-});
-sprite.addEventListener("pointermove", event => {
+}
+function moveDrag(event) {
   if (drag?.id !== event.pointerId) return;
   if (!drag.moved && Math.abs(event.screenX - drag.startX) < 4 && Math.abs(event.screenY - drag.startY) < 4) return;
   drag.moved = true;
@@ -161,21 +176,29 @@ sprite.addEventListener("pointermove", event => {
   drag.x = event.screenX;
   drag.y = event.screenY;
   act("drag-move", { x: event.screenX, y: event.screenY }); animate();
-});
+}
 function endDrag(event) {
   if (drag?.id !== event.pointerId) return;
-  const moved = drag.moved;
+  const { moved, element } = drag;
   act("drag-end", { x: moved ? event.type === "pointerup" ? event.screenX : drag.x : drag.startX,
-    y: moved ? event.type === "pointerup" ? event.screenY : drag.y : drag.startY }); drag = null; sprite.dataset.dragging = "false";
-  if (sprite.hasPointerCapture(event.pointerId)) sprite.releasePointerCapture(event.pointerId);
+    y: moved ? event.type === "pointerup" ? event.screenY : drag.y : drag.startY }); drag = null; element.dataset.dragging = "false";
+  if (element.hasPointerCapture(event.pointerId)) element.releasePointerCapture(event.pointerId);
   animate();
   if (!moved && event.type === "pointerup") act("open-main");
 }
-sprite.addEventListener("pointerup", endDrag);
-sprite.addEventListener("pointercancel", endDrag);
-sprite.addEventListener("lostpointercapture", endDrag);
+for (const element of [sprite, miniBar]) {
+  element.addEventListener("pointerdown", startDrag);
+  element.addEventListener("pointermove", moveDrag);
+  element.addEventListener("pointerup", endDrag);
+  element.addEventListener("pointercancel", endDrag);
+  element.addEventListener("lostpointercapture", endDrag);
+}
+miniOpen.addEventListener("click", event => { if (event.detail === 0) act("open-main"); });
+miniMenu.addEventListener("pointerdown", event => event.stopPropagation());
+miniMenu.addEventListener("click", () => act("context-menu"));
+miniBar.addEventListener("contextmenu", event => { event.preventDefault(); act("context-menu"); });
 sprite.addEventListener("contextmenu", event => { event.preventDefault(); act("context-menu"); });
-document.addEventListener("mousemove", event => pointerInteraction(Boolean(drag || event.target.closest("#pet, .notice, #error:not([hidden])"))));
+document.addEventListener("mousemove", event => pointerInteraction(Boolean(drag || event.target.closest("#pet, #mini-bar, .notice, #error:not([hidden])"))));
 document.addEventListener("mouseleave", () => { if (!drag) pointerInteraction(false); });
 media.addEventListener("change", animate);
 window.miniPet.onState(next => { void apply(next).catch(showError); });

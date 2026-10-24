@@ -279,7 +279,7 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             dependency_paths=sorted(dependencies) if include_dependency_paths or include_dependencies else None,
             complete=not issues, issues=issues, **self.identity())
 
-    async def git(self, operation, *, path="", file=""):
+    async def git(self, operation, *, path="", file="", base_ref="HEAD"):
         from backend.workspace.executor_git import run_executor_git_metadata
         from backend.services.workspace_api_service import parse_workspace_git_status
         from backend.permissions.review import generate_unified_diff
@@ -293,8 +293,15 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         verified = await run("rev-parse", "--show-toplevel", allowed=(0, 128))
         if verified.returncode != 0:
             if "not a git repository" in verified.stderr.decode("utf-8", errors="replace").lower():
-                return {"is_git_repo": False, **({"diff": ""} if operation == "diff" else {"branch": "", "modified": [], "staged": [], "untracked": []}), **self.identity()}
+                empty = {"diff": ""} if operation == "diff" else {"branches": [], "current_branch": "", "default_base_branch": None} if operation == "branches" else {"branch": "", "modified": [], "staged": [], "untracked": []}
+                return {"is_git_repo": False, **empty, **self.identity()}
             raise HTTPException(422, verified.stderr.decode("utf-8", errors="replace"))
+        if operation == "branches":
+            from backend.diff.comparison import default_base_branch
+            branches = [value for value in (await run("for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/heads", "refs/remotes")).stdout.decode("utf-8").splitlines() if not value.endswith("/HEAD")]
+            current = (await run("branch", "--show-current")).stdout.decode("utf-8").strip()
+            default = await default_base_branch(root, self)
+            return {"is_git_repo": True, "branches": branches, "current_branch": current, "default_base_branch": default, **self.identity()}
         if operation == "status":
             prefix = (await run("rev-parse", "--show-prefix")).stdout.decode("utf-8").removesuffix("\n")
             result = parse_workspace_git_status((await run("status", "--porcelain=v1", "--branch", "-z", "--untracked-files=all", "--", ".")).stdout.decode("utf-8"))
@@ -305,8 +312,10 @@ class ExecutorEditorService(ExecutorWorkspaceService):
         if operation == "diff":
             target = await self.allowed(file) if file else root
             name = target.relative_to(root).as_posix()
-            head = await run("rev-parse", "--verify", "--quiet", "HEAD", allowed=(0, 1))
+            head = await run("rev-parse", "--verify", "--quiet", "--end-of-options", base_ref, allowed=(0, 1) if base_ref == "HEAD" else (0,))
             baseline = head.stdout.decode("ascii").strip() if head.returncode == 0 else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+            if base_ref != "HEAD":
+                baseline = (await run("merge-base", "HEAD", baseline)).stdout.decode("ascii").strip()
             changed = (await run("diff", "--relative", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", baseline, "--", name)).stdout.decode("utf-8").split("\0")
             allowed_paths = [value for value in changed if value and self.scope.resolve_access(root.joinpath(value).uri).can_read]
             patches = []

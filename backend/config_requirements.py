@@ -236,11 +236,11 @@ class ConfigRequirements:
     def apply_exact_to_config(self, config: Mapping[str, Any]) -> dict[str, Any]:
         effective = copy.deepcopy(dict(config))
         if self.feature_requirements:
-            raw_flags = effective.get("feature_flags")
+            raw_flags = effective.get("features")
             flags = dict(raw_flags) if isinstance(raw_flags, Mapping) else {}
             for name, required in self.feature_requirements.items():
                 flags[str(name)] = bool(required)
-            effective["feature_flags"] = flags
+            effective["features"] = flags
         return effective
 
     def ensure_approval_policy(self, policy: Any) -> None:

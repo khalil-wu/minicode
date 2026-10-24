@@ -65,6 +65,8 @@ describe("ChatContextCard", () => {
     useAppStore.setState({
       appMode: "cowork",
       contextCardCollapsed: false,
+      contextCardPinned: false,
+      defaultTerminalLocation: "bottom",
       conversationId: "conv-active",
       messages: [{
         id: "assistant-1",
@@ -158,14 +160,13 @@ describe("ChatContextCard", () => {
   it("renders a focused context summary with shared sources and compact workspace", () => {
     const { container } = render(<ChatContextCard />);
 
-    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "工作区上下文摘要" })).toBeTruthy();
     expect(container.querySelector(".mc-chat-context-card-header")?.textContent).toContain("MiniCode");
     expect(screen.queryByText("附件")).toBeNull();
     expect(screen.getByRole("region", { name: "来源摘要" })).toBeTruthy();
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
     expect(screen.getByText("Layout guide")).toBeTruthy();
     expect(screen.getByText("后台任务")).toBeTruthy();
-    expect(screen.getByRole("region", { name: "环境信息" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看工作区：MiniCode" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "查看工作区：MiniCode" }).title).toContain("codex/ui-polish");
     expect(container.querySelector('.brand-icon-remote')?.getAttribute('src')).toContain('https://www.google.com/s2/favicons?domain=');
@@ -174,10 +175,9 @@ describe("ChatContextCard", () => {
 
   it("closes the summary without leaving a second toolbar glyph in Cowork", () => {
     render(<ChatContextCard />);
-    fireEvent.click(screen.getByRole("button", { name: "摘要操作" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "收起上下文卡片" }));
+    fireEvent.keyDown(document, { key: "Escape" });
     expect(useAppStore.getState().contextCardCollapsed).toBe(true);
-    expect(screen.queryByRole("complementary", { name: "工作区上下文摘要" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "工作区上下文摘要" })).toBeNull();
     expect(screen.queryByRole("button", { name: "展开上下文卡片" })).toBeNull();
     act(() => useAppStore.getState().setContextCardCollapsed(false));
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
@@ -190,7 +190,7 @@ describe("ChatContextCard", () => {
     expect(screen.queryByRole("button", { name: "展开上下文卡片" })).toBeNull();
     act(() => useAppStore.getState().setContextCardCollapsed(false));
     expect(useAppStore.getState().contextCardCollapsed).toBe(false);
-    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" }).getAttribute("data-collapsed")).toBe("false");
+    expect(screen.getByRole("dialog", { name: "工作区上下文摘要" }).getAttribute("data-collapsed")).toBe("false");
     expect(screen.getByText("来源").closest(".mc-chat-context-card-body")?.hidden).toBe(false);
   });
 
@@ -581,17 +581,35 @@ describe("ChatContextCard", () => {
     expect(screen.getByText("1 个等待输入")).toBeTruthy();
   });
 
-  it("hides the summary while the right pane opens and restores it when the pane closes", () => {
+  it("keeps the summary and its real project actions beside another right pane", () => {
     useAppStore.setState({ rightPanelOpen: true, rightStackTab: "subagents" });
     render(<ChatContextCard />);
-    expect(screen.queryByRole("complementary", { name: "工作区上下文摘要" })).toBeNull();
-    expect(useAppStore.getState().contextCardCollapsed).toBe(false);
-    act(() => useAppStore.setState({ rightPanelOpen: false }));
-    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
+    expect(screen.getByRole("dialog", { name: "工作区上下文摘要" })).toBeTruthy();
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "摘要操作" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "收起上下文卡片" }));
-    expect(useAppStore.getState()).toMatchObject({ contextCardCollapsed: true, rightPanelOpen: false, rightStackTab: "subagents" });
+    expect(screen.getAllByRole("menuitem").map(item => item.textContent)).toEqual(["设置本地环境", "打开终端", "移动到工作树"]);
+    const terminal = screen.getByRole("menuitem", { name: "打开终端" });
+    fireEvent.pointerDown(terminal);
+    expect(screen.getByRole("dialog", { name: "工作区上下文摘要" })).toBeTruthy();
+    fireEvent.click(terminal);
+    expect(useAppStore.getState()).toMatchObject({ activeBottomTab: "terminal", dockCollapsed: false });
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(useAppStore.getState()).toMatchObject({ contextCardCollapsed: true, rightPanelOpen: true, rightStackTab: "subagents" });
+  });
+
+  it("retains the pinned choice while resizing between inline and popover with another pane open", () => {
+    act(() => useAppStore.getState().setContextCardPinned(true));
+    useAppStore.setState({ rightPanelOpen: true, rightStackTab: "files" });
+    const view = render(<ChatContextCard displayMode="shift" />);
+    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" }).getAttribute("data-surface")).toBe("inline");
+    view.rerender(<ChatContextCard displayMode="overlay" />);
+    expect(screen.getByRole("dialog", { name: "工作区上下文摘要" })).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ contextCardPinned: true, rightPanelOpen: true, rightStackTab: "files" });
+    view.rerender(<ChatContextCard displayMode="shift" />);
+    expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
+    expect(localStorage.getItem("minicode.summary-pinned")).toBe("1");
   });
 
   it("does not reopen a closed summary when a details pane opens or closes", () => {

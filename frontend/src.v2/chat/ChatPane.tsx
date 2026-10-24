@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { LoaderCircle } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { Composer } from "../composer/Composer";
@@ -11,8 +11,21 @@ import { ChatContextCard } from "./ChatContextCard";
 import { TurnChangeSummary } from "./TurnChangeSummary";
 import { useAppStore } from "../stores";
 import { TranscriptSearchContext } from "./TranscriptSearchContext";
+import { threadSummaryDisplayMode } from "./thread-summary-layout";
 
-export const ChatPane = () => {
+const ThreadSummary = ({ paneRef }: { paneRef: RefObject<HTMLDivElement> }) => {
+  const [displayMode, setDisplayMode] = useState(() => threadSummaryDisplayMode(window.innerWidth));
+  useEffect(() => {
+    const pane = paneRef.current!;
+    setDisplayMode(threadSummaryDisplayMode(pane.clientWidth));
+    const observer = new ResizeObserver(([entry]) => setDisplayMode(threadSummaryDisplayMode(entry.contentRect.width)));
+    observer.observe(pane);
+    return () => observer.disconnect();
+  }, [paneRef]);
+  return <ChatContextCard displayMode={displayMode} />;
+};
+
+export const ChatPane = memo(function ChatPane() {
   const { t: tr } = useI18n();
   const [showSearch, setShowSearch] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,7 +102,7 @@ export const ChatPane = () => {
             <span className="sr-only">{tr("正在打开会话…")}</span>
           </div>
         )}
-        <div className="chat-pane-layout" style={showLoading ? { display: "none" } : undefined}>
+        <div className="chat-pane-layout" aria-hidden={showLoading || undefined} style={showLoading ? { visibility: "hidden" } : undefined}>
         <div className="chat-pane-main">
           {showSearch && (
             <ChatSearch onClose={handleCloseSearch} containerRef={messageContainerRef} />
@@ -115,13 +128,11 @@ export const ChatPane = () => {
               {tr("正在恢复会话上下文、运行状态和工具记录…")}</div>
           )}
           <div ref={messageContainerRef} className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
-            {!showLoading && (
             <SafeBoundary fallback={<ChatErrorFallback />}>
               <TranscriptSearchContext.Provider value={showSearch}>
               <MessageList searchActive={showSearch} />
               </TranscriptSearchContext.Provider>
             </SafeBoundary>
-            )}
           </div>
           <div className="chat-pane-composer-region">
             <TurnChangeSummary />
@@ -130,8 +141,8 @@ export const ChatPane = () => {
             </SafeBoundary>
           </div>
         </div>
-        <ChatContextCard />
+        <ThreadSummary paneRef={containerRef} />
         </div>
     </div>
   );
-};
+});

@@ -317,7 +317,7 @@ def _definition_from_handler(
     warnings: list[str],
 ) -> HookDefinition | None:
     handler_type = str(raw_handler.get("type") or "command").strip().lower()
-    if handler_type not in {"command", "prompt", "agent", "http"}:
+    if handler_type not in {"command", "prompt", "agent", "http", "mcp_tool"}:
         warnings.append(f"Skipping unsupported {handler_type!r} hook in {source_path}")
         return None
     command = str(raw_handler.get("command") or "").strip()
@@ -328,6 +328,18 @@ def _definition_from_handler(
         ).strip()
     prompt = str(raw_handler.get("prompt") or "").strip()
     url = str(raw_handler.get("url") or "").strip()
+    server = str(raw_handler.get("server") or "").strip()
+    tool = str(raw_handler.get("tool") or "").strip()
+    mcp_input = raw_handler.get("input", {})
+    if handler_type == "mcp_tool" and (not server or not tool or not isinstance(mcp_input, Mapping)):
+        warnings.append(f"Skipping MCP tool hook in {source_path}: server, tool and object input are required")
+        return None
+    if handler_type == "mcp_tool" and event == "session_end":
+        warnings.append(f"Skipping MCP tool SessionEnd hook in {source_path}: SessionEnd MCP hooks are not supported")
+        return None
+    if event == "interrupt" and handler_type not in {"command", "mcp_tool"}:
+        warnings.append(f"Skipping {handler_type} Interrupt hook in {source_path}: Interrupt supports command and MCP tool hooks")
+        return None
     if handler_type == "command" and not command:
         warnings.append(f"Skipping empty command hook in {source_path}")
         return None
@@ -352,7 +364,7 @@ def _definition_from_handler(
             f"Clamping {event} hook timeout to {policy.max_timeout_seconds:g}s in {source_path}"
         )
         timeout = policy.max_timeout_seconds
-    async_rewake = _coerce_bool(raw_handler.get("async_rewake"), False)
+    async_rewake = handler_type != "mcp_tool" and _coerce_bool(raw_handler.get("async_rewake"), False)
     run_async = handler_type == "command" and (
         _coerce_bool(raw_handler.get("async"), False) or async_rewake
     )
@@ -409,6 +421,9 @@ def _definition_from_handler(
         command=command,
         prompt=prompt,
         url=url,
+        server=server,
+        tool=tool,
+        input=copy.deepcopy(dict(mcp_input)) if handler_type == "mcp_tool" else {},
         headers=headers,
         allowed_env_vars=allowed_env,
         env=env,
@@ -419,7 +434,7 @@ def _definition_from_handler(
         condition=str(raw_handler.get("if") or "").strip(),
         model=str(raw_handler.get("model") or "").strip(),
         shell=str(raw_handler.get("shell") or "").strip().lower(),
-        status_message=str(raw_handler.get("status_message") or "").strip(),
+        status_message=str(raw_handler.get("statusMessage") or raw_handler.get("status_message") or "").strip(),
         additional_context_limit=additional_limit,
         plugin_id=plugin_id,
         plugin_root=plugin_root,
@@ -449,7 +464,7 @@ def _deduplicate_entries(entries: list[HookDefinition]) -> list[HookDefinition]:
     last_by_key: dict[tuple[str, str, str, str], HookDefinition] = {}
     passthrough: list[HookDefinition] = []
     for entry in entries:
-        if entry.handler_type not in {"command", "prompt", "agent", "http"}:
+        if entry.handler_type not in {"command", "prompt", "agent", "http", "mcp_tool"}:
             passthrough.append(entry)
             continue
         namespace = (

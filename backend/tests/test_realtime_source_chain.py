@@ -113,7 +113,9 @@ def test_provider_capture_uses_original_selection_auth_proxy_and_never_publishes
         auth_header=True, proxy_mode="disabled", max_tokens=0)
     resolved = []
     def resolve(provider, model): resolved.append((provider, model)); return spec
-    runtime = SimpleNamespace(get_provider=lambda provider: SimpleNamespace(configured=True),
+    provider_reads = []
+    runtime = SimpleNamespace(get_provider=lambda provider: provider_reads.append(provider) or SimpleNamespace(configured=True),
+        get_available_snapshot=lambda: (SimpleNamespace(provider="original-provider"),),
         get_model=lambda provider, model: SimpleNamespace(api="openai-responses", base_url="https://original.example/v1"), resolve_adapter_spec=resolve)
     session = SimpleNamespace(conversation_repo=SimpleNamespace(get_conversation_summary=lambda _owner: SimpleNamespace(
         model_selection={"provider": "original-provider", "model": "original-model"})),
@@ -121,9 +123,10 @@ def test_provider_capture_uses_original_selection_auth_proxy_and_never_publishes
         _model_runtime_for_conversation=lambda _owner: runtime)
     monkeypatch.setattr(module, "load_config", lambda **_kwargs: config)
     public = capture_config(session, "original-thread", credentials=False).capabilities()
-    assert public["configured"] and not resolved
+    assert public["configured"] and not resolved and not provider_reads
     assert not any(secret in json.dumps(public) for secret in ("base-provider-secret", "original-provider-secret", "actual-header-secret"))
     captured = capture_config(session, "original-thread", credentials=True)
+    assert provider_reads == ["original-provider"]
     assert resolved == [("original-provider", "original-model")]
     assert captured.base_url == "https://original.example/v1" and captured.proxy_mode == "disabled"
     assert captured.headers == {"x-runtime-auth": "actual-header-secret", "Authorization": "Bearer original-provider-secret"}

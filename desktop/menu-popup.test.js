@@ -73,9 +73,9 @@ test("menu IPC accepts only its enum from the trusted main frame", async () => {
   for (const key of ["file", "edit", "view", "help"]) await popup(owned, key, { x: 20, path: "ignored" });
   assert.deepEqual(calls, ["file", "edit", "view", "help"]);
   const setState = handlers.get("minicode:menu:setState");
-  const state = { terminalEnabled: true, bottomPanelToggleEnabled: false, newProjectEnabled: true, editorFocused: false, accelerators: { terminal: "CommandOrControl+Shift+Y" }, acceleratorBindings: { terminal: ["CommandOrControl+Shift+Y"] }, shortcutOverrides: ["terminal"], shortcutRecording: false };
+  const state = { terminalEnabled: true, bottomPanelToggleEnabled: false, newProjectEnabled: true, editorFocused: false, accelerators: { terminal: "CommandOrControl+Shift+Y" }, acceleratorBindings: { terminal: ["CommandOrControl+Shift+Y"] }, shortcutOverrides: ["terminal"], shortcutRecording: false, workspaceRoot: "C:/OwnedProject" };
   assert.throws(() => setState({ sender: webContents, senderFrame: { url: mainFrame.url } }, state), { code: "ERR_UNTRUSTED_IPC_SENDER" });
-  for (const invalid of [null, {}, { ...state, editorFocused: 1 }, { ...state, extra: true }]) {
+  for (const invalid of [null, {}, { ...state, editorFocused: 1 }, { ...state, workspaceRoot: null }, { ...state, extra: true }]) {
     assert.throws(() => setState(owned, invalid), /capability fields/);
   }
   await setState(owned, state);

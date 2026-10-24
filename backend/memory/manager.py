@@ -12,6 +12,10 @@ class MemoryManager:
     def load_context(self) -> str:
         return self._file_memory.get_context()
 
+    @property
+    def file_memory(self) -> FileMemory:
+        return self._file_memory
+
     def read_file(self, filename: str) -> str | None:
         return self._file_memory.read_file(filename)
 

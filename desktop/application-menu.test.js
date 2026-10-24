@@ -73,12 +73,12 @@ test("Windows native menu follows the installed production groups without MiniCo
   assert.deepEqual(Array.from(titles(submenu(h, "file"))), ["New Chat", "New Temporary Chat", "New Project…", "---", "Close", "---", "Quit MiniCode"]);
   assert.equal(submenu(h, "file").find(item => item.label === "New Temporary Chat").enabled, false);
   assert.deepEqual(Array.from(titles(submenu(h, "edit"))), ["Undo", "Redo", "---", "Cut", "Copy", "Paste", "Delete", "---", "Select All", "---", "Settings…"]);
-  assert.deepEqual(Array.from(titles(submenu(h, "view"))), ["Toggle Sidebar", "Toggle Pinned Summary", "Toggle navigation panel", "Toggle Changes Panel", "---", "Find", "---", "Back", "Forward", "---", "Previous Sidebar Item", "Next Sidebar Item", "---", "Previous Tab", "Next Tab", "---", "Zoom In", "Zoom Out", "Actual Size", "---", "Toggle Full Screen"]);
-  assert.equal(submenu(h, "view").some(item => item.label === "Browser"), false);
-  const reload = submenu(h, "view").find(item => item.id === "minicode-shortcut-browserReload");
+  assert.deepEqual(Array.from(titles(submenu(h, "view"))), ["Toggle Sidebar", "Toggle Pinned Summary", "Toggle navigation panel", "Toggle Changes Panel", "Browser", "---", "Find", "---", "Back", "Forward", "---", "Previous Sidebar Item", "Next Sidebar Item", "---", "Previous Tab", "Next Tab", "---", "Zoom In", "Zoom Out", "Actual Size", "---", "Toggle Full Screen"]);
+  const browser = submenu(h, "view").find(item => item.label === "Browser");
+  assert.deepEqual(Array.from(titles(browser.submenu)), ["Open Browser Tab", "Focus Browser Address Bar", "Reload Browser Page"]);
+  const reload = browser.submenu.find(item => item.id === "minicode-shortcut-browserReload");
   assert.equal(reload.enabled, false);
-  assert.equal(reload.visible, false);
-  assert.equal(reload.acceleratorWorksWhenHidden, true);
+  assert.notEqual(reload.visible, false);
   assert.equal(submenu(h, "view").some(item => ["Reload", "Force Reload", "Toggle Developer Tools", "Toggle Context Panel"].includes(item.label)), false);
 });
 

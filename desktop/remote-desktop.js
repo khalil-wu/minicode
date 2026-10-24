@@ -171,6 +171,36 @@ class RemoteDesktop {
   }
 
   async close() { await Promise.all([...this.hosts.hosts.values()].map(host => this.closeHost(host))); }
+
+  personalizationHosts() {
+    return [{ id: "local", displayName: "Local", kind: "local" },
+      ...[...this.hosts.hosts.values()].filter(host => !host.closed && host.status === "connected").map(host => ({
+        id: host.connection.id, displayName: host.connection.displayName, kind: host.connection.kind,
+      }))];
+  }
+
+  async personalizationRequest(hostId, action, payload, localRuntime) {
+    const operations = {
+      "read-memory": ["GET", "/api/settings/memory"], "update-memory": ["PUT", "/api/settings/memory"],
+      "read-instructions": ["GET", "/api/settings/personalization"], "update-instructions": ["PUT", "/api/settings/personalization"],
+      "reset-memory": ["POST", "/api/settings/memory/reset"],
+    };
+    if (!Object.hasOwn(operations, action)) throw new Error("Unknown personalization operation");
+    const host = hostId === "local" ? null : this.hosts.hosts.get(hostId);
+    if (hostId !== "local" && (!host || host.closed || host.status !== "connected")) throw new Error("This personalization host is disconnected");
+    const runtime = host ? host.runtime() : localRuntime;
+    const [method, path] = operations[action];
+    const response = await fetch(new URL(path, runtime.apiBaseUrl), { method,
+      headers: { "X-MiniCode-Token": runtime.runtimeToken, "content-type": "application/json" },
+      ...method !== "GET" ? { body: JSON.stringify(payload) } : {}, signal: AbortSignal.timeout(30_000), cache: "no-store" });
+    if (!response.ok) {
+      const text = await response.text();
+      let detail;
+      try { detail = JSON.parse(text).detail; } catch { detail = text; }
+      throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    }
+    return response.json();
+  }
 }
 
 module.exports = { RemoteDesktop };

@@ -15,11 +15,11 @@ const frequencyOptions = (tr: Translate) => [
   ["monthly", tr("每月")], ["yearly", tr("每年")],
 ];
 
-function TimePicker({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function TimePicker({ value, onChange, timezoneLabel }: { value: string; onChange: (value: string) => void; timezoneLabel?: string }) {
   const { t: tr } = useI18n();
   const times = Array.from({ length: 96 }, (_, index) => `${String(Math.floor(index / 4)).padStart(2, "0")}:${String(index % 4 * 15).padStart(2, "0")}`);
   if (value && !times.includes(value)) times.push(value);
-  return <SelectMenu className="automation-select" value={value} onValueChange={onChange} ariaLabel={tr("运行时间")} align="end">
+  return <SelectMenu className="automation-select" value={value} selectedLabel={timezoneLabel ? `${timezoneLabel} ${value}` : undefined} onValueChange={onChange} ariaLabel={tr("运行时间")} align="end">
     {times.sort().map(time => <option key={time} value={time}>{time}</option>)}
   </SelectMenu>;
 }
@@ -33,13 +33,15 @@ function WeekdayPicker({ value, onChange }: { value: AutomationWeekday[]; onChan
   </div>;
 }
 
-export function AutomationFrequencySection({ draft, custom, onChange, onCustomChange, onRuleSave, afterScheduleRows }: {
+export function AutomationFrequencySection({ draft, custom, onChange, onCustomChange, onRuleSave, afterScheduleRows, variant = "panel", timezoneLabel }: {
   draft: AutomationScheduleDraft;
   custom: CustomScheduleDraft | null;
   onChange: (draft: AutomationScheduleDraft) => void;
   onCustomChange: (draft: CustomScheduleDraft) => void;
   onRuleSave: (value: string) => void;
   afterScheduleRows?: ReactNode;
+  variant?: "panel" | "dialog";
+  timezoneLabel?: string;
 }) {
   const { t: tr } = useI18n();
   const [unit, setUnit] = useState<"minutes" | "hours">(() => Number(draft.intervalMinutes) % 60 === 0 ? "hours" : "minutes");
@@ -49,14 +51,14 @@ export function AutomationFrequencySection({ draft, custom, onChange, onCustomCh
   const update = (patch: Partial<AutomationScheduleDraft>) => onChange({ ...draft, ...patch });
   const updateCustom = (patch: Partial<CustomScheduleDraft>) => onCustomChange({ ...custom!, ...patch });
   return <section className="automation-section">
-    <div className="automation-section-heading"><h3>{tr("频率")}</h3>
+    {variant === "panel" && <div className="automation-section-heading"><h3>{tr("频率")}</h3>
       {draft.mode === "custom" && <button type="button" className="automation-rule-button" onClick={() => setRuleOpen(true)} aria-label={tr("编辑计划规则")} title={tr("编辑计划规则")}>
         <span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/automation-edit-rule.svg)` }} />
       </button>}
-    </div>
+    </div>}
     <div className="automation-detail-row"><span>{tr("重复")}</span>
       <SelectMenu className="automation-select" value={draft.mode} onValueChange={mode => update({ mode: mode as AutomationScheduleMode })} ariaLabel={tr("重复计划")} align="end">
-        <option value="hourly">{tr("间隔")}</option><option value="daily">{tr("每天")}</option><option value="weekdays">{tr("工作日")}</option>
+        {(variant === "panel" || draft.mode === "hourly") && <option value="hourly">{tr("间隔")}</option>}<option value="daily">{tr("每天")}</option><option value="weekdays">{tr("工作日")}</option>
         <option value="weekly">{tr("每周")}</option><option value="custom">{tr("自定义")}</option>
       </SelectMenu>
     </div>
@@ -73,7 +75,7 @@ export function AutomationFrequencySection({ draft, custom, onChange, onCustomCh
         {AUTOMATION_WEEKDAYS.map((day, index) => <option key={day} value={day}>{labels[index]}</option>)}
       </SelectMenu>
     </div>}
-    {["daily", "weekdays", "weekly"].includes(draft.mode) && <div className="automation-detail-row"><span>{tr("时间")}</span><TimePicker value={draft.time} onChange={time => update({ time })} /></div>}
+    {["daily", "weekdays", "weekly"].includes(draft.mode) && <div className="automation-detail-row"><span>{tr("时间")}</span><TimePicker value={draft.time} timezoneLabel={timezoneLabel} onChange={time => update({ time })} /></div>}
     {draft.mode === "custom" && <>
       {custom && <>
         <div className="automation-detail-row"><span>{tr("重复单位")}</span>
@@ -95,7 +97,7 @@ export function AutomationFrequencySection({ draft, custom, onChange, onCustomCh
         </div>}
         {custom.frequency === "hourly" ? <div className="automation-detail-row"><span>{tr("整点后的分钟")}</span><input className="automation-number" type="number" min="0" max="59" step="1"
           value={custom.minute} aria-label={tr("整点后的分钟")} onChange={event => updateCustom({ minute: event.target.value })} /></div>
-          : <div className="automation-detail-row"><span>{tr("开始时间")}</span><TimePicker value={custom.time} onChange={time => updateCustom({ time })} /></div>}
+          : <div className="automation-detail-row"><span>{tr("开始时间")}</span><TimePicker value={custom.time} timezoneLabel={timezoneLabel} onChange={time => updateCustom({ time })} /></div>}
       </>}
     </>}
     {afterScheduleRows}

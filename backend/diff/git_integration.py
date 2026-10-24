@@ -274,44 +274,44 @@ async def is_git_worktree(workspace_root: str, *, service=None) -> bool:
     return result.strip() == "true"
 
 
-async def get_working_tree_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False) -> StructuredDiff:
+async def get_working_tree_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False, relative=True) -> StructuredDiff:
     # Combined conflict diffs suppress patches when --raw is present. Compare
     # unresolved files with the index's stage 2 to retain their working content.
     flags = await _diff_filter_flags(workspace_root, service=service)
     raw = await _read_git(
-        workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--ours", "--relative", "--raw", "--no-abbrev", "--numstat", "-z",
+        workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--ours", *(["--relative"] if relative else []), "--raw", "--no-abbrev", "--numstat", "-z",
         "--patch", "--full-index", *(["--binary"] if binary else []), "--find-renames", *(["--ignore-all-space"] if hide_whitespace else []), "--no-color",
         "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service,
     )
     return _parse_diff_output(raw, hide_whitespace=hide_whitespace)
 
 
-async def get_staged_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False) -> StructuredDiff:
+async def get_staged_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False, relative=True) -> StructuredDiff:
     flags = await _diff_filter_flags(workspace_root, service=service)
     raw = await _read_git(
-        workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--cached", "--relative", "--raw", "--no-abbrev", "--numstat", "-z",
+        workspace_root, *_GIT_DIFF_CONFIG_FLAGS, *flags, "diff", "--cached", *(["--relative"] if relative else []), "--raw", "--no-abbrev", "--numstat", "-z",
         "--patch", "--full-index", *(["--binary"] if binary else []), "--find-renames", *(["--ignore-all-space"] if hide_whitespace else []), "--no-color",
         "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service,
     )
     return _parse_diff_output(raw, hide_whitespace=hide_whitespace)
 
 
-async def get_uncommitted_diff(workspace_root: str, *, service=None, hide_whitespace=False) -> StructuredDiff:
+async def get_uncommitted_diff(workspace_root: str, *, service=None, hide_whitespace=False, binary=False, relative=True) -> StructuredDiff:
     # Source L4/I4 compares this source with HEAD (or its empty tree before
     # the first commit), independently from the index->disk unstaged source.
     head = await _read_git(workspace_root, "rev-parse", "--verify", "--quiet", "HEAD",
         service=service, allowed_exit_codes=(0, 1))
     baseline = "HEAD" if head.strip() else "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
     return await get_comparison_diff(workspace_root, [baseline], service=service,
-        hide_whitespace=hide_whitespace, worktree=True, include_unmerged=True)
+        hide_whitespace=hide_whitespace, worktree=True, include_unmerged=True, binary=binary, relative=relative)
 
 
 async def get_comparison_diff(workspace_root: str, comparison: list[str], *, service=None,
-                              hide_whitespace=False, worktree=False, include_unmerged=False) -> StructuredDiff:
+                              hide_whitespace=False, worktree=False, include_unmerged=False, binary=False, relative=True) -> StructuredDiff:
     baseline = comparison[0]
     flags = await _diff_filter_flags(workspace_root, service=service)
     common = [*_GIT_DIFF_CONFIG_FLAGS, *flags, "diff"]
-    options = ["--relative", "--raw", "--no-abbrev", "--numstat", "-z", "--patch", "--full-index",
+    options = [*(["--relative"] if relative else []), "--raw", "--no-abbrev", "--numstat", "-z", "--patch", "--full-index", *(["--binary"] if binary else []),
         "--find-renames", *(["--ignore-all-space"] if hide_whitespace else []), "--no-color",
         "--submodule=short", *_GIT_DIFF_SAFETY_FLAGS]
     raw = await _read_git(workspace_root, *common, *comparison, *options, "--", ".", service=service)
@@ -323,7 +323,7 @@ async def get_comparison_diff(workspace_root: str, comparison: list[str], *, ser
     # adding a staged patch to an unstaged patch.
     changed = {file.path: file for file in result.files if file.old_path is None}
     if worktree and changed:
-        staged = await _read_git(workspace_root, *common, "--cached", "--relative", "--find-renames",
+        staged = await _read_git(workspace_root, *common, "--cached", *(["--relative"] if relative else []), "--find-renames",
             "--name-status", "-z", "--no-color", *_GIT_DIFF_SAFETY_FLAGS, "--", ".", service=service)
         records = iter(staged.rstrip("\0").split("\0") if staged else ())
         renames = []
@@ -369,7 +369,7 @@ def _rename_patch(patch: str, old_path: str, new_path: str) -> str:
     return re.sub(r"^\+\+\+ .*$", lambda _: f"+++ {new}", patch, count=1, flags=re.MULTILINE)
 
 
-async def get_untracked_file_diffs(workspace_root: str, paths: list[str], *, service=None, binary=False) -> list[FileDiff]:
+async def get_untracked_file_diffs(workspace_root: str, paths: list[str], *, service=None, binary=False, path_prefix="") -> list[FileDiff]:
     flags = await _diff_filter_flags(workspace_root, service=service)
     files = []
     for path in paths:
@@ -389,7 +389,17 @@ async def get_untracked_file_diffs(workspace_root: str, paths: list[str], *, ser
             "--numstat", "-z", "--patch", "--full-index", *(["--binary"] if binary else []), "--no-color", *_GIT_DIFF_SAFETY_FLAGS,
             "--", "/dev/null", path, service=service, allowed_exit_codes=(0, 1))
         files.extend(_parse_diff_output(raw).files)
+    if path_prefix:
+        files = [_prefix_added_file(file, path_prefix) for file in files]
     return files
+
+
+def _prefix_added_file(file: FileDiff, prefix: str) -> FileDiff:
+    path = prefix + file.path
+    old, new = _quote_patch_path(f"a/{path}"), _quote_patch_path(f"b/{path}")
+    patch = _DIFF_HEADER_RE.sub(lambda _: f"diff --git {old} {new}", file.patch, count=1)
+    patch = re.sub(r"^\+\+\+ .*$", lambda _: f"+++ {new}", patch, count=1, flags=re.MULTILINE)
+    return replace(file, path=path, patch=patch)
 
 
 def _quote_patch_path(path: str) -> str:

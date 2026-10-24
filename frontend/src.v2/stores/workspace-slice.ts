@@ -10,6 +10,7 @@ import {
   LEFT_SIDEBAR_MIN_WIDTH,
   RIGHT_SIDEBAR_DEFAULT_WIDTH,
   writeLS,
+  readLS,
   normalizePanelSlots,
   defaultPanelSlots,
   persistPanelSlots,
@@ -18,6 +19,10 @@ import {
   uniqueMessageId,
 } from "./shared-helpers";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
+import { workspaceRequestPath } from "../protocol/workspace-request-path";
+import { draftWindowOwnerId } from "./draft-window-owner";
+import type { WorkspaceFileTab } from "./types";
+import { emptyConversationWorkbenchState } from "./ui-slice";
 
 const normalizeEditorOpenPath = (path: string, workingDirectory = ""): string =>
   normalizeEditorPath(path, workingDirectory);
@@ -45,8 +50,64 @@ const resolveLocalOpenPath = (path: string, workingDirectory: string): string =>
 
 export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice> = (set, get) => {
   const layout = loadInitialLayout();
+  const filesStorageKey = `minicode.workspaceFiles.${draftWindowOwnerId()}`;
+  const saveFiles = (tabs: WorkspaceFileTab[]) => { writeLS(filesStorageKey, JSON.stringify(tabs)); return tabs; };
   return {
     ...layout,
+    initializeWorkspaceView: (conversationId, fullView) => set(state => state.conversationWorkbenchStates[conversationId] ? state : ({
+      conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+        [conversationId]: { ...emptyConversationWorkbenchState(), rightPanelExpanded: fullView } },
+    })),
+    workspaceFileTabs: JSON.parse(readLS(filesStorageKey) ?? "[]") as WorkspaceFileTab[],
+    fileBrowserRoots: {},
+    pendingWorkspaceFileTabId: null,
+    openWorkspaceFileTab: (owner, path, title, line) => {
+      const relativePath = workspaceRequestPath(path, owner.browserRoot).replaceAll("\\", "/");
+      const current = get().workspaceFileTabs.find(tab => tab.owner.scopeId === owner.scopeId
+        && tab.owner.conversationId === owner.conversationId && tab.owner.environmentId === owner.environmentId
+        && workspaceRootsEqual(tab.owner.executionCwd, owner.executionCwd)
+        && workspaceRootsEqual(tab.owner.browserRoot, owner.browserRoot) && tab.path === relativePath);
+      const id = current?.id ?? uniqueMessageId("file");
+      set(state => ({ workspaceFileTabs: saveFiles(current
+        ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, open: true, ...(line ? { line } : {}) } : tab)
+        : [...state.workspaceFileTabs, { id, owner, path: relativePath, title: title ?? relativePath.split("/").at(-1)!, open: true, pinned: false, pane: "right", line }]) }));
+      get().activateWorkspaceFileTab(id);
+      return id;
+    },
+    activateWorkspaceFileTab: id => {
+      const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, open: true } : value)) }));
+      const layoutConversationId = tab.owner.scopeId.startsWith("conversation:") ? tab.owner.scopeId.slice(13) : tab.owner.conversationId;
+      if (layoutConversationId && layoutConversationId !== get().conversationId) {
+        set({ pendingWorkspaceFileTabId: id });
+        get().requestConversationSwitch(layoutConversationId);
+      } else if (tab.pane === "left") {
+        get().addPanel({ id: `workspace-file:${id}`, kind: "file", fileTabId: id, label: tab.title });
+        get().movePanel(`workspace-file:${id}`, -1);
+      }
+      else get().setRightStackTab(`file:${id}`);
+    },
+    closeWorkspaceFileTab: id => {
+      const tab = get().workspaceFileTabs.find(value => value.id === id)!;
+      const next = get().workspaceFileTabs.find(value => value.id !== id && value.open && value.pane === "left" && value.owner.scopeId === tab.owner.scopeId);
+      const wasFocused = get().panelSlots.some(slot => slot.fileTabId === id && slot.focused);
+      get().removePanel(`workspace-file:${id}`);
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.flatMap(tab => tab.id !== id ? [tab] : tab.pinned ? [{ ...tab, open: false }] : [])) }));
+      if (wasFocused && next) get().activateWorkspaceFileTab(next.id);
+    },
+    pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned } : tab)) })),
+    moveWorkspaceFileTab: (id, pane) => {
+      const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, pane, open: true } : value)) }));
+      if (pane === "left") {
+        get().addPanel({ id: `workspace-file:${id}`, kind: "file", fileTabId: id, label: tab.title });
+        get().movePanel(`workspace-file:${id}`, -1);
+      } else {
+        get().removePanel(`workspace-file:${id}`);
+        get().setRightStackTab(`file:${id}`);
+      }
+    },
+    setFileBrowserRoot: (scopeId, path) => set(state => ({ fileBrowserRoots: { ...state.fileBrowserRoots, [scopeId]: path } })),
     rightPanelExpanded: false,
     gitReviewRequest: null,
     sideChatOpen: false,
@@ -180,8 +241,9 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           return;
         }
       set((s) => {
-        if (s.panelSlots.some((p) => p.kind === canonicalSlot.kind && canonicalSlot.kind !== "chat")) {
-          const next = normalizePanelSlots(s.panelSlots.map((p) => ({ ...p, focused: p.kind === canonicalSlot.kind })));
+        if (s.panelSlots.some((p) => (canonicalSlot.kind === "file" ? p.id === canonicalSlot.id : p.kind === canonicalSlot.kind && canonicalSlot.kind !== "chat"))) {
+          const next = normalizePanelSlots(s.panelSlots.map((p) => p.kind === canonicalSlot.kind
+            && (canonicalSlot.kind !== "file" || p.id === canonicalSlot.id) ? { ...p, ...canonicalSlot, focused: true } : { ...p, focused: false }));
           persistPanelSlots(next);
           return { panelSlots: next };
         }
@@ -189,8 +251,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
           ...s.panelSlots.map((p) => ({ ...p, focused: false, maximized: false })),
           { ...canonicalSlot, size: canonicalSlot.size ?? 1, focused: true, maximized: false },
         ];
-        if (next.length > 2) {
-          const firstNonChat = next.findIndex((p) => p.kind !== "chat");
+        if (canonicalSlot.kind !== "file" && next.filter(p => p.kind !== "file").length > 2) {
+          const firstNonChat = next.findIndex((p) => p.kind !== "chat" && p.kind !== "file");
           if (firstNonChat >= 0) next.splice(firstNonChat, 1);
           else next = next.slice(-2);
         }
@@ -361,7 +423,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         const requestId = uniqueMessageId("open");
         const editorLabel = label ?? normalizedPath.split(/[/\\]/).pop() ?? normalizedPath;
         const editorSlot = s.panelSlots.find((p) => p.kind === "editor");
-        const baseSlots = s.panelSlots.filter((p) => p.kind === "chat" || p.kind === "editor");
+        const baseSlots = s.panelSlots.filter((p) => p.kind === "chat" || p.kind === "editor" || p.kind === "file");
         const line = Number.isFinite(target?.line) && Number(target?.line) > 0
           ? Math.floor(Number(target?.line))
           : undefined;

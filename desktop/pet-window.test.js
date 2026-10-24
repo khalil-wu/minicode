@@ -10,22 +10,43 @@ async function renderer(t, tasks = [], overrides = {}, onAction) {
   const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "pet-window.html"), "utf8"), { runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const actions = [];
+  const spriteRequests = [];
   let changed;
   const state = { pets: [{ id: "codex", displayName: "Codex", spriteVersionNumber: 2, updatedAt: 0 }], selectedPetId: "codex", size: 112, petVisible: true, miniOpen: true,
     activity: { running: false, waiting: false, failed: false, review: false, tasks }, reducedMotion: true, locale: "en-US", animations, layout: { noticeHeight: tasks.length * 76 }, ...overrides };
   dom.window.matchMedia = () => ({ matches: false, addEventListener() {} });
-  dom.window.miniPet = { getState: async () => state, getSprite: async () => "data:image/webp;base64,fixture", act: async (action, payload) => { actions.push({ action, payload }); return onAction?.(action, payload); }, onState: callback => { changed = callback; }, onError() {} };
+  dom.window.miniPet = { getState: async () => state, getSprite: async id => { spriteRequests.push(id); return "data:image/webp;base64,fixture"; }, act: async (action, payload) => { actions.push({ action, payload }); return onAction?.(action, payload); }, onState: callback => { changed = callback; }, onError() {} };
   dom.window.eval(fs.readFileSync(path.join(__dirname, "pet-window.js"), "utf8"));
   const flush = () => new Promise(resolve => setImmediate(resolve));
   await flush();
   const pet = dom.window.document.getElementById("pet");
-  pet.setPointerCapture = () => {}; pet.hasPointerCapture = () => false;
-  function pointer(type, x, y) {
+  const bar = dom.window.document.getElementById("mini-bar");
+  for (const element of [pet, bar]) { element.setPointerCapture = () => {}; element.hasPointerCapture = () => false; }
+  function pointer(type, x, y, element = pet) {
     const event = new dom.window.MouseEvent(type, { button: 0, screenX: x, screenY: y, bubbles: true });
-    Object.defineProperty(event, "pointerId", { value: 1 }); pet.dispatchEvent(event);
+    Object.defineProperty(event, "pointerId", { value: 1 }); element.dispatchEvent(event);
   }
-  return { dom, pet, actions, state, pointer, changed: next => changed(next), flush };
+  return { dom, pet, bar, actions, spriteRequests, state, pointer, changed: next => changed(next), flush };
 }
+
+test("None renders a live Mini bar and actual notices without requesting a sprite", async t => {
+  const h = await renderer(t, [{ id: "actual-task", title: "Actual task", status: "running" }], { selectedPetId: null });
+  assert.equal(h.pet.hidden, true); assert.equal(h.bar.hidden, false);
+  assert.deepEqual(h.spriteRequests, []);
+  assert.equal(h.dom.window.document.getElementById("error").hidden, true);
+  assert.equal(h.dom.window.document.getElementById("mini-count").textContent, "1");
+  assert.equal(h.dom.window.document.querySelector(".notice-title").textContent, "Actual task");
+  h.dom.window.document.getElementById("mini-open").click();
+  h.dom.window.document.getElementById("mini-menu").click(); await h.flush();
+  assert.deepEqual(h.actions.filter(item => ["open-main", "context-menu"].includes(item.action)).map(item => item.action), ["open-main", "context-menu"]);
+  h.actions.length = 0;
+  h.pointer("pointerdown", 100, 100, h.bar); h.pointer("pointermove", 80, 100, h.bar); h.pointer("pointerup", 80, 100, h.bar); await h.flush();
+  assert.deepEqual(h.actions.filter(item => item.action !== "element-size-changed").map(item => item.action), ["drag-start", "drag-move", "drag-end"]);
+  h.changed({ ...h.state, selectedPetId: "codex" }); await h.flush();
+  assert.equal(h.bar.hidden, true); assert.equal(h.pet.hidden, false); assert.deepEqual(h.spriteRequests, ["codex"]);
+  h.changed({ ...h.state, selectedPetId: null }); await h.flush();
+  assert.equal(h.bar.hidden, false); assert.equal(h.pet.hidden, true); assert.deepEqual(h.spriteRequests, ["codex"]);
+});
 
 test("the Mini attention card opens the exact actual task and treats its title as text", async t => {
   const h = await renderer(t, [{ id: "real-approval", title: "<img src=x> Actual approval", status: "waiting" }]);

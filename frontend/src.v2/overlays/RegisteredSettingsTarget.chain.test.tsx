@@ -21,7 +21,7 @@ const hook = { key: "catalog-owned-plugin-key", event: "stop", handler_type: "co
   enabled: true, is_managed: false, current_hash: "registered-hash", trust_status: "trusted", timeout_seconds: null };
 const configFields = { approval_policy: "on-request", sandbox_mode: "workspace-write",
   network_access: false, web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
-const config = { path: "C:/Profile/settings.json", default_scope_id: "user", ...configFields, effective: configFields, origins: {}, requirements: {},
+const config = { path: "C:/Profile/settings.json", default_scope_id: "user", ...configFields, effective: configFields, origins: {}, requirements: {}, warnings: [],
   scopes: [{ id: "user", kind: "user", path: "C:/Profile/settings.json", version: "user-v1", values: {}, readonly: false,
     workspace_root: null, disabled_reason: null,
     source: { type: "user", display: "user (C:/Profile/settings.json)" } }] };

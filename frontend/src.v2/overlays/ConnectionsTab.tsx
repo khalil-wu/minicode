@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { Info, Laptop, Monitor, MoreHorizontal, Pencil, Plus, RefreshCw, Server, X } from "lucide-react";
-import { desktop, type RemoteDesktopConnection } from "../desktop/runtime";
+import { desktop, type RemoteDesktopConnection, type RemoteConnectionColor } from "../desktop/runtime";
+import { PROJECT_COLORS } from "../lib/project-appearance";
+import { useAppStore } from "../stores";
 import { useI18n } from "../i18n";
 import { ContextMenu } from "../components/ContextMenu";
 import { SelectMenu } from "../components/SelectMenu";
@@ -97,7 +99,7 @@ export const ConnectionsTab = ({ active }: { active: boolean }) => {
         {kind === "ssh" && <button type="button" className="settings-action-button" data-primary="true" disabled={adding} aria-busy={discovering} onClick={add}>{tr("添加")}</button>}</div>}
       {[
       ...visible.map(connection => ({ displayName: connection.displayName, row: <div className="settings-row remote-connection-row" key={`connection:${connection.id}`}>
-        <Monitor size={20} aria-hidden="true" /><div className="settings-row-copy"><div className="settings-row-title">{connection.displayName}</div>
+        <ConnectionMarker color={connection.color} /><div className="settings-row-copy"><div className="settings-row-title">{connection.displayName}</div>
           <div className="settings-row-description" title={connection.sshHost || connection.distribution}>{connection.kind === "ssh" ? `${connection.sshHost}${connection.sshPort ? `:${connection.sshPort}` : ""}` : connection.distribution}</div></div>
         <div className="settings-row-control remote-connection-actions"><span className="remote-connection-status">{connection.status === "connected" ? tr("已连接") : connection.status === "connecting" ? tr("正在连接") : tr("未连接")}</span>
           <button type="button" className="settings-action-button" disabled={busy === connection.id || connection.status === "connecting"} onClick={() => void operate(connection.id, () => api.open(connection.id))}>{busy === connection.id ? tr("正在连接") : connection.status === "connected" ? tr("打开") : tr("连接")}</button>
@@ -148,6 +150,7 @@ function ConnectionDetails({ connection, editDisabled, onClose, onEdit }: { conn
         {connection.kind === "ssh" && <button type="button" className="mc-icon-btn" aria-label={tr("编辑连接")} disabled={editDisabled} onClick={onEdit}><Pencil size={16} /></button>}
         <button type="button" className="mc-icon-btn" aria-label={tr("关闭")} onClick={onClose}><X size={16} /></button>
       </div></header>
+      <div className="remote-connection-details-marker"><ConnectionMarker color={connection.color} size={28} /></div>
       <div className="remote-connection-details-kind"><span className="remote-connection-details-status" data-connected={connection.status === "connected"} role="img" aria-label={status} title={status} />{connection.kind === "wsl" ? "WSL" : "SSH"}</div>
       <dl className="remote-connection-details-fields">{fields.map(({ label, value }) => <div className="remote-connection-detail-row" key={label}>
         <dt>{label}</dt><dd>{value == null ? <span>—</span> : <button type="button" className="remote-connection-detail-value" aria-label={tr("复制 {label}", { label })} title={value} onClick={() => {
@@ -181,18 +184,42 @@ function SshDiscovery({ aliases, selectedAliases, refreshing, saving, error, onC
   </div>, document.body);
 }
 
+function ConnectionMarker({ color, size = 20 }: { color?: RemoteConnectionColor | null; size?: number }) {
+  const variant = useAppStore(state => state.resolvedTheme);
+  return <Monitor size={size} aria-hidden="true" style={color ? { color: PROJECT_COLORS[color][variant === "light" ? 0 : 1] } : undefined} />;
+}
+
+function ConnectionColorPicker({ color, disabled, onChange }: { color?: RemoteConnectionColor | null; disabled: boolean; onChange(value: RemoteConnectionColor | null): void }) {
+  const { t: tr } = useI18n();
+  const variant = useAppStore(state => state.resolvedTheme);
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  const colors = ["black", "red", "orange", "yellow", "green", "blue", "purple", "pink"] as const;
+  const labels = { black: tr("默认"), red: tr("红色"), orange: tr("橙色"), yellow: tr("黄色"), green: tr("绿色"), blue: tr("蓝色"), purple: tr("紫色"), pink: tr("粉色") };
+  return <>
+    <button type="button" className="settings-action-button remote-connection-color-trigger" aria-label={tr("颜色")} aria-haspopup="menu" aria-expanded={Boolean(anchor)} disabled={disabled}
+      onClick={event => setAnchor(anchor ? null : event.currentTarget)}><ConnectionMarker color={color} /></button>
+    {anchor && <ContextMenu anchor={anchor} position={{ x: 0, y: 0 }} onClose={() => setAnchor(null)} ariaLabel={tr("颜色")} className="remote-connection-color-menu"
+      items={colors.map(value => ({ label: labels[value], checkType: "radio", checked: (color ?? "black") === value,
+        iconWidth: 24, icon: <span className="remote-connection-color-swatch" data-selected={(color ?? "black") === value}
+          style={{ backgroundColor: PROJECT_COLORS[value][variant === "light" ? 0 : 1] }} />,
+        onClick: () => onChange(value === "black" ? null : value) }))} />}
+  </>;
+}
+
 function ConnectionEditor({ draft, saving, error, onClose, onSave }: { draft: RemoteDesktopConnection; saving: boolean; error: string; onClose(): void; onSave(value: RemoteDesktopConnection): void }) {
   const { t: tr } = useI18n();
   const discovered = draft.source === "discovered";
   const [name, setName] = useState(draft.displayName), [host, setHost] = useState((discovered ? draft.alias : draft.sshHost) || ""), [port, setPort] = useState(draft.sshPort?.toString() || "");
   const [identity, setIdentity] = useState(draft.identity || ""), [auth, setAuth] = useState(draft.identity ? "identity" : "default");
+  const [color, setColor] = useState(draft.color);
   const focus = useFocusTrap(true);
   return createPortal(<div ref={focus} className="mc-dialog-backdrop remote-connection-backdrop" data-dialog-variant="default" onMouseDown={event => { if (event.target === event.currentTarget && !saving) onClose(); }}>
     <form className="mc-dialog-panel remote-connection-dialog" role="dialog" aria-modal="true" aria-label={tr("SSH 连接")} onKeyDown={event => { if (event.key === "Escape" && !saving) { event.stopPropagation(); onClose(); } }} onSubmit={event => {
-      event.preventDefault(); onSave(discovered ? { ...draft, displayName: name.trim() } : { ...draft, source: "manual", alias: undefined, displayName: name.trim(), sshHost: host.trim(), sshPort: port ? Number(port) : null, identity: auth === "identity" ? identity.trim() : null });
+      event.preventDefault(); onSave(discovered ? { ...draft, displayName: name.trim(), color } : { ...draft, source: "manual", alias: undefined, displayName: name.trim(), color, sshHost: host.trim(), sshPort: port ? Number(port) : null, identity: auth === "identity" ? identity.trim() : null });
     }}>
       <header><h3>{tr("SSH 连接")}</h3><button type="button" className="mc-icon-btn" aria-label={tr("关闭")} disabled={saving} onClick={onClose}><X size={16} /></button></header>
       <label>{tr("显示名称")}<input required autoFocus disabled={saving} value={name} onChange={event => setName(event.target.value)} /></label>
+      <div className="remote-connection-color-row"><span>{tr("颜色")}</span><ConnectionColorPicker color={color} disabled={saving} onChange={setColor} /></div>
       <div className="remote-connection-host-fields"><label>{tr(discovered ? "SSH 别名" : "主机名或 SSH 别名")}<input required disabled={saving || discovered} value={host} onChange={event => setHost(event.target.value)} placeholder="user@hostname" /></label>
         {!discovered && <label>{tr("端口")}<input type="number" min={1} max={65535} disabled={saving} value={port} placeholder="22" onChange={event => setPort(event.target.value)} /></label>}</div>
       {!discovered && <label>{tr("身份验证")}<SelectMenu value={auth} onValueChange={setAuth} disabled={saving} ariaLabel={tr("身份验证")} className="settings-select"><option value="default">{tr("默认 SSH 配置")}</option><option value="identity">{tr("身份文件")}</option></SelectMenu></label>}

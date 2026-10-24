@@ -40,10 +40,16 @@ import configurationEn from "./configuration.en.json";
 import configurationZh from "./configuration.zh-CN.json";
 import automationsEn from "./automations.en.json";
 import automationsZh from "./automations.zh-CN.json";
+import filesEn from "./files.en.json";
+import filesZh from "./files.zh-CN.json";
+import alignmentEn from "./alignment.en.json";
+import alignmentZh from "./alignment.zh-CN.json";
+import personalizationEn from "./personalization.en.json";
+import personalizationZh from "./personalization.zh-CN.json";
 import { resolveLocale, type Locale } from "./locale";
 
-const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn, ...appearanceEn, ...gitEn, ...navigationEn, ...projectsEn, ...goalsEn, ...localEnvironmentsEn, ...petsEn, ...pluginMarketplacesEn, ...generalExtraEn, ...appearanceSourceEn, ...voiceEn, ...computerUseEn, ...configurationEn, ...automationsEn };
-const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh, ...appearanceZh, ...gitZh, ...navigationZh, ...projectsZh, ...goalsZh, ...localEnvironmentsZh, ...petsZh, ...pluginMarketplacesZh, ...generalExtraZh, ...appearanceSourceZh, ...voiceZh, ...computerUseZh, ...configurationZh, ...automationsZh };
+const en = { ...coreEn, ...desktopEn, ...processEn, ...rootEn, ...guardianEn, ...connectionsEn, ...appearanceEn, ...gitEn, ...navigationEn, ...projectsEn, ...goalsEn, ...localEnvironmentsEn, ...petsEn, ...pluginMarketplacesEn, ...generalExtraEn, ...appearanceSourceEn, ...voiceEn, ...computerUseEn, ...configurationEn, ...automationsEn, ...filesEn, ...alignmentEn, ...personalizationEn };
+const zh = { ...coreZh, ...desktopZh, ...processZh, ...rootZh, ...guardianZh, ...connectionsZh, ...appearanceZh, ...gitZh, ...navigationZh, ...projectsZh, ...goalsZh, ...localEnvironmentsZh, ...petsZh, ...pluginMarketplacesZh, ...generalExtraZh, ...appearanceSourceZh, ...voiceZh, ...computerUseZh, ...configurationZh, ...automationsZh, ...filesZh, ...alignmentZh, ...personalizationZh };
 export type TranslationKey = keyof typeof en;
 export type TranslationValues = Record<string, string | number>;
 export type Translate = (key: TranslationKey, values?: TranslationValues) => string;

@@ -6,7 +6,6 @@ import {
   FileText,
   MoreHorizontal,
   ListChecks,
-  PanelRightOpen,
   Plus,
   Terminal,
 } from "../lib/icons";
@@ -44,12 +43,15 @@ import {
   withPreviewCacheBust,
 } from "../lib/artifact-resource";
 import { useAppStore } from "../stores";
-import type { ChatMessage, RightStackTab } from "../stores/types";
+import type { ChatMessage } from "../stores/types";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { openWebTarget } from "./openWebTarget";
 import { useTurnChanges } from "./useTurnChanges";
 import { collectConversationSources, markdownSourceLabelKey } from "./conversationSources";
+import { threadSummaryDisplayMode } from "./thread-summary-layout";
+import { openSettings } from "../lib/settings-navigation";
+import { handoffConversationWorktree } from "../lib/handoff-worktree";
 import "./ChatContextCard.css";
 
 
@@ -338,7 +340,7 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
   );
 }
 
-export const ChatContextCard = () => {
+export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.innerWidth) }: { displayMode?: ReturnType<typeof threadSummaryDisplayMode> } = {}) => {
   const { t: tr } = useI18n();
   const contextInputs = useAppStore(useShallow((state) => state.messages.flatMap((message) => [
     message.id, message.isStreaming ? "" : markdownSourceLabelKey(message.content), message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
@@ -350,14 +352,28 @@ export const ChatContextCard = () => {
   const workingDirectory = useAppStore((state) => state.workingDirectory);
   const workspaceGit = useAppStore((state) => state.workspaceGit);
   const { summary: changes, openReview } = useTurnChanges();
-  const rightPanelOpen = useAppStore((state) => state.rightPanelOpen);
   const collapsed = useAppStore((state) => state.contextCardCollapsed);
   const setCollapsed = useAppStore((state) => state.setContextCardCollapsed);
+  const pinned = useAppStore((state) => state.contextCardPinned);
   const setRightStackTab = useAppStore((state) => state.setRightStackTab);
   const setFocusedSubagentId = useAppStore((state) => state.setFocusedSubagentId);
   const [browserTargets, setBrowserTargets] = useState<EmbeddedBrowserState[]>([]);
   const [summaryMenu, setSummaryMenu] = useState<{ x: number; y: number } | null>(null);
   const [showAllSources, setShowAllSources] = useState(false);
+  const popover = displayMode === "overlay" && !collapsed;
+  useEffect(() => {
+    if (!popover) return;
+    const dismiss = (event: PointerEvent) => {
+      const target = event.target as Element;
+      if (!target.closest('#thread-summary-panel, [aria-controls="thread-summary-panel"], .context-menu-surface')) setCollapsed(true);
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented && !summaryMenu) setCollapsed(true);
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("pointerdown", dismiss); document.removeEventListener("keydown", escape); };
+  }, [popover, setCollapsed, summaryMenu]);
   useEffect(() => { setSummaryMenu(null); setShowAllSources(false); }, [conversationId]);
   const agentViews = useMemo(() => projectAgentViews(subagents), [subagents]);
   // Collect final Markdown link labels without recomputing on every stream delta.
@@ -438,15 +454,6 @@ export const ChatContextCard = () => {
   const hasWorkspace = Boolean(conversationId && workingDirectory);
   const contextCount = attachments.length + sources.length + browserTargets.length + agentViews.length + (hasBackgroundTasks ? 1 : 0) + (hasWorkspace ? 1 : 0) + (changes ? 1 : 0);
 
-  const openPanel = (tab: RightStackTab) => setRightStackTab(tab);
-  const openSources = () => {
-    openPanel("tasks");
-    requestAnimationFrame(() => {
-      const section = document.getElementById("conversation-sources");
-      section?.scrollIntoView({ block: "start", behavior: "smooth" });
-      section?.focus({ preventScroll: true });
-    });
-  };
   const openAgent = (agentId?: string) => {
     setFocusedSubagentId(agentId ?? null);
     setRightStackTab("subagents");
@@ -508,38 +515,39 @@ export const ChatContextCard = () => {
   };
   const openBackgroundTasks = () => useAppStore.getState().setRightStackTab("tasks");
 
-  if (contextCount === 0 || collapsed || rightPanelOpen) return null;
+  if (contextCount === 0 || !(pinned && displayMode !== "overlay") && !popover) return null;
 
   return (
     <aside
+      id="thread-summary-panel"
       className="mc-chat-context-card"
+      role={popover ? "dialog" : undefined}
+      data-surface={popover ? "popover" : "inline"}
+      data-display-mode={displayMode}
       data-state="visible"
       data-collapsed={collapsed ? "true" : "false"}
       aria-label={tr("工作区上下文摘要")}
     >
-      <header className="mc-chat-context-card-header" hidden={collapsed}>
-        <span>{hasWorkspace ? shortPath(workingDirectory) : tr("上下文")}</span>
+      <header className="mc-chat-context-card-header">
+        {hasWorkspace ? <button type="button" className="mc-chat-context-project-name" aria-label={tr("查看工作区：{v0}", { v0: shortPath(workingDirectory) })}
+          title={`${workingDirectory}${workspaceGit?.branch ? `\n${workspaceGit.branch}` : ""}`}
+          onClick={() => useAppStore.getState().requestFileTreeReveal(workingDirectory, "folder")}>{shortPath(workingDirectory)}</button> : <span>{tr("上下文")}</span>}
         <span className="mc-chat-context-card-header-actions">
-          <button type="button" aria-label={tr("摘要操作")} title={tr("摘要操作")} aria-haspopup="menu" aria-expanded={Boolean(summaryMenu)} onClick={(event) => {
+          {hasWorkspace && <button type="button" aria-label={tr("摘要操作")} title={tr("摘要操作")} aria-haspopup="menu" aria-expanded={Boolean(summaryMenu)} onClick={(event) => {
             const rect = event.currentTarget.getBoundingClientRect();
             setSummaryMenu(summaryMenu ? null : { x: rect.right - 220, y: rect.bottom + 4 });
           }}>
             <MoreHorizontal size={16} />
-          </button>
+          </button>}
         </span>
       </header>
 
-      <div className="mc-chat-context-card-body" hidden={collapsed}>
-        {(hasWorkspace || changes) && <section className="mc-chat-context-card-section" aria-label={tr("环境信息")}>
+      <div className="mc-chat-context-card-body">
+        {changes && <section className="mc-chat-context-card-section" aria-label={tr("环境信息")}>
           {changes && <button type="button" className="mc-chat-context-environment-row" onClick={openReview} title={tr("审阅本轮文件更改")}>
             <SquarePlus size={16} aria-hidden="true" />
             <span>{tr("变更")}</span>
             <span className="mc-chat-context-change-stats"><RollingNumber className="chat-change-added" prefix="+" value={changes.additions} /><RollingNumber className="chat-change-deleted" prefix="-" value={changes.deletions} /></span>
-          </button>}
-          {hasWorkspace && <button type="button" className="mc-chat-context-environment-row mc-chat-context-workspace"
-            aria-label={tr("查看工作区：{v0}", { v0: shortPath(workingDirectory) })} title={`${workingDirectory}${workspaceGit?.branch ? `\n${workspaceGit.branch}` : ""}`}
-            onClick={() => useAppStore.getState().requestFileTreeReveal(workingDirectory, "folder")}>
-            <span>{shortPath(workingDirectory)}</span><ChevronRight size={14} aria-hidden="true" />
           </button>}
         </section>}
         {agentViews.length > 0 && <section className="mc-chat-context-card-section" aria-label={tr("子智能体摘要")}>
@@ -695,10 +703,10 @@ export const ChatContextCard = () => {
         )}
       </div>
       {summaryMenu && <ContextMenu position={summaryMenu} onClose={() => setSummaryMenu(null)} items={[
-        { label: tr("打开上下文详情"), icon: <PanelRightOpen size={15} />, onClick: () => openPanel("tasks") },
-        ...(sources.length ? [{ label: tr("查看全部来源"), icon: <FileText size={15} />, onClick: openSources }] : []),
-        ...(workspaceGit?.branch ? [{ label: tr("分支：{v0}", { v0: workspaceGit.branch }), onClick: () => openPanel("diff") }] : []),
-        { label: tr("收起上下文卡片"), onClick: () => setCollapsed(true) },
+        { label: tr("设置本地环境"), onClick: () => openSettings("advanced") },
+        { label: tr("打开终端"), onClick: () => useAppStore.getState().openTerminal() },
+        { label: workspaceGit?.isWorktree ? tr("移到本地") : tr("移动到工作树"), disabled: !workspaceGit?.branch,
+          onClick: () => { void handoffConversationWorktree(conversationId!, shortPath(workingDirectory), workspaceGit?.isWorktree ? "local" : "worktree"); } },
       ]} />}
     </aside>
   );

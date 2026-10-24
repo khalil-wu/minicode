@@ -22,7 +22,7 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
   useEffect(() => { setSkills([]); setPluginSkills([]); setError(""); }, [workspaceRoot]);
   const receive = useCallback((payload: SkillsSettingsPayload) => {
     const normalize = (skill: SettingsSkill): SettingsSkill => ({
-      ...normalizeSkillInfo(skill, payload.workspace_root)!, path: skill.path, enabled: skill.enabled,
+      ...normalizeSkillInfo(skill, payload.workspace_root)!, path: skill.path, enabled: skill.enabled, uninstall_name: skill.uninstall_name,
     });
     setSkills(payload.skills.map(normalize));
     setPluginSkills(payload.plugin_skills.map(normalize));
@@ -38,7 +38,7 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
       });
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), t("读取技能设置失败")));
       const payload = await response.json() as SkillsSettingsPayload;
-      if (!controller.signal.aborted) receive(payload);
+      if (!controller.signal.aborted) { receive(payload); return payload; }
     } catch (cause) {
       if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : String(cause));
     } finally { if (!controller.signal.aborted) setLoading(false); }
@@ -61,5 +61,25 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
     } catch (cause) { pushToast(cause instanceof Error ? cause.message : String(cause), "error"); }
     finally { setPendingPath(""); }
   };
-  return { workspaceRoot, skills, pluginSkills, loading, error, pendingPath, reload, toggle };
+  const uninstall = async (skill: SettingsSkill) => {
+    const root = workspaceRoot;
+    setPendingPath(skill.path);
+    try {
+      const response = await fetchWithTimeout(`${apiBase()}/api/skills/${encodeURIComponent(skill.uninstall_name!)}`, {
+        method: "DELETE", headers: authHeaders(),
+      });
+      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), t("卸载")));
+      const store = useAppStore.getState();
+      store.setMarketplaceSkills(store.marketplaceSkills.map(item => item.name === skill.uninstall_name ? { ...item, installed: false } : item));
+      if (workspaceRootsEqual(root, useAppStore.getState().workingDirectory)) {
+        const payload = await reload();
+        if (payload && workspaceRootsEqual(root, useAppStore.getState().workingDirectory)) {
+          useAppStore.getState().setAvailableSkills(normalizeSkillList(payload.available_skills, root));
+        }
+      }
+      return true;
+    } catch (cause) { pushToast(cause instanceof Error ? cause.message : String(cause), "error"); return false; }
+    finally { setPendingPath(""); }
+  };
+  return { workspaceRoot, skills, pluginSkills, loading, error, pendingPath, reload, toggle, uninstall };
 }

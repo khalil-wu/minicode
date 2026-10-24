@@ -3,7 +3,9 @@ import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { SelectMenu } from "../components/SelectMenu";
-import { openManagedSettingsTarget } from "../desktop/runtime";
+import { isDesktop, openManagedSettingsTarget } from "../desktop/runtime";
+import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { ContextMenu } from "../components/ContextMenu";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import "./ConfigTab.css";
 
@@ -28,6 +30,7 @@ export type AgentConfigSnapshot = AgentConfigFields & {
   effective: AgentConfigFields;
   scopes: ConfigScope[];
   origins: Partial<Record<Field, ConfigOrigin>>;
+  warnings: string[];
   requirements: { allowed_approval_policies?: Array<string | Record<string, unknown>>;
     allowed_sandbox_modes?: string[]; allowed_web_search_modes?: string[] };
   write?: { status: "applied" | "overridden"; path: string; version: string; fields: Partial<Record<Field, WriteField>> };
@@ -156,7 +159,7 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
   };
   const labels: Record<string, string> = { "on-request": t("按需"), never: t("从不"), untrusted: t("不受信任"), "on-failure": t("失败时"),
     "read-only": t("只读"), "workspace-write": t("工作区写入"), "danger-full-access": t("完整访问权限"),
-    disabled: t("已禁用"), cached: t("缓存"), indexed: "Indexed", live: t("实时"),
+    disabled: t("已禁用"), cached: t("缓存"), indexed: t("索引"), live: t("实时"),
     [modelDefault]: t("模型默认值"), low: t("低"), medium: t("中"), high: t("高"),
     auto: t("自动"), concise: t("简洁"), detailed: t("详细"), none: t("无") };
   const choice = (field: Exclude<Field, "network_access">, label: string, options: string[], optionDescriptions?: Record<string, string>) => {
@@ -178,6 +181,7 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
   return <>
     <section className="settings-group">
       <h3 className="settings-group-title">{t("智能体默认设置")}</h3>
+      {config?.warnings.map((warning, index) => <div className="config-scope-warning" role="alert" key={`${index}:${warning}`}><span>{warning}</span></div>)}
       <div className="settings-section-heading-row config-scope-toolbar">
         <SelectMenu ariaLabel={t("配置作用域")} value={scopeId} selectedLabel={!config ? t("正在加载…") : undefined}
           className="settings-select config-scope-select" menuWidth={240} disabled={!config || config.scopes.length === 0}
@@ -215,6 +219,44 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
         {choice("model_reasoning_summary", t("推理摘要"), ["auto", "concise", "detailed", "none"])}
       </div>
     </section>
+    <ConfigModelFeatures />
     {children}
   </>;
+}
+
+function ConfigModelFeatures() {
+  const models = useAppStore(state => state.availableModelOptions);
+  const supported = new Set<string>(models.flatMap(model => model.reasoningEffortLevels));
+  if (!isDesktop() || !["max", "ultra", "persistent"].some(level => supported.has(level))) return null;
+  return <ReasoningEffortVisibility supported={supported} />;
+}
+
+function ReasoningEffortVisibility({ supported }: { supported: Set<string> }) {
+  const { t } = useI18n();
+  const { preferences, error, update } = useDesktopPreferences();
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  const [saving, setSaving] = useState(false);
+  const optional = ["max", "ultra"].filter(level => supported.has(level));
+  const base = ["low", "medium", "high", "xhigh", ...(supported.has("persistent") ? ["persistent"] : [])];
+  const enabled = new Set<string>(preferences?.enabledReasoningEfforts);
+  const labels: Record<string, string> = { low: t("轻度"), medium: t("中"), high: t("高"), xhigh: t("极高"), persistent: t("持久"), max: "Max", ultra: "Ultra" };
+  const toggle = (level: string) => {
+    const next = new Set(enabled);
+    if (next.has(level)) next.delete(level); else next.add(level);
+    setSaving(true);
+    void update({ enabledReasoningEfforts: [...next] }).finally(() => setSaving(false));
+  };
+  return <section className="settings-group">
+    <h3 className="settings-group-title">{t("模型功能")}</h3>
+    {error && <p role="alert">{error}</p>}
+    <div className="settings-card"><div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("可用推理强度")}</div>
+      <div className="settings-row-description">{t("选择在模型控件中显示哪些推理强度级别。可用性因模型而异。")}</div>
+    </div><button type="button" className="config-effort-visibility" aria-haspopup="menu" aria-expanded={Boolean(anchor)} disabled={!preferences || saving} onClick={event => setAnchor(event.currentTarget)}>
+      {preferences ? t("已选择 {count} 个", { count: base.length + optional.filter(level => enabled.has(level)).length }) : error ? t("不可用") : t("正在加载…")}
+    </button></div></div>
+    {anchor && <ContextMenu anchor={anchor} position={{ x: anchor.getBoundingClientRect().right, y: anchor.getBoundingClientRect().bottom }} ariaLabel={t("可用推理强度")} onClose={() => setAnchor(null)} items={[
+      ...base.map(level => ({ label: labels[level], checked: true, checkType: "checkbox" as const, disabled: true })),
+      ...optional.map(level => ({ label: labels[level], checked: enabled.has(level), checkType: "checkbox" as const, disabled: saving, onClick: () => toggle(level) })),
+    ]} />}
+  </section>;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { GitMerge, GitPullRequest, GitPullRequestClosed, GitPullRequestDraft } from "../lib/icons";
 import { workspacePathsEqual } from "../lib/workspace-path";
 import { openExternal } from "../desktop/runtime";
@@ -7,6 +7,9 @@ import { useI18n } from "../i18n";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { threadMetadataRequest, type ThreadResourceReference } from "../protocol/thread-metadata";
 import type { ConversationMeta } from "../stores/types";
+import { useAppStore } from "../stores";
+import { fireConfetti } from "../desktop/confetti";
+import { pushToast } from "../overlays/ToastContainer";
 
 export type LinkedPullRequest = {
   number: number; title: string; state: "OPEN" | "MERGED" | "CLOSED"; isDraft: boolean;
@@ -17,6 +20,7 @@ type PullRequestProjection = { referenceId: string; pr: LinkedPullRequest | null
 /** One producer per visible conversation, shared by its project/recent rows. */
 export function useThreadPullRequestStatuses(conversations: ConversationMeta[], connected: boolean) {
   const [statuses, setStatuses] = useState<Record<string, PullRequestProjection>>({});
+  const previousPullRequests = useRef(new Map<string, LinkedPullRequest["state"]>());
   const sessionId = connected ? getWebSocket()?.sessionId : undefined;
   const owners = [...new Map(conversations.map(conversation => [conversation.id, conversation])).values()].flatMap(conversation => {
     const references = conversation.resourceReferences?.filter(item => item.attachment_type === "pull_request")
@@ -45,6 +49,14 @@ export function useThreadPullRequestStatuses(conversations: ConversationMeta[], 
             const result = await threadMetadataRequest<{ reference_id: string; conversation_id: string; pr: LinkedPullRequest }>(
               `/${encodeURIComponent(owner.id)}/resources/${encodeURIComponent(reference.id)}/pull-request`,
               { signal: controller.signal }, sessionId);
+            if (controller.signal.aborted) return;
+            const identity = `${owner.id}:${reference.id}:${result.pr.url}`;
+            const prior = previousPullRequests.current.get(identity);
+            previousPullRequests.current.set(identity, result.pr.state);
+            if (!controller.signal.aborted && prior === "OPEN" && result.pr.state === "MERGED"
+              && useAppStore.getState().conversationId === owner.id) {
+              void fireConfetti(useAppStore.getState().reducedMotion).catch(error => pushToast(String(error), "error"));
+            }
             received.push({ reference, pr: result.pr });
             const current = received[received.length - 1];
             if (current.pr.state === "OPEN" && !current.pr.isDraft && (!owner.branch || !owner.directory || preferred(current))) break;

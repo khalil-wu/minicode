@@ -10,6 +10,7 @@ import {
   Download,
   ExternalLink,
   FileDiff,
+  FolderOpen,
   Globe2,
   LoaderCircle,
   MessageSquarePlus,
@@ -23,6 +24,7 @@ import {
   Smartphone,
   ShieldCheck,
   Trash2,
+  TerminalSquare,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -63,7 +65,7 @@ import { BrowserDeviceToolbar, BrowserDeviceResizeHandles, browserDeviceLayout, 
 import { captureBrowserAnnotationAttachments } from "./browser-annotation-capture";
 import { liveConversationWorkbenchState } from "../stores/ui-slice";
 import { pushToast } from "../overlays/ToastContainer";
-import { matchesShortcut } from "../lib/keyboard-shortcuts";
+import { formatShortcut, matchesShortcut } from "../lib/keyboard-shortcuts";
 
 export type BrowserTabSummary = { id: string; title: string; active: boolean };
 
@@ -191,6 +193,8 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
   const { preferences } = useDesktopPreferences();
   const [addressFocused, setAddressFocused] = useState(false);
   const conversationId = useAppStore((state) => state.conversationId) || "";
+  const shortcutBindings = useAppStore((state) => state.shortcutBindings);
+  const [terminalMenuAnchor, setTerminalMenuAnchor] = useState<HTMLButtonElement | null>(null);
   const rightStackTab = useAppStore((state) => state.rightStackTab);
   const browserVisible = useAppStore((state) => state.rightPanelOpen && state.rightStackTab === "browser");
   const floatingComposerVisible = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
@@ -1370,15 +1374,28 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
           }} />}
         {!activeTab.url && (
           <div className="mc-browser-empty">
-            <span className="mc-browser-empty-icon"><Globe2 size={28} strokeWidth={1.8} /></span>
             <div className="mc-browser-new-tools" aria-label={t("工具")}>
-              <span>{t("工具")}</span>
+              <h3>{t("工具")}</h3>
+              <div className="mc-browser-tool-grid">
               {([
-                ["变更", () => useAppStore.getState().setRightStackTab("diff")],
-                ["终端", () => useAppStore.getState().setRightStackTab("terminal")],
-                ["侧边聊天", () => { const state = useAppStore.getState(); openNewSideChat({ conversationId, workspaceRoot: state.workingDirectory, permissionMode: state.permissionMode }); }],
-                ["文件", () => useAppStore.getState().setRightStackTab("files")],
-              ] as const).map(([label, action]) => <button type="button" key={label} onClick={() => { action(); void closeTab(activeTab.id); }}>{t(label)}</button>)}
+                ["变更", FileDiff, "sidePanel", () => useAppStore.getState().setRightStackTab("diff")],
+                ["终端", TerminalSquare, "terminal", () => useAppStore.getState().setRightStackTab("terminal")],
+                ...conversationId ? [["侧边聊天", MessageSquarePlus, "openSideChat", () => { const state = useAppStore.getState(); openNewSideChat({ conversationId, workspaceRoot: state.workingDirectory, permissionMode: state.permissionMode }); }] as const] : [],
+                ["文件", FolderOpen, "fileTree", () => useAppStore.getState().setRightStackTab("files")],
+              ] as const).map(([label, Icon, shortcut, action]) => <div className="mc-browser-tool-card" key={label}>
+                <button type="button" aria-label={t(label)} onClick={() => { action(); void closeTab(activeTab.id); }}>
+                  <Icon size={16} strokeWidth={1.5} aria-hidden="true" /><span>{t(label)}</span>
+                  {shortcutBindings[shortcut].length > 0 && <kbd>{formatShortcut(shortcutBindings[shortcut][0])}</kbd>}
+                </button>
+                {label === "终端" && <button type="button" className="mc-browser-terminal-options" aria-label={t("终端选项")}
+                  aria-haspopup="menu" aria-expanded={Boolean(terminalMenuAnchor)} onClick={event => setTerminalMenuAnchor(event.currentTarget)}><MoreHorizontal size={16} /></button>}
+              </div>)}
+              </div>
+              {terminalMenuAnchor && <ContextMenu anchor={terminalMenuAnchor} returnFocusTo={terminalMenuAnchor} position={{ x: 0, y: 0 }}
+                ariaLabel={t("终端选项")} onClose={() => setTerminalMenuAnchor(null)} items={[{
+                  label: t("打开底部终端"), icon: <TerminalSquare size={16} />, shortcut: formatShortcut(shortcutBindings.bottomPanel),
+                  onClick: () => { useAppStore.getState().openBottomTab("terminal"); void closeTab(activeTab.id); },
+                }]} />}
             </div>
           </div>
         )}

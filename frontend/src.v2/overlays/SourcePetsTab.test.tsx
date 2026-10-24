@@ -31,19 +31,29 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("connects selection, Refresh, folder, size and Wake/Tuck to their real desktop consumers", async () => {
+it("connects the preview cards, Show Mini, Customize and Reset to their actual preferences", async () => {
   const create = vi.fn(async () => {});
   render(<SourcePetsTab onCreatePet={create} />);
-  expect(await screen.findByRole("button", { name: "已选择 Codex" })).toHaveProperty("disabled", true);
-  fireEvent.click(screen.getByRole("button", { name: "选择 Dewey" }));
-  await screen.findByRole("button", { name: "已选择 Dewey" });
-  expect(api.update).toHaveBeenCalledWith({ selectedPetId: "dewey", petVisible: true });
-  fireEvent.change(screen.getByRole("slider", { name: "宠物大小" }), { target: { value: "180" } });
+  expect((await screen.findByRole("button", { name: "Codex The original Codex companion." })).getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "Dewey A calm companion" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Dewey A calm companion" }).getAttribute("aria-pressed")).toBe("true"));
+  expect(api.update).toHaveBeenCalledWith({ selectedPetId: "dewey" });
+  expect(state.miniOpen).toBe(false);
+  expect(screen.queryByRole("slider")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "自定义", exact: true }));
+  const dialog = screen.getByRole("dialog", { name: "自定义虚拟宠物" });
+  expect(screen.getByRole("button", { name: "重置" })).toHaveProperty("disabled", true);
+  fireEvent.change(screen.getByRole("slider", { name: "虚拟宠物大小" }), { target: { value: "180" } });
   await waitFor(() => expect(api.update).toHaveBeenCalledWith({ size: 180 }));
-  await waitFor(() => expect(screen.getByRole("slider", { name: "宠物大小" })).toHaveProperty("value", "180"));
-  fireEvent.click(screen.getByRole("button", { name: "唤醒 Mini" }));
-  fireEvent.click(await screen.findByRole("button", { name: "收起 Mini" }));
-  await screen.findByRole("button", { name: "唤醒 Mini" });
+  await waitFor(() => expect(screen.getByRole("slider", { name: "虚拟宠物大小" })).toHaveProperty("value", "180"));
+  fireEvent.click(screen.getByRole("button", { name: "重置" }));
+  await waitFor(() => expect(screen.getByRole("slider", { name: "虚拟宠物大小" })).toHaveProperty("value", "112"));
+  fireEvent.keyDown(dialog, { key: "Escape" });
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "显示 Mini" }));
+  await waitFor(() => expect(api.update).toHaveBeenCalledWith({ petVisible: true }));
+  expect(api.toggleMini).not.toHaveBeenCalled();
+  await waitFor(() => expect(screen.getByRole("button", { name: "打开文件夹" })).toHaveProperty("disabled", false));
   fireEvent.click(screen.getByRole("button", { name: "打开文件夹" }));
   await waitFor(() => expect(api.openFolder).toHaveBeenCalledOnce());
   await waitFor(() => expect(screen.getByRole("button", { name: "刷新宠物" })).toHaveProperty("disabled", false));
@@ -59,23 +69,39 @@ it("loads only the active page and applies real broadcasts from other windows", 
   const view = render(<SourcePetsTab active={false} onCreatePet={vi.fn()} />);
   expect(api.getState).not.toHaveBeenCalled(); expect(api.onStateChanged).not.toHaveBeenCalled();
   view.rerender(<SourcePetsTab onCreatePet={vi.fn()} />);
-  await screen.findByRole("button", { name: "已选择 Codex" });
+  await screen.findByRole("button", { name: "Codex The original Codex companion." });
   act(() => changed({ ...state, selectedPetId: "dewey", size: 200, miniOpen: true }));
-  expect(screen.getByRole("button", { name: "已选择 Dewey" })).toHaveProperty("disabled", true);
-  expect(screen.getByRole("slider", { name: "宠物大小" })).toHaveProperty("value", "200");
-  expect(screen.getByRole("button", { name: "收起 Mini" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Dewey A calm companion" }).getAttribute("aria-pressed")).toBe("true");
+  fireEvent.click(screen.getByRole("button", { name: "自定义", exact: true }));
+  expect(screen.getByRole("slider", { name: "虚拟宠物大小" })).toHaveProperty("value", "200");
+  view.rerender(<SourcePetsTab active={false} onCreatePet={vi.fn()} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
 it("preserves an unsuccessful selection and reports actual preparation or manifest errors", async () => {
   state.issues = ["C:/private-minicode/pets/broken/pet.json: invalid JSON"];
   api.update.mockRejectedValueOnce(new Error("Actual preference write error"));
   render(<SourcePetsTab onCreatePet={vi.fn(async () => { throw new Error("Reference image editing is unavailable"); })} />);
-  await screen.findByRole("button", { name: "已选择 Codex" });
+  await screen.findByRole("button", { name: "Codex The original Codex companion." });
   expect(screen.getByText(/broken\/pet.json: invalid JSON/)).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: "选择 Dewey" }));
+  fireEvent.click(screen.getByRole("button", { name: "Dewey A calm companion" }));
   expect(await screen.findByText(/Actual preference write error/)).toBeTruthy();
-  expect(screen.getByRole("button", { name: "已选择 Codex" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("button", { name: "Codex The original Codex companion." }).getAttribute("aria-pressed")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "创建宠物" }));
   expect(await screen.findByText(/Reference image editing is unavailable/)).toBeTruthy();
   expect(screen.queryByText("已创建宠物")).toBeNull();
+});
+
+it("selects None independently of Mini visibility and keeps the existing size", async () => {
+  state.size = 180; state.miniOpen = true;
+  render(<SourcePetsTab onCreatePet={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "无 轻量级 Mini 小伙伴" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "无 轻量级 Mini 小伙伴" }).getAttribute("aria-pressed")).toBe("true"));
+  expect(api.update).toHaveBeenCalledExactlyOnceWith({ selectedPetId: null });
+  expect(state).toMatchObject({ selectedPetId: null, size: 180, petVisible: true, miniOpen: true });
+  expect(screen.getByRole("button", { name: "自定义", exact: true })).toHaveProperty("disabled", true);
+  expect(api.toggleMini).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "显示 Mini" }));
+  await waitFor(() => expect(api.update).toHaveBeenLastCalledWith({ petVisible: true }));
+  expect(state.selectedPetId).toBeNull();
 });

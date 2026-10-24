@@ -699,7 +699,8 @@ class WebSocketSession(
             "sandbox_status": sandbox_status,
         }
 
-    def runtime_toolset_policy(self, registry: ToolRegistry):
+    def runtime_toolset_policy(self, registry: ToolRegistry, *, model_selection: dict[str, Any] | None = None,
+                               config_snapshot: AppConfig | None = None):
         """Project the admitted tool surface, or derive the next idle surface."""
         from backend.agent.tool_schema_derivation import effective_toolset_policy
         from backend.llm.provider_contracts import hosted_web_search_supported, normalize_tool_mode
@@ -707,8 +708,9 @@ class WebSocketSession(
         from backend.tools.web_tools import WebSearchTool
 
         context = self.run_manager.context_for(self.active_conversation_id or "")
-        if context is not None and context.toolset_policy is not None:
+        if config_snapshot is None and context is not None and context.toolset_policy is not None:
             return context.toolset_policy
+        config_snapshot = config_snapshot if config_snapshot is not None else self.config
         generation = self._extension_runtime_states.get(self.active_conversation_id, {})
         selection = generation.get("active_tool_names")
         base = ToolsetPolicy.default()
@@ -717,11 +719,11 @@ class WebSocketSession(
         model_runtime = self._model_runtime_for_conversation(self.active_conversation_id)
         model = model_runtime.get_model(self.provider, self.selected_model) if model_runtime is not None else None
         tool_mode = normalize_tool_mode(
-            (model.tool_mode if model is not None else "") or self.config.llm.tool_mode
-        ) or ("code_mode_only" if self.config.agent.code_mode_only else "code_mode")
+            (model.tool_mode if model is not None else "") or config_snapshot.llm.tool_mode
+        ) or ("code_mode_only" if config_snapshot.agent.code_mode_only else "code_mode")
         hosted_search = False
         if isinstance(registry.get_tool("web_search"), WebSearchTool):
-            model_selection = self._llm_selection_payload()
+            model_selection = model_selection if model_selection is not None else self._llm_selection_payload()
             hosted_search = hosted_web_search_supported(
                 wire_api=model_selection["wire_api"], base_url=model_selection["base_url"],
                 declared=model_selection["supports_hosted_web_search"],
@@ -735,8 +737,8 @@ class WebSocketSession(
             permission_mode=self.permission_context.mode,
             hosted_web_search=hosted_search,
             hosted_cached_search=hosted_search and model_selection["wire_api"] == "responses",
-            config_snapshot=self.config,
-            supports_search_tool=model.supports_search_tool if model is not None else self.config.llm.supports_search_tool,
+            config_snapshot=config_snapshot, model_name=self.selected_model, model_info=model,
+            supports_search_tool=model.supports_search_tool if model is not None else config_snapshot.llm.supports_search_tool,
             tool_mode="code_mode" if selection is not None else tool_mode,
         )
 
@@ -747,6 +749,7 @@ class WebSocketSession(
     ) -> dict[str, Any]:
         """Compact per-session capability contract for runtime snapshots."""
         self.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
+        model_selection = self._llm_selection_payload()
         permission = permission_payload or self._runtime_permission_payload()
         registry = self.tool_registry
         summary_error: dict[str, str] | None = None
@@ -761,7 +764,7 @@ class WebSocketSession(
             summary = registry.build_capability_summary(
                 permission_checker=self.permission_checker,
                 permission_context=self.permission_context,
-                toolset_policy=self.runtime_toolset_policy(registry),
+                toolset_policy=self.runtime_toolset_policy(registry, model_selection=model_selection),
             )
         except Exception as exc:
             logger.debug("session %s capability summary failed: %s", self.session_id, exc)
@@ -789,18 +792,18 @@ class WebSocketSession(
             "summary": summary,
             "permission": permission,
             "mcp_registry_version": self._mcp_registry_version_snapshot,
-            "provider_capabilities": self._provider_capabilities_payload(),
+            "provider_capabilities": self._provider_capabilities_payload(model_selection),
             **({"status": "error", "error": summary_error} if summary_error else {}),
         }
 
-    def _provider_capabilities_payload(self) -> dict[str, Any]:
+    def _provider_capabilities_payload(self, model_selection: dict[str, Any] | None = None) -> dict[str, Any]:
         from dataclasses import replace
         from backend.llm.capabilities import ProviderCapabilities, capabilities_from_settings
 
         # The visible conversation can change while an earlier query retains its
         # adapter. Its composer describes the selected catalog/config contract;
         # execution snapshots keep the capabilities of their own bound clients.
-        selection = self._llm_selection_payload()
+        selection = model_selection if model_selection is not None else self._llm_selection_payload()
         model_controls = {key: selection[key] for key in ("default_model_selection", "model_selection_mode", "available_model_options")}
         if selection["models_source"] == "unavailable":
             return {**ProviderCapabilities(
@@ -827,9 +830,12 @@ class WebSocketSession(
     ) -> dict[str, Any]:
         """Full per-session capability contract, including current permissions."""
         from backend.commands.catalog import get_enabled_composer_command_catalog
-        from backend.feature_flags import feature_flags_payload
+        from backend.config import load_config
 
         self.refresh_tool_registry_if_mcp_changed()
+        config_snapshot = load_config(
+            cwd=self.session_lifecycle.workspace_root_for_conversation(), resolve_credentials=False)
+        model_selection = self._llm_selection_payload()
         registry = self.tool_registry
         try:
             registry_for_conversation = getattr(
@@ -842,7 +848,7 @@ class WebSocketSession(
             snapshot = registry.build_snapshot(
                 permission_checker=self.permission_checker,
                 permission_context=self.permission_context,
-                toolset_policy=self.runtime_toolset_policy(registry),
+                toolset_policy=self.runtime_toolset_policy(registry, model_selection=model_selection, config_snapshot=config_snapshot),
                 mcp_registry_version=self._mcp_registry_version_snapshot,
             )
         except Exception as exc:
@@ -881,7 +887,7 @@ class WebSocketSession(
             del snapshot["skills"]
             del snapshot["summary"]["skills"]
             snapshot["summary"].pop("skill_catalog", None)
-            snapshot["provider_capabilities"] = self._provider_capabilities_payload()
+            snapshot["provider_capabilities"] = self._provider_capabilities_payload(model_selection)
             return snapshot
         extension_commands = self.command_registry.list_extension_slash_commands(
             scope_id=self.active_conversation_id
@@ -898,12 +904,13 @@ class WebSocketSession(
         )
         snapshot["composer_commands"] = [
             *extension_commands,
-            *get_enabled_composer_command_catalog(
+            *(command for command in get_enabled_composer_command_catalog(
                 active_workspace_root,
                 resolve_active_workspace=False,
-            ),
+            ) if command["name"] != "goal" or config_snapshot.feature_flags.enabled("goals")),
         ]
-        snapshot["feature_flags"] = feature_flags_payload()
+        snapshot["feature_flags"] = {name: {"enabled": config_snapshot.feature_flags.enabled(name)}
+            for name in config_snapshot.feature_flags.flags}
         if self.skill_manager is not None:
             skills = (skill_catalog if skill_catalog is not None
                       else self.skill_manager.snapshot(active_workspace_root).list_all())
@@ -915,7 +922,7 @@ class WebSocketSession(
             }
         snapshot["permission"] = self._runtime_permission_payload()
         snapshot["mcp_registry_version"] = self._mcp_registry_version_snapshot
-        snapshot["provider_capabilities"] = self._provider_capabilities_payload()
+        snapshot["provider_capabilities"] = self._provider_capabilities_payload(model_selection)
         from backend.realtime.session import capture_config
         snapshot["realtime"] = capture_config(self, str(self.active_conversation_id or ""), credentials=False).capabilities()
         return snapshot
@@ -1399,9 +1406,12 @@ class WebSocketSession(
         command = self.run_manager.dequeue_user_message(conversation_id)
         if command is None:
             from backend.services.goal_runtime import continuation_prompt
+            from backend.config import load_config
             record = self.conversation_repo.get_conversation(conversation_id)
             goal = record.goal if record is not None else {}
-            if goal.get("status") == "active" and goal.get("_continuation_pending"):
+            goals_enabled = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(record),
+                resolve_credentials=False).feature_flags.enabled("goals")
+            if goals_enabled and goal.get("status") == "active" and goal.get("_continuation_pending"):
                 async def continue_goal():
                     try:
                         # The same dispatch owner handles user and automatic input.

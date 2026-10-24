@@ -376,3 +376,26 @@ def test_project_hook_refusal_and_filesystem_failure_preserve_the_actual_file(ca
     assert response.status_code == 500, response.text
     assert response.json()["detail"] == "fixture project disk write rejected"
     assert path.read_bytes() == original
+
+
+def test_actual_project_layer_warning_reaches_agent_config_read_and_write_without_values(catalog):
+    path = project_file(catalog.workspace, 'web_search = "cached"\n\n[llm.custom]\napi_key = "project-private-fixture"\n')
+    before = read(catalog)
+    assert len(before["warnings"]) == 1
+    warning = before["warnings"][0]
+    assert "Ignored unsupported project-local config keys" in warning
+    assert str(path) in warning and "llm" in warning
+    assert "project-private-fixture" not in json.dumps(before)
+    response = save_project(catalog, before, catalog.workspace, catalog.workspace, web_search="indexed")
+    assert response.status_code == 200, response.text
+    after = response.json()
+    assert after["warnings"] == before["warnings"]
+    assert after["effective"]["web_search"] == "indexed"
+    assert tomllib.loads(path.read_text())["llm"]["custom"]["api_key"] == "project-private-fixture"
+
+
+def test_agent_config_does_not_fabricate_source_schema_warnings_for_a_clean_minicode_stack(catalog):
+    payload = read(catalog)
+    assert payload["warnings"] == []
+    assert "private-user-key" not in json.dumps(payload)
+    catalog.hook.assert_not_awaited()

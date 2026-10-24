@@ -15,6 +15,8 @@ import { setWordDiffsEnabled } from "../chat/diff/word-diff-preference";
 import { clearGitReviewSelection } from "../chat/diff/git-review-selection";
 import { readGitReviewOptions, type GitReviewOptions } from "../chat/diff/git-review-options";
 import { clearReviewExpansion } from "../chat/diff/review-expansion-state";
+import { readFileWorkspaceApplyPatch, readFileWorkspaceBranches, readFileWorkspaceChanges } from "../protocol/file-workspace";
+import * as clipboard from "../lib/clipboard";
 
 const commandIds = vi.hoisted(() => ({ next: 0 }));
 
@@ -45,6 +47,8 @@ vi.mock("../protocol/ws-outbox", () => ({
 }));
 
 vi.mock("../chat/diff/git-review-options", () => ({ readGitReviewOptions: vi.fn() }));
+vi.mock("../protocol/file-workspace", async importOriginal => ({ ...await importOriginal<typeof import("../protocol/file-workspace")>(),
+  readFileWorkspaceApplyPatch: vi.fn(), readFileWorkspaceBranches: vi.fn(), readFileWorkspaceChanges: vi.fn() }));
 
 vi.mock("../overlays/DialogService", () => ({
   showConfirm: vi.fn(),
@@ -166,6 +170,45 @@ afterEach(() => {
   vi.mocked(sendClientCommandAwaitResult).mockReset();
   vi.mocked(sendPromptResponseCommand).mockReset();
   vi.mocked(showConfirm).mockReset();
+});
+
+describe("Files All changes repository ownership", () => {
+  it.each([null, "conv-diff"])("keeps an independent repository away from the active chat state (%s)", async conversationId => {
+    const owner = { scopeId: conversationId ? `conversation:${conversationId}` : "home:C:/B", conversationId: null, executionCwd: "C:/B", browserRoot: "C:/B" };
+    const patch = "diff --git a/foreign.ts b/foreign.ts\n--- a/foreign.ts\n+++ b/foreign.ts\n@@ -1 +1 @@\n-old\n+foreign content\n";
+    vi.mocked(readFileWorkspaceBranches).mockReset().mockResolvedValue(defaultOptions);
+    vi.mocked(readFileWorkspaceChanges).mockReset().mockResolvedValue({ source: "branch", baseBranch: "origin/main", isGitRepo: true, loading: false,
+      diff: patch, files: [{ path: "foreign.ts", patch, additions: 1, deletions: 1 }], status: "success" });
+    vi.mocked(readFileWorkspaceApplyPatch).mockReset().mockResolvedValue(patch);
+    const copy = vi.spyOn(clipboard, "copyText").mockResolvedValue(true);
+    useAppStore.setState({ conversationId, workingDirectory: "C:/A", isConnected: true, draft: "keep draft", workspaceFileTabs: [],
+      gitReviewRequest: { id: "files-owner-B", path: "", section: "working", workspaceRoot: "C:/B", conversationId,
+        source: "branch", baseBranch: "origin/main", fileOwner: owner } });
+    const before = useAppStore.getState();
+    render(<DiffPanel />);
+    await screen.findByText("foreign content");
+    expect(readFileWorkspaceChanges).toHaveBeenCalledWith(owner, { source: "branch", baseBranch: "origin/main" }, false, expect.any(AbortSignal), "C:/B");
+    expect(before.requestGitComparison).not.toHaveBeenCalled();
+    expect(useAppStore.getState().gitChanges).toBe(before.gitChanges);
+    expect(useAppStore.getState().diffReview).toBe(before.diffReview);
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: /评论 [LR]/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "“变更”选项" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "复制 git apply 命令" }));
+    await waitFor(() => expect(readFileWorkspaceApplyPatch).toHaveBeenCalledWith(owner, { source: "branch", baseBranch: "origin/main" }, "C:/B"));
+    expect(copy).toHaveBeenCalledWith(expect.stringContaining(patch), "git apply", "已复制 git apply 命令");
+    fireEvent.click(screen.getByRole("button", { name: "打开位置" }));
+    expect(useAppStore.getState().workspaceFileTabs).toMatchObject([{ owner, path: "foreign.ts" }]);
+    expect(useAppStore.getState()).toMatchObject({ conversationId, workingDirectory: "C:/A", draft: "keep draft" });
+  });
+
+  it("passes Files comparison selection into the existing same-root conversation producer", async () => {
+    useAppStore.setState({ gitReviewRequest: { id: "same-root-files", path: "", section: "working", workspaceRoot: "C:/workspace", conversationId: "conv-diff",
+      source: "branch", baseBranch: "origin/main", fileOwner: { scopeId: "conversation:conv-diff", conversationId: "conv-diff", executionCwd: "C:/workspace", browserRoot: "C:/workspace" } } });
+    render(<DiffPanel />);
+    await waitFor(() => expect(useAppStore.getState().requestGitComparison).toHaveBeenCalledWith({ source: "branch", baseBranch: "origin/main" }));
+  });
 });
 
 describe("DiffPanel", () => {
@@ -791,7 +834,7 @@ describe("DiffPanel", () => {
     render(<DiffPanel />);
     await waitFor(() => expect(readGitReviewOptions).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "提交", exact: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "已提交", exact: true }));
     fireEvent.click(screen.getByRole("menuitemradio", { name: "Actual commit", exact: true }));
     expect(screen.getByRole("button", { name: "Diff 来源：提交 1", exact: true }).textContent).toBe("提交");
     expect(screen.getByLabelText("选中的提交").textContent).toBe("Actual commit");

@@ -32,6 +32,7 @@ test("actual main drain retains a failed closed-window operation and retries it 
   const context = {
     module: { exports: {} }, Promise, RealtimeVoiceManager,
     remoteDesktop: null,
+    popoutWindow: { dispose() { events.push("popout-stopped"); } },
     dictationHotkeys: { async dispose() { events.push("dictation-stopped"); } },
     generalMaintenance: null, petManager: null, petInitialization: null,
     EMBEDDED_BROWSER_TOKEN: "owned-fixture-token",
@@ -50,8 +51,10 @@ test("actual main drain retains a failed closed-window operation and retries it 
   await assert.rejects(lifecycle.releaseWindowResources(record), /has not reported exit/);
   assert.equal(lifecycle.windowCleanupTasks.size, 1);
   await assert.rejects(lifecycle.drainDesktopResources(), /has not reported exit/);
+  assert.equal(events.filter(event => event === "popout-stopped").length, 1, "Popout shortcuts stop before a failed owned release aborts the drain");
   assert.equal(events.includes("backend-exited"), false);
   await lifecycle.drainDesktopResources();
+  assert.equal(events.filter(event => event === "popout-stopped").length, 2, "the explicit retry also disposes Popout ownership");
   assert.equal(attempts, 2);
   assert.equal(lifecycle.windowCleanupTasks.size, 0);
   assert.ok(events.indexOf("window-pty-exited") < events.indexOf("backend-exited"));

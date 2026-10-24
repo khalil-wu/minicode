@@ -1,0 +1,22 @@
+{
+  "MiniCode 记忆": "MiniCode memories",
+  "管理主机记忆与自定义指令。": "Manage host memories and custom instructions.",
+  "配置 MiniCode 在 {v0} 上管理记忆的方式。": "Configure how MiniCode manages memory for {v0}.",
+  "选择记忆主机": "Choose memory host",
+  "本地主机": "Local host",
+  "正在读取记忆设置…": "Loading memory settings…",
+  "启用 MiniCode 记忆功能": "Enable MiniCode memories",
+  "启用 MiniCode 记忆": "Enable MiniCode memories",
+  "根据 {v0} 上的聊天创建记忆，并使用这些记忆为今后在 {v0} 上的聊天提供个性化体验。": "Create memories from chats on {v0} and use them to personalize future chats on {v0}.",
+  "允许从使用工具的聊天中生成记忆": "Allow memories from tool-assisted chats",
+  "从使用过 MCP 工具或网页搜索的聊天生成记忆": "Generate memories from chats that used MCP tools or web search",
+  "删除 MiniCode 记忆": "Delete MiniCode memories",
+  "删除 {v0} 上的全部 MiniCode 记忆": "Delete all MiniCode memories for {v0}",
+  "删除全部 MiniCode 记忆？": "Delete all MiniCode memories?",
+  "这会删除 {v0} 上的全部 MiniCode 记忆。": "This deletes all MiniCode memories for {v0}.",
+  "MiniCode 记忆已删除": "MiniCode memories deleted",
+  "MiniCode 指令": "MiniCode instructions",
+  "编辑所选主机指令": "Edit instructions on the selected host",
+  "编辑所选电脑上的自定义指令，项目指令也可能适用。": "Edit custom instructions on the selected computer. Repository instructions may also apply.",
+  "编辑 {v0} 上的 {v1}。项目指令也可能适用。": "Edit {v1} on {v0}. Repository instructions may also apply."
+}

@@ -14,6 +14,15 @@
 .remote-connection-dialog label { display: grid; gap: 8px; }
 .remote-connection-dialog input { min-width: 0; width: 100%; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: var(--mc-control-radius); background: var(--surface-soft); color: inherit; font: inherit; }
 .remote-connection-host-fields { display: grid; gap: 20px; }
+.remote-connection-color-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.remote-connection-details-marker { color: var(--text-secondary); }
+.remote-connection-color-trigger { min-width: 44px; justify-content: center; }
+.remote-connection-color-menu { min-width: 0 !important; display: grid; grid-template-columns: repeat(8, 32px); gap: 2px; padding: 8px; }
+.remote-connection-color-menu [role="menuitemradio"] { justify-content: center; min-height: 32px !important; padding: 4px !important; }
+.remote-connection-color-menu .mc-menu-content > .flex-fill { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.remote-connection-color-menu [role="menuitemradio"] > .shrink-0:last-child { display: none !important; }
+.remote-connection-color-swatch { display: block; width: 24px; height: 24px; border-radius: var(--radius-full); color: var(--text-primary); }
+.remote-connection-color-swatch[data-selected="true"] { outline: 2px solid var(--text-secondary); outline-offset: 2px; }
 .remote-connection-dialog footer { justify-content: flex-end; }
 .remote-connection-dialog .settings-action-button { min-height: 36px; padding-inline: 14px; border-radius: var(--mc-control-radius); font-size: var(--mc-font-body); line-height: 1.2; }
 .remote-connection-error { overflow-wrap: anywhere; }

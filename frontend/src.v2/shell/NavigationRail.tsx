@@ -2,7 +2,7 @@ import { useI18n } from "../i18n";
 import { AtSign, Clock3, Folder, House, MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "../stores";
-import { openAutomations } from "../lib/automations-navigation";
+import { closeAutomations, openAutomations, useAutomationsPageState } from "../lib/automations-navigation";
 import { ContextMenu } from "../components/ContextMenu";
 import { openPreferredWebLink } from "../lib/open-preferred-target";
 import { desktop, type DesktopPetState } from "../desktop/runtime";
@@ -16,6 +16,7 @@ export function NavigationRail() {
   const { t: tr } = useI18n();
   const settingsOpen = useAppStore((state) => state.settingsOpen);
   const settingsTab = useAppStore((state) => state.settingsTab);
+  const { open: automationsOpen } = useAutomationsPageState();
   const marketplaceOpen = useAppStore((state) => state.skillsMarketplaceOpen);
   const appMode = useAppStore((state) => state.appMode);
   const projectsOpen = useAppStore((state) => state.projectsOpen);
@@ -34,6 +35,7 @@ export function NavigationRail() {
     return () => { current = false; unsubscribe(); };
   }, [pets]);
   const showWorkspace = () => {
+    closeAutomations();
     const state = useAppStore.getState();
     if (state.settingsOpen) state.toggleSettings();
     useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", projectsOpen: false });
@@ -49,9 +51,10 @@ export function NavigationRail() {
   };
   return <nav className="mc-navigation-rail" aria-label={tr("应用导航")}>
     <div className="mc-navigation-rail-main">
-      <button type="button" title={tr("首页")} aria-label={tr("首页")} aria-current={!settingsOpen && !marketplaceOpen && !projectsOpen && appMode !== "code" ? "page" : undefined} onClick={showChat}><House /></button>
-      <button type="button" title={tr("定时任务")} aria-label={tr("定时任务")} aria-current={settingsOpen && settingsTab === "scheduler" ? "page" : undefined} onClick={() => { useAppStore.setState({ projectsOpen: false }); openAutomations(); }}><Clock3 /></button>
-      <button type="button" title={tr("插件")} aria-label={tr("插件")} aria-current={!settingsOpen && marketplaceOpen ? "page" : undefined} onClick={() => {
+      <button type="button" title={tr("首页")} aria-label={tr("首页")} aria-current={!automationsOpen && !settingsOpen && !marketplaceOpen && !projectsOpen && appMode !== "code" ? "page" : undefined} onClick={showChat}><House /></button>
+      <button type="button" title={tr("定时任务")} aria-label={tr("定时任务")} aria-current={!settingsOpen && automationsOpen ? "page" : undefined} onClick={openAutomations}><Clock3 /></button>
+      <button type="button" title={tr("插件")} aria-label={tr("插件")} aria-current={!automationsOpen && !settingsOpen && marketplaceOpen ? "page" : undefined} onClick={() => {
+        closeAutomations();
         const state = useAppStore.getState();
         useAppStore.setState({ projectsOpen: false });
         if (state.settingsOpen) state.toggleSettings();
@@ -59,7 +62,7 @@ export function NavigationRail() {
         else useAppStore.setState({ skillsMarketplaceTab: "plugins", skillsMarketplaceSelectedPluginId: null, skillsMarketplaceReturnTarget: "app" });
       }}><AtSign /></button>
       <div className="mc-navigation-rail-more">
-        <button type="button" title={tr("探索")} aria-label={tr("探索")} aria-current={!settingsOpen && !marketplaceOpen && projectsOpen ? "page" : undefined} aria-haspopup="menu" aria-expanded={Boolean(moreMenu)} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setSettingsMenu(null); setMoreMenu(moreMenu ? null : { x: bounds.right + 4, y: bounds.top }); }}><MoreHorizontal /></button>
+        <button type="button" title={tr("探索")} aria-label={tr("探索")} aria-current={!automationsOpen && !settingsOpen && !marketplaceOpen && projectsOpen ? "page" : undefined} aria-haspopup="menu" aria-expanded={Boolean(moreMenu)} onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); setSettingsMenu(null); setMoreMenu(moreMenu ? null : { x: bounds.right + 4, y: bounds.top }); }}><MoreHorizontal /></button>
         {moreMenu && <ContextMenu position={moreMenu} onClose={() => setMoreMenu(null)} items={[
           { label: tr("项目"), icon: <Folder size={15} />, onClick: () => { showWorkspace(); useAppStore.setState({ projectsOpen: true }); } },
         ]} />}

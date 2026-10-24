@@ -16,11 +16,16 @@ import { openPreviewServiceManager } from "../lib/preview-server-actions";
 import { openNewBrowserTab } from "../chat/openWebInBrowser";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
 import { dispatchQueuedMessageHistory, queuedMessageHistorySnapshot, subscribeQueuedMessageHistory } from "../composer/queued-message-undo";
+import { useConversationSearch } from "../hooks/useConversationSearch";
+import { getWebSocket } from "../hooks/useWebSocket";
+import { searchResultConversation } from "../protocol/conversation-search";
+import { revealConversationMessage } from "../chat/revealConversationMessage";
 
 interface PaletteAction {
   id: string;
   label: string;
   hint?: string;
+  preview?: string;
   codeOnly?: boolean;
   group: "最近会话" | "导航" | "工作区" | "命令";
   run: () => void | Promise<void>;
@@ -92,6 +97,7 @@ export const CommandPalette = () => {
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
   const [query, setQuery] = useState("");
   const [activeIdx, setActiveIdx] = useState(0);
+  const bodySearch = useConversationSearch({ query, enabled: commandPaletteOpen && globalSearchEnabled });
   const dialogRef = useFocusTrap(commandPaletteOpen);
   const closePaletteIfIdle = () => {
     if (hasPendingUserAction()) return;
@@ -137,29 +143,41 @@ export const CommandPalette = () => {
   }));
 
   const trimmedQuery = query.trim().toLowerCase();
-  // With a query, search across ALL conversations by title + goal so the
-  // palette acts as a global conversation search; without one, show the recent
-  // 9 (with Ctrl+N shortcut hints) as quick switch targets.
   const conversationCandidates = conversations.filter(
-    (c) => !c.archived && c.id !== conversationId,
+    (c) => !c.archived && c.conversationType !== "side_chat" && c.id !== conversationId,
   );
-  const matchedConversations = trimmedQuery && globalSearchEnabled
+  const metadataMatches = trimmedQuery && globalSearchEnabled
     ? conversationCandidates.filter((c) =>
         `${c.title ?? ""} ${c.goal?.text ?? ""}`.toLowerCase().includes(trimmedQuery),
       )
     : conversationCandidates.slice(0, 9);
+  const contentMatches = new Map(bodySearch.results.filter(result => result.conversation.id !== conversationId
+    && !result.conversation.archived && result.conversation.conversation_type !== "side_chat"
+    && !conversations.some(c => c.id === result.conversation.id && c.archived))
+    .map(result => [result.conversation.id, result]));
+  const matchedConversations = trimmedQuery && globalSearchEnabled
+    ? [...new Map([...metadataMatches, ...[...contentMatches.values()].map(result =>
+      conversationCandidates.find(c => c.id === result.conversation.id) || searchResultConversation(result))]
+      .map(c => [c.id, c])).values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    : metadataMatches;
   const recentConversationActions: PaletteAction[] = matchedConversations.map((c, i) => {
     const shortcut = trimmedQuery ? "" : `Ctrl+${i + 1}`;
     const goal = c.goal?.text ?? "";
     const goalStart = Math.max(0, goal.toLowerCase().indexOf(trimmedQuery) - 20);
     const goalHint = trimmedQuery && goal
       ? `${goalStart ? "…" : ""}${goal.slice(goalStart, goalStart + 80)}` : "";
+    const match = contentMatches.get(c.id);
     return {
       id: `conversation.switch.${c.id}`,
       label: c.title || tr("未命名会话"),
-      hint: goalHint || shortcut,
+      hint: shortcut,
+      preview: match?.snippet || goalHint,
       group: "最近会话",
-      run: () => useAppStore.getState().requestConversationSwitch(c.id),
+      run: () => {
+        if (match) {
+          if (getWebSocket()?.sessionId === bodySearch.sessionId) revealConversationMessage(c.id, match.message_id);
+        } else useAppStore.getState().requestConversationSwitch(c.id);
+      },
     };
   });
 
@@ -524,13 +542,17 @@ export const CommandPalette = () => {
           className="command-palette-listbox"
           role="listbox"
           aria-label={tr("命令与会话")}
+          onScroll={event => {
+            const list = event.currentTarget;
+            if (list.scrollHeight - list.scrollTop - list.clientHeight < 80) bodySearch.loadMore();
+          }}
           style={{
             borderTop: "1px solid var(--border-subtle)",
             maxHeight: 360,
             overflowY: "auto",
           }}
         >
-          {filtered.length === 0 ? (
+          {filtered.length === 0 && !bodySearch.loading && !bodySearch.error ? (
             <div
               style={{
                 padding: 14,
@@ -578,7 +600,11 @@ export const CommandPalette = () => {
                   gap: 10,
                 }}
               >
-                <span style={{ flex: 1 }}>{highlightMatch(a.label, query)}</span>
+                <span style={{ flex: 1, minWidth: 0, display: "grid", gap: 3 }}>
+                  <span>{highlightMatch(a.label, query)}</span>
+                  {a.preview && <span className="command-palette-preview" style={{ color: "var(--text-muted)", fontSize: "var(--text-xs)",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{highlightMatch(a.preview, query)}</span>}
+                </span>
                 {a.hint && (
                   <kbd
                     className="mc-kbd"
@@ -593,6 +619,8 @@ export const CommandPalette = () => {
               </Fragment>
             ))
           )}
+          {bodySearch.loading && <div role="status" style={{ padding: "8px 12px", color: "var(--text-muted)" }}>{tr("正在搜索…")}</div>}
+          {bodySearch.error && <div role="alert" style={{ padding: "8px 12px", color: "var(--text-secondary)" }}>{bodySearch.error}</div>}
         </div>
         <div
           aria-hidden="true"

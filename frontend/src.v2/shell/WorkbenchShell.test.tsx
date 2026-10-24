@@ -24,6 +24,7 @@ vi.mock("../desktop/runtime", async original => ({
 }));
 
 const reconnect = vi.hoisted(() => vi.fn());
+const workspaceRenders = vi.hoisted(() => vi.fn());
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ reconnect }) }));
 
 vi.mock("../composer/useComposerPlugins", () => ({ useComposerPlugins: () => ({ plugins: [], loading: false, error: "", refresh: vi.fn() }) }));
@@ -33,13 +34,15 @@ vi.mock("./SidebarRight", () => ({
 }));
 
 vi.mock("./MainSlots", () => ({
-  MainSlots: ({ forceChat }: { forceChat?: boolean }) => (
-    <main>{forceChat ? "Chat" : "Code workspace"}<textarea data-composer-input aria-label="主对话输入" /></main>
-  ),
+  MainSlots: ({ forceChat }: { forceChat?: boolean }) => {
+    workspaceRenders();
+    return <main>{forceChat ? "Chat" : "Code workspace"}<textarea data-composer-input aria-label="主对话输入" /></main>;
+  },
 }));
 vi.mock("../panels/SideChatPanel", () => ({ SideChatPanel: () => null }));
 vi.mock("../overlays/SkillsMarketplace", () => ({ SkillsMarketplace: () => <main>Extensions page</main> }));
 vi.mock("./ProjectsPage", () => ({ ProjectsPage: () => <main>Projects page</main> }));
+vi.mock("../overlays/ScheduledTasksPage", () => ({ ScheduledTasksPage: () => <main>Scheduled page<textarea aria-label="Scheduled task draft" /></main> }));
 vi.mock("../chat/ChatPane", () => ({ ChatPane: () => <main>Chat</main> }));
 vi.mock("../overlays/GeneralTab", () => ({ GeneralTab: () => <div>General settings content</div> }));
 vi.mock("../protocol/api", async original => ({ ...await original<typeof import("../protocol/api")>(), fetchLLMSettings: vi.fn(async () => ({ provider: "custom", custom: {} })) }));
@@ -47,6 +50,7 @@ vi.mock("../protocol/api", async original => ({ ...await original<typeof import(
 import { useAppStore } from "../stores";
 import { WorkbenchShell } from "./WorkbenchShell";
 import { SettingsCenter } from "../overlays/SettingsCenter";
+import { closeAutomations, getAutomationsPageState } from "../lib/automations-navigation";
 
 const leftSidebar = () => document.querySelector<HTMLElement>(".mc-sidebar-left");
 const chooseMode = (name: "代码" | "协作") => {
@@ -61,6 +65,7 @@ let nativeDesktop: { windowControls: { minimize: () => void; maximize: () => voi
 
 describe("WorkbenchShell narrow navigation", () => {
   beforeEach(() => {
+    closeAutomations();
     runtimeState = { runtimeToken: "test-token" };
     nativeDesktop = null;
     vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
@@ -149,6 +154,16 @@ describe("WorkbenchShell narrow navigation", () => {
     act(() => useAppStore.setState({ settingsOpen: false }));
     expect(screen.getByRole("dialog", { name: "左侧栏" })).toBeTruthy();
     expect(leftSidebar()!).toBe(sidebar);
+  });
+
+  it("keeps the workspace out of parent capability notifications", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    const Parent = () => { useAppStore(state => state.runtimeCapabilities); return <WorkbenchShell />; };
+    render(<Parent />);
+    workspaceRenders.mockClear();
+    act(() => useAppStore.setState({ runtimeCapabilities: { version: 1, tools: [], commands: [], skills: [], summary: {} } as never }));
+    expect(workspaceRenders).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "主对话输入" })).toBeTruthy();
   });
 
   it("uses the existing side panel as the primary workspace and releases it for composer focus", () => {
@@ -581,6 +596,30 @@ describe("WorkbenchShell narrow navigation", () => {
     act(() => useAppStore.setState({ projectsOpen: false }));
     expect(screen.getByRole("textbox", { name: "主对话输入" })).toBe(input);
     expect(input.value).toBe("preserved project-switch draft");
+  });
+
+  it("opens Scheduled beside the rail while keeping the hidden workspace and task draft mounted", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1440 });
+    useAppStore.setState({ appMode: "cowork" });
+    render(<WorkbenchShell />);
+    const input = screen.getByRole("textbox", { name: "主对话输入" }) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "preserved Scheduled navigation draft" } });
+    const sidebar = leftSidebar()!;
+    fireEvent.click(screen.getByRole("button", { name: "定时任务", exact: true }));
+    expect(await screen.findByText("Scheduled page")).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "主对话输入" })).toBeNull();
+    expect(input.isConnected).toBe(true); expect(sidebar.isConnected).toBe(true); expect(sidebar.closest("[hidden]")).toBeTruthy();
+    expect(screen.getByTestId("right-sidebar").dataset.visible).toBe("false");
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+    const scheduledInput = screen.getByRole("textbox", { name: "Scheduled task draft" }) as HTMLTextAreaElement;
+    fireEvent.change(scheduledInput, { target: { value: "unsubmitted Scheduled task" } });
+    fireEvent.click(screen.getByRole("button", { name: "收起左侧栏" }));
+    expect(getAutomationsPageState().sidebarOpen).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "首页", exact: true }));
+    expect(screen.getByRole("textbox", { name: "主对话输入" })).toBe(input); expect(input.value).toBe("preserved Scheduled navigation draft");
+    expect(scheduledInput.isConnected).toBe(true); expect(scheduledInput.closest("[hidden]")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "定时任务", exact: true }));
+    expect(screen.getByRole("textbox", { name: "Scheduled task draft" })).toBe(scheduledInput); expect(scheduledInput.value).toBe("unsubmitted Scheduled task");
   });
 
   it("hides sidebar controls while a Code panel is maximized", () => {

@@ -778,7 +778,7 @@ class ContextBuilder:
         )
 
         settings = snapshot.config.config_layer_stack.effective_config() if snapshot.config.config_layer_stack is not None else {}
-        features = settings.get("feature_flags", settings.get("features", {}))
+        features = settings.get("features", {})
         preferences = (
             snapshot.config.context_window_config,
             snapshot.config.feature_flags.enabled("token_budget"),

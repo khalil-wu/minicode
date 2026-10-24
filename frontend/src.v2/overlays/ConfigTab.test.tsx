@@ -5,16 +5,18 @@ import { ConfigTab, type AgentConfigFields, type AgentConfigSnapshot } from "./C
 import { useAppStore } from "../stores";
 import { LanguageProvider } from "../i18n";
 
-const mocks = vi.hoisted(() => ({ fetch: vi.fn(), open: vi.fn() }));
+const mocks = vi.hoisted(() => ({ fetch: vi.fn(), open: vi.fn(), desktop: false,
+  preferences: null as { enabledReasoningEfforts: string[] } | null, preferenceError: "", updatePreferences: vi.fn() }));
 vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(),
   apiBase: () => "http://config.test", authHeaders: () => ({}), fetchWithTimeout: mocks.fetch }));
-vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), openManagedSettingsTarget: mocks.open }));
+vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), isDesktop: () => mocks.desktop, openManagedSettingsTarget: mocks.open }));
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: mocks.preferences, error: mocks.preferenceError, update: mocks.updatePreferences }) }));
 
 const path = "C:/Profile/config.toml";
 const defaults: AgentConfigFields = { approval_policy: "on-request", sandbox_mode: "workspace-write", network_access: false,
   web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
 const snapshot = (effective: Partial<AgentConfigFields> = {}, values: Partial<AgentConfigFields> = {}): AgentConfigSnapshot => ({
-  path, default_scope_id: "user", ...defaults, ...effective, effective: { ...defaults, ...effective }, origins: {}, requirements: {},
+  path, default_scope_id: "user", ...defaults, ...effective, effective: { ...defaults, ...effective }, origins: {}, requirements: {}, warnings: [],
   scopes: [{ id: "user", kind: "user", path, version: "user-v1", values, readonly: false,
     workspace_root: null, disabled_reason: null,
     source: { type: "user", file: path, profile: "review", display: `user (${path}, profile=review)` } }],
@@ -39,9 +41,10 @@ const ready = async () => { await screen.findByRole("button", { name: "配置作
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.desktop = false; mocks.preferences = null; mocks.preferenceError = "";
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   mocks.open.mockResolvedValue(true);
-  useAppStore.setState({ workingDirectory: "C:/A", draft: "Unsent chat", attachments: [] });
+  useAppStore.setState({ workingDirectory: "C:/A", draft: "Unsent chat", attachments: [], availableModelOptions: [] });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -368,4 +371,63 @@ it("keeps a delayed project write failure on its actual scope after selecting Us
   choose("配置作用域", "A");
   expect((await screen.findByRole("alert")).textContent).toContain("Project TOML changed on disk");
   expect(button("网页搜索").textContent).toBe("缓存");
+});
+
+it("uses Source's Chinese indexed label while saving the existing indexed wire value", async () => {
+  let current = snapshot();
+  mocks.fetch.mockImplementation(async (_url, init) => {
+    if (init?.method === "PUT") current = snapshot({ web_search: JSON.parse(String(init.body)).web_search });
+    return Response.json(current);
+  });
+  render(<ConfigTab active />); await ready();
+  choose("网页搜索", "索引");
+  await waitFor(() => expect(button("网页搜索").textContent).toBe("索引"));
+  const [, request] = mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
+  expect(JSON.parse(String(request.body))).toEqual({ workspace_root: "C:/A", scope_id: "user", expected_version: "user-v1", web_search: "indexed" });
+  expect(screen.queryByText("Indexed")).toBeNull();
+});
+
+it("shows actual configuration diagnostics and keeps each workspace's warning collection separate", async () => {
+  const warning = "Ignored unsupported project-local config keys in C:/A/.minicode/config.toml: llm";
+  const configA = { ...snapshot(), warnings: [warning] };
+  mocks.fetch.mockImplementation(async input => Response.json(new URL(String(input)).searchParams.get("workspace_root") === "C:/A" ? configA : snapshot()));
+  render(<ConfigTab active />); await ready();
+  expect(screen.getByRole("alert").textContent).toBe(warning);
+  act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
+  await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  act(() => useAppStore.setState({ workingDirectory: "C:/A" }));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toBe(warning));
+  expect(useAppStore.getState().draft).toBe("Unsent chat");
+});
+
+it("persists only the visible optional efforts after native acknowledgement and leaves runtime capabilities intact", async () => {
+  mocks.desktop = true;
+  mocks.preferences = { enabledReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra", "persistent"] };
+  const modelOptions = [{ model: "configured-model", reasoningEffortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultReasoningEffort: "medium" }];
+  useAppStore.setState({ availableModelOptions: modelOptions, effortLevel: "max" });
+  mocks.fetch.mockImplementation(async () => Response.json(snapshot()));
+  let acknowledge!: () => void;
+  mocks.updatePreferences.mockImplementation((patch: { enabledReasoningEfforts: string[] }) => new Promise<void>(resolve => {
+    acknowledge = () => { mocks.preferences = patch; resolve(); };
+  }));
+  render(<ConfigTab active />); await ready();
+  fireEvent.click(screen.getByRole("button", { name: "已选择 5 个" }));
+  for (const label of ["轻度", "中", "高", "极高"]) expect(screen.getByRole("menuitemcheckbox", { name: label })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("menuitemcheckbox", { name: "Max" }).getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByRole("menuitemcheckbox", { name: "Ultra" }).getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Max" }));
+  expect(screen.getByRole("button", { name: "已选择 5 个" })).toHaveProperty("disabled", true);
+  expect(mocks.updatePreferences).toHaveBeenCalledWith({ enabledReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra", "persistent", "max"] });
+  await act(async () => acknowledge());
+  expect(screen.getByRole("button", { name: "已选择 6 个" })).toHaveProperty("disabled", false);
+  expect(useAppStore.getState()).toMatchObject({ effortLevel: "max", availableModelOptions: modelOptions, draft: "Unsent chat" });
+  expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+});
+
+it("does not invent workspace-bundle repair controls without an installed runtime producer", async () => {
+  mocks.fetch.mockImplementation(async () => Response.json(snapshot()));
+  render(<ConfigTab active />); await ready();
+  expect(screen.queryByRole("button", { name: "诊断" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "重新安装" })).toBeNull();
+  expect(screen.queryByRole("switch", { name: /依赖项/ })).toBeNull();
 });

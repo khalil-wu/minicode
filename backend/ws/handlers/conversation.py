@@ -3151,6 +3151,9 @@ def _schedule_long_term_memory_forgetting(
     session: "WebSocketSession",
     conversation: Any,
 ) -> None:
+    from backend.config import load_config
+    if not load_config(cwd=session.session_lifecycle.workspace_root_for_conversation(conversation), resolve_credentials=False).feature_flags.enabled("memories"):
+        return
     try:
         from backend.memory.generation import schedule_memory_forgetting
 
@@ -3467,6 +3470,13 @@ async def handle_conversation_goal_set(session: "WebSocketSession", data: dict[s
         return True
     if target is None:
         await session.emit_command_result("goal", f"Conversation '{conversation_id}' not found.", level="error")
+        return True
+
+    from backend.config import load_config
+    goal_config = load_config(cwd=session.session_lifecycle.workspace_root_for_conversation(target), resolve_credentials=False)
+    if not goal_config.feature_flags.enabled("goals"):
+        await session.emit_command_result("goal", "goals feature is disabled", level="error",
+            data={"conversation_id": conversation_id})
         return True
 
     current_goal = dict(getattr(target, "goal", {}) or {})
@@ -4389,15 +4399,15 @@ async def handle_context_fork(session: "WebSocketSession", data: dict[str, Any])
             from backend.agent.plans import cleanup_plan_file, copy_plan_for_fork
 
             branch_transcript = source_transcript[: max(0, transcript_index + 1)]
-            branch_pollution_sources = pollution_sources_from_transcript(
-                branch_transcript
-            )
             branch_id = fork_id
             branch_workspace_root = str(
                 getattr(source_conversation, "worktree_path", "")
                 or getattr(source_conversation, "workspace_root", "")
                 or ""
             )
+            from backend.memory.settings import memory_settings_for_workspace
+            branch_pollution_sources = (pollution_sources_from_transcript(branch_transcript)
+                if memory_settings_for_workspace(branch_workspace_root).disable_on_external_context else [])
             branch_snapshot = forked.export_snapshot()
             copied_plan_path = None
             branch = None

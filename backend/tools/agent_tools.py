@@ -361,14 +361,11 @@ class TaskTool(BaseTool):
     def get_spec(self):
         from backend.tools.contracts import ToolSpec
 
-        from backend.agents.source_roles import source_agent_options
-        coordination = source_agent_options(self._schema_config) if self._schema_config is not None else None
-
         return ToolSpec(
             name=self.name,
             capability="agent.delegate",
             toolset="agent",
-            exposure="hidden" if coordination is not None and (not coordination["enabled"] or coordination["version"] == "v2") else "core",
+            exposure="core",
             required_args=("description", "prompt"),
         )
 

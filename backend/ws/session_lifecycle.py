@@ -1144,6 +1144,17 @@ class SessionLifecycle:
                 "unavailable_action": "reject_command",
                 "reason": str(exc),
             }
+        # Probe completion updates enforcement for the already selected scope.
+        if source == "sandbox.probe":
+            if not scope_is_current():
+                return
+            await self._session.send_payload({
+                "type": "runtime.capabilities", "session_id": self._session.session_id,
+                "source": source, "conversation_id": str(self._session.active_conversation_id or ""),
+                "workspace_root": str(workspace or ""),
+                "capabilities": {"permission": self._session._runtime_permission_payload()},
+            }, log_context="runtime.capabilities")
+            return
         manager = self._session.skill_manager
         skills = (
             await to_thread_cancel_safe(lambda: manager.snapshot(workspace).list_all())

@@ -1650,11 +1650,11 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
         summary: { ...s.runtimeCapabilities?.summary, ...patch.summary },
       }, s.runtimeCapabilities ?? undefined) ?? null;
       s.setRuntimeCapabilities(capabilities);
-      if (Array.isArray(capabilities?.skills)) {
-        s.setAvailableSkills(normalizeSkillList(capabilities.skills, e.workspace_root));
+      if (Array.isArray(patch?.skills)) {
+        s.setAvailableSkills(normalizeSkillList(patch.skills, e.workspace_root));
       }
-      if (Array.isArray(capabilities?.composer_commands)) {
-        s.setSlashCommands(normalizeSlashCommands(capabilities.composer_commands));
+      if (Array.isArray(patch?.composer_commands)) {
+        s.setSlashCommands(normalizeSlashCommands(patch.composer_commands));
       }
       return true;
     }

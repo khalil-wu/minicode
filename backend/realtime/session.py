@@ -24,9 +24,13 @@ def capture_config(session, conversation_id: str, *, credentials: bool) -> Realt
     selection = conversation.model_selection if conversation is not None else {}
     provider = selection.get("provider", llm.provider)
     model = selection.get("model", llm.model)
-    available = None
+    configured_provider = bool(llm.api_key or llm.default_headers)
     if runtime is not None:
-        available = runtime.get_provider(provider)
+        if credentials:
+            available = runtime.get_provider(provider)
+            configured_provider = available.configured if available is not None else configured_provider
+        else:
+            configured_provider = any(model.provider == provider for model in runtime.get_available_snapshot())
         definition = runtime.get_model(provider, model) if model else None
         if definition is not None:
             wire = {"openai-responses": "responses", "openai-completions": "chat", "anthropic-messages": "anthropic"}[definition.api]
@@ -44,7 +48,7 @@ def capture_config(session, conversation_id: str, *, credentials: bool) -> Realt
     explicit_endpoint = settings.get("experimental_realtime_ws_base_url")
     base_url = explicit_endpoint or llm.base_url
     configured = bool(base_url and (explicit_endpoint or llm.wire_api in {"chat", "responses"})
-        and ((available.configured if available is not None else bool(llm.api_key or headers)) or explicit_endpoint))
+        and (configured_provider or explicit_endpoint))
     if llm.aws is not None and not explicit_endpoint:
         configured = False
     return RealtimeConfig(base_url=base_url, headers=headers if credentials else {}, proxy_mode=llm.proxy_mode,

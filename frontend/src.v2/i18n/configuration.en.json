@@ -18,5 +18,14 @@
   "受阻操作直接失败，不请求批准": "Blocked actions fail instead of requesting approval",
   "可以读取文件，但不能编辑": "Can read files, but cannot edit them",
   "可以编辑文件，但仅限此工作区": "Can edit files, but only in this workspace",
-  "可以编辑此工作区之外的文件": "Can edit files outside this workspace"
+  "可以编辑此工作区之外的文件": "Can edit files outside this workspace",
+  "索引": "Indexed",
+  "模型与 API": "Models & API",
+  "模型功能": "Model features",
+  "可用推理强度": "Available reasoning efforts",
+  "选择在模型控件中显示哪些推理强度级别。可用性因模型而异。": "Choose which reasoning effort levels appear in model controls. Availability varies by model.",
+  "已选择 {count} 个": "{count} selected",
+  "轻度": "Low",
+  "持久": "Persistent",
+  "不可用": "Unavailable"
 }

@@ -108,7 +108,7 @@ export interface DesktopPetActivity {
 
 export interface DesktopPetState {
   pets: DesktopPet[];
-  selectedPetId: string;
+  selectedPetId: string | null;
   size: number;
   petVisible: boolean;
   miniOpen: boolean;
@@ -369,7 +369,12 @@ export interface DesktopPreferences extends DictationPreferences {
   defaultPermissionMode: "confirm" | "plan" | "auto" | "bypass";
   showFullAccess: boolean;
   showContextWindowUsage: boolean;
+  enabledReasoningEfforts: string[];
   showBottomPanel: boolean;
+  defaultWorkspaceFullView: boolean;
+  popoutWindowShortcut: string | null;
+  popoutWindowProjectlessDefault: boolean;
+  confettiEnabled: boolean;
   defaultTerminalLocation: "bottom" | "right";
   composerPlainTextMode: boolean;
   primaryNumberShortcutTarget: "tabs" | "sidebar";
@@ -397,7 +402,8 @@ export interface BrowserHistoryVisit { id: string; url: string; title: string; v
 export interface BrowserCaptureRequest { id: string; conversationId: string; expectedUrl: string; rect?: { x: number; y: number; width: number; height: number }; viewport?: { width: number; height: number } }
 export interface BrowserCaptureImage { data: string; mimeType: "image/png"; width: number; height: number; url: string }
 
-export type RemoteDesktopConnection = { id: string; displayName: string; kind: "ssh" | "wsl"; source?: "manual" | "discovered"; alias?: string; sshHost?: string; sshPort?: number | null; identity?: string | null; distribution?: string; appServerVersion?: string; status?: "connecting" | "connected" | "disconnected" };
+export type RemoteConnectionColor = "black" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink";
+export type RemoteDesktopConnection = { id: string; displayName: string; kind: "ssh" | "wsl"; color?: RemoteConnectionColor | null; source?: "manual" | "discovered"; alias?: string; sshHost?: string; sshPort?: number | null; identity?: string | null; distribution?: string; appServerVersion?: string; status?: "connecting" | "connected" | "disconnected" };
 
 export interface RemoteDirectoryEntries {
   directoryPath: string;
@@ -415,12 +421,18 @@ export interface DictationHotkeyState { available: boolean; holdHotkey: string; 
 export interface NativeDictationEvent { action: "start" | "stop" | "cancel"; token: string; targetKind: "composer" | "external" }
 
 export type DesktopVoiceClaim = { claimId: string; hostId: string; captureScreenContext: boolean; transferVoiceCall: boolean };
+export interface PersonalizationHost { id: string; displayName: string; kind: "local" | "ssh" | "wsl" }
+export type PersonalizationAction = "read-memory" | "update-memory" | "read-instructions" | "update-instructions" | "reset-memory";
 export type DesktopVoiceRequest = { type: "cancel"; requestId: string } | {
   type: "capture" | "prepare" | "stop" | "start"; requestId: string; claimId: string; callId: string;
   threadId?: string; transferId?: string; context?: string; capability?: import("../protocol/realtime-types").RealtimeCapability;
 };
 
 interface MiniCodeDesktop {
+  personalizations?: {
+    listHosts(): Promise<PersonalizationHost[]>;
+    request(hostId: string, action: PersonalizationAction, payload?: unknown): Promise<unknown>;
+  };
   realtimeVoice?: {
     claim(payload: { threadId: string; transferId?: string }): Promise<DesktopVoiceClaim>;
     update(payload: { claimId: string; phase: "active" | "stopping" }): Promise<void>;
@@ -591,7 +603,7 @@ interface MiniCodeDesktop {
     popup(key: DesktopMenuKey): Promise<void>;
     execute(action: string): Promise<boolean>;
     setState(state: { terminalEnabled: boolean; bottomPanelToggleEnabled: boolean; newProjectEnabled: boolean; editorFocused: boolean;
-      accelerators: Record<string, string | null>; acceleratorBindings: Record<string, string[]>; shortcutOverrides: string[]; shortcutRecording: boolean }): Promise<void>;
+      accelerators: Record<string, string | null>; acceleratorBindings: Record<string, string[]>; shortcutOverrides: string[]; shortcutRecording: boolean; workspaceRoot: string }): Promise<void>;
   };
   browserProfileImport: {
     listImportableBrowserProfiles(): Promise<ImportableBrowserProfile[]>;
@@ -641,7 +653,7 @@ declare global {
       windowOwnerId?: string;
       windowInstanceId?: string;
       windowBindingToken?: string;
-      initialNavigation?: { conversationId: string | null } | null;
+      initialNavigation?: { conversationId: string | null; popout?: boolean; workspaceRoot?: string; restoreLastConversation?: boolean } | null;
       apiBaseUrl?: string;
       wsBaseUrl?: string;
       runtimeToken?: string;

@@ -125,7 +125,7 @@ class FixtureTool(BaseTool):
             self.finished.set()
 
 
-async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, limit=0, observe=None, cancel=None, context=None, session=None, code_mode_only=False, model_info=None):
+async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, limit=0, observe=None, cancel=None, context=None, session=None, code_mode_only=False, model_info=None, emit_event=None):
     registry = ToolRegistry()
     for tool in [ToolExecTool(), ToolWaitTool(), *tools]: registry.register(tool)
     registry.register(ToolSearchTool(registry))
@@ -150,7 +150,7 @@ async def run_model(tmp_path, model, tools=(), *, mode="bypass", approval=None, 
     try:
         async with asyncio.timeout(15), aclosing(QueryEngine().submit(QuerySubmission(user_message=state.user_message, session=session, state=state,
             runtime=AgentLoopSessionContext(session_id="code-session", workspace_root=tmp_path, permission_context=PermissionContext(mode=mode),
-                cancel_event=cancel, run_context=run_context)))) as stream:
+                cancel_event=cancel, run_context=run_context, emit_event=emit_event)))) as stream:
             async for event in stream:
                 events.append(event)
                 if observe: await observe(event)
@@ -398,18 +398,26 @@ def test_nested_tool_callback_cannot_complete_parent_or_inject_model_messages(tm
     asyncio.run(scenario())
 
 
-def test_nested_async_question_reaches_the_ui_and_journal_without_injecting_model_history(tmp_path):
+def test_direct_async_question_reaches_the_ui_and_journal_without_injecting_model_history(tmp_path):
     from backend.tools.agent_user_tools import RequestUserInputAsyncTool
     async def scenario():
-        model = ScriptModel('text(await tools.request_user_input_async({questions:[{title:"QA_ASYNC_QUESTION",options:["A","B"]}]}));')
+        from backend.agent.message import AgentEvent
+        ui_events = []
+        async def emit_ui(event_type, data):
+            ui_events.append(AgentEvent(event_type, dict(data)))
+        model = ScriptModel("", first_call=ToolCallEvent(id="direct-async-question", name="request_user_input_async",
+            arguments={"questions": [{"title": "QA_ASYNC_QUESTION", "options": ["A", "B"]}]}))
         model._settings = LLMSettings(api_key="fixture", model="gpt-6.1-sol")
-        info = ModelDefinition(provider="custom", id="gpt-6.1-sol", name="Source async fixture", api="openai-responses", base_url="")
-        state, builder, journal, events, _ = await run_model(tmp_path, model, [RequestUserInputAsyncTool()], mode="confirm", model_info=info)
-        messages = [event for event in events if event.type in {"item.started", "item.completed"} and event.data.get("item", {}).get("delivery") == "async"]
+        info = ModelDefinition(provider="custom", id="gpt-6.1-sol", name="Source async fixture", api="openai-responses", base_url="",
+            extra={"experimental_supported_tools": ["request_user_input_async"]})
+        state, builder, journal, events, _ = await run_model(tmp_path, model, [RequestUserInputAsyncTool()], mode="confirm", model_info=info, emit_event=emit_ui)
+        assert model.reports[-1].get("accepted") is True, model.reports
+        messages = [event for event in ui_events if event.type in {"item.started", "item.completed"} and event.data.get("item", {}).get("delivery") == "async"]
         assert [event.type for event in messages] == ["item.started", "item.completed"]
         question = messages[-1].data["item"]
         assert question["questions"] == [{"title": "QA_ASYNC_QUESTION", "options": ["A", "B"]}]
-        assert messages[-1].data["call_source"]["kind"] == "code_mode"
+        assert "request_user_input_async" in model.visible_tool_names[0]
+        assert messages[-1].data["call_source"]["kind"] != "code_mode"
         retained = [event.payload for event in journal.read_events() if event.event_type == "progress" and event.payload.get("item_id") == question["id"]]
         assert retained[-1]["delivery"] == "async"
         assert retained[-1]["questions"] == question["questions"]

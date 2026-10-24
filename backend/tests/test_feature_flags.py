@@ -46,7 +46,7 @@ def test_feature_flags_default_to_existing_runtime_behaviour(monkeypatch) -> Non
 
 
 def test_feature_flags_payload_includes_enabled_state_and_source() -> None:
-    payload = feature_flags_payload({"feature_flags": {"global_search": False}})
+    payload = feature_flags_payload({"features": {"global_search": False}})
 
     assert payload["global_search"] == {"enabled": False}
     assert payload["agent_editor"] == {"enabled": True}
@@ -56,7 +56,7 @@ def test_feature_flags_settings_then_env_precedence(monkeypatch) -> None:
     monkeypatch.setenv("MINICODE_FEATURE_GLOBAL_SEARCH", "false")
 
     flags = load_feature_flags({
-        "feature_flags": {
+        "features": {
             "global_search": True,
             "custom.future.flag": "yes",
         },
@@ -147,7 +147,8 @@ def test_feature_flag_settings_service_updates_known_overrides(monkeypatch, tmp_
     )
 
     payload = json.loads(settings_file.read_text(encoding="utf-8"))
-    assert payload["feature_flags"] == {"global_search": False}
+    assert payload["features"] == {"global_search": False}
+    assert "feature_flags" not in payload
     assert result["overrides"] == {"global_search": False}
     assert result["effective"]["global_search"] == {"enabled": False}
     assert calls == [{"source": "feature_flags", "file_path": str(settings_file)}]
@@ -212,3 +213,27 @@ def test_skill_dependency_install_stable_flag_retains_effective_override_without
     assert payload["effective"]["skill_mcp_dependency_install"] == {"enabled": False}
     assert payload["overrides"]["skill_mcp_dependency_install"] is False
     assert "skill_mcp_dependency_install" not in {flag["name"] for flag in payload["flags"]}
+
+
+def test_source_runtime_gates_keep_effective_values_without_inventing_settings_controls(monkeypatch, tmp_path):
+    names = {"goals", "multi_agent", "sleep_tool", "current_time_reminder", "send_message_to_user_async"}
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"features": {name: False for name in names}}), encoding="utf-8")
+    monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", settings)
+    payload = get_feature_flag_settings()
+    assert all(payload["effective"][name] == {"enabled": False} for name in names)
+    assert not names & {flag["name"] for flag in payload["flags"]}
+
+
+def test_table_feature_override_uses_enabled_and_preserves_other_options(monkeypatch, tmp_path):
+    settings = tmp_path / "settings.json"
+    authored = json.dumps({"features": {"sleep_tool": {"enabled": False, "mode": "always_on"},
+        "plugins": {"enabled": False, "fixture_option": "retain"}}})
+    settings.write_text(authored, encoding="utf-8")
+    monkeypatch.setattr("backend.config_helpers.SETTINGS_FILE", settings)
+    payload = get_feature_flag_settings()
+    assert payload["overrides"]["sleep_tool"] is False and payload["overrides"]["plugins"] is False
+    assert payload["effective"]["sleep_tool"] == {"enabled": False}
+    plugins = next(flag for flag in payload["flags"] if flag["name"] == "plugins")
+    assert plugins["override"] is False and plugins["enabled"] is False
+    assert settings.read_text(encoding="utf-8") == authored

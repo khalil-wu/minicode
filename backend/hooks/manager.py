@@ -334,6 +334,13 @@ def _hook_input(
 ) -> dict[str, Any]:
     """Translate internal call-site values to MiniCode's stdin schema."""
     raw = dict(fields or {})
+    if event == HookEvent.INTERRUPT:
+        return {
+            "session_id": raw.get("SESSION_ID", ""), "turn_id": raw.get("TURN_ID", ""),
+            "transcript_path": raw.get("TRANSCRIPT_PATH") or None,
+            "cwd": str(workspace_root or Path.cwd()), "hook_event_name": "Interrupt",
+            "model": raw.get("MODEL", ""), "permission_mode": raw.get("PERMISSION_MODE", "default"),
+        }
     payload: dict[str, Any] = {
         "session_id": raw.get("SESSION_ID", ""),
         "transcript_path": raw.get("TRANSCRIPT_PATH", ""),
@@ -572,6 +579,9 @@ class _HookEntry:
     command: str = ""
     prompt: str = ""
     url: str = ""
+    server: str = ""
+    tool: str = ""
+    input: dict[str, Any] = field(default_factory=dict)
     headers: dict[str, str] = field(default_factory=dict)
     allowed_env_vars: tuple[str, ...] = ()
     model: str = ""
@@ -630,6 +640,7 @@ class HookManager:
     _llm: Any | None = field(default=None, repr=False)
     _tool_registry: Any | None = field(default=None, repr=False)
     _tool_context: Any | None = field(default=None, repr=False)
+    _mcp_executor: Any | None = field(default=None, repr=False)
 
     # Legacy compatibility properties
     @property
@@ -722,6 +733,9 @@ class HookManager:
                     command=definition.command,
                     prompt=definition.prompt,
                     url=definition.url,
+                    server=definition.server,
+                    tool=definition.tool,
+                    input=dict(definition.input),
                     headers=dict(definition.headers),
                     allowed_env_vars=definition.allowed_env_vars,
                     model=definition.model,
@@ -761,10 +775,12 @@ class HookManager:
         llm: Any,
         tool_registry: Any,
         tool_context: Any,
+        mcp_executor: Any | None = None,
     ) -> None:
         self._llm = llm
         self._tool_registry = tool_registry
         self._tool_context = tool_context
+        self._mcp_executor = mcp_executor
 
     def has_hooks(self, event: HookEvent) -> bool:
         return bool(self.hooks.get(event))
@@ -1269,6 +1285,29 @@ class HookManager:
             },
         )
 
+    async def run_interrupt(
+        self, *, turn_id: str, model: str, permission_mode: str, transcript_path: str = "",
+    ) -> HookResult:
+        from backend.hooks.runners import HookRuntimeBindings
+
+        context = (
+            replace(self._tool_context, cancel_event=None, deadline_monotonic=None)
+            if self._tool_context is not None else None
+        )
+        runtime = HookRuntimeBindings(
+            workspace_root=self.workspace_root, llm=self._llm,
+            tool_registry=self._tool_registry, tool_context=context,
+            mcp_executor=self._mcp_executor,
+        )
+        return await self._run_event(
+            HookEvent.INTERRUPT, match_target="", runtime=runtime,
+            env_extras={
+                "SESSION_ID": self.scope_id or self.owner_session_id, "TURN_ID": turn_id,
+                "MODEL": model, "PERMISSION_MODE": permission_mode,
+                "TRANSCRIPT_PATH": transcript_path,
+            },
+        )
+
     async def run_session_end(
         self,
         *,
@@ -1346,6 +1385,7 @@ class HookManager:
         *,
         match_target: str,
         env_extras: dict[str, str] | None = None,
+        runtime: Any | None = None,
     ) -> HookResult:
         entries = self.hooks.get(event, [])
         if not entries:
@@ -1378,7 +1418,7 @@ class HookManager:
                     continue
                 self._inflight_once_hooks.add(entry.entry_id)
             if entry.run_async or entry.async_rewake:
-                self._schedule_async_hook(entry, event, env_extras)
+                self._schedule_async_hook(entry, event, env_extras, runtime=runtime)
             else:
                 synchronous.append(entry)
 
@@ -1387,7 +1427,7 @@ class HookManager:
         try:
             executions = await execute_handlers(
                 synchronous,
-                lambda entry: self._execute_entry(entry, event, env_extras),
+                lambda entry: self._execute_entry(entry, event, env_extras, runtime=runtime),
                 permission_grant_allowed=grant_matches,
             )
         except asyncio.CancelledError:
@@ -1460,6 +1500,7 @@ class HookManager:
             tool_context=self._tool_context,
             allowed_http_hook_urls=self.allowed_http_hook_urls,
             http_hook_allowed_env_vars=self.http_hook_allowed_env_vars,
+            mcp_executor=self._mcp_executor,
         )
         if allow_async_handshake:
             completion_runtime = replace(
@@ -1516,6 +1557,7 @@ class HookManager:
         entry: _HookEntry,
         event: HookEvent,
         env_extras: dict[str, str] | None,
+        *, runtime: Any | None = None,
     ) -> None:
         from uuid import uuid4
 
@@ -1524,13 +1566,14 @@ class HookManager:
         # Snapshot the turn binding before scheduling.  HookManager config
         # generations share async session state, but an old process
         # must never read the LLM/tool context that a later turn bound.
-        runtime = HookRuntimeBindings(
+        runtime = runtime or HookRuntimeBindings(
             workspace_root=self.workspace_root,
             llm=self._llm,
             tool_registry=self._tool_registry,
             tool_context=self._tool_context,
             allowed_http_hook_urls=self.allowed_http_hook_urls,
             http_hook_allowed_env_vars=self.http_hook_allowed_env_vars,
+            mcp_executor=self._mcp_executor,
         )
         task = asyncio.create_task(
             self._run_async_entry(
@@ -1715,6 +1758,37 @@ class HookManager:
         runtime: Any,
         semantic_stdout: str | None = None,
     ) -> None:
+        if event == HookEvent.INTERRUPT:
+            from backend.hooks.dispatcher import HookExecution
+            from backend.hooks.reducer import reduce_hook_executions
+
+            # A dynamically backgrounded command includes its async handshake
+            # in the captured output. Interrupt's remaining output still has
+            # to satisfy the complete, strict Interrupt schema.
+            output = semantic_stdout if semantic_stdout is not None else stdout
+            output = "\n".join(
+                line for line in output.splitlines()
+                if not ((payload := parse_json_object(line)) is not None and payload.get("async") is True)
+            ).strip()
+            execution = HookExecution(
+                entry=entry, stdout=output, stderr=stderr, exit_code=exit_code,
+                configured_order=0, completion_order=0, duration_ms=0,
+            )
+            reduction = reduce_hook_executions(
+                event, [execution], expected_event_name=hook_event_name(event),
+            )
+            if entry.once:
+                self._inflight_once_hooks.discard(entry.entry_id)
+                if not reduction.failed:
+                    self._consumed_once_hooks.add(entry.entry_id)
+            await _emit_async_hook_response(
+                process_id=process_id, entry=entry, event=event, stdout=stdout,
+                stderr=stderr or "\n".join(reduction.errors), exit_code=exit_code,
+                outcome="error" if reduction.failed else "success",
+                tool_context=runtime.tool_context,
+            )
+            return
+
         visible_stdout, response = _async_hook_stdout(
             semantic_stdout if semantic_stdout is not None else stdout
         )

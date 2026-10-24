@@ -192,16 +192,22 @@ class CapabilityRegistry:
         permission_context: 'PermissionContext',
         name: str,
         tool: BaseTool,
+        permission_decisions: dict[str, Any] | None = None,
     ):
         from backend.permissions.checker import evaluate_permission_decision
 
-        return evaluate_permission_decision(
+        if permission_decisions is not None and name in permission_decisions:
+            return permission_decisions[name]
+        decision = evaluate_permission_decision(
             permission_checker,
             name,
             args={},
             context=permission_context,
             tool=tool,
         )
+        if permission_decisions is not None:
+            permission_decisions[name] = decision
+        return decision
 
     def build_schema_views(
         self,
@@ -210,6 +216,7 @@ class CapabilityRegistry:
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
         materialize_schema: bool = True,
+        permission_decisions: dict[str, Any] | None = None,
     ) -> list[Any]:
         """Return one ToolSchemaView per registered tool (Phase 1.2).
 
@@ -229,6 +236,7 @@ class CapabilityRegistry:
                     permission_checker=permission_checker,
                     permission_context=permission_context,
                     materialize_schema=materialize_schema,
+                    permission_decisions=permission_decisions,
                 )
             )
         return views
@@ -264,6 +272,7 @@ class CapabilityRegistry:
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
         materialize_schema: bool = True,
+        permission_decisions: dict[str, Any] | None = None,
     ) -> Any:
         from backend.tools.contracts import ToolSchemaView
 
@@ -283,6 +292,7 @@ class CapabilityRegistry:
                     permission_context,
                     name,
                     tool,
+                    permission_decisions,
                 )
                 denied = not allowed or decision.decision == "deny"
                 level = decision.permission_level
@@ -351,6 +361,7 @@ class CapabilityRegistry:
         *,
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
+        permission_decisions: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Per-tool non-model-facing metadata (permission, capability hints).
 
@@ -373,6 +384,7 @@ class CapabilityRegistry:
                             permission_context,
                             name,
                             tool,
+                            permission_decisions,
                         )
                         level = decision.permission_level
                         if not allowed or decision.decision == "deny":
@@ -397,11 +409,15 @@ class CapabilityRegistry:
         mcp_registry_version: int = 0,
     ) -> dict[str, Any]:
         """Return a stable capability snapshot for UI/runtime consumers."""
+        # Each synchronous snapshot shares decisions; the next call evaluates
+        # its current permission context again.
+        permission_decisions: dict[str, Any] = {}
         views = self.build_schema_views(
             toolset_policy=toolset_policy,
             permission_checker=permission_checker,
             permission_context=permission_context,
             materialize_schema=False,
+            permission_decisions=permission_decisions,
         )
         views = [view for view in views if not self._tools[view.name].private_model_only]
         return {
@@ -412,6 +428,7 @@ class CapabilityRegistry:
                     permission_context=permission_context,
                     toolset_policy=toolset_policy,
                     mcp_registry_version=mcp_registry_version,
+                    permission_decisions=permission_decisions,
                 ) if not self._tools[schema["function"]["name"]].private_model_only]
             ),
             "tool_views": [
@@ -421,6 +438,7 @@ class CapabilityRegistry:
             "tool_runtime_metadata": self.get_runtime_metadata(
                 permission_checker=permission_checker,
                 permission_context=permission_context,
+                permission_decisions=permission_decisions,
             ),
             "commands": [
                 self._build_named_metadata(name, metadata)
@@ -482,6 +500,7 @@ class CapabilityRegistry:
         *,
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
+        permission_decisions: dict[str, Any] | None = None,
     ) -> str:
         """Fingerprint only tools that can affect this turn's direct schema list."""
         direct_items: list[tuple[Any, ...]] = []
@@ -502,6 +521,7 @@ class CapabilityRegistry:
                         permission_context,
                         name,
                         tool,
+                        permission_decisions,
                     )
                     if decision.decision == "deny":
                         allowed = False
@@ -588,7 +608,10 @@ class CapabilityRegistry:
         permission_context: 'PermissionContext | None' = None,
         toolset_policy: 'ToolsetPolicy | None' = None,
         mcp_registry_version: int = 0,
+        permission_decisions: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        if permission_decisions is None:
+            permission_decisions = {}
         active_policy = self._resolve_toolset_policy(toolset_policy)
         # mcp_registry_version is intentionally ignored for the default direct
         # schema payload: deferred/MCP catalog churn must not perturb the model's
@@ -597,6 +620,7 @@ class CapabilityRegistry:
             active_policy,
             permission_checker=permission_checker,
             permission_context=permission_context,
+            permission_decisions=permission_decisions,
         )
         if active_policy.code_mode_only and not active_policy.nested_surface:
             # exec's description contains the nested directory. Its cache must
@@ -606,6 +630,7 @@ class CapabilityRegistry:
                 replace(active_policy, code_mode_only=False, nested_surface=True),
                 permission_checker=permission_checker,
                 permission_context=permission_context,
+                permission_decisions=permission_decisions,
             )
         cache_key = f"{active_policy.cache_key()}_{direct_fingerprint}"
         if permission_checker and permission_context:
@@ -633,6 +658,7 @@ class CapabilityRegistry:
                 name, tool, active_policy=active_policy,
                 permission_checker=permission_checker,
                 permission_context=permission_context,
+                permission_decisions=permission_decisions,
             )
             for name, tool in self._tools.items()
             if active_policy.is_directly_visible(self.get_tool_spec(name))
@@ -659,6 +685,7 @@ class CapabilityRegistry:
                 permission_checker=permission_checker,
                 permission_context=permission_context,
                 toolset_policy=replace(active_policy, code_mode_only=False, nested_surface=True),
+                permission_decisions=permission_decisions,
             )
             catalog = []
             for nested in nested_schemas:

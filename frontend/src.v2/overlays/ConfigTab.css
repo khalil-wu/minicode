@@ -9,3 +9,7 @@
 .config-field-error { color: var(--state-danger); }
 .config-scope-warning { display: flex; align-items: flex-start; gap: 8px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); color: var(--state-warning); font-size: var(--mc-font-body); }
 .config-scope-warning > svg { flex: 0 0 auto; }
+.config-scope-warning > span { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.config-effort-visibility { min-height: 28px; padding: 4px 8px; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-primary); font: inherit; cursor: pointer; }
+.config-effort-visibility:hover:not(:disabled) { background: var(--surface-hover); }
+.config-effort-visibility:disabled { color: var(--text-muted); cursor: default; }

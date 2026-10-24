@@ -37,6 +37,7 @@ class HookEvent(str, Enum):
     FILE_CHANGED = "file_changed"
     SESSION_END = "session_end"
     STOP = "stop"
+    INTERRUPT = "interrupt"
 
 
 class HookSource(str, Enum):
@@ -78,6 +79,9 @@ class HookDefinition:
     command: str = ""
     prompt: str = ""
     url: str = ""
+    server: str = ""
+    tool: str = ""
+    input: Mapping[str, Any] = field(default_factory=dict)
     headers: Mapping[str, str] = field(default_factory=dict)
     allowed_env_vars: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
@@ -102,6 +106,7 @@ class HookDefinition:
     def __post_init__(self) -> None:
         object.__setattr__(self, "headers", MappingProxyType(dict(self.headers)))
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        object.__setattr__(self, "input", MappingProxyType(dict(self.input)))
 
     @property
     def executable(self) -> bool:
@@ -118,6 +123,7 @@ class HookDefinition:
             "matcher": self.matcher,
             "command": self.command or None,
             "url": self.url or None,
+            **({"server": self.server, "tool": self.tool, "input": _json_safe(self.input)} if self.handler_type == "mcp_tool" else {}),
             "timeout_seconds": self.timeout_seconds,
             "status_message": self.status_message or None,
             "additional_context_limit": self.additional_context_limit,

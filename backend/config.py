@@ -23,6 +23,7 @@ from backend.feature_flags import FeatureFlags, coerce_feature_bool, load_featur
 from backend.llm.model_catalog import responses_model_catalog_entry
 from backend.llm.model_request_policy import ModelRequestPolicy
 from backend.permissions.approval_policy import ApprovalPolicy
+from backend.memory.settings import MemorySettings, memory_settings_from_config
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
 
 from backend.config_helpers import (
@@ -366,6 +367,7 @@ class AppConfig:
     agent: AgentSettings = field(default_factory=AgentSettings)
     ui: UISettings = field(default_factory=UISettings)
     feature_flags: FeatureFlags = field(default_factory=FeatureFlags)
+    memories: MemorySettings = field(default_factory=MemorySettings)
     config_layer_stack: "ConfigLayerStack | None" = None
     model_request_policy: "ModelRequestPolicy | None" = None
     token_budget_startup_config: "TokenBudgetStartupConfig | None" = None
@@ -789,6 +791,7 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
         permissions=permissions,
         agent=agent,
         feature_flags=feature_flags,
+        memories=memory_settings_from_config(settings_data),
         config_layer_stack=config_layer_stack,
         application_network_policy=network_policy,
     )

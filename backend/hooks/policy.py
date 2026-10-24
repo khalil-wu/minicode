@@ -32,6 +32,8 @@ class HookEventPolicy:
 
 _OBSERVER = HookEventPolicy()
 _POLICIES: dict[str, HookEventPolicy] = {
+    "interrupt": HookEventPolicy(matcher_applies=False, ignore_blocking=True, http_allowed=False,
+        default_timeout_seconds=1.0, max_timeout_seconds=3.0),
     "session_start": HookEventPolicy(
         ignore_blocking=True,
         http_allowed=False,

@@ -8,11 +8,8 @@ import {
   errorMessageFromResponseText,
   fetchAttachmentPreview,
   fetchWithTimeout,
-  workspaceRawResourceUrlWithToken,
 } from "../protocol/api";
-import { fetchWorkspaceFilePreview } from "../protocol/workspace";
-import { workspaceFileOwner, workspaceRequestOwner } from "../protocol/workspace-owner";
-import { conversationBrowserRawUrl, fetchConversationBrowserPreview } from "../protocol/conversation-browser";
+import { fileWorkspaceScope } from "../protocol/file-workspace";
 import {
   commandResultSucceeded,
   createClientCommandId,
@@ -300,74 +297,15 @@ export const openArtifactPreview = (target: ArtifactPreviewTarget): boolean => {
 
 /** Preview a workspace deliverable without opening a browser/default app. */
 export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): boolean => {
-  const path = String(target.path || "").trim();
+  const path = target.path.trim();
   if (!path) return false;
   const state = useAppStore.getState();
-  const workspaceRoot = String(target.workspaceRoot ?? state.workingDirectory ?? "").trim();
-  const conversationId = activePreviewConversationId(target.conversationId);
-  const name = String(target.name || basename(path) || "文件");
-  const artifactId = `workspace:${path}`;
-  const base = {
-    artifactId,
-    name,
-    mediaType: target.mediaType,
-    kind: target.kind,
-    source: "workspace" as const,
-    sourcePath: path,
-    workspaceRoot,
-  };
-
-  const lease = beginPreviewRequest(conversationId, { abortable: true });
-  openPreviewSurface(artifactId, name, conversationId);
-  publishPreview(lease, conversationId, {
-    ...base,
-    content: "",
-    loading: true,
-    loadedAt: Date.now(),
-  });
-
-  if (!workspaceRoot) {
-    failPreview(lease, conversationId, base, "未找到该文件所属的工作区。");
-    return false;
-  }
-
-  const controller = lease.controller!;
-  const workspaceOwner = workspaceRequestOwner();
-  const owner = workspaceOwner ? { ...workspaceOwner, conversation_id: conversationId } : undefined;
-  void fetchWorkspaceFilePreview(path, workspaceRoot, controller.signal, owner)
-    .then((preview) => {
-      if (!isPreviewRequestCurrent(lease)) return;
-      const mediaType = normalizedMediaType(preview.media_type || target.mediaType)
-        || "application/octet-stream";
-      publishPreview(lease, conversationId, {
-        artifactId,
-        content: preview.content || "",
-        preview: preview.summary || undefined,
-        warning: preview.parse_error || preview.parse_warning || undefined,
-        name: preview.file_name || name,
-        mediaType,
-        kind: preview.kind || target.kind,
-        sizeBytes: preview.size_bytes,
-        contentChars: preview.content_chars,
-        truncated: preview.truncated,
-        url: preview.has_native && supportsNativePreview(mediaType)
-          ? workspaceRawResourceUrlWithToken(preview.path_uri ?? path, workspaceRoot, undefined, workspaceFileOwner(preview) ?? owner)
-          : undefined,
-        source: "workspace",
-        sourcePath: preview.path,
-        workspaceRoot,
-        loading: false,
-        loadedAt: Date.now(),
-      });
-    })
-    .catch((error: unknown) => {
-      if (!isPreviewRequestCurrent(lease)) return;
-      if (controller.signal.aborted) return;
-      const message = error instanceof Error && error.message.trim()
-        ? error.message.trim()
-        : "文件预览加载失败。";
-      failPreview(lease, conversationId, base, message);
-    });
+  const conversationId = target.conversationId === undefined ? state.conversationId : target.conversationId || null;
+  const conversation = state.conversations.find(value => value.id === conversationId);
+  const workspaceRoot = target.workspaceRoot || conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || state.workingDirectory;
+  if (!workspaceRoot) { pushToast("未找到该文件所属的工作区。", "error"); return false; }
+  state.openWorkspaceFileTab({ scopeId: conversationId ? `conversation:${conversationId}` : fileWorkspaceScope(state),
+    conversationId, executionCwd: workspaceRoot, browserRoot: workspaceRoot }, path, target.name || basename(path));
   return true;
 };
 
@@ -404,28 +342,10 @@ export const openRegisteredSkillPreview = (target: RegisteredSkillPreviewTarget)
 
 /** Browse a file without changing the conversation's execution or editor root. */
 export const openConversationBrowserFilePreview = (target: ConversationBrowserFilePreviewTarget): boolean => {
-  const owner = { conversationId: target.conversationId, executionCwd: target.executionCwd };
-  const base = { artifactId: `browser:${target.executionCwd}:${target.path}`, name: target.name,
-    source: "browser" as const, sourcePath: target.path, workspaceRoot: target.executionCwd };
-  const lease = beginPreviewRequest(target.conversationId, { abortable: true });
-  openPreviewSurface(base.artifactId, target.name, target.conversationId);
-  publishPreview(lease, target.conversationId, { ...base, content: "", loading: true, loadedAt: Date.now() });
-  void fetchConversationBrowserPreview(owner, target.path, lease.controller!.signal).then(preview => {
-    if (!isPreviewRequestCurrent(lease)) return;
-    const mediaType = normalizedMediaType(preview.media_type);
-    publishPreview(lease, target.conversationId, {
-      ...base, content: preview.content, preview: preview.summary,
-      warning: preview.parse_error || preview.parse_warning || undefined,
-      name: preview.file_name, mediaType, kind: preview.kind,
-      sizeBytes: preview.size_bytes, contentChars: preview.content_chars,
-      truncated: preview.truncated, hasNative: preview.has_native,
-      url: preview.has_native && supportsNativePreview(mediaType) ? conversationBrowserRawUrl(owner, target.path) : undefined,
-      loading: false, loadedAt: Date.now(),
-    });
-  }).catch(error => {
-    if (!isPreviewRequestCurrent(lease) || lease.controller!.signal.aborted) return;
-    failPreview(lease, target.conversationId, base, error instanceof Error ? error.message : String(error));
-  });
+  const state = useAppStore.getState();
+  const conversation = state.conversations.find(value => value.id === target.conversationId);
+  state.openWorkspaceFileTab({ scopeId: `conversation:${target.conversationId}`, conversationId: target.conversationId,
+    executionCwd: target.executionCwd, browserRoot: conversation?.projectlessBrowserRoot || target.executionCwd }, target.path, target.name);
   return true;
 };
 

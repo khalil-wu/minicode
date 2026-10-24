@@ -21,6 +21,7 @@ from backend.plugins.materializer import materialize_source
 from backend.skills.frontmatter import parse_skill_frontmatter
 
 USER_SKILLS_DIR = get_minicode_config_home_dir() / "skills"
+_SKILL_DIRECTORY_NAME = re.compile(r"(?!.*\.\.)[a-z0-9][a-z0-9._-]*")
 
 OPENAI_SKILLS_CONTENTS_URL = "https://api.github.com/repos/openai/skills/contents/skills/.curated?ref=main"
 OPENAI_SKILL_RAW_URL = "https://raw.githubusercontent.com/openai/skills/main/skills/.curated/{name}/SKILL.md"
@@ -79,11 +80,20 @@ def _utc_now_iso() -> str:
 
 def _safe_skill_name(skill_name: str) -> str:
     normalized_name = skill_name.strip().lower()
-    if not normalized_name or "/" in normalized_name or "\\" in normalized_name or ".." in normalized_name:
-        raise ValueError("Skill name is not a safe directory name.")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", normalized_name):
+    if not _SKILL_DIRECTORY_NAME.fullmatch(normalized_name):
         raise ValueError("Skill name is not a safe directory name.")
     return normalized_name
+
+
+def user_skill_uninstall_name(skill_path: str) -> str | None:
+    """Return the identity accepted by DELETE for a MiniCode-owned install."""
+    skill_file = Path(skill_path).absolute()
+    directory = skill_file.parent
+    if (directory.parent.resolve() != USER_SKILLS_DIR.resolve()
+            or not _SKILL_DIRECTORY_NAME.fullmatch(directory.name)
+            or directory.is_symlink() or skill_file.is_symlink()):
+        return None
+    return directory.name
 
 
 def _slug(value: str) -> str:

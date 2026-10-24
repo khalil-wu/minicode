@@ -30,6 +30,7 @@ def skills_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("backend.config.load_config_layer_stack", stack)
     monkeypatch.setattr(SkillLoader, "_search_dirs", lambda _self: [("user", user), ("builtin", bundled), ("plugin", plugins)])
     monkeypatch.setattr(skills_api_service, "SETTINGS_FILE", tmp_path / "settings.json")
+    monkeypatch.setattr("backend.skills.marketplace.USER_SKILLS_DIR", user)
     writes = []
     def save(mutator):
         mutator(settings)
@@ -51,8 +52,27 @@ async def test_user_settings_inventory_keeps_disabled_skills_out_of_the_executab
     payload = await routes_skills.get_skill_settings_api(response)
     assert response.headers["Cache-Control"] == "no-store"
     assert {skill["name"]: skill["enabled"] for skill in payload["skills"]} == {"one": True, "two": False}
+    assert {skill["uninstall_name"] for skill in payload["skills"]} == {"one", "two"}
     assert {skill["name"] for skill in payload["available_skills"]} == {"one", "builtin", "plugin-owned"}
     assert fixture.manager.snapshot().get_meta_by_path(fixture.paths["two"]) is None
+
+
+def test_uninstall_identity_uses_owned_directory_and_excludes_other_user_roots(skills_settings, tmp_path, monkeypatch):
+    fixture = skills_settings
+    fixture.paths["one"].write_text("---\nname: shared\ndescription: Local workflow\n---\nLocal instructions", encoding="utf-8")
+    external = tmp_path / "external-skills" / "one" / "SKILL.md"
+    external.parent.mkdir(parents=True)
+    external.write_text("---\nname: shared\ndescription: External workflow\n---\nExternal instructions", encoding="utf-8")
+    monkeypatch.setattr(SkillLoader, "_search_dirs", lambda _self: [("user", fixture.paths["one"].parent.parent),
+        ("user", external.parent.parent), ("plugin", fixture.paths["plugin-owned"].parent.parent)])
+    payload = skills_api_service.skills_settings_payload(skill_manager=fixture.manager)
+    by_path = {Path(skill["path"]): skill for skill in payload["skills"]}
+    assert by_path[fixture.paths["one"]]["name"] == "shared"
+    assert by_path[fixture.paths["one"]]["uninstall_name"] == "one"
+    assert by_path[external]["name"] == "shared"
+    assert by_path[external]["uninstall_name"] is None
+    assert "uninstall_name" not in payload["plugin_skills"][0]
+    assert external.exists() and fixture.paths["one"].exists()
 
 
 @pytest.mark.asyncio

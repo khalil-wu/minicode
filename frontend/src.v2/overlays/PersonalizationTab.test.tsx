@@ -1,133 +1,116 @@
 /* @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+const mocks = vi.hoisted(() => ({ confirm: vi.fn(), request: vi.fn(), toast: vi.fn(), list: vi.fn() }));
+vi.mock("./DialogService", () => ({ showConfirm: mocks.confirm }));
+vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
+vi.mock("../protocol/memory-settings", () => ({ currentPersonalizationHost: () => ({ id: "local", displayName: "Local", kind: "local" }),
+  listPersonalizationHosts: mocks.list, personalizationRequest: mocks.request }));
 import { PersonalizationTab } from "./PersonalizationTab";
 import { useAppStore } from "../stores";
 
-const { confirm, command, toast } = vi.hoisted(() => ({ confirm: vi.fn(), command: vi.fn(), toast: vi.fn() }));
-vi.mock("./DialogService", () => ({ showConfirm: confirm }));
-vi.mock("./ToastContainer", () => ({ pushToast: toast }));
-vi.mock("../protocol/api", async importOriginal => ({
-  ...await importOriginal<typeof import("../protocol/api")>(),
-  apiBase: () => "http://personalization.test",
-  authHeaders: () => ({}),
-  fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
-}));
-vi.mock("../protocol/ws-outbox", async importOriginal => ({
-  ...await importOriginal<typeof import("../protocol/ws-outbox")>(),
-  sendClientCommandAwaitResult: command,
-}));
-
-const instructions = (contents: string) => new Response(JSON.stringify({
-  instructions: contents, path: "C:/owned-config/INSTRUCTIONS.md", exists: true, max_bytes: 32768,
-}), { headers: { "content-type": "application/json" } });
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
-}
+const memory = (enabled = true, disable = false) => ({ feature_enabled: enabled, memories: { generate_memories: enabled, use_memories: enabled, disable_on_external_context: disable }, path: "/config/settings.json", feature_locked: false, locked_fields: [] });
+const instructions = (contents: string) => ({ instructions: contents, path: "C:/owned-config/INSTRUCTIONS.md", exists: true, max_bytes: 32768 });
+function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
+const selectRemote = async () => { fireEvent.click(screen.getByRole("button", { name: "选择记忆主机" })); fireEvent.click(await screen.findByRole("menuitemradio", { name: "Lab host" })); };
 
 beforeEach(() => {
-  confirm.mockReset();
-  command.mockReset();
-  toast.mockClear();
-  useAppStore.setState({ conversationId: null, conversations: [] });
+  mocks.confirm.mockReset(); mocks.toast.mockReset();
+  mocks.list.mockReset().mockResolvedValue([{ id: "local", displayName: "Local", kind: "local" }, { id: "ssh-lab", displayName: "Lab host", kind: "ssh" }]);
+  mocks.request.mockReset().mockImplementation(async (_host, action, payload) => action === "read-memory" ? memory()
+    : action === "update-memory" ? memory(payload.enabled ?? true, payload.disable_on_external_context ?? false)
+    : action === "read-instructions" ? instructions("original instruction") : action === "update-instructions" ? instructions(payload.instructions) : {});
+  vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+  useAppStore.setState({ conversationId: null, conversations: [], workingDirectory: "C:/home", draft: "unsent chat draft" });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it("opens local instructions as a detail page and returns only after the explicit save succeeds", async () => {
-  const saved = deferred<Response>();
-  const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => Promise.resolve(
-    init?.method === "PUT" ? saved.promise : instructions("original instruction"),
-  ));
-  vi.stubGlobal("fetch", fetcher);
+it("saves selected-host memory preferences without rewriting the current task mode", async () => {
+  useAppStore.setState({ conversationId: "task", conversations: [{ id: "task", title: "Task", updatedAt: "", memoryMode: "polluted", memoryPolluted: true }] });
   render(<PersonalizationTab />);
-  expect(screen.queryByRole("textbox", { name: "自定义指令" })).toBeNull();
-  expect(fetcher).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
+  const toggle = await screen.findByRole("switch", { name: "启用 MiniCode 记忆" });
+  expect(toggle.getAttribute("aria-checked")).toBe("true");
+  fireEvent.click(toggle);
+  await waitFor(() => expect(mocks.request).toHaveBeenCalledWith("local", "update-memory", { enabled: false }));
+  expect(useAppStore.getState().conversations[0]).toMatchObject({ memoryMode: "polluted", memoryPolluted: true });
+  expect(screen.queryByText("外部上下文已隔离")).toBeNull();
+  expect(screen.queryByRole("button", { name: "重新启用" })).toBeNull();
+});
+
+it("uses the inverse external-context setting and keeps it disabled while the feature is off", async () => {
+  mocks.request.mockImplementation(async (_host, action, payload) => action === "read-memory" ? memory(true, true) : memory(true, payload.disable_on_external_context));
+  render(<PersonalizationTab />);
+  const external = await screen.findByRole("switch", { name: "允许从使用工具的聊天中生成记忆" });
+  expect(external.getAttribute("aria-checked")).toBe("false"); fireEvent.click(external);
+  await waitFor(() => expect(mocks.request).toHaveBeenCalledWith("local", "update-memory", { disable_on_external_context: false }));
+});
+
+it("binds pending writes to the selected host across host and conversation changes", async () => {
+  const saved = deferred<ReturnType<typeof memory>>();
+  mocks.request.mockImplementation(async (_host, action) => action === "update-memory" ? saved.promise : memory());
+  render(<PersonalizationTab />);
+  fireEvent.click(await screen.findByRole("switch", { name: "启用 MiniCode 记忆" }));
+  await selectRemote();
+  await waitFor(() => expect(mocks.request).toHaveBeenCalledWith("ssh-lab", "read-memory"));
+  act(() => useAppStore.setState({ conversationId: "other-task", workingDirectory: "C:/other", draft: "other authored draft" }));
+  await act(async () => saved.resolve(memory(false)));
+  expect(screen.getByRole("switch", { name: "启用 MiniCode 记忆" }).getAttribute("aria-checked")).toBe("true");
+  expect(mocks.request.mock.calls.filter(call => call[1] === "update-memory")).toEqual([["local", "update-memory", { enabled: false }]]);
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "other-task", workingDirectory: "C:/other", draft: "other authored draft" });
+});
+
+it("keeps feature and generate/use values separate in the displayed master switch", async () => {
+  const payload = memory(false); payload.memories.generate_memories = true; payload.memories.use_memories = true;
+  mocks.request.mockResolvedValue(payload);
+  render(<PersonalizationTab />);
+  expect((await screen.findByRole("switch", { name: "启用 MiniCode 记忆" })).getAttribute("aria-checked")).toBe("false");
+  expect(screen.getByRole("switch", { name: "允许从使用工具的聊天中生成记忆" })).toHaveProperty("disabled", true);
+});
+
+it("opens selected-host instructions as a detail page and returns only after save succeeds", async () => {
+  const saved = deferred<ReturnType<typeof instructions>>();
+  mocks.request.mockImplementation(async (_host, action) => action === "read-memory" ? memory() : action === "update-instructions" ? saved.promise : instructions("original instruction"));
+  render(<PersonalizationTab />);
+  fireEvent.click(screen.getByRole("button", { name: "编辑所选主机指令" }));
   const editor = await screen.findByRole("textbox", { name: "自定义指令" });
-  fireEvent.change(editor, { target: { value: "edited instruction" } });
-  fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
+  fireEvent.change(editor, { target: { value: "edited instruction" } }); fireEvent.keyDown(editor, { key: "s", ctrlKey: true });
   expect(screen.getByRole("button", { name: "保存中" })).toHaveProperty("disabled", true);
   expect(screen.getByRole("button", { name: "返回" })).toHaveProperty("disabled", true);
-  expect(screen.getByRole("button", { name: "取消" })).toHaveProperty("disabled", true);
-  expect(editor).toHaveProperty("disabled", true);
-  const put = fetcher.mock.calls.find(([, init]) => init?.method === "PUT");
-  expect(JSON.parse(String(put?.[1]?.body))).toEqual({ instructions: "edited instruction" });
-  await act(async () => { saved.resolve(instructions("edited instruction")); });
-  expect(await screen.findByRole("button", { name: "编辑本机指令" })).toBeTruthy();
-  expect(screen.queryByRole("textbox", { name: "自定义指令" })).toBeNull();
+  expect(mocks.request).toHaveBeenCalledWith("local", "update-instructions", { instructions: "edited instruction" });
+  await act(async () => saved.resolve(instructions("edited instruction")));
+  expect(await screen.findByRole("button", { name: "编辑所选主机指令" })).toBeTruthy();
 });
 
-it("keeps a failed instruction draft across hidden settings and conversation changes until explicit cancel", async () => {
-  const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => init?.method === "PUT"
-    ? new Response("The configuration volume is read-only", { status: 503 }) : instructions("original instruction"));
-  vi.stubGlobal("fetch", fetcher);
+it("keeps a failed instruction draft across hidden settings and task changes until explicit cancel", async () => {
+  mocks.request.mockImplementation(async (_host, action) => { if (action === "update-instructions") throw new Error("read-only config"); return action === "read-memory" ? memory() : instructions("original instruction"); });
   const view = render(<PersonalizationTab />);
-  fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
-  const editor = await screen.findByRole("textbox", { name: "自定义指令" });
-  fireEvent.change(editor, { target: { value: "keep this unsaved instruction" } });
+  fireEvent.click(screen.getByRole("button", { name: "编辑所选主机指令" }));
+  fireEvent.change(await screen.findByRole("textbox", { name: "自定义指令" }), { target: { value: "keep unsaved instruction" } });
   fireEvent.click(screen.getByRole("button", { name: "保存", exact: true }));
   expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("read-only"));
-  view.rerender(<PersonalizationTab active={false} />);
-  act(() => useAppStore.setState({ conversationId: "another-task" }));
-  view.rerender(<PersonalizationTab active />);
-  expect(screen.getByRole("textbox", { name: "自定义指令" })).toHaveProperty("value", "keep this unsaved instruction");
-  expect(fetcher.mock.calls.filter(([, init]) => !init?.method)).toHaveLength(1);
+  view.rerender(<PersonalizationTab active={false} />); act(() => useAppStore.setState({ conversationId: "another-task" })); view.rerender(<PersonalizationTab active />);
+  expect(screen.getByRole("textbox", { name: "自定义指令" })).toHaveProperty("value", "keep unsaved instruction");
   fireEvent.click(screen.getByRole("button", { name: "取消" }));
-  expect(confirm).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
-  await waitFor(() => expect(screen.getByRole("textbox", { name: "自定义指令" })).toHaveProperty("value", "original instruction"));
-  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(1);
+  expect(mocks.confirm).not.toHaveBeenCalled();
 });
 
-it("confirms Back before discarding and keeps an edited draft when a newer file read completes", async () => {
-  const refreshed = deferred<Response>();
-  let reads = 0;
-  vi.stubGlobal("fetch", vi.fn(() => ++reads === 2 ? refreshed.promise : Promise.resolve(instructions("original instruction"))));
-  render(<PersonalizationTab />);
-  fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
-  await screen.findByRole("textbox", { name: "自定义指令" });
-  fireEvent.click(screen.getByRole("button", { name: "返回" }));
-  expect(confirm).not.toHaveBeenCalled();
-  fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
-  fireEvent.change(screen.getByRole("textbox", { name: "自定义指令" }), { target: { value: "current draft" } });
-  await act(async () => { refreshed.resolve(instructions("changed on disk")); });
-  expect(screen.getByRole("textbox", { name: "自定义指令" })).toHaveProperty("value", "current draft");
-  confirm.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
-  fireEvent.click(screen.getByRole("button", { name: "返回" }));
-  await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
-  expect(screen.getByRole("textbox", { name: "自定义指令" })).toHaveProperty("value", "current draft");
-  fireEvent.click(screen.getByRole("button", { name: "返回" }));
-  expect(await screen.findByRole("button", { name: "编辑本机指令" })).toBeTruthy();
-  expect(screen.queryByRole("textbox", { name: "自定义指令" })).toBeNull();
+it("confirms deletion for the captured host without sending conversation memory-mode commands", async () => {
+  mocks.confirm.mockResolvedValue(true);
+  render(<PersonalizationTab />); await selectRemote();
+  fireEvent.click(await screen.findByRole("button", { name: "删除", exact: true }));
+  await waitFor(() => expect(mocks.request).toHaveBeenCalledWith("ssh-lab", "reset-memory", { confirmed: true }));
+  expect(mocks.confirm).toHaveBeenCalledWith(expect.objectContaining({ message: "这会删除 Lab host 上的全部 MiniCode 记忆。" }));
+  expect(mocks.request.mock.calls.some(call => String(call[1]).includes("memory_mode"))).toBe(false);
 });
 
-it("retains memory isolation causes and binds pending operations and real errors to their original task", async () => {
-  const result = deferred<{ level: string; message: string }>();
-  command.mockReturnValueOnce(result.promise);
-  confirm.mockResolvedValueOnce(true);
-  useAppStore.setState({ conversationId: "isolated-task", conversations: [
-    { id: "isolated-task", title: "Isolated", updatedAt: "2026-10-18", memoryMode: "polluted", memoryPolluted: true,
-      memoryPollutionSources: ["web_search", "mcp__github__search_issues"] },
-    { id: "other-task", title: "Other", updatedAt: "2026-10-18", memoryMode: "disabled", memoryPolluted: false },
-  ] });
-  render(<PersonalizationTab />);
-  expect(screen.getByText("mcp__github__search_issues")).toBeTruthy();
-  expect(screen.getByRole("switch", { name: "长期记忆生成" })).toHaveProperty("disabled", true);
-  fireEvent.click(screen.getByRole("button", { name: "重新启用" }));
-  await waitFor(() => expect(command).toHaveBeenCalledWith({
-    type: "conversation.memory_mode.set", conversation_id: "isolated-task", memory_mode: "enabled",
-  }, "conversation.memory_mode.set"));
-  act(() => useAppStore.setState({ conversationId: "other-task" }));
-  expect(screen.getByRole("switch", { name: "长期记忆生成" })).toHaveProperty("disabled", false);
-  act(() => useAppStore.setState({ conversationId: "isolated-task" }));
-  expect(screen.getByRole("button", { name: "恢复中" })).toHaveProperty("disabled", true);
-  act(() => useAppStore.setState({ conversationId: "other-task" }));
-  await act(async () => { result.resolve({ level: "error", message: "memory permission denied" }); });
-  expect(screen.queryByRole("alert")).toBeNull();
-  act(() => useAppStore.setState({ conversationId: "isolated-task" }));
-  expect(screen.getByRole("alert")).toHaveProperty("textContent", "memory permission denied");
-  expect(screen.getByRole("button", { name: "重新启用" })).toHaveProperty("disabled", false);
+it("replaces stale controls with the actual host read error and retries the same owner", async () => {
+  const view = render(<PersonalizationTab />);
+  await screen.findByRole("switch", { name: "启用 MiniCode 记忆" });
+  mocks.request.mockRejectedValueOnce(new Error("Selected host disconnected"));
+  view.rerender(<PersonalizationTab active={false} />); view.rerender(<PersonalizationTab active />);
+  expect(await screen.findByRole("alert")).toHaveProperty("textContent", expect.stringContaining("Selected host disconnected"));
+  expect(screen.queryByRole("switch", { name: "启用 MiniCode 记忆" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  await screen.findByRole("switch", { name: "启用 MiniCode 记忆" });
+  expect(mocks.request.mock.calls.at(-1)).toEqual(["local", "read-memory"]);
 });

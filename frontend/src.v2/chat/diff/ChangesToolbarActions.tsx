@@ -2,7 +2,7 @@ import { useLayoutEffect, useRef, useState, type MouseEvent, type ReactNode } fr
 import { useI18n } from "../../i18n";
 import { ContextMenu, type ContextMenuItem } from "../../components/ContextMenu";
 import { Tip } from "../../components/Tooltip";
-import { LoaderCircle } from "../../lib/icons";
+import { Copy, LoaderCircle } from "../../lib/icons";
 import { DiffSourceOptionIcon } from "../../lib/diff-source-icons";
 import { useDiffViewPreference } from "./diff-view-preferences";
 import { useWordDiffsPreference } from "./word-diff-preference";
@@ -171,6 +171,8 @@ export interface ChangesToolbarActionsProps {
   onToggleFiles: () => void;
   onJumpToFile: (anchor: HTMLButtonElement) => void;
   jumpOpen?: boolean;
+  onCopyGitApplyCommand?: () => void;
+  copyGitApplyDisabled?: boolean;
 }
 
 function ToolbarButton({ label, onClick, selected, disabled, children }: {
@@ -182,7 +184,8 @@ function ToolbarButton({ label, onClick, selected, disabled, children }: {
 
 /** Source Er: 625px changes controls; compact actions live inside its options menu. */
 export function ChangesToolbarActions({ width, mode, onModeChange, wrap, onWrapChange, allExpanded, onToggleAll,
-  onRefresh, refreshDisabled = false, refreshing = false, filesVisible, onToggleFiles, onJumpToFile, jumpOpen = false }: ChangesToolbarActionsProps) {
+  onRefresh, refreshDisabled = false, refreshing = false, filesVisible, onToggleFiles, onJumpToFile, jumpOpen = false,
+  onCopyGitApplyCommand, copyGitApplyDisabled = false }: ChangesToolbarActionsProps) {
   const { t, locale } = useI18n();
   const [loadFullFiles, setLoadFullFiles] = useDiffViewPreference("loadFullFiles");
   const [richPreview, setRichPreview] = useDiffViewPreference("richPreview");
@@ -229,6 +232,8 @@ export function ChangesToolbarActions({ width, mode, onModeChange, wrap, onWrapC
     { label: t("词级差异"), icon: <WordDiffIcon />, checked: wordDiffs, checkType: "checkbox", onClick: () => setWordDiffs(!wordDiffs) },
     { label: t("隐藏空白字符"), icon: <DiffSourceOptionIcon kind="eye" />, checked: hideWhitespace, checkType: "checkbox", onClick: () => setHideWhitespace(!hideWhitespace) },
     { label: t("隐藏导入内容"), icon: <DiffSourceOptionIcon kind="cube" />, checked: hideImports, checkType: "checkbox", onClick: () => setHideImports(!hideImports) },
+    ...onCopyGitApplyCommand ? [{ label: "", separator: true },
+      { label: t("复制 git apply 命令"), icon: <Copy size={16} />, disabled: copyGitApplyDisabled, onClick: onCopyGitApplyCommand }] : [],
   ];
 
   return <div className="mc-changes-toolbar-actions" data-layout={wide ? "wide" : "compact"}>

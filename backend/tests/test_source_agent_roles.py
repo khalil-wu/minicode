@@ -77,7 +77,7 @@ def test_role_only_projects_source_bounded_fields_and_relative_skill_paths(tmp_p
         '[[skills.config]]\npath="skills/disabled"\nenabled=false\n'
         '[[skills.config]]\npath="skills/enabled"\nenabled=true\n', encoding="utf-8")
     role = read_role_file(path)
-    assert role.overrides["features"] == {"shell_tool": False, "apps": False, "memory_tool": False, "request_permissions_tool": False}
+    assert role.overrides["features"] == {"shell_tool": False, "apps": False, "memories": False, "request_permissions_tool": False}
     assert role.overrides["skills"] == {"include_instructions": False, "config": [{"path": str((tmp_path / "skills/disabled").resolve()), "enabled": False}]}
     assert "approval_policy" not in role.overrides and "sandbox_mode" not in role.overrides
 

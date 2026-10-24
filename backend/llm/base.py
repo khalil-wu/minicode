@@ -53,6 +53,7 @@ _REQUEST_METADATA_MAX_PAIRS = 16
 _REQUEST_METADATA_MAX_VALUE_CHARS = 512
 _LOCAL_REQUEST_METADATA_KEYS = {
     "_source_responses_metadata",
+    "_concurrent_reasoning_summaries",
     "internal_session_source",
     "parent_response_id",
     "prompt_cache_skip_write",

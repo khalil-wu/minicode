@@ -20,17 +20,22 @@ import {
   ChevronDown,
   Target,
 } from "../lib/icons";
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "../stores";
 import { openNewBrowserTab } from "../chat/openWebInBrowser";
 import { draftWindowOwnerId } from "../stores/draft-window-owner";
 import { RIGHT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { rightPanelDefaultWidth, rightPanelMaximumWidth, rightPanelWidthFromRatio } from "./right-panel-width";
 import type { RightStackTab } from "../stores/types";
+import { fileWorkspaceScope } from "../protocol/file-workspace";
+import { fileIcon } from "../lib/file-icons";
+import { workspaceFileTabMenuItems } from "./WorkspaceFileTabs";
 import { ContextMenu } from "../components/ContextMenu";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import type { BrowserTabSummary } from "../panels/BrowserPanel";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
+import { allowDebugMenu } from "../lib/desktop-debug";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { closeThreadAutomationEditor, useThreadAutomationEditors } from "../lib/automations-navigation";
 import { projectAgentViews } from "../lib/agent-view-model";
 import { mcpServerNeedsAttention } from "../lib/mcp-status";
@@ -63,28 +68,29 @@ const normalizeInitialTab = (tab: SidebarRightProps["initialTab"]): StackTab => 
 const sidebarIconProps = { size: 16, strokeWidth: 1.5 } as const;
 
 const LazyPreviewPanel = lazy(() =>
-  import("../panels/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
+  import("../panels/PreviewPanel").then((module) => ({ default: memo(module.PreviewPanel) })),
 );
 const LazyBrowserPanel = lazy(() =>
   import("../panels/BrowserPanel").then((module) => ({ default: module.BrowserPanel })),
 );
 const LazyTerminalPanel = lazy(() => import("../panels/TerminalPanel").then(module => ({ default: module.TerminalPanel })));
-const LazyFilesPanel = lazy(() => import("../panels/FilesPanel").then(module => ({ default: module.FilesPanel })));
-const LazyGoalPanel = lazy(() => import("../panels/GoalPanel").then(module => ({ default: module.GoalPanel })));
+const LazyFilesPanel = lazy(() => import("../panels/FilesPanel").then(module => ({ default: memo(module.FilesPanel) })));
+const LazyFileViewerPanel = lazy(() => import("../panels/FileViewerPanel").then(module => ({ default: memo(module.FileViewerPanel) })));
+const LazyGoalPanel = lazy(() => import("../panels/GoalPanel").then(module => ({ default: memo(module.GoalPanel) })));
 const LazyDiffPanel = lazy(() =>
-  import("../panels/DiffPanel").then((module) => ({ default: module.DiffPanel })),
+  import("../panels/DiffPanel").then((module) => ({ default: memo(module.DiffPanel) })),
 );
 const LazySubagentsTab = lazy(() =>
-  import("./tabs/SubagentsTab").then((module) => ({ default: module.SubagentsTab })),
+  import("./tabs/SubagentsTab").then((module) => ({ default: memo(module.SubagentsTab) })),
 );
 const LazyArtifactsTab = lazy(() =>
-  import("./tabs/ArtifactsTab").then((module) => ({ default: module.ArtifactsTab })),
+  import("./tabs/ArtifactsTab").then((module) => ({ default: memo(module.ArtifactsTab) })),
 );
 const LazyInspectorTab = lazy(() =>
-  import("./tabs/InspectorTab").then((module) => ({ default: module.InspectorTab })),
+  import("./tabs/InspectorTab").then((module) => ({ default: memo(module.InspectorTab) })),
 );
 const LazyDiagnosticsTab = lazy(() =>
-  import("./tabs/DiagnosticsTab").then((module) => ({ default: module.DiagnosticsTab })),
+  import("./tabs/DiagnosticsTab").then((module) => ({ default: memo(module.DiagnosticsTab) })),
 );
 const LazySchedulerTab = lazy(() => import("../overlays/SchedulerTab").then(module => ({ default: module.SchedulerTab })));
 
@@ -93,6 +99,14 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const mainConversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId)?.title || tr("主聊天"));
   const rightStackTab = useAppStore((s) => s.rightStackTab);
   const conversationId = useAppStore((s) => s.conversationId);
+  const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
+  const inspectorFocus = useAppStore((s) => s.inspectorFocus);
+  const goalsEnabled = capabilityFeatureEnabled(runtimeCapabilities, "goals");
+  const debugAllowed = allowDebugMenu();
+  const focusedRecordAvailable = Boolean(inspectorFocus && (inspectorFocus.conversationId ?? conversationId) === conversationId);
+  const workspaceFileTabs = useAppStore(s => s.workspaceFileTabs);
+  const fileScope = useAppStore(s => fileWorkspaceScope(s));
+  const pendingFileTabId = useAppStore(s => s.pendingWorkspaceFileTabId);
   const mcpAppEntries = useMcpAppSurfaces(s => s.entries);
   const automationEditors = useThreadAutomationEditors();
   const mountedAutomationEditors = useRef(new Set<string>());
@@ -115,6 +129,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     ? [normalizeInitialTab(initialTab)]
     : rightPanelOpen ? [normalizeInitialTab(rightStackTab)] : []);
   const [openedPanelPosition, setOpenedPanelPosition] = useState<{ x: number; y: number } | null>(null);
+  const [tabMenu, setTabMenu] = useState<{ key: string; x: number; y: number } | null>(null);
   const [tabsOverflow, setTabsOverflow] = useState(false);
   const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
   const [measuredMainContentWidth, setMeasuredMainContentWidth] = useState<number | null>(null);
@@ -143,7 +158,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const normalizedRequestedTab = requestedActiveTab === "plan" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
   const expanded = initialTab === undefined && rightPanelExpanded;
-  const canExpand = initialTab === undefined && (["browser", "preview", "diff", "artifacts", "terminal", "sidechat", "files", "subagents", "goal"].includes(activeTab) || activeTab.startsWith("mcp-app:") || activeTab.startsWith("automation:"));
+  const canExpand = initialTab === undefined && (activeTab !== "goal" || goalsEnabled) && (["browser", "preview", "diff", "artifacts", "terminal", "sidechat", "files", "subagents", "goal"].includes(activeTab) || activeTab.startsWith("mcp-app:") || activeTab.startsWith("automation:") || activeTab.startsWith("file:"));
   const setActiveTab = initialTab === undefined ? setRightStackTab : setLocalTab;
   useEffect(() => {
     if (!visible) { setOpenedPanelPosition(null); }
@@ -161,6 +176,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     ?? new Set([...gitChanges.workingTree.map(file => file.path), ...gitChanges.staged.map(file => file.path), ...gitChanges.untracked]).size;
 
   const tabs: { id: StackTab; label: string; badge?: string; icon: React.ReactNode }[] = [
+    ...workspaceFileTabs.filter(tab => tab.open && tab.pane === "right" && (tab.owner.scopeId === fileScope || rightStackTab === `file:${tab.id}`))
+      .map(tab => ({ id: `file:${tab.id}` as const, label: tab.title, icon: fileIcon(tab.path, { size: 16 }) })),
     ...automationEditors.filter(editor => editor.open && editor.owner.id === conversationId).map(editor => ({
       id: `automation:${editor.id}` as const, label: editor.title ?? editor.task?.name ?? editor.owner.title,
       icon: <span aria-hidden="true" style={{ display: "inline-block", width: 16, height: 16, background: "currentColor",
@@ -175,12 +192,12 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     { id: "browser", label: tr("浏览器"), icon: <Globe2 {...sidebarIconProps} /> },
     { id: "terminal", label: tr("终端"), icon: <TerminalSquare {...sidebarIconProps} /> },
     { id: "files", label: tr("文件"), icon: <FolderOpen {...sidebarIconProps} /> },
-    { id: "goal", label: tr("编辑目标"), icon: <Target {...sidebarIconProps} /> },
+    ...(goalsEnabled ? [{ id: "goal" as const, label: tr("编辑目标"), icon: <Target {...sidebarIconProps} /> }] : []),
     { id: "sidechat", label: tr("侧边聊天"), icon: <MessageCirclePlus {...sidebarIconProps} /> },
     { id: "artifacts", label: tr("产物"), badge: activePreviewArtifact ? "1" : undefined, icon: <Layers {...sidebarIconProps} /> },
     { id: "subagents", label: tr("子智能体"), badge: runningSubagents ? String(runningSubagents) : undefined, icon: <Bot {...sidebarIconProps} /> },
-    { id: "inspector", label: tr("运行详情"), icon: <FileSearch {...sidebarIconProps} /> },
-    { id: "diagnostics", label: tr("运行状态"), badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> },
+    ...(debugAllowed || focusedRecordAvailable ? [{ id: "inspector" as const, label: tr(debugAllowed ? "运行详情" : "详情"), icon: <FileSearch {...sidebarIconProps} /> }] : []),
+    ...(debugAllowed ? [{ id: "diagnostics" as const, label: tr("运行状态"), badge: mcpErrors ? String(mcpErrors) : undefined, icon: <HeartPulse {...sidebarIconProps} /> }] : []),
   ];
   const [browserTabs, setBrowserTabs] = useState<BrowserTabSummary[]>([]);
   const [browserTabHosts, setBrowserTabHosts] = useState<Record<string, HTMLElement>>({});
@@ -212,6 +229,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     return position(left) - position(right);
   });
   const sharedTabKeys = sharedTabs.map(tab => tab.key).join("\n");
+  const tabMenuFrame = tabMenu ? orderedTabs.find(tab => tab.key === tabMenu.key) : undefined;
   useEffect(() => {
     const live = new Set(sharedTabKeys.split("\n"));
     setTabOrder(current => current.filter(key => live.has(key)));
@@ -238,6 +256,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     "data-workspace-tab-key": key,
     style: { touchAction: "none" },
     onMouseDown: cancelTabFocus,
+    onContextMenu: event => { event.preventDefault(); event.stopPropagation(); setTabMenu({ key, x: event.clientX, y: event.clientY }); },
     onPointerDown: event => {
       suppressTabClick.current = false;
       if (event.button !== 0) return;
@@ -281,7 +300,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const addOpenTab = useCallback((tab: StackTab) => {
     setOpenTabIds((current) => current.includes(tab) ? current : [...current, tab]);
   }, []);
-  const closeOpenTab = useCallback((tab: StackTab) => {
+  const closeOpenTab = useCallback((tab: StackTab, dispose = true) => {
+    setTabMenu(null);
     const tabIndex = openTabIds.indexOf(tab);
     if (tabIndex < 0) return;
     if (tab.startsWith("mcp-app:")) closeMcpAppPanel(tab.slice("mcp-app:".length));
@@ -291,6 +311,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       ? [...openTabIds, requested] : openTabIds;
     const nextTabs = liveTabs.filter(id => id !== tab && (!id.startsWith("automation:") || tabById.has(id)));
     setOpenTabIds(nextTabs);
+    if (dispose && tab.startsWith("file:")) useAppStore.getState().closeWorkspaceFileTab(tab.slice(5));
     if (tab === "browser") setBrowserTabs([]);
     if (tab === "sidechat") closeSideChat();
     if (nextTabs.length === 0) {
@@ -308,6 +329,38 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     if (initialTab === undefined && !panelWasOpen && useAppStore.getState().rightPanelOpen) toggleRightPanel();
     if (adjacent) scheduleTabActivation(adjacent.key);
   }, [activeTab, setActiveTab, openTabIds, orderedTabs, tabById, closeSideChat, rightPanelOpen, toggleRightPanel, initialTab]);
+  const closeSharedTabs = (keys: string[]) => {
+    setTabMenu(null);
+    const closing = orderedTabs.filter(tab => keys.includes(tab.key));
+    for (const tab of closing) {
+      if (tab.nativeId) browserTabHosts[tab.nativeId].querySelector<HTMLButtonElement>('button:not([role="tab"])')!.click();
+      else {
+        if (tab.panel.id.startsWith("file:")) useAppStore.getState().closeWorkspaceFileTab(tab.panel.id.slice(5));
+        if (tab.panel.id.startsWith("mcp-app:")) closeMcpAppPanel(tab.panel.id.slice(8));
+        if (tab.panel.id.startsWith("automation:")) closeThreadAutomationEditor(tab.panel.id.slice(11));
+        if (tab.panel.id === "sidechat") closeSideChat();
+      }
+    }
+    const closedPanels = new Set(closing.filter(tab => !tab.nativeId).map(tab => tab.panel.id));
+    setOpenTabIds(current => current.filter(id => !closedPanels.has(id)));
+    const remaining = orderedTabs.filter(tab => !keys.includes(tab.key));
+    if (closing.some(tab => tab.panel.id === activeTab)) {
+      if (remaining.length) { setActiveTab(remaining[0].panel.id); scheduleTabActivation(remaining[0].key); }
+      else { setActiveTab("tasks"); if (useAppStore.getState().rightPanelOpen) toggleRightPanel(); }
+    }
+  };
+  useEffect(() => {
+    if (!pendingFileTabId) return;
+    const tab = workspaceFileTabs.find(value => value.id === pendingFileTabId)!;
+    const ownerId = tab.owner.scopeId.startsWith("conversation:") ? tab.owner.scopeId.slice(13) : tab.owner.conversationId;
+    if (ownerId !== conversationId || useAppStore.getState().pendingConversationSwitchId) return;
+    useAppStore.setState({ pendingWorkspaceFileTabId: null });
+    useAppStore.getState().activateWorkspaceFileTab(tab.id);
+  }, [pendingFileTabId, conversationId, workspaceFileTabs]);
+  useEffect(() => {
+    const ids = workspaceFileTabs.filter(tab => tab.open && tab.pane === "right" && tab.owner.scopeId === fileScope).map(tab => `file:${tab.id}` as StackTab);
+    setOpenTabIds(current => [...current.filter(id => !id.startsWith("file:") || tabById.has(id)), ...ids.filter(id => !current.includes(id))]);
+  }, [workspaceFileTabs, fileScope]);
   const closeGoalEditor = useCallback(() => closeOpenTab("goal"), [closeOpenTab]);
   useEffect(() => {
     const close = (event: Event) => {
@@ -320,6 +373,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     if (!wasActive || (initialTab === undefined ? useAppStore.getState().rightStackTab : activeTab) !== "browser") return;
     const index = orderedTabs.findIndex(tab => tab.nativeId === id);
     const remaining = orderedTabs.filter(tab => tab.nativeId !== id);
+    if (remaining.length === 0) { closeOpenTab("browser"); return; }
     const adjacent = remaining[Math.min(index, remaining.length - 1)];
     setActiveTab(adjacent.panel.id);
     scheduleTabActivation(adjacent.key);
@@ -431,8 +485,6 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     ? rightSidebarWidth === RIGHT_SIDEBAR_DEFAULT_WIDTH ? defaultSidebarWidth : rightSidebarWidth
     : rightPanelWidthFromRatio(rightSidebarWidthRatio, mainContentWidth));
   const sidebarWidthStyle = expanded || embedded ? "100%" : rightPanelOpen ? `${sidebarWidth}px` : "0px";
-  const sidebarMinWidth = expanded || embedded ? 0 : rightPanelOpen ? minSidebarWidth : 0;
-  const sidebarMaxWidth = expanded || embedded ? "none" : rightPanelOpen ? `${effectiveResizeMax}px` : "0px";
   const activateTab = (tab: StackTab) => {
     addOpenTab(tab);
     setActiveTab(tab);
@@ -476,11 +528,18 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     const previouslyDragging = document.body.classList.contains("layout-dragging");
     const startX = event.clientX;
     const startWidth = sidebarWidth;
+    let nextWidth = startWidth;
+    let frame: number | null = null;
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
-      setRightSidebarWidth(boundWidth(startWidth + startX - moveEvent.clientX), { mainContentWidth, persist: false });
+      nextWidth = boundWidth(startWidth + startX - moveEvent.clientX);
+      if (frame === null) frame = requestAnimationFrame(() => {
+        frame = null;
+        setRightSidebarWidth(nextWidth, { mainContentWidth, persist: false });
+      });
     };
     const cleanup = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
@@ -492,7 +551,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       resizeCleanupRef.current = null;
     };
     const finishResize = () => {
-      setRightSidebarWidth(useAppStore.getState().rightSidebarWidth, { mainContentWidth });
+      setRightSidebarWidth(nextWidth, { mainContentWidth });
       cleanup();
     };
     const onUp = (upEvent: PointerEvent) => {
@@ -546,9 +605,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         flexDirection: "column",
         overflow: "hidden",
         width: sidebarWidthStyle,
-        minWidth: sidebarMinWidth,
-        maxWidth: sidebarMaxWidth,
-        flex: expanded || embedded ? "1 1 auto" : `0 0 ${rightPanelOpen ? sidebarWidth : 0}px`,
+        minWidth: 0,
+        flex: expanded || embedded ? "1 1 auto" : "0 0 auto",
         background: "var(--surface-base)",
         border: 0,
         borderLeft: expanded || embedded || !rightPanelOpen ? 0 : "1px solid var(--border-subtle)",
@@ -558,7 +616,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         transform: embedded || rightPanelOpen ? "none" : "translateX(8px)",
         visibility: embedded || rightPanelOpen ? "visible" : "hidden",
         pointerEvents: embedded || rightPanelOpen ? "auto" : "none",
-        transition: `width var(--transition-normal), min-width var(--transition-normal), max-width var(--transition-normal), flex-basis var(--transition-normal), margin var(--transition-normal), opacity var(--transition-fast), transform var(--duration-base) var(--easing-enter), border-color var(--transition-fast), box-shadow var(--transition-normal), visibility 0s linear ${embedded || rightPanelOpen ? "0ms" : "var(--duration-base)"}`,
+        transition: `width var(--transition-normal), opacity var(--transition-fast), transform var(--duration-base) var(--easing-enter), visibility 0s linear ${embedded || rightPanelOpen ? "0ms" : "var(--duration-base)"}`,
       } as React.CSSProperties}
     >
       {!embedded && !expanded && (
@@ -678,6 +736,22 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           onClick: () => activateSharedTab(tab.key),
         }))}
       />}
+      {tabMenu && tabMenuFrame && (() => {
+        const frame = tabMenuFrame;
+        const file = frame.panel.id.startsWith("file:") ? workspaceFileTabs.find(tab => `file:${tab.id}` === frame.panel.id) : undefined;
+        const right = orderedTabs.slice(orderedTabs.indexOf(frame) + 1).map(tab => tab.key);
+        const close = () => closeSharedTabs([frame.key]);
+        const closeOthers = () => closeSharedTabs(orderedTabs.filter(tab => tab.key !== frame.key).map(tab => tab.key));
+        const closeRight = () => closeSharedTabs(right);
+        return <ContextMenu position={tabMenu} ariaLabel={tr("标签页操作")} onClose={() => setTabMenu(null)} items={file ? workspaceFileTabMenuItems(file, tr, {
+          close, closeOthers, closeRight, otherCount: orderedTabs.length - 1, rightCount: right.length,
+          move: pane => { useAppStore.getState().moveWorkspaceFileTab(file.id, pane); if (pane === "left") closeOpenTab(frame.panel.id, false); },
+        }) : [
+          { label: tr("关闭"), onClick: close },
+          { label: tr("关闭其他标签页"), disabled: orderedTabs.length === 1, onClick: closeOthers },
+          { label: tr("关闭右侧标签页"), disabled: right.length === 0, onClick: closeRight },
+        ]} />;
+      })()}
       {openedTabs.filter(({ id }) => !id.startsWith("automation:")).map(({ id: panelTab }) => <div
         key={panelTab}
         className="mc-sidebar-panel-view flex-1 overflow-hidden text-sm flex flex-col"
@@ -689,6 +763,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       >
         <div className="panel-content-wrapper" style={{ minHeight: 0, minWidth: 0, overflow: "hidden" }}>
           {panelTab.startsWith("mcp-app:") && <McpAppPanelSlot id={panelTab.slice("mcp-app:".length)} />}
+          {panelTab.startsWith("file:") && <Suspense fallback={<PanelSkeleton kind="preview" />}><LazyFileViewerPanel tabId={panelTab.slice(5)} active={visible && rightPanelOpen && activeTab === panelTab} /></Suspense>}
           {panelTab === "sidechat" && sideChatOpen && <SideChatPanel active={visible && activeTab === "sidechat" && rightPanelOpen} />}
           {panelTab === "preview" && (
             <ChunkErrorBoundary>
@@ -712,7 +787,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
             <LazyTerminalPanel visible={visible && activeTab === "terminal"} />
           </Suspense>}
           {panelTab === "files" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyFilesPanel active={visible && rightPanelOpen && activeTab === "files"} /></Suspense>}
-          {panelTab === "goal" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyGoalPanel key={conversationId || ""}
+          {panelTab === "goal" && goalsEnabled && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyGoalPanel key={conversationId || ""}
             active={visible && rightPanelOpen && activeTab === "goal"} onClose={closeGoalEditor} /></Suspense>}
           {panelTab === "tasks" && <ScrollablePanel><ActivityTab /></ScrollablePanel>}
           {panelTab === "diff" && (
@@ -733,7 +808,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           )}
           {panelTab === "artifacts" && <Suspense fallback={<PanelSkeleton kind="artifacts" />}><ScrollablePanel><LazyArtifactsTab /></ScrollablePanel></Suspense>}
           {panelTab === "inspector" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyInspectorTab /></ScrollablePanel></Suspense>}
-          {panelTab === "diagnostics" && <Suspense fallback={<PanelSkeleton kind="diagnostics" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
+          {panelTab === "diagnostics" && debugAllowed && <Suspense fallback={<PanelSkeleton kind="diagnostics" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
         </div>
       </div>)}
       {automationEditors.filter(editor => mountedAutomationEditors.current.has(editor.id)).map(editor => {

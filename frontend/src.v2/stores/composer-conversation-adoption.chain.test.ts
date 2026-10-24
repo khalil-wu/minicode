@@ -70,12 +70,13 @@ it("does not adopt a homepage draft into a newer selected task or apply a goal a
   const createdId = useAppStore.getState().pendingConversationCreateId!;
   const createCommandId = String(vi.mocked(sendClientCommandAwaitResult).mock.calls[0][0].client_command_id);
   useAppStore.getState().requestConversationSwitch("other-task");
+  expect(useAppStore.getState().pendingComposerConversationAdoption).toBeNull();
   const switchCommandId = String(vi.mocked(sendClientCommand).mock.calls.find(([command])=>command.type==="conversation.switch")![0].client_command_id);
   switched("other-task","C:/other",switchCommandId,"conversation.switch");
   switched(createdId,"C:/project",createCommandId,"conversation.create");
   complete({type:"command.result",command:"conversation.create",level:"success",message:"",data:{conversation_id:createdId}});
   expect(await ensure).toBeNull();
-  expect(useAppStore.getState()).toMatchObject({conversationId:"other-task",draft:""});
+  expect(useAppStore.getState()).toMatchObject({conversationId:"other-task",draft:"",pendingComposerConversationAdoption:null});
   expect(useAppStore.getState().workspaceComposerDrafts[composerWorkspaceKey("C:/project")].draft).toBe("Keep homepage draft");
   expect(useAppStore.getState().conversationWorkbenchStates[createdId]).toBeUndefined();
 });
@@ -85,6 +86,30 @@ it("uses an already active task without creating or moving its composer",async()
   expect(await useAppStore.getState().ensureComposerConversation()).toBe("existing");
   expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   expect(useAppStore.getState().draft).toBe("Keep homepage draft");
+});
+
+it("keeps the second creation's adoption owner when the superseded first creation completes",async()=>{
+  let firstComplete!:(value:CommandResultEvent)=>void,secondComplete!:(value:CommandResultEvent)=>void;
+  vi.mocked(sendClientCommandAwaitResult)
+    .mockImplementationOnce(()=>new Promise(resolve=>{firstComplete=resolve;}))
+    .mockImplementationOnce(()=>new Promise(resolve=>{secondComplete=resolve;}));
+  const first=useAppStore.getState().createConversation({bindWorkspace:true,adoptDraft:true});
+  const firstId=useAppStore.getState().pendingConversationCreateId!;
+  const firstCommandId=String(vi.mocked(sendClientCommandAwaitResult).mock.calls[0][0].client_command_id);
+  const second=useAppStore.getState().createConversation({bindWorkspace:true,adoptDraft:true});
+  const secondId=useAppStore.getState().pendingConversationCreateId!;
+  const secondCommandId=String(vi.mocked(sendClientCommandAwaitResult).mock.calls[1][0].client_command_id);
+  switched(firstId,"C:/project",firstCommandId,"conversation.create");
+  firstComplete({type:"command.result",command:"conversation.create",level:"success",message:"",data:{conversation_id:firstId}});
+  expect(await first).toBe(true);
+  expect(useAppStore.getState()).toMatchObject({conversationId:null,draft:"Keep homepage draft",
+    pendingComposerConversationAdoption:{conversationId:secondId,workspaceRoot:"C:/project"}});
+  switched(secondId,"C:/project",secondCommandId,"conversation.create");
+  secondComplete({type:"command.result",command:"conversation.create",level:"success",message:"",data:{conversation_id:secondId}});
+  expect(await second).toBe(true);
+  expect(useAppStore.getState()).toMatchObject({conversationId:secondId,draft:"Keep homepage draft",
+    pendingComposerConversationAdoption:null,attachments:[{id:"local"}],selectedSkills:[{name:"writing"}]});
+  expect(useAppStore.getState().conversationWorkbenchStates[firstId]).toBeUndefined();
 });
 
 it("keeps an adopted homepage draft in its real isolated workspace",async()=>{

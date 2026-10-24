@@ -11,5 +11,6 @@
 .skill-details-body { font-size: var(--mc-font-body); line-height: var(--leading-relaxed); }
 .skill-details-dialog > footer { display: flex; flex-shrink: 0; justify-content: flex-end; padding: 16px 24px 24px; }
 .skill-details-dialog > footer > button { min-height: 32px; padding: 0 14px; border: 0; border-radius: var(--radius-full); font: inherit; cursor: pointer; }
+.skill-details-uninstall { margin-inline-end: auto; }
 .settings-skill-open { padding: 0; border: 0; background: transparent; font: inherit; text-align: left; cursor: pointer; }
 .settings-skill-open > span { overflow: hidden; color: var(--text-secondary); font-size: inherit; font-weight: var(--fw-medium); text-overflow: ellipsis; white-space: nowrap; }

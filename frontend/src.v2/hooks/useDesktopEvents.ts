@@ -27,6 +27,15 @@ const markViewedConversationRead = (isWindowFocused: boolean) => {
 
 export const useDesktopEvents = () => {
   useDesktopTerminalMirror();
+  useEffect(() => {
+    const navigation = window.__MINICODE_RUNTIME__?.initialNavigation;
+    if (!navigation?.popout || !navigation.workspaceRoot) return;
+    const current = useAppStore.getState();
+    if (current.isConnected && !current.conversationId) current.setWorkingDirectory(navigation.workspaceRoot);
+    return useAppStore.subscribe((state, previous) => {
+      if (state.isConnected && !previous.isConnected && !state.conversationId) state.setWorkingDirectory(navigation.workspaceRoot!);
+    });
+  }, []);
   useEffect(() => installDesktopVoiceControl(), []);
   useEffect(() => {
     if (isDesktop()) return;
@@ -49,10 +58,7 @@ export const useDesktopEvents = () => {
     const consumeProviderSettings = () => { void consumeDictationProviderSettings().catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); };
     const toggleSummary = () => {
       const store = useAppStore.getState();
-      const chat = document.querySelector<HTMLElement>('.mc-main-slot-frame[data-panel-slot-kind="chat"]');
-      if (chat && chat.clientWidth < 900) store.setRightStackTab("tasks");
-      else if (store.rightPanelOpen) { store.toggleRightPanel(); store.setContextCardCollapsed(false); }
-      else store.setContextCardCollapsed(!store.contextCardCollapsed);
+      store.setContextCardPinned(!store.contextCardPinned);
     };
     const navigateThread = (direction: -1 | 1) => {
       const store = useAppStore.getState();
@@ -177,6 +183,7 @@ export const useDesktopEvents = () => {
         acceleratorBindings: nativeMenuBindings(state.shortcutBindings),
         shortcutOverrides: nativeShortcutOverrides(state.shortcutBindings),
         shortcutRecording: Boolean(document.querySelector('[data-shortcut-recording="true"]')),
+        workspaceRoot: state.workingDirectory,
       };
       const serialized = JSON.stringify(menuState);
       if (serialized === lastMenuState) return;
@@ -190,6 +197,7 @@ export const useDesktopEvents = () => {
     const removeMenuState = useAppStore.subscribe((state, previous) => {
       if (state.appMode !== previous.appMode || state.isConnected !== previous.isConnected
         || state.conversationId !== previous.conversationId || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
+        || state.workingDirectory !== previous.workingDirectory
         || state.settingsOpen !== previous.settingsOpen || state.skillsMarketplaceOpen !== previous.skillsMarketplaceOpen
         || state.projectsOpen !== previous.projectsOpen || state.shortcutBindings !== previous.shortcutBindings) updateMenuState();
     });
@@ -241,7 +249,7 @@ export const useDesktopEvents = () => {
       if (desktopRuntime) {
         const state = useAppStore.getState();
         void desktopRuntime.menu.setState({ terminalEnabled: false, bottomPanelToggleEnabled: false, newProjectEnabled: false, editorFocused: false,
-          accelerators: nativeMenuAccelerators(state.shortcutBindings), acceleratorBindings: nativeMenuBindings(state.shortcutBindings), shortcutOverrides: nativeShortcutOverrides(state.shortcutBindings), shortcutRecording: false });
+          accelerators: nativeMenuAccelerators(state.shortcutBindings), acceleratorBindings: nativeMenuBindings(state.shortcutBindings), shortcutOverrides: nativeShortcutOverrides(state.shortcutBindings), shortcutRecording: false, workspaceRoot: state.workingDirectory });
       }
       document.removeEventListener("focusin", updateMenuState);
       document.removeEventListener("focusout", updateMenuAfterBlur);

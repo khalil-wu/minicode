@@ -12,6 +12,7 @@ from backend.config import (
     load_config,
 )
 from backend.config_requirements import RequirementViolation
+from backend.config_layers import ConfigLayer, ConfigLayerSource
 from backend.application_network import reload_application_config
 from backend.feature_flags import (
     DEFAULT_FEATURE_FLAGS,
@@ -19,6 +20,7 @@ from backend.feature_flags import (
     feature_env_name,
     feature_flags_payload,
     normalize_feature_name,
+    write_feature_values,
 )
 from backend.hooks.runtime import ConfigChangeHookBlocked, raise_if_config_change_blocked
 
@@ -32,7 +34,7 @@ class FeatureFlagSettingsError(ValueError):
 
 
 def get_feature_flag_settings() -> dict[str, Any]:
-    settings_data = _load_settings_json()
+    settings_data = ConfigLayer(ConfigLayerSource("user"), _load_settings_json()).config
     requirements = get_config_requirements()
     managed = requirements.feature_requirements
     overrides = _settings_overrides(settings_data)
@@ -43,6 +45,8 @@ def get_feature_flag_settings() -> dict[str, Any]:
         # Their real config values stay available in `effective`; they do not
         # create new desktop switches when a runtime capability is added.
         if name in {
+            "memories",
+            "multi_agent", "goals", "sleep_tool", "current_time_reminder", "send_message_to_user_async",
             "content_item_kinds",
             "skill_mcp_dependency_install",
             "stable_environment_tools",
@@ -127,17 +131,7 @@ async def update_feature_flag_settings(
         raise FeatureFlagSettingsError(str(exc), status_code=409) from exc
 
     def apply_updates(settings_data: dict[str, Any]) -> None:
-        raw_flags = settings_data.get("feature_flags")
-        feature_flags = dict(raw_flags) if isinstance(raw_flags, dict) else {}
-        for name, value in normalized_updates.items():
-            if value is None:
-                feature_flags.pop(name, None)
-            else:
-                feature_flags[name] = value
-        if feature_flags:
-            settings_data["feature_flags"] = dict(sorted(feature_flags.items()))
-        else:
-            settings_data.pop("feature_flags", None)
+        write_feature_values(settings_data, normalized_updates)
 
     _update_settings_json(apply_updates)
     return {
@@ -147,12 +141,12 @@ async def update_feature_flag_settings(
 
 
 def _settings_overrides(settings_data: Mapping[str, Any]) -> dict[str, bool]:
-    raw = settings_data.get("feature_flags")
-    if not isinstance(raw, Mapping):
-        return {}
+    from backend.feature_flags import _settings_flags
+    raw = _settings_flags(settings_data)
     overrides: dict[str, bool] = {}
     for raw_name, raw_value in raw.items():
         name = normalize_feature_name(str(raw_name))
         if name in DEFAULT_FEATURE_FLAGS:
-            overrides[name] = coerce_feature_bool(raw_value, DEFAULT_FEATURE_FLAGS[name])
+            value = raw_value.get("enabled") if isinstance(raw_value, Mapping) else raw_value
+            overrides[name] = coerce_feature_bool(value, DEFAULT_FEATURE_FLAGS[name])
     return dict(sorted(overrides.items()))

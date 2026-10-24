@@ -1,289 +1,162 @@
-import { useI18n, type Translate } from "../i18n";
-import { useCallback, useRef, useState, type KeyboardEvent } from "react";
-import { ArrowLeft, ChevronRight, LoaderCircle, RotateCcw, ShieldAlert } from "lucide-react";
-import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
+import { useI18n } from "../i18n";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { ArrowLeft, ChevronDown, ChevronRight, LoaderCircle, Monitor, Server } from "lucide-react";
+import { ContextMenu } from "../components/ContextMenu";
 import { pushToast } from "./ToastContainer";
-import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
-import { useAppStore } from "../stores";
 import { Section } from "./settingsShared";
 import { showConfirm } from "./DialogService";
+import { currentPersonalizationHost, listPersonalizationHosts, personalizationRequest, type MemorySettingsPayload, type MemorySettingsUpdate, type PersonalizationPayload } from "../protocol/memory-settings";
+import type { PersonalizationHost } from "../desktop/runtime";
 import "./PersonalizationTab.css";
 
-type PersonalizationPayload = {
-  instructions: string;
-  path: string;
-  exists: boolean;
-  max_bytes: number;
-};
-
-type MemoryRequest = { action: "mode" | "restore"; pending: boolean; error: string };
-
-const fileName = (path: string): string => path.split(/[\\/]/).pop()!;
+type InstructionsState = { payload?: PersonalizationPayload; draft?: string; loading?: boolean; saving?: boolean; loadError?: string; saveError?: string };
+type MemoryState = { payload?: MemorySettingsPayload; loading?: boolean; pending?: boolean; loadError?: string; error?: string; resetting?: boolean };
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
-
-const pollutionSourceLabel = (tr: Translate, source: string): string => {
-  const normalized = source.trim().toLowerCase();
-  if (normalized === "web_search" || normalized.includes("web_search")) return tr("联网搜索");
-  if (normalized === "web_fetch" || normalized.includes("web_fetch")) return tr("网页读取");
-  if (normalized === "tool_search") return tr("工具检索");
-  if (normalized === "browser_control") return tr("浏览器");
-  if (normalized.startsWith("mcp__") || normalized.includes("mcp_")) return "MCP";
-  return source;
-};
 
 export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
   const { t: tr } = useI18n();
-  const conversationId = useAppStore((state) => state.conversationId);
-  const currentConversation = useAppStore((state) => state.conversations.find((conversation) => conversation.id === state.conversationId));
-  const memoryPolluted = currentConversation?.memoryPolluted === true;
-  const memoryMode = memoryPolluted ? "polluted" : currentConversation?.memoryMode || "enabled";
-  const memoryPollutionSources = currentConversation?.memoryPollutionSources || [];
-  const [payload, setPayload] = useState<PersonalizationPayload | null>(null);
-  const [draft, setDraft] = useState<string | null>(null);
+  const [selectedHost, setSelectedHost] = useState<PersonalizationHost>(currentPersonalizationHost);
+  const hostId = selectedHost.id;
+  const currentHost = useRef(hostId);
+  currentHost.current = hostId;
+  const [hosts, setHosts] = useState<PersonalizationHost[]>([selectedHost]);
+  const [hostError, setHostError] = useState("");
+  const [hostMenu, setHostMenu] = useState(false);
+  const hostButton = useRef<HTMLButtonElement>(null);
+  const [memories, setMemories] = useState<Record<string, MemoryState>>({});
+  const memoryEpoch = useRef<Record<string, number>>({});
+  const [instructions, setInstructions] = useState<Record<string, InstructionsState>>({});
+  const instructionEpoch = useRef<Record<string, number>>({});
   const [editingInstructions, setEditingInstructions] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [loadError, setLoadError] = useState("");
-  const [saveError, setSaveError] = useState("");
-  const [memoryRequests, setMemoryRequests] = useState<Record<string, MemoryRequest>>({});
-  const [resettingMemory, setResettingMemory] = useState(false);
-  const [resetError, setResetError] = useState("");
-  const loadEpoch = useRef(0);
-  const instructionEndpoint = useRef(`${apiBase()}/api/settings/personalization`).current;
-  const contents = draft ?? payload?.instructions ?? "";
-  const dirty = payload !== null && draft !== null && draft !== payload.instructions;
-  const tooLarge = payload !== null && new TextEncoder().encode(contents).length > payload.max_bytes;
-  const memoryRequest = conversationId ? memoryRequests[conversationId] : undefined;
-  const savingMemoryMode = memoryRequest?.pending === true && memoryRequest.action === "mode";
-  const clearingPollution = memoryRequest?.pending === true && memoryRequest.action === "restore";
+  const memory = memories[hostId] ?? {};
+  const editor = instructions[hostId] ?? {};
+  const contents = editor.draft ?? editor.payload?.instructions ?? "";
+  const dirty = editor.payload !== undefined && editor.draft !== undefined && editor.draft !== editor.payload.instructions;
+  const tooLarge = editor.payload !== undefined && new TextEncoder().encode(contents).length > editor.payload.max_bytes;
+  const patchMemory = (id: string, patch: Partial<MemoryState>) => setMemories(current => ({ ...current, [id]: { ...current[id], ...patch } }));
+  const patchInstructions = (id: string, patch: Partial<InstructionsState>) => setInstructions(current => ({ ...current, [id]: { ...current[id], ...patch } }));
 
-  const load = useCallback(async () => {
-    const epoch = ++loadEpoch.current;
-    setLoading(true);
-    setLoadError("");
+  const loadHosts = useCallback(async () => {
+    try { setHosts(await listPersonalizationHosts()); setHostError(""); }
+    catch (error) { setHostError(errorMessage(error)); }
+  }, []);
+  const loadMemory = useCallback(async (id: string) => {
+    const epoch = (memoryEpoch.current[id] ?? 0) + 1;
+    memoryEpoch.current[id] = epoch;
+    patchMemory(id, { loading: true, loadError: "", error: "" });
     try {
-      const response = await fetchWithTimeout(instructionEndpoint, { cache: "no-store", headers: authHeaders() });
-      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
-      const next = await response.json() as PersonalizationPayload;
-      if (epoch === loadEpoch.current) setPayload(next);
+      const payload = await personalizationRequest<MemorySettingsPayload>(id, "read-memory");
+      if (memoryEpoch.current[id] === epoch) patchMemory(id, { payload });
     } catch (error) {
-      if (epoch === loadEpoch.current) setLoadError(errorMessage(error));
+      if (memoryEpoch.current[id] === epoch) patchMemory(id, { loadError: errorMessage(error) });
     } finally {
-      if (epoch === loadEpoch.current) setLoading(false);
+      if (memoryEpoch.current[id] === epoch) patchMemory(id, { loading: false });
     }
-  }, [instructionEndpoint]);
+  }, []);
+  useEffect(() => { if (active) void loadHosts(); }, [active, loadHosts]);
+  useEffect(() => { if (active) void loadMemory(hostId); }, [active, hostId, loadMemory]);
 
-  const openInstructions = () => {
-    setEditingInstructions(true);
-    setSaveError("");
-    void load();
+  const loadInstructions = async (id: string) => {
+    const epoch = (instructionEpoch.current[id] ?? 0) + 1;
+    instructionEpoch.current[id] = epoch;
+    patchInstructions(id, { loading: true, loadError: "" });
+    try {
+      const payload = await personalizationRequest<PersonalizationPayload>(id, "read-instructions");
+      if (instructionEpoch.current[id] === epoch) patchInstructions(id, { payload });
+    } catch (error) {
+      if (instructionEpoch.current[id] === epoch) patchInstructions(id, { loadError: errorMessage(error) });
+    } finally {
+      if (instructionEpoch.current[id] === epoch) patchInstructions(id, { loading: false });
+    }
   };
-
   const closeInstructions = () => {
-    setDraft(null);
-    setSaveError("");
+    patchInstructions(hostId, { draft: undefined, saveError: "" });
     setEditingInstructions(false);
   };
-
   const backToPersonalization = async () => {
-    if (saving) return;
-    if (dirty && !await showConfirm({
-      title: tr("放弃未保存的更改？"),
-      message: tr("返回后将放弃对自定义指令的更改。"),
-      confirmLabel: tr("放弃更改"),
-      cancelLabel: tr("继续编辑"),
-    })) return;
+    if (editor.saving) return;
+    if (dirty && !await showConfirm({ title: tr("放弃未保存的更改？"), message: tr("返回后将放弃对自定义指令的更改。"), confirmLabel: tr("放弃更改"), cancelLabel: tr("继续编辑") })) return;
     closeInstructions();
   };
-
   const save = async () => {
-    if (!dirty || tooLarge || saving) return;
-    const submitted = contents;
-    // A read started before this explicit save must not replace its result.
-    loadEpoch.current += 1;
-    setLoading(false);
-    setSaving(true);
-    setSaveError("");
+    if (!dirty || tooLarge || editor.saving) return;
+    const owner = hostId, submitted = contents;
+    instructionEpoch.current[owner] = (instructionEpoch.current[owner] ?? 0) + 1;
+    patchInstructions(owner, { loading: false, saving: true, saveError: "" });
     try {
-      const response = await fetchWithTimeout(instructionEndpoint, {
-        method: "PUT",
-        headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ instructions: submitted }),
-      }, { timeoutMessage: tr("保存自定义指令超时，请重试。") });
-      if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
-      const next = await response.json() as PersonalizationPayload;
-      setPayload(next);
-      setDraft(null);
-      setEditingInstructions(false);
-      pushToast(tr("自定义指令已保存"), "success");
+      const payload = await personalizationRequest<PersonalizationPayload>(owner, "update-instructions", { instructions: submitted });
+      patchInstructions(owner, { payload, draft: undefined });
+      if (currentHost.current === owner) { setEditingInstructions(false); pushToast(tr("自定义指令已保存"), "success"); }
     } catch (error) {
       const message = errorMessage(error);
-      setSaveError(message);
-      pushToast(tr("自定义指令保存失败：{v0}", { v0: message }), "error");
-    } finally {
-      setSaving(false);
-    }
+      patchInstructions(owner, { saveError: message });
+      if (currentHost.current === owner) pushToast(tr("自定义指令保存失败：{v0}", { v0: message }), "error");
+    } finally { patchInstructions(owner, { saving: false }); }
   };
-
   const onEditorKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (!active || event.nativeEvent.isComposing || !(event.metaKey || event.ctrlKey)
-      || !["s", "Enter"].includes(event.key)) return;
-    event.preventDefault();
-    event.stopPropagation();
-    void save();
+    if (!active || event.nativeEvent.isComposing || !(event.metaKey || event.ctrlKey) || !["s", "Enter"].includes(event.key)) return;
+    event.preventDefault(); event.stopPropagation(); void save();
   };
-
-  const isCurrentMemoryOwner = (owner: string) => useAppStore.getState().conversationId === owner;
-
-  const updateMemoryMode = async (enabled: boolean) => {
-    if (!conversationId || memoryRequest?.pending || memoryPolluted) return;
-    const owner = conversationId;
-    const nextMode = enabled ? "enabled" : "disabled";
-    if (nextMode === memoryMode) return;
-    setMemoryRequests((current) => ({ ...current, [owner]: { action: "mode", pending: true, error: "" } }));
-    let failure = "";
-    try {
-      const result = await sendClientCommandAwaitResult({
-        type: "conversation.memory_mode.set", conversation_id: owner, memory_mode: nextMode,
-      }, "conversation.memory_mode.set");
-      if (!commandResultSucceeded(result)) throw new Error(result.message);
-      if (isCurrentMemoryOwner(owner)) pushToast(enabled ? tr("当前任务已启用长期记忆。") : tr("当前任务已关闭长期记忆。"), "success");
-    } catch (error) {
-      failure = errorMessage(error);
-      if (isCurrentMemoryOwner(owner)) pushToast(tr("长期记忆设置失败：{v0}", { v0: failure }), "error");
-    } finally {
-      setMemoryRequests((current) => ({ ...current, [owner]: { action: "mode", pending: false, error: failure } }));
-    }
+  const updateMemory = async (updates: MemorySettingsUpdate) => {
+    const owner = hostId;
+    memoryEpoch.current[owner] = (memoryEpoch.current[owner] ?? 0) + 1;
+    patchMemory(owner, { pending: true, loading: false, error: "" });
+    try { patchMemory(owner, { payload: await personalizationRequest<MemorySettingsPayload>(owner, "update-memory", updates) }); }
+    catch (error) { patchMemory(owner, { error: errorMessage(error) }); }
+    finally { patchMemory(owner, { pending: false }); }
   };
-
   const resetMemory = async () => {
-    if (resettingMemory) return;
-    const confirmed = await showConfirm({
-      title: tr("清除长期记忆"),
-      message: tr("这会清除所有生成的长期记忆和派生摘要。任务对话、目标以及每个任务选择的记忆模式会保留。"),
-      confirmLabel: tr("清除记忆"), danger: true,
-    });
-    if (!confirmed) return;
-    setResettingMemory(true);
-    setResetError("");
+    const owner = hostId;
+    if (!await showConfirm({ title: tr("删除全部 MiniCode 记忆？"), message: tr("这会删除 {v0} 上的全部 MiniCode 记忆。", { v0: selectedHost.displayName }), confirmLabel: tr("删除"), cancelLabel: tr("取消"), danger: true })) return;
+    patchMemory(owner, { resetting: true, error: "" });
     try {
-      const result = await sendClientCommandAwaitResult({ type: "memory.reset", confirmed: true }, "memory.reset");
-      if (!commandResultSucceeded(result)) throw new Error(result.message);
-      pushToast(tr("长期记忆已清除，任务对话和记忆模式已保留。"), "success");
-    } catch (error) {
-      const message = errorMessage(error);
-      setResetError(message);
-      pushToast(tr("记忆清除失败：{v0}", { v0: message }), "error");
-    } finally {
-      setResettingMemory(false);
-    }
+      await personalizationRequest(owner, "reset-memory", { confirmed: true });
+      if (currentHost.current === owner) pushToast(tr("MiniCode 记忆已删除"), "success");
+    } catch (error) { patchMemory(owner, { error: errorMessage(error) }); }
+    finally { patchMemory(owner, { resetting: false }); }
   };
 
-  const clearPollution = async () => {
-    if (!conversationId || memoryRequest?.pending) return;
-    const owner = conversationId;
-    setMemoryRequests((current) => ({ ...current, [owner]: { action: "restore", pending: true, error: "" } }));
-    let failure = "";
-    try {
-      const confirmed = await showConfirm({
-        title: tr("重新启用任务记忆"),
-        message: tr("此任务包含联网、浏览器或 MCP 外部上下文。重新启用后，后续回复可以再次生成长期记忆。"),
-        confirmLabel: tr("重新启用"),
-      });
-      if (!confirmed || !isCurrentMemoryOwner(owner)) return;
-      const result = await sendClientCommandAwaitResult({
-        type: "conversation.memory_mode.set", conversation_id: owner, memory_mode: "enabled",
-      }, "conversation.memory_mode.set");
-      if (!commandResultSucceeded(result)) throw new Error(result.message);
-      if (isCurrentMemoryOwner(owner)) pushToast(tr("当前任务已重新启用长期记忆。"), "success");
-    } catch (error) {
-      failure = errorMessage(error);
-      if (isCurrentMemoryOwner(owner)) pushToast(tr("任务记忆恢复失败：{v0}", { v0: failure }), "error");
-    } finally {
-      setMemoryRequests((current) => ({ ...current, [owner]: { action: "restore", pending: false, error: failure } }));
-    }
-  };
-
-  if (editingInstructions) return (
-    <section className="personalization-instructions-page" aria-labelledby="personalization-instructions-title" onKeyDown={onEditorKeyDown}>
-      <header className="settings-page-heading personalization-editor-heading">
-        <button type="button" className="personalization-back" onClick={() => void backToPersonalization()} disabled={saving}>
-          <ArrowLeft aria-hidden="true" />{tr("返回")}
-        </button>
-        <div className="personalization-editor-actions">
-          <button type="button" className="settings-action-button" onClick={closeInstructions} disabled={saving}>{tr("取消")}</button>
-          <button type="button" className="settings-action-button" data-primary="true" onClick={() => void save()} disabled={!dirty || tooLarge || saving}>
-            {saving && <LoaderCircle className="settings-spin" aria-hidden="true" />}{saving ? tr("保存中") : tr("保存")}
-          </button>
-        </div>
-        <h2 id="personalization-instructions-title">{tr("自定义指令")}</h2>
-        <p>{payload ? tr("编辑此电脑上的 {v0}。项目指令也可能适用。", { v0: fileName(payload.path) }) : tr("编辑此电脑上的自定义指令，项目指令也可能适用。")}</p>
-      </header>
-      {loadError && <div className="personalization-editor-error" role="alert">
-        <span>{tr("自定义指令暂时不可用")}：{loadError}</span>
-        <button type="button" className="settings-action-button" onClick={() => void load()} disabled={loading || saving}>{tr("重试")}</button>
-      </div>}
-      {loading && !payload ? <div className="personalization-loading" role="status"><LoaderCircle className="settings-spin" aria-hidden="true" />{tr("正在读取指令…")}</div>
-        : payload && <textarea className="personalization-instructions-input" aria-label={tr("自定义指令")} value={contents}
-          onChange={(event) => { setDraft(event.target.value); setSaveError(""); }} rows={13} spellCheck={false} disabled={saving}
-          placeholder={tr("添加自定义指令…")} autoFocus />}
-      {tooLarge && payload && <p className="personalization-inline-error" role="alert">{tr("自定义指令不能超过 {v0} KiB", { v0: payload.max_bytes / 1024 })}</p>}
-      {saveError && <p className="personalization-inline-error" role="alert">{tr("自定义指令保存失败：{v0}", { v0: saveError })}</p>}
-    </section>
-  );
-
-  return <div className="personalization-tab">
-    <Section title={tr("当前任务记忆")} description={tr("控制当前任务是否参与长期记忆生成。")}>
-      <div className="personalization-memory-card">
-        <div className="personalization-memory-row">
-          <div className="settings-row-copy">
-            <div className="settings-row-title">{tr("长期记忆生成")}</div>
-            <div className="settings-row-description">{tr("从当前任务生成可复用的记忆，供今后的任务参考。")}</div>
-          </div>
-          <button type="button" className="settings-toggle" role="switch" aria-label={tr("长期记忆生成")}
-            aria-checked={memoryMode === "enabled"} data-active={memoryMode === "enabled" ? "true" : "false"}
-            disabled={!conversationId || memoryPolluted || savingMemoryMode || clearingPollution}
-            onClick={() => void updateMemoryMode(memoryMode !== "enabled")}><span /></button>
-        </div>
-        <div className="personalization-memory-row">
-          <div className="settings-row-copy">
-            <div className="settings-row-title">{tr("清除长期记忆")}</div>
-            <div className="settings-row-description">{tr("删除此电脑上生成的长期记忆，保留任务对话与记忆模式。")}</div>
-          </div>
-          <button type="button" className="settings-action-button" data-danger="true" disabled={resettingMemory} onClick={() => void resetMemory()}>
-            {resettingMemory && <LoaderCircle className="settings-spin" aria-hidden="true" />}{resettingMemory ? tr("清除中") : tr("清除记忆")}
-          </button>
-        </div>
+  if (editingInstructions) return <section className="personalization-instructions-page" aria-labelledby="personalization-instructions-title" onKeyDown={onEditorKeyDown}>
+    <header className="settings-page-heading personalization-editor-heading">
+      <button type="button" className="personalization-back" onClick={() => void backToPersonalization()} disabled={editor.saving}><ArrowLeft aria-hidden="true" />{tr("返回")}</button>
+      <div className="personalization-editor-actions">
+        <button type="button" className="settings-action-button" onClick={closeInstructions} disabled={editor.saving}>{tr("取消")}</button>
+        <button type="button" className="settings-action-button" data-primary="true" onClick={() => void save()} disabled={!dirty || tooLarge || editor.saving}>{editor.saving && <LoaderCircle className="settings-spin" aria-hidden="true" />}{editor.saving ? tr("保存中") : tr("保存")}</button>
       </div>
-      {memoryPolluted && <div className="personalization-memory-isolation" role="status">
-        <ShieldAlert aria-hidden="true" />
-        <div className="personalization-isolation-copy">
-          <strong>{tr("外部上下文已隔离")}</strong>
-          <span>{tr("此任务不会生成或传递新的长期记忆。")}</span>
-          {memoryPollutionSources.length > 0 && <span className="personalization-isolation-sources">
-            {Array.from(new Set(memoryPollutionSources)).map((source) => <span key={source}>
-              <span>{pollutionSourceLabel(tr, source)}</span>
-              {pollutionSourceLabel(tr, source) !== source && <span className="personalization-source-detail">{source}</span>}
-            </span>)}
-          </span>}
-        </div>
-        <button type="button" className="settings-action-button" disabled={clearingPollution || savingMemoryMode} onClick={() => void clearPollution()}>
-          {clearingPollution ? <LoaderCircle className="settings-spin" aria-hidden="true" /> : <RotateCcw aria-hidden="true" />}
-          {clearingPollution ? tr("恢复中") : tr("重新启用")}
+      <h2 id="personalization-instructions-title">{tr("自定义指令")}</h2>
+      <p>{editor.payload ? tr("编辑 {v0} 上的 {v1}。项目指令也可能适用。", { v0: selectedHost.displayName, v1: editor.payload.path.split(/[\\/]/).pop()! }) : tr("编辑所选电脑上的自定义指令，项目指令也可能适用。")}</p>
+    </header>
+    {editor.loadError && <div className="personalization-editor-error" role="alert"><span>{tr("自定义指令暂时不可用")}：{editor.loadError}</span><button type="button" className="settings-action-button" onClick={() => void loadInstructions(hostId)} disabled={editor.loading || editor.saving}>{tr("重试")}</button></div>}
+    {editor.loading && !editor.payload ? <div className="personalization-loading" role="status"><LoaderCircle className="settings-spin" aria-hidden="true" />{tr("正在读取指令…")}</div>
+      : editor.payload && <textarea className="personalization-instructions-input" aria-label={tr("自定义指令")} value={contents} onChange={event => patchInstructions(hostId, { draft: event.target.value, saveError: "" })} rows={13} spellCheck={false} disabled={editor.saving} placeholder={tr("添加自定义指令…")} autoFocus />}
+    {tooLarge && editor.payload && <p className="personalization-inline-error" role="alert">{tr("自定义指令不能超过 {v0} KiB", { v0: editor.payload.max_bytes / 1024 })}</p>}
+    {editor.saveError && <p className="personalization-inline-error" role="alert">{tr("自定义指令保存失败：{v0}", { v0: editor.saveError })}</p>}
+  </section>;
+
+  const payload = memory.payload;
+  const enabled = payload?.feature_enabled === true && payload.memories.generate_memories && payload.memories.use_memories;
+  const busy = memory.loading || memory.pending || memory.resetting;
+  return <div className="personalization-tab">
+    <Section title={tr("MiniCode 记忆")} description={tr("配置 MiniCode 在 {v0} 上管理记忆的方式。", { v0: selectedHost.displayName })}>
+      <div className="personalization-memory-heading-actions">
+        <button ref={hostButton} type="button" className="settings-action-button personalization-host-selector" aria-label={tr("选择记忆主机")} aria-haspopup="menu" aria-expanded={hostMenu} onClick={() => { void loadHosts(); setHostMenu(value => !value); }}>
+          {selectedHost.kind === "local" ? <Monitor size={15} /> : <Server size={15} />}{selectedHost.kind === "local" ? tr("本地主机") : selectedHost.displayName}<ChevronDown size={14} />
         </button>
+        <a href="https://developers.openai.com/codex/memories" target="_blank" rel="noreferrer">{tr("了解更多")}</a>
+      </div>
+      {hostMenu && <ContextMenu anchor={hostButton.current!} position={{ x: 0, y: 0 }} onClose={() => setHostMenu(false)} items={hosts.map(host => ({ label: host.kind === "local" ? tr("本地主机") : host.displayName, checked: host.id === hostId, checkType: "radio", onClick: () => setSelectedHost(host) }))} />}
+      {hostError && <p role="alert" className="personalization-inline-error">{hostError}</p>}
+      {!payload && memory.loading && <div className="personalization-loading" role="status"><LoaderCircle className="settings-spin" aria-hidden="true" />{tr("正在读取记忆设置…")}</div>}
+      {memory.loadError && <div className="personalization-editor-error" role="alert"><span>{memory.loadError}</span><button type="button" className="settings-action-button" onClick={() => void loadMemory(hostId)} disabled={busy}>{tr("重试")}</button></div>}
+      {memory.error && <p className="personalization-inline-error" role="alert">{memory.error}</p>}
+      {payload && !memory.loadError && <div className="personalization-memory-card">
+        <div className="personalization-memory-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("启用 MiniCode 记忆功能")}</div><div className="settings-row-description">{tr("根据 {v0} 上的聊天创建记忆，并使用这些记忆为今后在 {v0} 上的聊天提供个性化体验。", { v0: selectedHost.displayName })}</div></div>
+          <button type="button" className="settings-toggle" role="switch" aria-label={tr("启用 MiniCode 记忆")} aria-checked={enabled} data-active={enabled} disabled={busy || payload.feature_locked || payload.locked_fields.some(field => field === "generate_memories" || field === "use_memories")} onClick={() => void updateMemory({ enabled: !enabled })}><span /></button></div>
+        <div className="personalization-memory-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("允许从使用工具的聊天中生成记忆")}</div><div className="settings-row-description">{tr("从使用过 MCP 工具或网页搜索的聊天生成记忆")}</div></div>
+          <button type="button" className="settings-toggle" role="switch" aria-label={tr("允许从使用工具的聊天中生成记忆")} aria-checked={!payload.memories.disable_on_external_context} data-active={!payload.memories.disable_on_external_context} disabled={busy || !payload.feature_enabled || payload.locked_fields.includes("disable_on_external_context")} onClick={() => void updateMemory({ disable_on_external_context: !payload.memories.disable_on_external_context })}><span /></button></div>
+        <div className="personalization-memory-row"><div className="settings-row-copy"><div className="settings-row-title">{tr("删除 MiniCode 记忆")}</div><div className="settings-row-description">{tr("删除 {v0} 上的全部 MiniCode 记忆", { v0: selectedHost.displayName })}</div></div><button type="button" className="settings-action-button" data-danger="true" disabled={busy} onClick={() => void resetMemory()}>{memory.resetting && <LoaderCircle className="settings-spin" aria-hidden="true" />}{tr("删除")}</button></div>
       </div>}
-      {memoryRequest?.error && <p className="personalization-inline-error" role="alert">{memoryRequest.error}</p>}
-      {resetError && <p className="personalization-inline-error" role="alert">{tr("记忆清除失败：{v0}", { v0: resetError })}</p>}
-      {!conversationId && <p className="settings-page-note">{tr("新建任务后可设置记忆。")}</p>}
     </Section>
-    <Section title={tr("自定义指令")}>
-      <button type="button" className="personalization-instructions-entry" aria-label={tr("编辑本机指令")} onClick={openInstructions}>
-        <span className="settings-row-copy">
-          <span className="settings-row-title">{tr("本机指令")}</span>
-          <span className="settings-row-description">{tr("编辑此电脑上的自定义指令，项目指令也可能适用。")}</span>
-        </span>
-        <ChevronRight aria-hidden="true" />
-      </button>
-    </Section>
+    <Section title={tr("自定义指令")}><button type="button" className="personalization-instructions-entry" aria-label={tr("编辑所选主机指令")} onClick={() => { setEditingInstructions(true); patchInstructions(hostId, { saveError: "" }); void loadInstructions(hostId); }}><span className="settings-row-copy"><span className="settings-row-title">{tr("MiniCode 指令")}</span><span className="settings-row-description">{tr("编辑所选电脑上的自定义指令，项目指令也可能适用。")}</span></span><ChevronRight aria-hidden="true" /></button></Section>
   </div>;
 };

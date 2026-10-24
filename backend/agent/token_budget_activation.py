@@ -22,7 +22,7 @@ def _settings(config: Any) -> dict:
 
 
 def _configured_token_budget(settings: dict) -> Any:
-    return settings.get("feature_flags", settings.get("features", {})).get("token_budget")
+    return settings.get("features", {}).get("token_budget")
 
 
 def _enable(config: Any, enabled: bool) -> Any:

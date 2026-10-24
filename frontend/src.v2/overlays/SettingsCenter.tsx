@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   CalendarClock,
   Cpu,
@@ -23,41 +23,41 @@ import {
   toUiProvider,
 } from "./settingsShared";
 import { GeneralTab } from "./GeneralTab";
-import { OpenSourceLicenses } from "./OpenSourceLicenses";
-import { VoiceSettings } from "./VoiceSettings";
-import { AppearanceTab } from "./AppearanceTab";
-import { PersonalizationTab } from "./PersonalizationTab";
-import { BrowserIntegrationTab } from "./BrowserIntegrationTab";
-import { ArchivedTab } from "./ArchivedTab";
-import { WorkspaceGitTab } from "./WorkspaceGitTab";
-import { ShortcutsTab } from "./ShortcutsTab";
-import { ProviderTab } from "./ProviderTab";
-import { ConnectorsTab } from "./ConnectorsTab";
-import { ConnectionsTab } from "./ConnectionsTab";
-import { SchedulerTab } from "./SchedulerTab";
-import { SourceEnvironmentsTab } from "./SourceEnvironmentsTab";
 import { FeatureFlagsTab } from "./FeatureFlagsTab";
 import { PluginsTab, PluginSettingsToolbar } from "./PluginsTab";
-import { SkillsTab } from "./SkillsTab";
 import { formatSettingsLoadError } from "./settingsLoad";
 import { SETTINGS_OPTIONS } from "./settingsSearch";
 import { formatShortcut, isCodeShortcut, SHORTCUT_DEFINITIONS } from "../lib/keyboard-shortcuts";
-import { FEATURE_FLAG_LABELS } from "./FeatureFlagsTab";
 import { ImportSettingsTab } from "./ImportSettingsTab";
-import { ConfigTab } from "./ConfigTab";
-import { HooksTab } from "./HooksTab";
-import { StorageTab } from "./StorageTab";
-import { WorktreesTab } from "./WorktreesTab";
-import { SourcePetsTab } from "./SourcePetsTab";
 import { createPetChat } from "../pets/createPetChat";
 import { SourcePetIcon } from "../pets/SourcePetIcon";
 import { usePluginsFeature } from "../hooks/usePluginsFeature";
 import { useComputerUseSettings } from "../hooks/useComputerUseSettings";
-import { ComputerUseSettings } from "./ComputerUseSettings";
 import { ComputerUseSourceIcon } from "../lib/computer-use-icons";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
 
-export const SettingsCenter = () => {
+const OpenSourceLicenses = lazy(() => import("./OpenSourceLicenses").then(m => ({ default: m.OpenSourceLicenses })));
+const VoiceSettings = lazy(() => import("./VoiceSettings").then(m => ({ default: m.VoiceSettings })));
+const AppearanceTab = lazy(() => import("./AppearanceTab").then(m => ({ default: m.AppearanceTab })));
+const PersonalizationTab = lazy(() => import("./PersonalizationTab").then(m => ({ default: m.PersonalizationTab })));
+const BrowserIntegrationTab = lazy(() => import("./BrowserIntegrationTab").then(m => ({ default: m.BrowserIntegrationTab })));
+const ArchivedTab = lazy(() => import("./ArchivedTab").then(m => ({ default: m.ArchivedTab })));
+const WorkspaceGitTab = lazy(() => import("./WorkspaceGitTab").then(m => ({ default: m.WorkspaceGitTab })));
+const ShortcutsTab = lazy(() => import("./ShortcutsTab").then(m => ({ default: m.ShortcutsTab })));
+const ProviderTab = lazy(() => import("./ProviderTab").then(m => ({ default: m.ProviderTab })));
+const ConnectorsTab = lazy(() => import("./ConnectorsTab").then(m => ({ default: m.ConnectorsTab })));
+const ConnectionsTab = lazy(() => import("./ConnectionsTab").then(m => ({ default: m.ConnectionsTab })));
+const SchedulerTab = lazy(() => import("./SchedulerTab").then(m => ({ default: m.SchedulerTab })));
+const SourceEnvironmentsTab = lazy(() => import("./SourceEnvironmentsTab").then(m => ({ default: m.SourceEnvironmentsTab })));
+const SkillsTab = lazy(() => import("./SkillsTab").then(m => ({ default: m.SkillsTab })));
+const ConfigTab = lazy(() => import("./ConfigTab").then(m => ({ default: m.ConfigTab })));
+const HooksTab = lazy(() => import("./HooksTab").then(m => ({ default: m.HooksTab })));
+const StorageTab = lazy(() => import("./StorageTab").then(m => ({ default: m.StorageTab })));
+const WorktreesTab = lazy(() => import("./WorktreesTab").then(m => ({ default: m.WorktreesTab })));
+const SourcePetsTab = lazy(() => import("./SourcePetsTab").then(m => ({ default: m.SourcePetsTab })));
+const ComputerUseSettings = lazy(() => import("./ComputerUseSettings").then(m => ({ default: m.ComputerUseSettings })));
+
+export const SettingsCenter = memo(function SettingsCenter() {
   const { t: tr } = useI18n();
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const sidebarWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
@@ -122,7 +122,7 @@ export const SettingsCenter = () => {
   const [visitedTabs, setVisitedTabs] = useState<Tab[]>([activeTab]);
   const [searchTarget, setSearchTarget] = useState<{ tab: Tab; title: string; sourceTitle: string } | null>(null);
   useEffect(() => {
-    if (settingsOpen) setVisitedTabs((tabs) => [...new Set([...tabs, activeTab, ...(activeTab === "config" ? ["provider" as const, "features" as const] : [])])]);
+    if (settingsOpen) setVisitedTabs((tabs) => [...new Set([...tabs, activeTab])]);
   }, [activeTab, settingsOpen]);
 
   useEffect(() => {
@@ -184,7 +184,7 @@ export const SettingsCenter = () => {
 
   useEffect(() => {
     if (!settingsOpen) return;
-    if (activeTab !== "general" && activeTab !== "provider" && activeTab !== "config") return;
+    if (activeTab !== "general" && activeTab !== "provider") return;
     if (settingsPayloadRef.current) {
       setSettingsLoadState("ready");
       return;
@@ -233,10 +233,10 @@ export const SettingsCenter = () => {
     { id: "voice" as const, group: tr("个人"), label: tr("语音"), description: tr("设置麦克风与听写服务，录音转成可编辑草稿。"), keywords: tr("听写 录音 转录 麦克风 词汇"), icon: <SettingsSourceIcon icon="voice" /> },
     { id: "storage" as const, group: tr("个人"), label: tr("存储"), description: tr("管理保存在这台电脑上的聊天和工作树。"), keywords: "disk storage cleanup", icon: <SettingsSourceIcon icon="storage" /> },
     { id: "config" as const, group: tr("个人"), label: tr("配置"), description: tr("为新聊天配置权限、网络访问和智能体回复。"), keywords: "config model permissions", icon: <SettingsSourceIcon icon="config" /> },
-    { id: "personalization" as const, group: tr("个人"), label: tr("个性化"), description: tr("管理影响模型行为的指令、任务记忆与来源。"), keywords: tr("INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则"), icon: <SettingsSourceIcon icon="personalization" /> },
+    { id: "personalization" as const, group: tr("个人"), label: tr("个性化"), description: tr("管理主机记忆与自定义指令。"), keywords: tr("INSTRUCTIONS.md AGENTS.md 摘要 偏好 规则"), icon: <SettingsSourceIcon icon="personalization" /> },
     { id: "pets" as const, group: tr("个人"), label: tr("Mini 与宠物"), description: tr("Mini 管理聊天并显示需要关注的事项"), keywords: "mini pets avatar sprite hatch", icon: <SourcePetIcon active={activeTab === "pets"} /> },
     { id: "shortcuts" as const, group: tr("个人"), label: tr("快捷键"), description: tr("查看当前可用的键盘操作。"), keywords: tr("命令面板 终端 侧栏 发送 换行"), icon: <SettingsSourceIcon icon="shortcuts" /> },
-    { id: "provider" as const, group: tr("个人"), label: tr("模型"), description: tr("配置提供商、接口、认证与默认模型。"), keywords: tr("API 密钥 Base URL 推理 供应商"), icon: <Cpu /> },
+    { id: "provider" as const, group: tr("个人"), label: tr("模型与 API"), description: tr("配置提供商、接口、认证与默认模型。"), keywords: tr("API 密钥 Base URL 推理 供应商"), icon: <Cpu /> },
     { id: "plugins" as const, group: tr("集成"), label: tr("插件"), description: tr("管理插件、技能和 MCP。"), keywords: tr("导入 Zip 验证 打包 Hook App MCP 技能 服务"), icon: <SettingsSourceIcon icon="plugins" /> },
     { id: "marketplace" as const, group: tr("集成"), label: tr("插件市场"), description: tr("管理插件市场"), keywords: "marketplace git source upgrade", icon: <SettingsSourceIcon icon="plugins" /> },
     { id: "skills" as const, group: tr("集成"), label: tr("技能"), description: tr("查看任务工作流，并选择用于下一条消息。"), keywords: tr("SKILL.md 工作流 市场 安装"), icon: <SettingsSourceIcon icon="skills" /> },
@@ -257,12 +257,12 @@ export const SettingsCenter = () => {
       setActiveTab("connectors");
     }
   }, [activeTab, pluginCount, settingsOpen, setActiveTab, skillCount, marketplaceCount, pluginsEnabled]);
-  const navigationTab = integrationOpen ? "plugins" : ["provider", "features"].includes(activeTab) ? "config" : activeTab;
+  const navigationTab = integrationOpen ? "plugins" : activeTab === "features" ? "config" : activeTab;
   const activeTabMeta = tabs.find((tab) => tab.id === navigationTab)!;
   const documentationHref = activeTab === "config" ? "https://developers.openai.com/codex/config-basic"
     : activeTab === "hooks" ? "https://developers.openai.com/codex/hooks" : null;
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
-  const navigationTabs = tabs.filter(tab => !["import", "connections", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id)
+  const navigationTabs = tabs.filter(tab => !["import", "skills", "connectors", "marketplace", "provider", "features", "scheduler"].includes(tab.id)
     && (tab.id !== "computerUse" || computerUse.data?.navigation_visible));
   const visibleTabs = normalizedSettingsQuery
     ? navigationTabs.filter(tab => `${tab.label} ${tab.group} ${tab.description} ${tab.keywords}`.toLowerCase().includes(normalizedSettingsQuery))
@@ -270,7 +270,6 @@ export const SettingsCenter = () => {
 
   const searchableOptions = [...SETTINGS_OPTIONS.map((option) => ({ ...option, sourceTitle: option.title, title: tr(option.title), description: tr(option.description) })),
     ...SHORTCUT_DEFINITIONS.filter(shortcut => appMode === "code" || !isCodeShortcut(shortcut.id)).map((shortcut) => ({ tab: "shortcuts" as const, sourceTitle: shortcut.label, title: tr(shortcut.label), description: tr("快捷键绑定：{binding}", { binding: formatShortcut(shortcutBindings[shortcut.id]) || tr("未绑定") }), keywords: `${shortcut.action} ${formatShortcut(shortcutBindings[shortcut.id])}` })),
-    ...Object.entries(FEATURE_FLAG_LABELS).map(([key, flag]) => ({ tab: "features" as const, sourceTitle: flag.title, title: tr(flag.title), description: tr(flag.description), keywords: key })),
   ];
   const matchingOptions = normalizedSettingsQuery ? searchableOptions.filter((option) =>
     (option.tab !== "computerUse" || computerUse.data?.navigation_visible)
@@ -383,7 +382,8 @@ export const SettingsCenter = () => {
             </label></div>}
             <div className="settings-page-body">
               {Array.from(new Set([...visitedTabs, ...(settingsOpen ? [activeTab, ...(integrationOpen ? ["plugins" as const, "connectors" as const, "skills" as const] : [])] : [])])).filter(tab => tab !== "marketplace").map((tab) => <div
-                className="settings-tab-pane" key={tab} data-settings-tab={tab === "plugins" && activeTab === "marketplace" ? "marketplace" : tab} hidden={tab !== activeTab && !(activeTab === "marketplace" && tab === "plugins") && !(activeTab === "config" && ["provider", "features"].includes(tab))}>
+                className="settings-tab-pane" key={tab} data-settings-tab={tab === "plugins" && activeTab === "marketplace" ? "marketplace" : tab} hidden={tab !== activeTab && !(activeTab === "marketplace" && tab === "plugins")}>
+              <Suspense fallback={<div className="settings-load-state" role="status" aria-label={tr("正在加载设置")}><span className="settings-load-state-spinner" aria-hidden="true" /></div>}>
               {tab === "appearance" && <AppearanceTab />}
               {tab === "import" && <ImportSettingsTab active={settingsOpen && tab === activeTab} />}
               {tab === "config" && <ConfigTab active={settingsOpen && tab === activeTab} />}
@@ -393,7 +393,7 @@ export const SettingsCenter = () => {
               {tab === "personalization" && <PersonalizationTab active={settingsOpen && tab === activeTab} />}
               {tab === "shortcuts" && <ShortcutsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "shortcuts" ? searchTarget.title : undefined} />}
               {tab === "general" && (
-                <><div hidden={licensesOpen}><GeneralTab
+                <><div hidden={licensesOpen}><GeneralTab active={settingsOpen && tab === activeTab && !licensesOpen}
                   onOpenLicenses={() => { generalBeforeLicenses.current = contentRef.current?.scrollTop || 0; setLicensesOpen(true); }}
                   importSettings={<ImportSettingsTab variant="general-row" active={settingsOpen && activeTab === "general" && !licensesOpen} />}
                 /></div>{licensesOpen && <OpenSourceLicenses onBack={() => setLicensesOpen(false)} />}</>
@@ -426,7 +426,7 @@ export const SettingsCenter = () => {
                   onProviderChange={handleProviderChange}
                   onSettingsPayloadChange={handleSettingsPayloadChange}
                   searchTarget={searchTarget?.tab === "provider" ? searchTarget.title : undefined}
-                  isActive={settingsOpen && (tab === activeTab || activeTab === "config")}
+                  isActive={settingsOpen && tab === activeTab}
                 /></>
               )}
               {tab === "skills" && <SkillsTab active={settingsOpen && integrationOpen} search={integrationSearch} onSkillsChange={setSkillCount} />}
@@ -438,7 +438,7 @@ export const SettingsCenter = () => {
               {tab === "browser" && <BrowserIntegrationTab active={settingsOpen && tab === activeTab} />}
               {tab === "scheduler" && <SchedulerTab active={settingsOpen && tab === activeTab} title={tr("定时任务")} description={tr("自动运行的任务和最近结果。")} />}
               {tab === "workspaceGit" && <WorkspaceGitTab active={settingsOpen && tab === activeTab} />}
-              {tab === "features" && <FeatureFlagsTab active={settingsOpen && (tab === activeTab || activeTab === "config")} searchTarget={searchTarget?.tab === "features" ? searchTarget.title : undefined} />}
+              {tab === "features" && <FeatureFlagsTab active={settingsOpen && tab === activeTab} searchTarget={searchTarget?.tab === "features" ? searchTarget.title : undefined} />}
               {tab === "plugins" && <PluginsTab managedToolbar search={integrationSearch} marketplaceRequest={marketplaceRequest}
                 onPluginsChange={setPluginCount} onMarketplacesChange={setMarketplaceCount} managedView={activeTab === "marketplace" ? "marketplaces" : "plugins"}
                 loadInventory={settingsOpen && integrationOpen} active={settingsOpen && (tab === activeTab || activeTab === "marketplace")}
@@ -446,10 +446,11 @@ export const SettingsCenter = () => {
               {tab === "advanced" && <SourceEnvironmentsTab active={settingsOpen && tab === activeTab} />}
               {tab === "pets" && <SourcePetsTab active={settingsOpen && tab === activeTab} onCreatePet={createPetChat} />}
               {tab === "archived" && <ArchivedTab toolbarHost={toolbarHost} active={settingsOpen && tab === activeTab} />}
+              </Suspense>
               </div>)}
             </div>
           </div>
       </section>
     </main>
   );
-};
+});

@@ -4,9 +4,10 @@ import { PromptSourceIcon } from "../lib/prompt-source-icons";
 import { BrandIcon } from "../components/BrandIcon";
 import { useComposerPlugins } from "./useComposerPlugins";
 
-export function ComposerAddMenu({ workspaceRoot, planMode, goalAvailable, onFiles, onRemoteFiles, onGoal, onPlan, onPlugin, onClose }: {
+export function ComposerAddMenu({ workspaceRoot, planMode, showGoal, goalAvailable, onFiles, onRemoteFiles, onGoal, onPlan, onPlugin, onClose }: {
   workspaceRoot: string;
   planMode: boolean;
+  showGoal: boolean;
   goalAvailable: boolean;
   onFiles: () => void;
   onRemoteFiles?: () => void;
@@ -52,8 +53,8 @@ export function ComposerAddMenu({ workspaceRoot, planMode, goalAvailable, onFile
       onMouseMove={() => setHighlighted("files")} onClick={() => choose(onFiles)}><PromptSourceIcon icon="paperclip" /><span>{tr("文件和文件夹")}</span></button>
     {onRemoteFiles && <button type="button" role="menuitem" data-add-menu-item="remote-files" data-highlighted={highlighted === "remote-files" || undefined} aria-current={highlighted === "remote-files" || undefined}
       onMouseMove={() => setHighlighted("remote-files")} onClick={() => choose(onRemoteFiles)}><PromptSourceIcon icon="paperclip" /><span>{tr("添加远程文件")}</span></button>}
-    <button type="button" role="menuitem" disabled={!goalAvailable} data-add-menu-item="goal" data-highlighted={goalAvailable && highlighted === "goal" || undefined} aria-current={goalAvailable && highlighted === "goal" || undefined}
-      onMouseMove={() => { if (goalAvailable) setHighlighted("goal"); }} onClick={() => choose(onGoal)}><PromptSourceIcon icon="target" /><span>{tr("目标")}</span><small>{tr("设置持续追求的目标")}</small></button>
+    {showGoal && <button type="button" role="menuitem" disabled={!goalAvailable} data-add-menu-item="goal" data-highlighted={goalAvailable && highlighted === "goal" || undefined} aria-current={goalAvailable && highlighted === "goal" || undefined}
+      onMouseMove={() => { if (goalAvailable) setHighlighted("goal"); }} onClick={() => choose(onGoal)}><PromptSourceIcon icon="target" /><span>{tr("目标")}</span><small>{tr("设置持续追求的目标")}</small></button>}
     <button type="button" role="menuitem" data-add-menu-item="plan" data-highlighted={highlighted === "plan" || undefined} aria-current={highlighted === "plan" || undefined}
       onMouseMove={() => setHighlighted("plan")} onClick={() => choose(onPlan)}><PromptSourceIcon icon="lightbulb" /><span>{tr("计划模式")}</span><small>{planMode ? tr("关闭计划模式") : tr("开启计划模式")}</small></button>
     <div className="composer-add-section"><span>{tr("插件")}</span></div>

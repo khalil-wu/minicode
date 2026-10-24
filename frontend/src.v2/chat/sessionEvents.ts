@@ -48,6 +48,7 @@ import { mergeCapabilities } from "../protocol/capabilities";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import {
   conversationResetPayload,
+  conversationWorkspacePath,
   LS,
   readLS,
   removeConversationOwnedPrompts,
@@ -552,18 +553,43 @@ const hydrateConversationAgentState = (
     }));
   }
   if (!agentState) return;
-  if (hasStreamingAssistantForConversation(conversationId)) return;
+  const parentStreaming = hasStreamingAssistantForConversation(conversationId);
   useAppStore.setState((state) => {
-    const previousAgents = state.conversationId === conversationId ? state.subagents
-      : state.conversationAgentStates[conversationId]?.subagents ?? [];
-    const hydrated = { ...agentState, subagents: agentState.subagents.map(agent => {
+    const previousState = state.conversationId === conversationId
+      ? { plan: state.plan, todos: state.todos, subagents: state.subagents, agentProgress: state.agentProgress }
+      : state.conversationAgentStates[conversationId] ?? { plan: null, todos: [], subagents: [], agentProgress: [] };
+    const previousAgents = previousState.subagents;
+    const restoredAgents = agentState.subagents.map(agent => {
       const previous = previousAgents.find(candidate => candidate.id === agent.id);
+      const sameIncarnation = previous && previous.agentPath === agent.agentPath && previous.mailboxEpoch === agent.mailboxEpoch;
+      if (parentStreaming && previous) {
+        if (previous.agentPath && typeof previous.mailboxEpoch === "number") {
+          if (!agent.agentPath || typeof agent.mailboxEpoch !== "number"
+            || agent.mailboxEpoch < previous.mailboxEpoch
+            || (agent.mailboxEpoch === previous.mailboxEpoch && agent.agentPath !== previous.agentPath)) return previous;
+          if (sameIncarnation
+            && ["done", "partial", "cancelled", "error"].includes(previous.status)
+            && !["done", "partial", "cancelled", "error"].includes(agent.status)) return previous;
+        }
+        if (sameIncarnation && previous.completedAt !== undefined && agent.completedAt !== undefined
+          && agent.completedAt < previous.completedAt) return previous;
+      }
       // Durable UI snapshots carry metadata, while transcript pushes own the
       // working record. A return to the same incarnation must retain that record.
-      return previous && previous.agentPath === agent.agentPath && previous.mailboxEpoch === agent.mailboxEpoch
-        ? { ...agent, transcriptMessages: previous.transcriptMessages, transcriptSeq: previous.transcriptSeq }
+      return sameIncarnation
+        ? { ...agent, displayName: agent.displayName ?? previous.displayName,
+          teammateName: agent.teammateName ?? previous.teammateName,
+          transcriptMessages: previous.transcriptMessages, transcriptSeq: previous.transcriptSeq }
         : agent;
-    }) };
+    });
+    // A live parent owns its current plan/progress, not the child's lifecycle.
+    // Keep locally observed children omitted by an older snapshot while
+    // accepting durable child completion and newer incarnations independently.
+    const subagents = parentStreaming
+      ? [...previousAgents.map(previous => restoredAgents.find(agent => agent.id === previous.id) ?? previous),
+        ...restoredAgents.filter(agent => !previousAgents.some(previous => previous.id === agent.id))]
+      : restoredAgents;
+    const hydrated = { ...(parentStreaming ? previousState : agentState), subagents };
     return {
       ...(state.conversationId === conversationId ? hydrated : {}),
       conversationAgentStates: { ...state.conversationAgentStates, [conversationId]: hydrated },
@@ -918,7 +944,14 @@ const hydrateActiveConversation = (
       forceAuthoritative: options.forceAuthoritative,
     });
   }
-  useAppStore.getState().applyConversationSwitched({ conversationId });
+  const selection = useAppStore.getState();
+  const nextConversation = selection.conversations.find(item => item.id === conversationId);
+  // Hydration completion refreshes the current snapshot; it is not another
+  // navigation and must not reset and restore every conversation-owned slice.
+  if (selection.conversationId !== conversationId || selection.pendingConversationSwitchId === conversationId
+    || !workspaceRootsEqual(selection.workingDirectory, conversationWorkspacePath(nextConversation))) {
+    selection.applyConversationSwitched({ conversationId });
+  }
   const modeMeta = useAppStore.getState().conversations.find(item => item.id === conversationId);
   if (modeMeta?.agentMode !== undefined) useAppStore.getState().syncConversationAgentMode(modeMeta.agentMode, conversationId, undefined, modeMeta.revision);
   if (!workspaceRootsEqual(previousWorkspace, useAppStore.getState().workingDirectory)) {

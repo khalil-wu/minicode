@@ -237,7 +237,7 @@ describe("useDesktopEvents open actions", () => {
   });
 
   it("toggles the pinned context summary and the bottom pane in both work modes through their real owners", () => {
-    useAppStore.setState({ contextCardCollapsed: false });
+    useAppStore.setState({ contextCardCollapsed: false, contextCardPinned: true });
     render(<Harness />);
     fireEvent(window, new Event("toggle-pinned-summary"));
     expect(useAppStore.getState().contextCardCollapsed).toBe(true);
@@ -246,7 +246,7 @@ describe("useDesktopEvents open actions", () => {
     fireEvent(window, new Event("toggle-side-panel"));
     expect(useAppStore.getState().rightPanelOpen).toBe(true);
     fireEvent(window, new Event("toggle-pinned-summary"));
-    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: false, contextCardCollapsed: false });
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, contextCardCollapsed: true, contextCardPinned: false });
     fireEvent(window, new Event("toggle-bottom-panel"));
     expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", dockCollapsed: false, activeBottomTab: "terminal" });
     fireEvent(window, new Event("toggle-bottom-panel"));
@@ -325,6 +325,10 @@ describe("useDesktopEvents open actions", () => {
       acceleratorBindings: expect.objectContaining({ zoomIn: ["CommandOrControl+Shift+=", "CommandOrControl+="] }) }));
     act(() => useAppStore.setState({ appMode: "code", isConnected: true }));
     expect(setState).toHaveBeenLastCalledWith(expect.objectContaining({ terminalEnabled: true, bottomPanelToggleEnabled: true }));
+    const owner = useAppStore.getState();
+    act(() => useAppStore.getState().setWorkingDirectory("C:/NewPopoutProject"));
+    expect(setState).toHaveBeenLastCalledWith(expect.objectContaining({ workspaceRoot: "C:/NewPopoutProject" }));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: owner.conversationId, draft: owner.draft });
     fireEvent.focusIn(document.querySelector("textarea")!);
     (document.querySelector("textarea") as HTMLTextAreaElement).focus();
     expect(setState).toHaveBeenLastCalledWith(expect.objectContaining({ editorFocused: true }));
@@ -342,6 +346,17 @@ describe("useDesktopEvents open actions", () => {
     expect(setState).toHaveBeenLastCalledWith(expect.objectContaining({ shortcutRecording: false }));
     act(() => useAppStore.getState().setShortcutBinding("terminal", ""));
     expect(setState).toHaveBeenLastCalledWith(expect.objectContaining({ accelerators: expect.objectContaining({ terminal: null }) }));
+  });
+
+  it("binds only an empty Popout's initial project without borrowing another window's conversation or draft", () => {
+    useAppStore.setState({ isConnected: false, conversationId: null, workingDirectory: "", draft: "", workspaceComposerDrafts: {} });
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "popout", initialNavigation: { conversationId: null, popout: true, workspaceRoot: "C:/PopoutProject", restoreLastConversation: true } };
+    render(<Harness />);
+    act(() => useAppStore.setState({ isConnected: true }));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: null, workingDirectory: "C:/PopoutProject", draft: "" });
+    act(() => useAppStore.setState({ isConnected: false, conversationId: "restored-popout", workingDirectory: "C:/RestoredProject", draft: "Kept Popout draft" }));
+    act(() => useAppStore.setState({ isConnected: true }));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "restored-popout", workingDirectory: "C:/RestoredProject", draft: "Kept Popout draft" });
   });
 
   it("removes native action listeners when the desktop harness unmounts", () => {

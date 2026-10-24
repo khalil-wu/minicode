@@ -949,6 +949,8 @@ def build_llm_request_metadata(
         request["internal_session_source"] = metadata["internal_session_source"]
     if "_source_responses_metadata" in metadata:
         request["_source_responses_metadata"] = dict(metadata["_source_responses_metadata"])
+    if "_concurrent_reasoning_summaries" in metadata:
+        request["_concurrent_reasoning_summaries"] = metadata["_concurrent_reasoning_summaries"]
     if provider_lifecycle_runtime is not None:
         request[LIFECYCLE_RUNTIME_METADATA_KEY] = provider_lifecycle_runtime
     return request

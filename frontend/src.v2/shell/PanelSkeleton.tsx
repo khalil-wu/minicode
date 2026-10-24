@@ -6,6 +6,7 @@ const PANEL_KIND_LABELS: Record<PanelKind | "browser" | "diagnostics", Translati
   chat: "对话",
   diff: "Diff",
   editor: "编辑器",
+  file: "文件",
   preview: "预览",
   terminal: "终端",
   plan: "计划",

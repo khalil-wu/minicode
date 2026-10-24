@@ -791,7 +791,11 @@ export interface McpProjectDecisionCommand {
   workspace_root: string;
 }
 
-export interface SchedulerListCommand extends WorkspaceOwnedCommand {
+interface SchedulerOwnedCommand extends WorkspaceOwnedCommand {
+  scheduler_scope?: "global";
+}
+
+export interface SchedulerListCommand extends SchedulerOwnedCommand {
   type: "scheduler.list";
   task_workspace_root?: string;
 }
@@ -815,11 +819,12 @@ export interface SchedulerAddCommand extends WorkspaceOwnedCommand {
 
 export interface SchedulerUpdateCommand extends Omit<SchedulerAddCommand, "type"> {
   type: "scheduler.update";
+  scheduler_scope?: "global";
   task_id: string;
   task_workspace_root?: string;
 }
 
-export interface SchedulerHistoryCommand extends WorkspaceOwnedCommand {
+export interface SchedulerHistoryCommand extends SchedulerOwnedCommand {
   type: "scheduler.history";
   task_workspace_root?: string;
   task_id?: string;
@@ -827,32 +832,32 @@ export interface SchedulerHistoryCommand extends WorkspaceOwnedCommand {
   limit?: number;
 }
 
-export interface SchedulerRemoveCommand extends WorkspaceOwnedCommand {
+export interface SchedulerRemoveCommand extends SchedulerOwnedCommand {
   type: "scheduler.remove";
   task_workspace_root?: string;
   task_id: string;
 }
 
-export interface SchedulerToggleCommand extends WorkspaceOwnedCommand {
+export interface SchedulerToggleCommand extends SchedulerOwnedCommand {
   type: "scheduler.toggle";
   task_workspace_root?: string;
   task_id: string;
   enabled: boolean;
 }
 
-export interface SchedulerRunNowCommand extends WorkspaceOwnedCommand {
+export interface SchedulerRunNowCommand extends SchedulerOwnedCommand {
   type: "scheduler.run_now";
   task_workspace_root?: string;
   task_id: string;
 }
 
-export interface SchedulerRetryCommand extends WorkspaceOwnedCommand {
+export interface SchedulerRetryCommand extends SchedulerOwnedCommand {
   type: "scheduler.retry";
   task_workspace_root?: string;
   run_id: string;
 }
 
-export interface SchedulerCancelCommand extends WorkspaceOwnedCommand {
+export interface SchedulerCancelCommand extends SchedulerOwnedCommand {
   type: "scheduler.cancel";
   task_workspace_root?: string;
   run_id: string;

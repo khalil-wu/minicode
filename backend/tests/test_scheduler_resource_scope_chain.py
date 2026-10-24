@@ -14,7 +14,7 @@ from backend.config import AppConfig, LLMSettings, PermissionSettings
 from backend.conversations.repository import ConversationRepository
 from backend.permissions.checker import PermissionChecker
 from backend.tasks import scheduler as scheduler_module
-from backend.tasks.scheduler import TaskScheduler
+from backend.tasks.scheduler import ScheduledTaskRun, TaskScheduler
 from backend.tools.registry import ToolRegistry
 from backend.ws.command_scope import resolve_command_scope
 from backend.ws.handler import WebSocketSession
@@ -202,3 +202,74 @@ async def test_cold_recovery_dispatches_the_explicit_resource_owner_while_select
     assert cold.active_conversation_id == case.reader.id and cold.session_lifecycle.workspace_root == case.root_b
     assert [command.data["client_command_id"] for command in cold.run_manager.durable_client_commands.pending_client_commands()] == ["saved-selected-action"]
     assert dispatcher._client_command_seen(saved) and not dispatcher._client_command_seen(selected)
+
+
+@pytest.mark.asyncio
+async def test_global_scheduler_list_reads_persisted_orphan_roots_without_a_chat_projection(resource_case, tmp_path, monkeypatch):
+    case = resource_case
+    orphan_root = tmp_path / "scheduler-only-project"
+    orphan_root.mkdir()
+    tasks = [case.scheduler.add_task("Owned task", "Inspect A", "0 9 * * *", workspace_root=str(case.execution_a)),
+        case.scheduler.add_task("Orphan cron", "No conversation owns this root", "0 10 * * *", workspace_root=str(orphan_root)),
+        case.scheduler.add_task("Legacy unbound task", "Keep it visible", "0 11 * * *", workspace_root="")]
+    restored = TaskScheduler()
+    monkeypatch.setattr(handlers, "_get_scheduler", lambda _session: restored)
+
+    receipt, messages = await case.dispatch("scheduler.list", scheduler_scope="global")
+
+    assert receipt["level"] == "success"
+    assert {task["id"] for task in receipt["data"]["tasks"]} == {task.id for task in tasks}
+    assert receipt["data"]["scheduler_scope"] == "global"
+    assert not any(message["type"] == "scheduler.list" for message in messages)
+    assert case.session.active_conversation_id == case.reader.id
+    assert case.session.session_lifecycle.workspace_root == case.root_b
+    assert case.repository.get_conversation(case.reader.id).transcript[0]["content"] == "Retain B's input"
+
+
+@pytest.mark.asyncio
+async def test_global_scheduler_mutation_uses_the_captured_task_root_without_borrowing_a_chat(resource_case, tmp_path):
+    case = resource_case
+    orphan_root = tmp_path / "orphan-task-storage"
+    orphan_root.mkdir()
+    original = case.scheduler.add_task("Orphan task", "Original prompt", "0 9 * * *", workspace_root=str(orphan_root))
+    unrelated = case.scheduler.add_task("Reader task", "Leave this alone", "0 10 * * *", workspace_root=str(case.root_b))
+    configuration = {"task_id": original.id, "scheduler_scope": "global", "task_workspace_root": str(orphan_root),
+        "name": "Edited orphan", "prompt": "Saved through its actual storage root", "schedule": "0 11 * * *",
+        "kind": "cron", "permission_mode": "confirm", "timezone": "UTC", "isolation": "workspace"}
+
+    receipt, messages = await case.dispatch("scheduler.update", **configuration)
+
+    assert receipt["level"] == "info"
+    assert receipt["data"]["task"]["workspace_root"] == str(orphan_root)
+    assert receipt["data"]["task"]["prompt"] == configuration["prompt"]
+    assert not any(message["type"] == "scheduler.list" for message in messages)
+    assert case.scheduler.list_tasks(workspace_root=str(case.root_b))[0]["id"] == unrelated.id
+    assert case.session.active_conversation_id == case.reader.id and case.session.session_lifecycle.workspace_root == case.root_b
+
+    rejected, _ = await case.dispatch("scheduler.update", **{**configuration, "task_workspace_root": str(case.root_b), "prompt": "Wrong root"})
+    assert rejected["level"] == "error" and "not found" in rejected["message"]
+    assert case.scheduler.list_tasks(workspace_root=str(orphan_root))[0]["prompt"] == configuration["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_global_scheduler_toggle_and_history_keep_the_task_and_run_resource_root(resource_case, tmp_path):
+    case = resource_case
+    orphan_root = tmp_path / "orphan-history"
+    orphan_root.mkdir()
+    task = case.scheduler.add_task("Orphan history", "Keep real errors", "0 9 * * *", workspace_root=str(orphan_root))
+    run = ScheduledTaskRun(id="orphan-real-failure", task_id=task.id, status="failed", workspace_root=str(orphan_root),
+        result_summary="Original scheduled command failed", error="Real scheduler failure")
+    other = ScheduledTaskRun(id="other-root-run", task_id=task.id, status="completed", workspace_root=str(case.root_b))
+    case.scheduler._runs.update({run.id: run, other.id: other})
+    scope = {"scheduler_scope": "global", "task_workspace_root": str(orphan_root), "task_id": task.id}
+
+    history, messages = await case.dispatch("scheduler.history", offset=0, limit=50, **scope)
+    assert [row["id"] for row in history["data"]["runs"]] == [run.id]
+    assert history["data"]["runs"][0]["error"] == "Real scheduler failure"
+    assert not any(message["type"] == "scheduler.list" for message in messages)
+
+    receipt, messages = await case.dispatch("scheduler.toggle", enabled=False, **scope)
+    assert receipt["data"]["task"]["enabled"] is False
+    assert receipt["data"]["task"]["workspace_root"] == str(orphan_root)
+    assert not any(message["type"] == "scheduler.list" for message in messages)
+    assert case.session.active_conversation_id == case.reader.id and case.session.session_lifecycle.workspace_root == case.root_b

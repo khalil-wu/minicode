@@ -3457,6 +3457,11 @@ class OpenAIAdapter(LLMAdapter):
         api_input = self._build_responses_input(input_messages)
 
         model = self._settings.model
+        uses_sequential_cutoff_summaries = (
+            self._settings.provider == "openai"
+            and metadata is not None
+            and bool(metadata.get("_concurrent_reasoning_summaries"))
+        )
         request_metadata = sanitize_llm_request_metadata(metadata)
         if metadata is not None and "_source_responses_metadata" in metadata:
             request_metadata["_source_responses_metadata"] = metadata["_source_responses_metadata"]
@@ -3552,6 +3557,9 @@ class OpenAIAdapter(LLMAdapter):
         if include_request:
             kwargs["include"] = include_request
         self._apply_model_request_options(kwargs, model=model, responses=True)
+        if (uses_sequential_cutoff_summaries
+                and "reasoning" in kwargs and "summary" in kwargs["reasoning"]):
+            kwargs["stream_options"] = {"reasoning_summary_delivery": "sequential_cutoff"}
 
         # Keep routing metadata through the concrete transport even when no
         # lifecycle hook is installed. It owns turn-scoped sticky state as
@@ -3612,6 +3620,7 @@ class OpenAIAdapter(LLMAdapter):
         # 解析 Responses API 流式事件
         full_text = ""
         full_reasoning_summary = ""
+        active_reasoning_item_id = ""
         pending_tool_calls: list[ToolCallEvent] = []
         response_tool_items: dict[str, dict[str, str]] = {}
         finalized_response_tool_shapes: dict[str, tuple[str, str]] = {}
@@ -4546,6 +4555,9 @@ class OpenAIAdapter(LLMAdapter):
 
                 # 推理摘要增量（GPT-5 / o-series via Responses API）
                 elif event_type == "response.reasoning_summary_text.delta":
+                    if uses_sequential_cutoff_summaries:
+                        yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
+                        continue
                     delta = getattr(event, "delta", "")
                     if delta:
                         delta_text = append_reasoning_summary_delta(
@@ -4572,6 +4584,9 @@ class OpenAIAdapter(LLMAdapter):
                         )
 
                 elif event_type == "response.reasoning_summary_part.added":
+                    if uses_sequential_cutoff_summaries:
+                        yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
+                        continue
                     part = _get_attr_or_item(event, "part", None)
                     initial_text = _get_attr_or_item(part, "text", "")
                     if isinstance(initial_text, str) and initial_text:
@@ -4604,6 +4619,13 @@ class OpenAIAdapter(LLMAdapter):
                     "response.reasoning_summary_text.done",
                     "response.reasoning_summary_part.done",
                 }:
+                    if uses_sequential_cutoff_summaries and (
+                        event_type != "response.reasoning_summary_text.done"
+                        or not active_reasoning_item_id
+                        or _get_attr_or_item(event, "item_id", "") != active_reasoning_item_id
+                    ):
+                        yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
+                        continue
                     part = _get_attr_or_item(event, "part", None)
                     terminal_text = _get_attr_or_item(
                         event, "text", ""
@@ -4652,6 +4674,8 @@ class OpenAIAdapter(LLMAdapter):
                 elif event_type == "response.output_item.added":
                     item = _get_attr_or_item(event, "item", None)
                     item_type = str(_get_attr_or_item(item, "type", "") or "").strip()
+                    if uses_sequential_cutoff_summaries and item_type in {"reasoning", "message"}:
+                        active_reasoning_item_id = str(_get_attr_or_item(item, "id", "") or "") if item_type == "reasoning" else ""
                     output_index = _get_attr_or_item(event, "output_index", None)
                     output_index_value = (
                         output_index if isinstance(output_index, int) else None
@@ -4784,6 +4808,8 @@ class OpenAIAdapter(LLMAdapter):
                     if closed_item is not None:
                         closed_response_items.append(closed_item)
                     item_type = str(_get_attr_or_item(item, "type", "") or "").strip()
+                    if item_type == "reasoning" and _get_attr_or_item(item, "id", "") == active_reasoning_item_id:
+                        active_reasoning_item_id = ""
                     output_index = _get_attr_or_item(event, "output_index", None)
                     output_index_value = (
                         output_index if isinstance(output_index, int) else None

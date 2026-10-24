@@ -482,8 +482,10 @@ class RemoteHosts {
   saveMany(connections) {
     const entries = connections.map(connection => {
       if (!["ssh", "wsl"].includes(connection.kind)) throw new Error("Desktop connections use SSH or WSL");
+      if (connection.color != null && !["black", "red", "orange", "yellow", "green", "blue", "purple", "pink"].includes(connection.color)) throw new Error("Invalid desktop connection color");
       const alias = connection.kind === "ssh" && connection.source === "discovered" ? connection.alias.trim() : null;
       const entry = { id: connection.id || crypto.randomUUID(), kind: connection.kind, displayName: connection.displayName.trim(),
+        ...(connection.color != null ? { color: connection.color } : {}),
         ...(connection.kind === "ssh" ? alias !== null
           ? { source: "discovered", alias, sshHost: alias, sshPort: null, identity: null }
           : { sshHost: connection.sshHost.trim(), sshPort: connection.sshPort ?? null, identity: connection.identity || null }

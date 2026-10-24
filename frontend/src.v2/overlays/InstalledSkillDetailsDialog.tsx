@@ -5,12 +5,14 @@ import { selectSkillForComposer } from "../lib/select-skill-for-composer";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
 
-export function InstalledSkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = skill.plugin_enabled === false, onToggle, onClose }: {
+export function InstalledSkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = skill.plugin_enabled === false, onToggle, onUninstall, onClose }: {
   skill: SettingsSkill; workspaceRoot: string; pending: boolean; readOnly?: boolean;
-  onToggle: () => void; onClose: () => void;
+  onToggle: () => void; onUninstall?: () => Promise<boolean>; onClose: () => void;
 }) {
   return <SkillDetailsDialog skill={skill} workspaceRoot={workspaceRoot} pending={pending} readOnly={readOnly}
     canToggle={skill.source_level === "user" || skill.source_level === "plugin"}
+    onUninstall={!readOnly && skill.source_level === "user" && skill.uninstall_name && onUninstall
+      ? () => { void onUninstall().then(removed => { if (removed) onClose(); }); } : undefined}
     canOpen={!window.__MINICODE_RUNTIME__?.remoteHost} canReveal={isDesktop() && !window.__MINICODE_RUNTIME__?.remoteHost}
     onToggle={onToggle} onClose={onClose}
     onOpen={() => {

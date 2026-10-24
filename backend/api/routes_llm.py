@@ -55,6 +55,47 @@ router = APIRouter()
 USER_INSTRUCTIONS_FILE = get_minicode_config_home_dir() / "INSTRUCTIONS.md"
 
 
+class MemorySettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    disable_on_external_context: bool | None = None
+
+
+class MemoryResetRequest(BaseModel):
+    confirmed: bool
+
+
+@router.post("/api/settings/memory/reset")
+async def reset_memory_settings_api(request: MemoryResetRequest):
+    from backend.services.memory_reset_service import reset_host_memory
+    try:
+        return await reset_host_memory(confirmed=request.confirmed)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+
+
+@router.get("/api/settings/memory")
+def get_memory_settings_api(response: Response):
+    from backend.services.memory_settings_service import get_memory_settings
+    response.headers["Cache-Control"] = "no-store"
+    return get_memory_settings()
+
+
+@router.put("/api/settings/memory")
+async def update_memory_settings_api(request: MemorySettingsUpdate, response: Response):
+    from backend.services.memory_settings_service import update_memory_settings
+    from backend.hooks.runtime import ConfigChangeHookBlocked
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        payload, config = await update_memory_settings(request.model_dump(exclude_none=True), settings_file=SETTINGS_FILE,
+            config_change_hook=run_config_change_hook)
+    except (ValueError, SettingsError, ConfigChangeHookBlocked) as error:
+        raise HTTPException(409, str(error)) from error
+    if _state.bootstrap is not None:
+        _state.bootstrap.config = config
+    _state.invalidate_status_cache()
+    return payload
+
+
 @router.get("/api/llm/bedrock/discover")
 def discover_bedrock_api(response: Response):
     from backend.llm.bedrock import discover_bedrock

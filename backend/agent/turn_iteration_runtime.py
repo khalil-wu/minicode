@@ -361,6 +361,7 @@ class TurnIterationRuntime:
                         permission_scope=primary.permission_scope if primary is not None else None,
                         prompted_dependencies=self.context.prompted_mcp_dependencies,
                         feature_flags=self.tool_context.model_execution.config.feature_flags,
+                        originator="minicode-desktop" if run_context.session_source == "desktop" else run_context.session_source,
                     ):
                         events.append(skill_event)
                 original_attachments = self.state.attachments

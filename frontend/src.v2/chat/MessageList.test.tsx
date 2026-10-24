@@ -647,8 +647,8 @@ describe("MessageList cell UI", () => {
     Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 640 });
     Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1400 });
     Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 760 });
-    const resize = () => act(() => { observers.filter(observer => observer.targets.has(scroll))
-      .forEach(observer => observer.callback([], {} as ResizeObserver)); });
+    const resize = (height = scroll.clientHeight - 40) => act(() => { observers.filter(observer => observer.targets.has(scroll))
+      .forEach(observer => observer.callback([{ target: scroll, contentRect: { height } } as ResizeObserverEntry], {} as ResizeObserver)); });
     resize();
     expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("600px");
     expect(container.querySelectorAll('[data-reply-viewport="true"]')).toHaveLength(1);
@@ -660,6 +660,9 @@ describe("MessageList cell UI", () => {
     Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 440 });
     resize();
     expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("400px");
+    resize(0);
+    expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("400px");
+    resize(400);
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(scroll.scrollTop).toBe(250);
   });

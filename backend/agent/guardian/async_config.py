@@ -42,7 +42,7 @@ class GuardianModelPolicy:
 
 def resolve_guardian_model_policy(config, model_info) -> GuardianModelPolicy:
     settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
-    raw = settings.get("features", settings.get("feature_flags", {})).get("guardianv2")
+    raw = settings.get("features", {}).get("guardianv2")
     local = raw if isinstance(raw, dict) else {}
     scope = local.get("review_scope") or {}
     computer_only = scope.get("computer_use_only", True)
@@ -105,7 +105,7 @@ class GuardianAsyncConfig:
     @classmethod
     def resolve(cls, config, model_info):
         settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
-        raw = settings.get("features", settings.get("feature_flags", {})).get("guardianv2")
+        raw = settings.get("features", {}).get("guardianv2")
         local = raw if isinstance(raw, dict) else {}
         messages = model_info.model_messages if model_info is not None else config.llm.model_messages
         model = (messages or {}).get("guardian_v2") or {}

@@ -19,6 +19,7 @@ from backend.config_requirements import (
 )
 from backend.runtime_env import ShellEnvironmentPolicy, ShellEnvironmentPolicyError
 from backend.workspace.path_filters import is_local_filename
+from backend.feature_flags import normalize_feature_config
 
 
 _PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -139,6 +140,7 @@ class ConfigLayer:
         if not isinstance(self.config, Mapping):
             raise ConfigLayerError(f"{self.source.display()} must contain a table/object")
         copied = copy.deepcopy(dict(self.config))
+        normalize_feature_config(copied)
         if self.disabled_reason is None:
             _normalize_project_document_config(copied, self.source.display())
         shell_environment_policy = copied.get("shell_environment_policy")
@@ -316,7 +318,7 @@ class ConfigLayerStack:
         for field_name, source in self.requirements.sources.items():
             if field_name == "features":
                 for feature_name in self.requirements.feature_requirements:
-                    origins[f"feature_flags.{feature_name}"] = ConfigLayerMetadata(
+                    origins[f"features.{feature_name}"] = ConfigLayerMetadata(
                         ConfigLayerSource(
                             "system",
                             file=source.location,
@@ -605,6 +607,7 @@ def _default_trust_resolver(path: Path) -> bool:
 
 
 def _sanitize_project_config(config: dict[str, Any]) -> list[str]:
+    normalize_feature_config(config)
     ignored: list[str] = []
     for key in sorted(_PROJECT_LOCAL_CONFIG_DENYLIST):
         if key in config:

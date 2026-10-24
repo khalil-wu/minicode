@@ -63,7 +63,10 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
   const under = solid(mix(surface, light ? ink : black, (light ? .04 : .16) + (authoredContrast - baseline) * (light ? .0012 : .0015)));
   const control = solid(mix(surface, light ? white : ink, light ? .09 + contrast * .04 : .06 + contrast * .05));
   const elevated = solid(mix(surface, light ? white : ink, light ? .16 + contrast * .12 : .08 + contrast * .08));
-  const secondary = solid(mix(surface, light ? white : ink, light ? .08 + contrast * .08 : .04 + contrast * .05));
+  // Source chrome uses foreground alpha for soft actions and segmented state,
+  // independently of its elevated-secondary surface (which can be pure white).
+  const soft = alpha(ink, .025);
+  const selected = alpha(ink, .05);
   const hover = alpha(ink, light ? .08 + contrast * .04 : .05 + contrast * .03);
   const active = alpha(ink, light ? .16 + contrast * .08 : .07 + contrast * .05);
   const accentText = light ? colors.accent : solid(mix(accent, white, .3 + contrast * .15));
@@ -82,7 +85,8 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
     "--surface-base": colors.surface,
     "--surface-sidebar": under,
     "--surface-page": colors.surface,
-    "--surface-soft": secondary,
+    "--surface-soft": soft,
+    "--surface-selected": selected,
     "--surface-panel": solid(mix(surface, light ? white : ink, light ? .18 + contrast * .008 : .03 + contrast * .03)),
     "--surface-raised": elevated,
     "--surface-hover": hover,

@@ -17,6 +17,30 @@ function fixture() {
   return { directory, file };
 }
 
+test("reasoning effort visibility follows Source defaults and persists without changing model settings", () => {
+  const { file } = fixture();
+  assert.deepEqual(preferences.getPreferences().enabledReasoningEfforts, ["low", "medium", "high", "xhigh", "ultra", "persistent"]);
+  preferences.setPreferences({ defaultPermissionMode: "confirm", enabledReasoningEfforts: ["low", "medium", "high", "xhigh", "max"] });
+  preferences.init(file);
+  assert.deepEqual(preferences.getPreferences().enabledReasoningEfforts, ["low", "medium", "high", "xhigh", "max"]);
+  assert.equal(preferences.getPreferences().defaultPermissionMode, "confirm");
+  assert.equal("reasoning_effort_levels" in JSON.parse(fs.readFileSync(file, "utf8")), false);
+});
+
+test("Source General view, Popout and Toys defaults are off and durable without changing authored legacy preferences", () => {
+  const { file } = fixture();
+  const initial = preferences.getPreferences();
+  assert.equal(initial.defaultWorkspaceFullView, false); assert.equal(initial.popoutWindowShortcut, null);
+  assert.equal(initial.popoutWindowProjectlessDefault, false); assert.equal(initial.confettiEnabled, false);
+  preferences.setPreferences({ defaultTerminalLocation: "right", defaultPermissionMode: "plan", defaultWorkspaceFullView: true,
+    popoutWindowShortcut: "CommandOrControl+Alt+P", popoutWindowProjectlessDefault: true, confettiEnabled: true });
+  preferences.init(file);
+  const saved = preferences.getPreferences();
+  assert.equal(saved.defaultTerminalLocation, "right"); assert.equal(saved.defaultPermissionMode, "plan");
+  assert.equal(saved.defaultWorkspaceFullView, true); assert.equal(saved.popoutWindowShortcut, "CommandOrControl+Alt+P");
+  assert.equal(saved.popoutWindowProjectlessDefault, true); assert.equal(saved.confettiEnabled, true);
+});
+
 test("persisted preferences drive close and typed notification policy after restart", () => {
   const { file } = fixture();
   preferences.setPreferences({ localeOverride: "en-US", confirmBeforeClose: "always", turnCompletionNotifications: "never", permissionNotifications: false, questionNotifications: true, showContextWindowUsage: true, showBottomPanel: false });

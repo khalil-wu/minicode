@@ -245,7 +245,6 @@ AGENT_HARD_DENIED_TOOLS = frozenset(
         "create_goal",
         "get_goal",
         "update_goal",
-        "update_plan",
         "enter_plan_mode",
         "exit_plan_mode",
     }
@@ -294,6 +293,7 @@ ASYNC_AGENT_ALLOWED_TOOLS = frozenset(
         "tool_exec",
         "tool_wait",
         "tool_search",
+        "update_plan",
         "web_fetch",
         "web_search",
         "write_file",

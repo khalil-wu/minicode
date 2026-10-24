@@ -140,6 +140,24 @@ test("discovered SSH aliases persist as aliases without freezing resolved overri
   assert.equal(fs.readFileSync(path.join(homeDirectory, ".ssh/config"), "utf8"), config);
 });
 
+test("SSH colors survive batch persistence, alias resolution and reload, and default clears the preference", async t => {
+  const { hosts, homeDirectory, userData } = discoveryFixture(t, { ".ssh/config": "Host colored\n" });
+  const entries = hosts.saveMany([
+    { id: "color-alias", kind: "ssh", source: "discovered", alias: "colored", displayName: "Alias", color: "purple" },
+    { id: "color-manual", kind: "ssh", sshHost: "alice@server", displayName: "Manual", color: "green" },
+  ]);
+  const restored = new RemoteHosts(userData, { homeDirectory, execFile: async () => ({ stdout: "hostname actual.internal\nport 2222\nidentityfile none\n" }) });
+  assert.deepEqual(restored.saved.connections, entries);
+  const resolved = await restored.refresh();
+  assert.equal(resolved[0].color, "purple"); assert.equal(resolved[0].source, "discovered"); assert.equal(resolved[0].alias, "colored");
+  assert.equal(resolved[0].sshHost, "actual.internal"); assert.equal(resolved[1].color, "green");
+  const cleared = restored.save({ ...resolved[0], color: null });
+  assert.equal(Object.hasOwn(cleared, "color"), false);
+  const next = new RemoteHosts(userData, { homeDirectory });
+  assert.equal(Object.hasOwn(next.saved.connections.find(item => item.id === "color-alias"), "color"), false);
+  assert.equal(next.saved.connections.find(item => item.id === "color-manual").color, "green");
+});
+
 test("SSH metadata refresh derives Source hostname, first valid port and first non-none identity while transport keeps the alias", async t => {
   const { hosts, homeDirectory, userData } = discoveryFixture(t, { ".ssh/config": "Host owned-alias\n" });
   const raw = hosts.save({ id: "metadata-alias", displayName: "Owned", kind: "ssh", source: "discovered", alias: "owned-alias" });

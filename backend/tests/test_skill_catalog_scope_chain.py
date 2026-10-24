@@ -91,8 +91,9 @@ async def test_model_capability_projection_skips_skill_discovery_and_sandbox_pro
         active_conversation_id="model-owner", session_id="model-session",
         refresh_tool_registry_if_mcp_changed=Mock(), tool_registry=ToolRegistry(),
         permission_checker=None, permission_context=None, _mcp_registry_version_snapshot=0,
-        runtime_toolset_policy=lambda _: None,
-        _provider_capabilities_payload=lambda: {"model": "chosen-model", "configured_reasoning_effort": "high"},
+        runtime_toolset_policy=lambda _, **_kwargs: None,
+        _llm_selection_payload=lambda: {"model": "chosen-model", "configured_reasoning_effort": "high"},
+        _provider_capabilities_payload=lambda _selection=None: {"model": "chosen-model", "configured_reasoning_effort": "high"},
         send_payload=AsyncMock(),
     )
     lifecycle = SessionLifecycle(owner)
@@ -185,3 +186,22 @@ async def test_old_sandbox_probe_never_publishes_as_new_workspace(tmp_path, monk
     await asyncio.wait_for(lifecycle.sandbox_capability_task, 8)
     assert lifecycle.sandbox_capability_payload == {"probe_workspace": str(root_b)}
     assert not any(message["workspace_root"] == str(root_b) and message["probe"] == {"probe_workspace": str(root_a)} for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_completed_sandbox_probe_publishes_permission_without_rebuilding_catalogs(tmp_path):
+    permission = {"mode": "auto", "sandbox_status": {"probe_status": "ready", "backend_available": True}}
+    owner = SimpleNamespace(session_id="probe-session", active_conversation_id="probe-owner",
+        permission_context=PermissionContext(mode="auto"), send_payload=AsyncMock(),
+        _runtime_permission_payload=Mock(return_value=permission), runtime_capabilities_payload=Mock(),
+        skill_manager=SimpleNamespace(snapshot=Mock()))
+    lifecycle = SessionLifecycle(owner)
+    lifecycle.workspace_root_for_conversation = lambda: tmp_path
+    lifecycle._sandbox_capability_scope = lifecycle._current_sandbox_capability_scope()
+    lifecycle._sandbox_capability_payload = permission["sandbox_status"]
+    await lifecycle.send_runtime_capabilities(source="sandbox.probe")
+    payload = owner.send_payload.call_args.args[0]
+    assert payload["conversation_id"] == "probe-owner" and payload["workspace_root"] == str(tmp_path)
+    assert payload["capabilities"] == {"permission": permission}
+    owner.runtime_capabilities_payload.assert_not_called()
+    owner.skill_manager.snapshot.assert_not_called()

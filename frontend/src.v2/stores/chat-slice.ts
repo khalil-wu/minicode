@@ -670,7 +670,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         delete remainingWorkspaceDrafts[workspaceKey];
         return {
           conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
-            [id]: { ...emptyConversationWorkbenchState(), ...draft } },
+            [id]: { ...emptyConversationWorkbenchState(), ...state.conversationWorkbenchStates[id], ...draft } },
           workspaceComposerDrafts: remainingWorkspaceDrafts,
           pendingComposerConversationAdoption: null,
         };
@@ -804,7 +804,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       pushToast("Select a workspace before creating a workspace-bound conversation.", "error", 4000);
       return false;
     }
-    const workspaceRoot = shouldBindWorkspace
+    let workspaceRoot = shouldBindWorkspace
       ? requestedWorkspace
       : "";
     set((current) => ({ pendingConversationSwitchId: id, pendingConversationCreateId: id,
@@ -815,6 +815,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     try {
       const preferences = desktop() ? await desktop()!.preferences.get() : null;
       if (get().pendingConversationCreateId !== id) return false;
+      if (preferences) {
+        get().initializeWorkspaceView(id, Boolean(preferences.defaultWorkspaceFullView));
+        if (window.__MINICODE_RUNTIME__?.initialNavigation?.popout && preferences.popoutWindowProjectlessDefault && !options?.workspaceRoot) workspaceRoot = "";
+      }
       const createCommand = {
         type: "conversation.create",
         conversation_id: id,

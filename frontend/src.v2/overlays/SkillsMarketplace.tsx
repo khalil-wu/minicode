@@ -72,7 +72,7 @@ export const SkillsMarketplace = () => {
 const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | null; active: boolean }) => {
   const availableSkills = useAppStore((s) => s.availableSkills);
   const marketplaceSkills = useAppStore((s) => s.marketplaceSkills);
-  const { workspaceRoot, skills: userSkills, pluginSkills, error: settingsError, pendingPath, reload: reloadSkills, toggle: toggleSkill } = useSkillSettings(active);
+  const { workspaceRoot, skills: userSkills, pluginSkills, error: settingsError, pendingPath, reload: reloadSkills, toggle: toggleSkill, uninstall: uninstallSkill } = useSkillSettings(active);
   const [scope, setScope] = useState("all");
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState(false);
@@ -121,24 +121,23 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
   useEffect(() => () => loadAbortRef.current?.abort(), []);
   useEffect(() => { if (!active) setMenu(null); }, [active]);
 
-  const mutate = async (kind: "install" | "remove" | "import", name = "") => {
+  const mutate = async (kind: "install" | "import", name = "") => {
     if (pendingRef.current) return;
     pendingRef.current = true;
     setOperation(`${kind}:${name}`);
     try {
       let sourcePath: string | null = null;
-      if (kind === "remove" && !await showConfirm({ title: "卸载技能", message: `确定卸载 ${name}？本地技能文件会被移除。`, confirmLabel: "卸载", danger: true })) return;
       if (kind === "import") {
         sourcePath = isDesktop() ? await pickDirectory() : await showPrompt({ title: "导入本地技能", message: "输入后端所在电脑上的技能文件夹路径。", placeholder: "包含 SKILL.md 的文件夹", confirmLabel: "导入" });
         if (!sourcePath?.trim()) return;
       }
-      const response = await fetchWithTimeout(`${apiBase()}/api/skills/${kind === "remove" ? encodeURIComponent(name) : kind}`, {
-        method: kind === "remove" ? "DELETE" : "POST", headers: authHeaders({ "content-type": "application/json" }),
-        ...(kind !== "remove" ? { body: JSON.stringify(kind === "install" ? { skill_name: name } : { source_path: sourcePath?.trim() }) } : {}),
+      const response = await fetchWithTimeout(`${apiBase()}/api/skills/${kind}`, {
+        method: "POST", headers: authHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify(kind === "install" ? { skill_name: name } : { source_path: sourcePath?.trim() }),
       }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "技能操作超时，请刷新查看安装状态。" });
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), "技能操作失败"));
       useAppStore.getState().setMarketplaceSkills(useAppStore.getState().marketplaceSkills.map((skill) => skill.name === name ? { ...skill, installed: kind === "install" } : skill));
-      pushToast(kind === "remove" ? `已卸载技能：${name}` : kind === "import" ? "已导入本地技能" : `已安装技能：${name}`, "success");
+      pushToast(kind === "import" ? "已导入本地技能" : `已安装技能：${name}`, "success");
       refresh(true);
     } catch (error) {
       pushToast(error instanceof Error ? error.message : String(error), "error");
@@ -166,7 +165,11 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
     setMenu({ kind: "skill", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [
       { label: "用于下一条消息", disabled: !skill.enabled || skill.plugin_enabled === false || skill.user_invocable === false, icon: <MessageSquarePlus />, onClick: () => selectSkillForComposer(skill) },
       { label: "查看技能详情", onClick: () => showSkillDetails(skill) },
-      ...(skill.source_level === "user" ? [{ label: "卸载技能", danger: true, disabled: Boolean(operation), icon: <Trash2 />, onClick: () => void mutate("remove", skill.name) }] : []),
+      ...(skill.source_level === "user" && skill.plugin_enabled !== false && skill.uninstall_name ? [{ label: "卸载技能", danger: true, disabled: Boolean(operation || pendingPath), icon: <Trash2 />, onClick: async () => {
+        if (await showConfirm({ title: "卸载技能", message: `确定卸载 ${skill.display_name || skill.name}？本地技能文件会被移除。`, confirmLabel: "卸载", danger: true })) {
+          if (await uninstallSkill(skill)) pushToast(`已卸载技能：${skill.name}`, "success");
+        }
+      } }] : []),
       ...(skill.source_level === "plugin" ? [{ label: "管理所属插件", onClick: () => useAppStore.setState({ skillsMarketplaceTab: "plugins" }) }] : []),
     ] });
   };
@@ -184,7 +187,8 @@ const SkillsCatalog = ({ toolbarHost, active }: { toolbarHost: HTMLElement | nul
         setMenu({ kind: "add", position: { x: rect.right - 200, y: rect.bottom + 4 }, items: [{ label: "导入本地技能", icon: <FolderOpen />, onClick: () => void mutate("import") }, { label: "浏览公开技能", icon: <Globe2 />, onClick: () => setScope("public") }] });
       }}>添加 <ChevronDown /></button>
     </>, toolbarHost)}
-    {active && selected && <InstalledSkillDetailsDialog skill={selected} workspaceRoot={workspaceRoot} pending={Boolean(pendingPath)} onToggle={() => void toggleSkill(selected)} onClose={() => setInstalledDetailPath(null)} />}
+    {active && selected && <InstalledSkillDetailsDialog skill={selected} workspaceRoot={workspaceRoot} pending={Boolean(pendingPath || operation)} onToggle={() => void toggleSkill(selected)}
+      onUninstall={() => uninstallSkill(selected)} onClose={() => setInstalledDetailPath(null)} />}
     {settingsError && <div className="skills-detail-note" role="alert">{settingsError}</div>}
     {detail && <section ref={detailRef} tabIndex={-1} className="skills-detail-page" aria-label="技能详情" onKeyDown={(event) => {
       if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeDetails(); }

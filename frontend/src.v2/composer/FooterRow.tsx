@@ -18,6 +18,7 @@ import { ComposerAddMenu } from "./ComposerAddMenu";
 import { PromptSourceIcon } from "../lib/prompt-source-icons";
 import { isDesktop, openExternal } from "../desktop/runtime";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { Target } from "../lib/icons";
 import { enterComposerGoalMode, updateThreadGoal } from "./goal-state";
 import "./goal.css";
@@ -65,7 +66,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   const { preferences } = useDesktopPreferences();
   const permissionMode = useAppStore((s) => s.permissionMode);
   const agentMode = useAppStore((s) => s.agentMode);
-  const goalMode = useAppStore((s) => s.goalMode);
+  const goalMode = useAppStore((s) => s.goalMode && capabilityFeatureEnabled(s.runtimeCapabilities, "goals"));
   const setAgentMode = useAppStore((s) => s.setAgentMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
   const conversationId = useAppStore((s) => s.conversationId);
@@ -260,7 +261,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
     const owner = useAppStore.getState();
     if (owner.agentMode === "plan") { void owner.setAgentMode("build"); return; }
     useAppStore.setState({ goalMode: false });
-    if (owner.activeGoal && owner.conversationId) {
+    if (owner.activeGoal && owner.conversationId && capabilityFeatureEnabled(owner.runtimeCapabilities, "goals")) {
       void updateThreadGoal(owner.conversationId, "clear")
         .catch(error => pushToast(error instanceof Error ? error.message : tr("目标操作失败"), "error"));
     }
@@ -410,7 +411,9 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
     && capabilityBool(
     providerCapabilities?.reasoning_effort_supported ?? providerCapabilities?.reasoning_effort,
   ) && capabilityEffortLevels.length > 0;
-  const composerEffortLevels = capabilityEffortLevels;
+  const visibleReasoningEfforts = preferences?.enabledReasoningEfforts;
+  const composerEffortLevels = capabilityEffortLevels.filter(level => level !== "max" && level !== "ultra"
+    || visibleReasoningEfforts === undefined || visibleReasoningEfforts.includes(level));
   const effortOptions = supportsReasoningEffort
     ? composerEffortLevels.map((level) => {
       const option = effortOption(level, tr);
@@ -434,7 +437,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
 
   return (
     <div ref={footerRef} className="flex flex-col gap-0">
-      {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} goalAvailable={!pendingConversationSwitchId}
+      {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} showGoal={capabilityFeatureEnabled(runtimeCapabilities, "goals")} goalAvailable={!pendingConversationSwitchId}
         onFiles={openFilePicker}
         onRemoteFiles={remoteHost ? () => void openRemoteFilePicker() : undefined}
         onGoal={() => void editGoal()} onPlan={togglePlanMode}

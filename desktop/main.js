@@ -1,4 +1,4 @@
-const { app, BrowserWindow, crashReporter, dialog, Menu, Notification, powerMonitor, protocol, safeStorage, session, shell, webContents } = require("electron");
+const { app, BrowserWindow, crashReporter, dialog, globalShortcut, Menu, Notification, powerMonitor, protocol, safeStorage, session, shell, webContents } = require("electron");
 const fs = require("node:fs");
 const crypto = require("node:crypto");
 const path = require("node:path");
@@ -33,6 +33,7 @@ const notificationSounds = require("./notification-sounds");
 const { createPetManager } = require("./pet-manager");
 const { createPetActionBridge } = require("./pet-action-bridge");
 const { createDictationHotkeys } = require("./dictation-hotkeys");
+const { createPopoutWindow } = require("./popout-window");
 const { RemoteDesktop } = require("./remote-desktop");
 let remoteDesktop = null;
 let petManager = null;
@@ -43,7 +44,15 @@ registerMcpAppScheme(protocol);
 const petActionBridge = createPetActionBridge(windowManager.getWindowByInstanceId);
 const dictationHotkeys = createDictationHotkeys({ app, getMainWindows: windowManager.getMainWindows,
   getFocusedMainWindow: windowManager.getFocusedMainWindow, getFocusedWebContents: () => webContents.getFocusedWebContents() });
-app.on("browser-window-focus", (_event, window) => dictationHotkeys.noteFocusedWindow(window));
+const popoutWindow = createPopoutWindow({ globalShortcut, preferences: desktopPreferences,
+  createNewWindow: windowManager.createNewWindow, getFocusedMainWindow: windowManager.getFocusedMainWindow,
+  getWindowMenuState: window => applicationMenuStates.get(window),
+  getWindowRecord: windowManager.getWindowRecord, focusMainWindow: windowManager.focusMainWindow,
+  onError: error => dialog.showErrorBox("Popout Window", error.message) });
+app.on("browser-window-focus", (_event, window) => {
+  dictationHotkeys.noteFocusedWindow(window);
+  if (windowManager.getMainWindows().includes(window)) popoutWindow.noteFocusedWindow(window);
+});
 
 // ---------------------------------------------------------------------------
 // Optional native PTY
@@ -822,9 +831,14 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
           label: label("显示/隐藏“变更”面板", "Toggle Changes Panel"), accelerator: "Ctrl+Alt+B",
           click: () => send("minicode:menu:toggle-side-panel"),
         },
-        hidden("Open Browser Tab", "Ctrl+T", () => send("minicode:menu:open-browser-tab")),
-        hidden("Focus Browser Address Bar", undefined, () => send("minicode:menu:focus-browser-address-bar")),
-        { ...hidden("Reload Browser Page", "Ctrl+R", () => browserCommand("reload")), enabled: Boolean(canReloadBrowser) },
+        {
+          label: label("浏览器", "Browser"), enabled: editorWorkspace,
+          submenu: [
+            { label: label("打开浏览器标签页", "Open Browser Tab"), accelerator: "Ctrl+T", click: () => send("minicode:menu:open-browser-tab") },
+            { label: label("聚焦浏览器地址栏", "Focus Browser Address Bar"), click: () => send("minicode:menu:focus-browser-address-bar") },
+            { label: label("重新加载页面", "Reload Browser Page"), accelerator: "Ctrl+R", enabled: Boolean(canReloadBrowser), click: () => browserCommand("reload") },
+          ],
+        },
         { ...hidden("Force Reload Browser Page", "Ctrl+Shift+R", () => browserCommand("hard-reload")), enabled: Boolean(canReloadBrowser) },
         hidden("Browser Back", "Alt+Left", () => browserCommand("back")),
         hidden("Browser Forward", "Alt+Right", () => browserCommand("forward")),
@@ -919,7 +933,7 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
     ["pinnedSummary", ["切换摘要面板固定状态", "Toggle Pinned Summary"]], ["terminal", ["打开终端", "Open Terminal"]],
     ["fileTree", ["显示/隐藏导航面板", "Toggle navigation panel"]], ["sidePanel", ["显示/隐藏“变更”面板", "Toggle Changes Panel"]],
     ["browserTab", ["打开浏览器标签页", "Open Browser Tab"]], ["browserAddress", ["聚焦浏览器地址栏", "Focus Browser Address Bar"]],
-    ["browserReload", ["重新加载浏览器页面", "Reload Browser Page"]], ["browserHardReload", ["Force Reload Browser Page"]],
+    ["browserReload", ["重新加载页面", "Reload Browser Page"]], ["browserHardReload", ["Force Reload Browser Page"]],
     ["browserBack", ["Browser Back"]], ["browserForward", ["Browser Forward"]], ["find", ["查找", "Find"]], ["findNext", ["Find Next"]], ["findPrevious", ["Find Previous"]],
     ["navigateBack", ["返回", "Back"]], ["navigateForward", ["前进", "Forward"]],
     ["previousConversation", ["侧边栏中的上一项", "Previous Sidebar Item"]], ["nextConversation", ["下一个侧边栏项目", "Next Sidebar Item"]],
@@ -1209,6 +1223,7 @@ ipcHandlers.init({
   getRemoteDesktop,
   desktopPreferences,
   onLocaleChanged: buildApplicationMenu,
+  popoutWindow,
   browserHistory,
   getMainWindows: windowManager.getMainWindows,
   browserProfileImport: createBrowserProfileImporter({ history: browserHistory }),
@@ -1336,6 +1351,8 @@ async function attemptAppStartup(source = "startup") {
       },
       onError: error => appendDesktopLog(`[history maintenance] ${error.message}`),
     });
+    try { popoutWindow.initialize(); }
+    catch (error) { dialog.showErrorBox("Popout Window shortcut", error.message); }
     closeStartupFailureWindow();
     appendDesktopLog(`[desktop] startup attempt succeeded (${source})`);
     return true;
@@ -1377,6 +1394,7 @@ let rollbackPreparationInProgress = false;
 
 async function drainDesktopResources() {
   try {
+    popoutWindow.dispose();
     await dictationHotkeys.dispose();
     generalMaintenance?.dispose();
     generalMaintenance = null;

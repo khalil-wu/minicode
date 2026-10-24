@@ -42,10 +42,9 @@ def retain_user_inputs(messages: list[LLMMessage], max_tokens: int) -> list[LLMM
 
 
 def format_compaction_history(messages: list[LLMMessage]) -> str:
-    """Serialize selected history into MiniCode's compaction transcript format."""
+    """Serialize the admitted history without applying another output budget."""
     if any(native_compaction_windows(message) for message in messages):
         raise ValueError("An encrypted compaction window cannot be rewritten as a text summary")
-    tool_budget = 500
     tool_names = {
         call.id: call.name
         for message in messages
@@ -68,7 +67,7 @@ def format_compaction_history(messages: list[LLMMessage]) -> str:
                         f"{key}={json.dumps(value, ensure_ascii=False, separators=(',', ':'))}"
                         for key, value in call.arguments.items()
                     )
-                    calls.append(f"{call.name}({truncate_middle_tokens(args, tool_budget)}) [call_id={json.dumps(call.id)}]")
+                    calls.append(f"{call.name}({args}) [call_id={json.dumps(call.id)}]")
                 parts.append(f"[Assistant tool calls]: {'; '.join(calls)}")
         elif message.role == "tool":
             content = str(message.content or "")
@@ -77,7 +76,7 @@ def format_compaction_history(messages: list[LLMMessage]) -> str:
                 "name": message.name or tool_names.get(message.tool_call_id),
                 "is_error": message.is_error,
             }, ensure_ascii=False, separators=(",", ":"))
-            parts.append(f"[Tool result] {identity}: {truncate_middle_tokens(content, tool_budget)}")
+            parts.append(f"[Tool result] {identity}: {content}")
         if message.attachment_refs:
             parts.append("[Attachments; originals available through read_artifact]: " + json.dumps(
                 message.attachment_refs, ensure_ascii=False, separators=(",", ":"),

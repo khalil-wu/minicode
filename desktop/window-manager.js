@@ -269,10 +269,11 @@ function nextWindowOwnerId() {
   return `secondary-${slot}`;
 }
 
-async function createNewWindow({ conversationId = null, restoreLastConversation = false, remoteHostId = null, runtime = null, settingsTab } = {}) {
+async function createNewWindow({ conversationId = null, restoreLastConversation = false, remoteHostId = null, runtime = null, settingsTab,
+  windowOwnerId: requestedOwnerId, popout = false, initialWorkspaceRoot = "" } = {}) {
   const { app } = require("electron");
   const target = getFrontendTarget();
-  const windowOwnerId = nextWindowOwnerId();
+  const windowOwnerId = requestedOwnerId ?? nextWindowOwnerId();
   const windowInstanceId = crypto.randomUUID();
   const windowBindingToken = crypto.randomBytes(32).toString("hex");
   const savedWindowState = readWindowState(windowOwnerId);
@@ -308,7 +309,8 @@ async function createNewWindow({ conversationId = null, restoreLastConversation 
     },
   });
   const record = { window: mainWindow, webContents: mainWindow.webContents, windowOwnerId, windowInstanceId, windowBindingToken,
-    remoteHostId, runtime, initialNavigation: restoreLastConversation ? null : { conversationId },
+    remoteHostId, runtime, initialNavigation: popout ? { conversationId, popout, workspaceRoot: initialWorkspaceRoot, restoreLastConversation }
+      : restoreLastConversation ? null : { conversationId },
     pendingProviderSettings: settingsTab === "provider",
     nativeCloseAttempt: false, requestedReload: null, unloadIntent: null };
   mainWindows.set(record.webContents, record);

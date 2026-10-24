@@ -46,15 +46,17 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("settings and selected catalog ownership", () => {
-  it("cancels a task memory confirmation when its conversation changes", async () => {
-    const confirmation = deferred<boolean>();
-    mocks.confirm.mockReturnValue(confirmation.promise);
-    useAppStore.setState((state) => ({ conversations: state.conversations.map((item) => ({ ...item, memoryPolluted: true, memoryMode: "polluted" })) }));
+  it("keeps a host preference write attached to its host across a conversation change", async () => {
+    const saved = deferred<Response>();
+    const payload = { feature_enabled: true, memories: { generate_memories: true, use_memories: true, disable_on_external_context: false }, path: "/settings.json", feature_locked: false, locked_fields: [] };
+    mocks.fetch.mockImplementation((_url, init) => init?.method === "PUT" ? saved.promise : Promise.resolve(Response.json(payload)));
     render(<PersonalizationTab />);
-    fireEvent.click(await screen.findByRole("button", { name: "重新启用" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "启用 MiniCode 记忆" }));
     act(() => useAppStore.setState({ conversationId: "B" }));
-    await act(async () => confirmation.resolve(true));
+    await act(async () => saved.resolve(Response.json({ ...payload, feature_enabled: false, memories: { ...payload.memories, generate_memories: false, use_memories: false } })));
     expect(mocks.awaitResult).not.toHaveBeenCalled();
+    expect(mocks.fetch).toHaveBeenCalledWith("http://settings.test/api/settings/memory", expect.objectContaining({ method: "PUT", body: JSON.stringify({ enabled: false }) }));
+    expect(useAppStore.getState().conversationId).toBe("B");
   });
 
   it("clears old workspace inputs and rejects same-conversation stale catalogs", () => {

@@ -167,7 +167,7 @@ def test_requirements_strictly_reject_empty_or_unsafe_sandbox_allowlist(tmp_path
 def test_managed_features_override_settings_and_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MINICODE_FEATURE_GLOBAL_SEARCH", "true")
     flags = load_feature_flags(
-        {"feature_flags": {"global_search": True}},
+        {"features": {"global_search": True}},
         managed_requirements={"global_search": False},
     )
     assert flags.enabled("global_search") is False

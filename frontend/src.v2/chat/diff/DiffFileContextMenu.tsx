@@ -46,6 +46,8 @@ export interface DiffFileContextMenuProps {
   preferences: DesktopPreferences | null;
   githubUrl?: string;
   canOpenFile?: boolean;
+  onOpenFile?: (line: number) => void;
+  canRequestChanges?: boolean;
   children: ReactNode;
 }
 
@@ -53,7 +55,7 @@ type MenuState = { position: { x: number; y: number }; location?: DiffLineLocati
 
 /** Source Fe/Re: current file actions, real selection and registered annotation utility. */
 export function DiffFileContextMenu({ path, workspaceRoot, deleted = false, firstChangedLine = 1, preferences, githubUrl,
-  canOpenFile = true, children }: DiffFileContextMenuProps) {
+  canOpenFile = true, onOpenFile, canRequestChanges = true, children }: DiffFileContextMenuProps) {
   const { t, locale } = useI18n();
   const requestChanges = useRef<RequestChanges>();
   const [menu, setMenu] = useState<MenuState>();
@@ -74,11 +76,11 @@ export function DiffFileContextMenu({ path, workspaceRoot, deleted = false, firs
       ...persist && target.kind === "editor" ? { persistPreferredTargetPath: workspaceRoot } : {} });
   };
   const items: ContextMenuItem[] = [
-    { label: zh ? "请求更改" : "Request changes", onClick: () => requestChanges.current?.(menu?.location) },
+    ...canRequestChanges ? [{ label: zh ? "请求更改" : "Request changes", onClick: () => requestChanges.current?.(menu?.location) }] : [],
     ...primary ? [{ label: zh ? `在“${primary.label}”中打开` : `Open in ${primary.label}`, icon: icon(primary), onClick: () => openTarget(primary, false) }] : [],
     ...primary || newTab ? [{ label: zh ? "打开方式" : "Open with", submenu: [
       ...newTab ? [{ label: t("新标签页"), icon: nativeNewTab ? icon(nativeNewTab) : undefined,
-        onClick: () => openWorkspaceSourceFile(path, workspaceRoot, line) }] : [],
+        onClick: () => onOpenFile ? onOpenFile(line) : openWorkspaceSourceFile(path, workspaceRoot, line) }] : [],
       ...targets.map(target => ({ label: target.label, icon: icon(target), onClick: () => openTarget(target, true) })),
     ] }] : [],
     ...githubUrl ? [{ label: zh ? "在 GitHub 中打开" : "Open in GitHub", onClick: () => { void openPreferredWebLink(githubUrl); } }] : [],

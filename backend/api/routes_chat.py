@@ -30,6 +30,7 @@ from . import _state
 from .models import ChatRequest, ChatResponse, UploadResponse
 from backend.services.tool_registry_factory import get_attachment_store as _get_attachment_store
 from backend.services.conversation_resources_service import background_command_detail, conversation_resource_page
+from backend.services.conversation_search_service import conversation_search_page
 from backend.services.conversation_payload_service import restore_tool_artifact_sources
 from backend.ws.command_scope import resolve_command_scope
 from backend.conversations.import_export import import_conversation_tree
@@ -38,6 +39,24 @@ _UPLOAD_READ_CHUNK = 1024 * 1024
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.get("/api/conversations/search")
+async def search_conversations(
+    session_id: str = Query(..., min_length=1), query: str = Query(..., min_length=1, max_length=512),
+    archived: bool = Query(False), project: str | None = Query(None),
+    sort: str = Query("updated", pattern="^(updated|created|alphabetical)$"),
+    cursor: str = Query(""), limit: int = Query(50, ge=1, le=200),
+) -> dict:
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session is not connected.")
+    try:
+        return await run_in_threadpool(conversation_search_page, session, session_id=session_id,
+                                       query=query, archived=archived, project=project, sort=sort,
+                                       cursor=cursor, limit=limit)
+    except ChatApiServiceError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 @router.post("/api/conversations/import")
 async def import_conversations(

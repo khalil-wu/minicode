@@ -320,6 +320,9 @@ async def bootstrap_agent_loop(
     elif model_snapshot.config.config_layer_stack is None:
         model_snapshot = replace(model_snapshot, config=replace(model_snapshot.config, config_layer_stack=turn_config_stack))
         run_context.model_execution = model_snapshot
+    resolved_metadata["_concurrent_reasoning_summaries"] = model_snapshot.config.feature_flags.enabled(
+        "concurrent_reasoning_summaries", False
+    )
     from backend.skills.manager import SkillManager
 
     if isinstance(skill_manager, SkillManager):

@@ -35,6 +35,16 @@ describe("Codex chrome color contracts", () => {
     expect(Object.keys(tokens).some(key => /font|--fs-|--fw-|line-height|syntax/.test(key))).toBe(false);
   });
 
+  it("uses Source foreground alpha roles on the saved white light palette", () => {
+    const tokens = appearanceColorTokens({ accent: "#0169cc", surface: "#ffffff", ink: "#0d0d0d" }, "light");
+    expect(tokens["--surface-soft"]).toBe("rgba(13, 13, 13, 0.025)");
+    expect(tokens["--surface-selected"]).toBe("rgba(13, 13, 13, 0.05)");
+    expect(tokens["--surface-raised"]).toBe("rgb(255, 255, 255)");
+    const dark = appearanceColorTokens({ accent: "#0169cc", surface: "#101010", ink: "#ededed" }, "dark");
+    expect(dark["--surface-soft"]).toBe("rgba(237, 237, 237, 0.025)");
+    expect(dark["--surface-selected"]).toBe("rgba(237, 237, 237, 0.05)");
+  });
+
   it.each([
     { variant: "dark", contrast: 85, info: "rgb(157, 187, 218)", sidebar: "rgb(13, 13, 13)", panel: "rgb(31, 31, 31)", control: "rgb(44, 44, 44)", secondary: "rgba(208, 208, 208, 0.818)" },
     { variant: "light", contrast: 30, info: "#2468ac", sidebar: "rgb(20, 20, 20)", panel: "rgb(59, 59, 59)", control: "rgb(39, 39, 39)", secondary: "rgba(208, 208, 208, 0.662)" },

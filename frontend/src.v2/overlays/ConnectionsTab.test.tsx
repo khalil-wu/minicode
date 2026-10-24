@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectionsTab } from "./ConnectionsTab";
+import { useAppStore } from "../stores";
 
 const api = vi.hoisted(() => ({ list: vi.fn(), discover: vi.fn(), save: vi.fn(), saveMany: vi.fn(), connect: vi.fn(), open: vi.fn(), remove: vi.fn(), disconnect: vi.fn(), onChanged: vi.fn() }));
 const clipboard = vi.hoisted(() => ({ copyText: vi.fn(), pushToast: vi.fn() }));
@@ -12,6 +13,7 @@ vi.mock("./ToastContainer", () => ({ pushToast: clipboard.pushToast }));
 
 beforeEach(() => {
   vi.clearAllMocks();
+  useAppStore.setState({ resolvedTheme: "light" });
   api.list.mockResolvedValue([{ id: "host-one", kind: "ssh", displayName: "Build server", sshHost: "user@build", status: "disconnected" }]);
   api.onChanged.mockReturnValue(() => {});
   api.discover.mockResolvedValue({ sshAliases: ["build"], wslDistributions: ["Ubuntu"] });
@@ -24,6 +26,53 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("desktop remote connection controls", () => {
+  it("offers the eight Source colors and keeps palette changes staged until manual Save", async () => {
+    render(<ConnectionsTab active />);
+    await screen.findByText("Build server");
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    fireEvent.click(await screen.findByRole("button", { name: "手动添加" }));
+    fireEvent.click(screen.getByRole("button", { name: "颜色", exact: true }));
+    expect(screen.getAllByRole("menuitemradio").map(button => button.textContent)).toEqual(["默认", "红色", "橙色", "黄色", "绿色", "蓝色", "紫色", "粉色"]);
+    expect(screen.getByRole("menuitemradio", { name: "默认", exact: true }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "粉色", exact: true }));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(api.save).not.toHaveBeenCalled(); expect(api.saveMany).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "取消", exact: true }));
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    fireEvent.click(await screen.findByRole("button", { name: "手动添加" }));
+    fireEvent.click(screen.getByRole("button", { name: "颜色", exact: true }));
+    expect(screen.getByRole("menuitemradio", { name: "默认", exact: true }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "蓝色", exact: true }));
+    fireEvent.change(screen.getByLabelText("显示名称"), { target: { value: "Blue server" } });
+    fireEvent.change(screen.getByLabelText("主机名或 SSH 别名"), { target: { value: "alice@blue" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(api.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ color: "blue", displayName: "Blue server", sshHost: "alice@blue" })));
+    await waitFor(() => expect(api.connect).toHaveBeenCalledOnce());
+  });
+
+  it("displays a persisted color in the row and details, and changes only the alias color on Save", async () => {
+    const connection = { id: "colored-alias", kind: "ssh", source: "discovered", alias: "prod", sshHost: "actual.internal", displayName: "Production", status: "disconnected", color: "purple" };
+    api.list.mockResolvedValue([connection]);
+    const { container } = render(<ConnectionsTab active />);
+    await screen.findByText("Production");
+    expect(container.querySelector(".remote-connection-row > svg")).toHaveProperty("style.color", "rgb(146, 79, 247)");
+    fireEvent.click(screen.getByRole("button", { name: "Production的连接操作" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "详情" }));
+    expect(screen.getByRole("dialog", { name: "Production" }).querySelector(".remote-connection-details-marker > svg")).toHaveProperty("style.color", "rgb(146, 79, 247)");
+    fireEvent.click(screen.getByRole("button", { name: "编辑连接" }));
+    fireEvent.click(screen.getByRole("button", { name: "颜色", exact: true }));
+    expect(screen.getByRole("menuitemradio", { name: "紫色", exact: true }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "绿色", exact: true }));
+    expect(api.save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(api.save).toHaveBeenCalledExactlyOnceWith({ ...connection, color: "green" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    act(() => api.onChanged.mock.calls[0][0]([{ ...connection, color: "green" }]));
+    expect(container.querySelector(".remote-connection-row > svg")).toHaveProperty("style.color", "rgb(4, 184, 76)");
+    act(() => useAppStore.setState({ resolvedTheme: "dark" }));
+    expect(container.querySelector(".remote-connection-row > svg")).toHaveProperty("style.color", "rgb(64, 201, 119)");
+  });
+
   it("sorts saved hosts by current display name for both SSH and WSL without reordering the producer catalog", async () => {
     const connections = [
       { id: "z-ssh", kind: "ssh" as const, displayName: "Zulu SSH", sshHost: "zulu", status: "disconnected" as const },

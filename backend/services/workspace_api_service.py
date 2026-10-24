@@ -298,15 +298,17 @@ def parse_workspace_git_status(stdout: str) -> dict[str, Any]:
     return {"branch": branch, "modified": modified, "staged": staged, "untracked": untracked}
 
 
-def workspace_git_diff_payload(root: Path, file: str, *, workspace_root: Path | None = None) -> dict[str, Any]:
+def workspace_git_diff_payload(root: Path, file: str, *, workspace_root: Path | None = None, base_ref: str = "HEAD") -> dict[str, Any]:
     try:
         # Verify the repository separately: an unborn HEAD is a normal state,
         # while a failed Git command must never look like an empty diff.
         _run_workspace_git(root, "rev-parse", "--show-toplevel")
         try:
-            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "HEAD").strip()
+            baseline = _run_workspace_git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", base_ref).strip()
+            if base_ref != "HEAD":
+                baseline = _run_workspace_git(root, "merge-base", "HEAD", baseline).strip()
         except subprocess.CalledProcessError as exc:
-            if exc.returncode != 1:
+            if exc.returncode != 1 or base_ref != "HEAD":
                 raise
             baseline = _run_workspace_git(root, "hash-object", "-t", "tree", "--stdin").strip()
 

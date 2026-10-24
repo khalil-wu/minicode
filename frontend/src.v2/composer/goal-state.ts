@@ -7,6 +7,7 @@ import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protoco
 import { composerWorkspaceKey } from "../stores/composer-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import type { Translate } from "../i18n";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 
 export interface GoalEditorState {
   draft: string;
@@ -29,8 +30,10 @@ export const useGoalEditor = (owner: string) => useSyncExternalStore(subscribe, 
 
 export function enterComposerGoalMode() {
   const owner = useAppStore.getState();
+  if (!capabilityFeatureEnabled(owner.runtimeCapabilities, "goals")) return false;
   useAppStore.setState({ goalMode: true });
   if (owner.agentMode === "plan") void owner.setAgentMode("build");
+  return true;
 }
 
 export function prepareGoalEditor(owner: string, goal: ConversationGoal) {
@@ -45,6 +48,7 @@ export function prepareGoalEditor(owner: string, goal: ConversationGoal) {
 
 export function toggleGoalEditor(owner: string, goal: ConversationGoal) {
   const state = useAppStore.getState();
+  if (!capabilityFeatureEnabled(state.runtimeCapabilities, "goals")) return;
   if (state.rightPanelOpen && state.rightStackTab === "goal") {
     window.dispatchEvent(new CustomEvent("goal:close-editor", { detail: { conversationId: owner } }));
     return;
@@ -64,6 +68,7 @@ export async function updateThreadGoal(owner: string, action: "set" | "pause" | 
 
 export async function submitComposerGoal(tr: Translate) {
   const captured = useAppStore.getState();
+  if (!capabilityFeatureEnabled(captured.runtimeCapabilities, "goals")) return;
   const text = captured.draft.trim();
   if (!text) return;
   const owner = captured.conversationId || await captured.ensureComposerConversation();

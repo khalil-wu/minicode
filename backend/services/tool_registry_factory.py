@@ -96,6 +96,8 @@ def build_tool_registry(
     config_snapshot = config or load_config(cwd=resolved_workspace_root)
     from backend.agent.token_budget_activation import prepare_token_budget_for_startup, resolve_context_window_config
     config_snapshot = prepare_token_budget_for_startup(config_snapshot)
+    from backend.tools.source_tool_gates import source_utility_tool_gates
+    utility_gates = source_utility_tool_gates(config_snapshot)
     registry = ToolRegistry()
 
     registry.register(ReadFileTool(artifact_store))
@@ -111,7 +113,8 @@ def build_tool_registry(
     registry.register(RunCommandTool(artifact_store))
     registry.register(ToolExecTool())
     registry.register(ToolWaitTool())
-    registry.register(SleepTool())
+    if utility_gates["sleep"]:
+        registry.register(SleepTool())
     registry.register(MonitorTool())
     registry.register(ReadTerminalTool())
 
@@ -124,14 +127,14 @@ def build_tool_registry(
     registry.register(BriefTool())
     from backend.tools.goal_tools import GoalTool
     for name in ("create_goal", "get_goal", "update_goal"):
-        registry.register(GoalTool(name, config_snapshot))
+        if utility_gates[name]:
+            registry.register(GoalTool(name, config_snapshot))
     from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
-    from backend.llm.model_request_policy import source_model_request_capabilities
-    supported = source_model_request_capabilities(config_snapshot.llm.model).get("experimental_supported_tools", [])
-    if "clock" in supported:
+    if utility_gates["curr_time"]:
         registry.register(CurrentTimeTool())
-    if "send_user_message_async" in supported or "request_user_input_async" in supported:
+    if utility_gates["request_user_input_async"]:
         registry.register(RequestUserInputAsyncTool())
+    if utility_gates["send_message_to_user_async"]:
         registry.register(SendMessageToUserAsyncTool())
     registry.register(
         ReadArtifactTool(
@@ -272,7 +275,8 @@ def build_tool_registry(
         ScheduleCronListTool,
         ScheduleCronDeleteTool,
     )
-    registry.register(UpdatePlanTool())
+    if utility_gates["update_plan"]:
+        registry.register(UpdatePlanTool())
     registry.register(ExitPlanModeTool(workspace_root=resolved_workspace_root))
     registry.register(EnterPlanModeTool(workspace_root=resolved_workspace_root))
     registry.register(ScheduleCronTool())

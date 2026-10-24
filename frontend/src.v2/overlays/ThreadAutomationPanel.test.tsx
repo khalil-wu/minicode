@@ -7,6 +7,7 @@ import { flushEditorDrafts } from "../stores/editor-drafts";
 import type { ScheduledTaskEntry } from "../stores/types";
 import { ThreadAutomationPanel } from "./ThreadAutomationPanel";
 import { SchedulerTab } from "./SchedulerTab";
+import { ScheduledTasksPage } from "./ScheduledTasksPage";
 import { openAutomations, openThreadAutomationEditor, openThreadAutomationSettings, removeThreadAutomationEditor, useThreadAutomationEditors } from "../lib/automations-navigation";
 
 const mocks = vi.hoisted(() => ({ send: vi.fn(), toast: vi.fn(), preferences: vi.fn() }));
@@ -44,7 +45,7 @@ describe("ThreadAutomationPanel", () => {
       availableModelOptions: [{ model: "model-one", reasoningEffortLevels: ["low", "high"], defaultReasoningEffort: "low" }, { model: "model-two", reasoningEffortLevels: ["medium", "xhigh"], defaultReasoningEffort: "medium" }],
     });
     mocks.send.mockImplementation(async (command: Record<string, unknown>) => command.type === "scheduler.list"
-      ? ack("scheduler.list", { tasks: command.workspace_root === "C:/B" ? [makeTask({ id: "other-active", conversation_id: "pane-C", workspace_root: "C:/B" }), makeTask({ id: "other-paused", conversation_id: "pane-B", workspace_root: "C:/B", enabled: false })] : [], runs: [] })
+      ? ack("scheduler.list", { tasks: command.scheduler_scope === "global" || command.workspace_root === "C:/B" ? [makeTask({ id: "other-active", conversation_id: "pane-C", workspace_root: "C:/B" }), makeTask({ id: "other-paused", conversation_id: "pane-B", workspace_root: "C:/B", enabled: false })] : [], runs: [] })
       : ack(String(command.type), { task: makeTask({ ...command as Partial<ScheduledTaskEntry>, workspace_root: String(command.task_workspace_root ?? command.workspace_root ?? "C:/A") }) }));
   });
   afterEach(async () => {
@@ -75,7 +76,7 @@ describe("ThreadAutomationPanel", () => {
   it("uses real local targets and scoped occupancy, then saves standalone project/model/reasoning through the captured owner", async () => {
     render(<ThreadAutomationPanel editor={editor()} />);
     let picker = await targetPicker();
-    expect(mocks.send).toHaveBeenCalledWith({ type: "scheduler.list", owner_conversation_id: "pane-B", workspace_root: "C:/B" }, "scheduler.list");
+    expect(mocks.send).toHaveBeenCalledWith({ type: "scheduler.list", scheduler_scope: "global" }, "scheduler.list");
     expect(within(picker).queryByRole("button", { name: "Child work" })).toBeNull();
     expect(within(picker).queryByRole("button", { name: "Remote chat" })).toBeNull();
     expect(within(picker).getByRole("button", { name: "Occupied chat" })).toHaveProperty("disabled", true);
@@ -179,13 +180,13 @@ describe("ThreadAutomationPanel", () => {
     expect(mutations()).toHaveLength(2);
   });
 
-  it("opens the same RRULE task in Settings through its captured list ACK without exposing Cron fields or touching the selected main chat", async () => {
+  it("opens the same RRULE task on Scheduled through its captured list ACK without exposing Cron fields or touching the selected main chat", async () => {
     const task = makeTask({ schedule: "DTSTART:20270101T000000Z\nRRULE:FREQ=YEARLY;BYMONTH=1;BYMONTHDAY=1;BYHOUR=0;BYMINUTE=0;BYSECOND=0" });
     mocks.send.mockResolvedValue(ack("scheduler.list", { tasks: [task], runs: [] }));
     act(() => { useAppStore.setState({ conversationId: "pane-B", workingDirectory: "C:/B", draft: "Unsent B", scheduledTasks: [makeTask({ id: "B-only", name: "B task" })] }); openThreadAutomationSettings(owner, task); });
-    render(<SchedulerTab />);
+    render(<ScheduledTasksPage />);
     await act(async () => {});
-    expect(mocks.send).toHaveBeenCalledWith({ type: "scheduler.list", workspace_root: "C:/A", task_workspace_root: "C:/A", owner_conversation_id: owner.id }, "scheduler.list");
+    expect(mocks.send).toHaveBeenCalledWith({ type: "scheduler.list", scheduler_scope: "global" }, "scheduler.list");
     expect(screen.getByLabelText("重复计划")).toHaveProperty("value", "custom");
     expect(screen.queryByText("查看 Cron 表达式")).toBeNull(); expect(screen.queryByLabelText("任务权限模式")).toBeNull();
     expect(useAppStore.getState()).toMatchObject({ conversationId: "pane-B", workingDirectory: "C:/B", draft: "Unsent B" });

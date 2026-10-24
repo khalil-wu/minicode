@@ -842,7 +842,6 @@ const DiffApprovalCard = ({ request }: { request: PendingDiffReview }) => {
   const openDiff = () => {
     const store = useAppStore.getState();
     if (request.reviewState) store.setDiffReviewState(request.reviewState);
-    store.setRightStackTab("inspector");
     store.addPanel({
       id: "approval-diff",
       kind: "diff",

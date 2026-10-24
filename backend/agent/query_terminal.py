@@ -235,6 +235,17 @@ class QueryTerminalTransaction:
                 self.turn_ctx.turn_kernel.checkpoint_evidence()
             )
 
+        if (
+            status == "cancelled" and reason == "interrupted"
+            and self.turn_ctx.run_context.cancel_reason in {"", "user_interrupted"}
+        ):
+            from backend.hooks.interrupt import interrupt_hook_events
+
+            evidence_events.extend(await interrupt_hook_events(
+                self.turn_ctx,
+                transcript_path=str(self.journal.journal.path) if self.journal.journal is not None else "",
+            ))
+
         self._result = QueryTerminalResult(
             status=status,
             reason=reason,

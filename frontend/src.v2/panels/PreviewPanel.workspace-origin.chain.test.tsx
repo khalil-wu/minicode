@@ -26,7 +26,7 @@ beforeEach(() => {
   preview.mockReset();
   vi.mocked(sendClientCommandAwaitResult).mockReset();
   useAppStore.setState({ conversationId: "workspace-owner", workingDirectory: "C:/owner", conversationWorkbenchStates: {}, previewArtifact: null,
-    previewOwnerConversationId: null, panelSlots: [], editorOpenRequests: [], draft: "未发送的主草稿", isConnected: true });
+    previewOwnerConversationId: null, panelSlots: [], editorOpenRequests: [], workspaceFileTabs: [], draft: "未发送的主草稿", isConnected: true });
 });
 afterEach(() => { cleanup(); resetPreviewRequestScopesForTests(); });
 
@@ -43,21 +43,17 @@ describe("workspace file origin reaches document navigation", () => {
     expect(useAppStore.getState().workingDirectory).toBe("C:/active-other");
     expect(useAppStore.getState().draft).toBe("未发送的主草稿");
   });
-  it("carries the real HTTP preview origin into the toolbar without changing an existing unsaved buffer", async () => {
+  it("opens a workspace file as an independent captured tab without changing an existing unsaved buffer", () => {
     const dirtyTab = { id: "dirty", path: "docs/design.md", label: "design.md", content: "用户尚未保存的正文", original: "旧正文", loading: false };
     useAppStore.setState({ editorTabs: [dirtyTab], activeTabPath: dirtyTab.path });
-    preview.mockResolvedValue({ file_name: "design.md", path: "docs/design.md", content: "# 已保存的预览正文", media_type: "text/markdown", kind: "document", has_native: false, size_bytes: 40, content_chars: 20, truncated: false, parse_error: "", summary: "" });
     expect(openWorkspaceFilePreview({ path: "C:/owner/docs/design.md", workspaceRoot: "C:/owner", conversationId: "workspace-owner" })).toBe(true);
-    expect(useAppStore.getState().previewArtifact).toMatchObject({ source: "workspace", sourcePath: "C:/owner/docs/design.md", workspaceRoot: "C:/owner", loading: true });
-    await waitFor(() => expect(useAppStore.getState().previewArtifact).toMatchObject({ sourcePath: "docs/design.md", workspaceRoot: "C:/owner", loading: false }));
-    // Opening follows explicit source metadata even with an opaque artifact id.
-    useAppStore.getState().setPreviewArtifact({ ...useAppStore.getState().previewArtifact!, artifactId: "opaque-origin-id" });
-    render(<PreviewPanel />);
-    fireEvent.click(screen.getByRole("button", { name: "打开文件" }));
-    expect(useAppStore.getState().editorOpenRequests.at(-1)?.path).toBe(dirtyTab.path);
+    expect(useAppStore.getState().workspaceFileTabs).toMatchObject([{ path: "docs/design.md", title: "design.md", owner: {
+      scopeId: "conversation:workspace-owner", conversationId: "workspace-owner", executionCwd: "C:/owner", browserRoot: "C:/owner" }, pane: "right", open: true }]);
+    expect(useAppStore.getState().previewArtifact).toBeNull();
+    expect(useAppStore.getState().editorOpenRequests).toEqual([]);
     expect(useAppStore.getState().editorTabs).toEqual([dirtyTab]);
     expect(useAppStore.getState().draft).toBe("未发送的主草稿");
-    expect(preview).toHaveBeenCalledWith("C:/owner/docs/design.md", "C:/owner", expect.any(AbortSignal), { session_id: "preview-origin", conversation_id: "workspace-owner" });
+    expect(preview).not.toHaveBeenCalled();
   });
 
   it.each(["attachment", "artifact", "local"] as const)("does not invent a disk-open action for a %s document", (source) => {

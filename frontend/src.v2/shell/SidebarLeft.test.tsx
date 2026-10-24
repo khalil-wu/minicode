@@ -27,6 +27,7 @@ import { sendClientCommand, sendClientCommandAwaitResult, sendConversationDelete
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import type { ChatMessage } from "../stores/types";
 import { LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
+import { closeAutomations, getAutomationsPageState } from "../lib/automations-navigation";
 
 const renderSidebarShell = (props: { embedded?: boolean; onNavigate?: () => void } = {}) => render(<>
   <HeaderBar leftPanelAvailable={false} leftPanelOpen={false} rightPanelAvailable={false} rightPanelOpen={false}
@@ -150,7 +151,7 @@ describe("SidebarLeft session status", () => {
     expect(useAppStore.getState().leftSidebarWidth).toBe(LEFT_SIDEBAR_DEFAULT_WIDTH);
   });
 
-  it("drags without transition lag and retains folder content when collapsed", () => {
+  it("drags without transition lag and retains folder content when collapsed", async () => {
     useAppStore.setState({ leftSidebarWidth: 300, leftSidebarExpandedWidth: 300 });
     localStorage.setItem("minicode.layout.left-width", "300");
     localStorage.setItem("minicode.layout.left-expanded-width", "300");
@@ -160,7 +161,7 @@ describe("SidebarLeft session status", () => {
     handle.setPointerCapture = vi.fn();
     fireEvent(handle, new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 300 }));
     fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 348 }));
-    expect(useAppStore.getState().leftSidebarWidth).toBe(348);
+    await waitFor(() => expect(useAppStore.getState().leftSidebarWidth).toBe(348));
     expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(300);
     expect(localStorage.getItem("minicode.layout.left-width")).toBe("300");
     expect(localStorage.getItem("minicode.layout.left-expanded-width")).toBe("300");
@@ -176,7 +177,7 @@ describe("SidebarLeft session status", () => {
     expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(358);
   });
 
-  it("collapses below half the minimum and retains the saved expanded width and draft", () => {
+  it("collapses below half the minimum and retains the saved expanded width and draft", async () => {
     useAppStore.getState().setLeftSidebarWidth(300);
     useAppStore.setState({ draft: "unfinished resize draft" });
     const { container } = render(<SidebarLeft />);
@@ -185,9 +186,9 @@ describe("SidebarLeft session status", () => {
     handle.setPointerCapture = vi.fn();
     fireEvent(handle, new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 300 }));
     fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 120 }));
-    expect(useAppStore.getState().leftSidebarWidth).toBe(240);
+    await waitFor(() => expect(useAppStore.getState().leftSidebarWidth).toBe(240));
     fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 119 }));
-    expect(useAppStore.getState()).toMatchObject({ leftSidebarWidth: 0, leftSidebarExpandedWidth: 300 });
+    await waitFor(() => expect(useAppStore.getState()).toMatchObject({ leftSidebarWidth: 0, leftSidebarExpandedWidth: 300 }));
     expect(localStorage.getItem("minicode.layout.left-width")).toBe("300");
     fireEvent(handle, new MouseEvent("pointerup", { bubbles: true, clientX: 119 }));
     expect(localStorage.getItem("minicode.layout.left-width")).toBe("0");
@@ -535,20 +536,20 @@ describe("SidebarLeft session status", () => {
     expect(sidebar?.style.borderRightWidth).toBe("0px");
   });
 
-  it("routes scheduled tasks to the scheduler settings page", async () => {
-    useAppStore.setState({ settingsOpen: false, automationsOpen: false, settingsTab: "general" });
+  it("routes scheduled tasks to the independent Scheduled page without opening Settings", () => {
+    closeAutomations();
+    useAppStore.setState({ settingsOpen: false, settingsTab: "general" });
     render(<SidebarLeft />);
 
     fireEvent.click(screen.getByRole("button", { name: "已安排" }));
-    expect(useAppStore.getState().automationsOpen).toBe(false);
-    expect(useAppStore.getState().settingsOpen).toBe(true);
-    await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("scheduler"));
+    expect(getAutomationsPageState().open).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, settingsTab: "general" });
 
     useAppStore.getState().setSettingsTab("general");
     fireEvent.click(screen.getByRole("button", { name: "已安排" }));
-    expect(useAppStore.getState().automationsOpen).toBe(false);
-    expect(useAppStore.getState().settingsOpen).toBe(true);
-    await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("scheduler"));
+    expect(getAutomationsPageState().open).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, settingsTab: "general" });
+    closeAutomations();
   });
 
   it("keeps the editor panel when switching back to Code from Cowork", () => {

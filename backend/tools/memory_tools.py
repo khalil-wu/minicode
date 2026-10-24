@@ -63,6 +63,18 @@ class _MemoryTool(BaseTool):
         )
 
 
+def memory_tools_for_run(registry, memory: FileMemory | None):
+    """Project builtin memory capabilities onto the run's captured preference."""
+    result = registry.fork()
+    for name in ("memory_list", "memory_read", "memory_search", "memory_add_ad_hoc_note"):
+        if isinstance(result.get_tool(name), _MemoryTool):
+            result.unregister(name)
+    if memory is not None:
+        for tool_type in (MemoryListTool, MemoryReadTool, MemorySearchTool, MemoryAddAdHocNoteTool):
+            result.register(tool_type(memory))
+    return result
+
+
 class MemoryListTool(_MemoryTool):
     name = "memory_list"
     display_label = "List memories"

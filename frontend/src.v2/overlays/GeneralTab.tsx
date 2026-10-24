@@ -1,15 +1,16 @@
 import { useI18n, type TranslationKey } from "../i18n";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { FollowUpBehavior, SendShortcut } from "../stores/types";
-import { desktop, isDesktop, type UpdatePreflightResult, type UpdateStatus } from "../desktop/runtime";
+import { desktop, isDesktop } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { pushToast } from "./ToastContainer";
 import { SelectMenu } from "../components/SelectMenu";
 import { FileOpenTargetIcon } from "../components/FileOpenTargetIcon";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 import { useFocusTrap } from "../hooks/useFocusTrap";
-import { ChevronDown, ShieldAlert } from "lucide-react";
+import { Pencil, ShieldAlert, X } from "lucide-react";
+import { formatShortcut, shortcutFromEvent, toElectronAccelerator } from "../lib/keyboard-shortcuts";
 import { notificationSoundWav } from "./notificationSoundImport";
 import "./GeneralTab.css";
 import { setPluginsFeatureEnabled, usePluginsFeature } from "../hooks/usePluginsFeature";
@@ -26,9 +27,11 @@ const FOLLOW_UP_CHOICES = [
  ] as const satisfies readonly { id: FollowUpBehavior; label: TranslationKey; title: TranslationKey }[];
 
 export const GeneralTab = ({
+  active = true,
   onOpenLicenses,
   importSettings,
 }: {
+  active?: boolean;
   onOpenLicenses?: () => void;
   importSettings?: ReactNode;
 }) => {
@@ -66,12 +69,9 @@ export const GeneralTab = ({
         </SettingsRow>
       </SettingsGroup>
 
+      {isDesktop() && <PopoutWindowPreferences active={active} />}
       {isDesktop() && <DesktopNotificationPreferences />}
-
-      <details className="settings-appearance-advanced"><summary className="settings-appearance-advanced-trigger">{t("高级")}<ChevronDown size={15} aria-hidden="true" /></summary><div className="settings-appearance-advanced-body">
-      {isDesktop() && <DefaultPermissionSettings />}
-      {isDesktop() && <DesktopUpdates />}
-      </div></details>
+      {isDesktop() && <ToysPreferences />}
     </div>
   );
 };
@@ -107,33 +107,6 @@ const PlainTextComposerPreference = () => {
         catch (error) { pushToast(String(error), "error"); }
         finally { setSaving(false); }
       }}><span /></button>
-  </SettingsRow>;
-};
-
-const DefaultTerminalLocationPreference = () => {
-  const { t } = useI18n();
-  const location = useAppStore(state => state.defaultTerminalLocation);
-  const setLocation = useAppStore(state => state.setDefaultTerminalLocation);
-  const [saving, setSaving] = useState(false);
-  const select = async (next: "bottom" | "right") => {
-    setSaving(true);
-    try { await setLocation(next); }
-    catch (error) { pushToast(String(error), "error"); }
-    finally { setSaving(false); }
-  };
-  return <SettingsRow title={t("默认终端位置")} description={t("选择终端快捷键和环境动作打开终端标签页的位置。")}>
-    <div className="settings-segmented" role="radiogroup" aria-label={t("默认终端位置")}
-      onKeyDown={event => {
-        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) || saving) return;
-        event.preventDefault();
-        const next = event.key === "Home" ? "bottom" : event.key === "End" ? "right" : location === "bottom" ? "right" : "bottom";
-        void select(next);
-        event.currentTarget.querySelector<HTMLButtonElement>('[data-value="' + next + '"]')!.focus();
-      }}>
-      {(["bottom", "right"] as const).map(value => <button key={value} type="button" role="radio"
-        className="settings-segment" data-value={value} data-active={location === value} aria-checked={location === value}
-        tabIndex={location === value ? 0 : -1} disabled={saving} onClick={() => void select(value)}>{t(value === "bottom" ? "底部" : "右侧")}</button>)}
-    </div>
   </SettingsRow>;
 };
 
@@ -192,7 +165,6 @@ const DesktopGeneralPreferences = ({ onOpenLicenses, importSettings }: { onOpenL
           {preferences.terminalShellTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
         </SelectMenu>
       </SettingsRow>
-      <DefaultTerminalLocationPreference />
       <SettingsRow title={t("语言")} description={t("应用界面语言。")}>
         <SelectMenu ariaLabel={t("语言")} className="settings-select settings-select-regular" align="end" value={preferences.localeOverride ?? "auto"} onValueChange={(value) => void update({ localeOverride: value === "auto" ? null : value as "zh-CN" | "en-US" })}>
           <option value="auto">{t("自动检测")}</option><option value="zh-CN">简体中文</option><option value="en-US">English</option>
@@ -202,6 +174,11 @@ const DesktopGeneralPreferences = ({ onOpenLicenses, importSettings }: { onOpenL
         <SelectMenu ariaLabel={t("关闭窗口前确认")} className="settings-select settings-select-regular" align="end" value={preferences.confirmBeforeClose} onValueChange={(value) => void update({ confirmBeforeClose: value as typeof preferences.confirmBeforeClose })}>
           <option value="never">{t("从不")}</option><option value="keyboardOnly">{t("仅关闭快捷键")}</option><option value="always">{t("始终")}</option>
         </SelectMenu>
+      </SettingsRow>
+      <SettingsRow title={t("默认使用完整视图")} description={t("新建聊天时，将聊天和内容显示在同一个标签页栏中")}>
+        <button type="button" className="settings-toggle" role="switch" aria-label={t("默认使用完整视图")}
+          aria-checked={preferences.defaultWorkspaceFullView} data-active={preferences.defaultWorkspaceFullView}
+          onClick={() => void update({ defaultWorkspaceFullView: !preferences.defaultWorkspaceFullView })}><span /></button>
       </SettingsRow>
       <SettingsRow title={t("底部面板")} description={t("在应用顶部显示底部面板入口。") }>
         <button type="button" className="settings-toggle" role="switch" aria-label={t("底部面板")}
@@ -231,6 +208,64 @@ const DesktopGeneralPreferences = ({ onOpenLicenses, importSettings }: { onOpenL
       setFullAccessConfirmation(false);
     }} />}
   </>;
+};
+
+const PopoutWindowPreferences = ({ active }: { active: boolean }) => {
+  const { t } = useI18n();
+  const { preferences, error, update } = useDesktopPreferences();
+  const [capturing, setCapturing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [captureError, setCaptureError] = useState("");
+  const save = async (shortcut: string | null) => {
+    setCapturing(false); setSaving(true); setCaptureError("");
+    await update({ popoutWindowShortcut: shortcut });
+    setSaving(false);
+  };
+  useEffect(() => { if (!active) setCapturing(false); }, [active]);
+  useEffect(() => {
+    if (!capturing || !active) return;
+    const capture = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      event.preventDefault(); event.stopPropagation();
+      if (event.key === "Escape") { setCapturing(false); return; }
+      const binding = shortcutFromEvent(event);
+      if (!binding) return;
+      if (!event.ctrlKey && !event.metaKey && !event.altKey && !/^F\d+$/.test(event.key)) {
+        setCaptureError(t("快捷键需要 Ctrl/Cmd、Alt 或功能键。")); return;
+      }
+      void save(toElectronAccelerator(binding));
+    };
+    window.addEventListener("keydown", capture, true);
+    return () => window.removeEventListener("keydown", capture, true);
+  }, [active, capturing, update, t]);
+  if (!preferences) return null;
+  return <SettingsGroup title={t("弹出窗口")}>
+    <SettingsRow title={t("弹出窗口快捷键")} description={<>{t("为弹出窗口设置全局快捷键。不设置则保持关闭。")}{(error || captureError) && <span className="settings-popout-error" role="alert">{error || captureError}</span>}</>}>
+      <div className="settings-popout-shortcut" data-shortcut-recording={capturing || undefined}>
+        <span>{capturing ? t("按下快捷键…") : preferences.popoutWindowShortcut ? formatShortcut(preferences.popoutWindowShortcut.replace("CommandOrControl", "Mod")) : t("关闭")}</span>
+        <button type="button" className="settings-icon-button" aria-label={t("为“弹出窗口快捷键”设置快捷键")} disabled={saving} onClick={() => { setCaptureError(""); setCapturing(!capturing); }}><Pencil size={14} /></button>
+        {preferences.popoutWindowShortcut && <button type="button" className="settings-icon-button" aria-label={t("清除弹出窗口快捷键")} disabled={saving} onClick={() => void save(null)}><X size={14} /></button>}
+      </div>
+    </SettingsRow>
+    <SettingsRow title={t("默认使用独立聊天")} description={t("在任何项目外开始新聊天")}>
+      <button type="button" className="settings-toggle" role="switch" aria-label={t("默认将弹出窗口设为独立聊天")}
+        aria-checked={preferences.popoutWindowProjectlessDefault} data-active={preferences.popoutWindowProjectlessDefault}
+        onClick={() => void update({ popoutWindowProjectlessDefault: !preferences.popoutWindowProjectlessDefault })}><span /></button>
+    </SettingsRow>
+  </SettingsGroup>;
+};
+
+const ToysPreferences = () => {
+  const { t } = useI18n();
+  const { preferences, update } = useDesktopPreferences();
+  if (!preferences) return null;
+  return <SettingsGroup title={t("趣味实验")}>
+    <SettingsRow title={t("彩纸礼炮")} description={t("按你的要求，在应用内展示彩纸特效！")}>
+      <button type="button" className="settings-toggle" role="switch" aria-label={t("彩纸礼炮")}
+        aria-checked={preferences.confettiEnabled} data-active={preferences.confettiEnabled}
+        onClick={() => void update({ confettiEnabled: !preferences.confettiEnabled })}><span /></button>
+    </SettingsRow>
+  </SettingsGroup>;
 };
 
 const PluginsFeaturePreference = () => {
@@ -353,152 +388,4 @@ const FullAccessAvailabilityDialog = ({ onClose, onConfirm }: { onClose: () => v
       </form>
     </div>
   </div>, document.body);
-};
-
-const DefaultPermissionSettings = () => {
-  const { t } = useI18n();
-  const { preferences, update } = useDesktopPreferences();
-  if (!preferences) return null;
-  return <SettingsGroup title={t("新任务")}>
-    <SettingsRow title={t("默认权限")} description={t("为之后新建的任务设置权限；当前任务保留自己的权限。")}>
-      <SelectMenu ariaLabel={t("新任务默认权限")} className="settings-select settings-select-regular" align="end" value={preferences.defaultPermissionMode} onValueChange={(value) => void update({ defaultPermissionMode: value as typeof preferences.defaultPermissionMode })}>
-        <option value="confirm">{t("默认权限")}</option><option value="auto">{t("自动批准")}</option><option value="plan">{t("计划")}</option><option value="bypass">{t("完全访问")}</option>
-      </SelectMenu>
-    </SettingsRow>
-  </SettingsGroup>;
-};
-
-const DesktopUpdates = () => {
-  const { t } = useI18n();
-  const [status, setStatus] = useState("idle");
-  const [version, setVersion] = useState("");
-  const [previousVersion, setPreviousVersion] = useState("");
-  const [failedVersion, setFailedVersion] = useState("");
-  const [message, setMessage] = useState("");
-  const [percent, setPercent] = useState<number | null>(null);
-  const [pendingAction, setPendingAction] = useState<"" | "check" | "download" | "install">("");
-  const [installBlockMessage, setInstallBlockMessage] = useState("");
-  const statusSequenceRef = useRef(-1);
-  useEffect(() => {
-    let cancelled = false;
-    const requestedSequence = statusSequenceRef.current;
-    const applyStatus = (payload: UpdateStatus) => {
-      if (cancelled) return;
-      const sequence = Number(payload.sequence ?? 0);
-      if (sequence < statusSequenceRef.current) return;
-      statusSequenceRef.current = sequence;
-      setStatus(payload.status);
-      setVersion(payload.version || "");
-      setPreviousVersion(payload.previousVersion || "");
-      setFailedVersion(payload.failedVersion || "");
-      setMessage(payload.message || "");
-      setPercent(typeof payload.percent === "number" ? payload.percent : null);
-      if (payload.status !== "ready") setInstallBlockMessage("");
-    };
-    const updates = desktop()?.updates;
-    const unsubscribe = updates?.onStatus(applyStatus);
-    void updates?.getStatus().then(applyStatus).catch((error) => {
-      if (cancelled || statusSequenceRef.current !== requestedSequence) return;
-      const detail = error instanceof Error ? error.message : String(error || "未知错误");
-      setStatus("error");
-      setMessage(detail);
-    });
-    return () => { cancelled = true; unsubscribe?.(); };
-  }, []);
-
-  const runUpdateAction = async (action: "check" | "download" | "install") => {
-    if (pendingAction) return;
-    const updates = desktop()?.updates;
-    if (!updates) {
-      pushToast("桌面更新服务不可用", "error");
-      return;
-    }
-    setPendingAction(action);
-    try {
-      if (action === "install") {
-        const installPreflight = await updates.preflight();
-        if (!installPreflight.allowed || !installPreflight.fingerprint) {
-          const detail = describeUpdateBlockers(installPreflight) || "当前状态无法安全安装更新。";
-          setInstallBlockMessage(detail);
-          pushToast(detail, "warning");
-          return;
-        }
-        setInstallBlockMessage("");
-        const result = await updates.install({ fingerprint: installPreflight.fingerprint });
-        if (!result.installed) {
-          const detail = result.message
-            || describeUpdateBlockers(result.preflight)
-            || (result.reason === "preflight_changed" || result.reason === "preflight_stale"
-              ? "应用状态在安装前发生变化，请确认当前任务后重新安装。"
-              : "当前环境不支持此更新操作。");
-          setInstallBlockMessage(detail);
-          pushToast(detail, result.reason === "install_failed" ? "error" : "warning");
-          return;
-        }
-      } else {
-        const accepted = await updates[action]();
-        if (!accepted) throw new Error("当前环境不支持此更新操作");
-      }
-      pushToast(
-        action === "check" ? "已开始检查更新" : action === "download" ? "已开始下载更新" : "正在重启并安装更新",
-        "success",
-      );
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error || "未知错误");
-      pushToast(`${action === "check" ? "检查" : action === "download" ? "下载" : "安装"}更新失败：${detail}`, "error");
-    } finally {
-      setPendingAction("");
-    }
-  };
-  const label = status === "ready" && installBlockMessage ? `暂不能安装：${installBlockMessage}`
-    : status === "checking" ? "正在检查更新…"
-    : status === "available" ? `版本 ${version || "更新"} 已可下载。`
-      : status === "downloading" ? `正在下载${percent == null ? "…" : ` ${Math.round(percent)}%`}`
-        : status === "ready" ? `版本 ${version || "更新"} 已可安装。${message ? ` 上次操作未完成：${message}` : ""}`
-          : status === "current" ? "MiniCode 已是最新版本。"
-            : status === "rollback_launching" ? `正在恢复至 ${version || previousVersion || "上一版本"}…`
-              : status === "rolled_back" ? `已自动恢复至 ${version || "上一版本"}${failedVersion ? `；版本 ${failedVersion} 未通过启动检查。` : "。"}`
-                : status === "recovery_required" ? `当前版本未通过启动检查${previousVersion ? `，且无法自动启动 ${previousVersion}` : ""}。${message ? ` ${message}` : ""}`
-            : status === "unavailable" ? "此构建未启用自动更新。"
-              : status === "error" ? `更新服务失败${message ? `：${message}` : "，请稍后重试。"}`
-              : "MiniCode 会通过已配置的发布源检查更新。";
-  const updatesUnavailable = status === "unavailable" || status === "recovery_required" || status === "rollback_launching";
-  const actionPending = Boolean(pendingAction);
-  return (
-    <SettingsGroup title={t("桌面更新")}>
-      <SettingsRow title={t("更新通道")} description={label}>
-        <button type="button" className="settings-action-button" onClick={() => void runUpdateAction("check")} disabled={updatesUnavailable || actionPending || status === "checking" || status === "downloading" || status === "ready"}>
-          {pendingAction === "check" ? t("正在请求…") : t("检查更新")}
-        </button>
-        {status === "available" && <button type="button" className="settings-action-button" data-primary="true" disabled={actionPending} onClick={() => void runUpdateAction("download")}>{pendingAction === "download" ? t("正在请求…") : t("下载")}</button>}
-        {status === "ready" && <button type="button" className="settings-action-button" data-primary="true" disabled={actionPending} onClick={() => void runUpdateAction("install")}>{pendingAction === "install" ? t("正在请求…") : t("重启并安装")}</button>}
-      </SettingsRow>
-    </SettingsGroup>
-  );
-};
-
-const describeUpdateBlockers = (preflight?: UpdatePreflightResult): string => {
-  if (!preflight) return "";
-  const labelByCode: Record<string, string> = {
-    "update.not_ready": "更新尚未下载完成",
-    "install.locked": "另一项安装正在进行",
-    "activity.unknown": "尚未取得应用活动状态",
-    "activity.invalid": "应用活动状态无效",
-    "activity.stale": "应用活动状态已过期",
-    "runtime.not_ready": "会话仍在连接或恢复",
-    "turn.running": "主任务仍在运行",
-    "side_chat.running": "侧聊仍在生成",
-    "prompt.pending": "仍有审批、提问或差异确认待处理",
-    "attachment.uploading": "附件仍在上传",
-    "download.active": "浏览器下载仍在进行",
-    "editor.dirty": "编辑器中仍有未保存内容",
-    "task.running": "后台任务仍在运行",
-    "pty.running": "终端会话仍在运行",
-    "pty.unknown": "无法确认终端状态",
-    "pty.invalid": "终端状态无效",
-  };
-  return preflight.checks
-    .filter((check) => check.severity === "blocking")
-    .map((check) => labelByCode[check.code] || check.message)
-    .join("；");
 };

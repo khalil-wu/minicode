@@ -10,6 +10,7 @@ import { SettingsCenter } from "./SettingsCenter";
 import { SkillsMarketplace } from "./SkillsMarketplace";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { installAppThemeTokens } from "../../test/app-theme-tokens";
+import { openSettings } from "../lib/settings-navigation";
 import type { ComputerUseSettingsSnapshot } from "../protocol/computer-use-settings";
 
 let removeThemeTokens: () => void;
@@ -17,6 +18,7 @@ beforeEach(() => { removeThemeTokens = installAppThemeTokens(); });
 afterEach(() => removeThemeTokens());
 const desktopPreferences = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }));
 const pluginsFeature = vi.hoisted(() => ({ enabled: true as boolean | undefined }));
+const memoryFixture = vi.hoisted(() => ({ value: { feature_enabled: true, memories: { generate_memories: true, use_memories: true, disable_on_external_context: false }, path: "/config/settings.json", feature_locked: false, locked_fields: [] as string[] }, calls: [] as Array<{ url: string; body: Record<string, boolean> }> }));
 const computerUseFixture = vi.hoisted(() => ({ sessionId: null as string | null, data: null as ComputerUseSettingsSnapshot | null }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => computerUseFixture.sessionId ? { sessionId: computerUseFixture.sessionId } : null }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: desktopPreferences.value, error: "", update: vi.fn() }) }));
@@ -46,8 +48,17 @@ vi.mock("../protocol/api", () => ({
   runtimeToken: () => "",
   authHeaders: (headers?: HeadersInit) => headers ?? {},
   errorMessageFromResponseText: (text: string, fallback: string) => text || fallback,
-  fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => String(input).includes("/api/skills/settings")
-    ? skillsSettingsRequest(input, init) : fetch(input, init),
+  fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(input).includes("/api/settings/memory")) {
+      if (init?.method === "PUT" || init?.method === "POST") {
+        const body = JSON.parse(String(init.body)); memoryFixture.calls.push({ url: String(input), body });
+        if (body.enabled !== undefined) { memoryFixture.value.feature_enabled = body.enabled; memoryFixture.value.memories.generate_memories = body.enabled; memoryFixture.value.memories.use_memories = body.enabled; }
+        if (body.disable_on_external_context !== undefined) memoryFixture.value.memories.disable_on_external_context = body.disable_on_external_context;
+      }
+      return Promise.resolve(Response.json(memoryFixture.value));
+    }
+    return String(input).includes("/api/skills/settings") ? skillsSettingsRequest(input, init) : fetch(input, init);
+  },
   LONG_HTTP_TIMEOUT_MS: 300_000,
   fetchLLMSettings: () => fetchLLMSettingsMock(),
 }));
@@ -76,6 +87,8 @@ vi.mock("../desktop/runtime", () => ({
 
 describe("SettingsCenter reasoning effort visibility", () => {
   beforeEach(() => {
+    memoryFixture.calls = [];
+    memoryFixture.value = { feature_enabled: true, memories: { generate_memories: true, use_memories: true, disable_on_external_context: false }, path: "/config/settings.json", feature_locked: false, locked_fields: [] };
     computerUseFixture.sessionId = null;
     computerUseFixture.data = null;
     desktopPreferences.value = null;
@@ -284,9 +297,12 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("button", { name: "Max" })).toBeNull();
   });
 
-  it("keeps system, dark, and light theme controls in appearance settings", () => {
+  it("keeps system, dark, and light theme controls in appearance settings", async () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
+    // Assert the real lazy page after its module graph has loaded; cold Vite
+    // transforms are not part of the theme control's DOM query deadline.
+    await act(async () => { await vi.dynamicImportSettled(); });
 
     const themes = within(screen.getByRole("radiogroup", { name: "应用主题" }));
     expect(themes.getByRole("radio", { name: "深色" }).getAttribute("aria-checked")).toBe("true");
@@ -328,10 +344,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
     }
   });
 
-  it("keeps settings navigation at the existing expanded width when the chat sidebar is collapsed and preserves page search", () => {
+  it("keeps settings navigation at the existing expanded width when the chat sidebar is collapsed and preserves page search", async () => {
     useAppStore.setState({ settingsTab: "shortcuts", leftSidebarWidth: 340, leftSidebarExpandedWidth: 340 });
     const { container } = render(<SettingsCenter />);
-    fireEvent.change(screen.getByPlaceholderText("搜索快捷键"), { target: { value: "终端" } });
+    fireEvent.change(await screen.findByPlaceholderText("搜索快捷键"), { target: { value: "终端" } });
     act(() => useAppStore.getState().setLeftSidebarWidth(0));
     expect(container.querySelector(".settings-workspace-sidebar")).toHaveProperty("hidden", false);
     expect(container.querySelector(".settings-workspace")?.getAttribute("style")).toContain("--settings-sidebar-width: 340px");
@@ -413,7 +429,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "个性化" }));
-    fireEvent.click(screen.getByRole("button", { name: "编辑本机指令" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑所选主机指令" }));
 
     const editor = await screen.findByRole("textbox", { name: "自定义指令" }) as HTMLTextAreaElement;
     expect(editor.value).toBe("复用现有结构");
@@ -426,53 +442,18 @@ describe("SettingsCenter reasoning effort visibility", () => {
       expect(put).toBeTruthy();
       expect(JSON.parse(String(put?.[1]?.body)).instructions).toBe("复用现有结构\n统一运行测试");
     });
-    expect(await screen.findByRole("button", { name: "编辑本机指令" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "编辑所选主机指令" })).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "自定义指令" })).toBeNull();
   });
 
-  it("keeps long-term generation separate from new-task inheritance", async () => {
-    useAppStore.setState({
-      conversationId: "conv-memory",
-      conversations: [{
-        id: "conv-memory",
-        title: "Memory",
-        updatedAt: "2026-08-08T00:00:00.000Z",
-        memoryMode: "enabled",
-        memoryPolluted: false,
-      }],
-    });
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.endsWith("/api/settings/personalization")) {
-        return new Response(JSON.stringify({
-          instructions: "",
-          path: "C:\\Users\\ago\\.minicode\\AGENTS.md",
-          exists: true,
-          max_bytes: 32768,
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (url.endsWith("/api/guidelines")) {
-        return new Response(JSON.stringify({ blocks: [] }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    }));
-
-    render(<SettingsCenter />);
-    fireEvent.click(screen.getByRole("button", { name: "个性化" }));
-
-    const generation = await screen.findByRole("switch", { name: "长期记忆生成" });
-    expect(generation.getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByRole("radiogroup", { name: "新任务继承" })).toBeNull();
-
-    fireEvent.click(generation);
-    await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith(expect.objectContaining({
-      type: "conversation.memory_mode.set",
-      conversation_id: "conv-memory",
-      memory_mode: "disabled",
-    })));
+  it("saves host memory preferences while preserving the existing task's mode", async () => {
+    useAppStore.setState({ conversationId: "conv-memory", conversations: [{ id: "conv-memory", title: "Memory", updatedAt: "", memoryMode: "enabled", memoryPolluted: false }] });
+    render(<SettingsCenter />); fireEvent.click(screen.getByRole("button", { name: "个性化" }));
+    const toggle = await screen.findByRole("switch", { name: "启用 MiniCode 记忆" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true"); fireEvent.click(toggle);
+    await waitFor(() => expect(memoryFixture.calls).toContainEqual({ url: "http://test.local/api/settings/memory", body: { enabled: false } }));
+    expect(useAppStore.getState().conversations[0].memoryMode).toBe("enabled");
+    expect(awaitCommandResultMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.memory_mode.set" }));
   });
 
   it("uses the desktop page heading without adding a subtitle or composer permission controls", () => {
@@ -504,7 +485,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     const navigation = screen.getByRole("navigation", { name: "设置分类" });
     expect(within(navigation).queryByRole("button", { name: "导入", exact: true })).toBeNull();
     expect(screen.getByText("从其他 AI 应用导入")).toBeTruthy();
-    expect(within(navigation).queryByRole("button", { name: "连接", exact: true })).toBeNull();
+    expect(within(navigation).getByRole("button", { name: "连接", exact: true })).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
     expect(useAppStore.getState().settingsTab).toBe("general");
     expect(screen.getByRole("switch", { name: "Claude Code" })).toBeTruthy();
@@ -534,7 +515,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("button", { name: "代码" })).toBeNull();
     expect(screen.queryByRole("button", { name: "详细" })).toBeNull();
 
-    fireEvent.click(screen.getByText("高级"));
+    expect(screen.queryByText("高级")).toBeNull();
     expect(screen.queryByRole("button", { name: /远程 Markdown 图片/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "清除列表" })).toBeNull();
     expect(useAppStore.getState()).toMatchObject({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });
@@ -661,7 +642,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.click(screen.getByRole("button", { name: "MCP 服务", exact: true }));
     fireEvent.click(screen.getByRole("button", { name: "添加", exact: true }));
     fireEvent.click(screen.getByRole("menuitem", { name: "添加 MCP 服务器" }));
-    fireEvent.change(screen.getByLabelText("服务名称"), { target: { value: "未保存的服务" } });
+    fireEvent.change(await screen.findByLabelText("服务名称"), { target: { value: "未保存的服务" } });
     fireEvent.change(screen.getByLabelText("启动命令"), { target: { value: "npx" } });
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
     fireEvent.keyDown(screen.getByRole("main", { name: "设置" }), { key: "Escape" });
@@ -842,97 +823,32 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState().settingsOpen).toBe(true);
   });
 
-  it("updates the current task memory with the existing conversation command", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.endsWith("/api/settings/personalization")) {
-        return new Response(JSON.stringify({ instructions: "", path: "C:\\Users\\ago\\.minicode\\AGENTS.md", exists: false, max_bytes: 32768 }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (url.endsWith("/api/guidelines")) {
-        return new Response(JSON.stringify({ blocks: [] }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    }));
-    useAppStore.setState({
-      conversationId: "conv-memory",
-      conversations: [{ id: "conv-memory", title: "Memory", updatedAt: "2026-08-02T00:00:00.000Z", memoryMode: "disabled" }],
-    });
-    render(<SettingsCenter />);
-
-    fireEvent.click(screen.getByRole("button", { name: "个性化" }));
-    fireEvent.click(await screen.findByRole("switch", { name: "长期记忆生成" }));
-
-    await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith({
-      type: "conversation.memory_mode.set",
-      conversation_id: "conv-memory",
-      memory_mode: "enabled",
-    }));
+  it("keeps host memories available on Home without creating a conversation", async () => {
+    useAppStore.setState({ conversationId: null, conversations: [] });
+    render(<SettingsCenter />); fireEvent.click(screen.getByRole("button", { name: "个性化" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "启用 MiniCode 记忆" }));
+    await waitFor(() => expect(memoryFixture.calls.at(-1)?.body).toEqual({ enabled: false }));
+    expect(useAppStore.getState().conversationId).toBeNull();
   });
 
-  it("requires confirmation before resetting generated memory", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.endsWith("/api/settings/personalization")) {
-        return new Response(JSON.stringify({ instructions: "", path: "C:\\Users\\ago\\.minicode\\AGENTS.md", exists: false, max_bytes: 32768 }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (url.endsWith("/api/guidelines")) {
-        return new Response(JSON.stringify({ blocks: [] }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    }));
-    render(<SettingsCenter />);
-
-    fireEvent.click(screen.getByRole("button", { name: "个性化" }));
-    fireEvent.click(await screen.findByRole("button", { name: "清除记忆" }));
-
-    const dialog = screen.getByRole("dialog", { name: "清除长期记忆" });
-    expect(dialog).toBeTruthy();
+  it("requires confirmation before deleting memories on the selected host", async () => {
+    render(<SettingsCenter />); fireEvent.click(screen.getByRole("button", { name: "个性化" }));
+    fireEvent.click(await screen.findByRole("button", { name: "删除", exact: true }));
+    const dialog = screen.getByRole("dialog", { name: "删除全部 MiniCode 记忆？" });
+    expect(memoryFixture.calls).toEqual([]);
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除", exact: true }));
+    await waitFor(() => expect(memoryFixture.calls).toContainEqual({ url: "http://test.local/api/settings/memory/reset", body: { confirmed: true } }));
     expect(awaitCommandResultMock).not.toHaveBeenCalledWith({ type: "memory.reset", confirmed: true });
-    fireEvent.click(within(dialog).getByRole("button", { name: "清除记忆" }));
-
-    await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith({
-      type: "memory.reset",
-      confirmed: true,
-    }));
   });
 
-  it("shows isolated external context and explicitly re-enables task memory", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.endsWith("/api/settings/personalization")) {
-        return new Response(JSON.stringify({ instructions: "", path: "C:\\Users\\ago\\.minicode\\AGENTS.md", exists: false, max_bytes: 32768 }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      if (url.endsWith("/api/guidelines")) {
-        return new Response(JSON.stringify({ blocks: [] }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    }));
-    useAppStore.setState({
-      conversationId: "conv-polluted",
-      conversations: [{
-        id: "conv-polluted",
-        title: "External context",
-        updatedAt: "2026-08-07T00:00:00.000Z",
-        memoryMode: "polluted",
-        memoryPolluted: true,
-        memoryPollutionSources: ["web_search", "mcp__github__search_issues"],
-      }],
-    });
-    render(<SettingsCenter />);
-
-    fireEvent.click(screen.getByRole("button", { name: "个性化" }));
-    expect(await screen.findByText("外部上下文已隔离")).toBeTruthy();
-    expect(screen.getByText("联网搜索")).toBeTruthy();
-    expect(screen.getAllByText("MCP").length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "重新启用" }));
-
-    const dialog = screen.getByRole("dialog", { name: "重新启用任务记忆" });
-    fireEvent.click(within(dialog).getByRole("button", { name: "重新启用" }));
-    await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith({
-      type: "conversation.memory_mode.set",
-      conversation_id: "conv-polluted",
-      memory_mode: "enabled",
-    }));
+  it("changes the host external-context preference without clearing a task's recorded pollution", async () => {
+    memoryFixture.value.memories.disable_on_external_context = true;
+    useAppStore.setState({ conversationId: "conv-polluted", conversations: [{ id: "conv-polluted", title: "External context", updatedAt: "", memoryMode: "polluted", memoryPolluted: true, memoryPollutionSources: ["web_search"] }] });
+    render(<SettingsCenter />); fireEvent.click(screen.getByRole("button", { name: "个性化" }));
+    fireEvent.click(await screen.findByRole("switch", { name: "允许从使用工具的聊天中生成记忆" }));
+    await waitFor(() => expect(memoryFixture.calls.at(-1)?.body).toEqual({ disable_on_external_context: false }));
+    expect(useAppStore.getState().conversations[0]).toMatchObject({ memoryMode: "polluted", memoryPolluted: true, memoryPollutionSources: ["web_search"] });
+    expect(screen.queryByRole("button", { name: "重新启用" })).toBeNull();
   });
 
   it("opens the Source local environment project list without extra diagnostic controls", async () => {
@@ -946,10 +862,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState().settingsOpen).toBe(true);
   });
 
-  it("shows Source Git preferences without adding workspace or login launchers", () => {
+  it("shows Source Git preferences without adding workspace or login launchers", async () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
-    expect(screen.getByRole("textbox", { name: "分支前缀" })).toBeTruthy();
+    expect(await screen.findByRole("textbox", { name: "分支前缀" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "打开 Git 工作区" })).toBeNull();
     expect(screen.getByRole("button", { name: "已归档聊天" })).toBeTruthy();
     expect(useAppStore.getState().settingsOpen).toBe(true);
@@ -1037,7 +953,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     render(<SettingsCenter />);
 
     fireEvent.click(screen.getByRole("button", { name: "已归档聊天" }));
-    fireEvent.click(screen.getByRole("button", { name: "恢复 旧任务" }));
+    fireEvent.click(await screen.findByRole("button", { name: "恢复 旧任务" }));
 
     await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith({
       type: "conversation.unarchive",
@@ -1130,6 +1046,34 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     fireEvent.change(format, { target: { value: "anthropic" } });
     expect(screen.getByDisplayValue("https://api.deepseek.com/v1")).toBeTruthy();
+  });
+
+  it("keeps ordinary Configuration separate from Provider and internal gates while retaining the existing model-settings route and draft", async () => {
+    const fields = { approval_policy: "on-request", sandbox_mode: "read-only", network_access: false, web_search: "cached", model_verbosity: "medium", model_reasoning_summary: "auto" };
+    const config = { path: "C:/settings.json", ...fields, effective: fields, origins: {}, warnings: [], requirements: {}, default_scope_id: "user",
+      scopes: [{ id: "user", kind: "user", path: "C:/settings.json", workspace_root: null, disabled_reason: null, version: "v1", readonly: false, values: {}, source: { type: "user", display: "User" } }] };
+    const existingFetch = vi.mocked(fetch).getMockImplementation()!;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => new URL(String(input)).pathname === "/api/settings/agent-config"
+      ? Response.json(config) : existingFetch(input, init));
+    vi.stubGlobal("fetch", fetchMock);
+    fetchLLMSettingsMock.mockClear();
+    useAppStore.setState({ settingsTab: "config", availableModelOptions: [], draft: "Retained current conversation input" });
+    render(<SettingsCenter />);
+    await screen.findByRole("button", { name: "配置作用域，当前：用户" });
+    expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/api/settings/feature-flags"))).toBe(false);
+    expect(screen.queryByRole("button", { name: "编辑 DeepSeek" })).toBeNull();
+    expect(within(screen.getByRole("navigation", { name: "设置分类" })).queryByRole("button", { name: "模型与 API" })).toBeNull();
+    expect(screen.queryByText("响应式上下文压缩")).toBeNull();
+    act(() => openSettings("provider"));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    const endpoint = screen.getByDisplayValue("https://api.deepseek.com/v1") as HTMLInputElement;
+    fireEvent.change(endpoint, { target: { value: "https://retained-provider.invalid/v1" } });
+    act(() => openSettings("config"));
+    expect(endpoint.isConnected).toBe(true); expect(endpoint.closest("[hidden]")).toBeTruthy();
+    act(() => openSettings("provider"));
+    expect(screen.getByDisplayValue("https://retained-provider.invalid/v1")).toBe(endpoint);
+    expect(useAppStore.getState().draft).toBe("Retained current conversation input");
   });
 
   it("keeps provider-declared reasoning metadata out of the provider form", async () => {

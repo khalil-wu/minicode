@@ -79,13 +79,16 @@ class MetadataSession:
     def _runtime_permission_payload(self, **_kwargs):
         return {"profile": "confirm", "sandbox_status": {"probe_status": "ready"}}
 
-    def _provider_capabilities_payload(self):
+    def _llm_selection_payload(self):
+        return self.capability
+
+    def _provider_capabilities_payload(self, _selection=None):
         return self.capability
 
     def refresh_tool_registry_if_mcp_changed(self, **_kwargs):
         pass
 
-    def runtime_toolset_policy(self, _registry):
+    def runtime_toolset_policy(self, _registry, **_kwargs):
         return None
 
     async def reemit_pending_state(self):

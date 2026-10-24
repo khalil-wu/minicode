@@ -455,6 +455,11 @@ class ConversationRuntime:
         snapshot["turn_admissions"] = retained_admissions
         snapshot.pop("context_ledger", None)
         from backend.agent.plans import ensure_plan_file_for_resume
+        from backend.memory.settings import memory_settings_for_workspace
+        memory_settings = memory_settings_for_workspace(getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", ""))
+        memory_pollution_sources = list(conversation.memory_pollution_sources)
+        if memory_settings.disable_on_external_context:
+            memory_pollution_sources = list(dict.fromkeys([*memory_pollution_sources, *pollution_sources_from_transcript(trimmed_transcript)]))
 
         ensure_plan_file_for_resume(
             snapshot,
@@ -468,9 +473,7 @@ class ConversationRuntime:
                 trimmed_transcript,
                 compaction_summary=conversation.compaction_summary or "",
             ),
-            "memory_pollution_sources": pollution_sources_from_transcript(
-                trimmed_transcript
-            ),
+            "memory_pollution_sources": memory_pollution_sources,
             "expected_revision": int(getattr(conversation, "revision", 0) or 0),
         }
 

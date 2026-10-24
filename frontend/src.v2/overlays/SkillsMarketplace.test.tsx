@@ -25,7 +25,8 @@ const catalog = { skills: [{ name: "remote-review", title: "Remote Review", desc
 const docs = { name: "docs", display_name: "文档处理", description: "处理文档", source_level: "user", path: "C:/skills/docs/SKILL.md", default_prompt: "Use the document workflow" };
 const internal = { name: "internal", display_name: "内部技能", description: "模型调用", source_level: "builtin", user_invocable: false, path: "C:/skills/internal/SKILL.md" };
 let docsEnabled = true;
-const settingsPayload = (root = "C:/marketplace") => ({ skills: [{ ...docs, enabled: docsEnabled }], plugin_skills: [], available_skills: docsEnabled ? [docs, internal] : [internal], workspace_root: root });
+let docsInstalled = true;
+const settingsPayload = (root = "C:/marketplace") => ({ skills: docsInstalled ? [{ ...docs, enabled: docsEnabled, uninstall_name: "docs" }] : [], plugin_skills: [], available_skills: docsInstalled && docsEnabled ? [docs, internal] : [internal], workspace_root: root });
 const rawSkill = "---\nname: docs\ndescription: Actual document workflow\n---\n# Document workflow\n\nFull original Skill instructions.\n";
 
 describe("Plugins and skills workspace", () => {
@@ -33,9 +34,10 @@ describe("Plugins and skills workspace", () => {
     useAppStore.setState({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "skills", skillsMarketplaceReturnTarget: "app", settingsOpen: false,
       workingDirectory: "C:/marketplace", conversationId: "catalog-owner", draft: "Keep draft", availableSkills: [docs, internal],
       marketplaceSkills: [], selectedSkills: [] });
-    docsEnabled = true;
+    docsEnabled = true; docsInstalled = true;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
+      if (url.pathname === "/api/skills/docs" && init?.method === "DELETE") { docsInstalled = false; return Promise.resolve(json({ removed: true })); }
       if (url.pathname === "/api/skills/settings") {
         if (init?.method === "PUT") docsEnabled = JSON.parse(String(init.body)).enabled;
         return Promise.resolve(json(settingsPayload(url.searchParams.get("workspace_root") || "C:/marketplace")));
@@ -107,6 +109,7 @@ describe("Plugins and skills workspace", () => {
   });
   it("honors user_invocable and removes only personal skills", async () => {
     render(<SkillsMarketplace />);
+    await act(async () => {});
     fireEvent.click(screen.getAllByRole("button", { name: "管理技能 internal" })[0]);
     expect((screen.getByRole("menuitem", { name: "用于下一条消息" }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByRole("menuitem", { name: "卸载技能" })).toBeNull();
@@ -115,6 +118,43 @@ describe("Plugins and skills workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "卸载技能" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/skills/docs", expect.objectContaining({ method: "DELETE" })));
+  });
+
+  it("uninstalls owned Skill details by the backend directory identity and clears catalog installation state", async () => {
+    const originalFetch = fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (init?.method === "DELETE") { docsInstalled = false; return Promise.resolve(json({ removed: true })); }
+      if (url.pathname === "/api/skills/settings") return Promise.resolve(json({ ...settingsPayload(),
+        skills: docsInstalled ? [{ ...docs, enabled: true, uninstall_name: "actual-directory" }] : [] }));
+      return originalFetch(input, init);
+    }));
+    useAppStore.setState({ marketplaceSkills: [{ name: "actual-directory", title: "Actual directory", description: "Installed workflow", triggers: [], installed: true }] });
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getByRole("button", { name: "查看技能详情 docs" }));
+    const dialog = screen.getByRole("dialog", { name: "文档处理" });
+    await within(dialog).findByText("Full original Skill instructions.");
+    fireEvent.click(await within(dialog).findByRole("button", { name: "卸载", exact: true }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/skills/actual-directory", expect.objectContaining({ method: "DELETE" })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByRole("button", { name: "查看技能详情 docs" })).toBeNull();
+    expect(useAppStore.getState().marketplaceSkills[0].installed).toBe(false);
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["internal"]);
+    expect(useAppStore.getState().draft).toBe("Keep draft");
+  });
+
+  it("keeps external user roots readable without Uninstall in either the detail or row menu", async () => {
+    const originalFetch = fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => new URL(String(input)).pathname === "/api/skills/settings"
+      ? Promise.resolve(json({ ...settingsPayload(), skills: [{ ...docs, enabled: true, uninstall_name: null }] })) : originalFetch(input, init)));
+    render(<SkillsMarketplace />);
+    fireEvent.click(screen.getByRole("button", { name: "查看技能详情 docs" }));
+    const dialog = screen.getByRole("dialog", { name: "文档处理" });
+    await within(dialog).findByText("Full original Skill instructions.");
+    expect(within(dialog).queryByRole("button", { name: "卸载", exact: true })).toBeNull();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "管理技能 docs" }));
+    expect(screen.queryByRole("menuitem", { name: "卸载技能", exact: true })).toBeNull();
   });
   it("supports the add menu and web-host local imports", async () => {
     render(<SkillsMarketplace />);

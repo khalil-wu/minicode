@@ -10,6 +10,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
+from backend.feature_flags import normalize_feature_config
 
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,7 @@ def load_minicode_managed_file_settings(directory: Path) -> ManagedSettingsResul
             sources.append(str(path))
         if payload is None or not payload:
             continue
+        normalize_feature_config(payload)
         _merge_settings(merged, payload)
     return ManagedSettingsResult(
         settings=merged,

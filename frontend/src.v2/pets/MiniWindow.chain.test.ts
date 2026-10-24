@@ -4,10 +4,12 @@ import { resolve } from "node:path";
 import { fireEvent, screen, waitFor } from "@testing-library/dom";
 import { afterEach, expect, it, vi } from "vitest";
 
+const miniMarkup = new DOMParser().parseFromString(readFileSync(resolve("../desktop/pet-window.html"), "utf8"), "text/html").body.innerHTML;
+
 afterEach(() => { document.body.replaceChildren(); vi.restoreAllMocks(); });
 
 it("preserves Mini follow-up text and focus through updates, rejection, and edits during submission", async () => {
-  document.body.innerHTML = '<div id="activity"></div><div id="pet"></div><div id="error" hidden></div>';
+  document.body.innerHTML = miniMarkup;
   Object.defineProperty(window, "matchMedia", { configurable: true, value: () => ({ matches: true, addEventListener() {} }) });
   let update!: (state: unknown) => void;
   let accept!: () => void;
@@ -42,7 +44,7 @@ it("preserves Mini follow-up text and focus through updates, rejection, and edit
 });
 
 it("keeps IME composition alive through activity updates and sends the complete multiline text only on non-composing Enter", async () => {
-  document.body.innerHTML = '<div id="activity"></div><div id="pet"></div><div id="error" hidden></div>';
+  document.body.innerHTML = miniMarkup;
   Object.defineProperty(window, "matchMedia", { configurable: true, value: () => ({ matches: true, addEventListener() {} }) });
   let update!: (state: unknown) => void;
   const state = { locale: "en-US", size: 112, miniOpen: true, petVisible: true, reducedMotion: true,

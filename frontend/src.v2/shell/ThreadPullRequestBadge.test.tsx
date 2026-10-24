@@ -3,11 +3,14 @@ import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@t
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { ThreadPullRequestBadge, useThreadPullRequestStatuses, type LinkedPullRequest } from "./ThreadPullRequestBadge";
 import type { ConversationMeta } from "../stores/types";
+import { useAppStore } from "../stores";
+import { fireConfetti } from "../desktop/confetti";
+vi.mock("../desktop/confetti", () => ({ fireConfetti: vi.fn(async () => true) }));
 
 const mocks = vi.hoisted(() => ({ request: vi.fn(), open: vi.fn(), sessionId: "original-session" }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: mocks.sessionId }) }));
 vi.mock("../protocol/thread-metadata", () => ({ threadMetadataRequest: mocks.request }));
-vi.mock("../desktop/runtime", () => ({ openExternal: mocks.open }));
+vi.mock("../desktop/runtime", async load => ({ ...await load<Record<string, unknown>>(), openExternal: mocks.open }));
 const pr = (number = 1, state: LinkedPullRequest["state"] = "OPEN", isDraft = false): LinkedPullRequest => ({
   number, title: `Actual PR ${number}`, state, isDraft, url: `https://github.enterprise/owner/repo/pull/${number}`,
   headRefName: "original-branch", statusCheckRollup: [],
@@ -15,7 +18,7 @@ const pr = (number = 1, state: LinkedPullRequest["state"] = "OPEN", isDraft = fa
 const owner = (id = "original"): ConversationMeta => ({ id, title: id, updatedAt: "2026-10-21", workspaceRoot: "C:/original",
   gitBranch: "original-branch", resourceReferences: [3, 2, 1].map(number => ({ id: `resource-${number}`, attachment_type: "pull_request",
     identity_key: String(number), payload: { url: pr(number).url, root: "C:/original" }, created_at: number })) });
-beforeEach(() => { vi.clearAllMocks(); mocks.sessionId = "original-session"; });
+beforeEach(() => { vi.clearAllMocks(); mocks.sessionId = "original-session"; useAppStore.setState({ conversationId: "original", reducedMotion: false }); });
 afterEach(() => cleanup());
 
 it("shares a visible owner's query across duplicate rows and chooses a real open PR over a newer closed or draft PR", async () => {
@@ -54,6 +57,27 @@ it("retains actual lookup failure without inventing a successful PR badge", asyn
   const hook = renderHook(() => useThreadPullRequestStatuses([owner()], true));
   await waitFor(() => expect(hook.result.current.original?.error).toBe("Original host permission denied"));
   expect(hook.result.current.original.pr).toBeNull();
+});
+
+it("celebrates only an active owner's confirmed OPEN to MERGED transition, once", async () => {
+  let state: LinkedPullRequest["state"] = "OPEN";
+  mocks.request.mockImplementation(async () => ({ pr: pr(1, state) }));
+  const conversation = { ...owner(), resourceReferences: owner().resourceReferences!.slice(-1) };
+  const hook = renderHook(() => useThreadPullRequestStatuses([conversation], true));
+  await waitFor(() => expect(hook.result.current.original?.pr?.state).toBe("OPEN"));
+  expect(fireConfetti).not.toHaveBeenCalled();
+  state = "MERGED"; fireEvent.focus(window);
+  await waitFor(() => expect(hook.result.current.original?.pr?.state).toBe("MERGED"));
+  expect(fireConfetti).toHaveBeenCalledExactlyOnceWith(false);
+  fireEvent.focus(window); await act(async () => {});
+  expect(fireConfetti).toHaveBeenCalledOnce();
+});
+
+it("does not celebrate the first observation of an already merged PR", async () => {
+  mocks.request.mockResolvedValue({ pr: pr(1, "MERGED") });
+  const hook = renderHook(() => useThreadPullRequestStatuses([owner()], true));
+  await waitFor(() => expect(hook.result.current.original?.pr?.state).toBe("MERGED"));
+  expect(fireConfetti).not.toHaveBeenCalled();
 });
 
 it.each([

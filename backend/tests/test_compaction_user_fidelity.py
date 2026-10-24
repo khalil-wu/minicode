@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,31 @@ class SummaryModel:
     async def simple_chat(self, messages, *, max_tokens=None):
         self.calls.append((messages, max_tokens))
         return "Continue the investigation."
+
+
+@pytest.mark.parametrize("manual", [False, True])
+def test_local_compaction_preserves_admitted_tool_arguments_and_results_beyond_500_tokens(manual):
+    async def scenario():
+        model = SummaryModel()
+        builder = ContextBuilder(llm=model, agent_settings=AgentSettings(compaction_keep_recent_tokens=20))
+        await builder.start_turn("Keep the exact diagnostic evidence.", AgentState(user_message="Keep the exact diagnostic evidence."))
+        argument = "query boundary " * 230 + "内部参数 🧪" + " source path " * 200
+        output = "trace detail " * 230 + "真实错误位置 🧪" + " result line " * 200
+        assert estimate_text_tokens(argument) > 500 and estimate_text_tokens(output) > 500
+        builder.append_assistant_tool_calls([ToolCallEvent(id="diagnostic", name="run_command", arguments={"command": argument})])
+        builder.append_tool_result("diagnostic", "run_command", ToolResult(content=output, is_error=True))
+        admitted = builder._history[-1].content
+        assert output in admitted
+        await builder.compact(manual=manual)
+        prompt = model.calls[0][0][-1].content
+        assert admitted in prompt
+        assert "command=" + json.dumps(argument, ensure_ascii=False, separators=(",", ":")) in prompt
+        assert '"call_id":"diagnostic","name":"run_command","is_error":true' in prompt
+        cold = ContextBuilder(llm=model)
+        cold.load_snapshot(builder.export_snapshot())
+        assert cold.export_snapshot()["compaction_count"] == 1
+        assert [message.content for message in cold._history if message.is_user_input] == ["Keep the exact diagnostic evidence."]
+    asyncio.run(scenario())
 
 
 def test_source_manual_compaction_sends_the_actual_short_window_without_the_automatic_tail_threshold():

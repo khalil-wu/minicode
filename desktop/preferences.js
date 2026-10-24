@@ -14,6 +14,7 @@ const DEFAULT_PREFERENCES = Object.freeze({
   defaultPermissionMode: "confirm",
   showFullAccess: true,
   showContextWindowUsage: false,
+  enabledReasoningEfforts: ["low", "medium", "high", "xhigh", "ultra", "persistent"],
   localeOverride: null,
   terminalShell: process.platform === "win32" ? "powershell" : "system",
   confirmBeforeClose: "keyboardOnly",
@@ -24,6 +25,10 @@ const DEFAULT_PREFERENCES = Object.freeze({
   autoArchiveAfterDays: 0,
   localHistoryCompression: false,
   showBottomPanel: true,
+  defaultWorkspaceFullView: false,
+  popoutWindowShortcut: null,
+  popoutWindowProjectlessDefault: false,
+  confettiEnabled: false,
   defaultTerminalLocation: "bottom",
   composerPlainTextMode: false,
   urlOpenTarget: "external-browser",
@@ -56,6 +61,9 @@ const OPTIONS = {
   autoArchiveAfterDays: [0, 1, 7, 14, 30, 90],
   localHistoryCompression: [true, false],
   showBottomPanel: [true, false],
+  defaultWorkspaceFullView: [true, false],
+  popoutWindowProjectlessDefault: [true, false],
+  confettiEnabled: [true, false],
   defaultTerminalLocation: ["bottom", "right"],
   composerPlainTextMode: [true, false],
   urlOpenTarget: ["in-app-browser", "external-browser"],
@@ -90,8 +98,11 @@ function getPreferences() {
 
 function setPreferences(patch) {
   for (const [key, value] of Object.entries(patch)) {
+    if (key === "popoutWindowShortcut" && (value === null || typeof value === "string" && value.trim())) continue;
     if (key === "defaultTaskDirectory" && (value === null || typeof value === "string" && path.isAbsolute(value))) continue;
     if (key === "notificationSound" && isNotificationSound(value)) continue;
+    if (key === "enabledReasoningEfforts" && Array.isArray(value)
+      && value.every(level => ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "persistent"].includes(level))) continue;
     if (DICTATION_KEYS.includes(key) && isDictationValue(key, value)) continue;
     if (!OPTIONS[key]?.includes(value)) throw new Error(`Unsupported desktop preference: ${key}`);
   }

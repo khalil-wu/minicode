@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from "react";
-import { openSettings } from "./settings-navigation";
 import { useAppStore } from "../stores";
 import type { ScheduledTaskEntry } from "../stores/types";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -8,11 +7,23 @@ import type { ThreadActionOwner } from "./thread-actions";
 
 export const openAutomations = () => {
   settingsIntent = null;
+  pageState = { ...pageState, open: true, navigationId: pageState.navigationId + 1 };
   listeners.forEach(listener => listener());
-  openSettings("scheduler");
+  const state = useAppStore.getState();
+  if (state.settingsOpen) state.toggleSettings();
+  useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", projectsOpen: false });
 };
 
-export type ThreadAutomationOwner = Pick<ThreadActionOwner, "id" | "title" | "workspaceRoot" | "permissionMode">;
+export const closeAutomations = () => {
+  pageState = { ...pageState, open: false };
+  listeners.forEach(listener => listener());
+};
+export const toggleAutomationsSidebar = () => {
+  pageState = { ...pageState, sidebarOpen: !pageState.sidebarOpen };
+  listeners.forEach(listener => listener());
+};
+
+export type ThreadAutomationOwner = Pick<ThreadActionOwner, "id" | "title" | "workspaceRoot" | "permissionMode"> & { schedulerScope?: "global" };
 export interface ThreadAutomationEditor {
   id: string;
   owner: ThreadAutomationOwner;
@@ -26,6 +37,7 @@ export interface AutomationSettingsIntent {
 }
 let editors: ThreadAutomationEditor[] = [];
 let settingsIntent: AutomationSettingsIntent | null = null;
+let pageState = { open: false, sidebarOpen: true, navigationId: 0 };
 const listeners = new Set<() => void>();
 const publish = (next: ThreadAutomationEditor[]) => { editors = next; listeners.forEach(listener => listener()); };
 const subscribe = (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; };
@@ -33,16 +45,19 @@ const snapshot = () => editors;
 export const useThreadAutomationEditors = () => useSyncExternalStore(subscribe, snapshot);
 const settingsSnapshot = () => settingsIntent;
 export const useAutomationSettingsIntent = () => useSyncExternalStore(subscribe, settingsSnapshot);
+export const getAutomationsPageState = () => pageState;
+export const useAutomationsPageState = () => useSyncExternalStore(subscribe, getAutomationsPageState);
 
 export function openThreadAutomationSettings(owner: ThreadAutomationOwner, task: ScheduledTaskEntry) {
+  openAutomations();
   settingsIntent = { owner, task };
   listeners.forEach(listener => listener());
-  openSettings("scheduler");
 }
 
 export async function loadThreadAutomations(owner: ThreadAutomationOwner): Promise<ScheduledTaskEntry[]> {
-  const result = await sendClientCommandAwaitResult({ type: "scheduler.list", owner_conversation_id: owner.id,
-    workspace_root: owner.workspaceRoot }, "scheduler.list");
+  const result = await sendClientCommandAwaitResult(owner.schedulerScope === "global"
+    ? { type: "scheduler.list", scheduler_scope: "global" }
+    : { type: "scheduler.list", owner_conversation_id: owner.id, workspace_root: owner.workspaceRoot }, "scheduler.list");
   if (!commandResultSucceeded(result)) throw new Error(result.message || translateApp("无法读取定时任务。"));
   return (result.data as unknown as { tasks: ScheduledTaskEntry[] }).tasks;
 }

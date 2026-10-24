@@ -27,7 +27,7 @@ import {
   ActivitySection,
   PanelHeader,
 } from '../SidebarShared'
-import { ConversationFilesTree } from './ConversationFilesTree'
+import { FilesPanel } from '../../panels/FilesPanel'
 
 type ArtifactItem = {
   id: string
@@ -51,9 +51,7 @@ export const ArtifactsTab = () => {
   const isConnected = useAppStore((s) => s.isConnected)
   const conversation = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId))
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId)
-  const fileTreeVersion = useAppStore((s) => s.fileTreeVersion)
   const executionCwd = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || ''
-  const browserRoot = conversation?.projectlessBrowserRoot || executionCwd
   const messages = useAppStore((s) => s.messages)
   const previewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact)
   const [inventory, setInventory] = useState<{ conversationId: string; executionCwd: string; page: ConversationResourcePage } | null>(null)
@@ -113,8 +111,7 @@ export const ArtifactsTab = () => {
   return (
     <div style={panelStyle}>
       <PanelHeader title="文件" />
-      {executionCwd && browserRoot && !pendingConversationSwitchId && <ConversationFilesTree key={`${conversationId}:${executionCwd}:${browserRoot}`}
-        owner={{ conversationId, executionCwd }} browserRoot={browserRoot} connected={isConnected} version={fileTreeVersion} />}
+      {executionCwd && !pendingConversationSwitchId && <FilesPanel />}
       <ArtifactSection title="生成文件" items={generated} />
       <ArtifactSection title="附件" items={attachments} />
       {loading && <p role="status" style={metaStyle}>正在读取历史资源…</p>}

@@ -36,6 +36,7 @@
   --surface-sidebar: oklch(0.225 0.002 250);
   --surface-page:    oklch(0.245 0.002 250);
   --surface-soft:    oklch(0.265 0.003 250);
+  --surface-selected: color-mix(in oklab, var(--text-primary) 5%, transparent);
   --surface-panel:   oklch(0.285 0.003 250);
   --surface-raised:  oklch(0.305 0.004 250);
   --surface-hover:   oklch(0.325 0.004 250);

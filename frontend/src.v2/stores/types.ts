@@ -33,7 +33,7 @@ export type ViewMode = "normal" | "verbose" | "summary";
 export type AppMode = "chat" | "code" | "cowork";
 export type SessionFilter = "all" | "running" | "waiting" | "idle" | "archived";
 export type SessionGroupBy = "none" | "project" | "branch";
-export type RightStackTab = "preview" | "browser" | "files" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "goal" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}` | `automation:${string}`;
+export type RightStackTab = "preview" | "browser" | "files" | "terminal" | "sidechat" | "tasks" | "diff" | "plan" | "goal" | "subagents" | "artifacts" | "inspector" | "diagnostics" | `mcp-app:${string}` | `automation:${string}` | `file:${string}`;
 export type EffortLevel =
   | "off"
   | "minimal"
@@ -453,6 +453,9 @@ export interface UISlice {
   projectEditTarget: string | null;
   contextCardCollapsed: boolean;
   setContextCardCollapsed: (collapsed: boolean) => void;
+  contextCardPinned: boolean;
+  setContextCardPinned: (pinned: boolean) => void;
+  toggleContextCard: (width: number) => void;
   themeMode: ThemeMode;
   resolvedTheme: ResolvedTheme;
   appearanceColors: AppearanceColors;
@@ -619,6 +622,7 @@ export type PanelKind =
   | "chat"
   | "diff"
   | "editor"
+  | "file"
   | "preview"
   | "terminal"
   | "plan"
@@ -632,6 +636,7 @@ export type LegacyPanelKind = "subagent";
 export interface PanelSlot {
   id: string;
   kind: PanelKind;
+  fileTabId?: string;
   label?: string;
   size?: number;
   focused?: boolean;
@@ -802,9 +807,41 @@ export interface GitReviewRequest {
   section: "staged" | "working" | "untracked";
   workspaceRoot: string;
   conversationId: string | null;
+  source?: GitDiffSource;
+  baseBranch?: string;
+  fileOwner?: WorkspaceFileOwner;
+}
+
+export interface WorkspaceFileOwner {
+  scopeId: string;
+  conversationId: string | null;
+  executionCwd: string;
+  browserRoot: string;
+  environmentId?: string;
+}
+
+export interface WorkspaceFileTab {
+  id: string;
+  owner: WorkspaceFileOwner;
+  path: string;
+  title: string;
+  open: boolean;
+  pinned: boolean;
+  pane: "left" | "right";
+  line?: number;
 }
 
 export interface WorkspaceSlice {
+  initializeWorkspaceView: (conversationId: string, fullView: boolean) => void;
+  workspaceFileTabs: WorkspaceFileTab[];
+  fileBrowserRoots: Record<string, string>;
+  pendingWorkspaceFileTabId: string | null;
+  openWorkspaceFileTab: (owner: WorkspaceFileOwner, path: string, title?: string, line?: number) => string;
+  activateWorkspaceFileTab: (id: string) => void;
+  closeWorkspaceFileTab: (id: string) => void;
+  pinWorkspaceFileTab: (id: string, pinned: boolean) => void;
+  moveWorkspaceFileTab: (id: string, pane: "left" | "right") => void;
+  setFileBrowserRoot: (scopeId: string, path: string) => void;
   leftSidebarWidth: number;
   leftSidebarExpandedWidth: number;
   rightSidebarWidth: number;

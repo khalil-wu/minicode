@@ -15,6 +15,7 @@ from backend.agent.query_engine import QueryEngine
 from backend.agent.runtime import default_runtime
 from backend.artifact.store import ArtifactStore
 from backend.config import AppConfig, LLMSettings, PermissionSettings
+from backend.memory.settings import MemorySettings
 from backend.conversations.repository import ConversationRepository
 from backend.llm.base import LLMAdapter, ToolCallEvent
 from backend.permissions.checker import PermissionChecker
@@ -524,7 +525,7 @@ def test_runner_marks_external_context_and_disables_memory_generation(tmp_path, 
             provider="openai",
             base_url="https://api.openai.com/v1",
             model="gpt-test",
-        )),
+        ), memories=MemorySettings(disable_on_external_context=True)),
     )
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])

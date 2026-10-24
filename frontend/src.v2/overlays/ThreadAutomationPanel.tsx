@@ -3,11 +3,13 @@ import { createPortal } from "react-dom";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
 import type { ConversationMeta, ScheduledTaskEntry } from "../stores/types";
+import { newConversationId } from "../stores/shared-helpers";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { SelectMenu } from "../components/SelectMenu";
 import { ContextMenu } from "../components/ContextMenu";
 import { Tip } from "../components/Tooltip";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { ChevronDown } from "../lib/icons";
 import { getDesktopPreferences } from "../desktop/runtime";
 import { selectableModelsForProvider } from "../lib/provider-models";
 import { projectExecutionRoot, projectOwnsConversation, projectOwnsWorkspace } from "../lib/project-registry";
@@ -56,8 +58,17 @@ function AutomationPanelSourceGlyph({ icon }: { icon: "check" | "chevronDown" | 
   }
 }
 
-export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: { editor: ThreadAutomationEditor; onClose?: () => void; inSettings?: boolean }) {
-  const { t: tr } = useI18n();
+export function ThreadAutomationPanel({ editor, onClose, inSettings = false, variant = "panel", active = true, onTaskSaved, onTaskRemoved }: {
+  editor: ThreadAutomationEditor;
+  onClose?: () => void;
+  inSettings?: boolean;
+  variant?: "panel" | "create-dialog";
+  active?: boolean;
+  onTaskSaved?: (task: ScheduledTaskEntry, draftUnchanged: boolean) => void;
+  onTaskRemoved?: (task: ScheduledTaskEntry) => void;
+}) {
+  const { t: tr, locale } = useI18n();
+  const createDialog = variant === "create-dialog";
   const projects = useAppStore(state => state.recentWorkspaces);
   const conversations = useAppStore(state => state.conversations);
   const selectedConversationId = useAppStore(state => state.conversationId);
@@ -69,26 +80,27 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
   const modelsSource = useAppStore(state => state.modelsSource);
   const [catalog, setCatalog] = useState(() => {
     const state = useAppStore.getState();
-    if (state.conversationId !== editor.owner.id) return { provider: editor.task?.provider ?? "", currentModel: "", labels: {} as Record<string, string>, models: [] as string[], options: [] as typeof state.availableModelOptions };
+    if (state.conversationId !== editor.owner.id && editor.owner.schedulerScope !== "global") return { provider: editor.task?.provider ?? "", currentModel: "", labels: {} as Record<string, string>, models: [] as string[], options: [] as typeof state.availableModelOptions };
     return { provider: state.currentProvider as string, currentModel: state.currentModel, labels: state.availableModelLabels,
       models: selectableModelsForProvider(state.availableModels, state.currentModel, state.currentProvider, state.modelsSource), options: state.availableModelOptions };
   });
   useEffect(() => {
-    if (selectedConversationId !== editor.owner.id) return;
+    if (selectedConversationId !== editor.owner.id && editor.owner.schedulerScope !== "global") return;
     setCatalog({ provider: currentProvider, currentModel, labels: availableModelLabels,
       models: selectableModelsForProvider(availableModels, currentModel, currentProvider, modelsSource), options: availableModelOptions });
-  }, [editor.owner.id, selectedConversationId, currentProvider, currentModel, availableModels, availableModelLabels, availableModelOptions, modelsSource]);
+  }, [editor.owner.id, editor.owner.schedulerScope, selectedConversationId, currentProvider, currentModel, availableModels, availableModelLabels, availableModelOptions, modelsSource]);
   const [savedTask, setSavedTask] = useState(editor.task);
   const [name, setName] = useState(editor.task?.name ?? editor.owner.title);
   const [prompt, setPrompt] = useState(editor.task?.prompt ?? "");
   const [kind, setKind] = useState(taskKind(editor.task));
-  const [targetId, setTargetId] = useState(editor.task?.conversation_id || editor.owner.id);
+  const [targetId, setTargetId] = useState(editor.task?.conversation_id || (createDialog ? "" : editor.owner.id));
+  const createdTargetId = useRef("");
   const [executionRoot, setExecutionRoot] = useState<string | null>(editor.task?.execution_workspace_root ?? null);
   const [provider, setProvider] = useState<string | null>(editor.task?.provider ?? null);
   const [model, setModel] = useState<string | null>(editor.task?.model ?? null);
   const [effort, setEffort] = useState<string | null>(editor.task?.reasoning_effort ?? null);
   const [notificationPolicy, setNotificationPolicy] = useState(editor.task?.notification_policy ?? null);
-  const [schedule, setSchedule] = useState(() => readAutomationSchedule(editor.task?.schedule));
+  const [schedule, setSchedule] = useState(() => readAutomationSchedule(editor.task?.schedule ?? (createDialog ? "0 9 * * *" : undefined)));
   const [custom, setCustom] = useState(() => readCustomSchedule(schedule.customRrule));
   const [customDirty, setCustomDirty] = useState(false);
   const [scheduleDirty, setScheduleDirty] = useState(false);
@@ -100,20 +112,25 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
   const [saveError, setSaveError] = useState("");
   const [actionMenu, setActionMenu] = useState<HTMLElement | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advancedId = useId();
   const effectiveSchedule = scheduleDirty ? schedule.mode === "custom" && custom && customDirty ? buildCustomSchedule(custom) : buildAutomationSchedule(schedule) : originalSchedule;
   const fields = useMemo(() => ({
-    name: name.trim(), prompt: prompt.trim(), schedule: effectiveSchedule ?? "", kind,
+    name: createDialog && !savedTask ? prompt.trim().split("\n")[0] : name.trim(), prompt: prompt.trim(), schedule: effectiveSchedule ?? "", kind,
     timezone: savedTask?.timezone ?? localTimezone, isolation: savedTask?.isolation ?? "workspace" as const,
     permission_mode: savedTask?.permission_mode ?? "auto", notification_policy: notificationPolicy,
     conversation_id: kind === "heartbeat" ? targetId : "",
     execution_workspace_root: kind === "cron" ? executionRoot : null,
     provider: kind === "cron" ? provider : null, model: kind === "cron" ? model : null,
     reasoning_effort: kind === "cron" ? effort : null,
-  }), [name, prompt, effectiveSchedule, kind, savedTask?.timezone, savedTask?.isolation, savedTask?.permission_mode, notificationPolicy, targetId, executionRoot, provider, model, effort]);
+  }), [name, prompt, effectiveSchedule, kind, createDialog, savedTask, notificationPolicy, targetId, executionRoot, provider, model, effort]);
   const patch = JSON.stringify(fields);
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
   const [savedPatch, setSavedPatch] = useState(patch);
-  const canSave = Boolean(fields.name && fields.prompt && effectiveSchedule && (kind === "cron" || targetId));
-  const ownerScope = { owner_conversation_id: editor.owner.id, workspace_root: editor.owner.workspaceRoot };
+  const canSave = Boolean(fields.name && fields.prompt && effectiveSchedule && (kind === "cron" || targetId || createDialog && !savedTask));
+  const ownerScope = editor.owner.schedulerScope === "global" ? { scheduler_scope: "global" as const }
+    : { owner_conversation_id: editor.owner.id, workspace_root: editor.owner.workspaceRoot };
   const currentTarget = conversations.find(conversation => conversation.id === targetId);
   const targetLabel = currentTarget?.title ?? (targetId === editor.owner.id ? editor.owner.title : tr("聊天不可用"));
   const root = executionRoot ?? savedTask?.workspace_root ?? editor.owner.workspaceRoot;
@@ -157,29 +174,42 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
     setPending("save"); setSaveError(""); setFailedPatch(null);
     const requestedPatch = patch;
     try {
-      const projectlessBase = fields.execution_workspace_root === "" ? (await getDesktopPreferences()).defaultTaskDirectory : null;
-      const configuration = { ...fields, projectless_base: projectlessBase,
-        owner_conversation_id: editor.owner.id, workspace_root: editor.owner.workspaceRoot };
       const task = savedTaskRef.current;
+      let targetConversationId = fields.conversation_id;
+      if (createDialog && !task && fields.kind === "heartbeat") {
+        if (!createdTargetId.current) {
+          const conversationId = newConversationId();
+          const created = await sendClientCommandAwaitResult({ type: "conversation.create", conversation_id: conversationId,
+            title: fields.name, workspace_root: editor.owner.workspaceRoot, permission_mode: "auto", activate: false }, "conversation.create");
+          if (!commandResultSucceeded(created)) throw new Error(created.message || tr("无法创建定时任务聊天。"));
+          createdTargetId.current = created.data!.conversation_id as string;
+        }
+        targetConversationId = createdTargetId.current;
+      }
+      const projectlessBase = fields.execution_workspace_root === "" ? (await getDesktopPreferences()).defaultTaskDirectory : null;
+      const configuration = { ...fields, conversation_id: targetConversationId, projectless_base: projectlessBase, ...ownerScope };
       const result = await sendClientCommandAwaitResult(task
         ? { type: "scheduler.update", task_id: task.id, task_workspace_root: task.workspace_root, ...configuration }
         : { type: "scheduler.add", ...configuration }, task ? "scheduler.update" : "scheduler.add");
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法保存定时任务"));
       const saved = (result.data as unknown as { task: ScheduledTaskEntry }).task;
-      setSavedTask(saved); setSavedPatch(requestedPatch);
+      if (!task && createDialog) setName(saved.name);
+      if (!task && createDialog && fields.kind === "heartbeat") setTargetId(targetConversationId);
+      setSavedTask(saved); setSavedPatch(JSON.stringify({ ...fields, conversation_id: targetConversationId }));
       saveThreadAutomationEditor(editor.id, saved);
+      onTaskSaved?.(saved, patchRef.current === requestedPatch);
     } catch (error) {
       const message = errorMessage(error);
       setFailedPatch(requestedPatch); setSaveError(message);
       pushToast(`${tr("无法保存定时任务")}：${message}`, "error");
     } finally { pendingRef.current = false; setPending(null); }
-  }, [canSave, patch, fields, editor.id, editor.owner.id, editor.owner.workspaceRoot, tr]);
+  }, [canSave, patch, fields, editor.id, editor.owner.id, editor.owner.workspaceRoot, editor.owner.schedulerScope, createDialog, onTaskSaved, tr]);
 
   useEffect(() => {
-    if (!savedTask || !canSave || pending || deleteOpen || deleted.current || patch === savedPatch || patch === failedPatch) return;
+    if (!active || !savedTask || !canSave || pending || deleteOpen || deleted.current || patch === savedPatch || patch === failedPatch) return;
     const timeout = window.setTimeout(() => { void save(); }, 600);
     return () => window.clearTimeout(timeout);
-  }, [savedTask, canSave, pending, deleteOpen, patch, savedPatch, failedPatch, save]);
+  }, [active, savedTask, canSave, pending, deleteOpen, patch, savedPatch, failedPatch, save]);
 
   const changeSchedule = (next: AutomationScheduleDraft) => {
     if (next.mode === "weekly" && schedule.mode !== "weekly") next = { ...next, weekdays: [next.weekdays[0]] };
@@ -201,6 +231,7 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法更新定时任务状态"));
       const task = (result.data as unknown as { task: ScheduledTaskEntry }).task;
       setSavedTask(task); saveThreadAutomationEditor(editor.id, task);
+      onTaskSaved?.(task, patch === savedPatch);
     } catch (error) { pushToast(errorMessage(error), "error"); }
     finally { pendingRef.current = false; setPending(null); }
   };
@@ -211,10 +242,50 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
       const result = await sendClientCommandAwaitResult({ type: "scheduler.remove", task_id: savedTask.id, task_workspace_root: savedTask.workspace_root, ...ownerScope }, "scheduler.remove");
       if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法删除定时任务"));
       deleted.current = true;
+      onTaskRemoved?.(savedTask);
       onClose?.(); removeThreadAutomationEditor(editor.id);
     } catch (error) { pushToast(errorMessage(error), "error"); }
     finally { pendingRef.current = false; setPending(null); }
   };
+
+  const projectModelRows = <>
+    <DetailRow label={tr("项目")}><SelectMenu className="automation-select" value={projectValue} selectedLabel={root === "" ? tr("无项目") : undefined} ariaLabel={tr("定时任务项目")} align="end"
+      onValueChange={value => setExecutionRoot(value === "__none__" ? "" : value === "__owner__" ? null : projectExecutionRoot(projects.find(project => project.path === value)!))}>
+      <option value="__none__">{tr("不在项目中工作")}</option>
+      {!selectedProject && root !== "" && <option value="__owner__">{workspaceDisplayName(root)}</option>}
+      {projects.map(project => <option key={project.path} value={project.path}>{project.name || workspaceDisplayName(project.path)}</option>)}
+    </SelectMenu></DetailRow>
+    <DetailRow label={tr("模型")}><SelectMenu className="automation-select" value={model ?? ""} selectedLabel={model ? undefined : tr("选择模型")} ariaLabel={tr("定时任务模型")} align="end" onValueChange={value => {
+      setModel(value || null); setProvider(value ? catalog.provider : null);
+      setEffort(value ? catalog.options.find(option => option.model === value)?.defaultReasoningEffort ?? null : null);
+    }}>
+      {model && !selectableModels.includes(model) && <option value={model} disabled>{model}</option>}
+      {selectableModels.map(value => <option key={value} value={value}>{catalog.labels[value] || value}</option>)}
+    </SelectMenu></DetailRow>
+    <DetailRow label={tr("思考强度")}><SelectMenu className="automation-select" value={effort ?? ""} disabled={!model || !effortOptions.length} ariaLabel={tr("定时任务思考强度")} align="end" onValueChange={value => setEffort(value || null)}>
+      <option value="">{tr("默认")}</option>
+      {effort && !effortOptions.includes(effort) && <option value={effort} disabled>{effort}</option>}
+      {effortOptions.map(value => <option key={value} value={value}>{value}</option>)}
+    </SelectMenu></DetailRow>
+  </>;
+  const notificationRow = <DetailRow label={tr("通知")}><SelectMenu className="automation-select" value={notificationPolicy ?? ""} onValueChange={value => setNotificationPolicy(value === "failed_runs_only" ? value : null)} ariaLabel={tr("通知")} align="end">
+    <option value="">{kind === "heartbeat" ? tr("重要更新") : tr("所有运行")}</option><option value="failed_runs_only">{tr("仅失败运行")}</option>
+  </SelectMenu></DetailRow>;
+
+  if (createDialog) {
+    const timezoneLabel = new Intl.DateTimeFormat(locale, { timeZone: fields.timezone, timeZoneName: "longGeneric" }).formatToParts().find(part => part.type === "timeZoneName")!.value;
+    return <form className="automation-create-form" onSubmit={event => { event.preventDefault(); void save(); }}>
+      <textarea className="automation-create-description" aria-label={tr("说明…")} placeholder={tr("说明…")} value={prompt} rows={3} onChange={event => setPrompt(event.target.value)} />
+      <AutomationFrequencySection variant="dialog" timezoneLabel={timezoneLabel} draft={schedule} custom={custom} onChange={changeSchedule} onCustomChange={changeCustom} onRuleSave={saveRule} />
+      <button type="button" className="automation-advanced-trigger" aria-expanded={advancedOpen} aria-controls={advancedId} onClick={() => setAdvancedOpen(open => !open)}><ChevronDown size={14} />{tr("高级")}</button>
+      <section id={advancedId} className="automation-create-advanced" aria-label={tr("高级")} hidden={!advancedOpen}>
+        {notificationRow}
+        <DetailRow label={tr("每次运行时都开启新聊天")}><button type="button" className="automation-new-chat-toggle" role="switch" aria-label={tr("每次运行时都开启新聊天")} aria-checked={kind === "cron"} onClick={() => setKind(kind === "cron" ? "heartbeat" : "cron")}><span /></button></DetailRow>
+        {kind === "cron" && projectModelRows}
+      </section>
+      <div className="automation-dialog-actions"><button type="button" className="automation-ghost-button" onClick={onClose}>{tr("取消")}</button><button type="submit" className="automation-primary-button" disabled={!canSave || Boolean(pending)}>{pending === "save" ? tr("正在保存…") : savedTask ? tr("保存") : tr("创建")}</button></div>
+    </form>;
+  }
 
   return <div className={`thread-automation-panel${inSettings ? " thread-automation-in-settings" : ""}`}>
     <div className="thread-automation-scroll"><div className="thread-automation-content">
@@ -235,31 +306,10 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false }: {
       </div>
         <DetailRow label={tr("运行于")}><AutomationTargetPicker editor={editor} taskId={savedTask?.id} value={kind === "cron" ? "" : targetId} label={kind === "cron" ? tr("每次新建聊天") : targetLabel}
           onChange={(id, title) => { setKind(id ? "heartbeat" : "cron"); if (id) setTargetId(id); if (!name.trim() && title) { setName(title); renameThreadAutomationEditor(editor.id, title); } }} /></DetailRow>
-        {kind === "cron" && <>
-          <DetailRow label={tr("项目")}><SelectMenu className="automation-select" value={projectValue} selectedLabel={root === "" ? tr("无项目") : undefined} ariaLabel={tr("定时任务项目")} align="end"
-            onValueChange={value => setExecutionRoot(value === "__none__" ? "" : value === "__owner__" ? null : projectExecutionRoot(projects.find(project => project.path === value)!))}>
-            <option value="__none__">{tr("不在项目中工作")}</option>
-            {!selectedProject && root !== "" && <option value="__owner__">{workspaceDisplayName(root)}</option>}
-            {projects.map(project => <option key={project.path} value={project.path}>{project.name || workspaceDisplayName(project.path)}</option>)}
-          </SelectMenu></DetailRow>
-          <DetailRow label={tr("模型")}><SelectMenu className="automation-select" value={model ?? ""} selectedLabel={model ? undefined : tr("选择模型")} ariaLabel={tr("定时任务模型")} align="end" onValueChange={value => {
-            setModel(value || null); setProvider(value ? catalog.provider : null);
-            setEffort(value ? catalog.options.find(option => option.model === value)?.defaultReasoningEffort ?? null : null);
-          }}>
-            {model && !selectableModels.includes(model) && <option value={model} disabled>{model}</option>}
-            {selectableModels.map(value => <option key={value} value={value}>{catalog.labels[value] || value}</option>)}
-          </SelectMenu></DetailRow>
-          <DetailRow label={tr("思考强度")}><SelectMenu className="automation-select" value={effort ?? ""} disabled={!model || !effortOptions.length} ariaLabel={tr("定时任务思考强度")} align="end" onValueChange={value => setEffort(value || null)}>
-            <option value="">{tr("默认")}</option>
-            {effort && !effortOptions.includes(effort) && <option value={effort} disabled>{effort}</option>}
-            {effortOptions.map(value => <option key={value} value={value}>{value}</option>)}
-          </SelectMenu></DetailRow>
-        </>}
+        {kind === "cron" && projectModelRows}
       </section>
       <AutomationFrequencySection draft={schedule} custom={custom} onChange={changeSchedule} onCustomChange={changeCustom} onRuleSave={saveRule} afterScheduleRows={
-      <DetailRow label={tr("通知")}><SelectMenu className="automation-select" value={notificationPolicy ?? ""} onValueChange={value => setNotificationPolicy(value === "failed_runs_only" ? value : null)} ariaLabel={tr("通知")} align="end">
-        <option value="">{kind === "heartbeat" ? tr("重要更新") : tr("所有运行")}</option><option value="failed_runs_only">{tr("仅失败运行")}</option>
-      </SelectMenu></DetailRow>} />
+      notificationRow} />
     </div></div>
     {(!inSettings || canSave && failedPatch === patch) && <div className="thread-automation-footer">
       {savedTask ? <>
@@ -297,17 +347,8 @@ function AutomationTargetPicker({ editor, taskId, value, label, onChange }: {
     search.current!.focus();
     let cancelled = false;
     setLoading(true); setError("");
-    // Each inventory is scoped to its real chat owner. A selected main chat's
-    // global projection cannot answer whether another project's chat is occupied.
-    const owners = [editor.owner];
-    for (const conversation of localChats) {
-      const workspaceRoot = conversation.executionCwd || conversation.worktreePath || conversation.workspaceRoot;
-      if (workspaceRoot && !owners.some(owner => owner.id === conversation.id)) {
-        owners.push({ id: conversation.id, title: conversation.title, workspaceRoot, permissionMode: editor.owner.permissionMode });
-      }
-    }
-    void Promise.all(owners.map(owner => loadThreadAutomations(owner))).then(snapshots => {
-      if (!cancelled) setTasks(snapshots.flat());
+    void loadThreadAutomations({ ...editor.owner, schedulerScope: "global" }).then(tasks => {
+      if (!cancelled) setTasks(tasks);
     }).catch(error => { if (!cancelled) setError(errorMessage(error)); }).finally(() => { if (!cancelled) setLoading(false); });
     const outside = (event: MouseEvent) => { if (!root.current!.contains(event.target as Node)) setOpen(false); };
     document.addEventListener("mousedown", outside);

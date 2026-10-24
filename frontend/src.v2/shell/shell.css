@@ -662,8 +662,6 @@ html[data-theme="light"] .workbench-home {
   padding: 11px 9px 8px;
   transition:
     width var(--transition-fast),
-    min-width var(--transition-fast),
-    max-width var(--transition-fast),
     opacity var(--transition-fast),
     border-color var(--transition-fast);
 }
@@ -1238,6 +1236,12 @@ html[data-theme="dark"] [aria-label="Agent is waiting for input"] section {
 
 .mc-sidebar-panel-view > .panel-content-wrapper {
   animation: none;
+}
+
+/* Reveal the existing panel through the sidebar clip instead of rewrapping
+   its files, diffs and browser toolbar at every intermediate animation width. */
+.mc-sidebar-right[data-embedded="false"][data-expanded="false"] > :is(.mc-sidebar-right-header, .mc-sidebar-panel-view) {
+  width: var(--right-sidebar-width);
 }
 
 .mc-workspace-folder-glyph {

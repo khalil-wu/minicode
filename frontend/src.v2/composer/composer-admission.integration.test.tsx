@@ -103,7 +103,7 @@ beforeEach(async () => {
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: "main", workingDirectory: root,
     conversations: [{ id: "main", title: "owned", workspaceRoot: root }], messages: [], conversationMessages: {},
     conversationStreaming: {}, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, sideChats: {},
-    sideChatPendingContext: null, isConnected: true, isStreaming: false, runtimeSession: null,
+    sideChatPendingContext: null, isConnected: true, isStreaming: false, runtimeSession: null, runtimeCapabilities: null,
     currentProvider: "custom", currentModel: "fixture-model", availableModels: ["fixture-model"],
     availableSkills: [], slashCommands: [], selectedMentions: [], selectedSkills: [], pendingPermissionModeChanges: {},
     pendingConversationSwitchId: null, pendingConversationCreateId: null, pendingApproval: null, approvalQueue: [],
@@ -132,6 +132,24 @@ describe("actual composer durable admission boundary", () => {
     localDiffHunk: "@@ -50,2 +100,4 @@\n-old\n+new", localWorkspaceRoot: root };
   const secondComment: DiffComment = { ...comment, position: { path: "src/other.ts", side: "left", line: 7 },
     content: [{ content_type: "text", text: "发送期间新写的评论" }] };
+
+  it("sends an ordinary authored input when a saved goal mode is disabled in the current workspace", async () => {
+    const goal = { text: "Keep this saved goal", status: "active" };
+    useAppStore.setState({ draft: "实际普通消息", goalMode: true, activeGoal: goal,
+      runtimeCapabilities: { feature_flags: { goals: { enabled: false } } } as never });
+    render(<Composer />);
+    expect(document.querySelector(".composer-container")?.getAttribute("data-goal-mode")).toBe("false");
+    expect(screen.queryByRole("button", { name: "编辑目标" })).toBeNull();
+    submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(command).toMatchObject({ type: "user_message", conversation_id: "main", content: "实际普通消息" });
+    expect(useAppStore.getState()).toMatchObject({ activeGoal: goal, draft: "实际普通消息" });
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+      command_type: "user_message" } as ServerEvent));
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
+    expect(useAppStore.getState()).toMatchObject({ activeGoal: goal, draft: "" });
+  });
 
   it("previews a single count pill without modifying input, and removes only the comment context", async () => {
     useAppStore.setState({ draft: "原输入不改" }); setDiffComments("main", [comment]);

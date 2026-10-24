@@ -248,7 +248,8 @@ def test_skill_dependency_real_config_install_and_post_answer_policy_check(
         assert len(events) == 1 and "not connected: docs" in events[0].data["content"]
 
 
-def test_agent_loop_keeps_third_party_originator_and_does_not_automatically_install(tmp_path, monkeypatch):
+@pytest.mark.parametrize("session_source,expect_install", [("sdk", False), ("desktop", True)])
+def test_agent_loop_preserves_originator_and_desktop_dependency_install_entry(tmp_path, monkeypatch, session_source, expect_install):
     skills = _skill_manager(tmp_path, monkeypatch)
     manager = _McpManager()
     installed, messages_seen = [], []
@@ -263,7 +264,7 @@ def test_agent_loop_keeps_third_party_originator_and_does_not_automatically_inst
 
     class CapturingLLM(LLMAdapter):
         async def stream_chat(self, messages, tools=None):
-            assert not installed
+            assert bool(installed) is expect_install
             messages_seen.extend(messages)
             yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Skill instructions are loaded.")
             yield StreamEvent(type=StreamEventType.DONE)
@@ -284,12 +285,13 @@ def test_agent_loop_keeps_third_party_originator_and_does_not_automatically_inst
             session_context=AgentLoopSessionContext(
                 workspace_root=tmp_path, session_id="skill-policy-session",
                 metadata={"conversation_id": "skill-policy-conversation", "assistant_message_id": "skill-policy-answer"},
-                run_context=RunContext(mcp_manager=manager),
+                run_context=RunContext(session_source=session_source, mcp_manager=manager),
             ),
         )]
 
     events = asyncio.run(run())
-    assert installed == [] and manager.admitted == []
+    assert bool(installed) is expect_install
+    assert manager.admitted == (["docs"] if expect_install else [])
     assert not any(event.type == "request_user_input" for event in events)
     assert any("Use the docs server." in str(message.content) for message in messages_seen)
-    assert any("MCP dependency unavailable" in str(message.content) for message in messages_seen)
+    assert any("MCP dependency unavailable" in str(message.content) for message in messages_seen) is not expect_install

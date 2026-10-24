@@ -107,7 +107,7 @@ class RequestUserInputAsyncTool(BaseTool):
     display_label = "Ask user"
 
     def get_spec(self):
-        return ToolSpec(name=self.name, capability="user.ask", toolset="core", exposure="core", required_args=("questions",))
+        return ToolSpec(name=self.name, capability="user.ask", toolset="core", exposure="direct_model_only", required_args=("questions",))
 
     def get_schema(self):
         return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {
@@ -135,7 +135,7 @@ class SendMessageToUserAsyncTool(BaseTool):
     result_kind = "status"
 
     def get_spec(self):
-        return ToolSpec(name=self.name, capability="user.reply", toolset="core", exposure="core", required_args=("message",))
+        return ToolSpec(name=self.name, capability="user.reply", toolset="core", exposure="direct_model_only", required_args=("message",))
 
     def get_schema(self):
         return ToolSchema(name=self.name, description=self.description, parameters={"type": "object", "properties": {

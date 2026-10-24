@@ -80,11 +80,12 @@ function createPetManager({ configRoot, builtinAssetRoot, getMainWindow, onOpenS
   const dismissedTurns = new Map();
   const save = () => atomicWriteTextSync(preferencesFile, `${JSON.stringify(preferences, null, 2)}\n`);
   const miniLayout = () => {
-    const petHeight = Math.ceil(preferences.size * 208 / 192);
+    const barOnly = preferences.selectedPetId === null;
+    const petHeight = barOnly ? 40 : Math.ceil(preferences.size * 208 / 192);
     const estimated = activity.tasks.reduce((height, task) => height + 76 + (task.detail ? 36 : 0) + (task.actions?.length ? 40 : 0), 0);
     const noticeHeight = Math.min(260, measuredNoticeHeight ?? estimated);
-    const width = activity.tasks.length ? Math.max(330, preferences.size) + 24 : preferences.size + 24;
-    return { width, height: petHeight + 24 + noticeHeight, petLeft: width - preferences.size - 12, petTop: noticeHeight + 12, noticeHeight };
+    const width = barOnly ? 408 : activity.tasks.length ? Math.max(330, preferences.size) + 24 : preferences.size + 24;
+    return { width, height: petHeight + 24 + noticeHeight, petLeft: barOnly ? 12 : width - preferences.size - 12, petTop: noticeHeight + 12, noticeHeight };
   };
   const getState = () => ({ pets, selectedPetId: preferences.selectedPetId, size: preferences.size, petVisible: preferences.petVisible,
     miniOpen: Boolean(miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible()), petDirectory, activity, reducedMotion, issues, mutedConversationIds: [...preferences.mutedConversationIds] });
@@ -122,7 +123,7 @@ function createPetManager({ configRoot, builtinAssetRoot, getMainWindow, onOpenS
     const { width, height, petLeft, petTop } = miniLayout();
     const workArea = preferences.position ? screen.getDisplayNearestPoint(preferences.position).workArea
       : screen.getDisplayMatching(getMainWindow()?.getBounds() ?? screen.getPrimaryDisplay().workArea).workArea;
-    const point = preferences.position ?? { x: workArea.x + workArea.width - preferences.size - 24, y: workArea.y + workArea.height - Math.ceil(preferences.size * 208 / 192) - 24 };
+    const point = preferences.position ?? { x: workArea.x + workArea.width - width + petLeft - 12, y: workArea.y + workArea.height - height + petTop - 12 };
     miniWindow.setBounds({ width, height, x: Math.round(Math.min(Math.max(point.x - petLeft, workArea.x), workArea.x + workArea.width - width)),
       y: Math.round(Math.min(Math.max(point.y - petTop, workArea.y), workArea.y + workArea.height - height)) });
   };
@@ -134,7 +135,7 @@ function createPetManager({ configRoot, builtinAssetRoot, getMainWindow, onOpenS
   };
   const showMini = async () => {
     if (disposed) throw new Error("Pet manager has been disposed.");
-    if (!pets.some(pet => pet.id === preferences.selectedPetId)) throw new Error(`Selected pet is unavailable: ${preferences.selectedPetId}`);
+    if (preferences.selectedPetId !== null && !pets.some(pet => pet.id === preferences.selectedPetId)) throw new Error(`Selected pet is unavailable: ${preferences.selectedPetId}`);
     if (!miniWindow || miniWindow.isDestroyed()) {
       miniWindow = new BrowserWindow({ width: preferences.size + 24, height: Math.ceil(preferences.size * 208 / 192) + 24,
         title: "Mini", transparent: true, backgroundColor: "#00000000", frame: false, resizable: false, hasShadow: false,
@@ -156,7 +157,7 @@ function createPetManager({ configRoot, builtinAssetRoot, getMainWindow, onOpenS
   };
   const update = async patch => {
     for (const [key, value] of Object.entries(patch)) {
-      if (key === "selectedPetId" && typeof value === "string" && pets.some(pet => pet.id === value)) continue;
+      if (key === "selectedPetId" && (value === null || typeof value === "string" && pets.some(pet => pet.id === value))) continue;
       if (key === "size" && Number.isInteger(value) && value >= 80 && value <= 224) continue;
       if ((key === "petVisible" || key === "reducedMotion") && typeof value === "boolean") continue;
       throw new Error(`Unsupported pet preference: ${key}`);

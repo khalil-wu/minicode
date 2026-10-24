@@ -19,6 +19,7 @@ import { runtimePendingUserActionLabelForConversation } from "../lib/runtime-ses
 import { SessionRow } from "./SessionRow";
 import { useThreadPullRequestStatuses } from "./ThreadPullRequestBadge";
 import { PinnedConversationList } from "./PinnedConversationList";
+import { PinnedWorkspaceFiles } from "./WorkspaceFileTabs";
 import { SidebarSortableList, type SidebarDragBinding } from "./SidebarSortableList";
 import { SidebarSortMenu } from "./SidebarSortMenu";
 import { orderSidebarItems } from "./sidebarOrder";
@@ -39,6 +40,7 @@ import { loadConversationMarkdown } from "../chat/conversationMarkdown";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useSidebarSections, type SidebarSection } from "../protocol/thread-metadata";
 import { SidebarSections } from "./SidebarSections";
+import { handoffConversationWorktree } from "../lib/handoff-worktree";
 
 // The menu invocation owns its reply even after the reader changes chats.
 const runMenuCommand = async (command: ClientCommand): Promise<CommandResultEvent | undefined> => {
@@ -212,6 +214,7 @@ export const ConversationsTab = ({
   const { t: tr } = useI18n();
   const conversations = useAppStore((s) => s.conversations);
   const pinnedConversationIds = useAppStore((s) => s.pinnedConversationIds);
+  const hasPinnedFiles = useAppStore(s => s.workspaceFileTabs.some(tab => tab.pinned));
   const pinnedConversationSortMode = useAppStore((s) => s.pinnedConversationSortMode);
   const sidebarOrder = useAppStore((s) => s.sidebarOrder);
   const [pendingSortMode, setPendingSortMode] = useState<{ mode: "manual" | "updated_at" } | null>(null);
@@ -536,30 +539,8 @@ export const ConversationsTab = ({
 
   const handoffWorktree = useCallback(async (id: string, target: "local" | "worktree") => {
     const taskName = conversationsRef.current.find(conversation => conversation.id === id)?.title || id;
-    let result = await runMenuCommand({ type: "conversation.worktree.handoff.preflight", conversation_id: id, target });
-    if (!result) return;
-    let checks = (result.data?.checks ?? []) as Array<{ code: string; severity: string; message: string }>;
-    const dirty = checks.some(check => check.code === "source.dirty" && check.severity === "blocking");
-    if (!result.data?.allowed && dirty) {
-      if (!await showConfirm({ title: tr("检测到未提交改动"), message: tr("将已跟踪和未跟踪文件暂存，并在目标工作区恢复。发生冲突时暂存内容保留，可手动恢复。"), confirmLabel: tr("暂存后继续"), danger: true })) return;
-      result = await runMenuCommand({ type: "conversation.worktree.handoff.preflight", conversation_id: id, target, dirty_action: "stash" });
-      if (!result) return;
-      checks = (result.data?.checks ?? []) as Array<{ code: string; severity: string; message: string }>;
-    }
-    if (!result.data?.allowed) {
-      pushToast(checks.filter(check => check.severity === "blocking").map(check => check.message).join("\n") || result.message, "warning", 6000);
-      return;
-    }
-    const confirmed = await showConfirm({
-      title: target === "local" ? tr("将“{name}”移到本地检出？", { name: taskName }) : tr("将“{name}”移到隔离工作区？", { name: taskName }),
-      message: [target === "local" ? tr("移除干净的隔离工作区，并把本地检出切换到此任务分支。") : tr("为此任务创建干净、隔离的 Worktree。"), ...checks.filter(check => check.severity === "warning").map(check => check.message)].join("\n\n"),
-      confirmLabel: tr("移动任务"),
-    });
-    if (!confirmed) return;
-    const completed = await runMenuCommand({ type: "conversation.worktree.handoff.execute", conversation_id: id, target,
-      fingerprint: result.data.fingerprint as string, dirty_action: result.data.dirty_action === "stash" ? "stash" : "block" });
-    if (completed) pushToast(completed.message, completed.data?.completed && completed.level !== "warning" ? "success" : "warning", 5000);
-  }, [tr]);
+    await handoffConversationWorktree(id, taskName, target);
+  }, []);
   const copyConversationPath = useCallback((path?: string) => {
     if (!path) return;
     setMenuFor(null);
@@ -777,7 +758,7 @@ export const ConversationsTab = ({
     : allProjectGroups.get(workspaceGroupIdentity(key.slice(8)))?.items.map(item => item.id) ?? []))];
   const projectGroupsById = new Map(orderedProjectGroups.map(group => [group.projectKey, group]));
   const isEmpty = activityView ? filtered.length === 0
-    : pinnedConversations.length === 0 && projectGroups.size === 0 && sections.length === 0 && (!showRecent || recentConversations.length === 0);
+    : !hasPinnedFiles && pinnedConversations.length === 0 && projectGroups.size === 0 && sections.length === 0 && (!showRecent || recentConversations.length === 0);
 
   return (
     <>
@@ -835,8 +816,9 @@ export const ConversationsTab = ({
             onNavigate?.();
           }}>{tr("新建任务")}</button>}
         />}
-        {!activityView && pinnedConversations.length > 0 && <section aria-label={tr("已固定")} className="mc-sidebar-pinned">
+        {!activityView && (pinnedConversations.length > 0 || hasPinnedFiles) && <section aria-label={tr("已固定")} className="mc-sidebar-pinned">
           <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{tr("已固定")}</span></div>
+          <PinnedWorkspaceFiles />
           <PinnedConversationList conversations={pinnedConversations} renderRow={renderSessionRow} renamingId={renaming}
             onDragStart={() => setMenuFor(null)} onReorder={async (movedId, beforeId, visibleIds) => Boolean(await runMenuCommand({
               type: "conversation.pin.reorder", moved_conversation_id: movedId, before_conversation_id: beforeId, visible_conversation_ids: visibleIds,

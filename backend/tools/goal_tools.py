@@ -20,6 +20,7 @@ class GoalTool(BaseTool):
 
     def __init__(self, name, config):
         self.name = name
+        self.config = config
         effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
         self.max_budget = effective.get("goals", {}).get("max_goal_token_budget")
         self.description = {
@@ -45,6 +46,9 @@ class GoalTool(BaseTool):
             "required": list(self.get_spec().required_args), "additionalProperties": False})
 
     async def execute(self, args, context=None):
+        config = context.model_execution.config if context is not None and context.model_execution is not None else self.config
+        if not config.feature_flags.enabled("goals"):
+            return self._error_result("goals feature is disabled")
         owner = context.run_context if context is not None else None
         if owner is None or owner.conversation_repository is None or not context.conversation_id:
             return self._error_result("Goal tools require a persistent conversation")

@@ -56,6 +56,7 @@ export type WorkspaceServerEventType =
 export type WorkspaceClientCommandType =
   | "diff.git_file_contents"
   | "diff.git_review_options"
+  | "diff.git_review_patch"
   | "diff.git_revert_patch"
   | "workspace.import"
   | "workspace.switch"

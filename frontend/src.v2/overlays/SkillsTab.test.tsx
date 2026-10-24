@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { SkillsTab } from "./SkillsTab";
+import type { SettingsSkill } from "./SkillDetailsDialog";
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), toast: vi.fn() }));
 vi.hoisted(() => {
@@ -12,10 +13,10 @@ vi.hoisted(() => {
 vi.mock("../protocol/api", async original => ({ ...await original<typeof import("../protocol/api")>(),
   apiBase: () => "http://test.local", authHeaders: (headers?: HeadersInit) => headers || {}, fetchWithTimeout: mocks.fetch }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
-const one = { name: "same", display_name: "First", description: "Review files", path: "C:/skills/first/SKILL.md", source_level: "user", enabled: true };
-const two = { name: "same", display_name: "Second", description: "Write tests", path: "C:/skills/second/SKILL.md", source_level: "user", enabled: false };
+const one: SettingsSkill = { name: "same", display_name: "First", description: "Review files", path: "C:/skills/first/SKILL.md", source_level: "user", enabled: true, uninstall_name: "first" };
+const two: SettingsSkill = { name: "same", display_name: "Second", description: "Write tests", path: "C:/skills/second/SKILL.md", source_level: "user", enabled: false, uninstall_name: "second" };
 const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
-const payload = (skills = [one, two], root = "C:/A") => ({ skills, plugin_skills: [], available_skills: skills.filter(skill => skill.enabled), workspace_root: root });
+const payload = (skills: SettingsSkill[] = [one, two], root = "C:/A") => ({ skills, plugin_skills: [], available_skills: skills.filter(skill => skill.enabled), workspace_root: root });
 
 describe("Skills settings inventory", () => {
   beforeEach(() => {
@@ -100,5 +101,74 @@ describe("Skills settings inventory", () => {
     expect(useAppStore.getState().selectedSkills).toMatchObject([{ name: "same", path: two.path }]);
     expect(useAppStore.getState().draft).toBe("Keep my draft\nFollow the second workflow");
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("uninstalls the backend-owned directory identity and refreshes inventory without changing the draft", async () => {
+    let finish!: (result: Response) => void;
+    let removed = false;
+    mocks.fetch.mockImplementation(async (input, init) => {
+      if (init?.method === "DELETE") {
+        expect(String(input)).toBe("http://test.local/api/skills/second");
+        return new Promise<Response>(resolve => { finish = result => { removed = true; resolve(result); }; });
+      }
+      if (new URL(input).pathname === "/api/skills/detail") return response({ content: "Actual instructions", raw_content: "Actual source" });
+      return response(payload(removed ? [one] : [one, two]));
+    });
+    useAppStore.setState({ availableSkills: [one, two], selectedSkills: [two] });
+    render(<SkillsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看技能详情 Second" }));
+    const dialog = screen.getByRole("dialog", { name: "Second" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "卸载", exact: true }));
+    expect(within(dialog).getByRole("button", { name: "卸载", exact: true })).toHaveProperty("disabled", true);
+    await act(async () => finish(response({ removed: true })));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByRole("button", { name: "查看技能详情 Second" })).toBeNull();
+    expect(useAppStore.getState().availableSkills.map(skill => skill.path)).toEqual([one.path]);
+    expect(useAppStore.getState().draft).toBe("Keep my draft");
+    expect(useAppStore.getState().selectedSkills).toEqual([two]);
+  });
+
+  it("keeps the Skill detail and actual deletion error when uninstall is rejected", async () => {
+    mocks.fetch.mockImplementation(async (input, init) => init?.method === "DELETE"
+      ? new Response("Actual delete permission failure", { status: 400 })
+      : response(new URL(input).pathname === "/api/skills/detail" ? { content: "Actual instructions", raw_content: "Actual source" } : payload()));
+    render(<SkillsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看技能详情 First" }));
+    fireEvent.click(screen.getByRole("button", { name: "卸载", exact: true }));
+    await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith("Actual delete permission failure", "error"));
+    expect(screen.getByRole("dialog", { name: "First" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "卸载", exact: true })).toHaveProperty("disabled", false);
+    expect(screen.getByRole("button", { name: "查看技能详情 First" })).toBeTruthy();
+  });
+
+  it("does not expose Uninstall for external user roots or read-only details", async () => {
+    mocks.fetch.mockImplementation(async input => response(new URL(input).pathname === "/api/skills/detail"
+      ? { content: "Actual instructions", raw_content: "Actual source" }
+      : payload([{ ...one, plugin_enabled: false }, { ...two, uninstall_name: null }])));
+    render(<SkillsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看技能详情 Second" }));
+    expect(screen.queryByRole("button", { name: "卸载", exact: true })).toBeNull();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    fireEvent.click(screen.getByRole("button", { name: "查看技能详情 First" }));
+    expect(screen.queryByRole("button", { name: "卸载", exact: true })).toBeNull();
+    expect(screen.queryByRole("button", { name: "立即试用" })).toBeNull();
+  });
+
+  it("keeps the new workspace catalog when an earlier uninstall finishes", async () => {
+    let finish!: (result: Response) => void;
+    mocks.fetch.mockImplementation(async (input, init) => {
+      if (init?.method === "DELETE") return new Promise<Response>(resolve => { finish = resolve; });
+      const url = new URL(input);
+      return response(url.pathname === "/api/skills/detail" ? { content: "Actual instructions", raw_content: "Actual source" }
+        : payload([one, two], url.searchParams.get("workspace_root")!));
+    });
+    render(<SkillsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看技能详情 Second" }));
+    fireEvent.click(screen.getByRole("button", { name: "卸载", exact: true }));
+    act(() => useAppStore.setState({ workingDirectory: "C:/B", availableSkills: [{ name: "workspace-b", description: "B" }] }));
+    await screen.findByRole("button", { name: "查看技能详情 Second" });
+    await act(async () => finish(response({ removed: true })));
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["workspace-b"]);
+    expect(useAppStore.getState().draft).toBe("Keep my draft");
   });
 });

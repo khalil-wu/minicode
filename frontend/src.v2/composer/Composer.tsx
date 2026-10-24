@@ -39,6 +39,7 @@ import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { uniqueMessageId } from "../stores/shared-helpers";
 import { composerWorkspaceKey } from "../stores/composer-drafts";
 import type { CommandResultEvent } from "../protocol/events";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { CodeReviewMenu, type CodeReviewOwner } from "./CodeReviewMenu";
 import { createCodeReview } from "../protocol/code-review";
 import type { CodeReviewOptions } from "../protocol/code-review-types";
@@ -178,8 +179,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     ...[s.pendingAskUser, ...s.askUserQueue].filter(request => request?.requestUserInput || request?.elicitation),
   ], s.conversationId));
   const skillCatalog = useAppStore((s) => s.availableSkills);
-  const activeGoal = useAppStore((s) => s.activeGoal);
-  const goalMode = useAppStore((s) => s.goalMode);
+  const activeGoal = useAppStore((s) => capabilityFeatureEnabled(s.runtimeCapabilities, "goals") ? s.activeGoal : null);
+  const goalMode = useAppStore((s) => s.goalMode && capabilityFeatureEnabled(s.runtimeCapabilities, "goals"));
   const currentModel = useAppStore((s) => s.currentModel);
   const conversationId = useAppStore(state => state.conversationId);
   const planMessages = useAppStore(state => state.agentMode === "plan" && !state.isStreaming ? state.messages : null);
@@ -621,7 +622,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     if (useAppStore.getState().pendingConversationSwitchId) return;
     if (sendState === "stop" && !draft.trim()) return;
     if (sendState !== "idle" && sendState !== "queue" && sendState !== "offline-queue") return;
-    if (useAppStore.getState().goalMode) {
+    if (useAppStore.getState().goalMode && capabilityFeatureEnabled(useAppStore.getState().runtimeCapabilities, "goals")) {
       await submitComposerGoal(tr);
       return;
     }
@@ -632,7 +633,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     const slashInput = parseRuntimeSlashInput(content);
     if (slashInput?.commandLine.trim() === "/goal" && useAppStore.getState().slashCommands.some(command => command.name === "goal" && command.source === "builtin")) {
-      enterComposerGoalMode();
+      if (!enterComposerGoalMode()) return;
       setDraft(""); setSelectedSlashCommand(null); closeSlashPanel();
       return;
     }
@@ -930,7 +931,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
 
     if (slashPanelOpen) {
       if (value === "/goal" && useAppStore.getState().slashCommands.some(command => command.name === "goal" && command.source === "builtin")) {
-        enterComposerGoalMode();
+        if (!enterComposerGoalMode()) return;
         setSelectedSlashCommand(null);
         setDraft(draft.replace(/^\s*\/[\w-]+\s*/, ""));
         closeSlashPanel(); setMenuFilter("");

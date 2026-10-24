@@ -407,10 +407,12 @@ class QueryEngine:
         host_emit_event = turn_ctx.emit_event
         async def emit_runtime_event(event_type, data):
             # Direct tool callbacks do not travel through the yielded query
-            # stream. Commit their real native start before the host sees it,
-            # including SDK sessions without a host callback. CodeMode and
-            # extension callbacks retain their acknowledged nested route.
-            if (event_type == "runtime.span" and data.get("event") == "tool.started"
+            # stream. Commit native starts and async user messages before the
+            # host sees them, including SDK sessions without a host callback.
+            # CodeMode and extension callbacks retain their nested route.
+            native_start = event_type == "runtime.span" and data.get("event") == "tool.started"
+            async_user_message = event_type in {"item.started", "item.completed"} and data.get("item", {}).get("delivery") == "async"
+            if ((native_start or async_user_message)
                     and (data.get("call_source") or {}).get("kind") not in {"code_mode", "extension"}):
                 await journal.record_event_async(AgentEvent(event_type, data))
             if host_emit_event is not None:

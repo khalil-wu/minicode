@@ -20,7 +20,8 @@ from backend.llm.model_request_policy import source_model_request_capabilities
 
 logger = logging.getLogger(__name__)
 SOURCE_ROLE_NAMES = frozenset({"default", "explorer", "worker"})
-BOUNDED_ROLE_FEATURES = frozenset({"shell_tool", "apps", "plugins", "memory_tool", "request_permissions_tool"})
+BOUNDED_ROLE_FEATURES = frozenset({"shell_tool", "apps", "plugins", "memories", "request_permissions_tool"})
+_ROLE_FEATURE_ALIASES = {"memory_tool": "memories", "connectors": "apps"}
 _AGENTS_SETTINGS = frozenset({"enabled", "interrupt_message", "max_threads", "max_depth", "max_concurrent_threads_per_session", "job_max_runtime_seconds", "default_subagent_model", "default_subagent_reasoning_effort"})
 
 
@@ -82,10 +83,13 @@ def _bounded_overrides(raw: dict[str, Any], base: Path) -> dict[str, Any]:
     raw_features = raw.get("features", {})
     if not isinstance(raw_features, dict):
         raise ValueError("features must be a TOML table")
-    for name, enabled in raw_features.items():
+    features = {}
+    for raw_name, enabled in raw_features.items():
+        name = _ROLE_FEATURE_ALIASES.get(raw_name, raw_name)
         if name in BOUNDED_ROLE_FEATURES and not isinstance(enabled, bool):
-            raise ValueError(f"features.{name} must be a boolean")
-    features = {name: False for name, enabled in raw_features.items() if name in BOUNDED_ROLE_FEATURES and enabled is False}
+            raise ValueError(f"features.{raw_name} must be a boolean")
+        if name in BOUNDED_ROLE_FEATURES and enabled is False:
+            features[name] = False
     if features:
         result["features"] = features
     skills = raw.get("skills", {})
@@ -220,8 +224,11 @@ def get_execution_agent(name: str, workspace_root: str | Path | None = None, *, 
 def source_spawn_version(config: Any, *, model: str = "", definition: Any = None) -> str:
     if config.feature_flags.enabled("multi_agent_v2"):
         return "v2"
+    effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    if not effective.get("agents", {}).get("enabled", True):
+        return "disabled"
     model_version = source_model_request_capabilities(model or config.llm.model, definition).get("multi_agent_version")
-    return model_version or "v1"
+    return model_version or ("v1" if config.feature_flags.enabled("multi_agent") else "disabled")
 
 
 def source_agent_options(config: Any, *, model: str = "", definition: Any = None, version: str = "") -> dict[str, Any]:
@@ -230,8 +237,13 @@ def source_agent_options(config: Any, *, model: str = "", definition: Any = None
     agents = effective.get("agents", {})
     declared = effective.get("features", {}).get("multi_agent_v2")
     options = declared if isinstance(declared, dict) else {}
-    version = version or source_spawn_version(config, model=model, definition=definition)
-    enabled = version != "disabled" and (config.feature_flags.enabled("multi_agent_v2") or agents.get("enabled", True))
+    if config.feature_flags.enabled("multi_agent_v2"):
+        version = "v2"
+    elif not agents.get("enabled", True):
+        version = "disabled"
+    else:
+        version = version or source_spawn_version(config, model=model, definition=definition)
+    enabled = version != "disabled"
     if version == "v2" and "max_concurrent_threads_per_session" in agents and (
             type(agents["max_concurrent_threads_per_session"]) is not int or agents["max_concurrent_threads_per_session"] < 1):
         raise ValueError("agents.max_concurrent_threads_per_session must be a positive integer")
@@ -346,7 +358,7 @@ def role_tool_denials(overrides: dict[str, Any], registry: Any) -> list[str]:
         spec = registry.get_tool_spec(name)
         owner = registry.get_tool_owner(name) or ""
         if ((disabled.get("shell_tool") is False and (spec.capability.startswith("shell.") or name == "monitor"))
-            or (disabled.get("memory_tool") is False and (spec.toolset == "memory" or spec.capability.startswith("memory.") or name.startswith("memory_")))
+            or (disabled.get("memories") is False and (spec.toolset == "memory" or spec.capability.startswith("memory.") or name.startswith("memory_")))
             or (disabled.get("request_permissions_tool") is False and name == "request_permissions")
             or (disabled.get("plugins") is False and (owner.startswith("plugin:") or owner.startswith("mcp:plugin:")))
             or (disabled.get("apps") is False and (spec.toolset == "apps" or owner.startswith("app:") or owner.startswith("mcp:codex_apps")))):

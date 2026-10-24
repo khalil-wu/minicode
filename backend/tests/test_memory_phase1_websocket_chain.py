@@ -324,6 +324,7 @@ async def test_phase1_partial_usage_and_actual_socket_owner_close_on_every_termi
     startup = conversation(repository, tmp_path, "startup-A")
     old = conversation(repository, tmp_path, "ROLLOUT_B_FACT")
     entered = asyncio.Event()
+    usage_consumed = asyncio.Event()
     tracker = CostTracker()
     monkeypatch.setattr(CostTracker, "_instance", tracker)
     async def respond(item):
@@ -340,12 +341,28 @@ async def test_phase1_partial_usage_and_actual_socket_owner_close_on_every_termi
             item.connection.closed = True
     async with responses_provider(respond) as server:
         adapter = adapter_for(server)
+        original_events = adapter._emit_responses_websocket_events
+
+        async def observed_events(*args, **kwargs):
+            stream = original_events(*args, **kwargs)
+            try:
+                async for event in stream:
+                    yield event
+                    # The real collector has handled this usage-bearing frame
+                    # before it asks the iterator for its next event.
+                    if event.type == "response.created":
+                        usage_consumed.set()
+            finally:
+                await stream.aclose()
+
+        monkeypatch.setattr(adapter, "_emit_responses_websocket_events", observed_events)
         calls = observe_side_calls(monkeypatch, adapter)
         coordinator = MemoryGenerationCoordinator(repository=repository, llm=adapter, workspace_root=tmp_path)
         task = asyncio.create_task(coordinator._extract_phase1(old, "ROLLOUT_B_FACT",
             startup_source=MemoryStartupSource(startup.id, "workspace-write")))
         try:
             await asyncio.wait_for(entered.wait(), 5)
+            await asyncio.wait_for(usage_consumed.wait(), 5)
             if stop == "cancel":
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):

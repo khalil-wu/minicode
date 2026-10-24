@@ -47,6 +47,7 @@ class HookRuntimeBindings:
     tool_context: Any | None = None
     allowed_http_hook_urls: tuple[str, ...] | None = None
     http_hook_allowed_env_vars: tuple[str, ...] | None = None
+    mcp_executor: Any | None = None
     register_async_command: Callable[["PendingAsyncCommand"], None] | None = None
 
 
@@ -91,6 +92,25 @@ async def execute_hook(
     if entry.hook_type == "http":
         result = await _execute_http(entry, event=event, json_input=json_input, runtime=runtime)
         return HookExecutionResult(*result)
+    if entry.hook_type == "mcp_tool":
+        from backend.hooks.mcp_executor import HookMcpExecutor, expand_mcp_input
+
+        executor = runtime.mcp_executor
+        if executor is None:
+            manager = runtime.tool_context.run_context.mcp_manager
+            if manager is None:
+                raise HookExecutionError("MCP hook executor is not bound to this turn")
+            # Environment capability refresh publishes a new manager for each
+            # admitted step. Resolve it when this synchronous hook executes.
+            executor = HookMcpExecutor(manager)
+        hook_input = json.loads(json_input)
+        hook_input.setdefault("hook_event_name", "".join(part.title() for part in event_name.split("_")))
+        arguments = expand_mcp_input(entry.input, hook_input)
+        output = await executor.execute(
+            server=entry.server, tool=entry.tool, input=arguments,
+            timeout=_entry_timeout_seconds(entry, event), tool_context=runtime.tool_context,
+        )
+        return HookExecutionResult(output, "", 0)
     if entry.hook_type == "prompt":
         result = await _execute_prompt(
             entry,

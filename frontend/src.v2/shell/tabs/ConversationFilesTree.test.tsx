@@ -4,11 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", { configurable: true, value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) });
-  return { tree: vi.fn(), original: vi.fn(), preview: vi.fn(), upload: vi.fn(), openPreferred: vi.fn(), toast: vi.fn(), copy: vi.fn(), target: "minicode",
+  return { tree: vi.fn(), original: vi.fn(), preview: vi.fn(), branches: vi.fn(), search: vi.fn(), upload: vi.fn(), openPreferred: vi.fn(), toast: vi.fn(), copy: vi.fn(), target: "minicode",
     perPath: {} as Record<string, string>, targets: [] as Array<{ id: string; label: string; kind: string; icon: string }> };
 });
-vi.mock("../../protocol/conversation-browser", () => ({ fetchConversationBrowserTree: mocks.tree, fetchConversationBrowserOriginal: mocks.original }));
-vi.mock("../../chat/openAttachmentPreview", () => ({ openConversationBrowserFilePreview: mocks.preview }));
+vi.mock("../../protocol/file-workspace", () => ({ readFileWorkspaceTree: mocks.tree, readFileWorkspaceOriginal: mocks.original, readFileWorkspaceBranches: mocks.branches, searchFileWorkspace: mocks.search }));
 vi.mock("../../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: { fileOpenTarget: mocks.target,
   fileOpenTargetPerPath: mocks.perPath, fileOpenTargets: [{ id: "minicode", label: "MiniCode", kind: "editor", hidden: true }, { id: "system", label: "默认应用", kind: "systemDefault", hidden: true }, ...mocks.targets] } }) }));
 vi.mock("../../desktop/runtime", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../desktop/runtime")>()), desktop: () => ({ openPreferredPath: mocks.openPreferred }) }));
@@ -21,8 +20,8 @@ import { useAppStore } from "../../stores";
 import { ConversationFilesTree } from "./ConversationFilesTree";
 import type { ConversationBrowserEntry, ConversationBrowserTree } from "../../protocol/conversation-browser";
 
-const owner = { conversationId: "owner-a", executionCwd: "C:/tasks/a" };
 const browserRoot = "C:/Users/ago/Documents";
+const owner = { scopeId: "conversation:owner-a", conversationId: "owner-a", executionCwd: "C:/tasks/a", browserRoot };
 const entry = (path: string, is_dir = false): ConversationBrowserEntry => ({ name: path.split("/").at(-1)!, path, is_dir, size_bytes: is_dir ? null : 12, modified_at: "", has_children: is_dir });
 const page = (entries: ConversationBrowserEntry[], root = browserRoot): ConversationBrowserTree => ({ workspace_root: root, requested_path: ".", entries });
 const show = () => render(<ConversationFilesTree owner={owner} browserRoot={browserRoot} connected version={1} />);
@@ -38,15 +37,29 @@ beforeEach(() => {
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   URL.createObjectURL = vi.fn(() => "blob:original"); URL.revokeObjectURL = vi.fn();
   mocks.tree.mockResolvedValue(page([entry("notes", true), entry("note.txt"), entry("photo.png")]));
+  mocks.branches.mockResolvedValue({ is_git_repo: false, current_branch: null, default_base_branch: null, branches: [], commits: [] });
+  mocks.search.mockResolvedValue({ results: [] });
   mocks.original.mockResolvedValue(new Blob(["original bytes\r\n"], { type: "text/plain" }));
   mocks.upload.mockResolvedValue({ conversation_id: "owner-a", artifact_id: "uploaded-original", attachment: { artifact_id: "uploaded-original", file_name: "note.txt", kind: "document", media_type: "text/plain" } });
   useAppStore.setState({ conversationId: "owner-a", pendingConversationSwitchId: null, conversations: [{ id: "owner-a", title: "Owner A", updatedAt: "", executionCwd: owner.executionCwd, projectlessBrowserRoot: browserRoot }],
     workingDirectory: owner.executionCwd, draft: "authored draft", attachments: [{ id: "existing", name: "keep.txt", type: "text/plain", size: 1, status: "ready" }],
-    composerDraftsReady: true, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, sideChats: {}, editorOpenRequests: [], appMode: "chat" });
+    composerDraftsReady: true, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, sideChats: {}, editorOpenRequests: [], appMode: "chat", openWorkspaceFileTab: mocks.preview });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("read-only conversation Files tree", () => {
+  it("passes the selected repository and comparison to All changes and filters unloaded paths", async () => {
+    mocks.branches.mockResolvedValue({ is_git_repo: true, current_branch: "feature", default_base_branch: "origin/main", branches: ["origin/main"], commits: [] });
+    mocks.search.mockResolvedValue({ results: [{ path: "unloaded/deep.ts" }] });
+    show();
+    fireEvent.click(await screen.findByRole("button", { name: "All changes" }));
+    expect(useAppStore.getState().gitReviewRequest).toMatchObject({ path: "", workspaceRoot: browserRoot,
+      source: "branch", baseBranch: "origin/main", fileOwner: { ...owner, conversationId: null, executionCwd: browserRoot }, conversationId: "owner-a" });
+    fireEvent.change(screen.getByRole("textbox", { name: "筛选文件" }), { target: { value: "deep" } });
+    await screen.findByText("unloaded/deep.ts");
+    expect(mocks.search).toHaveBeenCalledWith(owner, "deep", expect.any(AbortSignal));
+    expect(useAppStore.getState()).toMatchObject({ workingDirectory: owner.executionCwd, draft: "authored draft" });
+  });
   it("uses the execution workspace preference when browsing a different projectless root, and explicit file targets stay temporary", async () => {
     mocks.target = "cursor"; mocks.perPath[owner.executionCwd] = "vscode";
     mocks.targets = [{ id: "vscode", label: "VS Code", kind: "editor", icon: "apps/vscode.png" }, { id: "cursor", label: "Cursor", kind: "editor", icon: "apps/cursor.png" },
@@ -74,7 +87,7 @@ describe("read-only conversation Files tree", () => {
     show(); fireEvent.click(await screen.findByText("notes"));
     fireEvent.click(await screen.findByText("nested.txt"));
     expect(mocks.tree).toHaveBeenCalledWith(owner, "notes", expect.any(AbortSignal));
-    expect(mocks.preview).toHaveBeenCalledWith({ ...owner, path: "notes/nested.txt", name: "nested.txt" });
+    expect(mocks.preview).toHaveBeenCalledWith(owner, "notes/nested.txt", "nested.txt");
     expect(useAppStore.getState().workingDirectory).toBe(owner.executionCwd);
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
   });
@@ -98,20 +111,22 @@ describe("read-only conversation Files tree", () => {
   it("opens text in the editor only inside the execution root and keeps other browser files in read-only preview", async () => {
     const view = show(); await screen.findByText("note.txt");
     selectAction("note.txt", "在 MiniCode 中打开");
-    expect(mocks.preview).toHaveBeenCalledWith({ ...owner, path: "note.txt", name: "note.txt" });
+    expect(mocks.preview).toHaveBeenCalledWith(owner, "note.txt", "note.txt");
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
-    view.unmount(); mocks.tree.mockResolvedValue(page([entry("main.py"), entry("image.png")], owner.executionCwd)); show();
+    view.unmount(); mocks.tree.mockResolvedValue(page([entry("main.py"), entry("image.png")], owner.executionCwd));
+    const executionOwner = { ...owner, browserRoot: owner.executionCwd };
+    render(<ConversationFilesTree owner={executionOwner} browserRoot={owner.executionCwd} connected version={1} />);
     await screen.findByText("main.py");
     const editorOpen = vi.spyOn(useAppStore.getState(), "openEditorFile");
     selectAction("main.py", "在 MiniCode 中打开");
     expect(editorOpen).toHaveBeenCalledWith("C:/tasks/a/main.py", "main.py", { exact: true });
     expect(useAppStore.getState().editorOpenRequests).toMatchObject([{ path: "main.py", exact: true }]);
     selectAction("image.png", "在 MiniCode 中打开");
-    expect(mocks.preview).toHaveBeenLastCalledWith({ ...owner, path: "image.png", name: "image.png" });
+    expect(mocks.preview).toHaveBeenLastCalledWith(executionOwner, "image.png", "image.png");
     expect(useAppStore.getState().workingDirectory).toBe(owner.executionCwd);
     act(() => useAppStore.setState({ workingDirectory: "C:/other-editor-root", editorOpenRequests: [] }));
     selectAction("main.py", "在 MiniCode 中打开");
-    expect(mocks.preview).toHaveBeenLastCalledWith({ ...owner, path: "main.py", name: "main.py" });
+    expect(mocks.preview).toHaveBeenLastCalledWith(executionOwner, "main.py", "main.py");
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
     expect(useAppStore.getState().workingDirectory).toBe("C:/other-editor-root");
   });

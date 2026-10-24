@@ -109,6 +109,8 @@ def effective_toolset_policy(
     model_execution: Any | None = None,
     multi_agent_version: str = "",
     config_snapshot: Any | None = None,
+    model_name: str = "",
+    model_info: Any | None = None,
     is_subagent: bool = False,
     realtime_service: Any | None = None,
 ) -> ToolsetPolicy:
@@ -116,15 +118,15 @@ def effective_toolset_policy(
 
     denied = set(disabled_tools)
     coordination_options = None
-    if model_execution is not None:
+    config = model_execution.config if model_execution is not None else config_snapshot
+    model_name = model_execution.model if model_execution is not None else model_name
+    model_info = model_execution.model_info if model_execution is not None else model_info
+    if config is not None:
         from backend.agents.source_roles import source_agent_options
         from backend.llm.model_request_policy import source_model_request_capabilities
         from backend.tools.collaboration_tools import SpawnAgentTool, ListAgentsTool, WaitAgentTool, InterruptAgentTool
-        from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
-        from backend.tools.sleep_tool import CurrentTimeTool
         from backend.tools.swarm_tools import FollowupTaskTool, SourceSendMessageTool
-        config = model_execution.config
-        coordination = source_agent_options(config, model=model_execution.model, definition=model_execution.model_info, version=multi_agent_version)
+        coordination = source_agent_options(config, model=model_name, definition=model_info, version=multi_agent_version)
         v2_names = {"spawn_agent", "list_agents", "wait_agent", "interrupt_agent"}
         legacy_names = {"task", "task_status", "task_stop", "send_message", "followup_task", "message_list",
             "task_create", "task_list", "task_get", "task_update", "task_output", "team_create", "team_list", "team_delete"}
@@ -143,8 +145,8 @@ def effective_toolset_policy(
                     if tool_registry.get_tool(tool.name) is None:
                         tool_registry.register(tool)
             denied.update(legacy_names - {"send_message", "followup_task"})
-            if is_subagent and source_model_request_capabilities(model_execution.model,
-                    model_execution.model_info).get("multi_agent_version") != "v2":
+            if is_subagent and source_model_request_capabilities(model_name,
+                    model_info).get("multi_agent_version") != "v2":
                 denied.update(SOURCE_V2_COORDINATION_TOOLS)
             if not coordination["wait_agent_enabled"]:
                 denied.add("wait_agent")
@@ -164,17 +166,20 @@ def effective_toolset_policy(
         else:
             denied.update(v2_names)
             denied.update(SOURCE_MESSAGE_BOARD_TOOLS)
-        supported = source_model_request_capabilities(model_execution.model, model_execution.model_info).get("experimental_supported_tools", [])
-        if "send_user_message_async" in supported or "request_user_input_async" in supported:
-            for tool in (RequestUserInputAsyncTool(), SendMessageToUserAsyncTool()):
-                if tool_registry.get_tool(tool.name) is None:
-                    tool_registry.register(tool)
-        else:
-            denied.update({"request_user_input_async", "send_message_to_user_async"})
-        if "clock" in supported and tool_registry.get_tool("curr_time") is None:
-            tool_registry.register(CurrentTimeTool())
-        elif "clock" not in supported:
-            denied.add("curr_time")
+        from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
+        from backend.tools.goal_tools import GoalTool
+        from backend.tools.plan_tool import UpdatePlanTool
+        from backend.tools.sleep_tool import CurrentTimeTool, SleepTool
+        from backend.tools.source_tool_gates import source_utility_tool_gates
+        factories = {"request_user_input_async": RequestUserInputAsyncTool,
+            "send_message_to_user_async": SendMessageToUserAsyncTool, "curr_time": CurrentTimeTool,
+            "sleep": SleepTool, "update_plan": UpdatePlanTool,
+            **{name: (lambda name=name: GoalTool(name, config)) for name in ("create_goal", "get_goal", "update_goal")}}
+        for name, available in source_utility_tool_gates(config, model=model_name, definition=model_info, is_subagent=is_subagent).items():
+            if not available:
+                denied.add(name)
+            elif tool_registry.get_tool(name) is None:
+                tool_registry.register(factories[name]())
     from backend.tools.web_tools import WebSearchTool
 
     search_tool = tool_registry.get_tool("web_search")

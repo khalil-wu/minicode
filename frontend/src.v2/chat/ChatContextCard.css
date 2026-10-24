@@ -1,5 +1,5 @@
 .chat-pane {
-  --chat-context-card-expanded-width: 320px;
+  --chat-context-card-expanded-width: 300px;
   container: chat-pane / inline-size;
   position: relative;
   display: grid;
@@ -39,10 +39,29 @@
   grid-area: search;
 }
 
-.chat-pane-layout:has(> .mc-chat-context-card) {
-  grid-template-columns: minmax(0, 1fr) var(--chat-context-card-expanded-width);
-  column-gap: 16px;
-  padding-right: 16px;
+.chat-pane-layout:has(> .mc-chat-context-card[data-surface="inline"]) {
+  --summary-content-shift: 0px;
+  --input-max-width: 736px;
+  --chat-axis-width: min(736px, calc(100% - 48px));
+  --mc-chat-width: min(736px, calc(100% - 48px));
+}
+
+.chat-pane-layout:has(> .mc-chat-context-card[data-display-mode="shift"]) {
+  --summary-content-shift: -154px;
+}
+
+.chat-pane-layout:has(> .mc-chat-context-card[data-surface="inline"]) > .chat-pane-main {
+  transform: translateX(var(--summary-content-shift));
+  transition: transform var(--duration-fast) var(--easing-enter);
+}
+
+.mc-chat-context-card[data-surface="inline"] {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: var(--chat-context-card-expanded-width);
+  max-height: calc(100% - 16px);
+  margin: 0;
 }
 
 .chat-pane-message-transition {
@@ -119,6 +138,16 @@
   animation: mc-context-card-in var(--duration-fast) var(--easing-enter);
 }
 
+.mc-chat-context-card[data-surface="popover"] {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: min(var(--chat-context-card-expanded-width), calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  margin: 0;
+  z-index: var(--z-dropdown);
+}
+
 .mc-chat-context-card-header,
 .mc-chat-context-section-title,
 .mc-chat-context-source,
@@ -176,6 +205,18 @@
   place-items: center;
   border-radius: var(--mc-control-radius);
   color: var(--text-muted);
+}
+
+.mc-chat-context-card-header .mc-chat-context-project-name {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+  padding: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-weight: var(--fw-medium);
 }
 
 .mc-chat-context-card button:hover {
@@ -409,12 +450,11 @@ html[data-theme="light"] .mc-chat-context-card {
 }
 
 @container chat-pane (max-width: 900px) {
-  .chat-pane-layout:has(> .mc-chat-context-card) {
+  .chat-pane-layout:has(> .mc-chat-context-card[data-surface="inline"]) {
     grid-template-columns: minmax(0, 1fr);
     gap: 0;
     padding-right: 0;
   }
-  .mc-chat-context-card { display: none; }
 
   .message-list-scroll {
     padding-left: 24px !important;
@@ -431,6 +471,7 @@ html[data-theme="light"] .mc-chat-context-card {
 
 @media (prefers-reduced-motion: reduce) {
   html:not([data-reduced-motion="false"]) .chat-pane-layout,
+  html:not([data-reduced-motion="false"]) .chat-pane-main,
   html:not([data-reduced-motion="false"]) .mc-chat-context-card,
   html:not([data-reduced-motion="false"]) .mc-chat-context-agent,
   html:not([data-reduced-motion="false"]) .mc-chat-context-card button {

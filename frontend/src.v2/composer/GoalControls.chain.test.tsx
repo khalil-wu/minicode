@@ -8,7 +8,7 @@ import { useAppStore } from "../stores";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { showConfirm } from "../overlays/DialogService";
 import { pushToast } from "../overlays/ToastContainer";
-import { prepareGoalEditor, readGoalEditor, submitComposerGoal } from "./goal-state";
+import { enterComposerGoalMode, prepareGoalEditor, readGoalEditor, submitComposerGoal, toggleGoalEditor, updateGoalEditor } from "./goal-state";
 import { translate } from "../i18n";
 import { emptyConversationWorkbenchState } from "../stores/ui-slice";
 import type { CommandResultEvent } from "../protocol/events";
@@ -48,6 +48,46 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.clearAllMocks(); vi.unstubAllGlobals(); });
+
+it("consumes goals=false across entries and existing views while retaining the actual goal and drafts", async () => {
+  const goal = { text: "Saved objective", status: "active" };
+  const attachment = { id: "kept", name: "notes.txt", type: "text/plain", size: 0, status: "ready" as const };
+  useAppStore.setState({ activeGoal: goal, goalMode: true, attachments: [attachment],
+    runtimeCapabilities: { feature_flags: { goals: { enabled: false } } } as never });
+  prepareGoalEditor(owner, goal);
+  updateGoalEditor(owner, { draft: "My unsaved goal edit" });
+  const close = vi.fn();
+  render(<><FooterRow sendState="idle" onSend={() => {}} /><GoalBar /><GoalPanel active onClose={close} /></>);
+  fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+  expect(screen.queryByRole("menuitem", { name: /^目标/ })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "目标" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "编辑目标" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "清除目标" })).toBeNull();
+  expect(enterComposerGoalMode()).toBe(false);
+  toggleGoalEditor(owner, goal);
+  await submitComposerGoal(tr);
+  expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+  expect(useAppStore.getState()).toMatchObject({ activeGoal: goal, goalMode: true, draft: "Keep the original draft",
+    attachments: [attachment], rightStackTab: "tasks", rightPanelOpen: false });
+  act(() => useAppStore.setState({ runtimeCapabilities: { feature_flags: { goals: { enabled: true } } } as never }));
+  expect((screen.getByRole("textbox", { name: "目标" }) as HTMLTextAreaElement).value).toBe("My unsaved goal edit");
+  fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+  expect(screen.getByRole("menuitem", { name: /^目标/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "编辑目标" })).toBeTruthy();
+});
+
+it("chooses Plan with goals disabled without clearing a persisted goal", async () => {
+  const goal = { text: "Retained disabled goal", status: "active" };
+  useAppStore.setState({ activeGoal: goal, goalMode: true,
+    runtimeCapabilities: { feature_flags: { goals: { enabled: false } } } as never });
+  render(<FooterRow sendState="idle" onSend={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: /^计划模式/ }));
+  await waitFor(() => expect(useAppStore.getState().pendingAgentModeChanges).toEqual({}));
+  expect(useAppStore.getState()).toMatchObject({ agentMode: "plan", activeGoal: goal, draft: "Keep the original draft" });
+  expect(sendClientCommandAwaitResult).not.toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.goal.set" }), "goal");
+});
 
 it("opens goal mode in the original composer and keeps all attachment and quote data", () => {
   const attachment = { id: "kept", name: "notes.txt", type: "text/plain", size: 0, status: "ready" as const };

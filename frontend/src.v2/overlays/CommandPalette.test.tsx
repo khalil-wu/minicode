@@ -27,6 +27,12 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import { showConfirm } from "./DialogService";
 import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 
+const { bodySearchRequest } = vi.hoisted(() => ({ bodySearchRequest: vi.fn() }));
+vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "palette-search-owner" }) }));
+vi.mock("../protocol/conversation-search", async importOriginal => ({
+  ...await importOriginal<typeof import("../protocol/conversation-search")>(), searchConversations: bodySearchRequest,
+}));
+
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
 }));
@@ -76,6 +82,7 @@ describe("CommandPalette pending user action guard", () => {
   });
   beforeEach(() => {
     vi.clearAllMocks();
+    bodySearchRequest.mockResolvedValue({ data: [], next_cursor: null });
     __resetOpenWebInBrowserForTests();
     useAppStore.setState({
       commandPaletteOpen: true,
@@ -90,11 +97,30 @@ describe("CommandPalette pending user action guard", () => {
         pending_approvals: [{ request_id: "ask-1", type: "ask_user" }],
       },
       slashCommands: [],
+      runtimeCapabilities: null,
     });
   });
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("merges body-only results with immediate metadata matches and reveals the producing message without overwriting drafts", async () => {
+    bodySearchRequest.mockResolvedValueOnce({ data: [{ conversation: { id: "body-owner", title: "Stored conversation", updated_at: "2026-10-23", archived: false },
+      message_id: "old-body-message", snippet: "an earlier needle in the conversation" }], next_cursor: null });
+    useAppStore.setState({ conversationId: "active-owner", runtimeSession: null, isConnected: true,
+      draft: "unsent composer draft", conversations: [{ id: "metadata-owner", title: "needle title", updatedAt: "2026-10-22" }],
+      editorTabs: [{ id: "editor-unchanged", path: "C:/unchanged.ts", content: "unsaved editor text", original: "saved text", loading: false, language: "typescript" }],
+      activeTabPath: "C:/unchanged.ts" });
+    render(<CommandPalette />);
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "needle" } });
+    expect(screen.getByRole("option", { name: /needle title/ })).toBeTruthy();
+    const result = await screen.findByRole("option", { name: /Stored conversation.*earlier needle/ });
+    expect(bodySearchRequest).toHaveBeenCalledWith(expect.objectContaining({ sessionId: "palette-search-owner", query: "needle", archived: false, limit: 50 }));
+    fireEvent.click(result);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "active-owner", pendingConversationSwitchId: "body-owner",
+      draft: "unsent composer draft", messageRevealTarget: { conversationId: "body-owner", messageId: "old-body-message" } });
+    expect(useAppStore.getState().editorTabs[0].content).toBe("unsaved editor text");
   });
 
   it("keeps the palette open on Escape when restored runtime state is waiting for user action", () => {

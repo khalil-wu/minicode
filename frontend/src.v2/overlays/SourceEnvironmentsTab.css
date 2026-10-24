@@ -25,7 +25,7 @@
 .source-environments textarea::placeholder { color: var(--text-muted); }
 .source-environment-platforms { display: flex; align-items: center; gap: 4px; }
 .source-environment-platforms > button { border: 0; border-radius: var(--radius-full); padding: 3px 10px; background: transparent; color: var(--text-muted); font: inherit; font-size: var(--mc-font-secondary); cursor: pointer; }
-.source-environment-platforms > button[aria-selected="true"], .source-environment-platforms > button[aria-pressed="true"] { background: var(--surface-soft); color: var(--text-primary); }
+.source-environment-platforms > button[aria-selected="true"], .source-environment-platforms > button[aria-pressed="true"] { background: var(--surface-selected); color: var(--text-primary); }
 .source-environment-variables { position: absolute; top: 38px; right: 0; z-index: 2; width: 320px; box-sizing: border-box; display: grid; gap: 9px; padding: 16px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--surface-raised); box-shadow: var(--shadow-soft); font-size: var(--mc-font-secondary); }
 .source-environment-variables > span { margin-top: 8px; color: var(--text-muted); }
 .source-environment-variables > code { padding: 6px 8px; background: var(--surface-soft); border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--mc-font-caption); }

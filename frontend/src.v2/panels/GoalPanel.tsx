@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { RotateCcw } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { useI18n } from "../i18n";
+import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { pushToast } from "../overlays/ToastContainer";
 import { prepareGoalEditor, readGoalEditor, updateGoalEditor, updateThreadGoal, useGoalEditor } from "../composer/goal-state";
 import "../composer/goal.css";
@@ -10,6 +11,7 @@ export function GoalPanel({ onClose, active }: { onClose: () => void; active: bo
   const { t: tr } = useI18n();
   const owner = useAppStore(state => state.conversationId) || "";
   const goal = useAppStore(state => state.activeGoal);
+  const enabled = useAppStore(state => capabilityFeatureEnabled(state.runtimeCapabilities, "goals"));
   const connected = useAppStore(state => state.isConnected && !state.pendingConversationSwitchId);
   const editor = useGoalEditor(owner);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -26,9 +28,13 @@ export function GoalPanel({ onClose, active }: { onClose: () => void; active: bo
     previousObjective.current = goal?.text;
     previousStatus.current = goal?.status;
   }, [owner, goal?.text, goal?.status, onClose]);
-  useEffect(() => { if (active) input.current?.focus(); }, [active, Boolean(editor)]);
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 60000); return () => clearInterval(timer); }, []);
-  if (!goal || !editor) return null;
+  useEffect(() => { if (active && enabled) input.current?.focus(); }, [active, enabled, Boolean(editor)]);
+  useEffect(() => {
+    if (!enabled) return;
+    const timer = setInterval(() => setNow(Date.now()), 60000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+  if (!enabled || !goal || !editor) return null;
   const changed = editor.draft !== editor.savedObjective;
   const canSave = connected && !editor.busy && editor.draft.trim().length > 0 && editor.draft.trim() !== editor.savedObjective;
   const save = async () => {

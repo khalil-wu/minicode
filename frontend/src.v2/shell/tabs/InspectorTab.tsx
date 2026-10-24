@@ -22,10 +22,11 @@ import { InfoCard, InfoRow, SectionLabel, SmallButton } from '../SidebarShared'
 import { ToolCallTimeline, buildRunReplayEvents, buildRunReplaySummary, runTimelineExportJsonl, runTimelineReplayJsonl, type RunReplayEvent, type RunReplaySummary } from '../../chat/tool-calls/ToolCallTimeline'
 import { getToolCallsFromMessage } from '../../lib/content-blocks'
 import { safeJsonParse } from '../../lib/safe-parse'
+import { allowDebugMenu } from '../../lib/desktop-debug'
 import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from '../../protocol/ws-outbox'
 
 export const InspectorTab = () => (
-  <InspectorTabContent />
+  allowDebugMenu() ? <InspectorTabContent /> : <DetailsTab traceExportEnabled={false} focusedOnly />
 )
 
 const InspectorTabContent = () => {
@@ -542,7 +543,7 @@ const RuntimeMetricsSection = () => {
   )
 }
 
-const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => {
+const DetailsTab = ({ traceExportEnabled, focusedOnly = false }: { traceExportEnabled: boolean; focusedOnly?: boolean }) => {
   const allLiveEntries = useAppStore((s) => s.inspectorEntries)
   const messages = useAppStore((s) => s.messages)
   const conversationId = useAppStore((s) => s.conversationId)
@@ -627,6 +628,13 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
     if (imported > 0 && useAppStore.getState().conversationId === ownerConversationId) setFilter('provider')
   }
 
+  const focusedDetails = focusedEntry && (isProviderTraceEntry(focusedEntry)
+    ? <ProviderTraceDetails entry={focusedEntry} previous={previousProviderEntry(providerEntries, focusedEntry)} traceExportEnabled={traceExportEnabled} />
+    : focusedEntry.targetKind === 'cache' ? <CacheMetricDetails entry={focusedEntry} />
+    : isPermissionDecisionEntry(focusedEntry) ? <PermissionDecisionDetails entry={focusedEntry} />
+    : <pre style={jsonBlockStyle}>{JSON.stringify(focusedEntry.payload, null, 2)}</pre>)
+  if (focusedOnly) return focusedDetails || null
+
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       <input
@@ -686,19 +694,7 @@ const DetailsTab = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => 
               </button>
             ))}
           </div>
-          {focusedEntry && (
-            isProviderTraceEntry(focusedEntry)
-              ? <ProviderTraceDetails entry={focusedEntry} previous={previousProviderEntry(providerEntries, focusedEntry)} traceExportEnabled={traceExportEnabled} />
-              : focusedEntry.targetKind === 'cache'
-                ? <CacheMetricDetails entry={focusedEntry} />
-              : isPermissionDecisionEntry(focusedEntry)
-                ? <PermissionDecisionDetails entry={focusedEntry} />
-              : (
-                <pre style={jsonBlockStyle}>
-                  {JSON.stringify(focusedEntry.payload, null, 2)}
-                </pre>
-              )
-          )}
+          {focusedDetails}
           {visibleEntries.slice(-10).reverse().map((entry, i) => (
             <button
               key={`${entry.targetId}-${i}`}

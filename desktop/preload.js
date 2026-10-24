@@ -58,6 +58,10 @@ const runtimeConfig = {
   windowBindingToken: mainRuntimeConfig?.windowBindingToken || "",
   initialNavigation: mainRuntimeConfig?.initialNavigation,
   desktop: {
+    personalizations: {
+      listHosts: () => ipcRenderer.invoke("minicode:personalizations:listHosts"),
+      request: (hostId, action, payload) => ipcRenderer.invoke("minicode:personalizations:request", hostId, action, payload),
+    },
     realtimeVoice: {
       claim: payload => ipcRenderer.invoke("minicode:realtimeVoice:claim", payload),
       update: payload => ipcRenderer.invoke("minicode:realtimeVoice:update", payload),

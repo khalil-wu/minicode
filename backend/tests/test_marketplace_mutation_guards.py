@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.skills.marketplace import install_marketplace_skill, remove_user_skill
+from backend.skills.marketplace import install_marketplace_skill, remove_user_skill, user_skill_uninstall_name
 
 
 def test_marketplace_install_is_create_only_under_concurrency(tmp_path: Path, monkeypatch) -> None:
@@ -52,12 +52,13 @@ def test_marketplace_install_is_create_only_under_concurrency(tmp_path: Path, mo
     assert (skills_dir / "review" / "SKILL.md").read_text(encoding="utf-8") == content
 
 
-def test_marketplace_remove_rejects_symlinked_skill_directory(tmp_path: Path) -> None:
+def test_marketplace_remove_rejects_symlinked_skill_directory(tmp_path: Path, monkeypatch) -> None:
     skills_dir = tmp_path / "skills"
     outside = tmp_path / "outside"
     skills_dir.mkdir()
     outside.mkdir()
     (outside / "SKILL.md").write_text("outside", encoding="utf-8")
+    monkeypatch.setattr("backend.skills.marketplace.USER_SKILLS_DIR", skills_dir)
     try:
         (skills_dir / "review").symlink_to(outside, target_is_directory=True)
     except OSError as exc:
@@ -65,5 +66,7 @@ def test_marketplace_remove_rejects_symlinked_skill_directory(tmp_path: Path) ->
 
     with pytest.raises(FileNotFoundError):
         remove_user_skill("review", skills_dir)
+
+    assert user_skill_uninstall_name(str(skills_dir / "review" / "SKILL.md")) is None
 
     assert (outside / "SKILL.md").read_text(encoding="utf-8") == "outside"

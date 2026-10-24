@@ -1243,6 +1243,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "thread/realtime/appendSpeech", "thread/realtime/stop", "thread/realtime/listVoices",
   "diff.git_file_contents",
   "diff.git_review_options",
+  "diff.git_review_patch",
   // Chat
   "user_message",
   "user_message.queue.cancel",

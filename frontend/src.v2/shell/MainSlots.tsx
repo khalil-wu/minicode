@@ -12,10 +12,13 @@ import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
 import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { ChatActionsButton } from "./ChatActionsButton";
+import { fileWorkspaceScope } from "../protocol/file-workspace";
+import { WorkspaceFileTabs } from "./WorkspaceFileTabs";
 
 const loadEditorPanel = () => import("../panels/EditorPanel").then((module) => ({ default: module.EditorPanel }));
 
 const LazyEditorPanel = lazy(loadEditorPanel);
+const LazyFileViewerPanel = lazy(() => import("../panels/FileViewerPanel").then(module => ({ default: module.FileViewerPanel })));
 const COMPACT_MAIN_WIDTH = 900;
 
 interface MainSlotsProps {
@@ -27,7 +30,13 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   const { t: tr } = useI18n();
   const floating = useAppStore((s) => s.rightPanelExpanded && s.rightPanelOpen);
   const forceChat = requestedForceChat || floating;
-  const panelSlots = useAppStore((s) => s.panelSlots);
+  const allPanelSlots = useAppStore((s) => s.panelSlots);
+  const fileTabs = useAppStore((s) => s.workspaceFileTabs);
+  const fileScope = useAppStore(fileWorkspaceScope);
+  const lastAuxiliarySlot = useRef<string | null>(null);
+  const panelSlots = useMemo(() => allPanelSlots.filter(slot => slot.kind !== "file"
+    || fileTabs.some(tab => tab.id === slot.fileTabId && (tab.owner.scopeId === fileScope
+      || tab.owner.conversationId === null && (slot.focused || slot.id === lastAuxiliarySlot.current)))), [allPanelSlots, fileTabs, fileScope]);
   const appMode = useAppStore((s) => s.appMode);
   const focusPanel = useAppStore((s) => s.focusPanel);
   const togglePanelMaximized = useAppStore((s) => s.togglePanelMaximized);
@@ -40,27 +49,30 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
     && s.diffReview?.previewReturnTarget?.conversationId === s.conversationId ? s.diffReview.previewReturnTarget : undefined);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
   const rightPanelOpen = useAppStore((s) => s.rightPanelOpen);
-  const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const contextCardCollapsed = useAppStore((s) => s.contextCardCollapsed);
-  const setContextCardCollapsed = useAppStore((s) => s.setContextCardCollapsed);
+  const contextCardPinned = useAppStore((s) => s.contextCardPinned);
+  const toggleContextCard = useAppStore((s) => s.toggleContextCard);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
 
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: tr("对话") };
   const focusedSlot = panelSlots.find((slot) => slot.focused) ?? chatSlot;
   const editorSlot = panelSlots.find((slot) => slot.kind === "editor") ?? null;
-  const showEditorLayout = Boolean(editorSlot) && !forceChat;
+  const fileSlots = panelSlots.filter(slot => slot.kind === "file");
+  if (focusedSlot.kind === "file" || focusedSlot.kind === "editor") lastAuxiliarySlot.current = focusedSlot.id;
+  const auxiliarySlot = panelSlots.find(slot => slot.id === lastAuxiliarySlot.current) ?? editorSlot ?? fileSlots[0];
+  const showEditorLayout = Boolean(auxiliarySlot) && !forceChat;
   const maximizedSlot = panelSlots.find((slot) => slot.maximized) ?? null;
   const effectiveMaximizedSlot = forceChat ? null : maximizedSlot;
   const tabbed = mode === "tabs";
   const activeSlot = forceChat ? chatSlot : effectiveMaximizedSlot
-    ?? ((tabbed || compact) && editorSlot ? editorSlot : focusedSlot);
+    ?? ((tabbed || compact) && auxiliarySlot ? auxiliarySlot : focusedSlot);
   const visibleSlots = useMemo(() => {
     if (forceChat) return [chatSlot];
     if (effectiveMaximizedSlot) return [effectiveMaximizedSlot];
-    if (tabbed || compact || !editorSlot) return [activeSlot];
-    return [chatSlot, editorSlot];
-  }, [activeSlot, chatSlot, compact, editorSlot, effectiveMaximizedSlot, forceChat, tabbed]);
+    if (tabbed || compact || !auxiliarySlot) return [activeSlot];
+    return [chatSlot, auxiliarySlot];
+  }, [activeSlot, chatSlot, compact, auxiliarySlot, effectiveMaximizedSlot, forceChat, tabbed]);
   const editorVisited = useRef(false);
   if (visibleSlots.some((slot) => slot.kind === "editor")) editorVisited.current = true;
   const keepEditorMounted = hasOpenEditor || editorVisited.current;
@@ -68,11 +80,9 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   // history, virtual-row measurements, composer state, and scroll position
   // then survive switching between the chat and Code rail entries.
   const mountedSlots = useMemo(() => {
-    if (!editorSlot) return visibleSlots;
-    return keepEditorMounted
-      ? [chatSlot, editorSlot]
-      : [chatSlot];
-  }, [chatSlot, editorSlot, keepEditorMounted, visibleSlots]);
+    return [chatSlot, ...editorSlot && keepEditorMounted ? [editorSlot] : [],
+      ...allPanelSlots.filter(slot => slot.kind === "file")];
+  }, [chatSlot, editorSlot, keepEditorMounted, allPanelSlots]);
 
   useLayoutEffect(() => {
     const surface = surfaceRef.current!;
@@ -148,11 +158,9 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
               <LocalEnvironmentActions />
               <ChatActionsButton />
               {visibleSlots.some((slot) => slot.kind === "chat") && <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("切换摘要")} title={tr("切换摘要")}
-                aria-pressed={!contextCardCollapsed && !rightPanelOpen} onClick={() => {
+                aria-pressed={!contextCardCollapsed || contextCardPinned} aria-controls="thread-summary-panel" onClick={() => {
                   const chatFrame = surfaceRef.current!.querySelector<HTMLElement>('.mc-main-slot-frame[data-panel-slot-kind="chat"]')!;
-                  if (chatFrame.clientWidth < COMPACT_MAIN_WIDTH) setRightStackTab("tasks");
-                  else if (rightPanelOpen) { toggleRightPanel(); setContextCardCollapsed(false); }
-                  else setContextCardCollapsed(!contextCardCollapsed);
+                  toggleContextCard(chatFrame.clientWidth);
                 }}><SlidersHorizontal size={17} /></button>}
               {(!rightPanelOpen || (effectiveMaximizedSlot && effectiveMaximizedSlot.kind !== "chat")) && <button
                 type="button" className="btn-ghost mc-icon-button" aria-label={tr("新建标签页")} title={tr("新建标签页")}
@@ -163,6 +171,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
             </div>
           </div>
         )}
+        {fileSlots.length > 0 && !forceChat && <WorkspaceFileTabs pane="left" activeTabId={auxiliarySlot?.kind === "file" ? auxiliarySlot.fileTabId : undefined} />}
         <div style={slotDeckStyle}>
           {mountedSlots.map((slot) => {
             const visibleIndex = visibleSlots.findIndex((candidate) => candidate.id === slot.id);
@@ -188,7 +197,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
                 onMouseDown={focusSlot}
                 onFocusCapture={() => { if (!slot.focused) focusSlot(); }}
               >
-                <PanelContent slot={slot} />
+                <PanelContent slot={slot} active={visible} />
                 {!tabbed && visible && visibleIndex < visibleSlots.length - 1 && (
                   <ResizeHandle
                     slotId={slot.id}
@@ -228,25 +237,36 @@ const ResizeHandle = ({
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
     let lastX = event.clientX;
+    let nextX = lastX;
+    let frame: number | null = null;
+    const flushResize = () => {
+      const delta = nextX - lastX;
+      lastX = nextX;
+      if (delta) onResize(slotId, delta);
+    };
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
-      const delta = moveEvent.clientX - lastX;
-      lastX = moveEvent.clientX;
-      onResize(slotId, delta);
+      nextX = moveEvent.clientX;
+      if (frame === null) frame = requestAnimationFrame(() => {
+        frame = null;
+        flushResize();
+      });
     };
     const cleanup = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
-      handle.removeEventListener("lostpointercapture", cleanup);
+      handle.removeEventListener("lostpointercapture", finishResize);
       if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
       resizeCleanupRef.current = null;
     };
+    const finishResize = () => { flushResize(); cleanup(); };
     const onUp = (upEvent: PointerEvent) => {
       if (upEvent.pointerId !== pointerId) return;
-      cleanup();
+      finishResize();
     };
     resizeCleanupRef.current = cleanup;
     document.body.style.cursor = "col-resize";
@@ -255,7 +275,7 @@ const ResizeHandle = ({
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
-    handle.addEventListener("lostpointercapture", cleanup);
+    handle.addEventListener("lostpointercapture", finishResize);
   };
   const totalSize = Math.max(currentSize + neighborSize, 0.9);
   const currentPercent = Math.round((currentSize / totalSize) * 100);
@@ -295,7 +315,7 @@ const ResizeHandle = ({
   );
 };
 
-const PanelContent = ({ slot }: { slot: PanelSlot }) => {
+const PanelContent = ({ slot, active }: { slot: PanelSlot; active: boolean }) => {
   const { t: tr } = useI18n();
   return (
   <div key={slot.id} className="anim-fade-in" style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -312,6 +332,15 @@ const PanelContent = ({ slot }: { slot: PanelSlot }) => {
                 like VSCode). The store already tracks multiple editorTabs; the
                 strip is what lets the user see and switch between them. */}
             <LazyEditorPanel chrome="full" />
+          </SafeBoundary>
+        </Suspense>
+      </ChunkErrorBoundary>
+    )}
+    {slot.kind === "file" && (
+      <ChunkErrorBoundary>
+        <Suspense fallback={<PanelSkeleton kind="file" />}>
+          <SafeBoundary fallback={<PanelErrorFallback panelName={tr("文件")} />}>
+            <LazyFileViewerPanel tabId={slot.fileTabId!} active={active} />
           </SafeBoundary>
         </Suspense>
       </ChunkErrorBoundary>

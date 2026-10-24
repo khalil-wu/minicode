@@ -11,6 +11,12 @@
   gap: 16px;
 }
 
+.personalization-memory-heading-actions { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.personalization-memory-heading-actions > a { color:var(--text-secondary); font-size:var(--text-sm); text-decoration:none; }
+.personalization-memory-heading-actions > a:hover { color:var(--text-primary); }
+.personalization-host-selector { display:inline-flex; align-items:center; gap:7px; }
+.personalization-host-selector svg { flex-shrink:0; }
+
 .personalization-memory-card,
 .personalization-instructions-entry {
   overflow: hidden;
@@ -46,22 +52,6 @@
 
 .personalization-instructions-entry:hover { background: var(--surface-hover); }
 .personalization-instructions-entry > svg { flex: 0 0 auto; width: 16px; height: 16px; color: var(--text-muted); stroke-width: var(--mc-icon-stroke); }
-
-.personalization-memory-isolation {
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) auto;
-  align-items: start;
-  gap: 12px;
-  margin-top: 14px;
-  color: var(--text-secondary);
-}
-
-.personalization-memory-isolation > svg { width: 18px; height: 18px; margin-top: 2px; color: var(--state-warning); }
-.personalization-isolation-copy { display: grid; min-width: 0; gap: 4px; line-height: var(--leading-normal); }
-.personalization-isolation-copy > strong { color: var(--text-primary); font-weight: var(--fw-medium); }
-.personalization-isolation-sources { display: flex; flex-wrap: wrap; gap: 6px 16px; }
-.personalization-isolation-sources > span { display: inline-flex; flex-wrap: wrap; gap: 6px; }
-.personalization-source-detail { color: var(--text-muted); overflow-wrap: anywhere; }
 
 /* The detail page owns its heading only while this exact pane is visible. */
 .settings-center-content:has(.settings-tab-pane[data-settings-tab="personalization"]:not([hidden]) .personalization-instructions-page) > .settings-page-heading { display: none; }

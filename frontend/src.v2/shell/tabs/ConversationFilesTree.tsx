@@ -1,10 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight, LoaderCircle } from "../../lib/icons";
+import { ChevronDown, ChevronRight, LoaderCircle, FileDiff, Search } from "../../lib/icons";
 import { ContextMenu } from "../../components/ContextMenu";
-import { openConversationBrowserFilePreview } from "../../chat/openAttachmentPreview";
 import { uploadComposerFiles } from "../../composer/uploads";
 import { useDesktopPreferences } from "../../hooks/useDesktopPreferences";
-import { desktop, type FileOpenTargetId } from "../../desktop/runtime";
+import { desktop, pickWorkspaceDirectory, type FileOpenTargetId } from "../../desktop/runtime";
 import { FileOpenTargetIcon } from "../../components/FileOpenTargetIcon";
 import { isNativeExternalFile, preferredFileTargetForWorkspace } from "../../lib/open-preferred-target";
 import { useI18n } from "../../i18n";
@@ -15,14 +14,19 @@ import { isTextMediaType } from "../../lib/media-types";
 import { saveBlobFile } from "../../lib/save-blob";
 import { pushToast } from "../../overlays/ToastContainer";
 import {
-  fetchConversationBrowserOriginal, fetchConversationBrowserTree,
-  type ConversationBrowserEntry, type ConversationBrowserOwner, type ConversationBrowserTree,
+  type ConversationBrowserEntry, type ConversationBrowserTree,
 } from "../../protocol/conversation-browser";
+import { readFileWorkspaceBranches, readFileWorkspaceOriginal, readFileWorkspaceTree, searchFileWorkspace, type FileWorkspaceBranches } from "../../protocol/file-workspace";
+import { workspaceRequestPath } from "../../protocol/workspace-request-path";
+import type { WorkspaceFileOwner } from "../../stores/types";
+import { openWorkspaceSourceFile } from "../../workspace/openWorkspaceFolder";
 import { useAppStore } from "../../stores";
 import { ROW_HEIGHT } from "../fileTreeTypes";
+import "./ConversationFilesTree.css";
 
-export function ConversationFilesTree({ owner, browserRoot, connected, version }: {
-  owner: ConversationBrowserOwner; browserRoot: string; connected: boolean; version: number;
+export function ConversationFilesTree({ owner, browserRoot, connected, version, onRootChange, comparison, comparisonBase }: {
+  owner: WorkspaceFileOwner; browserRoot: string; connected: boolean; version: number; onRootChange?: (path: string) => void;
+  comparison?: FileWorkspaceBranches | null; comparisonBase?: string;
 }) {
   const { t } = useI18n();
   const { preferences } = useDesktopPreferences();
@@ -35,12 +39,23 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version }
   const [selected, setSelected] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ entry: ConversationBrowserEntry; x: number; y: number } | null>(null);
   const controller = useRef<AbortController | null>(null);
+  const [filter, setFilter] = useState("");
+  const [matches, setMatches] = useState<ConversationBrowserEntry[]>([]);
+  const [filtering, setFiltering] = useState(false);
+  const [rootMenu, setRootMenu] = useState<{ x: number; y: number } | null>(null);
+  const [ownComparison, setOwnComparison] = useState<FileWorkspaceBranches | null>(null);
+  const git = comparison === undefined ? ownComparison : comparison;
+  const comparisonOwner = workspacePathWithin(browserRoot, owner.executionCwd) ? owner
+    : { ...owner, conversationId: null, executionCwd: browserRoot, browserRoot };
+  const basePath = workspaceRequestPath(browserRoot, owner.browserRoot);
+  const projects = useAppStore(state => state.conversations);
+  const projectRoots = [...new Set(projects.map(value => value.executionCwd || value.worktreePath || value.workspaceRoot).filter((value): value is string => Boolean(value)))];
 
   const loadDirectory = async (path: string, signal: AbortSignal) => {
     setLoading((current) => new Set(current).add(path));
     setError(null);
     try {
-      const page = await fetchConversationBrowserTree(owner, path, signal);
+      const page = await readFileWorkspaceTree(owner, path, signal);
       if (!signal.aborted) setDirectories((current) => ({ ...current, [path]: page }));
     } catch (reason) {
       if (!signal.aborted) setError({ path, message: reason instanceof Error ? reason.message : String(reason) });
@@ -50,24 +65,47 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version }
   };
 
   useEffect(() => {
-    if (!connected) { setMenu(null); return; }
+    if (!connected || !owner.browserRoot) { setMenu(null); return; }
     const operation = new AbortController();
     controller.current = operation;
-    void Promise.all([".", ...expandedRef.current].map((path) => loadDirectory(path, operation.signal)));
+    void Promise.all([basePath, ...expandedRef.current].map((path) => loadDirectory(path, operation.signal)));
     return () => { operation.abort(); controller.current = null; };
-  }, [owner.conversationId, owner.executionCwd, connected, version]);
+  }, [owner.conversationId, owner.executionCwd, owner.browserRoot, basePath, connected, version]);
 
-  const root = directories["."]?.workspace_root ?? browserRoot;
+  useEffect(() => {
+    if (!filter.trim() || !connected || !owner.browserRoot) { setMatches([]); setFiltering(false); return; }
+    const operation = new AbortController();
+    setFiltering(true);
+    setError(null);
+    void searchFileWorkspace(owner, filter.trim(), operation.signal).then(page => {
+      if (operation.signal.aborted) return;
+      const prefix = basePath === "." ? "" : `${basePath.replace(/\/$/, "")}/`;
+      setMatches(page.results.filter(value => !prefix || value.path.startsWith(prefix)).map(value => ({
+        name: value.path, path: value.path, is_dir: Boolean(value.is_dir), size_bytes: null, modified_at: "", has_children: false,
+      })));
+    }).catch(reason => { if (!operation.signal.aborted) setError({ path: basePath, message: reason instanceof Error ? reason.message : String(reason) }); })
+      .finally(() => { if (!operation.signal.aborted) setFiltering(false); });
+    return () => operation.abort();
+  }, [filter, connected, owner.conversationId, owner.executionCwd, owner.browserRoot, basePath]);
+  useEffect(() => {
+    if (!connected || !owner.browserRoot || comparison !== undefined) return;
+    const operation = new AbortController();
+    void readFileWorkspaceBranches(comparisonOwner, operation.signal, undefined, browserRoot).then(value => { if (!operation.signal.aborted) setOwnComparison(value); })
+      .catch(reason => { if (!operation.signal.aborted) setError({ path: basePath, message: reason instanceof Error ? reason.message : String(reason) }); });
+    return () => operation.abort();
+  }, [owner.conversationId, owner.executionCwd, owner.browserRoot, browserRoot, connected, version, comparison]);
+
+  const root = owner.browserRoot;
   const preferredTarget = preferences ? preferredFileTargetForWorkspace(preferences, owner.executionCwd) : "minicode";
   const fileTarget = (entry: ConversationBrowserEntry) => preferredTarget !== "minicode" && isNativeExternalFile(entry.path) ? "system" : preferredTarget;
   const absolutePath = (entry: ConversationBrowserEntry) => `${normalizeWorkspacePath(root).replace(/\/$/, "")}/${entry.path}`;
   const ownerIsCurrent = () => {
     const state = useAppStore.getState();
     const conversation = state.conversations.find((item) => item.id === owner.conversationId);
-    return state.conversationId === owner.conversationId && !state.pendingConversationSwitchId
-      && workspaceRootsEqual(conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot, owner.executionCwd);
+    return !state.pendingConversationSwitchId && (!owner.conversationId || state.conversationId === owner.conversationId
+      && workspaceRootsEqual(conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot, owner.executionCwd));
   };
-  const openFile = (entry: ConversationBrowserEntry) => openConversationBrowserFilePreview({ ...owner, path: entry.path, name: entry.name });
+  const openFile = (entry: ConversationBrowserEntry) => useAppStore.getState().openWorkspaceFileTab(owner, entry.path, entry.name.split("/").at(-1));
   const toggle = (entry: ConversationBrowserEntry) => {
     const opening = !expanded.has(entry.path);
     setExpanded((current) => { const next = new Set(current); opening ? next.add(entry.path) : next.delete(entry.path); return next; });
@@ -82,8 +120,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version }
           if (!ownerIsCurrent()) return;
           const state = useAppStore.getState();
           if (workspaceRootsEqual(state.workingDirectory, owner.executionCwd) && workspacePathWithin(fullPath, owner.executionCwd) && isTextMediaType("", entry.name)) {
-            state.openEditorFile(fullPath, entry.name, { exact: true });
-            state.setAppMode("code");
+            openWorkspaceSourceFile(fullPath, owner.executionCwd);
           } else openFile(entry);
         };
         if (!ownerIsCurrent()) return;
@@ -94,7 +131,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version }
         }
         return;
       }
-      const blob = await fetchConversationBrowserOriginal(owner, entry.path, signal);
+      const blob = await readFileWorkspaceOriginal(owner, entry.path, signal);
       if (!ownerIsCurrent()) return;
       if (action === "attach") {
         uploadComposerFiles([new File([blob], entry.name, { type: blob.type })]);
@@ -130,12 +167,25 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version }
   });
 
   return <section aria-label={t("文件资源管理器")}>
-    <div title={root} style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 14px", color: "var(--text-secondary)", fontFamily: "var(--font-ui)", fontSize: "var(--text-sm)" }}>
-      {folderIcon(true, 18)}<span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{root.split(/[\\/]/).filter(Boolean).at(-1) ?? root}</span>
-    </div>
-    {loading.has(".") && !directories["."] && <div role="status" aria-label={t("正在加载文件…")}><LoaderCircle size={16} className="animate-spin" /></div>}
-    <div role="tree" aria-label={t("文件")}>{renderEntries(directories["."]?.entries ?? [])}</div>
-    {directories["."]?.entries.length === 0 && <p style={{ margin: "4px 14px", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t("未找到文件。")}</p>}
+    <button type="button" className="mc-file-tree-root" title={browserRoot} aria-label={t("选择文件树根目录")} aria-haspopup="menu" aria-expanded={Boolean(rootMenu)} onClick={event => {
+      const rect = event.currentTarget.getBoundingClientRect(); setRootMenu({ x: rect.left, y: rect.bottom + 4 });
+    }}>{folderIcon(true, 18)}<span>{browserRoot.split(/[\\/]/).filter(Boolean).at(-1) || t("选择文件夹")}</span><ChevronDown size={14} /></button>
+    <label className="mc-file-tree-filter"><Search size={14} /><input aria-label={t("筛选文件")} placeholder={t("筛选文件…")} value={filter} onChange={event => setFilter(event.target.value)} /></label>
+    {git?.is_git_repo && <button type="button" className="mc-file-tree-all-changes" onClick={() => {
+      const baseBranch = comparisonBase || git.default_base_branch || undefined;
+      const state = useAppStore.getState();
+      state.openGitReview({ path: "", section: "working", workspaceRoot: browserRoot, conversationId: state.conversationId,
+        source: baseBranch && baseBranch !== "HEAD" ? "branch" : "uncommitted", baseBranch, fileOwner: comparisonOwner });
+    }}><FileDiff size={16} />All changes</button>}
+    {(filtering || loading.has(basePath) && !directories[basePath]) && <div role="status" aria-label={t("正在加载文件…")}><LoaderCircle size={16} className="animate-spin" /></div>}
+    <div role="tree" aria-label={t("文件")}>{renderEntries(filter.trim() ? matches : directories[basePath]?.entries ?? [])}</div>
+    {!filtering && (filter.trim() ? matches.length === 0 : directories[basePath]?.entries.length === 0) && <p style={{ margin: "4px 14px", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t("未找到文件。")}</p>}
+    {rootMenu && <ContextMenu ariaLabel={t("选择文件树根目录")} position={rootMenu} onClose={() => setRootMenu(null)} items={[
+      ...[...new Set([owner.browserRoot, browserRoot, ...projectRoots, ...(directories["."]?.entries ?? []).filter(entry => entry.is_dir).map(absolutePath)])].filter(Boolean).map(path => ({
+        label: path.split(/[\\/]/).filter(Boolean).at(-1)!, checked: workspaceRootsEqual(path, browserRoot), checkType: "radio" as const, onClick: () => onRootChange?.(path),
+      })),
+      { label: t("选择文件夹…"), onClick: () => { void pickWorkspaceDirectory().then(path => { if (path) onRootChange?.(path); }); } },
+    ]} />}
     {error && <div role="alert" style={{ margin: "4px 14px", color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{error.message}
       <button type="button" className="btn-ghost" disabled={!connected} onClick={() => void loadDirectory(error.path, controller.current!.signal)}>{t("重试")}</button></div>}
     {menu && <ContextMenu position={{ x: menu.x, y: menu.y }} onClose={() => setMenu(null)} items={[

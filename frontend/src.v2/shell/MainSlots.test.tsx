@@ -30,6 +30,9 @@ vi.mock("../chat/ChatPane", () => ({
 vi.mock("../panels/EditorPanel", () => ({
   EditorPanel: () => <div>Editor pane<input aria-label="Editor input" /></div>,
 }));
+vi.mock("../panels/FileViewerPanel", () => ({
+  FileViewerPanel: ({ tabId, active }: { tabId: string; active: boolean }) => <div data-testid={`file-viewer-${tabId}`} data-active={active}>File {tabId}</div>,
+}));
 
 import { useAppStore } from "../stores";
 import { MainSlots } from "./MainSlots";
@@ -52,6 +55,39 @@ const LayoutFixture = () => {
 };
 
 describe("MainSlots", () => {
+  it("opens an explicit Home file reference without changing the current workspace or draft", async () => {
+    useAppStore.setState({ conversationId: null, workingDirectory: "/home-B", draft: "Retain Home B draft", workbenchLayout: "split",
+      workspaceFileTabs: [{ id: "home-A-file", owner: { scopeId: "home:/home-A", conversationId: null, executionCwd: "/home-A", browserRoot: "/home-A" },
+        path: "file.ts", title: "Home A file", open: true, pinned: true, pane: "left" }],
+      panelSlots: [{ id: "chat", kind: "chat" }, { id: "home-file", kind: "file", fileTabId: "home-A-file", focused: true }],
+    });
+    render(<MainSlots mode="split" />);
+    const file = await screen.findByTestId("file-viewer-home-A-file");
+    expect(file.getAttribute("data-active")).toBe("true");
+    fireEvent.mouseDown(screen.getByLabelText("Chat input"));
+    expect(file.getAttribute("data-active")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Home A file" }).getAttribute("aria-selected")).toBe("true");
+    expect(useAppStore.getState()).toMatchObject({ workingDirectory: "/home-B", draft: "Retain Home B draft" });
+  });
+  it("keeps the last selected auxiliary file when chatting, and hides other owners without deleting them", async () => {
+    const owner = { scopeId: "conversation:owner-A", conversationId: "owner-A", executionCwd: "/a", browserRoot: "/a" };
+    useAppStore.setState({ conversationId: "owner-A", workingDirectory: "/a", workbenchLayout: "split",
+      editorTabs: [{ path: "unsaved.ts", content: "Keep this unsaved", original: "", language: "typescript" }],
+      workspaceFileTabs: ["first", "second"].map(id => ({ id, owner, path: `${id}.ts`, title: id, open: true, pinned: false, pane: "left" as const })),
+      panelSlots: [{ id: "chat", kind: "chat" }, { id: "editor", kind: "editor" },
+        { id: "file-first", kind: "file", fileTabId: "first" }, { id: "file-second", kind: "file", fileTabId: "second", focused: true }],
+    });
+    render(<MainSlots mode="split" />);
+    const second = await screen.findByTestId("file-viewer-second");
+    expect(second.getAttribute("data-active")).toBe("true");
+    fireEvent.mouseDown(screen.getByLabelText("Chat input"));
+    expect(second.getAttribute("data-active")).toBe("true");
+    expect(screen.getByTestId("file-viewer-first").getAttribute("data-active")).toBe("false");
+    act(() => useAppStore.setState({ conversationId: "owner-B", workingDirectory: "/b" }));
+    expect(second.getAttribute("data-active")).toBe("false");
+    expect(useAppStore.getState().workspaceFileTabs).toHaveLength(2);
+    expect(useAppStore.getState().editorTabs[0].content).toBe("Keep this unsaved");
+  });
   let surfaceWidth = 1200;
   let notifySurfaceResize: () => void;
   beforeEach(() => {
@@ -80,6 +116,8 @@ describe("MainSlots", () => {
       editorTabs: [],
       activeTabPath: null,
       contextCardCollapsed: true,
+      contextCardPinned: false,
+      workspaceFileTabs: [],
       rightPanelOpen: false,
       rightPanelExpanded: false,
       rightStackTab: "preview",
@@ -568,13 +606,13 @@ describe("MainSlots", () => {
     expect(screen.getByTestId("chat-owner-fixture")).toBe(chat);
   });
 
-  it("routes a narrow chat's summary into the right pane without placing a card over messages", () => {
+  it("opens a narrow summary without replacing the selected right content or mounted chat", () => {
     useAppStore.setState({ appMode: "chat", rightPanelOpen: false, contextCardCollapsed: true });
     render(<MainSlots forceChat />);
     Object.defineProperty(document.querySelector('.mc-main-slot-frame[data-panel-slot-kind="chat"]'), "clientWidth", { value: 600 });
     const chat = screen.getByTestId("chat-owner-fixture");
     fireEvent.click(screen.getByRole("button", { name: "切换摘要" }));
-    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightStackTab: "tasks", contextCardCollapsed: true });
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: false, rightStackTab: "preview", contextCardCollapsed: false });
     expect(screen.getByTestId("chat-owner-fixture")).toBe(chat);
   });
 });

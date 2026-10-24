@@ -11,6 +11,11 @@ import { handleSessionEvent } from "../chat/sessionEvents";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
 import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 
+const reasoningPreference = vi.hoisted(() => ({ enabled: ["low", "medium", "high", "xhigh", "max", "ultra"] as string[] | null }));
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({
+  preferences: reasoningPreference.enabled === null ? null : { enabledReasoningEfforts: reasoningPreference.enabled, showFullAccess: true, showContextWindowUsage: false }, error: "", update: vi.fn(),
+}) }));
+
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
     writable: true,
@@ -140,6 +145,7 @@ describe("FooterRow permission picker", () => {
     await waitFor(() => expect(sendClientCommand).toHaveBeenCalledWith({ type: "git.pr_automation.set", conversation_id: "conv-footer", workspace_root: "C:/project", auto_fix: true }));
   });
   beforeEach(() => {
+    reasoningPreference.enabled = ["low", "medium", "high", "xhigh", "max", "ultra"];
     useAppStore.setState({
       permissionMode: "auto",
       agentMode: "build",
@@ -675,6 +681,47 @@ describe("FooterRow permission picker", () => {
     fireEvent.click(control);
     expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("Ultra");
     expect(screen.getByRole("slider").getAttribute("max")).toBe("5");
+  });
+
+  it("applies optional effort visibility while preserving the current model, effort and declared capability data", () => {
+    const capability = { model: "gpt-6.1-sol", reasoning_effort_supported: true, reasoning_effort_levels: ["low", "focused", "high", "max", "ultra"] };
+    reasoningPreference.enabled = ["low", "medium", "high", "xhigh"];
+    useAppStore.setState({ currentModel: "gpt-6.1-sol", effortLevel: "max", draft: "Keep the current input", runtimeCapabilities: { provider_capabilities: capability } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，最大" }));
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.getByRole("option", { name: "focused" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "最大" })).toBeNull();
+    expect(screen.queryByRole("option", { name: "Ultra" })).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ currentModel: "gpt-6.1-sol", effortLevel: "max", draft: "Keep the current input" });
+    expect(useAppStore.getState().runtimeCapabilities?.provider_capabilities).toBe(capability);
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("updates the open model control when effort preferences change without sending a model configuration", () => {
+    useAppStore.setState({ currentModel: "gpt-6.1-sol", effortLevel: "high", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort_supported: true, reasoning_effort_levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    } } });
+    const view = render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，高" }));
+    expect(screen.getByRole("slider").getAttribute("max")).toBe("5");
+    reasoningPreference.enabled = ["low", "medium", "high", "xhigh"];
+    view.rerender(<FooterRow sendState="idle" onSend={() => {}} />);
+    expect(screen.getByRole("slider").getAttribute("max")).toBe("3");
+    expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("高");
+    expect(useAppStore.getState().effortLevel).toBe("high");
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("keeps declared efforts available when no native visibility preference has been produced", () => {
+    reasoningPreference.enabled = null;
+    useAppStore.setState({ currentModel: "gpt-6.1-sol", effortLevel: "high", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort_supported: true, reasoning_effort_levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，高" }));
+    expect(screen.getByRole("slider").getAttribute("max")).toBe("5");
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
   it.each(["low", "medium", "high", "xhigh", "max", "ultra"] as const)("sends the selected GPT-6.1 Sol reasoning level to its task: %s", async (level) => {

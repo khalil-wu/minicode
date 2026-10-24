@@ -18,6 +18,7 @@ function bindNative(initialOverride: string | null = null) {
     fileOpenTarget: "minicode", fileOpenTargetPerPath: {}, fileOpenTargets: [{ id: "minicode", label: "MiniCode", kind: "editor", icon: "apps/minicode.svg" }],
     terminalShell: "powershell", terminalShellTargets: [{ id: "powershell", label: "PowerShell" }],
     defaultPermissionMode: "confirm", showFullAccess: true, showContextWindowUsage: false, showBottomPanel: true,
+    defaultWorkspaceFullView: false, popoutWindowShortcut: null, popoutWindowProjectlessDefault: false, confettiEnabled: false,
     defaultTerminalLocation: "bottom", composerPlainTextMode: false, localeOverride: "zh-CN", systemLocale: "zh-CN",
     confirmBeforeClose: "keyboardOnly", turnCompletionNotifications: "onlyWhenUnfocused", permissionNotifications: true, questionNotifications: true,
     autoArchiveAfterDays: 0, localHistoryCompression: false, notificationSound: "default", urlOpenTarget: "external-browser", localUrlOpenTarget: "in-app-browser",
@@ -56,7 +57,68 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); delete window.__MINICODE_RUNTIME__; });
 
-it("shows Reset only for an explicit selection and sends new projectless chats to the restored effective default", async () => {
+it.each(["files", "browser"] as const)("initializes only a new workspace's full view and retains it on its first %s tab", async (target) => {
+  const native = bindNative();
+  await native.set({ defaultWorkspaceFullView: true });
+  useAppStore.setState({ conversationWorkbenchStates: {}, rightPanelOpen: false, rightPanelExpanded: false });
+  await useAppStore.getState().createConversation({ bindWorkspace: false });
+  const command = mocks.command.mock.calls[0][0];
+  expect(useAppStore.getState().rightPanelExpanded).toBe(false);
+  useAppStore.getState().initializeWorkspaceView(command.conversation_id, false);
+  useAppStore.setState({ conversationId: command.conversation_id });
+  useAppStore.getState().restoreWorkbenchState(command.conversation_id);
+  expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: false, rightPanelExpanded: true });
+  useAppStore.getState().setRightStackTab(target);
+  expect(useAppStore.getState()).toMatchObject({ rightStackTab: target, rightPanelOpen: true, rightPanelExpanded: true, draft: "" });
+  expect(useAppStore.getState().conversationWorkbenchStates["existing-chat"]).toBeUndefined();
+});
+
+it("applies standalone defaults only to Popout tasks and keeps an explicit chosen project", async () => {
+  const native = bindNative();
+  await native.set({ popoutWindowProjectlessDefault: true });
+  window.__MINICODE_RUNTIME__!.initialNavigation = { conversationId: null, popout: true };
+  await useAppStore.getState().createConversation({ bindWorkspace: true });
+  expect(mocks.command.mock.calls[0][0]).toMatchObject({ workspace_root: undefined, projectless_base: runtimeDefault });
+  await useAppStore.getState().createConversation({ workspaceRoot: "C:/ExplicitProject" });
+  expect(mocks.command.mock.calls[1][0].workspace_root).toBe("C:/ExplicitProject");
+});
+
+it("keeps a new full-view task's initialized layout when adopting an unsent workspace composer", async () => {
+  const native = bindNative();
+  await native.set({ defaultWorkspaceFullView: true });
+  useAppStore.setState({ conversationId: null, conversations: [], conversationWorkbenchStates: {},
+    draft: "Adopt this unsent draft", workingDirectory: "C:/ExistingWorkspace", workspaceComposerDrafts: {} });
+  const attachments = useAppStore.getState().attachments;
+  let complete!: (value: unknown) => void;
+  mocks.command.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+  const ensure = useAppStore.getState().ensureComposerConversation();
+  await waitFor(() => expect(mocks.command).toHaveBeenCalledOnce());
+  const id = mocks.command.mock.calls[0][0].conversation_id;
+  expect(mocks.command.mock.calls[0][0]).toMatchObject({ type: "conversation.create", workspace_root: "C:/ExistingWorkspace", conversation_id: id });
+  expect(useAppStore.getState()).toMatchObject({ draft: "Adopt this unsent draft",
+    pendingComposerConversationAdoption: { conversationId: id, workspaceRoot: "C:/ExistingWorkspace" } });
+  useAppStore.setState({ conversations: [{ id, title: "New", updatedAt: "now", workspaceRoot: "C:/ExistingWorkspace" }] });
+  useAppStore.getState().applyConversationSwitched({ conversationId: id });
+  expect(useAppStore.getState()).toMatchObject({ conversationId: id, rightPanelExpanded: true, draft: "Adopt this unsent draft", pendingComposerConversationAdoption: null });
+  expect(useAppStore.getState().attachments).toEqual(attachments);
+  complete({ type: "command.result", level: "success", command: "conversation.create", message: "Conversation created.", data: { conversation_id: id, created: true, activated: true } });
+  expect(await ensure).toBe(id);
+  expect(useAppStore.getState()).toMatchObject({ conversationId: id, rightPanelExpanded: true, draft: "Adopt this unsent draft" });
+  expect(useAppStore.getState().attachments).toEqual(attachments);
+  useAppStore.getState().setRightStackTab("files");
+  expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightPanelExpanded: true });
+});
+
+it("clears a rejected new task's adoption marker while retaining the unsent workspace draft", async () => {
+  bindNative();
+  useAppStore.setState({ conversationId: null, conversations: [], draft: "Keep this unsent draft", workingDirectory: "C:/ExistingWorkspace" });
+  mocks.command.mockResolvedValueOnce({ level: "error", command: "conversation.create", message: "Actual creation rejection", data: {} });
+  expect(await useAppStore.getState().createConversation({ bindWorkspace: false, adoptDraft: true })).toBe(false);
+  expect(useAppStore.getState()).toMatchObject({ conversationId: null, draft: "Keep this unsent draft", pendingComposerConversationAdoption: null });
+  expect(mocks.toast).toHaveBeenCalledWith("Actual creation rejection", "error", 4000);
+});
+
+it("matches Source's override-only Reset and restores the effective default for new projectless tasks", async () => {
   const native = bindNative();
   native.chooseTaskDirectory.mockImplementation(async () => native.publish(selectedFolder));
   renderGeneral();
@@ -66,7 +128,6 @@ it("shows Reset only for an explicit selection and sends new projectless chats t
   fireEvent.click(taskRow().getByRole("button", { name: "更改" }));
   const reset = await taskRow().findByRole("button", { name: "重置" });
   expect(taskRow().getByTitle(selectedFolder).textContent).toBe(selectedFolder);
-  expect(reset.classList.contains("settings-general-task-reset")).toBe(true);
   fireEvent.click(reset);
   await waitFor(() => expect(taskRow().queryByRole("button", { name: "重置" })).toBeNull());
   expect(native.set).toHaveBeenCalledExactlyOnceWith({ defaultTaskDirectory: null });

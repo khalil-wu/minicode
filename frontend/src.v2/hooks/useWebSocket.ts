@@ -1151,8 +1151,17 @@ export const useWebSocketConnection = () => {
             maxAttempts: null,
             error: message,
           });
+          // Recovery has stopped, so this renderer cannot confirm more live
+          // progress. Preserve the partial evidence without deciding the
+          // backend outcome; a later authoritative restore can replace it.
+          clearStreamingState({ textStreamBuffer, thinkingStreamBuffer }, {
+            clearAllConversations: true,
+            terminalStatus: "partial",
+            failureMessage: message,
+            failureRecoverable: true,
+          });
           connectionFailureToast = pushToast(message, "error", 0);
-          // Keep queued commands, composer drafts and unfinished turns intact.
+          // Keep queued commands, composer drafts and unfinished evidence.
           // A new explicit connection must restore the owner before delivery.
           ref.current = null;
           ws.close();

@@ -1,5 +1,5 @@
 import { useI18n, type Translate } from "../i18n";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { RefreshCw, X } from "lucide-react";
 import { getWebSocket } from "../hooks/useWebSocket";
@@ -18,9 +18,11 @@ import { ChatErrorFallback } from "../components/ChatErrorFallback";
 import { isDesktop, runtime } from "../desktop/runtime";
 import { useEscapeKey, useFocusTrap } from "../hooks/useFocusTrap";
 import { getConnectionPresentation } from "./connectionPresentation";
+import { toggleAutomationsSidebar, useAutomationsPageState } from "../lib/automations-navigation";
 
 const SkillsMarketplace = lazy(() => import("../overlays/SkillsMarketplace").then((m) => ({ default: m.SkillsMarketplace })));
 const ProjectsPage = lazy(() => import("./ProjectsPage").then((m) => ({ default: m.ProjectsPage })));
+const ScheduledTasksPage = lazy(() => import("../overlays/ScheduledTasksPage").then(module => ({ default: module.ScheduledTasksPage })));
 
 const useCompactWorkbench = () => {
   const [compact, setCompact] = useState(isCompactWorkbenchViewport);
@@ -208,7 +210,7 @@ const NarrowSidebarDrawer = ({
   );
 };
 
-export const WorkbenchShell = () => {
+export const WorkbenchShell = memo(function WorkbenchShell() {
   const { t: tr } = useI18n();
   const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
   const [marketplaceVisited, setMarketplaceVisited] = useState(skillsMarketplaceOpen);
@@ -218,6 +220,9 @@ export const WorkbenchShell = () => {
   const sideChatOpen = useAppStore((s) => s.sideChatOpen);
   const appMode = useAppStore((s) => s.appMode);
   const settingsOpen = useAppStore((s) => s.settingsOpen);
+  const { open: automationsOpen, sidebarOpen: automationsSidebarOpen } = useAutomationsPageState();
+  const [automationsVisited, setAutomationsVisited] = useState(automationsOpen);
+  useEffect(() => { if (automationsOpen) setAutomationsVisited(true); }, [automationsOpen]);
   const projectsOpen = useAppStore((s) => s.projectsOpen);
   const leftSidebarWidth = useAppStore((s) => s.leftSidebarWidth);
   const leftSidebarExpandedWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
@@ -242,9 +247,9 @@ export const WorkbenchShell = () => {
     appMode === "code" && activeCodeSlot?.maximized && activeCodeSlot.kind !== "chat",
   );
   const leftPanelAvailable = skillsMarketplaceOpen || appMode === "cowork" || (appMode === "code" && !codePanelMaximized);
-  const rightPanelAvailable = !projectsOpen && !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode !== "code" || !codePanelMaximized);
+  const rightPanelAvailable = !automationsOpen && !projectsOpen && !skillsMarketplaceOpen && (rightPanelExpanded || sideChatOpen || appMode !== "code" || !codePanelMaximized);
   const expandedRight = rightPanelExpanded && rightPanelOpen && rightPanelAvailable;
-  const bottomVisible = !codePanelMaximized && !settingsOpen && !projectsOpen && !skillsMarketplaceOpen && !expandedRight;
+  const bottomVisible = !automationsOpen && !codePanelMaximized && !settingsOpen && !projectsOpen && !skillsMarketplaceOpen && !expandedRight;
 
   useEffect(() => {
     if (!compact) setCompactPanel(null);
@@ -283,6 +288,7 @@ export const WorkbenchShell = () => {
   }, [compact, previewRequestAt, rightPanelAvailable]);
 
   const toggleLeftPanel = () => {
+    if (automationsOpen) { toggleAutomationsSidebar(); return; }
     if (compact) {
       setCompactPanel((current) => current === "left" ? null : "left");
       return;
@@ -315,9 +321,9 @@ export const WorkbenchShell = () => {
       }}
     >
       <HeaderBar
-        leftPanelControls={compact ? "left-sidebar-drawer" : undefined}
-        leftPanelAvailable={!settingsOpen && leftPanelAvailable && !projectsOpen}
-        leftPanelOpen={compact ? compactPanel === "left" : leftSidebarWidth > 0}
+        leftPanelControls={compact && !automationsOpen ? "left-sidebar-drawer" : undefined}
+        leftPanelAvailable={!settingsOpen && (automationsOpen || leftPanelAvailable && !projectsOpen)}
+        leftPanelOpen={automationsOpen ? automationsSidebarOpen : compact ? compactPanel === "left" : leftSidebarWidth > 0}
         rightPanelControls={compact && !expandedRight ? "right-panel-drawer" : undefined}
         rightPanelAvailable={!settingsOpen && rightPanelAvailable}
         rightPanelOpen={expandedRight || (compact ? compactPanel === "right" : rightPanelOpen)}
@@ -329,6 +335,7 @@ export const WorkbenchShell = () => {
       <div className="mc-desktop-body">
         <NavigationRail />
         <div className="workbench-mode-body mc-desktop-workspace" hidden={settingsOpen} style={{ flex: 1, minHeight: 0, display: settingsOpen ? "none" : "flex", overflow: "hidden" }}>
+          <div hidden={automationsOpen} style={{ display: automationsOpen ? "none" : "flex", flex: 1, minWidth: 0, minHeight: 0 }}>
           <div hidden={projectsOpen} style={{ display: projectsOpen ? "none" : "contents" }}>
             {!compact && leftPanelAvailable && <SidebarLeft withGlobalRail />}
           </div>
@@ -355,14 +362,18 @@ export const WorkbenchShell = () => {
               <SidebarRight embedded={compact && !expandedRight} visible={!settingsOpen && rightPanelAvailable && (expandedRight || (compact ? compactPanel === "right" : rightPanelOpen))} />
             </NarrowSidebarDrawer>
           </div>
+          </div>
+          <div hidden={!automationsOpen} style={{ display: automationsOpen ? "flex" : "none", flex: 1, minWidth: 0, minHeight: 0 }}>
+            <Suspense fallback={null}>{(automationsVisited || automationsOpen) && <ScheduledTasksPage active={automationsOpen && !settingsOpen} />}</Suspense>
+          </div>
         </div>
       </div>
 
-      {compact && !projectsOpen && leftPanelAvailable && compactPanel === "left" && (
+      {compact && !automationsOpen && !projectsOpen && leftPanelAvailable && compactPanel === "left" && (
         <NarrowSidebarDrawer id="left-sidebar-drawer" label={tr("左侧栏")} side="left" open={!settingsOpen} onClose={() => setCompactPanel(null)}>
           <SidebarLeft embedded withGlobalRail onNavigate={() => setCompactPanel(null)} />
         </NarrowSidebarDrawer>
       )}
     </div>
   );
-};
+});

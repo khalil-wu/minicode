@@ -11,6 +11,7 @@ from backend.skills.marketplace import (
     import_local_skill,
     install_marketplace_skill,
     remove_user_skill,
+    user_skill_uninstall_name,
 )
 
 MarketplaceLoader = Callable[..., Awaitable[dict[str, Any]]]
@@ -18,7 +19,8 @@ MarketplaceLoader = Callable[..., Awaitable[dict[str, Any]]]
 
 def skills_settings_payload(*, skill_manager: Any, workspace_root: str = "") -> dict[str, Any]:
     snapshot = skill_manager.snapshot(workspace_root or None)
-    return {"skills": snapshot.list_settings(), "available_skills": snapshot.list_all(),
+    skills = [{**skill, "uninstall_name": user_skill_uninstall_name(skill["path"])} for skill in snapshot.list_settings()]
+    return {"skills": skills, "available_skills": snapshot.list_all(),
         "plugin_skills": snapshot.list_settings(source_level="plugin"),
         "workspace_root": workspace_root}
 

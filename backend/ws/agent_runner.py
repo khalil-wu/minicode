@@ -3468,14 +3468,18 @@ class SessionAgentRunnerMixin:
             model=str(getattr(self, "selected_model", "") or ""),
         )
         run_llm = getattr(self, "llm", None)
-        run_memory_manager = getattr(self, "memory_manager", None)
-        if workspace_root is not None:
+        from backend.memory.settings import memory_policy_snapshot
+        from backend.tools.memory_tools import memory_tools_for_run
+        memory_policy = memory_policy_snapshot(config)
+        run_memory_manager = getattr(self, "memory_manager", None) if memory_policy["enabled"] and memory_policy["use_memories"] else None
+        if workspace_root is not None and memory_policy["enabled"] and memory_policy["use_memories"]:
             from backend.memory.file_memory import FileMemory
             from backend.memory.manager import MemoryManager
 
             run_memory_manager = MemoryManager(
                 FileMemory.for_workspace(workspace_root)
             )
+        tool_registry = memory_tools_for_run(tool_registry, run_memory_manager.file_memory if run_memory_manager is not None else None)
         context_builder = ContextBuilder(
             token_budget=config.token_budget,
             agent_settings=config.agent,
@@ -3498,6 +3502,7 @@ class SessionAgentRunnerMixin:
             run_metadata={
                 "conversation_id": conversation_id,
                 "_extension_command_context": True,
+                "memory_settings": memory_policy,
             },
             run_context_builder=context_builder,
             run_llm=run_llm,
@@ -3851,8 +3856,13 @@ class SessionAgentRunnerMixin:
         try:
             run_metadata["conversation_run_generation"] = query_claim.generation
             from backend.services.goal_runtime import GoalTurnAccounting
-            run_context.goal_accounting = GoalTurnAccounting(self.conversation_repo, target_conversation_id,
-                automatic=bool(run_metadata.get("_goal_continuation")))
+            goal_record = self.conversation_repo.get_conversation(target_conversation_id)
+            goal_config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(goal_record), resolve_credentials=False)
+            goals_enabled = goal_config.feature_flags.enabled("goals")
+            run_context.goal_accounting = (GoalTurnAccounting(self.conversation_repo, target_conversation_id,
+                automatic=bool(run_metadata.get("_goal_continuation"))) if goals_enabled else None)
+            if run_metadata.get("_goal_continuation") and not goals_enabled:
+                return
             await self._run_agent_locked(
                 user_message,
                 attachments=attachments,
@@ -4189,6 +4199,8 @@ class SessionAgentRunnerMixin:
         # session fields that concurrent runs might be reading
         try:
             run_config = load_config(cwd=run_workspace_root)
+            if not run_config.feature_flags.enabled("goals"):
+                run_context.goal_accounting = None
             run_settings = (
                 run_config.config_layer_stack.effective_config()
                 if run_config.config_layer_stack is not None
@@ -4507,13 +4519,17 @@ class SessionAgentRunnerMixin:
             getattr(self, "_conversation_streams", {}).pop(conversation.id, None)
             return
 
-        run_memory_manager = getattr(self, "memory_manager", None)
-        if run_workspace_root is not None:
+        from backend.memory.settings import memory_policy_snapshot
+        from backend.tools.memory_tools import memory_tools_for_run
+        run_memory_policy = memory_policy_snapshot(run_config)
+        run_metadata["memory_settings"] = run_memory_policy
+        run_memory_manager = getattr(self, "memory_manager", None) if run_memory_policy["enabled"] and run_memory_policy["use_memories"] else None
+        if run_workspace_root is not None and run_memory_policy["enabled"] and run_memory_policy["use_memories"]:
             from backend.memory.file_memory import FileMemory
-            from backend.memory.generation import schedule_memory_startup
             from backend.memory.manager import MemoryManager
 
             run_memory_manager = MemoryManager(FileMemory.for_workspace(run_workspace_root))
+        run_tool_registry = memory_tools_for_run(run_tool_registry, run_memory_manager.file_memory if run_memory_manager is not None else None)
 
         run_context_builder = ContextBuilder(
             token_budget=run_config.token_budget,
@@ -4692,7 +4708,8 @@ class SessionAgentRunnerMixin:
                 requirements_source=run_permission_context.requirements_source,
             )
 
-        if run_workspace_root is not None and str(conversation.conversation_type) == "main":
+        if run_memory_policy["enabled"] and run_workspace_root is not None and str(conversation.conversation_type) == "main":
+            from backend.memory.generation import schedule_memory_startup
             from backend.sandbox.policy import SandboxEnforcement, sandbox_policy_for_permission_context
 
             startup_policy = sandbox_policy_for_permission_context(run_workspace_root, run_permission_context,
@@ -5117,7 +5134,7 @@ class SessionAgentRunnerMixin:
         agent_state.conversation_id = conversation.id
         goal = dict(getattr(conversation, "goal", {}) or {})
         goal_text = str(goal.get("text") or "").strip()
-        if goal_text:
+        if goal_text and run_config.feature_flags.enabled("goals"):
             goal_status = str(goal.get("status") or "active").strip().lower()
             if goal_status != "active":
                 agent_state.task_summary = (
@@ -6015,7 +6032,7 @@ class SessionAgentRunnerMixin:
             )
             memory_pollution_updated_at = conversation.updated_at
             pollution_state_changed = False
-            if terminal_projection_owned and detected_pollution_sources:
+            if terminal_projection_owned and run_memory_policy["disable_on_external_context"] and detected_pollution_sources:
                 previous_sources = {
                     str(source).casefold()
                     for source in getattr(
@@ -6054,7 +6071,7 @@ class SessionAgentRunnerMixin:
                         "Failed to persist memory isolation for conversation %s",
                         conversation.id,
                     )
-                if memory_polluted:
+                if memory_polluted and run_memory_policy["enabled"]:
                     try:
                         from backend.memory.generation import schedule_memory_forgetting
 

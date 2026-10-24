@@ -352,6 +352,7 @@ ClientCommandType = Literal[
     "diff.git_revert_patch",
     "diff.git_file_contents",
     "diff.git_review_options",
+    "diff.git_review_patch",
     "mcp.list",
     "mcp.inventory.list",
     "mcp.inventory.cancel",

@@ -115,7 +115,8 @@ import { flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTe
 import { SidebarRight } from "./SidebarRight";
 import type { ChatMessage } from "../stores/types";
 import { useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
-import { openThreadAutomationEditor } from "../lib/automations-navigation";
+import { getAutomationsPageState, openThreadAutomationEditor } from "../lib/automations-navigation";
+import { readGoalEditor } from "../composer/goal-state";
 
 const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "role">): ChatMessage => ({
   content: "",
@@ -229,6 +230,7 @@ describe("SidebarRight activity", () => {
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllEnvs();
     window.__MINICODE_RUNTIME__ = undefined;
   });
 
@@ -378,7 +380,7 @@ describe("SidebarRight activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "扩大到主工作区" }));
     expect(useAppStore.getState().rightPanelExpanded).toBe(true);
     expect(aside.getAttribute("data-expanded")).toBe("true");
-    expect(aside.style.maxWidth).toBe("none");
+    expect(aside.style.maxWidth).toBe("");
     fireEvent.click(screen.getByRole("button", { name: "还原到侧栏" }));
     expect(useAppStore.getState().rightPanelExpanded).toBe(false);
     expect(screen.getByText("Browser Control panel")).toBe(panel);
@@ -509,6 +511,44 @@ describe("SidebarRight activity", () => {
     expect(screen.getByRole("tab", { name: /打开运行详情/ })).toBeTruthy();
   });
 
+  it("gates full run/debug consumers in a prod build while keeping focused real failure details inspectable", async () => {
+    vi.stubEnv("DEV", false);
+    const evidence = { targetKind: "tool_call" as const, targetId: "actual-command", conversationId: "debug-owner", timestamp: 1,
+      payload: { event: "tool.failed", error: "command exited 2", command: "actual command" } };
+    useAppStore.setState({ conversationId: "debug-owner", rightStackTab: "diagnostics", inspectorFocus: null,
+      inspectorEntries: [evidence], draft: "unsent text", messages: [chatMessage({ id: "process-owner", role: "assistant", content: "actual process evidence" })] });
+    render(<SidebarRight />);
+    expect(screen.queryByRole("tab", { name: /运行状态/ })).toBeNull();
+    expect(screen.queryByText("运行诊断")).toBeNull();
+    act(() => useAppStore.getState().setRightStackTab("inspector"));
+    expect(screen.queryByRole("tab", { name: /运行详情/ })).toBeNull();
+    act(() => useAppStore.getState().setInspectorFocus({ kind: "tool_call", id: "actual-command", conversationId: "debug-owner" }));
+    expect(await screen.findByText(/command exited 2/)).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "打开详情" })).toBeTruthy();
+    expect(screen.queryByText("高级诊断")).toBeNull();
+    expect(screen.queryByText("运行概览")).toBeNull();
+    expect(useAppStore.getState().inspectorEntries).toEqual([evidence]);
+    expect(useAppStore.getState().messages[0].content).toBe("actual process evidence");
+    expect(useAppStore.getState().draft).toBe("unsent text");
+  });
+
+  it("hides a disabled Goal surface and restores its unsaved owner draft without switching tabs", async () => {
+    const goal = { text: "Saved objective", status: "active" };
+    useAppStore.setState({ conversationId: "gated-goal-owner", rightStackTab: "goal", activeGoal: goal, isConnected: true,
+      draft: "main composer text", runtimeCapabilities: null });
+    render(<SidebarRight />);
+    const input = await screen.findByRole("textbox", { name: "目标" });
+    fireEvent.change(input, { target: { value: "Unsaved objective draft" } });
+    act(() => useAppStore.setState({ runtimeCapabilities: { feature_flags: { goals: { enabled: false, source: "settings" } } } }));
+    expect(screen.queryByRole("tab", { name: "打开编辑目标" })).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "目标" })).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ rightStackTab: "goal", activeGoal: goal, draft: "main composer text" });
+    expect(readGoalEditor("gated-goal-owner")?.draft).toBe("Unsaved objective draft");
+    act(() => useAppStore.setState({ runtimeCapabilities: { feature_flags: { goals: { enabled: true, source: "settings" } } } }));
+    expect(await screen.findByRole("textbox", { name: "目标" })).toHaveProperty("value", "Unsaved objective draft");
+    expect(useAppStore.getState().rightStackTab).toBe("goal");
+  });
+
   it("renders Activity as a compact runtime center with task, workspace, and evidence", async () => {
     useAppStore.setState({
       conversationId: "conv-activity",
@@ -587,8 +627,8 @@ describe("SidebarRight activity", () => {
     useAppStore.getState().setSettingsTab("general");
     fireEvent.click(screen.getByText("Daily smoke"));
 
-    expect(useAppStore.getState().settingsOpen).toBe(true);
-    await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("scheduler"));
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, settingsTab: "general" });
+    expect(getAutomationsPageState().open).toBe(true);
   });
 
   it("keeps tool and skill internals out of Activity while preserving human-readable task progress", () => {
@@ -1302,7 +1342,7 @@ describe("SidebarRight activity", () => {
     expect(await screen.findByText("Preview panel")).toBeTruthy();
   });
 
-  it("resizes the right sidebar from the left edge handle", () => {
+  it("resizes the right sidebar from the left edge handle", async () => {
     useAppStore.setState({
       rightStackTab: "diff",
       rightPanelOpen: true,
@@ -1315,7 +1355,7 @@ describe("SidebarRight activity", () => {
     fireEvent.pointerDown(handle, { pointerId: 1, clientX: 800 });
     fireEvent.pointerMove(window, { pointerId: 1, clientX: 620 });
 
-    expect(useAppStore.getState().rightSidebarWidth).toBe(560);
+    await waitFor(() => expect(useAppStore.getState().rightSidebarWidth).toBe(560));
     expect(document.body.classList.contains("layout-dragging")).toBe(true);
 
     fireEvent.pointerUp(window, { pointerId: 1 });
@@ -1357,13 +1397,13 @@ describe("SidebarRight activity", () => {
     expect(container.querySelector("aside")?.style.width).toBe("492px");
   });
 
-  it("persists a drag only on release and keeps its ratio across tabs and viewport changes", () => {
+  it("persists a drag only on release and keeps its ratio across tabs and viewport changes", async () => {
     const { container } = render(<SidebarRight />);
     const handle = screen.getByRole("separator", { name: "调整右侧栏宽度" });
     const persisted = localStorage.getItem("minicode.layout.right-width-ratio:v3");
     fireEvent.pointerDown(handle, { pointerId: 8, clientX: 1000 });
     fireEvent.pointerMove(window, { pointerId: 8, clientX: 766 });
-    expect(useAppStore.getState().rightSidebarWidth).toBe(614);
+    await waitFor(() => expect(useAppStore.getState().rightSidebarWidth).toBe(614));
     expect(localStorage.getItem("minicode.layout.right-width-ratio:v3")).toBe(persisted);
     fireEvent.pointerUp(window, { pointerId: 8 });
     expect(localStorage.getItem("minicode.layout.right-width-ratio:v3")).toBe("0.5");

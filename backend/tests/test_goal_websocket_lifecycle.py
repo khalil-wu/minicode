@@ -1,6 +1,9 @@
 import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -9,6 +12,7 @@ from backend.agent.query_engine import QueryEngine
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import default_runtime
 from backend.config import AppConfig, LLMSettings
+from backend.feature_flags import FeatureFlags
 from backend.services.goal_runtime import GoalTurnAccounting, new_goal
 from backend.tests.test_agent_runner_done_fallback import _Session, _NoopLLM, _admit_runner_turn, _run_session_scenario
 from backend.ws.event_outbox import EventOutbox
@@ -141,3 +145,65 @@ def test_goal_delivery_failure_cannot_reclassify_a_committed_terminal_as_a_proje
     assert accounting.finished
     assert any(event.payload.get("lifecycle") == "conversation_projection_committed" for event in owner.execution_journal.read_events())
     assert not any(event.get("error_code") == "conversation.persistence_failed" for event in events)
+
+
+def test_disabled_goal_queue_preserves_pending_saved_state_and_does_not_start_a_turn(tmp_path, monkeypatch):
+    events = []
+    session = _PayloadSession(tmp_path, events)
+    conversation_id = session.active_conversation_id
+    session.conversation_repo.update_goal(conversation_id, new_goal("Retain the pending goal"))
+    before = session.conversation_repo.get_conversation(conversation_id)
+    off = replace(session.config, feature_flags=FeatureFlags({"goals": False}))
+    monkeypatch.setattr("backend.config.load_config", lambda **kwargs: off)
+    owner = SimpleNamespace(ws_manager=None, run_manager=session.run_manager, conversation_repo=session.conversation_repo,
+        running_agent_task_for=lambda _: None, start_agent_run=AsyncMock(),
+        session_lifecycle=SimpleNamespace(is_shutting_down=False, workspace_root_for_conversation=lambda record: Path(record.workspace_root)))
+    WebSocketSession.schedule_next_queued_user_message(owner, conversation_id)
+    assert not session.run_manager.is_queue_dispatching(conversation_id)
+    owner.start_agent_run.assert_not_called()
+    after = session.conversation_repo.get_conversation(conversation_id)
+    assert after.goal == before.goal and after.revision == before.revision
+
+
+def test_disabled_goal_rejects_automatic_admission_without_rewriting_accounting(tmp_path, monkeypatch):
+    events = []
+    session = _PayloadSession(tmp_path, events)
+    conversation_id = session.active_conversation_id
+    session.conversation_repo.update_goal(conversation_id, new_goal("Retain this automatic goal"))
+    before = session.conversation_repo.get_conversation(conversation_id)
+    off = replace(session.config, feature_flags=FeatureFlags({"goals": False}))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda **kwargs: off)
+    enter = AsyncMock()
+    monkeypatch.setattr(session, "_run_agent_locked", enter)
+    owner = RunContext()
+    _run_session_scenario(session, session._run_agent("Must not run", conversation_id=conversation_id,
+        metadata={"_goal_continuation": before.goal["id"]}, run_context=owner))
+    enter.assert_not_awaited()
+    after = session.conversation_repo.get_conversation(conversation_id)
+    assert owner.goal_accounting is None and after.goal == before.goal and after.revision == before.revision
+
+
+def test_disabled_goals_are_not_injected_or_charged_during_an_ordinary_user_turn(tmp_path, monkeypatch):
+    configure_runner(monkeypatch)
+    events, observed = [], []
+    session = _PayloadSession(tmp_path, events)
+    conversation_id = session.active_conversation_id
+    session.conversation_repo.update_goal(conversation_id, new_goal("Old goal must remain stored but inactive"))
+    before = session.conversation_repo.get_conversation(conversation_id).goal
+    off = replace(session.config, feature_flags=FeatureFlags({"goals": False}))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda **kwargs: off)
+    async def runner(**kwargs):
+        await _admit_runner_turn(kwargs)
+        observed.append((kwargs["state"].task_summary, kwargs["run_context"].goal_accounting))
+        yield AgentEvent.agent_message_completed("Actual ordinary reply", source="model_final")
+        yield AgentEvent.done()
+    session.query_engine = QueryEngine(runner=runner)
+    owner = RunContext()
+    async def scenario():
+        await session._run_agent("A new ordinary user request", conversation_id=conversation_id,
+            metadata={"assistant_message_id": "ordinary-answer", "user_message_id": "ordinary-user"}, run_context=owner)
+        await drain(session)
+    _run_session_scenario(session, scenario())
+    assert observed and all(not summary and accounting is None for summary, accounting in observed)
+    assert session.conversation_repo.get_conversation(conversation_id).goal == before
+    assert not any(event.get("type") == "goal.updated" for event in events)

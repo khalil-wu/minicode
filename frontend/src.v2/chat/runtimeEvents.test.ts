@@ -1465,9 +1465,20 @@ describe("runtime capability events", () => {
       tool_views: rawPatch.capabilities.tool_views,
       summary: { skills: 1, skill_catalog: true, tools_total: 1, direct_tools: 0, code_mode_tools: 1 },
     });
-    expect(useAppStore.getState().availableSkills).toEqual(skills);
-    expect(useAppStore.getState().slashCommands).toEqual(commands);
+    expect(useAppStore.getState().availableSkills).toBe(skills);
+    expect(useAppStore.getState().slashCommands).toBe(commands);
     expect(rawPatch).not.toHaveProperty("capabilities.skills");
+
+    const probe = normalizeInboundServerEvent({ type: "runtime.capabilities", source: "sandbox.probe",
+      conversation_id: "conv-capabilities", workspace_root: "C:/capabilities",
+      capabilities: { permission: { mode: "bypass", sandbox_status: { probe_status: "ready", backend_available: true } } },
+    });
+    expect(probe).not.toBeNull();
+    handleRuntimeEvent(probe!);
+    expect(useAppStore.getState().availableSkills).toBe(skills);
+    expect(useAppStore.getState().slashCommands).toBe(commands);
+    expect(useAppStore.getState().runtimeCapabilities).toMatchObject({ skills: catalog?.skills,
+      provider_capabilities: { model: "model-b" }, permission: { sandbox_status: { probe_status: "ready", backend_available: true } } });
 
     useAppStore.getState().applyConversationSwitched({ conversationId: "next-owner" });
     expect(useAppStore.getState().runtimeCapabilities).toBeNull();

@@ -20,7 +20,7 @@ from backend.agent.turn_state import content_from_blocks
 from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
 from backend.conversations.context_delta import apply_context_snapshot_delta, compose_context_snapshot_deltas
 from backend.conversations.projection_log import append_projection, read_projection
-from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message
+from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message, find_match as find_indexed_match
 from backend.conversations.compression import (
     HistoryCompressionError, compressed_history_path, compress_history_file,
     history_exists, history_stat, is_history_path, is_history_temporary, physical_history_path, read_history_bytes,
@@ -209,6 +209,10 @@ class ConversationRepository:
             )
         )
         normalized_conversation_type = normalize_conversation_type(conversation_type)
+        if memory_mode is None and normalized_conversation_type == "main":
+            from backend.memory.settings import memory_settings_for_workspace
+            memory_settings = memory_settings_for_workspace(workspace_root)
+            memory_mode = "enabled" if memory_settings.generate_memories else "disabled"
         is_memory_polluted = bool(
             memory_polluted
             or normalized_pollution_sources
@@ -395,6 +399,46 @@ class ConversationRepository:
             return None
         return {"conversation_id": conversation_id, "revision": view["revision"],
                 "transcript": view["transcript"], "transcript_page": view["transcript_page"]}
+
+    def find_transcript_match(self, conversation_id: str, pattern: re.Pattern[str]) -> dict[str, str] | None:
+        """Find the first visible match without reading the private provider checkpoint.
+
+        One forward indexed stream handles cold/compressed history and the
+        in-flight projection. Legacy and damaged generations use the existing
+        public history reader and its recovery contract.
+        """
+        from .search import message_match
+
+        with self._store_lock(conversation_id):
+            cached = self._record_cache.get(conversation_id)
+            if cached is not None and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id):
+                return next((match for message in cached.transcript
+                             if (match := message_match(message, pattern)) is not None), None)
+            manifest = self._read_manifest(conversation_id, log_errors=False)
+            if manifest is not None and self._manifest_is_deleted(manifest):
+                return None
+            try:
+                metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"]) if manifest else {}
+                if metadata.get("transcript_index_version") == 1:
+                    path = self._generation_paths(conversation_id, manifest["current_generation"])[1]
+                    replacement = self._load_partial_projection(conversation_id, manifest).get("assistant_message")
+                    return find_indexed_match(path, metadata["transcript_index"], pattern, replacement=replacement)
+            except (ConversationStorageCorruptError, OSError, UnicodeDecodeError, json.JSONDecodeError, TranscriptIndexError):
+                logger.warning("Indexed search read failed for %s; using the public history reader", conversation_id, exc_info=True)
+            before_message_id = ""
+            first_match = None
+            while True:
+                page = self.get_transcript_page(conversation_id, limit=200, before_message_id=before_message_id)
+                if page is None:
+                    return None
+                for message in page["transcript"]:
+                    match = message_match(message, pattern)
+                    if match is not None:
+                        first_match = match
+                        break
+                if not page["transcript_page"]["has_more"]:
+                    return first_match
+                before_message_id = page["transcript_page"]["before_message_id"]
 
     def get_conversation_view(
         self, conversation_id: str, *, limit: int = 80, before_message_id: str = "",

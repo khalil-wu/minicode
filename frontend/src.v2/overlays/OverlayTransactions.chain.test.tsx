@@ -8,7 +8,7 @@ import { AdvancedTab } from "./AdvancedTab";
 import { ArchivedTab } from "./ArchivedTab";
 import { GeneralTab } from "./GeneralTab";
 import { WorkspaceGitTab } from "./WorkspaceGitTab";
-import { openAutomations } from "../lib/automations-navigation";
+import { closeAutomations, getAutomationsPageState, openAutomations } from "../lib/automations-navigation";
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 const mocks = vi.hoisted(() => ({ command: vi.fn(), deleteConversation: vi.fn(), confirm: vi.fn(), toast: vi.fn(), detect: vi.fn(),
@@ -231,15 +231,11 @@ describe("overlay transaction chains", () => {
     expect((screen.getByRole("button", { name: "恢复 归档" }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText("归档")).toBeTruthy();
   });
-  it("retains a newer update event when the initial status request later fails", async () => {
-    const old = deferred<{ status: string }>();
-    mocks.getStatus.mockReturnValue(old.promise);
-    render(<GeneralTab remoteImagePolicy="ask" setRemoteImagePolicy={() => {}} />);
-    const statusCallback = mocks.onStatus.mock.calls[0][0];
-    act(() => statusCallback({ status: "ready", sequence: 4, version: "2.0.0" }));
-    await act(async () => old.reject(new Error("old read failed")));
-    expect(screen.getByRole("button", { name: "重启并安装" })).toBeTruthy();
-    expect(screen.queryByText(/old read failed/)).toBeNull();
+  it("does not mount desktop update operations from the Source General page", () => {
+    render(<GeneralTab />);
+    expect(screen.queryByRole("button", { name: "重启并安装" })).toBeNull();
+    expect(mocks.getStatus).not.toHaveBeenCalled();
+    expect(mocks.onStatus).not.toHaveBeenCalled();
   });
   it("keeps Git preferences in settings without an extra workspace launcher", () => {
     const before = useAppStore.getState().activeBottomTab;
@@ -249,10 +245,12 @@ describe("overlay transaction chains", () => {
     expect(useAppStore.getState().activeBottomTab).toBe(before);
   });
 
-  it("opens automations through the actual settings scheduler destination", () => {
+  it("opens the independent Scheduled destination without mutating its current settings selection", () => {
     useAppStore.setState({ settingsOpen: false });
     openAutomations();
-    expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "scheduler" });
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, settingsTab: "general" });
+    expect(getAutomationsPageState().open).toBe(true);
     expect("toggleAutomations" in useAppStore.getState()).toBe(false);
+    closeAutomations();
   });
 });

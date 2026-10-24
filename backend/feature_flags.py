@@ -5,10 +5,16 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, MutableMapping
 
 
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
+    "memories": False,
+    "multi_agent": True,
+    "goals": True,
+    "sleep_tool": True,
+    "current_time_reminder": False,
+    "send_message_to_user_async": False,
     "realtime_conversation": True,
     "stable_environment_tools": False,
     "content_item_kinds": True,
@@ -83,10 +89,35 @@ class FeatureFlags:
 def _settings_flags(settings_data: Mapping[str, Any] | None) -> Mapping[str, Any]:
     if not isinstance(settings_data, Mapping):
         return {}
-    raw = settings_data.get("feature_flags")
-    if not isinstance(raw, Mapping):
-        raw = settings_data.get("features")
-    return raw if isinstance(raw, Mapping) else {}
+    features = settings_data.get("features", {})
+    return features if isinstance(features, Mapping) else {}
+
+
+def normalize_feature_config(config: MutableMapping[str, Any]) -> None:
+    """Resolve the existing alias within one layer before precedence merging."""
+    if "feature_flags" in config:
+        flags = dict(config.pop("feature_flags"))
+        flags.update(config.get("features", {}))
+        config["features"] = flags
+
+
+def write_feature_values(config: MutableMapping[str, Any], updates: Mapping[str, bool | None]) -> None:
+    """Author canonical keys and retire only the edited aliases."""
+    features = dict(config.get("features", {}))
+    legacy = config.get("feature_flags")
+    for name, value in updates.items():
+        if value is None:
+            features.pop(name, None)
+        else:
+            features[name] = value
+        if legacy is not None:
+            legacy.pop(name, None)
+    if features:
+        config["features"] = features
+    else:
+        config.pop("features", None)
+    if legacy is not None and not legacy:
+        del config["feature_flags"]
 
 
 def load_feature_flags(

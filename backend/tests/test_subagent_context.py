@@ -579,10 +579,11 @@ def test_tool_search_cannot_bridge_denied_tools_for_subagent() -> None:
         "send_message",
         "team_create",
         "request_user_input",
-        "update_plan",
         "safe_deferred_tool",
     ]:
         registry.register(_DeferredTool(name))
+    from backend.tools.plan_tool import UpdatePlanTool
+    registry.register(UpdatePlanTool())
 
     state = AgentState(user_message="subagent discovery")
     context = ToolExecutionContext(
@@ -611,6 +612,7 @@ def test_tool_search_cannot_bridge_denied_tools_for_subagent() -> None:
     # directly visible under the child's actual capability policy.
     child_policy = subagent_toolset_policy(permission_mode="bypass", execution_profile=build_agent_execution_profile(background=False))
     assert child_policy.is_directly_visible(registry.get_tool_spec("send_message"))
+    assert child_policy.is_directly_visible(registry.get_tool_spec("update_plan"))
     assert state.loaded_deferred_tools == {"safe_deferred_tool"}
 
 

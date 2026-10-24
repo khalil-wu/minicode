@@ -627,7 +627,12 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(submitted).toHaveLength(2);
     for (const command of submitted) expect(command).toMatchObject({ expected_turn_id: "original-turn" });
     act(() => first.emit("close", 1006));
-    act(() => useAppStore.setState({ messages: [{ id: "new-answer", turnId: "new-current-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 3, isStreaming: true }] }));
+    // A new run updates both the reader and its conversation cache. Updating
+    // only messages creates an impossible split that restore correctly reads
+    // back from the previous cached turn.
+    act(() => useAppStore.getState().hydrateConversationMessages(owner, [{ id: "new-answer", turnId: "new-current-turn", role: "assistant", content: "new work", artifacts: [], timestamp: 3, isStreaming: true }], { activate: true, isStreaming: true }));
+    expect(useAppStore.getState().messages[0].turnId).toBe("new-current-turn");
+    expect(useAppStore.getState().conversationMessages[owner][0].turnId).toBe("new-current-turn");
     act(() => vi.advanceTimersByTime(1500)); const recovered = MockWebSocket.instances[1]; act(() => openWithInitialSync(recovered));
     act(() => recovered.emitMessage({ type: "session.restored", active_conversation_id: owner, conversation_switched_follows: false,
       session: { active_conversation_id: owner, active_stream_conversation_ids: [owner] } }));
@@ -805,7 +810,7 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(useAppStore.getState().isConnected).toBe(true);
   });
 
-  it("ends a rejected restore without releasing queued work or losing drafts and the replay cursor", async () => {
+  it("seals an unconfirmed local stream after restore failure without releasing queued work or losing evidence", async () => {
     const messages = [{ id: "unfinished", role: "assistant" as const, content: "partial answer",
       timestamp: 1, artifacts: [], isStreaming: true }];
     const attachments = [{ id: "draft-image", name: "draft.png", type: "image/png", size: 10 }];
@@ -823,14 +828,20 @@ describe("useWebSocketConnection socket ownership", () => {
       expect(getWebSocket()?.send({ type: "user_message", content: "queued instruction",
         conversation_id: "conv-rejected-restore", client_command_id: "queued-before-rejection" })).toBe(true);
       socket.emitMessage({ type: "agent.progress", conversation_id: "conv-rejected-restore",
-        seq: 10, previous_replay_seq: 0, stage: "running", message: "buffered" });
+        message_id: "unfinished", seq: 10, previous_replay_seq: 0, stage: "running", message: "buffered" });
       socket.emitMessage({ type: "command.result", command: "session.restore", level: "error",
         message: "session.capabilities contains a non-JSON value (tuple)",
         client_command_id: restore.client_command_id, client_command_type: "session.restore",
         conversation_id: "conv-rejected-restore", workspace_root: "", seq: 11, previous_replay_seq: 10 });
     });
     expect(useAppStore.getState()).toMatchObject({ connectionPhase: "failed", isConnected: false,
-      draft: "unsent user instruction", attachments, messages, isStreaming: true });
+      draft: "unsent user instruction", attachments, isStreaming: false,
+      conversationStreaming: { "conv-rejected-restore": false } });
+    expect(useAppStore.getState().messages[0]).toMatchObject({
+      id: "unfinished", content: "partial answer", isStreaming: false,
+      terminalStatus: "partial", failureRecoverable: true,
+      failureMessage: expect.stringContaining("non-JSON value"),
+    });
     expect(useAppStore.getState().connectionError).toContain("non-JSON value");
     expect(getLastReceivedServerSeqForTests()).toBe(0);
     expect(sentCommandCount(socket, "user_message")).toBe(0);
@@ -847,13 +858,23 @@ describe("useWebSocketConnection socket ownership", () => {
     act(() => openWithInitialSync(resumed));
     await flushQueuedCommands();
     expect(sentCommandCount(resumed, "user_message")).toBe(0);
-    act(() => resumed.emitMessage({ type: "session.restored", active_conversation_id: "conv-rejected-restore",
-      conversation_switched_follows: false, last_seq: 0, current_seq: 11, replayed_events: 0,
-      session: { active_conversation_id: "conv-rejected-restore" } }));
+    act(() => {
+      resumed.emitMessage({ type: "session.restored", active_conversation_id: "conv-rejected-restore",
+        conversation_switched_follows: true, last_seq: 0, current_seq: 11, replayed_events: 0,
+        session: { active_conversation_id: "conv-rejected-restore" } });
+      resumed.emitMessage({ type: "conversation.switched", conversation_id: "conv-rejected-restore",
+        conversation: { id: "conv-rejected-restore", title: "Recovered",
+          transcript: [{ id: "unfinished", role: "assistant", content: "Authoritative completed answer",
+            terminal_status: "completed" }] },
+        session: { active_conversation_id: "conv-rejected-restore", active_stream_conversation_ids: [], active_task_id: null } });
+    });
     await flushQueuedCommands();
     expect(useAppStore.getState().connectionPhase).toBe("connected");
     expect(sentCommands(resumed).filter((command) => command.client_command_id === "queued-before-rejection")).toHaveLength(1);
     expect(sentCommandCount(resumed, "session.restore")).toBe(1);
+    expect(useAppStore.getState().messages[0]).toMatchObject({
+      id: "unfinished", content: "Authoritative completed answer", terminalStatus: "completed",
+    });
   });
 
   it.each(["session.restore", "session.sync"] as const)("reports a current %s failure to its caller and ignores late success", async (command) => {
@@ -862,11 +883,16 @@ describe("useWebSocketConnection socket ownership", () => {
     const socket = MockWebSocket.instances[0];
     act(() => openWithInitialSync(socket));
     await flushQueuedCommands();
+    useAppStore.setState({ conversationId: "conv-live", messages: [{
+      id: "live-answer", role: "assistant", content: "Retained", artifacts: [], timestamp: 1, isStreaming: true,
+    }], isStreaming: true, conversationStreaming: { "conv-live": true } });
     const pending = sendClientCommandAwaitResult({ type: command, client_command_id: "current-recovery" }, command);
     act(() => socket.emitMessage({ type: "command.result", command, level: "error", message: "projection failed",
       client_command_id: "current-recovery", client_command_type: command }));
     await expect(pending).resolves.toMatchObject({ level: "error", message: "projection failed" });
     expect(useAppStore.getState().connectionPhase).toBe("failed");
+    expect(useAppStore.getState().isStreaming).toBe(false);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ content: "Retained", terminalStatus: "partial", failureRecoverable: true });
     act(() => socket.emitMessage({ type: command === "session.restore" ? "session.restored" : "session.synced",
       active_conversation_id: null, conversation_switched_follows: false,
       session: { active_conversation_id: null }, client_command_id: "current-recovery", client_command_type: command }));

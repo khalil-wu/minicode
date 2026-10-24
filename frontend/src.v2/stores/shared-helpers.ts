@@ -197,7 +197,7 @@ export const defaultPanelSlots = (): PanelSlot[] => [
 
 export const ensureCodePanelSlots = (slots: PanelSlot[]): PanelSlot[] => {
   const withoutMaximized = slots.map((slot) => ({ ...slot, maximized: false }));
-  const codeSlots = withoutMaximized.filter((slot) => slot.kind === "chat" || slot.kind === "editor");
+  const codeSlots = withoutMaximized.filter((slot) => slot.kind === "chat" || slot.kind === "editor" || slot.kind === "file");
   const focusedSlotId = codeSlots.find((slot) => slot.focused)?.id;
   const chatSlot: PanelSlot = codeSlots.find((slot) => slot.kind === "chat") ?? {
     id: "main-chat",
@@ -213,7 +213,9 @@ export const ensureCodePanelSlots = (slots: PanelSlot[]): PanelSlot[] => {
     size: 1,
     focused: false,
   };
-  const next: PanelSlot[] = [chatSlot, editorSlot];
+  const next: PanelSlot[] = [...codeSlots];
+  if (!next.some(slot => slot.kind === "chat")) next.unshift(chatSlot);
+  if (!next.some(slot => slot.kind === "editor")) next.push(editorSlot);
   return normalizePanelSlots(next.map((slot) => ({
     ...slot,
     label: slot.kind === "chat" ? (slot.label ?? "Chat") : (slot.label ?? "File"),

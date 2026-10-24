@@ -5,9 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatPane } from "./ChatPane";
 import { useAppStore } from "../stores";
 
-vi.mock("./MessageList", () => ({ MessageList: () => <div>messages</div> }));
+const { messageRenders, summaryRenders } = vi.hoisted(() => ({ messageRenders: vi.fn(), summaryRenders: vi.fn() }));
+vi.mock("./MessageList", () => ({ MessageList: () => { messageRenders(); return <div>messages</div>; } }));
 vi.mock("../composer/Composer", () => ({ Composer: () => <textarea aria-label="composer" /> }));
-vi.mock("./ChatContextCard", () => ({ ChatContextCard: () => <aside>context</aside> }));
+vi.mock("./ChatContextCard", () => ({ ChatContextCard: ({ displayMode }: { displayMode: string }) => { summaryRenders(displayMode); return <aside>context</aside>; } }));
 
 describe("ChatPane search shortcuts", () => {
   beforeEach(() => {
@@ -21,7 +22,24 @@ describe("ChatPane search shortcuts", () => {
     });
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+  it("updates only the summary at layout breakpoints while a sidebar animates", () => {
+    let resized: ResizeObserverCallback;
+    vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1200);
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { resized = callback; }
+      observe() {} disconnect() {}
+    });
+    render(<ChatPane />);
+    messageRenders.mockClear(); summaryRenders.mockClear();
+    for (const width of [1210, 1240, 1280, 1320, 1400]) act(() => resized([{ contentRect: { width } } as ResizeObserverEntry], {} as ResizeObserver));
+    expect(messageRenders).not.toHaveBeenCalled();
+    expect(summaryRenders).not.toHaveBeenCalled();
+    act(() => resized([{ contentRect: { width: 1600 } } as ResizeObserverEntry], {} as ResizeObserver));
+    expect(summaryRenders).toHaveBeenCalledWith("gutter");
+    expect(messageRenders).not.toHaveBeenCalled();
+  });
 
   it("toggles Ctrl+F and closes the search with Escape", () => {
     const { container } = render(<ChatPane />);
@@ -92,11 +110,12 @@ describe("ChatPane search shortcuts", () => {
 
     act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
     expect(container.querySelector(".chat-pane")?.getAttribute("data-switching")).toBe("true");
-    expect(screen.queryByText("messages")).toBeNull();
+    const messages = screen.getByText("messages");
+    expect(messages.closest<HTMLElement>(".chat-pane-layout")?.style.visibility).toBe("hidden");
     expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
-    expect(screen.getByRole("textbox", { name: "composer", hidden: true })).toBe(composer);
-    expect(container.querySelector<HTMLElement>(".chat-pane-layout")?.style.display).toBe("none");
-    expect(container.querySelector("aside")?.closest<HTMLElement>(".chat-pane-layout")?.style.display).toBe("none");
+    expect(screen.getByRole("textbox", { hidden: true })).toBe(composer);
+    expect(container.querySelector<HTMLElement>(".chat-pane-layout")?.style.visibility).toBe("hidden");
+    expect(container.querySelector("aside")?.closest<HTMLElement>(".chat-pane-layout")?.style.visibility).toBe("hidden");
     const opening = screen.getByRole("status");
     expect(opening.textContent).toContain("正在打开会话");
     expect(opening.className).toBe("chat-pane-switch-status");
@@ -107,7 +126,7 @@ describe("ChatPane search shortcuts", () => {
     act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
     expect(screen.getByRole("textbox", { name: "composer" })).toBe(composer);
     expect((composer as HTMLTextAreaElement).value).toBe("Unsent prompt");
-    expect(screen.getByText("messages")).toBeTruthy();
+    expect(screen.getByText("messages")).toBe(messages);
     expect(screen.queryByText("正在打开会话…")).toBeNull();
     expect(useAppStore.getState().draft).toBe("Unsent prompt");
   });
@@ -130,10 +149,10 @@ describe("ChatPane search shortcuts", () => {
   it("centers cold-loading progress in the entire chat pane while its retained composer is hidden", () => {
     useAppStore.setState({ conversationHydration: { "conv-chat-pane": { isHydrating: true, updatedAt: 1 } } });
     render(<ChatPane />);
-    expect(screen.queryByText("messages")).toBeNull();
+    expect(screen.getByText("messages").closest<HTMLElement>(".chat-pane-layout")?.style.visibility).toBe("hidden");
     expect(screen.getByRole("status").querySelector(".animate-spin")).toBeTruthy();
     expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
-    expect(screen.getByRole("textbox", { name: "composer", hidden: true })).toBeTruthy();
+    expect(screen.getByRole("textbox", { hidden: true })).toBeTruthy();
     act(() => useAppStore.setState({ conversationHydration: {} }));
     expect(screen.getByText("messages")).toBeTruthy();
     expect(screen.queryByText("正在打开会话…")).toBeNull();

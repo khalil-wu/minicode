@@ -59,6 +59,33 @@ class _DeferredTool(BaseTool):
         return ToolResult("optional")
 
 
+def test_capability_snapshot_evaluates_each_tool_once_and_rechecks_the_next_snapshot(tmp_path, monkeypatch):
+    from collections import Counter
+    from backend.permissions import checker as checker_module
+
+    registry = ToolRegistry()
+    registry.register(_SnapshotTool("visible"))
+    registry.register(_DeferredTool())
+    checker = PermissionChecker(PermissionSettings(auto_allow=["*"], require_confirm=[]), tmp_path)
+    context = PermissionContext(mode="auto", workspace_root=tmp_path)
+    original = checker_module.evaluate_permission_decision
+    calls = Counter()
+
+    def counted(permission_checker, name, **kwargs):
+        calls[name] += 1
+        return original(permission_checker, name, **kwargs)
+
+    monkeypatch.setattr(checker_module, "evaluate_permission_decision", counted)
+    snapshot = registry.build_snapshot(permission_checker=checker, permission_context=context)
+    assert calls == {"snapshot_tool": 1, "optional_snapshot_tool": 1}
+    assert snapshot["tool_runtime_metadata"]["snapshot_tool"]["permission"] == PermissionLevel.AUTO.value
+    calls.clear()
+    denied = registry.build_snapshot(permission_checker=checker,
+        permission_context=replace(context, tool_deny_rules=["snapshot_tool"]))
+    assert calls == {"snapshot_tool": 1, "optional_snapshot_tool": 1}
+    assert "snapshot_tool" not in {schema["function"]["name"] for schema in denied["tools"]}
+    assert denied["tool_runtime_metadata"]["snapshot_tool"]["permission"] == PermissionLevel.ALWAYS_DENY.value
+
 @pytest.mark.asyncio
 async def test_provider_step_executes_the_advertised_tool_after_live_replacement(
     tmp_path, monkeypatch

@@ -98,6 +98,32 @@ test("pet initialization loads the nine real Source atlases without opening a na
   for (const pet of state.pets) { const dimensions = h.imageDimensions(fs.readFileSync(path.join(assetRoot, `${pet.assetRef}.webp`))); assert.equal(dimensions.width, 1536); assert.equal(dimensions.height, 2288); }
 });
 
+test("None persists independently of visibility and resizes an open Mini to its real bar layout", async t => {
+  const h = harness(t); await h.manager.initialize();
+  await h.manager.update({ size: 180, selectedPetId: null });
+  assert.equal(h.windows.length, 0);
+  let saved = JSON.parse(fs.readFileSync(path.join(h.root, "pets-settings.json"), "utf8"));
+  assert.equal(saved.selectedPetId, null); assert.equal(saved.size, 180); assert.equal(saved.miniOpen, false);
+  await h.manager.toggleMini();
+  const window = h.windows[0];
+  assert.equal(window.visible, true); assert.equal(window.bounds.width, 408); assert.equal(window.bounds.height, 64);
+  assert.equal(h.manager.getState().selectedPetId, null);
+  await h.manager.update({ selectedPetId: "dewey" });
+  assert.equal(window.visible, true); assert.equal(window.bounds.width, 204); assert.equal(window.bounds.height, 219);
+  await h.manager.update({ selectedPetId: null });
+  assert.equal(window.visible, true); assert.equal(window.bounds.width, 408); assert.equal(window.bounds.height, 64);
+  saved = JSON.parse(fs.readFileSync(path.join(h.root, "pets-settings.json"), "utf8"));
+  assert.equal(saved.selectedPetId, null); assert.equal(saved.miniOpen, true); assert.equal(saved.size, 180);
+});
+
+test("restoring saved None opens only the bar and preserves the saved size", async t => {
+  const h = harness(t);
+  fs.writeFileSync(path.join(h.root, "pets-settings.json"), JSON.stringify({ selectedPetId: null, size: 224, miniOpen: true, petVisible: true }));
+  await h.manager.initialize(); await h.manager.restoreMini();
+  assert.equal(h.manager.getState().selectedPetId, null); assert.equal(h.manager.getState().size, 224);
+  assert.equal(h.windows[0].bounds.width, 408); assert.equal(h.windows[0].bounds.height, 64); assert.equal(h.windows[0].visible, true);
+});
+
 test("Refresh reads real local pet packages and preserves malformed records as visible issues", async t => {
   const h = harness(t); await h.manager.initialize();
   customPet(h.root);

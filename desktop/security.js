@@ -274,6 +274,7 @@ function trustedPathCandidates(targetPath) {
 }
 
 const IPC_CAPABILITIES = new Set([
+  "minicode:personalizations:listHosts", "minicode:personalizations:request",
   "minicode:dictation:get", "minicode:dictation:configure", "minicode:dictation:suspend", "minicode:dictation:insert", "minicode:dictation:complete",
   "minicode:dictation:getLocalRuntime", "minicode:dictation:openProviderSettings", "minicode:dictation:migratePreferences",
   "minicode:dictation:consumeProviderSettings",

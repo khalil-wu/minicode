@@ -2246,6 +2246,23 @@ describe("handleSessionEvent", () => {
     });
   });
 
+  it("commits navigation once while the following hydration snapshot refreshes the same owner", () => {
+    const original = useAppStore.getState().applyConversationSwitched;
+    const activate = vi.fn(original);
+    useAppStore.setState({ applyConversationSwitched: activate, pendingConversationSwitchId: "conv-hydration-once" });
+    const conversation = { id: "conv-hydration-once", title: "Hydration", updated_at: "2026-10-24T00:00:00Z",
+      workspace_root: "C:/hydration", messages: [{ id: "hydration-user", role: "user", content: "Read this", timestamp: 1 }] };
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    try {
+      handleSessionEvent({ type: "conversation.switched", conversation_id: conversation.id, conversation, is_hydrating: true } as unknown as ServerEvent, buffers);
+      useAppStore.getState().setDraft("Typed after opening");
+      handleSessionEvent({ type: "conversation.switched", conversation_id: conversation.id, conversation, is_hydrating: false } as unknown as ServerEvent, buffers);
+      expect(activate).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState()).toMatchObject({ conversationId: conversation.id, pendingConversationSwitchId: null, draft: "Typed after opening" });
+      expect(useAppStore.getState().conversationHydration[conversation.id].isHydrating).toBe(false);
+    } finally { useAppStore.setState({ applyConversationSwitched: original }); }
+  });
+
   it("conversation switched restores cached messages and goal when transcript is absent", () => {
     const textStreamBuffer = makeBuffer();
     const thinkingStreamBuffer = makeBuffer();
@@ -2511,6 +2528,90 @@ describe("handleSessionEvent", () => {
       compaction_count: 1,
     });
     expect(state.contextUsage?.ledger?.entries[0]?.category).toBe("history");
+  });
+
+  it("hydrates a durable child terminal snapshot while preserving its live parent and working record", () => {
+    const transcript = [{ id: "child-log", role: "assistant", content: "Read the real source", artifacts: [], timestamp: 1 }] as ChatMessage[];
+    const child: SubagentState = { id: "child-live", role: "reviewer", status: "running",
+      agentPath: "/root/reviewer", mailboxEpoch: 2, displayName: "Ada",
+      transcriptMessages: transcript, transcriptSeq: 17 };
+    const parent: ChatMessage = { id: "parent-live", role: "assistant", content: "Parent still working",
+      artifacts: [], timestamp: 1, isStreaming: true };
+    const currentPlan = { threadId: "conv-parent", turnId: "parent-turn",
+      plan: [{ step: "Keep the parent running", status: "in_progress" as const }] };
+    useAppStore.setState({ conversationId: "conv-parent", messages: [parent], isStreaming: true,
+      conversationStreaming: { "conv-parent": true }, conversationMessages: {},
+      plan: currentPlan, todos: [], agentProgress: [], subagents: [child],
+      conversationAgentStates: { "conv-parent": { plan: currentPlan, todos: [], agentProgress: [], subagents: [child] } } });
+
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-parent",
+      conversation: { id: "conv-parent", title: "Parent", revision: 3,
+        transcript: [{ id: "parent-live", role: "assistant", content: "Older persisted parent" }],
+        context_snapshot: { ui_agent_state: { plan: null, todos: [], agentProgress: [],
+          subagents: [{ id: "child-live", role: "reviewer", status: "done",
+            agentPath: "/root/reviewer", mailboxEpoch: 2, displayName: "Ada",
+            resultContent: "Verified source result", completedAt: 2000 }] } } },
+      session: { active_conversation_id: "conv-parent", active_task_id: "parent-task",
+        active_stream_conversation_ids: ["conv-parent"] },
+    } as unknown as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+
+    const state = useAppStore.getState();
+    expect(state.isStreaming).toBe(true);
+    expect(state.messages[0]).toMatchObject({ id: "parent-live", content: "Parent still working", isStreaming: true });
+    expect(state.plan).toBe(currentPlan);
+    expect(state.subagents[0]).toMatchObject({ id: "child-live", status: "done", displayName: "Ada",
+      resultContent: "Verified source result", completedAt: 2000, transcriptSeq: 17 });
+    expect(state.subagents[0].transcriptMessages).toBe(transcript);
+    expect(state.conversationAgentStates["conv-parent"].subagents[0].status).toBe("done");
+  });
+
+  it.each([
+    { label: "older epoch", previousStatus: "running", previousEpoch: 2, incomingStatus: "done", incomingEpoch: 1, expectedStatus: "running", expectedEpoch: 2, retainRecord: true },
+    { label: "terminal to running regression", previousStatus: "done", previousEpoch: 2, incomingStatus: "running", incomingEpoch: 2, expectedStatus: "done", expectedEpoch: 2, retainRecord: true },
+    { label: "newer incarnation", previousStatus: "done", previousEpoch: 2, incomingStatus: "running", incomingEpoch: 3, expectedStatus: "running", expectedEpoch: 3, retainRecord: false },
+    { label: "missing incoming fence", previousStatus: "running", previousEpoch: 2, incomingStatus: "done", incomingEpoch: undefined, expectedStatus: "running", expectedEpoch: 2, retainRecord: true },
+    { label: "unfenced authoritative snapshot", previousStatus: "done", previousEpoch: undefined, incomingStatus: "running", incomingEpoch: undefined, expectedStatus: "running", expectedEpoch: undefined, retainRecord: true },
+  ])("merges live-parent child hydration without accepting a $label as a terminal fact", (testCase) => {
+    const transcript = [{ id: "child-evidence", role: "assistant", content: "Actual earlier evidence", artifacts: [], timestamp: 1 }] as ChatMessage[];
+    const previous = { id: "child", role: "reviewer", status: testCase.previousStatus,
+      agentPath: "/root/reviewer", mailboxEpoch: testCase.previousEpoch, displayName: "Ada",
+      transcriptMessages: transcript, transcriptSeq: 17 } as SubagentState;
+    useAppStore.setState({ conversationId: "conv-parent", messages: [{
+      id: "parent", role: "assistant", content: "Working", artifacts: [], timestamp: 1, isStreaming: true,
+    }], conversationStreaming: { "conv-parent": true }, isStreaming: true,
+      plan: null, todos: [], agentProgress: [], subagents: [previous],
+      conversationAgentStates: { "conv-parent": { plan: null, todos: [], agentProgress: [], subagents: [previous] } } });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-parent",
+      conversation: { id: "conv-parent", title: "Parent", context_snapshot: { ui_agent_state: {
+        plan: null, todos: [], agentProgress: [], subagents: [{
+          id: "child", role: "reviewer", status: testCase.incomingStatus,
+          agentPath: "/root/reviewer", mailboxEpoch: testCase.incomingEpoch, displayName: "Ada",
+        }],
+      } } }, session: { active_stream_conversation_ids: ["conv-parent"], active_task_id: "parent-task" },
+    } as unknown as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+    const child = useAppStore.getState().subagents[0];
+    expect(child).toMatchObject({ status: testCase.expectedStatus, mailboxEpoch: testCase.expectedEpoch, displayName: "Ada" });
+    expect(child.transcriptMessages).toBe(testCase.retainRecord ? transcript : undefined);
+    expect(useAppStore.getState().isStreaming).toBe(true);
+  });
+
+  it("retains a newer genuine child failure when an older terminal snapshot arrives during the parent turn", () => {
+    const child = { id: "child", role: "reviewer", status: "error", agentPath: "/root/reviewer",
+      mailboxEpoch: 2, completedAt: 3000, displayName: "Ada", resultError: "Original tool failure" } as SubagentState;
+    useAppStore.setState({ conversationId: "conv-parent", messages: [{
+      id: "parent", role: "assistant", content: "Working", artifacts: [], timestamp: 1, isStreaming: true,
+    }], conversationStreaming: { "conv-parent": true }, isStreaming: true,
+      plan: null, todos: [], agentProgress: [], subagents: [child] });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-parent",
+      conversation: { id: "conv-parent", title: "Parent", context_snapshot: { ui_agent_state: {
+        plan: null, todos: [], agentProgress: [], subagents: [{
+          id: "child", role: "reviewer", status: "done", agentPath: "/root/reviewer", mailboxEpoch: 2,
+          completedAt: 2000, resultContent: "Older result",
+        }],
+      } } }, session: { active_stream_conversation_ids: ["conv-parent"], active_task_id: "parent-task" },
+    } as unknown as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+    expect(useAppStore.getState().subagents[0]).toMatchObject({ status: "error", displayName: "Ada",
+      completedAt: 3000, resultError: "Original tool failure" });
   });
 
   it("does not let a stale agent-state snapshot overwrite an in-flight local turn", () => {

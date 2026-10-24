@@ -949,7 +949,10 @@ def _get_scheduler(session):
 
 
 def _scheduler_command_scope(session: "WebSocketSession", data: dict[str, Any]):
-    from backend.ws.command_scope import resolve_resource_command_scope
+    from backend.ws.command_scope import CommandScope, resolve_resource_command_scope
+
+    if data.get("scheduler_scope") == "global":
+        return CommandScope("", str(data["task_workspace_root"]), str(data.get("client_command_id") or ""))
 
     return resolve_resource_command_scope(session, data)
 
@@ -962,21 +965,29 @@ def _scheduler_storage_root(scope: Any, data: Mapping[str, Any]) -> str:
     return str(data["task_workspace_root"] or "").strip() if "task_workspace_root" in data else scope.workspace_root
 
 
-async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, *, scope: Any, storage_root: str | None = None) -> SchedulerOperationResult:
+async def _send_scheduler_snapshot(session: "WebSocketSession", scheduler: Any, *, scope: Any, storage_root: str | None = None, publish: bool = True) -> SchedulerOperationResult:
     from backend.services.scheduler_service import list_scheduled_tasks
 
     projection = scope if storage_root is None else replace(scope, workspace_root=storage_root)
     result = list_scheduled_tasks(scheduler, workspace_root=projection.workspace_root,
         target_conversation_id=scope.conversation_id if storage_root is None else None)
-    await session.send_payload(
-        _scheduler_snapshot_payload(result, projection),
-        log_context="scheduler.list",
-    )
+    if publish:
+        await session.send_payload(
+            _scheduler_snapshot_payload(result, projection),
+            log_context="scheduler.list",
+        )
     return result
 
 
 async def handle_scheduler_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     scheduler = _get_scheduler(session)
+    if data.get("scheduler_scope") == "global":
+        from backend.services.scheduler_service import list_scheduled_tasks
+
+        result = list_scheduled_tasks(scheduler)
+        await session.send_event(AgentEvent.command_result("scheduler.list", "", level="success",
+            data={"tasks": result.tasks, "runs": result.runs, "scheduler_scope": "global"}))
+        return True
     try:
         scope = _scheduler_command_scope(session, data)
     except ValueError as exc:
@@ -1000,7 +1011,7 @@ async def handle_scheduler_add(session: "WebSocketSession", data: dict[str, Any]
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.add", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(
         AgentEvent.command_result("scheduler.add", "", data=scope.apply({"name": result.task["name"], "task": result.task}))
     )
@@ -1017,7 +1028,7 @@ async def handle_scheduler_update(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.update", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(AgentEvent.command_result("scheduler.update", "", data=scope.apply({"task_id": result.task["id"], "task": result.task})))
     return True
 
@@ -1080,7 +1091,7 @@ async def handle_scheduler_remove(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.remove", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.remove",
@@ -1101,7 +1112,7 @@ async def handle_scheduler_toggle(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.toggle", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.toggle",
@@ -1268,7 +1279,7 @@ async def handle_scheduler_run_now(session: "WebSocketSession", data: dict[str, 
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.run_now", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.run_now",
@@ -1289,7 +1300,7 @@ async def handle_scheduler_retry(session: "WebSocketSession", data: dict[str, An
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.retry", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.retry",
@@ -1310,7 +1321,7 @@ async def handle_scheduler_cancel(session: "WebSocketSession", data: dict[str, A
     except (SchedulerServiceError, ValueError) as exc:
         await emit_command_error(session, "scheduler.cancel", exc)
         return True
-    await _send_scheduler_snapshot(session, scheduler, scope=scope)
+    await _send_scheduler_snapshot(session, scheduler, scope=scope, publish=data.get("scheduler_scope") != "global")
     await session.send_event(
         AgentEvent.command_result(
             "scheduler.cancel",

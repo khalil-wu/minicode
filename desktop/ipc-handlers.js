@@ -326,6 +326,11 @@ function registerIpcHandlers() {
   // Window controls
   // -----------------------------------------------------------------------
 
+  ipcMain.handle("minicode:personalizations:listHosts", withMainSender("minicode:personalizations:listHosts", () =>
+    ctx.getRemoteDesktop().personalizationHosts()));
+  ipcMain.handle("minicode:personalizations:request", withMainSender("minicode:personalizations:request", (_event, hostId, action, payload) =>
+    ctx.getRemoteDesktop().personalizationRequest(hostId, action, payload, ctx.getBackendRuntimeConfig())));
+
   for (const action of ["claim", "update", "release", "ready", "reply"]) {
     const channel = `minicode:realtimeVoice:${action}`;
     ipcMain.handle(channel, withMainSender(channel, (event, payload) =>
@@ -498,7 +503,8 @@ function registerIpcHandlers() {
     return snapshot;
   }));
   ipcMain.handle("minicode:preferences:set", withMainSender("minicode:preferences:set", async (_event, patch) => {
-    ctx.desktopPreferences.setPreferences(patch);
+    if ("popoutWindowShortcut" in patch) ctx.popoutWindow.update(patch);
+    else ctx.desktopPreferences.setPreferences(patch);
     if ("localeOverride" in patch) ctx.onLocaleChanged();
     const snapshot = await preferencesSnapshot();
     for (const window of ctx.getMainWindows()) window.webContents.send("minicode:preferences:changed", snapshot);
@@ -1071,7 +1077,7 @@ function registerIpcHandlers() {
   }));
   ipcMain.handle("minicode:menu:setState", withMainSender("minicode:menu:setState", (event, state) => {
     const keys = ["terminalEnabled", "bottomPanelToggleEnabled", "newProjectEnabled", "editorFocused"];
-    if (!state || Object.keys(state).length !== keys.length + 4 || keys.some(key => typeof state[key] !== "boolean") || typeof state.shortcutRecording !== "boolean"
+    if (!state || Object.keys(state).length !== keys.length + 5 || keys.some(key => typeof state[key] !== "boolean") || typeof state.shortcutRecording !== "boolean" || typeof state.workspaceRoot !== "string"
       || !state.accelerators || typeof state.accelerators !== "object" || Array.isArray(state.accelerators)
       || Object.values(state.accelerators).some(value => value !== null && typeof value !== "string")
       || !state.acceleratorBindings || typeof state.acceleratorBindings !== "object" || Array.isArray(state.acceleratorBindings)

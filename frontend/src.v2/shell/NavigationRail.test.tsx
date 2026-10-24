@@ -6,6 +6,7 @@ import { NavigationRail } from "./NavigationRail";
 import { useAppStore } from "../stores";
 import type { DesktopPetState } from "../desktop/runtime";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
+import { closeAutomations, getAutomationsPageState } from "../lib/automations-navigation";
 
 const fixture = vi.hoisted(() => ({ available: true, getState: vi.fn(), update: vi.fn(), changed: vi.fn(), openLink: vi.fn(), toast: vi.fn() }));
 vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => fixture.available ? { pets: api } : null }));
@@ -19,6 +20,7 @@ const publish = (next: DesktopPetState) => { state = next; for (const listener o
 const openProfile = () => fireEvent.click(screen.getByRole("button", { name: "打开个人资料菜单" }));
 
 beforeEach(() => {
+  closeAutomations();
   vi.clearAllMocks(); fixture.available = true; listeners.clear();
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   state = { pets: [], selectedPetId: "codex", size: 112, petVisible: true, miniOpen: false, petDirectory: "C:/fixture/pets", reducedMotion: false,
@@ -46,8 +48,12 @@ it("routes every global rail destination without borrowing the owner, expanding 
   fireEvent.click(within(rail).getByRole("button", { name: "首页" }));
   expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, appMode: "cowork", leftSidebarWidth: 0 });
   fireEvent.click(within(rail).getByRole("button", { name: "定时任务" }));
-  expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "scheduler" });
+  expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, settingsTab: "general" });
+  expect(getAutomationsPageState().open).toBe(true);
+  expect(within(rail).getByRole("button", { name: "定时任务" }).getAttribute("aria-current")).toBe("page");
+  expect(within(rail).getByRole("button", { name: "首页" }).getAttribute("aria-current")).toBeNull();
   fireEvent.click(within(rail).getByRole("button", { name: "插件" }));
+  expect(getAutomationsPageState().open).toBe(false);
   expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, skillsMarketplaceOpen: true, skillsMarketplaceTab: "plugins" });
   act(() => useAppStore.setState({ skillsMarketplaceTab: "skills", skillsMarketplaceReturnTarget: "settings" }));
   fireEvent.click(within(rail).getByRole("button", { name: "插件" }));

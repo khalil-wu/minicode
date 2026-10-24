@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, BinaryIO
 from .compression import open_history_binary
+from .search import message_match
 
 
 class TranscriptCursorMissing(ValueError):
@@ -45,6 +47,26 @@ def _read_indexed_message(stream: BinaryIO, row: list[Any]) -> dict[str, Any]:
     if not isinstance(message, dict) or message.get("id") != message_id or message.get("role") != role:
         raise TranscriptIndexError("Transcript index does not match its generation")
     return message
+
+
+def find_match(
+    path: Path, index: list[list[Any]], pattern: re.Pattern[str], *, replacement: dict[str, Any] | None = None,
+) -> dict[str, str] | None:
+    """Scan visible rows once, in order, stopping at the first content match."""
+    replaced = False
+    with open_history_binary(path) as stream:
+        for row in index:
+            if replacement is not None and row[0] == replacement["id"]:
+                message = replacement
+                replaced = True
+            elif row[1] in {"user", "assistant"}:
+                message = _read_indexed_message(stream, row)
+            else:
+                continue
+            match = message_match(message, pattern)
+            if match is not None:
+                return match
+    return message_match(replacement, pattern) if replacement is not None and not replaced else None
 
 
 def read_page(

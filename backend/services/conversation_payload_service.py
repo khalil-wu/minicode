@@ -26,7 +26,7 @@ class ConversationCreateRequest:
     conversation_id: str | None
     title: str
     conversation_type: ConversationType
-    memory_mode: str
+    memory_mode: str | None
     permission_mode: str
     agent_mode: str
     workspace_root: str
@@ -266,7 +266,7 @@ def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreat
     memory_mode = (
         requested_memory_mode
         if requested_memory_mode in {"enabled", "disabled"}
-        else ("disabled" if conversation_type == "side_chat" else "enabled")
+        else ("disabled" if conversation_type == "side_chat" else None)
     )
     activate = conversation_type == "main" and data.get("activate") is not False
     workspace_root = str(data.get("workspace_root") or "").strip()

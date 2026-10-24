@@ -74,7 +74,8 @@ def _settings_payload(stack: ConfigLayerStack, workspace_root: str = "") -> dict
                         "disabled_reason": layer.disabled_reason, "values": _values(layer.config),
                         "readonly": key == "managed", "source": layer.source.to_payload()}
                        for key, layer in scopes.items()],
-            "origins": _origins(stack), "requirements": requirements}
+            "origins": _origins(stack), "requirements": requirements,
+            "warnings": stack.to_payload()["startup_warnings"]}
 
 
 def agent_config_settings(workspace_root: str = "") -> dict[str, Any]:

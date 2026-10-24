@@ -129,7 +129,7 @@ it("selects conversational plan mode independently of the permission profile", a
 
 it("opens the real file picker directly without adding another file-and-folder submenu",()=>{
   const files = vi.fn(), close = vi.fn();
-  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} goalAvailable onFiles={files} onGoal={vi.fn()} onPlan={vi.fn()} onPlugin={vi.fn()} onClose={close} />);
+  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} showGoal goalAvailable onFiles={files} onGoal={vi.fn()} onPlan={vi.fn()} onPlugin={vi.fn()} onClose={close} />);
   fireEvent.click(screen.getByRole("menuitem",{name:"文件和文件夹"}));
   expect(files).toHaveBeenCalledOnce();
   expect(screen.queryByRole("menuitem", { name: "引用文件夹" })).toBeNull();
@@ -193,7 +193,7 @@ it("keeps composer focus while suggestion arrows loop and Enter activates the hi
 
 it("skips disabled actions and leaves typing and Space to the composer rather than menu typeahead", async () => {
   const plan = vi.fn(), close = vi.fn();
-  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} goalAvailable={false}
+  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} showGoal goalAvailable={false}
     onFiles={vi.fn()} onGoal={vi.fn()} onPlan={plan} onPlugin={vi.fn()} onClose={close} />);
   await screen.findByRole("menuitem", { name: /Notes/ });
   const first = screen.getByRole("menuitem", { name: "文件和文件夹" }), item = screen.getByRole("menuitem", { name: /^计划模式/ });

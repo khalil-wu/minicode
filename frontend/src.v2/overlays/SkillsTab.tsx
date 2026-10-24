@@ -8,7 +8,7 @@ export function SkillsTab({ active = true, search = "", onSkillsChange }: {
   active?: boolean; search?: string; onSkillsChange?: (count: number) => void;
 }) {
   const { t: tr } = useI18n();
-  const { workspaceRoot, skills, loading, error, pendingPath, reload, toggle } = useSkillSettings(active, onSkillsChange);
+  const { workspaceRoot, skills, loading, error, pendingPath, reload, toggle, uninstall } = useSkillSettings(active, onSkillsChange);
   const [detailPath, setDetailPath] = useState<string | null>(null);
   useEffect(() => { setDetailPath(null); }, [workspaceRoot]);
   const selected = skills.find(skill => skill.path === detailPath);
@@ -25,6 +25,7 @@ export function SkillsTab({ active = true, search = "", onSkillsChange }: {
         aria-label={`${skill.enabled ? tr("停用") : tr("启用")} ${skill.display_name || skill.name}`} disabled={Boolean(pendingPath)} onClick={() => void toggle(skill)}><span /></button>
     </article>)}</div>}
     {!loading && !error && visible.length === 0 && <div className="settings-mcp-empty">{query ? tr("没有匹配的技能。") : tr("没有已安装技能")}</div>}
-    {active && selected && <InstalledSkillDetailsDialog skill={selected} workspaceRoot={workspaceRoot} pending={Boolean(pendingPath)} onToggle={() => void toggle(selected)} onClose={() => setDetailPath(null)} />}
+    {active && selected && <InstalledSkillDetailsDialog skill={selected} workspaceRoot={workspaceRoot} pending={Boolean(pendingPath)} onToggle={() => void toggle(selected)}
+      onUninstall={() => uninstall(selected)} onClose={() => setDetailPath(null)} />}
   </div>;
 }

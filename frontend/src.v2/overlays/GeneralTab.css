@@ -22,7 +22,7 @@
 
 .settings-follow-up-segmented .settings-segment[data-active="true"] {
   border: 0;
-  background: var(--surface-soft);
+  background: var(--surface-selected);
 }
 
 .settings-open-source-back {
@@ -55,8 +55,7 @@
   gap: 4px;
 }
 
-.settings-action-button.settings-general-task-reset {
-  border-color: transparent;
-  background: transparent;
-  font-weight: var(--fw-regular);
-}
+.settings-popout-shortcut { display: flex; align-items: center; gap: 8px; }
+.settings-popout-shortcut > span { color: var(--text-secondary); }
+.settings-popout-error { display: block; margin-top: 4px; color: var(--text-primary); }
+.settings-action-button.settings-general-task-reset { border-color: transparent; background: transparent; font-weight: var(--fw-regular); }

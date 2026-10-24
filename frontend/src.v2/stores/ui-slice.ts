@@ -60,6 +60,7 @@ import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewS
 import { openWebInBrowser } from "../chat/openWebInBrowser";
 import { pushToast } from "../overlays/ToastContainer";
 import { readDiffViewPreference } from "../chat/diff/diff-view-preferences";
+import { threadSummaryDisplayMode } from "../chat/thread-summary-layout";
 
 const CLOSED_OVERLAYS = {
   commandPaletteOpen: false,
@@ -308,6 +309,16 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   return ({
   contextCardCollapsed: true,
   setContextCardCollapsed: (collapsed) => set({ contextCardCollapsed: collapsed }),
+  contextCardPinned: readLS("minicode.summary-pinned") === "1",
+  setContextCardPinned: (pinned) => {
+    writeLS("minicode.summary-pinned", pinned ? "1" : "0");
+    set({ contextCardPinned: pinned, contextCardCollapsed: !pinned });
+  },
+  toggleContextCard: (width) => {
+    const state = get();
+    if (threadSummaryDisplayMode(width) === "overlay") state.setContextCardCollapsed(!state.contextCardCollapsed);
+    else state.setContextCardPinned(!state.contextCardPinned);
+  },
   themeMode: initialTheme(),
   resolvedTheme: initialResolvedTheme(),
   ...appearance,
@@ -539,7 +550,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
         ...(canonicalTab === "terminal" && s.activeBottomTab === "terminal" ? { dockCollapsed: true } : {}),
-        rightPanelExpanded: (["browser", "preview", "diff", "artifacts"].includes(canonicalTab) || canonicalTab.startsWith("mcp-app:")) && s.rightPanelExpanded,
+        rightPanelExpanded: s.rightPanelExpanded,
       };
     }),
   setRightStackTabLocked: (locked) => set({ rightStackTabLocked: locked }),

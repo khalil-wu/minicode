@@ -62,7 +62,7 @@ class ContextWindowConfig:
 
     @classmethod
     def from_settings(cls, settings: dict[str, Any]) -> "ContextWindowConfig":
-        features = settings.get("feature_flags", settings.get("features", {}))
+        features = settings.get("features", {})
         token_budget = features.get("token_budget", False)
         options = {key: value for key, value in token_budget.items() if key != "enabled"} if isinstance(token_budget, dict) else {}
         config = cls(**{

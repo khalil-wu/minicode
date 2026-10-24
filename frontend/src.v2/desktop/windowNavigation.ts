@@ -5,6 +5,6 @@ import { desktop } from "./runtime";
 export function initializeWindowNavigation() {
   const navigation = window.__MINICODE_RUNTIME__?.initialNavigation;
   if (!navigation) return;
-  writeLS(LS.conversation.activeId, navigation.conversationId ?? "");
+  if (!navigation.restoreLastConversation) writeLS(LS.conversation.activeId, navigation.conversationId ?? "");
   desktop()!.windowControls.consumeInitialNavigation();
 }

@@ -5,6 +5,7 @@ from backend.async_cleanup import to_thread_cancel_safe
 import asyncio
 from contextlib import suppress
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse
@@ -252,6 +253,21 @@ def create_workspace_router() -> APIRouter:
         service=Depends(_request_service),
     ) -> WorkspaceFileResponse:
         return await _call(service, "read_file", path)
+
+    @router.get("/browser-search", response_model=WorkspaceSearchResponse)
+    async def browser_search_api(
+        session_id: str = Query(..., min_length=1),
+        conversation_id: str = Query(..., min_length=1),
+        execution_cwd: str = Query(..., min_length=1),
+        query: str = Query(..., min_length=1),
+        limit: int = Query(100, ge=1, le=100),
+        service=Depends(_request_service),
+    ) -> WorkspaceSearchResponse:
+        if isinstance(service, ExecutorEditorService):
+            return WorkspaceSearchResponse(**(await service.search(query, limit=limit, kind="file")))
+        payload = await asyncio.to_thread(workspace_search_payload, root=service.workspace_root_path(),
+            query=query, limit=limit, include_tests=True, kind="file")
+        return WorkspaceSearchResponse(**payload)
 
     @router.get("/browser-preview")
     async def projectless_browser_preview_api(
@@ -569,20 +585,52 @@ def create_workspace_router() -> APIRouter:
         root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
         return await asyncio.to_thread(workspace_git_status_payload, root, workspace_root=owner_root)
 
+    @router.get("/git/branches")
+    async def git_branches_api(workspace_root: str = Query(..., min_length=1), path: str = Query(""), base_branch: str | None = Query(None), service=Depends(_request_service)) -> dict:
+        from .file_review import file_review_options
+        if isinstance(service, ExecutorEditorService):
+            service.cwd = await service.allowed(path or ".")
+            return {**await file_review_options(service.workspace_root_value, service, base_branch=base_branch), **service.identity()}
+        root, _ = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+        return await file_review_options(root, base_branch=base_branch)
+
     @router.get("/git/diff")
     async def git_diff_api(
         file: str = Query(""),
         path: str = Query(""),
+        base_ref: str = Query("HEAD", min_length=1),
+        source: Literal["uncommitted", "unstaged", "staged", "branch", "commit"] | None = Query(None),
+        base_branch: str | None = Query(None),
+        commit_sha: str | None = Query(None),
+        hide_whitespace: bool = Query(False),
+        for_apply: bool = Query(False),
         workspace_root: str = Query(..., min_length=1),
         service=Depends(_request_service),
     ) -> dict:
         """返回指定文件的 git diff"""
+        if source is not None:
+            from .file_review import file_review_diff
+            from backend.diff.review_patch import review_patch
+            if source == "commit" and not commit_sha:
+                raise HTTPException(422, "Commit review requires commit_sha")
+            if isinstance(service, ExecutorEditorService):
+                service.cwd = await service.allowed(path or ".")
+                if for_apply:
+                    return {"diff": await review_patch(service.workspace_root_value, source, service=service,
+                        base_branch=base_branch, commit_sha=commit_sha), **service.identity()}
+                return {**await file_review_diff(service.workspace_root_value, service, source=source,
+                    base_branch=base_branch, commit_sha=commit_sha, hide_whitespace=hide_whitespace), **service.identity()}
+            root, _ = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
+            if for_apply:
+                return {"diff": await review_patch(str(root), source, base_branch=base_branch, commit_sha=commit_sha)}
+            return await file_review_diff(root, source=source, base_branch=base_branch,
+                commit_sha=commit_sha, hide_whitespace=hide_whitespace)
         if isinstance(service, ExecutorEditorService):
-            return await service.git("diff", path=path, file=file)
+            return await service.git("diff", path=path, file=file, base_ref=base_ref)
         root, owner_root = await asyncio.to_thread(_resolve_git_root, path, workspace_root)
         if file and not is_path_within((root / file).resolve(), root):
             raise HTTPException(status_code=400, detail="Git file is outside workspace root.")
-        return await asyncio.to_thread(workspace_git_diff_payload, root, file, workspace_root=owner_root)
+        return await asyncio.to_thread(workspace_git_diff_payload, root, file, workspace_root=owner_root, base_ref=base_ref)
 
     @router.get("/git/worktree", response_model=WorkspaceGitWorktreeResponse)
     async def git_worktree_api(

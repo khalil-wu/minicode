@@ -49,6 +49,7 @@ vi.mock("../composer/useComposerPlugins", () => ({ useComposerPlugins: () => ({ 
 import { HeaderBar } from "./HeaderBar";
 import { SidebarLeft } from "./SidebarLeft";
 import { useAppStore } from "../stores";
+import { closeAutomations, getAutomationsPageState } from "../lib/automations-navigation";
 
 const header = (overrides = {}) => <HeaderBar
   leftPanelAvailable leftPanelOpen rightPanelAvailable rightPanelOpen
@@ -71,6 +72,7 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     expect(useAppStore.getState()).toMatchObject({settingsOpen:false,shortcutsHelpOpen:true,draft:"Keep gear-menu draft",conversationId:"A"});
   });
   beforeEach(() => {
+    closeAutomations();
     vi.clearAllMocks();
     windowControls.getState.mockResolvedValue({ isMaximized: false });
     windowStateListeners.clear();
@@ -333,9 +335,10 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     render(<SidebarLeft embedded />);
     send.mockClear();
     fireEvent.click(screen.getByRole("button", { name: "已安排" }));
-    expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, settingsTab: "scheduler" });
-    act(() => useAppStore.getState().toggleSettings());
+    expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, settingsTab: "general" });
+    expect(getAutomationsPageState().open).toBe(true);
     fireEvent.click(screen.getByRole("button", { name: "插件", exact: true }));
+    expect(getAutomationsPageState().open).toBe(false);
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, skillsMarketplaceOpen: true, skillsMarketplaceTab: "plugins" });
     expect(useAppStore.getState()).toMatchObject({ conversationId: "A", draft: "unfinished" });
     expect(useAppStore.getState().messages[0].id).toBe("message-A");

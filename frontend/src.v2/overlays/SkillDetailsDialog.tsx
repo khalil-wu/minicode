@@ -11,14 +11,15 @@ import type { SkillInfo } from "../stores/types";
 import { copyText } from "../lib/clipboard";
 import "./SkillDetailsDialog.css";
 
-export type SettingsSkill = SkillInfo & { path: string; enabled: boolean };
+export type SettingsSkill = SkillInfo & { path: string; enabled: boolean; uninstall_name?: string | null };
 
-export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = false, canToggle = true, canOpen, canReveal, onOpen, onReveal, onToggle, onTry, onClose }: {
+export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = false, canToggle = true, canOpen, canReveal, onOpen, onReveal, onToggle, onUninstall, onTry, onClose }: {
   skill: SettingsSkill; workspaceRoot: string; pending: boolean;
   canOpen: boolean; canReveal: boolean; onOpen: () => void; onReveal: () => void;
   readOnly?: boolean;
   canToggle?: boolean;
   onToggle: () => void; onTry: () => void; onClose: () => void;
+  onUninstall?: () => void;
 }) {
   const { t } = useI18n();
   const titleId = useId();
@@ -67,7 +68,8 @@ export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = f
         {error && <div role="alert"><p>{error}</p><button type="button" className="settings-action-button" onClick={() => setReload(value => value + 1)}>{t("重试")}</button></div>}
         {detail && <div className="skill-details-body"><MarkdownRenderer content={detail.content.replace(/^# [^\r\n]*(?:\r?\n|$)/, "")} workspaceRoot={skill.path.replace(/[/\\][^/\\]+$/, "")} /></div>}
       </div>
-      <footer>{readOnly ? <button type="button" className="plugin-primary-button" onClick={onClose}>{t("关闭")}</button>
+      <footer>{!readOnly && onUninstall && <button type="button" className="skill-details-uninstall settings-action-button" disabled={pending} onClick={onUninstall}>{t("卸载")}</button>}
+        {readOnly ? <button type="button" className="plugin-primary-button" onClick={onClose}>{t("关闭")}</button>
         : <button type="button" className="plugin-primary-button" disabled={!skill.enabled || skill.user_invocable === false || pending} onClick={onTry}>{t("立即试用")}</button>}</footer>
       {!readOnly && menu && <ContextMenu position={{ x: 0, y: 0 }} anchor={menu} onClose={() => setMenu(null)} ariaLabel={t("技能更多操作")} items={[
         { label: t("打开"), disabled: !canOpen, onClick: onOpen },

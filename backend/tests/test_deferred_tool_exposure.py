@@ -9,7 +9,8 @@ import pytest
 from backend.agent.state import AgentState
 from backend.agent.tool_execution import run_tool
 from backend.artifact.store import ArtifactStore
-from backend.config import LLMSettings, PermissionSettings, TokenBudget
+from backend.config import AppConfig, LLMSettings, PermissionSettings, TokenBudget
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.agent.context import ContextBuilder
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -35,6 +36,12 @@ from backend.tests.test_harness_native_tool_protocol import ResponsesEndpoint, c
 
 
 SEARCH_POLICY = ToolsetPolicy(supports_search_tool=True)
+
+
+@pytest.fixture
+def enabled_utility_config():
+    return AppConfig(llm=LLMSettings(api_key="fixture"), config_layer_stack=ConfigLayerStack((ConfigLayer(ConfigLayerSource("user"),
+        {"features": {"sleep_tool": {"mode": "always_on"}}, "tools": {"update_plan": {"enabled": True}}}),)))
 
 
 def search_names(result):
@@ -143,8 +150,8 @@ def test_search_rejects_invalid_source_limits_without_catalog_side_effects(limit
     assert state.loaded_deferred_tools == set()
 
 
-def test_search_capable_registry_defers_optional_tools_behind_bridge(tmp_path) -> None:
-    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+def test_search_capable_registry_defers_optional_tools_behind_bridge(tmp_path, enabled_utility_config) -> None:
+    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"), config=enabled_utility_config)
 
     direct_names = {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=SEARCH_POLICY)}
     deferred_names = {entry.name for entry in DeferredToolCatalog(registry, toolset_policy=SEARCH_POLICY).entries()}
@@ -301,8 +308,8 @@ def test_per_tool_exposure_separates_direct_nested_and_deferred_surfaces() -> No
     assert "deferred_model" in {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=activated)}
 
 
-def test_schema_postprocess_preserves_common_task_words(tmp_path) -> None:
-    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+def test_schema_postprocess_preserves_common_task_words(tmp_path, enabled_utility_config) -> None:
+    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"), config=enabled_utility_config)
     descriptions = {
         schema["function"]["name"]: schema["function"].get("description", "")
         for schema in registry.get_schemas(toolset_policy=SEARCH_POLICY)
@@ -630,7 +637,7 @@ def test_subagent_deferred_catalog_filters_denied_parent_tools() -> None:
     registry.register(_DeferredFakeTool("optional_lookup"))
     sub_permission = build_subagent_permission_context(
         "implement",
-        ToolExecutionContext(permission=PermissionContext(mode="bypass")),
+        ToolExecutionContext(permission=PermissionContext(mode="bypass", tool_deny_rules=["update_plan"])),
     )
     checker = PermissionChecker(PermissionSettings())
     context = ToolExecutionContext(
@@ -653,15 +660,16 @@ def test_subagent_deferred_catalog_filters_denied_parent_tools() -> None:
         ).entries()
     }
     search_result = asyncio.run(
-        ToolSearchTool(registry).execute({"query": "request_user_input optional_lookup"}, context=context)
+        ToolSearchTool(registry).execute({"query": "request_user_input update_plan optional_lookup"}, context=context)
     )
     assert "optional_lookup" in entries
     assert "request_user_input" not in entries
+    assert "update_plan" in sub_permission.tool_deny_rules
     assert "update_plan" not in entries
     assert search_names(search_result) == {"optional_lookup"}
 
 
-def test_enabled_toolsets_is_a_whitelist_that_can_exclude_by_omission(tmp_path) -> None:
+def test_enabled_toolsets_is_a_whitelist_that_can_exclude_by_omission(tmp_path, enabled_utility_config) -> None:
     """Naming concrete groups must mean "only these groups".
 
     ``exposure == "core"`` used to be visible whenever the ``core`` *toolset* was
@@ -671,7 +679,7 @@ def test_enabled_toolsets_is_a_whitelist_that_can_exclude_by_omission(tmp_path) 
     leaving it out. The default selection is the ``*`` sentinel so plugins that
     register their own group stay visible without enumerating groups here.
     """
-    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"))
+    registry = build_tool_registry(ArtifactStore(storage_dir=tmp_path / "artifacts"), config=enabled_utility_config)
     specs = [registry.get_tool_spec(name) for name in registry._tools]
 
     default_visible = {s.name for s in specs if ToolsetPolicy.default().is_directly_visible(s)}
