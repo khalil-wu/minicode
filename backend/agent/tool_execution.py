@@ -2303,7 +2303,7 @@ def store_result(
         stdout_preview=truncated.runtime_metadata.get("stdout_preview"),
         stderr_preview=truncated.runtime_metadata.get("stderr_preview"),
         exit_code=truncated.runtime_metadata.get("exit_code"),
-        recipient_id=truncated.runtime_metadata.get("recipient") if tc.name in {"send_message", "followup_task"} and truncated.runtime_metadata.get("recipient") not in {None, "*", "parent"} else None,
+        recipient_id=truncated.runtime_metadata.get("recipient") if tc.name in {"send_message", "followup_task"} and truncated.runtime_metadata.get("recipient") not in {None, "*"} else None,
         recipient_ids=truncated.runtime_metadata.get("recipient_ids") if tc.name in {"send_message", "followup_task"} else None,
     )
     if tool_ctx is not None and tool_ctx.run_context is not None and tool_ctx.run_context.tool_execution_gate is not None:

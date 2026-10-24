@@ -50,7 +50,7 @@ export const CollaborationCell = memo(function CollaborationCell({
 
   if (cell.action !== "completed") {
     const parentMessage = isTranscriptMode && cell.action === "sent_message"
-      && cell.entries.some((entry) => ["parent", "team-lead"].includes(entry.agentId));
+      && cell.entries.some((entry) => entry.agentId === "parent");
     const started = cell.entries.filter((entry, index, entries) => entry.agentId.trim()
       && (agentFor(entry.agentId) || entry.agentStatus)
       && entries.findIndex((candidate) => candidate.agentId === entry.agentId) === index);

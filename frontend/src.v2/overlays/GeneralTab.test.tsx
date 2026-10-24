@@ -30,6 +30,7 @@ it("keeps Source's conditional directory Reset while removing the three Source-a
   expect(screen.queryByLabelText("新任务默认权限")).toBeNull();
   expect(screen.queryByText("高级")).toBeNull();
   expect(screen.queryByRole("button", { name: "检查更新" })).toBeNull();
+  expect(screen.queryByText("从其他 AI 应用导入")).toBeNull();
   expect(fixture.updates).not.toHaveBeenCalled();
   expect(fixture.preferences.taskDirectoryOverride).toBe("C:/AuthoredTasks");
   expect(useAppStore.getState().draft).toBe("Original unsent draft");

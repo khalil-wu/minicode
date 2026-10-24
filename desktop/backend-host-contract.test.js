@@ -43,6 +43,7 @@ test("a mismatched external backend reaches the existing startup recovery and re
   let fingerprint = "another-native-host";
   const context = { startupRetryInFlight:false, rollbackPreparationInProgress:false, desktopCleanupFailed:false, MANAGE_BACKEND:false, RUNTIME_TOKEN:"runtime-token", EMBEDDED_BROWSER_TOKEN:contract.token,
     petManager: null, petInitialization: null, generalMaintenance: null, path,
+    popoutWindow: { initialize() { calls.push("popout"); } },
     app: { isPackaged: false, getPath: () => "fixture-home" }, getAppRoot: () => "fixture-app",
     createPetManager: () => ({ initialize: async () => {}, restoreMini: async () => {} }),
     desktopPreferences: { getPreferences: () => ({}) }, startGeneralMaintenance: () => ({ dispose() {} }),
@@ -65,5 +66,5 @@ test("a mismatched external backend reaches the existing startup recovery and re
   assert.deepEqual(calls, ["bridge", "ready", "peer-proof", "error-surface"]);
   fingerprint = contract.fingerprint;
   assert.equal(await startup("startup-retry"), true);
-  assert.deepEqual(calls.slice(4), ["bridge", "ready", "peer-proof", "window", "close-error"]);
+  assert.deepEqual(calls.slice(4), ["bridge", "ready", "peer-proof", "window", "popout", "close-error"]);
 });

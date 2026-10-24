@@ -122,6 +122,14 @@ def effective_toolset_policy(
     model_name = model_execution.model if model_execution is not None else model_name
     model_info = model_execution.model_info if model_execution is not None else model_info
     if config is not None:
+        from backend.tools.catalog import tool_spec_from_instance
+
+        registration_policy = (base_policy or ToolsetPolicy.default()).with_disabled_tools(disabled_tools)
+
+        def register_selected(tool, *, replace=False):
+            if registration_policy.is_available(tool_spec_from_instance(tool, name=tool.name)):
+                tool_registry.register(tool, replace=replace)
+
         from backend.agents.source_roles import source_agent_options
         from backend.llm.model_request_policy import source_model_request_capabilities
         from backend.tools.collaboration_tools import SpawnAgentTool, ListAgentsTool, WaitAgentTool, InterruptAgentTool
@@ -136,14 +144,14 @@ def effective_toolset_policy(
         elif coordination["version"] == "v2":
             coordination_options = coordination
             if not isinstance(tool_registry.get_tool("send_message"), SourceSendMessageTool):
-                tool_registry.register(SourceSendMessageTool(), replace=True)
+                register_selected(SourceSendMessageTool(), replace=True)
             if tool_registry.get_tool("followup_task") is None:
-                tool_registry.register(FollowupTaskTool())
+                register_selected(FollowupTaskTool())
             task = tool_registry.get_tool("task")
             if task is not None:
                 for tool in (SpawnAgentTool(task), ListAgentsTool(), WaitAgentTool(config), InterruptAgentTool()):
                     if tool_registry.get_tool(tool.name) is None:
-                        tool_registry.register(tool)
+                        register_selected(tool)
             denied.update(legacy_names - {"send_message", "followup_task"})
             if is_subagent and source_model_request_capabilities(model_name,
                     model_info).get("multi_agent_version") != "v2":
@@ -158,7 +166,7 @@ def effective_toolset_policy(
                 if coordination["message_board_backend"] in SUPPORTED_BOARD_BACKENDS:
                     for tool in message_board_tools():
                         if tool_registry.get_tool(tool.name) is None:
-                            tool_registry.register(tool)
+                            register_selected(tool)
                 else:
                     denied.update(SOURCE_MESSAGE_BOARD_TOOLS)
             else:
@@ -179,7 +187,7 @@ def effective_toolset_policy(
             if not available:
                 denied.add(name)
             elif tool_registry.get_tool(name) is None:
-                tool_registry.register(factories[name]())
+                register_selected(factories[name]())
     from backend.tools.web_tools import WebSearchTool
 
     search_tool = tool_registry.get_tool("web_search")

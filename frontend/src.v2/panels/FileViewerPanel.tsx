@@ -89,7 +89,7 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
   const media = preview?.media_type ?? "";
   const nativeMedia = /^(image\/|audio\/|video\/|application\/pdf)/.test(media);
   useEffect(() => {
-    if (!active || !preview || !/^(image\/|audio\/|video\/|application\/pdf)/.test(media)) return;
+    if (!active || !connected || !preview || !/^(image\/|audio\/|video\/|application\/pdf)/.test(media)) return;
     const operation = new AbortController();
     let url = "";
     setMediaLoading(true);
@@ -99,7 +99,7 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
     }).catch(reason => { if (!operation.signal.aborted) setError(reason instanceof Error ? reason.message : String(reason)); })
       .finally(() => { if (!operation.signal.aborted) setMediaLoading(false); });
     return () => { operation.abort(); if (url) URL.revokeObjectURL(url); setMediaUrl(""); setMediaLoading(false); };
-  }, [tab.id, active, media]);
+  }, [tab.id, active, connected, media]);
 
   const rows = useMemo(() => fileViewerRows(preview?.content ?? "", comparisonError || comparisonLoading || patchBase !== base ? "" : patch, changes && Boolean(branches?.is_git_repo)), [preview?.content, patch, patchBase, base, comparisonError, comparisonLoading, changes, branches]);
   const syntax = useColorizedLines(rows, guessLanguageFromPath(tab.path));

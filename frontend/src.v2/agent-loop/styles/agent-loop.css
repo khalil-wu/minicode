@@ -105,9 +105,9 @@
 .agent-loop-user-cell .user-cell-wrap {
   align-items: flex-end;
   align-self: flex-end;
-  width: min(72%, 760px);
-  max-width: min(72%, 760px);
-  margin: 10px 0 14px auto;
+  width: 70%;
+  max-width: 70%;
+  margin: 0 0 0 auto;
 }
 
 .agent-loop-user-cell .edit-bubble-wrap {
@@ -138,8 +138,14 @@
   color: inherit;
   font: inherit;
   text-decoration: underline dotted;
-  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--text-muted);
+  text-underline-offset: 4px;
   cursor: pointer;
+}
+
+.workbench-empty-project:hover {
+  color: var(--text-secondary);
 }
 
 /* ── Process summary（尺寸/字重由 ui-polish 接管，仅保留布局与图标色）─── */

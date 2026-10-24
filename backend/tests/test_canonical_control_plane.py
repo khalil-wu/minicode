@@ -11,6 +11,8 @@ import pytest
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.agent.runtime import AgentRuntime
 from backend.conversations.repository import ConversationRepository
+from backend.config import AppConfig, LLMSettings
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.memory import consolidation_agent
 from backend.services.checkpoint_service import RunCheckpointResumeResult
 from backend.terminal.task_persistence import PersistedTaskState
@@ -72,6 +74,9 @@ def test_legacy_control_commands_are_not_executable() -> None:
 def test_update_plan_is_the_only_builtin_checklist_writer(tmp_path) -> None:
     registry = build_tool_registry(
         ArtifactStore(storage_dir=tmp_path / "artifacts"),
+        config=AppConfig(llm=LLMSettings(api_key="offline-fixture"), config_layer_stack=ConfigLayerStack((ConfigLayer(
+            ConfigLayerSource("user"), {"tools": {"update_plan": {"enabled": True}}},
+        ),))),
     )
 
     assert registry.get_tool("update_plan") is not None

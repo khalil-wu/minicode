@@ -13,10 +13,10 @@
   --mc-font-heading: var(--text-lg);
   --mc-control-radius: var(--radius-md);
   --mc-card-radius: var(--radius-lg);
-  --mc-sidebar-row-height: 34px;
-  --mc-content-gutter: 24px;
+  --mc-sidebar-row-height: 30px;
+  --mc-content-gutter: 16px;
   /* Keep the composer on the same reading axis as assistant answers. */
-  --mc-chat-width: min(var(--input-max-width), calc(100vw - 48px));
+  --mc-chat-width: var(--input-max-width);
   --mc-scrollbar-color: color-mix(in oklch, var(--text-primary) 15%, transparent);
   --mc-scrollbar-hover: color-mix(in oklch, var(--text-primary) 30%, transparent);
   --menu-surface: var(--surface-base);
@@ -93,7 +93,7 @@ html[data-pointer-cursors="true"] :where(button:not(:disabled), a[href], [role="
   cursor: pointer;
 }
 
-#root :where(.btn, .settings-action-button, .plugin-primary-button, .skills-create-button) {
+#root :where(.btn, .plugin-primary-button, .skills-create-button) {
   min-height: 36px;
   padding-inline: 14px;
   border-radius: var(--mc-control-radius);
@@ -161,15 +161,11 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .header-bar {
-  min-height: var(--header-height) !important;
-  height: var(--header-height) !important;
-  padding-inline: 8px !important;
+  min-height: var(--height-toolbar-sm) !important;
+  height: var(--height-toolbar-sm) !important;
+  padding-inline: 6px 8px !important;
   background: var(--native-shell-background, var(--desktop-shell-background)) !important;
   border-bottom: 0 !important;
-}
-
-.header-bar button {
-  min-height: 30px;
 }
 
 .mc-sidebar-left,
@@ -209,7 +205,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .mc-sidebar-nav {
   gap: 0 !important;
-  padding: 8px 2px 14px !important;
+  padding: 0 0 4px !important;
 }
 
 .mc-sidebar-action {
@@ -218,7 +214,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   gap: 9px !important;
   padding: 0 8px !important;
   border: 0 !important;
-  border-radius: var(--radius-sm) !important;
+  border-radius: 10px !important;
   background: transparent !important;
   color: var(--text-primary) !important;
   font-size: var(--text-sm) !important;
@@ -273,8 +269,8 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 :is(.mc-sidebar-left, .mc-sidebar-sort-overlay) :where(.mc-workspace-group-toggle, section[aria-label] > button) {
-  min-height: 32px !important;
-  border-radius: var(--mc-control-radius) !important;
+  min-height: var(--mc-sidebar-row-height) !important;
+  border-radius: 10px !important;
   color: var(--text-secondary) !important;
   font-weight: var(--fw-regular) !important;
 }
@@ -301,7 +297,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 :is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover {
   min-height: var(--mc-sidebar-row-height) !important;
   border: 1px solid transparent !important;
-  border-radius: var(--radius-sm) !important;
+  border-radius: 10px !important;
 }
 
 :is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover:hover {
@@ -378,16 +374,17 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .mc-sidebar-right-header {
-  min-height: 52px !important;
-  padding: 8px 10px !important;
+  height: var(--app-shell-header-height);
+  min-height: var(--app-shell-header-height) !important;
+  padding: 0 6px 0 8px !important;
   border-bottom: 1px solid var(--border-subtle) !important;
   background: var(--surface-base) !important;
 }
 
 .mc-sidebar-right-tab-frame {
-  height: 30px !important;
+  height: 32px !important;
   max-width: 152px;
-  border-radius: var(--mc-control-radius) !important;
+  border-radius: 10px !important;
 }
 
 .mc-sidebar-right-tab-frame:hover {
@@ -460,7 +457,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .md-prose {
   font-family: var(--font-prose) !important;
   font-size: var(--mc-font-reading) !important;
-  line-height: 1.62 !important;
+  line-height: 1.625 !important;
   letter-spacing: 0 !important;
 }
 
@@ -471,9 +468,9 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 /* User bubble — neutral gray surface, visually separate from assistant prose. */
 .user-cell-bubble {
-  padding: 12px 16px !important;
+  padding: 10px 16px !important;
   border: 0 !important;
-  border-radius: var(--radius-xl) !important;
+  border-radius: 22px !important;
   background: var(--workbench-tool) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
@@ -493,7 +490,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .chat-turn .agent-loop-process.chat-turn-process {
   width: 100% !important;
   max-width: 100% !important;
-  margin: 3px 0 0 !important;
+  margin: 16px 0 0 !important;
   padding: 0 !important;
 }
 
@@ -554,16 +551,16 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 #root .chat-pane .composer-container,
 #root .workbench-home-composer .composer-container {
-  width: min(var(--mc-chat-width), calc(100% - 48px)) !important;
-  max-width: min(var(--mc-chat-width), calc(100% - 48px)) !important;
+  width: min(var(--mc-chat-width), calc(100% - 32px)) !important;
+  max-width: min(var(--mc-chat-width), calc(100% - 32px)) !important;
   margin-inline: auto !important;
   margin-top: 0 !important;
   margin-bottom: 16px !important;
-  padding: 14px 16px 10px !important;
-  border: 1px solid var(--mc-composer-border, var(--border-subtle)) !important;
-  border-radius: 24px !important;
+  padding: 14px 8px 8px !important;
+  border: 0 !important;
+  border-radius: 22px !important;
   background: var(--surface-base) !important;
-  box-shadow: var(--shadow-sm) !important;
+  box-shadow: 0 0 0 1px var(--mc-composer-border, var(--border-subtle)), 0 2px 8px #0000000a, 0 4px 80px 8px #00000006 !important;
 }
 
 .composer-container:focus-within {
@@ -634,7 +631,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 #root .composer-textarea {
   field-sizing: content;
-  min-height: 40px !important;
+  min-height: 44px !important;
   max-height: 260px;
   padding: 0 !important;
   border: 0 !important;
@@ -644,7 +641,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   font-family: var(--font-prose) !important;
   font-size: var(--mc-font-reading) !important;
   font-weight: var(--fw-regular) !important;
-  line-height: 1.55 !important;
+  line-height: 20px !important;
   outline: none !important;
   box-shadow: none !important;
 }
@@ -706,16 +703,15 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .composer-footer {
-  min-height: 34px !important;
+  min-height: 28px !important;
   border-top: 0 !important;
   background: transparent !important;
 }
 
-.composer-attach-btn,
 .composer-permission-btn,
 .composer-model-select,
 .composer-workspace-pill {
-  min-height: 30px !important;
+  min-height: 28px !important;
   padding-inline: 8px !important;
   border: 1px solid transparent !important;
   border-radius: var(--mc-control-radius) !important;
@@ -734,10 +730,10 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .composer-send-btn {
-  width: 32px !important;
-  height: 32px !important;
-  min-width: 32px !important;
-  min-height: 32px !important;
+  width: 28px !important;
+  height: 28px !important;
+  min-width: 28px !important;
+  min-height: 28px !important;
   border-radius: 50% !important;
   background: var(--text-primary) !important;
   color: var(--surface-base) !important;
@@ -883,11 +879,14 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .settings-center-main {
   font-size: var(--mc-font-secondary);
+  line-height: 1.5;
 }
 
 .settings-center-tab {
-  min-height: 34px !important;
-  border-radius: var(--mc-control-radius) !important;
+  height: 30px;
+  min-height: 30px !important;
+  border-radius: 10px !important;
+  corner-shape: superellipse(1.5);
   font-size: var(--mc-font-body) !important;
   transition:
     background-color var(--transition-fast),
@@ -912,20 +911,10 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .settings-page-heading p {
   font-size: var(--mc-font-body) !important;
-  line-height: 1.55 !important;
-}
-
-/* A section heading sits outside its single group of setting rows. */
-.settings-center-main .settings-group {
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
+  line-height: 24px !important;
 }
 
 .settings-center-main .settings-card {
-  padding-inline: 20px;
   border: 1px solid var(--border-subtle);
 }
 
@@ -949,6 +938,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   .scheduler-editor
 ) {
   border-radius: var(--mc-card-radius) !important;
+  corner-shape: superellipse(1.5);
   border-color: var(--border-subtle) !important;
   background: var(--surface-base) !important;
   box-shadow: none !important;
@@ -969,12 +959,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   background: var(--surface-hover) !important;
 }
 
-.settings-center-main :where(p, label, span, button, input, select, textarea) {
-  line-height: 1.45;
-}
-
 .settings-center-main :where(
-  .settings-row-title,
   .settings-source-copy > strong,
   .settings-archive-copy > strong,
   .settings-skill-copy strong,
@@ -985,8 +970,6 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .settings-center-main :where(
-  .settings-row-description,
-  .settings-section-description,
   .settings-page-note,
   .settings-personalization-note,
   .settings-source-copy > code,
@@ -996,6 +979,15 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 ) {
   font-size: var(--mc-font-secondary);
   line-height: 1.55;
+}
+
+.settings-center-main .settings-section-description {
+  font-size: var(--text-chrome);
+  line-height: 18px;
+}
+
+@supports (corner-shape: superellipse(1.5)) {
+  .settings-center-main { --mc-card-radius: 20px; }
 }
 
 .settings-center-main :where(small, code, kbd, .settings-state-pill) {
@@ -1332,18 +1324,6 @@ html[data-reduced-motion="true"] *::after {
   transition-duration: 0.01ms !important;
 }
 
-@media (max-width: 1023px) {
-  .message-list-scroll {
-    padding-inline: 14px !important;
-  }
-
-  #root .chat-pane .composer-container,
-  #root .workbench-home-composer .composer-container {
-    width: calc(100% - 28px) !important;
-    max-width: calc(100% - 28px) !important;
-  }
-}
-
 @media (max-width: 760px) {
   .mc-sidebar-right:not([data-embedded="true"]) {
     border-left: 0 !important;
@@ -1373,28 +1353,21 @@ html[data-reduced-motion="true"] *::after {
   background: var(--surface-active) !important;
 }
 
-/* Dialogs: entrance, depth, and button affordances. */
-.mc-dialog-backdrop {
-  backdrop-filter: blur(2px);
-  animation: fade-in var(--duration-fast) ease-out both;
-}
-
+/* Default Source dialogs keep their surface in place while controls change. */
 .mc-dialog-panel {
-  animation: mc-palette-enter var(--duration-slow) var(--easing-spring) both;
+  border-radius: 20px;
+  font-family: var(--font-ui);
 }
 
 .mc-dialog-btn {
-  min-height: 32px;
-  transition: filter var(--transition-fast), transform var(--transition-fast) !important;
+  min-height: 24px;
+  line-height: 18px;
+  font-family: inherit;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
 }
 
-.mc-dialog-btn:hover:not(:disabled) {
-  filter: brightness(1.12);
-  transform: translateY(-1px);
-}
-
-.mc-dialog-btn:active:not(:disabled) {
-  transform: scale(0.985);
+@supports (corner-shape: superellipse(1.5)) {
+  .mc-dialog-panel { border-radius: 25px; corner-shape: superellipse(1.5); }
 }
 
 .mc-dialog-btn:focus-visible {

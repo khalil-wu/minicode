@@ -277,7 +277,7 @@ class GuardianRuntime:
         checker = GuardianPermissionChecker(config.permissions, self.workspace_root)
         self.session = AgentSession(llm=self.llm, tool_registry=registry, artifact_store=artifacts,
             permission_checker=checker, agent_settings=config.agent, token_budget=config.token_budget,
-            context_builder=self.context_builder)
+            context_builder=self.context_builder, active_tool_names=tuple(sorted(REVIEWER_TOOLS)))
         self.completed_reviews = 0
         self.closed = False
 

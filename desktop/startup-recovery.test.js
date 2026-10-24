@@ -74,6 +74,7 @@ test("window-binding bridge failure reaches startup recovery and retry proves th
   let bridgeAvailable = false;
   const context = { startupRetryInFlight: false, rollbackPreparationInProgress: false, desktopCleanupFailed: false, appendDesktopLog() {}, process: { env: {} }, EMBEDDED_BROWSER_TOKEN: "private-bridge-token", MANAGE_BACKEND: true,
     petManager: null, petInitialization: null, generalMaintenance: null, path,
+    popoutWindow: { initialize() { calls.push("popout"); } },
     app: { isPackaged: false, getPath: () => "fixture-home" }, getAppRoot: () => "fixture-app",
     createPetManager: () => ({ initialize: async () => {}, restoreMini: async () => {} }),
     desktopPreferences: { getPreferences: () => ({}) }, startGeneralMaintenance: () => ({ dispose() {} }),
@@ -93,5 +94,5 @@ test("window-binding bridge failure reaches startup recovery and retry proves th
   assert.deepEqual(calls, ["bridge", "error-surface"]);
   bridgeAvailable = true;
   assert.equal(await startup("startup-retry"), true);
-  assert.deepEqual(calls, ["bridge", "error-surface", "bridge", "backend", "window", "close-error"]);
+  assert.deepEqual(calls, ["bridge", "error-surface", "bridge", "backend", "window", "popout", "close-error"]);
 });

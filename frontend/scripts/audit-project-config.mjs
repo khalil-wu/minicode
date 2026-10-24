@@ -218,6 +218,10 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   }, { id: originalConversation, root: workspace });
   assert(wire.slice(restoreAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
     && row.message.conversation_id === originalConversation && row.message.client_command_type === "conversation.switch"));
+  // Source's compact settings fit the tall audit window. Use a real smaller
+  // viewport for the parent-scroll case instead of adding synthetic content.
+  const previousViewport = page.viewportSize();
+  await page.setViewportSize({ width: previousViewport.width, height: 560 });
   // Observe the real final reopen without retries: a prior run lost its scope
   // menu here. Keep the event order to distinguish focus/scroll from config load.
   await page.evaluate(() => {
@@ -275,5 +279,6 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   } finally {
     checks.push({ scenario: "Actual final Configuration reopen and scope selection event order",
       events: await page.evaluate(() => window.__finishConfigReopenAudit()) });
+    await page.setViewportSize(previousViewport);
   }
 }

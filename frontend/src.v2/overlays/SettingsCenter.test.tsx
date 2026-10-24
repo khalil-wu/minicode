@@ -263,13 +263,13 @@ describe("SettingsCenter reasoning effort visibility", () => {
       approved_apps: [{ app_id: "actual-app", display_name: "Actual App", icon_data_url: null }], controls: [] };
     useAppStore.setState({ isConnected: true, conversationId: "A", workingDirectory: "C:/project", draft: "Keep this draft" });
     render(<SettingsCenter />);
-    fireEvent.click(await screen.findByRole("button", { name: "电脑操作" }));
+    fireEvent.click(await screen.findByRole("button", { name: "电脑操控" }));
     expect(await screen.findByRole("heading", { name: "始终允许的应用" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "移除 Actual App" })).toBeTruthy();
     expect(screen.queryByText("控制")).toBeNull();
     expect(useAppStore.getState().draft).toBe("Keep this draft");
     fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
-    expect(screen.getByRole("button", { name: /电脑操作 \/ 始终允许的应用/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /电脑操控 \/ 始终允许的应用/ })).toBeTruthy();
   });
 
   it("hides unsupported provider management from navigation and search and redirects a hidden direct route", async () => {
@@ -280,9 +280,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     useAppStore.setState({ isConnected: true, conversationId: null, workingDirectory: "", settingsTab: "computerUse" });
     render(<SettingsCenter />);
     await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("general"));
-    expect(screen.queryByRole("button", { name: "电脑操作" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "电脑操控" })).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
-    expect(screen.queryByRole("button", { name: /电脑操作 \/ 始终允许的应用/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /电脑操控 \/ 始终允许的应用/ })).toBeNull();
     expect(screen.queryByRole("heading", { name: "始终允许的应用" })).toBeNull();
   });
 
@@ -348,13 +348,17 @@ describe("SettingsCenter reasoning effort visibility", () => {
     useAppStore.setState({ settingsTab: "shortcuts", leftSidebarWidth: 340, leftSidebarExpandedWidth: 340 });
     const { container } = render(<SettingsCenter />);
     fireEvent.change(await screen.findByPlaceholderText("搜索快捷键"), { target: { value: "终端" } });
+    fireEvent.click(screen.getByRole("button", { name: "导入", exact: true }));
+    expect(screen.getByRole("heading", { name: "导入", exact: true })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "键盘快捷键", exact: true }));
+    expect(screen.getByPlaceholderText("搜索快捷键")).toHaveProperty("value", "终端");
     act(() => useAppStore.getState().setLeftSidebarWidth(0));
     expect(container.querySelector(".settings-workspace-sidebar")).toHaveProperty("hidden", false);
     expect(container.querySelector(".settings-workspace")?.getAttribute("style")).toContain("--settings-sidebar-width: 340px");
     expect(screen.getByRole("navigation", { name: "设置分类" })).toBeTruthy();
     expect(screen.getByPlaceholderText("搜索快捷键")).toHaveProperty("value", "终端");
     act(() => useAppStore.getState().setLeftSidebarWidth(340));
-    expect(screen.getByRole("button", { name: "快捷键" }).getAttribute("aria-current")).toBe("page");
+    expect(screen.getByRole("button", { name: "键盘快捷键" }).getAttribute("aria-current")).toBe("page");
     expect(screen.getByPlaceholderText("搜索快捷键")).toHaveProperty("value", "终端");
   });
 
@@ -467,7 +471,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("radio", { name: "使用规划模式" })).toBeNull();
   });
 
-  it("opens General import and keeps management search available while preserving the existing workspace draft", async () => {
+  it("opens the dedicated Source import navigation and preserves the existing workspace draft and settings pages", async () => {
     useAppStore.setState({ workingDirectory: "C:/existing-project", recentWorkspaces: [], draft: "Unsaved workspace draft" });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url);
@@ -483,11 +487,21 @@ describe("SettingsCenter reasoning effort visibility", () => {
     vi.stubGlobal("fetch", fetchMock);
     render(<SettingsCenter />);
     const navigation = screen.getByRole("navigation", { name: "设置分类" });
-    expect(within(navigation).queryByRole("button", { name: "导入", exact: true })).toBeNull();
-    expect(screen.getByText("从其他 AI 应用导入")).toBeTruthy();
+    const labels = within(navigation).getAllByRole("button").map(button => button.textContent);
+    expect(labels.slice(0, 3)).toEqual(["常规", "导入", "外观"]);
+    expect(labels).toEqual(expect.arrayContaining(["已归档的聊天", "Mini 与虚拟宠物", "键盘快捷键", "Worktrees"]));
+    expect(labels).not.toContain("已归档聊天");
+    expect(labels).not.toContain("Mini 与宠物");
+    expect(labels).not.toContain("快捷键");
+    expect(labels).not.toContain("工作树");
+    expect(screen.queryByText("从其他 AI 应用导入")).toBeNull();
+    expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).pathname.startsWith("/api/settings/import"))).toBe(false);
     expect(within(navigation).getByRole("button", { name: "连接", exact: true })).toBeTruthy();
-    fireEvent.click(await screen.findByRole("button", { name: "导入", exact: true }));
-    expect(useAppStore.getState().settingsTab).toBe("general");
+    fireEvent.click(within(navigation).getByRole("button", { name: "导入", exact: true }));
+    expect(useAppStore.getState().settingsTab).toBe("import");
+    expect(screen.getByRole("heading", { name: "导入", exact: true })).toBeTruthy();
+    const importPage = document.querySelector('[data-settings-tab="import"]');
+    fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code", exact: true }));
     expect(screen.getByRole("switch", { name: "Claude Code" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     expect(screen.getByRole("dialog", { name: "选择要导入的内容" })).toBeTruthy();
@@ -498,9 +512,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "自动同步" } });
     fireEvent.click(within(navigation).getByRole("button", { name: /^导入 \/ 自动同步/ }));
     expect(useAppStore.getState().settingsTab).toBe("import");
+    expect(document.querySelector('[data-settings-tab="import"]')).toBe(importPage);
     fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
     expect(screen.getByRole("dialog", { name: "从其他 AI 应用导入" })).toBeTruthy();
-    act(() => useAppStore.setState({ settingsTab: "general" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "" } });
+    fireEvent.click(within(navigation).getByRole("button", { name: "常规", exact: true }));
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.keyDown(screen.getByRole("textbox", { name: "搜索设置" }), { key: "Escape" });
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/existing-project", draft: "Unsaved workspace draft" });
@@ -525,7 +541,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     useAppStore.setState({ appMode: "code" });
     render(<SettingsCenter />);
 
-    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "键盘快捷键" }));
     const search = screen.getByRole("textbox", { name: "搜索快捷键" });
     fireEvent.change(search, { target: { value: "terminal" } });
 
@@ -565,7 +581,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
   it("records shortcut edits, rejects conflicts, deletes bindings, and confirms restoring defaults", async () => {
     render(<SettingsCenter />);
-    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "键盘快捷键" }));
     expect(screen.queryByRole("button", { name: "恢复默认" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "编辑 命令面板" }));
@@ -596,7 +612,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("closes settings with Escape after a disabled control releases focus to the document", () => {
     useAppStore.setState({ draft: "Keep the current chat draft", rightPanelOpen: true, rightStackTab: "terminal" });
     render(<SettingsCenter />);
-    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "键盘快捷键" }));
     fireEvent.click(screen.getByRole("button", { name: "删除 打开终端 快捷键" }));
     (document.activeElement as HTMLElement).blur();
     expect(document.activeElement).toBe(document.body);
@@ -620,14 +636,14 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
   it("ends shortcut recording when its page is hidden or settings is closed", () => {
     render(<SettingsCenter />);
-    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "键盘快捷键" }));
     fireEvent.click(screen.getByRole("button", { name: "编辑 命令面板" }));
     expect(screen.getByRole("textbox", { name: "编辑 命令面板" }).getAttribute("data-shortcut-recording")).toBe("true");
     fireEvent.click(screen.getByRole("button", { name: "外观" }));
     expect(document.querySelector('[data-shortcut-recording="true"]')).toBeNull();
     fireEvent.keyDown(window, { key: "K", code: "KeyK", ctrlKey: true, shiftKey: true });
     expect(useAppStore.getState().shortcutBindings.commandPalette).toEqual(["Mod+K"]);
-    fireEvent.click(screen.getByRole("button", { name: "快捷键" }));
+    fireEvent.click(screen.getByRole("button", { name: "键盘快捷键" }));
     fireEvent.click(screen.getByRole("button", { name: "编辑 命令面板" }));
     fireEvent.keyDown(screen.getByRole("main", { name: "设置" }), { key: "Escape" });
     expect(document.querySelector('[data-shortcut-recording="true"]')).toBeNull();
@@ -867,7 +883,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.click(screen.getByRole("button", { name: "Git" }));
     expect(await screen.findByRole("textbox", { name: "分支前缀" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "打开 Git 工作区" })).toBeNull();
-    expect(screen.getByRole("button", { name: "已归档聊天" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "已归档的聊天" })).toBeTruthy();
     expect(useAppStore.getState().settingsOpen).toBe(true);
   });
 
@@ -952,7 +968,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     });
     render(<SettingsCenter />);
 
-    fireEvent.click(screen.getByRole("button", { name: "已归档聊天" }));
+    fireEvent.click(screen.getByRole("button", { name: "已归档的聊天" }));
     fireEvent.click(await screen.findByRole("button", { name: "恢复 旧任务" }));
 
     await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith({

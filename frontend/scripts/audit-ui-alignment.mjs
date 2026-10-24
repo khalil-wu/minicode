@@ -178,13 +178,75 @@ async function capture(name, context = {}) {
     }) }));
   trace(`capture:${name}:render-state`, renderState);
   await writeFile(path.join(evidence, `${name}.aria.txt`), await page.locator("body").ariaSnapshot());
-  const metrics = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, dpr: devicePixelRatio, url: location.href,
-    theme: document.documentElement.dataset.theme, font: getComputedStyle(document.body).fontFamily }));
+  const metrics = await page.evaluate(() => {
+    const rulers = {
+      chrome: ".header-bar", workspace: ".mc-desktop-workspace", mainToolbar: ".mc-workbench-toolbar", rightToolbar: ".mc-sidebar-right-header",
+      sidebarHeader: ".mc-sidebar-heading", mode: ".mc-sidebar-mode-toggle", sidebarRows: ".mc-sidebar-action, .session-row-hover",
+      rail: ".mc-navigation-rail", railButtons: ".mc-navigation-rail button", railIcons: ".mc-navigation-rail button > svg",
+      tabs: ".mc-sidebar-right-tab-frame", splitters: ".mc-sidebar-left-resize-handle, .mc-sidebar-right-resize-handle",
+      transcript: ".message-list-content", transcriptScroll: ".message-list-scroll", composer: ".composer-container", composerFrame: ".composer-textarea-frame",
+      composerInput: "[data-composer-input]", composerFooter: ".composer-footer", composerControls: ".composer-send-btn, .composer-attach-btn",
+      composerTriggers: ".composer-permission-btn, .composer-model-select", composerGroups: ".composer-footer-primary, .composer-permission-picker, .composer-model-controls, .composer-model-picker",
+      composerVoice: ".composer-dictation, .composer-realtime-controls, .composer-voice-btn", titlebarNavigation: ".mc-header-start, .mc-titlebar-navigation, .mc-header-start .mc-header-icon-button",
+      titlebarMenu: ".mc-titlebar-menus, .mc-titlebar-menus > button",
+      userBubble: ".user-cell-bubble", prose: ".assistant-cell-content, .md-prose", process: ".agent-loop-process-summary, .chat-turn-process-summary",
+      homeBrand: ".workbench-empty-brand", homeMark: ".workbench-empty-mark > svg", homeTitle: ".workbench-empty-title",
+      settingsCard: ".settings-card", settingsRow: ".settings-row", settingsNav: ".settings-center-tabs", settingsSidebar: ".settings-workspace-sidebar",
+      settingsNavItem: ".settings-center-tab", settingsToggle: '.settings-toggle, .settings-center input[type="checkbox"]',
+      settingsButton: ".settings-action-button", menus: '.context-menu-surface, [role="menu"], .mc-dropdown-menu', menuRows: '[role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]',
+    };
+    const geometry = element => {
+      const rect = element.getBoundingClientRect(), style = getComputedStyle(element);
+      return { tag: element.tagName, className: element.getAttribute("class"), ariaLabel: element.getAttribute("aria-label"),
+        rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, right: rect.right, bottom: rect.bottom },
+        boxSizing: style.boxSizing, display: style.display, font: style.fontFamily, fontSize: style.fontSize, fontWeight: style.fontWeight, lineHeight: style.lineHeight,
+        padding: style.padding, paddingInline: style.paddingInline, margin: style.margin, gap: style.gap, rowGap: style.rowGap, columnGap: style.columnGap,
+        border: style.border, borderWidth: style.borderWidth, borderRadius: style.borderRadius, minHeight: style.minHeight, maxHeight: style.maxHeight,
+        minWidth: style.minWidth, maxWidth: style.maxWidth, flexBasis: style.flexBasis, scrollbarGutter: style.scrollbarGutter };
+    };
+    const domRulers = Object.fromEntries(Object.entries(rulers).map(([key, selector]) => [key, { selector,
+      elements: [...document.querySelectorAll(selector)].filter(element => {
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && getComputedStyle(element).visibility !== "hidden" && !element.closest("[hidden]");
+      }).slice(0, 12).map(geometry) }]));
+    return { width: innerWidth, height: innerHeight, dpr: devicePixelRatio, url: location.href,
+      theme: document.documentElement.dataset.theme, font: getComputedStyle(document.body).fontFamily,
+      cssZoom: getComputedStyle(document.documentElement).zoom, shellHeaderHeight: getComputedStyle(document.querySelector(".mc-desktop-shell")).getPropertyValue("--app-shell-header-height"),
+      domRulers, draftTrace: window.__uiAlignmentDraftTrace ?? null };
+  });
+  const browserWindow = await app.browserWindow(page);
+  metrics.nativeWindow = await browserWindow.evaluate(window => ({ id: window.id, zoomFactor: window.webContents.getZoomFactor(),
+    zoomLevel: window.webContents.getZoomLevel(), bounds: window.getBounds(), contentBounds: window.getContentBounds() }));
+  await browserWindow.dispose();
   trace(`capture:${name}:screenshot`);
   await page.screenshot({ path: path.join(evidence, `${name}.png`), animations: "disabled" });
   captures.push({ name, ...context, metrics,
     boundary: "Static Electron renderer viewport; finite animations fast-forwarded and continuous animations temporarily reset; excludes natural-motion completion and native OS window decoration" });
   trace(`capture:${name}:complete`);
+}
+async function observeDraftLifecycle() {
+  await page.evaluate(() => {
+    const store = window.__zustandStore;
+    const rows = [];
+    window.__uiAlignmentDraftTrace = rows;
+    const record = cause => {
+      const state = store.getState();
+      rows.push({ cause, at: performance.now(), conversationId: state.conversationId, pendingConversationSwitchId: state.pendingConversationSwitchId,
+        pendingConversationCreateId: state.pendingConversationCreateId, workingDirectory: state.workingDirectory, draft: state.draft,
+        richDraft: state.richDraft, ready: state.composerDraftsReady, revision: state.composerDraftRevision,
+        cached: Object.fromEntries(Object.entries(state.conversationWorkbenchStates).map(([id, snapshot]) => [id, { draft: snapshot.draft, richDraft: snapshot.richDraft }])),
+        editors: [...document.querySelectorAll('.composer-input-region [data-composer-input]')].map(element => ({
+          text: element.innerText, textContent: element.textContent, editable: element.getAttribute("contenteditable"), active: document.activeElement === element,
+          visible: element.getBoundingClientRect().height > 0 && getComputedStyle(element).visibility !== "hidden" && !element.closest('[hidden], [aria-hidden="true"]') })) });
+    };
+    store.subscribe((next, previous) => {
+      if (next.conversationId !== previous.conversationId || next.pendingConversationSwitchId !== previous.pendingConversationSwitchId
+        || next.draft !== previous.draft || next.richDraft !== previous.richDraft || next.conversationWorkbenchStates !== previous.conversationWorkbenchStates) record("store");
+    });
+    document.addEventListener("input", event => { if (event.target.closest('[data-composer-input]')) record("native-input"); }, true);
+    window.__uiAlignmentDraftTraceMark = record;
+    record("attached");
+  });
 }
 async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
   const button = page.locator(selector);
@@ -225,7 +287,9 @@ async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
     assert.equal(await button.isDisabled(), true);
     assert.equal(await button.getAttribute("aria-busy"), "true");
     const pending = await button.evaluate(element => ({ spinner: element.querySelector(".settings-refresh-spinner") !== null,
-      glyph: element.querySelector("svg").getAttribute("viewBox"), width: element.querySelector("svg").getBoundingClientRect().width }));
+      glyph: element.querySelector("svg").getAttribute("viewBox"),
+      // Rotation changes the painted bounds, not the Source glyph's layout size.
+      width: Number.parseFloat(getComputedStyle(element.querySelector("svg")).width) }));
     assert.equal(pending.spinner, spinner);
     assert.equal(pending.glyph, spinner ? "0 0 24 24" : "0 0 16 16");
     assert.equal(pending.width, spinner ? 12 : 16);
@@ -252,8 +316,9 @@ async function assertSettingsInfoColor(expected) {
   return actual;
 }
 async function persistEvidence(extra = {}) {
+  const draftDiagnostics = page && !page.isClosed() ? await page.evaluate(() => window.__uiAlignmentDraftTrace ?? null) : null;
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
-    scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, production AudioWorklet module loading under packaged CSP, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", ...extra }, null, 2));
+    scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, production AudioWorklet module loading under packaged CSP, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", draftDiagnostics, ...extra }, null, 2));
   await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
   await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
   await writeFile(path.join(evidence, "desktop.log"), logs.join(""));
@@ -320,14 +385,21 @@ try {
   assert.deepEqual(retryGeometry, { outerGap: "4px", contentGap: "6px", wifi: 16, chevron: 12 });
   await capture("03-actual-reconnect-expanded", { retryGeometry });
   checks.push({ scenario: "Source retry aggregate uses 6px icon/summary gap, 4px disclosure gap, 16px Wi-Fi and 12px filled chevron; original details remain plain text", retryGeometry });
+  await observeDraftLifecycle();
   await composer.fill("KEEP_A_DRAFT");
-  await page.evaluate(workspaceRoot => window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" }), workspace);
+  await page.evaluate(workspaceRoot => {
+    window.__uiAlignmentDraftTraceMark("before-create-B");
+    return window.__zustandStore.getState().createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" });
+  }, workspace);
   await page.waitForFunction(previous => window.__zustandStore.getState().conversationId !== previous, owner);
   const other = await page.evaluate(() => window.__zustandStore.getState().conversationId);
   await composer.fill("KEEP_B_DRAFT");
   assert.equal(await page.locator(".stream-error-cell").count(), 0);
   const returnToOwnerAt = wire.length;
-  await page.evaluate(id => window.__zustandStore.getState().requestConversationSwitch(id), owner);
+  await page.evaluate(id => {
+    window.__uiAlignmentDraftTraceMark("before-return-A");
+    window.__zustandStore.getState().requestConversationSwitch(id);
+  }, owner);
   await page.waitForFunction(id => {
     const state = window.__zustandStore.getState();
     return state.conversationId === id && state.pendingConversationSwitchId === null;
@@ -335,6 +407,9 @@ try {
   assert(wire.slice(returnToOwnerAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
     && row.message.conversation_id === owner && row.message.client_command_type === "conversation.switch"));
   await page.locator('.stream-error-cell[data-retry-attempt="2"]').waitFor();
+  // The backend owner is acknowledged before ChatPane exposes its restored
+  // editor. A retry cell can already be present while that composer is hidden.
+  await composer.waitFor({ state: "visible" });
   assert.equal(await composer.innerText(), "KEEP_A_DRAFT");
   await capture("04-return-to-running-owner");
   await page.reload();
@@ -342,6 +417,7 @@ try {
   await page.locator('.stream-error-cell[data-retry-attempt="2"]').waitFor();
   assert.equal(await page.locator(".stream-error-cell").count(), 1);
   assert.equal(await page.evaluate(() => window.__zustandStore.getState().isStreaming), true);
+  await composer.waitFor({ state: "visible" });
   assert.equal(await composer.innerText(), "KEEP_A_DRAFT");
   await capture("05-reload-restores-live-retry");
   reply(heldResponse);
@@ -355,6 +431,7 @@ try {
   }, other);
   assert(wire.slice(returnToOtherAt).some(row => row.direction === "server" && row.message.type === "conversation.switched"
     && row.message.conversation_id === other && row.message.client_command_type === "conversation.switch"));
+  await composer.waitFor({ state: "visible" });
   assert.equal(await composer.innerText(), "KEEP_B_DRAFT");
   checks.push("Actual provider 429 → busy retry 1/5 → session restore → 503 → ordinary retry 2/5 → live owner switch → session restore → final response, both drafts retained");
 
@@ -460,11 +537,15 @@ try {
         const heading = document.querySelector(".settings-tab-pane:not([hidden]) .settings-group-title");
         const toolbar = document.querySelector(".config-scope-toolbar");
         const opener = document.querySelector(".config-open-button");
+        const headingText = document.createRange();
+        headingText.selectNodeContents(heading);
         return { descriptionBottom: description.getBoundingClientRect().bottom, headingTop: heading.getBoundingClientRect().top,
-          headingBottom: heading.getBoundingClientRect().bottom, toolbarTop: toolbar.getBoundingClientRect().top,
+          headingBottom: heading.getBoundingClientRect().bottom, headingTextBottom: headingText.getBoundingClientRect().bottom,
+          toolbarTop: toolbar.getBoundingClientRect().top,
           openerBorder: getComputedStyle(opener).borderTopWidth, openerIconWidth: opener.querySelector("svg").getBoundingClientRect().width };
       });
-      assert(configGeometry.descriptionBottom < configGeometry.headingTop && configGeometry.headingBottom < configGeometry.toolbarTop);
+      assert(configGeometry.descriptionBottom < configGeometry.headingTop && configGeometry.headingBottom <= configGeometry.toolbarTop
+        && configGeometry.headingTextBottom < configGeometry.toolbarTop);
       assert.equal(configGeometry.openerBorder, "0px");
       assert.equal(configGeometry.openerIconWidth, 14);
       checks.push({ scenario: "Actual Configuration description → Agent defaults → scope toolbar; Source ghost opener and external arrow", configGeometry });
@@ -521,7 +602,7 @@ try {
       await auditSettingsRefresh({ selector: ".settings-hooks-refresh", paths: ["/api/settings/hooks"],
         name: "settings-12-refresh-pending", size: 26, spinner: false });
     }
-    if (label === "工作树") {
+    if (label === "Worktrees") {
       await auditSettingsRefresh({ selector: ".settings-worktrees-refresh",
         paths: ["/api/settings/worktrees", "/api/settings/worktrees/managed"],
         name: "settings-15-refresh-pending", size: 28, spinner: true });

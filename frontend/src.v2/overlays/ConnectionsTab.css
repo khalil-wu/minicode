@@ -1,6 +1,6 @@
 .remote-connections-heading, .remote-connection-dialog header, .remote-connection-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .remote-connections-heading h3, .remote-connection-dialog h3 { margin: 0; font: inherit; color: var(--text-primary); }
-.settings-row.remote-connection-row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; }
+.settings-row.remote-connection-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 14px; }
 .remote-connection-row > svg { flex: 0 0 auto; color: var(--text-secondary); }
 .remote-connection-actions { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; }
 .remote-connection-status { color: var(--text-muted); white-space: nowrap; }

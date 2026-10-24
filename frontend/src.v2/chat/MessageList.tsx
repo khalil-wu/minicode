@@ -3,7 +3,7 @@ import { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, use
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ArrowDown } from "lucide-react";
 import { useAppStore } from "../stores";
-import { BrandMark } from "../components/icons";
+import { HomeTaskMark } from "./HomeTaskMark";
 import {
   createRecentTurnProjectionCache,
   projectMessagesToTurns,
@@ -502,7 +502,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
           flexDirection: "column",
           gap: "var(--space-turn-gap)",
           overscrollBehavior: "contain",
-          scrollbarGutter: "auto",
+          scrollbarGutter: "stable both-edges",
           opacity: 1,
         }}
       >
@@ -617,7 +617,7 @@ const EmptyState = () => {
     <section className="workbench-empty-hero">
       <div className="workbench-empty-brand">
         <div className="workbench-empty-mark" aria-hidden="true">
-          <BrandMark size={22} />
+          <HomeTaskMark />
         </div>
         <h1 className="workbench-empty-title">{workingDirectory ? <>{tr("你想让我们在")}<button type="button" className="workbench-empty-project" onClick={() => window.dispatchEvent(new CustomEvent("composer:open-project-picker"))}>{workspaceDisplayName(canonicalWorkspacePath(workingDirectory))}</button> {tr("中构建什么？")}</> : tr("我们要构建什么？")}</h1>
       </div>

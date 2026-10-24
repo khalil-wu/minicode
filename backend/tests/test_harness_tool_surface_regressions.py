@@ -185,6 +185,8 @@ def test_runtime_projection_uses_admitted_policy_and_hides_unbound_workspace_too
     session.run_manager = SimpleNamespace(context_for=lambda _: None)
     session._extension_runtime_states = {}
     session.config = AppConfig(llm=LLMSettings(api_key="fixture"), agent=AgentSettings(code_mode_only=True))
+    session.selected_model = session.config.llm.model
+    session.provider = session.config.llm.provider
     session.permission_context = PermissionContext(mode="confirm")
     session.session_lifecycle = SimpleNamespace(current_workspace_root=lambda: None)
     session.llm = SimpleNamespace(configured_tool_mode=lambda: "")

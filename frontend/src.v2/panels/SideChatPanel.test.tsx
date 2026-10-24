@@ -73,7 +73,8 @@ describe("SideChatPanel server lifecycle", () => {
     Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1300 });
     Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 800 });
     const resize = () => act(() => { observers.filter(observer => observer.targets.has(scroll))
-      .forEach(observer => observer.callback([], {} as ResizeObserver)); });
+      .forEach(observer => observer.callback([{ target: scroll,
+        contentRect: { height: scroll.clientHeight - 40 } } as ResizeObserverEntry], {} as ResizeObserver)); });
     resize();
     expect(scroll.style.getPropertyValue("--reply-viewport-height")).toBe("460px");
     expect(container.querySelectorAll('[data-reply-viewport="true"]')).toHaveLength(1);

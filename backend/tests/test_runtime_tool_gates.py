@@ -144,6 +144,18 @@ def test_factory_and_next_step_register_only_the_tools_enabled_for_that_snapshot
     assert "task" not in names
 
 
+def test_next_step_automatic_tools_do_not_widen_an_explicit_session_scope(artifacts):
+    config = configured({"features": {"goals": True, "multi_agent_v2": True,
+        "send_message_to_user_async": True, "current_time_reminder": {"enabled": True, "sleep_tool": True}},
+        "tools": {"update_plan": {"enabled": True}}})
+    registry = ToolRegistry()
+    registry.register(ToolExecTool())
+    scope = ToolsetPolicy.from_iterables(enabled_toolsets=(), enabled_tools=["tool_exec"])
+    policy = policy_for(registry, config, info=model_info(("request_user_input_async",), "v2"), base=scope)
+    assert registry.list_tools() == ["tool_exec"]
+    assert {schema["function"]["name"] for schema in registry.get_schemas(toolset_policy=policy)} == {"tool_exec"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("background", [False, True])
 async def test_child_update_plan_is_selected_by_config_and_mode_without_a_child_hard_deny(background, artifacts):

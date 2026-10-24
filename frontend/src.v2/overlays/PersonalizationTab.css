@@ -1,6 +1,6 @@
 .personalization-tab {
   display: grid;
-  gap: 36px;
+  gap: 40px;
 }
 
 .personalization-tab > .settings-section {

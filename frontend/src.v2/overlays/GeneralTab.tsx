@@ -29,11 +29,9 @@ const FOLLOW_UP_CHOICES = [
 export const GeneralTab = ({
   active = true,
   onOpenLicenses,
-  importSettings,
 }: {
   active?: boolean;
   onOpenLicenses?: () => void;
-  importSettings?: ReactNode;
 }) => {
   const { t } = useI18n();
   const sendShortcut = useAppStore((s) => s.sendShortcut);
@@ -43,7 +41,7 @@ export const GeneralTab = ({
   const modifierSymbol = navigator.platform.startsWith("Mac") ? "⌘" : "^";
   return (
     <div className="settings-general-groups">
-      {isDesktop() ? <DesktopGeneralPreferences onOpenLicenses={onOpenLicenses} importSettings={importSettings} /> : importSettings && <SettingsGroup title={t("常规")}>{importSettings}</SettingsGroup>}
+      {isDesktop() && <DesktopGeneralPreferences onOpenLicenses={onOpenLicenses} />}
       <SettingsGroup title={t("输入框")}>
         <PlainTextComposerPreference />
         {isDesktop() && <ComposerContextUsagePreference />}
@@ -114,13 +112,13 @@ const SettingsRow = ({ title, description, children }: { title: string; descript
   <div className="settings-row">
     <div className="settings-row-copy">
       <div className="settings-row-title">{title}</div>
-      <div className="settings-row-description">{description}</div>
+      {description && <div className="settings-row-description">{description}</div>}
     </div>
     <div className="settings-row-control">{children}</div>
   </div>
 );
 
-const DesktopGeneralPreferences = ({ onOpenLicenses, importSettings }: { onOpenLicenses?: () => void; importSettings?: ReactNode }) => {
+const DesktopGeneralPreferences = ({ onOpenLicenses }: { onOpenLicenses?: () => void }) => {
   const { t } = useI18n();
   const { preferences, error, update } = useDesktopPreferences();
   const [fullAccessConfirmation, setFullAccessConfirmation] = useState(false);
@@ -196,7 +194,6 @@ const DesktopGeneralPreferences = ({ onOpenLicenses, importSettings }: { onOpenL
           aria-checked={preferences.localHistoryCompression} data-active={preferences.localHistoryCompression}
           onClick={() => void update({ localHistoryCompression: !preferences.localHistoryCompression })}><span /></button>
       </SettingsRow>
-      {importSettings}
       <SettingsRow title={t("开源许可证")} description={t("已打包依赖的第三方声明。") }>
         <button type="button" className="settings-action-button" onClick={onOpenLicenses}>{t("查看")}</button>
       </SettingsRow>
@@ -374,7 +371,7 @@ const FullAccessAvailabilityDialog = ({ onClose, onConfirm }: { onClose: () => v
         event.preventDefault(); event.stopPropagation(); onClose();
       }}>
       <form onSubmit={event => { event.preventDefault(); onConfirm(); }}>
-        <h3><ShieldAlert size={17} aria-hidden="true" />{title}</h3>
+        <h3><ShieldAlert size={16} aria-hidden="true" />{title}</h3>
         <div className="settings-full-access-copy">
           <p>{t("选中后，MiniCode 可以访问互联网，并在无需请求批准的情况下读取和编辑文件，包括执行可能具有破坏性的命令")}</p>
           <p>{t("开启后会将“完整访问权限”添加到权限菜单中，但不会开启“完整访问权限”。")}{" "}<a href={PERMISSIONS_LEARN_MORE_URL} onClick={event => {
@@ -383,7 +380,7 @@ const FullAccessAvailabilityDialog = ({ onClose, onConfirm }: { onClose: () => v
         </div>
         <div className="settings-full-access-actions">
           <button type="button" className="settings-action-button" onClick={onClose}>{t("取消")}</button>
-          <button type="submit" className="settings-action-button" data-danger="true"><ShieldAlert size={15} aria-hidden="true" />{t("确认")}</button>
+          <button type="submit" className="settings-action-button" data-danger="true"><ShieldAlert size={16} aria-hidden="true" />{t("确认")}</button>
         </div>
       </form>
     </div>

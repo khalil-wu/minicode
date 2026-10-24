@@ -34,9 +34,12 @@ def test_compaction_keeps_command_handle_error_tail_and_call_identity():
     assert text.endswith("FAILED: expected 3, got 2")
     assert '"call_id":"verify-1","name":"run_command","is_error":true' in text
     assert '"call_id":"read-1","name":"read_file","is_error":false' in text
-    assert "tokens truncated" in text
+    assert messages[-1].content in text
+    assert text.count("构建进度\n") == 3000
+    assert '[call_id="verify-1"]' in text and '[call_id="read-1"]' in text
+    assert "tokens truncated" not in text
     assert "\ufffd" not in text
-    assert len(text.encode("utf-8")) < 3000
+    assert len(text.encode("utf-8")) > len(messages[-1].content.encode("utf-8"))
 
 
 def test_two_compactions_and_restore_keep_attachment_originals(tmp_path, monkeypatch):

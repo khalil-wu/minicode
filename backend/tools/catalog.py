@@ -31,6 +31,12 @@ def _registered_tool_spec(tool_registry: ToolRegistry, tool_name: str) -> ToolSp
     tool = tool_registry.get_tool(tool_name)
     if tool is None:
         raise KeyError(f"Tool is not registered: {tool_name}")
+    return tool_spec_from_instance(tool, name=tool_name)
+
+
+def tool_spec_from_instance(tool: Any, *, name: str) -> ToolSpec:
+    """Resolve canonical metadata before a selected tool enters a registry."""
+    tool_name = name
     get_spec = getattr(tool, "get_spec", None)
     spec = get_spec() if callable(get_spec) else None
     if isinstance(spec, ToolSpec):

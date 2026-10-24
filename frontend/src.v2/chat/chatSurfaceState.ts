@@ -537,15 +537,15 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       && !(["task", "spawn_agent"].includes(name) && record.delegations?.some((delegation) => delegation.started_at > 0))) continue;
     if (name === "send_message" || name === "followup_task") {
       const requestedRecipient = stringArg(name === "followup_task" ? record.args?.target : record.args?.target ?? record.args?.recipient);
-      const parentMailbox = ["parent", "team-lead"].includes(requestedRecipient);
-      const recipients = parentMailbox ? [requestedRecipient]
-        : record.recipientIds ?? (record.recipientId ? [record.recipientId] : requestedRecipient ? [requestedRecipient] : []);
+      const recipients = record.recipientIds ?? (record.recipientId ? [record.recipientId] : requestedRecipient ? [requestedRecipient] : []);
       const content = (record.args.message as string | undefined) ?? "";
-      cells.push(collaborationCell(record, "sent_message", recipients.map((recipient) => ({
-        agentId: recipient,
-        agentLabel: collaborationAgentLabel(recipient),
-        content,
-      }))));
+      cells.push(collaborationCell(record, "sent_message", recipients.map((recipient) => {
+        // Source V2 addresses the root by its canonical path. The runtime
+        // receipt calls that same mailbox `parent`; keep one view identity
+        // for both live receipts and saved native calls.
+        const agentId = recipient === "/root" || recipient === "team-lead" ? "parent" : recipient;
+        return { agentId, agentLabel: collaborationAgentLabel(agentId), content };
+      })));
       continue;
     }
     if (name === "task_stop" || name === "interrupt_agent") {

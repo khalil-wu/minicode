@@ -413,6 +413,10 @@ def test_private_reviewer_uses_existing_harness_schema_and_source_policy_without
             assert models[0].model_request_policy().final_output_json_schema == GUARDIAN_OUTPUT_SCHEMA
             assert models[0].model_request_policy().final_output_json_schema_strict is False
             assert set(runtime.session.tool_registry.list_tools()) == {"run_command", "monitor", "view_image", "tool_exec", "tool_wait"}
+            assert set(runtime.session.active_tool_names) == {"run_command", "monitor", "view_image", "tool_exec", "tool_wait"}
+            assert not {"create_goal", "get_goal", "update_goal"} & {
+                tool["function"]["name"] for tool in tools
+            }
             assert not any("## Skills" in message.content for message in messages)
             assert messages[-1].user_text_parts() == list(prompt.items)
         finally:

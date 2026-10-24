@@ -19,19 +19,15 @@
  *    因此同优先级非 !important 的声明本文件生效；ui-polish 的 !important 仍压过
  *    本文件。凡 polish 已用 !important 接管的属性，这里一律不再重复：
  *      · 页面 / 侧栏 / 头部底色，卡片与行的圆角 / 描边 / 底色 / 阴影 / hover
- *      · 导航项高度 38 / 圆角 / 字号 / 选中态底色与 settle 动效
+ *      · 导航项高度 / 圆角 / 字号 / 选中态底色
  *      · 页标题 h2 与副标题 p 的字号字重行高
- *      · .settings-action-button 的高度 / 横向内边距 / 圆角 / 字号（#root 前缀）
  *      · settings-center-main 内 input/select/textarea 的高度 / 圆角 / 描边 / 字号
- *      · 各级正文字号（row-title / row-description / state-pill / code / kbd…）
+ *      · 通用次级文字与状态信息字号（state-pill / code / kbd…）
  *  - 图标尺寸与导航项 hover 由 styles/components.css 拥有。
  *  - 本文件只保留 polish 未管的：栅格与布局、间距节奏、各功能区块独有元素。
  *  - 无 !important；无 hex 字面量（主题预览的固定色板除外，见该节说明）。
  *
- * 刻度收敛：字号只用 --text-*，字重只用 --fw-*，行高只用 --leading-*，圆角只用
- * --radius-sm(6) / --mc-control-radius(8) / --radius-lg(12) / --radius-full。
- * 历史上散落的 520/540/560/570/580/590/610/620/630/640/650/660/670/680 半档字重
- * 与 7/9/10/11/17px 杂圆角已并入上述刻度。
+ * 尺寸以当前 Codex Electron settings 消费者为准；字号继续乘用户 text scale。
  */
 
 /* ── 页面骨架 ─────────────────────────────────────────────────────────── */
@@ -47,12 +43,10 @@
   color: var(--text-primary);
   font-family: var(--font-ui);
   font-synthesis: none;
-  animation: settings-page-in var(--transition-fast) both;
 }
 
 .settings-workspace.settings-center[hidden], .settings-tab-pane[hidden] { display: none; }
-.settings-tab-pane { display: grid; gap: 28px; min-width: 0; }
-.settings-tab-pane:not([hidden]) { animation: settings-tab-in var(--duration-fast) var(--easing-standard); }
+.settings-tab-pane { display: grid; gap: 40px; min-width: 0; }
 .settings-search-results { display: grid; gap: 4px; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); }
 .settings-search-result { display: grid; gap: 4px; padding: 9px; text-align: left; border: 0; border-radius: var(--radius-sm); background: transparent; color: var(--text-primary); }
 .settings-search-result:hover, .settings-search-result:focus-visible { background: var(--surface-soft); }
@@ -98,8 +92,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 18px 12px 16px;
+  gap: 0;
+  padding: 0 8px 8px;
   overflow: hidden;
   box-sizing: border-box;
   border-right: 1px solid var(--border-subtle);
@@ -107,7 +101,7 @@
 }
 .settings-workspace-sidebar[hidden] { display: none; }
 
-.settings-navigation-heading { display: flex; align-items: center; gap: 6px; min-height: 36px; }
+.settings-navigation-heading { display: flex; align-items: center; gap: 8px; min-height: 32px; margin-left: 8px; }
 .settings-workspace-header { border-top-left-radius: 16px; }
 .settings-integration-tabs { display: flex; gap: 8px; align-items: center; margin: 8px 0 32px; }
 .settings-integration-tabs button { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 6px 13px; border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
@@ -120,7 +114,7 @@
 .settings-workspace .settings-integration-controls > .settings-integration-search { width: min(240px, 50%); height: 34px; margin: 0; border-radius: var(--radius-lg); }
 .settings-mcp-search { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border: 1px solid var(--border-subtle); border-radius: var(--radius-full); color: var(--text-muted); }
 .settings-mcp-search input { width: min(220px, 18vw); min-width: 100px; padding: 0; border: 0; background: transparent; color: var(--text-primary); font: inherit; outline: none; }
-.settings-navigation-heading > h2 { margin: 0; color: var(--text-primary); font-size: 20px; font-weight: var(--fw-semibold); }
+.settings-navigation-heading > h2 { margin: 0; color: var(--text-primary); font-size: var(--text-lg); font-weight: var(--fw-semibold); line-height: 24px; }
 
 .settings-workspace .settings-workspace-header {
   grid-column: 2;
@@ -137,26 +131,25 @@
 }
 
 .settings-center-content {
-  width: min(48rem, calc(100% - 40px));
+  width: min(48rem, 100%);
   min-height: 100%;
   margin: 0 auto;
-  padding: 20px 0 80px;
+  padding: 20px;
   box-sizing: border-box;
-  animation: settings-content-in var(--duration-fast) var(--easing-standard);
 }
 
 /* ── 侧栏：返回 / 搜索 / 分类导航 ─────────────────────────────────────── */
 
 .settings-workspace .settings-search {
   width: 100%;
-  height: 34px;
+  height: 36px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px;
+  padding: 0 12px;
   box-sizing: border-box;
-  border: 1px solid var(--border-subtle);
-  border-radius: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
   background: color-mix(in oklch, var(--surface-soft) 70%, var(--surface-sidebar));
   color: var(--text-muted);
 }
@@ -175,7 +168,8 @@
   color: var(--text-primary);
   font: inherit;
   font-size: var(--text-sm);
-  font-weight: var(--fw-medium);
+  font-weight: var(--fw-regular);
+  line-height: 18px;
 }
 
 .settings-center-tabs {
@@ -185,38 +179,44 @@
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 20px;
-  padding: 8px 0 12px;
+  gap: 16px;
+  padding: 4px 0 8px;
   overflow-y: auto;
 }
 
 .settings-nav-group {
   display: grid;
-  gap: 2px;
+  gap: 1px;
 }
 
 .settings-nav-group-label {
-  padding: 0 9px 5px;
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  margin-bottom: 3px;
+  padding: 0 8px;
   color: var(--text-muted);
   font-size: var(--text-sm);
-  font-weight: var(--fw-regular);
+  font-weight: var(--fw-medium);
+  line-height: 1.5;
   letter-spacing: 0;
 }
 
-/* 高度 / 圆角 / 字号 / 选中底色与 settle 动效由 ui-polish 接管。 */
+/* 高度 / 圆角 / 字号 / 选中底色由 ui-polish 接管。 */
 .settings-center-tab {
   width: 100%;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 9px;
-  padding: 0 9px;
-  border: 1px solid transparent;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
   background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   font: inherit;
   font-weight: var(--fw-regular);
+  line-height: 1.5;
   text-align: left;
 }
 
@@ -275,7 +275,7 @@
 .settings-browser-history-day-toggle svg { color: var(--text-muted); transition: transform var(--duration-fast) var(--easing-standard); }
 .settings-browser-history-day-toggle svg[data-expanded="true"] { transform: rotate(180deg); }
 .settings-browser-history-day > div[hidden] { display: none; }
-.settings-row.settings-browser-history-row { grid-template-columns: auto minmax(0, 1fr) auto; min-height: 44px; gap: 12px; padding: 7px 0; }
+.settings-row.settings-browser-history-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; min-height: 44px; gap: 12px; padding: 7px 0; }
 .settings-browser-history-row-icons { display: flex; align-items: center; gap: 12px; color: var(--text-secondary); }
 .settings-browser-history-row-icons input[type="checkbox"] { width: 16px; height: 16px; margin: 0; accent-color: var(--text-primary); }
 .settings-browser-history-page { display: flex; align-items: baseline; gap: 8px; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
@@ -296,11 +296,16 @@
 
 .settings-page-body {
   display: grid;
-  gap: 28px;
+  gap: 40px;
 }
 
 /* Group headers and their rows share one edge; only the group has a frame. */
-.settings-group,
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .settings-section {
   display: grid;
   gap: 12px;
@@ -311,19 +316,36 @@
   box-shadow: var(--shadow-refined);
 }
 
-.settings-group-title,
+.settings-group-title {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 46px;
+  margin: 0;
+  padding: 0 0 6px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-medium);
+  line-height: 1.5;
+}
+
 .settings-section-title {
   margin: 0;
   padding: 0;
   color: var(--text-primary);
-  font-size: var(--text-md);
-  font-weight: var(--fw-semibold);
-  line-height: var(--leading-tight);
+  font-size: var(--text-sm);
+  font-weight: var(--fw-medium);
+  line-height: 1.5;
 }
 
 .settings-section-heading {
   display: grid;
-  gap: 3px;
+  gap: 2px;
+}
+
+.settings-section-heading:has(.settings-section-description) .settings-section-title {
+  font-size: var(--text-md);
+  line-height: calc(1.75 / 1.125);
 }
 
 .settings-section-heading-row {
@@ -339,14 +361,14 @@
 }
 
 .settings-row {
-  min-height: 68px;
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) minmax(0, max-content);
+  position: relative;
+  container-type: inline-size;
+  display: flex;
+  justify-content: space-between;
   align-items: center;
-  gap: 32px;
-  padding: 14px 0;
+  gap: 24px;
+  padding: 12px 16px;
   box-sizing: border-box;
-  border-bottom: 1px solid var(--border-subtle);
 }
 
 /* Hover keeps controls on their baseline while changing only the surface. */
@@ -357,20 +379,27 @@
               color var(--duration-fast) var(--easing-standard);
 }
 
-.settings-row:last-child {
-  border-bottom: 0;
+.settings-row:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  inset: auto 16px 0;
+  height: 1px;
+  background: var(--border-subtle);
+  pointer-events: none;
 }
 
 .settings-row-copy {
   min-width: 0;
+  flex: 1;
   display: grid;
-  gap: 4px;
+  gap: 2px;
 }
 
 .settings-row-title {
   color: var(--text-primary);
-  font-weight: var(--fw-semibold);
-  line-height: var(--leading-tight);
+  font-size: var(--text-chrome);
+  font-weight: var(--fw-medium);
+  line-height: calc(1.25 / .875);
 }
 
 /* 次级说明：比正文安静一档，但不至于发灰看不清。 */
@@ -379,23 +408,27 @@
 .settings-row-description,
 .settings-page-note {
   color: color-mix(in oklch, var(--text-secondary) 72%, var(--text-muted));
-  font-weight: var(--fw-normal);
+  font-weight: var(--fw-regular);
+}
+
+.settings-row-description {
+  margin: 0;
+  font-size: var(--text-2xs);
+  line-height: calc(16 / 12);
 }
 
 .settings-section-description,
-.settings-row-description,
 .settings-page-note {
   margin: 0;
   line-height: var(--leading-normal);
 }
 
 .settings-row-control {
-  min-width: 0;
+  min-width: min(160px, 40cqw);
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  flex-wrap: wrap;
 }
 
 .settings-row > .settings-select,
@@ -456,27 +489,27 @@
 
 .settings-toggle {
   position: relative;
-  width: 38px;
-  height: 22px;
+  width: 32px;
+  height: 20px;
   flex: 0 0 auto;
   padding: 0;
   border: 0;
   border-radius: var(--radius-full);
   background: var(--surface-active);
   cursor: pointer;
-  transition: background-color var(--transition-fast);
+  transition: background-color var(--duration-fast) ease-out;
 }
 
 .settings-toggle > span {
   position: absolute;
-  top: 3px;
-  left: 3px;
+  top: 2px;
+  left: 2px;
   width: 16px;
   height: 16px;
   border-radius: var(--radius-full);
   background: var(--text-on-accent);
   box-shadow: 0 1px 3px color-mix(in oklch, black 24%, transparent);
-  transition: transform var(--transition-fast);
+  transition: transform var(--duration-fast) ease-out;
 }
 
 .settings-toggle[data-active="true"] {
@@ -484,20 +517,27 @@
 }
 
 .settings-toggle[data-active="true"] > span {
-  transform: translateX(16px);
+  transform: translateX(12px);
 }
 
-/* 高度 / 横向内边距 / 圆角 / 字号由 ui-polish 接管（#root 前缀）。 */
+/* Source's toolbar action is shared by settings pages and their body portals. */
 .settings-action-button {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0 8px;
+  gap: 4px;
   border: 1px solid var(--border-subtle);
+  border-radius: 10px;
   background: var(--surface-soft);
   color: var(--text-secondary);
   cursor: pointer;
   font: inherit;
-  font-weight: var(--fw-semibold);
+  font-size: var(--text-chrome);
+  font-weight: var(--fw-regular);
+  line-height: 18px;
+  white-space: nowrap;
   transition:
     background-color var(--transition-fast),
     border-color var(--transition-fast),
@@ -505,8 +545,8 @@
 }
 
 .settings-action-button > svg {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
 }
 
 .settings-action-button:hover:not(:disabled) {
@@ -2111,17 +2151,6 @@
 
 /* ── 动效 ─────────────────────────────────────────────────────────────── */
 
-@keyframes settings-page-in {
-  from { opacity: 0; transform: translateY(3px); }
-  to { opacity: 1; transform: none; }
-}
-
-@keyframes settings-content-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-@keyframes settings-tab-in { from { opacity: 0; } to { opacity: 1; } }
-
 @keyframes settings-spin {
   to { transform: rotate(360deg); }
 }
@@ -2194,8 +2223,8 @@
   }
 
   .settings-center-content {
-    width: calc(100% - 28px);
-    padding: 24px 0 40px;
+    width: 100%;
+    padding: 20px;
   }
 
   .settings-page-heading {
@@ -2203,18 +2232,13 @@
   }
 
   .settings-row {
-    grid-template-columns: 1fr;
-    gap: 12px;
-    padding: 14px 0;
+    gap: 24px;
+    padding: 12px 16px;
   }
 
   .settings-group,
   .settings-section {
     padding: 18px;
-  }
-
-  .settings-row-control {
-    justify-content: flex-start;
   }
 
   .settings-segmented {
@@ -2383,9 +2407,6 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html:not([data-reduced-motion="false"]) .settings-workspace.settings-center,
-  html:not([data-reduced-motion="false"]) .settings-center-content,
-  html:not([data-reduced-motion="false"]) .settings-tab-pane,
   html:not([data-reduced-motion="false"]) .settings-theme-preview {
     animation: none;
   }
@@ -2396,17 +2417,22 @@
 .settings-row > code { max-width: min(380px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-general-task-path { width: 192px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-select-regular { font-weight: var(--fw-regular); }
-.settings-full-access-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 16px; background: var(--backdrop-strong); }
-.settings-full-access-dialog { width: min(380px, 100%); padding: 16px; background: var(--surface-raised); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); box-shadow: var(--shadow-strong-overlay); }
-.settings-full-access-dialog h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 16px; font-size: var(--text-md); font-weight: var(--fw-bold); }
-.settings-full-access-copy { display: flex; flex-direction: column; gap: 16px; color: var(--text-secondary); line-height: var(--leading-normal); }
+.settings-full-access-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; background: var(--dialog-overlay); font-family: var(--font-ui); }
+.settings-full-access-dialog { box-sizing: border-box; width: min(520px, 92vw); padding: 20px; background: color-mix(in srgb, var(--surface-raised) 90%, transparent); border-radius: 20px; box-shadow: 0 0 0 .5px var(--border-subtle), var(--shadow-strong-overlay); backdrop-filter: blur(24px); }
+.settings-full-access-dialog h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; font-size: var(--text-lg); font-weight: var(--fw-medium); line-height: 28px; }
+.settings-full-access-copy { display: flex; flex-direction: column; gap: 16px; color: var(--text-secondary); font-size: var(--text-sm); line-height: 1.5; }
 .settings-full-access-copy p { margin: 0; }
 .settings-full-access-copy a,
 .settings-full-access-learn-more { color: var(--text-info); text-decoration: none; }
-.settings-full-access-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
-.settings-full-access-actions .settings-action-button { padding: 2px 8px; border-radius: var(--radius-full); border-color: transparent; font-size: var(--mc-font-body); line-height: 18px; gap: 4px; }
+.settings-full-access-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 12px; }
+.settings-full-access-actions .settings-action-button { height: auto; min-height: 24px; padding: 2px 8px; border-radius: var(--radius-full); corner-shape: round; border-color: transparent; font-size: var(--text-chrome); line-height: 18px; gap: 4px; }
 .settings-full-access-actions [data-danger="true"] { background: color-mix(in oklch, var(--state-danger) 10%, transparent); color: var(--state-danger); }
 .settings-full-access-actions .settings-action-button[data-danger="true"]:hover:not(:disabled) { border-color: transparent; background: color-mix(in oklch, var(--state-danger) 20%, transparent); }
+
+@supports (corner-shape: superellipse(1.5)) {
+  .settings-action-button { border-radius: 12.5px; corner-shape: superellipse(1.5); }
+  .settings-full-access-dialog { border-radius: 25px; corner-shape: superellipse(1.5); }
+}
 
 .settings-mcp-tool-list { max-height: 270px; overflow: auto; }
 .settings-mcp-tool-list > label { display: flex; align-items: flex-start; gap: 8px; padding: 8px 2px; }

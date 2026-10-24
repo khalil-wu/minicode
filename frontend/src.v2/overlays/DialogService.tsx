@@ -241,59 +241,61 @@ const backdropStyle: CSSProperties = {
   zIndex: "var(--z-dialog)",
   display: "grid",
   placeItems: "center",
-  background: "var(--backdrop-strong)",
+  background: "var(--dialog-overlay)",
   padding: 16,
 };
 
 const panelStyle: CSSProperties = {
-  width: "min(380px, 100%)",
-  background: "var(--surface-raised)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-lg)",
-  boxShadow: "var(--shadow-strong-overlay)",
-  padding: 16,
+  boxSizing: "border-box",
+  width: "min(520px, 92vw)",
+  background: "color-mix(in srgb, var(--surface-raised) 90%, transparent)",
+  boxShadow: "0 0 0 .5px var(--border-subtle), var(--shadow-strong-overlay)",
+  backdropFilter: "blur(24px)",
+  padding: 20,
 };
 
 const titleStyle: CSSProperties = {
-  fontSize: "var(--text-md)",
+  fontSize: "var(--text-lg)",
   color: "var(--text-primary)",
-  fontWeight: "var(--fw-bold)",
-  marginBottom: 6,
+  fontWeight: "var(--fw-medium)",
+  lineHeight: "28px",
+  marginBottom: 12,
 };
 
 const messageStyle: CSSProperties = {
   color: "var(--text-secondary)",
   fontSize: "var(--text-sm)",
-  lineHeight: 1.45,
+  lineHeight: 1.5,
   whiteSpace: "pre-wrap",
 };
 
 const actionsStyle: CSSProperties = {
   display: "flex",
   justifyContent: "flex-end",
-  gap: 8,
-  marginTop: 16,
+  gap: 12,
+  marginTop: 12,
 };
 
 const cancelBtnStyle: CSSProperties = {
   border: "1px solid var(--border-subtle)",
   background: "var(--surface-soft)",
   color: "var(--text-secondary)",
-  borderRadius: "var(--radius-sm, 4px)",
-  padding: "6px 12px",
+  borderRadius: "var(--radius-full)",
+  padding: "2px 8px",
   cursor: "pointer",
-  fontSize: "var(--text-xs)",
+  fontSize: "var(--text-chrome)",
+  fontWeight: "var(--fw-regular)",
 };
 
 const confirmBtnStyle: CSSProperties = {
-  border: 0,
+  border: "1px solid transparent",
   background: "var(--accent-primary)",
   color: "var(--text-on-accent)",
-  borderRadius: "var(--radius-sm, 4px)",
-  padding: "6px 12px",
+  borderRadius: "var(--radius-full)",
+  padding: "2px 8px",
   cursor: "pointer",
-  fontSize: "var(--text-xs)",
-  fontWeight: "var(--fw-bold)",
+  fontSize: "var(--text-chrome)",
+  fontWeight: "var(--fw-regular)",
 };
 
 const inputStyle: CSSProperties = {

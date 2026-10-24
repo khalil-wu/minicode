@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // CI-only: real detection, filesystem migration and error. Only delivery of the
 // first completed HTTP response is held to inspect the renderer's pending state.
 export async function auditImportFlow({ page, profile, sourceHome, capture, checks, trace }) {
   assert.equal(process.env.CI, "true");
-  await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
-  const importButton = page.getByRole("button", { name: "导入", exact: true });
+  await page.getByRole("navigation", { name: "设置分类", exact: true }).getByRole("button", { name: "导入", exact: true }).click();
+  const importButton = page.getByRole("button", { name: "导入 Claude Code", exact: true });
   await importButton.click();
   const providers = page.getByRole("dialog", { name: "从其他 AI 应用导入", exact: true });
   await capture("import-01-actual-provider-menu");
@@ -90,12 +90,15 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
   await completed.getByRole("link", { name: importedFile.target_path, exact: true }).click();
   await completed.waitFor({ state: "hidden" });
   await page.locator(".settings-center").waitFor({ state: "hidden" });
-  await page.waitForFunction(target => window.__zustandStore.getState().editorTabs.some(tab => tab.path === target && !tab.loading), importedFile.target_path);
+  await page.waitForFunction(target => {
+    const normalize = value => value.replaceAll("\\", "/");
+    return window.__zustandStore.getState().editorTabs.some(tab => normalize(tab.path) === normalize(target) && !tab.loading);
+  }, importedFile.target_path);
   const opened = await page.evaluate(target => {
     const state = window.__zustandStore.getState();
     return { workspace: state.workingDirectory, conversation: state.conversationId, draft: state.draft,
       attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts,
-      tab: state.editorTabs.find(tab => tab.path === target) };
+      tab: state.editorTabs.find(tab => tab.path.replaceAll("\\", "/") === target.replaceAll("\\", "/")) };
   }, importedFile.target_path);
   assert.equal(opened.tab.error ?? null, null);
   assert.equal(opened.tab.content, await readFile(importedFile.target_path, "utf8"));
@@ -118,50 +121,55 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
 
   // Create a real destination I/O failure after detection, without substituting
   // an API payload or claiming a successful write from a synthetic transcript.
-  const commandSource = path.join(sourceHome, ".claude", "commands", "write-denied.md");
+  const commandSource = path.join(sourceHome, ".claude", "commands", "write-denied-case", "write-denied.md");
+  await mkdir(path.dirname(commandSource));
   await writeFile(commandSource, "---\ndescription: Audit an actual failed destination write\n---\nRead the actual file.\n");
-  await page.evaluate(() => {
-    const state = window.__zustandStore.getState();
-    state.setSettingsTab("appearance");
-    state.toggleSettings();
-  });
-  await page.locator(".settings-center-tab").filter({ hasText: "外观" }).click();
-  await page.locator(".settings-center-tab").filter({ hasText: "常规" }).click();
-  await page.getByRole("button", { name: "再次导入", exact: true }).click();
+  await page.getByRole("button", { name: "打开个人资料菜单", exact: true }).click();
+  await page.getByRole("menuitem", { name: /^设置/u }).click();
+  const [detectionResponse] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === "/api/settings/import/detect" && response.request().method() === "POST"),
+    page.getByRole("navigation", { name: "设置分类", exact: true }).getByRole("button", { name: "导入", exact: true }).click(),
+  ]);
+  const detection = await detectionResponse.json();
+  assert.equal(detection.items.length, 1, "The new command is the only newly detected import item");
+  const pendingItem = detection.items[0];
+  assert.equal(pendingItem.item_type, "commands");
+  assert.equal(path.resolve(pendingItem.source_path), path.resolve(commandSource));
+  await page.getByRole("button", { name: "导入 Claude Code", exact: true }).click();
   await page.getByRole("dialog", { name: "从其他 AI 应用导入", exact: true }).getByRole("button", { name: "继续", exact: true }).click();
-  const commandResult = migrated.results.find(result => result.item_type === "commands");
-  const destination = path.dirname(commandResult.target_path);
-  await chmod(destination, 0o555);
-  try {
-    const [response] = await Promise.all([
-      page.waitForResponse(response => response.url().endsWith("/api/settings/import") && response.request().method() === "POST"),
-      page.getByRole("dialog", { name: "选择要导入的内容", exact: true }).getByRole("button", { name: "导入", exact: true }).click(),
-    ]);
-    const failed = await response.json();
-    assert.equal(failed.results.length, 1, "The new command is the only newly detected import item");
-    assert(failed.results.some(result => result.status === "error" && result.title.includes("write-denied")));
-    const error = page.getByRole("dialog", { name: "导入失败", exact: true });
-    await error.waitFor();
-    assert.equal(await error.getByRole("button", { name: "确定", exact: true }).count(), 0);
-    assert.equal(await error.getByRole("link").count(), 0);
-    assert.equal(await error.getByRole("button", { name: "滚动到底部", exact: true }).count(), 0);
-    const failureScroll = await error.locator(".settings-import-files-content").evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
-    assert.equal(failureScroll.scrollHeight, failureScroll.height);
-    const failedItem = error.locator(".settings-import-file-result").filter({ hasText: "write-denied.md" });
-    assert((await failedItem.innerText()).includes("Permission denied"));
-    const failureGeometry = await failedItem.evaluate(element => {
-      const row = element.getBoundingClientRect();
-      const viewport = element.closest(".settings-import-files-content").getBoundingClientRect();
-      return { rowTop: row.top, rowBottom: row.bottom, viewportTop: viewport.top, viewportBottom: viewport.bottom };
-    });
-    assert(failureGeometry.rowTop >= failureGeometry.viewportTop && failureGeometry.rowBottom <= failureGeometry.viewportBottom);
-    await capture("import-07-real-destination-failure", { failureScroll, failureGeometry });
-    trace("import:failure:escape");
-    await page.keyboard.press("Escape");
-    await error.waitFor({ state: "hidden" });
-    trace("import:failure:closed");
-    checks.push("Actual import destination write failure preserves the original item error, exposes no nonexistent file link and closes only after the real result");
-  } finally {
-    await chmod(destination, 0o755);
-  }
+  const destination = path.dirname(pendingItem.target_path);
+  assert(destination.startsWith(profile));
+  await writeFile(destination, "Actual regular file blocking the detected import parent directory.\n", { flag: "wx" });
+  const [response] = await Promise.all([
+    page.waitForResponse(response => response.url().endsWith("/api/settings/import") && response.request().method() === "POST"),
+    page.getByRole("dialog", { name: "选择要导入的内容", exact: true }).getByRole("button", { name: "导入", exact: true }).click(),
+  ]);
+  const failed = await response.json();
+  assert.equal(failed.results.length, 1, "The new command is the only newly detected import item");
+  const failedResult = failed.results[0];
+  assert.equal(failedResult.id, pendingItem.id);
+  assert.equal(failedResult.target_path, pendingItem.target_path);
+  assert.equal(failedResult.status, "error");
+  assert(failedResult.message.length > 0);
+  const error = page.getByRole("dialog", { name: "导入失败", exact: true });
+  await error.waitFor();
+  assert.equal(await error.getByRole("button", { name: "确定", exact: true }).count(), 0);
+  assert.equal(await error.getByRole("link").count(), 0);
+  assert.equal(await error.getByRole("button", { name: "滚动到底部", exact: true }).count(), 0);
+  const failureScroll = await error.locator(".settings-import-files-content").evaluate(element => ({ height: element.clientHeight, scrollHeight: element.scrollHeight }));
+  assert.equal(failureScroll.scrollHeight, failureScroll.height);
+  const failedItem = error.locator(".settings-import-file-result").filter({ hasText: "write-denied.md" });
+  assert.equal(await failedItem.locator("p").textContent(), failedResult.message);
+  const failureGeometry = await failedItem.evaluate(element => {
+    const row = element.getBoundingClientRect();
+    const viewport = element.closest(".settings-import-files-content").getBoundingClientRect();
+    return { rowTop: row.top, rowBottom: row.bottom, viewportTop: viewport.top, viewportBottom: viewport.bottom };
+  });
+  assert(failureGeometry.rowTop >= failureGeometry.viewportTop && failureGeometry.rowBottom <= failureGeometry.viewportBottom);
+  await capture("import-07-real-destination-failure", { failureScroll, failureGeometry, failedResult, blockedParent: destination });
+  trace("import:failure:escape");
+  await page.keyboard.press("Escape");
+  await error.waitFor({ state: "hidden" });
+  trace("import:failure:closed");
+  checks.push("Actual import destination write failure preserves the original item error, exposes no nonexistent file link and closes only after the real result");
 }

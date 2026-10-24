@@ -400,6 +400,7 @@ uses in its UI. The `--cjk-leading` and
   --surface-sidebar: oklch(0.965 0.002 250);
   --surface-page:    oklch(1 0 0);
   --surface-soft:    oklch(0.975 0.003 250);
+  --surface-selected: color-mix(in oklab, var(--text-primary) 5%, transparent);
   --surface-panel:   oklch(0.960 0.003 250);
   --surface-raised:  oklch(1 0 0);
   --surface-hover:   oklch(0.940 0.004 250);

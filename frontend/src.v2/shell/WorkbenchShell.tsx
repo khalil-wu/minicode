@@ -309,6 +309,7 @@ export const WorkbenchShell = memo(function WorkbenchShell() {
   return (
     <div
       className="mc-desktop-shell"
+      data-app-shell-application-menu-header={isDesktop() ? "true" : undefined}
       style={{
         position: "fixed",
         inset: 0,

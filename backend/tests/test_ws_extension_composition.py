@@ -239,7 +239,12 @@ def test_ws_run_injects_the_conversation_owned_lifecycle_runtime(
     runtime = captured["runtime"]
     assert captured["conversation_id"] == "conv_runnerdone"
     assert captured["workspace_root"] is None
-    assert captured["tool_registry"] is captured["agent_session"].tool_registry
+    session_registry = captured["agent_session"].tool_registry
+    assert session_registry is not captured["tool_registry"]
+    assert session_registry.schema_source is captured["tool_registry"].schema_source
+    assert set(session_registry.list_tools()) == set(captured["tool_registry"].list_tools())
+    assert all(session_registry.get_tool(name) is captured["tool_registry"].get_tool(name)
+        for name in session_registry.list_tools())
     assert runtime.lifecycle_runtime is runner
     assert captured["run_context"].lifecycle_runtime is runner
     assert "_extension_runner" not in runtime.metadata

@@ -138,9 +138,8 @@ export const SelectMenu = ({
       const above = rect.top - 14;
       const useAbove = below < height && above > below;
       const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
-      // The portal keeps its intrinsic content width. A short trigger must not
-      // constrain longer options, and a long label wraps only at the viewport.
-      const minWidth = Math.min(menuWidth ?? Math.max(rect.width, 220), window.innerWidth - 16);
+      // Source menus size to their contents unless the consumer requests a width.
+      const minWidth = Math.min(menuWidth ?? 0, window.innerWidth - 16);
       const width = Math.min(Math.max(menu.getBoundingClientRect().width, minWidth), window.innerWidth - 16);
       const left = align === "end" ? rect.right - width : rect.left;
       const heightInView = Math.min(menu.scrollHeight, maxHeight);

@@ -10,7 +10,9 @@ import pytest
 import pytest_asyncio
 
 from backend.agent.query_engine import AgentSession
-from backend.config import AgentSettings, LLMSettings
+from backend.config import AgentSettings, AppConfig, LLMSettings
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+from backend.agent.model_execution import ModelExecutionSnapshot
 from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType, ToolCallEvent
 from backend.sandbox import SandboxPolicy
 from backend.tests.test_subagent_startup_lifecycle import _launch, _prepare_git, _RecordingLLM, startup_case
@@ -331,6 +333,7 @@ async def test_residency_does_not_evict_a_real_active_sleep_turn(lifetime_case, 
     class SleepModel(_RecordingLLM):
         async def stream_chat(self, messages, tools=None, metadata=None):
             self.calls += 1
+            assert "sleep" in {tool["function"]["name"] for tool in tools}
             if self.calls > 1:
                 yield StreamEvent(StreamEventType.TEXT_CHUNK, content="Sleep turn ended.", phase="final_answer")
                 yield StreamEvent(StreamEventType.DONE, finish_reason="stop")
@@ -338,7 +341,17 @@ async def test_residency_does_not_evict_a_real_active_sleep_turn(lifetime_case, 
             yield StreamEvent(StreamEventType.TOOL_CALL, tool_calls=[ToolCallEvent(
                 id="active-sleep", name="sleep", arguments={"duration_ms": 30000})])
             yield StreamEvent(StreamEventType.DONE, finish_reason="tool_calls")
-    case.tool._llm_provider = SleepModel()
+    model = SleepModel()
+    # This lifecycle fixture intentionally exercises an active sleep. The
+    # generic fixture model does not advertise Source's clock capability.
+    # Select Source's explicit always_on mode instead of waiting for a gated
+    # request to finish without ever entering the real sleep tool.
+    config = AppConfig(llm=LLMSettings(api_key="offline-fixture"), config_layer_stack=ConfigLayerStack((ConfigLayer(
+        ConfigLayerSource("user"), {"features": {"sleep_tool": {"mode": "always_on"}}},
+    ),)))
+    case.context.model_execution = ModelExecutionSnapshot.capture(config, model)
+    case.context.run_context.model_execution = case.context.model_execution
+    case.tool._llm_provider = model
     case.context.tool_registry.register(sleep)
     case.context.metadata[SESSION_TOOLSET_POLICY_METADATA_KEY] = ToolsetPolicy.from_iterables(
         enabled_toolsets=(), enabled_tools=["task", "sleep"],

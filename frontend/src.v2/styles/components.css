@@ -202,7 +202,7 @@
 
 /* Workbench header: stable start / flexible center / status-and-window end. */
 .mc-header {
-  height: var(--header-height);
+  height: var(--height-toolbar-sm);
   display: flex;
   align-items: center;
   gap: 6px;
@@ -223,7 +223,15 @@
   -webkit-app-region: no-drag;
 }
 
-.mc-header-start,
+.mc-header-start {
+  gap: 6px;
+}
+
+.mc-header-start .mc-header-icon-button {
+  --mc-icon-button-size: 28px;
+  --mc-icon-size: 16px;
+}
+
 .mc-header-end {
   gap: 3px;
 }

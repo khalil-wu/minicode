@@ -184,8 +184,24 @@ describe("SelectMenu", () => {
     fireEvent.click(screen.getByRole("button", { name: "实际选项，当前：Short" }));
     const menu = screen.getByRole("listbox");
     expect(menu.style.left).toBe("340px");
-    expect(menu.style.minWidth).toBe("220px");
+    expect(menu.style.minWidth).toBe("0px");
     expect(screen.getByRole("option", { name: "完整的已安装应用和真实版本名称" })).toBeTruthy();
+  });
+
+  it.each([undefined, 240])("preserves intrinsic narrow settings menus and explicit consumer widths (%s)", (menuWidth) => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function () {
+      const width = this.classList.contains("mc-select-popover") ? menuWidth ?? 88 : 120;
+      return { left: this.classList.contains("mc-select-popover") ? 0 : 600,
+        right: this.classList.contains("mc-select-popover") ? width : 720,
+        top: 100, bottom: 128, width, height: 28 } as DOMRect;
+    });
+    render(<SelectMenu ariaLabel="发送快捷键" className="settings-select" align="end" value="enter"
+      menuWidth={menuWidth} onValueChange={vi.fn()}><option value="enter">Enter</option></SelectMenu>);
+    fireEvent.click(screen.getByRole("button", { name: "发送快捷键，当前：Enter" }));
+    const menu = screen.getByRole("listbox");
+    expect(menu.style.left).toBe(`${720 - (menuWidth ?? 88)}px`);
+    expect(menu.style.minWidth).toBe(`${menuWidth ?? 0}px`);
+    expect(menu.style.width).toBe(menuWidth === undefined ? "" : "240px");
   });
 
   it("uses the same actual option icon in the selected trigger and menu without changing the option value", async () => {

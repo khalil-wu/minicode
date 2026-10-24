@@ -12,6 +12,8 @@ import {
 import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import mermaid from "mermaid";
 import { openWebInBrowser } from "../openWebInBrowser";
+import { FileViewerPanel } from "../../panels/FileViewerPanel";
+import { workspaceFileAbsolutePath } from "../../protocol/file-workspace";
 
 const { sendMock, openPathMock, revealPathMock, socketState } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -41,7 +43,12 @@ vi.mock("../../desktop/runtime", () => ({
   // These specs exercise the desktop shell path (default-app open / reveal),
   // which is only offered when a desktop runtime is present.
   isDesktop: () => true,
+  desktop: () => null,
+  runtime: () => null,
 }));
+vi.mock("../../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null }) }));
+vi.mock("../../shell/tabs/ConversationFilesTree", () => ({ ConversationFilesTree: () => null }));
+vi.mock("../../lib/monaco-colorize", () => ({ guessLanguageFromPath: () => "plaintext", useColorizedLines: () => null }));
 
 // These tests exercise link parsing and owner binding. Native preference and
 // asynchronous open contracts are exercised in the preference chain suite.
@@ -73,6 +80,10 @@ afterEach(() => {
     remoteImagePolicy: "ask",
     allowedRemoteImageDomains: [],
     previewArtifact: null,
+    workspaceFileTabs: [],
+    fileBrowserRoots: {},
+    pendingWorkspaceFileTabId: null,
+    pendingConversationSwitchId: null,
   });
 });
 
@@ -398,18 +409,28 @@ describe("MarkdownRenderer", () => {
     async (content) => {
       const original = useAppStore.getState().openEditorFile;
       const openEditorFile = vi.fn();
-      const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
-        path: "calculator.py", content: "return a + b", media_type: "text/x-python",
-      }), { headers: { "content-type": "application/json" } }));
-      useAppStore.setState({ workingDirectory: "C:/main-project", conversationId: "main-owner", openEditorFile });
+      const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async input => new Response(JSON.stringify(
+        new URL(String(input)).pathname.endsWith("git/branches") ? { is_git_repo: false, branches: [], commits: [] }
+          : { path: "calculator.py", content: "return a + b", media_type: "text/x-python", kind: "text" }), { headers: { "content-type": "application/json" } }));
+      useAppStore.setState({ workingDirectory: "C:/main-project", conversationId: "main-owner", openEditorFile, isConnected: true,
+        workspaceFileTabs: [], pendingConversationSwitchId: null, pendingWorkspaceFileTabId: null, draft: "main unsent draft",
+        editorTabs: [{ id: "main-editor", path: "C:/main-project/unsaved.ts", content: "unsaved main editor", original: "saved", loading: false }],
+        conversations: [{ id: "main-owner", title: "Main", updatedAt: "", executionCwd: "C:/main-project" },
+          { id: "side-owner", title: "Side", updatedAt: "", conversationType: "side_chat", executionCwd: "C:/side-project" }] });
       try {
         render(<MarkdownRenderer content={content} workspaceRoot="C:/side-project" conversationId="side-owner" />);
         fireEvent.click(screen.getByRole("button", { name: "file" }));
         expect(openEditorFile).not.toHaveBeenCalled();
-        expect(useAppStore.getState().previewOwnerConversationId).toBe("side-owner");
-        await waitFor(() => expect(fetchMock).toHaveBeenCalled());
-        expect(String(fetchMock.mock.calls[0][0])).toContain(encodeURIComponent("C:/side-project"));
-        expect(useAppStore.getState().workingDirectory).toBe("C:/main-project");
+        const tab = useAppStore.getState().workspaceFileTabs[0];
+        expect(tab).toMatchObject({ path: "calculator.py", owner: { scopeId: "conversation:side-owner", conversationId: "side-owner", executionCwd: "C:/side-project", browserRoot: "C:/side-project" } });
+        expect(fetchMock).not.toHaveBeenCalled();
+        render(<FileViewerPanel tabId={tab.id} />);
+        expect(await screen.findByText("return a + b")).toBeTruthy();
+        const request = fetchMock.mock.calls.find(call => new URL(String(call[0])).pathname.endsWith("browser-preview"))!;
+        const url = new URL(String(request[0]));
+        expect(Object.fromEntries(url.searchParams)).toMatchObject({ session_id: "session-markdown", conversation_id: "side-owner", execution_cwd: "C:/side-project", path: "calculator.py" });
+        expect(useAppStore.getState()).toMatchObject({ conversationId: "main-owner", workingDirectory: "C:/main-project", draft: "main unsent draft" });
+        expect(useAppStore.getState().editorTabs[0].content).toBe("unsaved main editor");
       } finally {
         fetchMock.mockRestore();
         useAppStore.setState({ openEditorFile: original });
@@ -706,11 +727,10 @@ describe("MarkdownRenderer", () => {
 
       fireEvent.click(chip);
       expect(openPathMock).not.toHaveBeenCalled();
-      expect(useAppStore.getState().previewArtifact).toMatchObject({
-        name: "report.pdf",
-        source: "workspace",
-        loading: true,
-      });
+      const tab = useAppStore.getState().workspaceFileTabs[0];
+      expect(tab).toMatchObject({ title: "report.pdf", path: "outputs/report.pdf", owner: {
+        scopeId: "home:C:/Desktop/MiniCode", conversationId: null, executionCwd: "C:/Desktop/MiniCode", browserRoot: "C:/Desktop/MiniCode" } });
+      expect(useAppStore.getState().rightStackTab).toBe(`file:${tab.id}`);
 
       fireEvent.contextMenu(chip, { clientX: 20, clientY: 20 });
       fireEvent.click(screen.getByText("在资源管理器中显示"));
@@ -728,10 +748,10 @@ describe("MarkdownRenderer", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "WorldCup2026_Semifinal.pdf" }));
     expect(openPathMock).not.toHaveBeenCalled();
-    expect(useAppStore.getState().previewArtifact).toMatchObject({
-      name: "WorldCup2026_Semifinal.pdf",
-      source: "workspace",
-    });
+    const tab = useAppStore.getState().workspaceFileTabs[0];
+    expect(tab.title).toBe("WorldCup2026_Semifinal.pdf");
+    expect(workspaceFileAbsolutePath(tab.owner, tab.path)).toBe("C:/Desktop/MiniCode/desktop/release/win-unpacked/resources/WorldCup2026_Semifinal.pdf");
+    expect(tab.owner).toMatchObject({ conversationId: null, browserRoot: "C:/Desktop/MiniCode" });
   });
 
   it("opens a generated document outside the workspace with the default app", () => {

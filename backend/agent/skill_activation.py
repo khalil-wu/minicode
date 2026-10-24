@@ -106,7 +106,7 @@ async def activate_turn_skills(
                 server for server in payload.get("mcp_dependencies", [])
                 if mcp_manager is None or mcp_manager.get_client(server) is None
             ]
-            first_party = originator in {"minicode", "minicode-desktop", "codex_cli_rs", "codex-tui", "codex_vscode"} or originator.startswith("Codex ")
+            first_party = originator in {"minicode-desktop", "codex_cli_rs", "codex-tui", "codex_vscode"} or originator.startswith("Codex ")
             if missing_dependencies and mcp_manager is not None and first_party and (feature_flags or FeatureFlags()).enabled("skill_mcp_dependency_install"):
                 from backend.services.mcp_service import MCPServiceError, _manual_config_from_payload, install_skill_mcp_servers
 

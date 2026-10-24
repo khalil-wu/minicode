@@ -833,10 +833,10 @@ const resizeHandleStyle: React.CSSProperties = {
   top: 0,
   bottom: 0,
   left: 0,
-  width: 9,
+  width: 16,
   cursor: "col-resize",
   zIndex: "var(--z-composer)",
   background: "transparent",
-  transform: "translateX(-4px)",
+  transform: "translateX(-8px)",
   touchAction: "none",
 };

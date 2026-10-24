@@ -192,7 +192,10 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       const state = get();
       if (state.defaultTerminalLocation === "right") {
         const maximized = state.appMode === "code" ? state.panelSlots.find(slot => slot.maximized) : undefined;
-        if (maximized) state.togglePanelMaximized(maximized.id);
+        if (maximized) {
+          state.togglePanelMaximized(maximized.id);
+          set({ rightPanelExpanded: false });
+        }
         if (state.activeBottomTab === "terminal") state.closeBottomDock();
         state.setRightStackTab("terminal");
       } else {

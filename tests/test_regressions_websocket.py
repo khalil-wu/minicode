@@ -2332,7 +2332,8 @@ def test_conversation_delete_releases_owned_resources_before_worktree_and_record
 
         event_outbox = EventOutbox()
         session_lifecycle = SimpleNamespace(
-            clear_workspace_runtime=lambda: order.append("release-workspace")
+            clear_workspace_runtime=lambda: order.append("release-workspace"),
+            workspace_root_for_conversation=lambda conversation: None,
         )
 
         def track_command_task(self, task) -> None:

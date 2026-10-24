@@ -65,7 +65,7 @@ def test_ui_workspace_status_and_diff_share_host_metadata_boundary(monkeypatch, 
             return subprocess.CompletedProcess(argv, 0, "## main\0 M tracked.txt\0?? new.txt\0", "")
         if args == ["rev-parse", "--show-toplevel"]:
             return subprocess.CompletedProcess(argv, 0, str(tmp_path) + "\n", "")
-        if args == ["rev-parse", "--verify", "--quiet", "HEAD"]:
+        if args == ["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD"]:
             return subprocess.CompletedProcess(argv, 1 if unborn else 0, "" if unborn else "head\n", "")
         if args == ["hash-object", "-t", "tree", "--stdin"]:
             return subprocess.CompletedProcess(argv, 0, "empty-tree\n", "")
@@ -80,6 +80,8 @@ def test_ui_workspace_status_and_diff_share_host_metadata_boundary(monkeypatch, 
     status = workspace_api_service.workspace_git_status_payload(tmp_path)
     assert status == {"is_git_repo": True, "branch": "main", "modified": ["tracked.txt"], "staged": [], "untracked": ["new.txt"]}
     assert workspace_api_service.workspace_git_diff_payload(tmp_path, "") == {"is_git_repo": True, "diff": "tracked patch\nnew patch\n"}
+    assert ("rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD") in calls
+    assert any(call[0] == "diff" and call[-3:] == ("empty-tree" if unborn else "head", "--", ".") for call in calls)
     assert (("hash-object", "-t", "tree", "--stdin") in calls) == unborn
 
 

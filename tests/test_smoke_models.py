@@ -2072,7 +2072,7 @@ def test_weather_text_does_not_hide_model_tools_or_inject_intent_guidance() -> N
         )
     )
 
-    assert llm.tool_names == ["mcp__websearch__search"]
+    assert set(llm.tool_names) == {"mcp__websearch__search", "create_goal", "get_goal", "update_goal"}
     assert tool_registry.get_tool_spec("mcp__websearch__search").exposure == "deferred"
     assert "missing a city, area, or physical location" not in llm.message_text
     assert not [event for event in events if event.type == "tool_call"]
@@ -2136,7 +2136,7 @@ def test_question_like_reply_does_not_hide_unrelated_tools() -> None:
         )
     )
 
-    assert set(llm.tool_names) == {"mcp__websearch__search", "read_file"}
+    assert set(llm.tool_names) == {"mcp__websearch__search", "read_file", "create_goal", "get_goal", "update_goal"}
     assert tool_registry.get_tool_spec("mcp__websearch__search").exposure == "deferred"
 
 

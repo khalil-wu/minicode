@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ tree: vi.fn(), preview: vi.fn() }));
-vi.mock("../protocol/conversation-browser", () => ({ fetchConversationBrowserTree: mocks.tree, fetchConversationBrowserOriginal: vi.fn() }));
-vi.mock("../chat/openAttachmentPreview", () => ({ openConversationBrowserFilePreview: mocks.preview }));
+const mocks = vi.hoisted(() => ({ tree: vi.fn() }));
+vi.mock("../protocol/file-workspace", async load => ({ ...await load<typeof import("../protocol/file-workspace")>(),
+  readFileWorkspaceTree: mocks.tree, readFileWorkspaceBranches: vi.fn(async () => ({ is_git_repo: false, branches: [], commits: [] })) }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null }) }));
 vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), desktop: () => null }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
@@ -15,18 +15,21 @@ beforeEach(() => {
   vi.clearAllMocks();
   useAppStore.setState({ conversationId: "A", conversations: [{ id: "A", title: "A", updatedAt: "", executionCwd: "C:/task/A", projectlessBrowserRoot: "D:/browse" }],
     workingDirectory: "C:/different-editor", pendingConversationSwitchId: null, isConnected: true, fileTreeVersion: 1,
+    fileBrowserRoots: {}, workspaceFileTabs: [], pendingWorkspaceFileTabId: null, panelSlots: [{ id: "chat", kind: "chat", focused: true }],
     quickOpenVisible: false, draft: "keep my draft", attachments: [{ id: "keep", name: "keep.txt", type: "text/plain", size: 1, status: "ready" }] });
-  mocks.tree.mockResolvedValue(page("note.txt"));
+  mocks.tree.mockImplementation(async (owner: { browserRoot: string }) => page("note.txt", owner.browserRoot));
 });
 afterEach(cleanup);
 
 it("reads the chat-owned Files tab and previews the selected file without opening Quick Open", async () => {
   render(<FilesPanel />);
   fireEvent.click(await screen.findByText("note.txt"));
-  expect(mocks.tree).toHaveBeenCalledWith({ conversationId: "A", executionCwd: "C:/task/A" }, ".", expect.any(AbortSignal));
-  expect(mocks.preview).toHaveBeenCalledWith({ conversationId: "A", executionCwd: "C:/task/A", path: "note.txt", name: "note.txt" });
+  const owner = { scopeId: "conversation:A", conversationId: "A", executionCwd: "C:/task/A", browserRoot: "D:/browse" };
+  expect(mocks.tree).toHaveBeenCalledWith(owner, ".", expect.any(AbortSignal));
+  expect(useAppStore.getState().workspaceFileTabs).toEqual([expect.objectContaining({ owner, path: "note.txt", title: "note.txt", open: true })]);
+  expect(useAppStore.getState().rightStackTab).toBe(`file:${useAppStore.getState().workspaceFileTabs[0].id}`);
   expect(useAppStore.getState()).toMatchObject({ quickOpenVisible: false, workingDirectory: "C:/different-editor", draft: "keep my draft", attachments: [{ name: "keep.txt" }] });
-  expect(screen.queryByRole("button")).toBeNull();
+  expect(screen.getByRole("button", { name: "选择文件树根目录" })).toBeTruthy();
 });
 
 it("reuses file watcher revisions and suspends hidden Files tabs", async () => {
@@ -51,12 +54,14 @@ it("does not publish a late file tree from the previous conversation", async () 
   await act(async () => finish(page("stale-A.txt")));
   expect(signal.aborted).toBe(true);
   expect(screen.queryByText("stale-A.txt")).toBeNull();
-  expect(mocks.tree).toHaveBeenLastCalledWith({ conversationId: "B", executionCwd: "C:/project/B" }, ".", expect.any(AbortSignal));
+  expect(mocks.tree).toHaveBeenLastCalledWith({ scopeId: "conversation:B", conversationId: "B", executionCwd: "C:/project/B", browserRoot: "C:/project/B" }, ".", expect.any(AbortSignal));
 });
 
-it("shows unavailable Files without borrowing an unrelated editor workspace", () => {
+it("reads Home's selected directory without retaining a previous conversation owner", async () => {
   useAppStore.setState({ conversationId: null, conversations: [] });
   render(<FilesPanel />);
-  expect(screen.getByText("文件不可用")).toBeTruthy();
-  expect(mocks.tree).not.toHaveBeenCalled();
+  await screen.findByText("note.txt");
+  expect(mocks.tree).toHaveBeenCalledWith({ scopeId: "home:C:/different-editor", conversationId: null,
+    executionCwd: "C:/different-editor", browserRoot: "C:/different-editor" }, ".", expect.any(AbortSignal));
+  expect(useAppStore.getState()).toMatchObject({ conversationId: null, workingDirectory: "C:/different-editor", draft: "keep my draft" });
 });

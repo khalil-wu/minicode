@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import * as fc from "fast-check";
-import { oklch, parse, wcagContrast, formatHex, type Color } from "culori";
+import { blend, oklch, parse, wcagContrast, formatHex, type Color } from "culori";
 
 const tokensCss = readFileSync(
   resolve(process.cwd(), "src.v2/styles/tokens.css"),
@@ -49,12 +49,12 @@ const resolveValue = (theme: TokenMap, raw: string): string => {
 };
 
 const tryParseColor = (raw: string): Color | undefined => {
-  try {
-    const c = parse(raw);
-    return c;
-  } catch {
-    return undefined;
+  const transparentMix = raw.match(/^color-mix\(in oklab,\s*(.+)\s+([\d.]+)%,\s*transparent\)$/);
+  if (transparentMix) {
+    const color = parse(transparentMix[1]);
+    return color && { ...color, alpha: (color.alpha ?? 1) * Number(transparentMix[2]) / 100 };
   }
+  return parse(raw);
 };
 
 describe("Phase A — design token property tests", () => {
@@ -140,11 +140,19 @@ describe("Phase A — design token property tests", () => {
       const fg = formatHex(parse(theme["--text-primary"]) as Color);
       const surfaces = Object.keys(theme).filter((n) => n.startsWith("--surface-"));
       for (const s of surfaces) {
-        const bg = formatHex(parse(theme[s]) as Color);
-        if (!fg || !bg) continue;
+        const color = tryParseColor(resolveValue(theme, theme[s]));
+        expect(color, s).toBeDefined();
+        const bg = formatHex(blend([parse(theme["--surface-base"]) as Color, color as Color]));
         const ratio = wcagContrast(fg, bg);
         expect(ratio).toBeGreaterThanOrEqual(4.5);
       }
+    }
+  });
+
+  it("uses a 5% primary-text selection overlay in both themes", () => {
+    for (const theme of [dark, light]) {
+      const selected = tryParseColor(resolveValue(theme, theme["--surface-selected"]));
+      expect(selected).toEqual({ ...parse(theme["--text-primary"]), alpha: 0.05 });
     }
   });
 

@@ -488,7 +488,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
         data-compact={compact ? "true" : "false"}
         data-minimal={minimal ? "true" : "false"}
         data-permission-mode={permissionMode}
-        style={footerStyle(compact)}
+        style={footerStyle}
       >
         <input
           id={fileInputId}
@@ -506,7 +506,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
               type="button"
             title={tr("添加文件等内容")}
             className="composer-attach-btn"
-            style={iconBtn(compact)}
+            style={iconBtn}
             aria-label={tr("添加文件等内容")}
             aria-haspopup="menu"
             aria-expanded={addOpen}
@@ -937,43 +937,40 @@ const prDotStyle = (status: string): React.CSSProperties => ({
   background: status === "failed" ? "var(--state-danger)" : status === "passed" ? "var(--state-success)" : status === "running" ? "var(--state-info)" : "var(--text-muted)",
 });
 
-const footerStyle = (compact: boolean): React.CSSProperties => ({
-  marginTop: compact ? 4 : 0,
+const footerStyle: React.CSSProperties = {
   fontSize: "var(--text-xs)",
-});
+};
 
 const footerLeftStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 7,
+  gap: 4,
   minWidth: 0,
 };
 
-const iconBtn = (compact: boolean): React.CSSProperties => ({
+const iconBtn: React.CSSProperties = {
   background: "transparent",
   color: "var(--text-secondary)",
   border: "1px solid transparent",
   cursor: "pointer",
-  width: compact ? 28 : 34,
-  height: compact ? 28 : 34,
+  width: 28,
+  height: 28,
   padding: 0,
   display: "inline-flex",
   alignItems: "center",
   justifyContent: "center",
   borderRadius: "var(--radius-full)",
-});
+};
 
 const pill: React.CSSProperties = {
   background: "transparent",
   color: "var(--text-secondary)",
   border: "1px solid transparent",
   borderRadius: "var(--radius-full)",
-  padding: "5px 8px",
+  padding: "0 8px",
   cursor: "pointer",
   fontSize: "var(--text-xs)",
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 7,
+  lineHeight: 1,
 };
 
 const dropdownStyle = (align: "left" | "right" = "left"): React.CSSProperties => ({

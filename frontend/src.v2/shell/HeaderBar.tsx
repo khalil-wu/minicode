@@ -144,8 +144,8 @@ export const HeaderBar = ({
   return (
     <header className="header-bar mc-header">
       <div className="mc-header-start">
-        <button type="button" className="mc-titlebar-navigation" aria-label={tr("上一条访问的对话")} title={tr("后退")} disabled={Boolean(pendingSwitch) || history.index <= 0} onClick={() => navigateHistory(history.index - 1)}><ArrowLeft size={17} /></button>
-        <button type="button" className="mc-titlebar-navigation" aria-label={tr("下一条访问的对话")} title={tr("前进")} disabled={Boolean(pendingSwitch) || history.index >= history.ids.length - 1} onClick={() => navigateHistory(history.index + 1)}><ArrowRight size={17} /></button>
+        <button type="button" className="mc-titlebar-navigation" aria-label={tr("上一条访问的对话")} title={tr("后退")} disabled={Boolean(pendingSwitch) || history.index <= 0} onClick={() => navigateHistory(history.index - 1)}><ArrowLeft size={16} /></button>
+        <button type="button" className="mc-titlebar-navigation" aria-label={tr("下一条访问的对话")} title={tr("前进")} disabled={Boolean(pendingSwitch) || history.index >= history.ids.length - 1} onClick={() => navigateHistory(history.index + 1)}><ArrowRight size={16} /></button>
         {leftPanelAvailable && (
           <IconButton
             label={leftPanelOpen ? tr("收起左侧栏") : tr("打开左侧栏")}

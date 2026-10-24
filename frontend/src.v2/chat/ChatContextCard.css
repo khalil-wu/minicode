@@ -42,8 +42,8 @@
 .chat-pane-layout:has(> .mc-chat-context-card[data-surface="inline"]) {
   --summary-content-shift: 0px;
   --input-max-width: 736px;
-  --chat-axis-width: min(736px, calc(100% - 48px));
-  --mc-chat-width: min(736px, calc(100% - 48px));
+  --chat-axis-width: min(736px, calc(100% - 32px));
+  --mc-chat-width: 736px;
 }
 
 .chat-pane-layout:has(> .mc-chat-context-card[data-display-mode="shift"]) {

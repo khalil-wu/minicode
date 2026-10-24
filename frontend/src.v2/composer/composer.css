@@ -46,7 +46,7 @@
   align-items: flex-start;
   gap: 4px 6px;
   min-width: 0;
-  padding: 4px 4px 8px;
+  padding: 0 4px 4px;
 }
 
 .composer-project-scope {
@@ -432,7 +432,7 @@
   flex-wrap: nowrap;
   align-items: center;
   gap: 5px;
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 .composer-footer-primary {
@@ -666,8 +666,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   flex-shrink: 0;
   cursor: pointer;
   transition: background-color var(--duration-base) var(--easing-standard),
@@ -677,7 +678,7 @@
 .composer-permission-btn {
   display: flex;
   align-items: center;
-  gap: var(--spacing-1);
+  gap: 4px;
   cursor: pointer;
   font-size: var(--text-xs);
   transition: background-color var(--duration-base) var(--easing-standard),
@@ -687,7 +688,7 @@
 .composer-model-select {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   max-width: 180px;
   cursor: pointer;
   font-family: var(--font-ui);
