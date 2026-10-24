@@ -4,14 +4,12 @@ MiniCode 是一个本地运行的 AI 编程助手，包含 Python 后端、React
 
 完整回复后自动收起工具过程，点击可查看执行记录；子任务的工作记录在侧栏独立呈现，Diff 按文件展开。代码工作区提供 Monaco 编辑器、LSP 补全与导航，默认显示代码缩略图。
 
-本批修复父子权限继承、并行任务启动、权限切换与发送时序、浏览器预览与图片产物链路，并完善审批输入区、回复空间、过程状态和亮暗 Mermaid。测试结果与验证边界见[本批验收记录](docs/validation/2026-10-08-codex-alignment.md)；此前归档与索引性能改进见[性能验收](docs/validation/2026-10-08-archive-editor-performance.md)。
-
 ## 环境要求
 
 - Python 3.11 或更高版本
 - Node.js 20.19 或更高版本
 - npm
-- Git 2.36 或更高版本（Source 工作树协议使用 `git worktree list --porcelain -z`）
+- Git 2.36 或更高版本（工作树管理使用 `git worktree list --porcelain -z`）
 - Windows x64 桌面端；Linux x86_64 后端/SSH 宿主要求 glibc 2.31 或更高版本（Ubuntu 20.04 为构建与安装验证基线）
 
 Linux 后端的原生组件、独立 wheel 和 SSH 安装步骤见 [Linux 后端安装](docs/linux-backend-install.md)。当前发布工作流只发布 Windows 桌面安装包；Linux wheel 由成功 CI 的 `minicode-linux-backend-wheel` artifact 提供，远端后端需要预先安装，不会随桌面更新自动安装或升级。
