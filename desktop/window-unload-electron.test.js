@@ -12,8 +12,9 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
   const reading = process.env.MINICODE_UNLOAD_TEST_MODE === "read";
   app.setPath("userData", profile);
   app.whenReady().then(async () => {
+    process.stdout.write(`[unload] ${reading ? "read" : "write"} process ready\n`);
     const commits = [], captures = [], resumes = [];
-    let closedCount = 0, verified = false, backendStopped = false;
+    let closedCount = 0, verified = false, backendStopped = false, popoutDisposed = false;
     const runtime = { revision: 0, apiBaseUrl: "", wsBaseUrl: "", runtimeToken: "unload-oracle-token" };
     const source = fs.readFileSync(path.join(__dirname, "../frontend/src.v2/stores/index.ts"), "utf8");
     const unload = source.match(/window.addEventListener\("beforeunload", event => \{[\s\S]*?\n  \}\);/)[0];
@@ -58,7 +59,7 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
     const server = http.createServer((request, response) => {
       if (request.url === "/committed") {
         let body = ""; request.on("data", (chunk) => { body += chunk; });
-        request.on("end", () => { commits.push(JSON.parse(body)); response.end("committed"); });
+        request.on("end", () => { commits.push(JSON.parse(body)); process.stdout.write(`[unload] committed ${commits.at(-1).text}\n`); response.end("committed"); });
       } else { response.writeHead(200, { "content-type": "text/html; charset=utf-8" }); response.end(html); }
     });
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -68,16 +69,17 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
       const port = Number(new URL(origin).port); await new Promise((resolve) => server.close(resolve));
       await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
     } else fs.writeFileSync(path.join(profile, "oracle-origin"), origin, "utf8");
+    process.stdout.write(`[unload] ${reading ? "read" : "write"} IndexedDB origin ready\n`);
     runtime.apiBaseUrl = origin; runtime.wsBaseUrl = origin.replace("http:", "ws:");
     windows.init({ frontendDevUrl: origin, preloadFile: path.join(__dirname, "preload.js"),
       onMainWindowCreated(window) { const area = screen.getPrimaryDisplay().workArea; window.setPosition(area.x + area.width - 24, area.y); },
-      onMainWindowClosed() { closedCount++; },
+      onMainWindowClosed() { closedCount++; process.stdout.write("[unload] native window closed\n"); },
     });
     ipc.init({ getWindowForSender: windows.getWindowForSender, getWindowRecord: windows.getWindowRecord,
       getRuntimeConfig: (window) => ({ ...runtime, windowOwnerId: windows.getWindowRecord(window).windowOwnerId,
         windowInstanceId: windows.getWindowRecord(window).windowInstanceId, windowBindingToken: windows.getWindowRecord(window).windowBindingToken }),
-      captureUnloadIntent(window) { const intent = windows.captureUnloadIntent(window); captures.push(intent); return intent; },
-      resumeUnload(window, id) { resumes.push(id); return windows.resumeUnload(window, id); },
+      captureUnloadIntent(window) { const intent = windows.captureUnloadIntent(window); captures.push(intent); process.stdout.write(`[unload] captured ${intent.action}\n`); return intent; },
+      resumeUnload(window, id) { resumes.push(id); process.stdout.write("[unload] resuming committed native intent\n"); return windows.resumeUnload(window, id); },
     });
     ipc.registerIpcHandlers();
     const mainSource = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
@@ -87,46 +89,52 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
     vm.runInNewContext(`${drain}\n${quit}\n${allClosed}`, {
       app, windowManager: windows, process, quitCleanupComplete: false, quitCleanupStarted: false, appQuitRequested: false,
       rollbackPreparationInProgress: false, desktopCleanupFailed: false,
+      popoutWindow: { dispose() { popoutDisposed = true; process.stdout.write("[unload] Popout ownership disposed\n"); } },
       dictationHotkeys: { async dispose() {} },
       generalMaintenance: null, petManager: null, petInitialization: null,
       windowCleanupTasks: new Map(), ptyManager: { async killAllSessions() {} },
       remoteDesktop: { async close() { assert.equal(backendStopped, false); } },
       backendSidecar: { requestBackendStop() {}, async stopBackendSidecar() {
+        assert.equal(popoutDisposed, true);
         if (!reading) assert.deepEqual(commits.at(-1), { text: "native-close-content", size: 2 * 1024 * 1024 });
-        backendStopped = true; server.close();
+        backendStopped = true; process.stdout.write("[unload] committed window released before backend stop\n"); server.close();
       }, getBackendProcess: () => null }, embeddedBrowserBridge: { async stop() {} }, embeddedBrowserManager: { disposeAll() {} },
       appendDesktopLog(message) { throw new Error(message); },
       async createStartupFailureWindow(error) { throw error; }, serializeError: error => error,
     });
     app.on("will-quit", () => {
       fs.writeFileSync(path.join(profile, `unload-${reading ? "read" : "write"}-receipt.json`), JSON.stringify({
-        verified, backendStopped, closedCount, actions: captures.map((intent) => intent.action),
+        verified, backendStopped, popoutDisposed, closedCount, actions: captures.map((intent) => intent.action),
+        ignoreCache: captures.map((intent) => intent.ignoreCache),
         resumedOwnIntents: resumes.length === captures.length && resumes.every((id, index) => id === captures[index].id),
         committed: commits.at(-1),
       }), "utf8");
-      assert.equal(verified, true); assert.equal(backendStopped, true); assert.equal(closedCount, 1);
+      assert.equal(verified, true); assert.equal(backendStopped, true); assert.equal(popoutDisposed, true); assert.equal(closedCount, 1);
       if (!reading) {
         assert.deepEqual(captures.map((intent) => intent.action), ["reload", "reload", "close"]);
+        assert.deepEqual(captures.map((intent) => intent.ignoreCache), [false, true, false]);
         assert.deepEqual(resumes, captures.map((intent) => intent.id));
       }
       process.stdout.write(reading ? "Cold process read preserved the committed 2 MiB attachment and authored close content.\n"
-        : "Real runtime-change reload and Ctrl+R each committed a pending 2 MiB draft without closing; native Quit committed before backend stop and exited normally.\n");
+        : "Real runtime-change reload and native cache-bypassing reload each committed a pending 2 MiB draft without closing; native Quit committed before backend stop and exited normally.\n");
     });
     try {
       const window = await windows.createMainWindow(); window.hide();
+      process.stdout.write("[unload] native renderer loaded\n");
       await window.webContents.executeJavaScript("window.oracle.ready.then(() => true)");
+      process.stdout.write("[unload] renderer IndexedDB ready\n");
       if (reading) {
         assert.deepEqual(await window.webContents.executeJavaScript("window.oracle.read()"), { text: "native-close-content", size: 2 * 1024 * 1024 });
+        process.stdout.write("[unload] cold persisted attachment verified\n");
       } else {
-        for (const trigger of ["runtime", "keyboard"]) {
+        for (const trigger of ["runtime", "native"]) {
           await window.webContents.executeJavaScript(`window.oracle.prepare(${JSON.stringify(trigger + "-reload-content")})`, true);
+          process.stdout.write(`[unload] ${trigger} draft prepared\n`);
           const loaded = new Promise((resolve) => window.webContents.once("did-finish-load", resolve));
           if (trigger === "runtime") window.webContents.send("minicode:runtime:changed", { revision: ++runtime.revision });
-          else {
-            window.show(); window.focus();
-            if (!window.isFocused()) await new Promise((resolve) => window.once("focus", resolve));
-            window.webContents.sendInputEvent({ type: "keyDown", keyCode: "R", modifiers: ["control"] });
-          }
+          // Ctrl+R belongs to the native browser-page menu. Exercise the
+          // actual window reload authority, including its cache-bypass intent.
+          else windows.reloadWindow(window, true);
           await loaded;
           assert.equal(closedCount, 0); assert.equal(windows.getMainWindows()[0], window);
           assert.deepEqual(await window.webContents.executeJavaScript("window.oracle.read()"), { text: trigger + "-reload-content", size: 2 * 1024 * 1024 });
@@ -136,6 +144,7 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
         await window.webContents.executeJavaScript("window.oracle.prepare('native-close-content')", true);
       }
       verified = true;
+      process.stdout.write("[unload] requesting normal native Quit\n");
       app.quit();
     } catch (error) {
       process.stderr.write(`${error.stack || error}\n`);
@@ -152,21 +161,21 @@ if (process.env.MINICODE_UNLOAD_TEST_CHILD === "1") {
         const env = { ...process.env, MINICODE_UNLOAD_TEST_CHILD: "1", MINICODE_UNLOAD_TEST_PROFILE: profile, MINICODE_UNLOAD_TEST_MODE: mode };
         delete env.ELECTRON_RUN_AS_NODE;
         const child = spawn(require("electron"), [__filename], { cwd: __dirname, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
-        child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { output += chunk; });
+        child.stdout.on("data", (chunk) => { output += chunk; process.stdout.write(chunk); }); child.stderr.on("data", (chunk) => { output += chunk; process.stderr.write(chunk); });
         const timer = setTimeout(() => child.kill(), 25000);
         try {
           const code = await new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", resolve); });
           assert.equal(code, 0, output);
           const receipt = JSON.parse(fs.readFileSync(path.join(profile, `unload-${mode}-receipt.json`), "utf8"));
-          assert.equal(receipt.verified, true); assert.equal(receipt.backendStopped, true); assert.equal(receipt.closedCount, 1);
+          assert.equal(receipt.verified, true); assert.equal(receipt.backendStopped, true); assert.equal(receipt.popoutDisposed, true); assert.equal(receipt.closedCount, 1);
           if (mode === "write") {
             assert.deepEqual(receipt.actions, ["reload", "reload", "close"]);
+            assert.deepEqual(receipt.ignoreCache, [false, true, false]);
             assert.equal(receipt.resumedOwnIntents, true);
             assert.deepEqual(receipt.committed, { text: "native-close-content", size: 2 * 1024 * 1024 });
           }
         } finally { clearTimeout(timer); }
       }
-      process.stdout.write(output);
     } finally {
       assert.equal(path.dirname(path.resolve(profile)), path.resolve(os.tmpdir()));
       fs.rmSync(profile, { recursive: true, force: true });

@@ -12,8 +12,8 @@
 }
 
 .personalization-memory-heading-actions { display:flex; align-items:center; justify-content:space-between; gap:16px; }
-.personalization-memory-heading-actions > a { color:var(--text-secondary); font-size:var(--text-sm); text-decoration:none; }
-.personalization-memory-heading-actions > a:hover { color:var(--text-primary); }
+.personalization-memory-heading-actions > a { color:var(--text-info); font-size:var(--text-sm); text-decoration:none; }
+.personalization-memory-heading-actions > a:hover { color:var(--text-info); }
 .personalization-host-selector { display:inline-flex; align-items:center; gap:7px; }
 .personalization-host-selector svg { flex-shrink:0; }
 

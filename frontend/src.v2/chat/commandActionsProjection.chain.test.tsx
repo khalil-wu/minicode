@@ -220,7 +220,7 @@ describe("source-backed Codex activity disclosure transitions", () => {
   });
 
   it("keeps a real parent-mailbox message separate from ordinary child identities", () => {
-    const record: ToolCallRecord = { id: "parent-send", name: "send_message", args: { recipient: "parent", message: "actual parent message" }, recipientIds: [], status: "success", startedAt: 1 };
+    const record: ToolCallRecord = { id: "parent-send", name: "send_message", args: { target: "/root", message: "actual parent message" }, recipientIds: ["parent"], status: "success", startedAt: 1 };
     const cell = projectMessagesToTurns([{ id: "answer", role: "assistant", content: "", artifacts: [], timestamp: 1, blocks: [{ type: "tool_call", record }] }], false)[0].committedCells[0];
     expect(cell).toMatchObject({ kind: "collaboration", entries: [{ agentId: "parent" }] });
     if (cell.kind !== "collaboration") throw new Error("Missing parent mailbox fact");
@@ -228,6 +228,7 @@ describe("source-backed Codex activity disclosure transitions", () => {
     expect(screen.getByText("已向父代理发送消息")).toBeTruthy();
     expect(view.container.querySelector(".mc-agent-avatar")).toBeNull();
     expect(view.container.textContent).not.toContain("actual parent message");
+    expect(record.args.target).toBe("/root");
   });
   it("keeps an active title for one second, then immediately switches to its terminal summary", () => {
     vi.useFakeTimers();

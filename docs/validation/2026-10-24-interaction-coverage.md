@@ -30,6 +30,8 @@
 
 Root 在本文交付前追加报告：新 head 的生产构建与预算、chrome 三组124项、Import相关123项、后端165项已通过；后续统一UI复跑和新head CI仍在进行。Config盒边界断言之后，compact设置页原40px滚动fixture因1000px视口已不溢出而失败，Root改用真实560px小视口并恢复窗口，没有给产品加padding。Import失败fixture正从POSIX chmod改为真实路径冲突。这里保留这些运行进展，不把正在修fixture/尚无最终receipt写成整轮成功。
 
+Root 后续取得的2af69cd9 Linux CI产物在 [独立下载目录](C:/Desktop/MiniCode/output/full-parity-audit-20261023/ci-ui-2af69cd9/receipt.json)：`success:true`、34检查、110截图、0 renderer errors。17可见设置页覆盖DPR1/1.25/1.5，导入文件真实读写及路径冲突失败、配置编辑修复、菜单子层及自动化表单均已进入该轮；53张设置/自定义对比度原图已复核。这不改变上表所指历史失败，也不扩成所有未开启gate或每个按钮均完成。Windows本地另一次首次请求前的Node companion超时仍见 [调查记录](C:/Desktop/MiniCode/docs/validation/2026-10-24-node-repl-startup-investigation.md)，未复现即未修改生产、未算通过。
+
 ## 通用契约与 owner
 
 这些是各表中按钮响应的共同链，不能只查最外层 JSX。

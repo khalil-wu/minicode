@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   fetchMock.mockImplementation(async (input: URL | string) => {
     const url = new URL(String(input));
-    if (url.pathname.endsWith("browser-raw")) return new Response(new Blob(["image bytes"], { type: "image/png" }));
+    if (url.pathname.endsWith("browser-raw")) return new Response("image bytes", { headers: { "content-type": "image/png" } });
     if (url.pathname.endsWith("git/branches")) return jsonResponse({ is_git_repo: false, branches: [], commits: [] });
     return jsonResponse(url.searchParams.get("conversation_id") === "next" ? { ...preview, content: "Current task file" } : preview);
   });
@@ -53,22 +53,36 @@ it("reads a browser-owned file through its mounted FileViewer without promoting 
 });
 
 it("retains native image ownership and reads raw bytes with the new session after reconnect", async () => {
+  const createObjectURL = vi.mocked(URL.createObjectURL)
+    .mockReturnValueOnce("blob:original-browser-file")
+    .mockReturnValueOnce("blob:restored-browser-file");
   fetchMock.mockImplementation(async (input: URL | string) => new URL(String(input)).pathname.endsWith("browser-raw")
-    ? new Response(new Blob(["image bytes"], { type: "image/png" }))
+    ? new Response("image bytes", { headers: { "content-type": "image/png" } })
     : jsonResponse(new URL(String(input)).pathname.endsWith("git/branches") ? { is_git_repo: false, branches: [], commits: [] }
       : { ...preview, media_type: "image/png", has_native: true }));
   openConversationBrowserFilePreview(target);
   const tab = useAppStore.getState().workspaceFileTabs[0];
   render(createElement(FileViewerPanel, { tabId: tab.id }));
   expect(await screen.findByRole("img", { name: target.name })).toBeTruthy();
+  expect(screen.getByRole("img", { name: target.name }).getAttribute("src")).toBe("blob:original-browser-file");
+  const originalBlob = createObjectURL.mock.calls[0][0] as Blob;
+  expect(originalBlob.type).toBe("image/png");
+  expect(await originalBlob.text()).toBe("image bytes");
   expect(new URL(String(rawRequests()[0][0])).searchParams.get("session_id")).toBe("browser-session");
   act(() => useAppStore.setState({ isConnected: false }));
+  expect(screen.queryByRole("img", { name: target.name })).toBeNull();
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:original-browser-file");
   transport.sessionId = "restored-browser-session";
   act(() => useAppStore.setState({ isConnected: true }));
   await waitFor(() => expect(rawRequests()).toHaveLength(2));
   const url = new URL(String(rawRequests()[1][0]));
   expect(Object.fromEntries(url.searchParams)).toMatchObject({ session_id: transport.sessionId, conversation_id: "owner", execution_cwd: target.executionCwd, path: target.path });
   expect(await screen.findByRole("img", { name: target.name })).toBeTruthy();
+  expect(screen.getByRole("img", { name: target.name }).getAttribute("src")).toBe("blob:restored-browser-file");
+  const restoredBlob = createObjectURL.mock.calls[1][0] as Blob;
+  expect(restoredBlob).not.toBe(originalBlob);
+  expect(restoredBlob.type).toBe("image/png");
+  expect(await restoredBlob.text()).toBe("image bytes");
 });
 
 it("aborts a retired FileViewer read and keeps its late bytes out of the newly selected owner", async () => {

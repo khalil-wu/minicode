@@ -50,3 +50,32 @@ Evidence under `output/full-parity-audit-20261023/`:
 - Original backend log and refetched root log remain available.
 
 The first batch covered the complete ten relevant backend test files plus the three failing root nodes. Existing Skill desktop/SDK/approval/managed-policy cases were included. Validation ran on the current Windows Python environment; a new Linux CI run is still required and belongs to Root's new-head push. No skipped or previous failed case is counted as passing without a later actual result.
+
+## New-head remote CI verification — 2af69cd9
+
+The follow-up remote runs use exact head `2af69cd94f23c462f8e83cc37196868da6f6a818`: push run `40087735727` and PR run `40087738460`. All eight jobs in this reviewer's assigned backend/Windows/cold-install scope completed successfully.
+
+| Job | Push job | PR job | Verified result in each run |
+|---|---:|---:|---|
+| Backend protocol and tests (root) | 120854725095 | 120854769261 | success; 1793 passed, 52 skipped, 2 warnings |
+| Backend protocol and tests (backend) | 120854725105 | 120854769258 | success; 8064 passed, 164 skipped, 34 warnings |
+| Windows harness and process contracts | 120853991653 | 120854000252 | success |
+| Linux wheel cold installation (glibc 2.31) | 120854725132 | 120854769204 | success |
+
+Both downloaded Linux backend logs explicitly record PASSED for:
+
+- `test_private_reviewer_uses_existing_harness_schema_and_source_policy_without_main_prompt`
+- `test_next_step_automatic_tools_do_not_widen_an_explicit_session_scope`
+- `test_source_dependency_gate_never_prompts_installs_or_admits_for_third_party_or_disabled_flag[minicode-True]`
+- `test_residency_does_not_evict_a_real_active_sleep_turn[foreground]`
+- `test_residency_does_not_evict_a_real_active_sleep_turn[background]`
+
+These results close the earlier Linux verification requirement for the assigned repair scope. Skipped cases remain skipped. Per-test duration is not inferred from the interval between adjacent timestamped log lines.
+
+Evidence under `output/full-parity-audit-20261023/`:
+
+- `github-2af69cd9-owner-ci.json`: exact-head job snapshot and scope.
+- `github-2af69cd9-push-backend.log` and `github-2af69cd9-pr-backend.log`: Linux backend results and the explicit regression pass lines.
+- `github-2af69cd9-push-backend-root.log` and `github-2af69cd9-pr-backend-root.log`: root-suite counts.
+
+The saved snapshot still reports both entire workflows as `in_progress`; this record confirms only the eight listed completed jobs. Frontend, desktop and UI jobs are owned by Root and are not claimed green here.
