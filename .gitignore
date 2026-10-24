@@ -180,3 +180,15 @@ pelican-bike.html
 engineering/
 frontend/.playwright-cli/
 data/sandbox-temp/
+
+# Local development notes
+/AGENTS.md
+/design.md
+/docs/validation/
+/docs/harness-*.md
+/docs/*audit*.md
+/docs/*review*.md
+/docs/*research*.md
+/docs/*checkpoint*.md
+/docs/*ledger*.md
+/docs/validation-*.md
