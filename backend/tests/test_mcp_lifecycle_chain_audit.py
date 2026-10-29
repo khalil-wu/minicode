@@ -68,7 +68,7 @@ async def test_cancellation_during_environment_binding_keeps_original_cancelled_
         await asyncio.Event().wait()
 
     manager = MCPServerManager(config_path=tmp_path / "mcp.json", workspace_root=tmp_path,
-        environment_runtime=SimpleNamespace(bind_server=bind_server), runtime_configs=())
+        environment_runtime=SimpleNamespace(bind_server=bind_server, connection_pool=None), runtime_configs=())
     task = asyncio.create_task(manager.start_server(MCPServerConfig("binding-cancel", command="not-launched")))
     try:
         await asyncio.wait_for(entered.wait(), 1)

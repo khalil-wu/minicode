@@ -1,8 +1,8 @@
 import { useAppStore } from "../stores";
+import { isComposerConversationDeleted } from "../stores/composer-drafts";
 import { subagentModelPatch } from "../lib/subagent-model";
 import { mcpProjectionMatches } from "./mcpProjectionScope";
 import { workspaceRootsEqual } from "../lib/workspace-path";
-import { runtimeModelSelectionPatch } from "../lib/model-selection";
 import type {
   AgentProgressEvent,
   AgentRunCompletedEvent,
@@ -41,7 +41,7 @@ import { applyToolDelegation, applySubagentTranscriptEvents, isHistoricCodeCellP
 import { eventMessageId } from "../lib/identity";
 import { adoptGeneratedConversation } from "./conversationAdoption";
 import { capturePendingUserMessageStart } from "./sendChatMessage";
-import { applyActiveStreamSnapshot, applyPendingTurnInputSnapshot, applyQueuedUserMessageSnapshot } from "./sessionEvents";
+import { applyRuntimeSessionSnapshot } from "./sessionEvents";
 
 const userVisibleSubagentProgress = (value?: string, explicitVisible?: boolean): string => {
   const text = String(value ?? "").trim();
@@ -665,6 +665,8 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
   conversationId = typeof eventOwner === "string" && eventOwner.trim()
     ? eventOwner.trim()
     : conversationId?.trim() || undefined;
+  if (conversationId && isComposerConversationDeleted(conversationId)
+    && (TURN_SCOPED_RUNTIME_EVENTS.has(e.type) || e.type === "session.state_changed")) return true;
   const messageId = eventMessageId(e);
   if (e.type === "agent.run.started" && (e as AgentRunStartedEvent).role === "main") {
     if (conversationId && messageId && !isReplayedRuntimeEvent(e)) capturePendingUserMessageStart(conversationId, messageId);
@@ -1104,19 +1106,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       const ev = e as TaskUpdateEvent;
 
       if ("session" in ev && ev.session) {
-        s.setRuntimeSession(ev.partial ? { ...s.runtimeSession, ...ev.session } : ev.session);
-        applyQueuedUserMessageSnapshot(ev.session.queued_user_messages);
-        applyPendingTurnInputSnapshot(ev.session.pending_turn_inputs);
-        applyActiveStreamSnapshot(ev.session);
-        useAppStore.setState(runtimeModelSelectionPatch(ev.session, useAppStore.getState()));
-        const permissionOwner = ev.session.active_conversation_id === undefined
-          ? (ev.partial ? s.runtimeSession?.active_conversation_id : conversationId)
-          : ev.session.active_conversation_id;
-        if (ev.session.permission_mode && permissionOwner !== undefined
-          && (permissionOwner || null) === (s.conversationId || null)
-          && (ev.session.workspace_root === undefined || workspaceRootsEqual(ev.session.workspace_root ?? "", s.workingDirectory))) {
-          useAppStore.setState({ permissionMode: fromBackendPermissionMode(ev.session.permission_mode) });
-        }
+        applyRuntimeSessionSnapshot(ev.session, conversationId ?? null, e, ev.partial === true);
         return true;
       }
       const snapshotTodos = todosFromSnapshot(ev);
@@ -1630,6 +1620,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "permission.mode.updated": {
+      if (s.activeConversationDraftId) return true;
       const ev = e as unknown as { mode?: string };
       if (e.conversation_id !== (s.conversationId || "")
         || !workspaceRootsEqual(e.workspace_root ?? "", s.workingDirectory)) return true;
@@ -1641,6 +1632,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       return true;
     }
     case "runtime.capabilities": {
+      if (s.activeConversationDraftId) return true;
       if (e.conversation_id !== (s.conversationId || "") || typeof e.workspace_root !== "string"
         || !workspaceRootsEqual(e.workspace_root, s.workingDirectory)) return true;
       const ev = e as unknown as { capabilities?: Parameters<typeof withDerivedCapabilitySummary>[0] };

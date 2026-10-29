@@ -9,7 +9,7 @@ import tempfile
 import secrets
 from uuid import uuid4
 
-from backend.environments.errors import ExecutorProtocolError, ExecutorRpcError
+from backend.environments.errors import ExecutorEventsLagged, ExecutorProtocolError, ExecutorRpcError
 from backend.permissions.environment_command import EnvironmentCommandPolicy
 from backend.sandbox.result import SandboxResult
 from backend.sandbox.runner import SandboxCapability
@@ -202,17 +202,49 @@ class ExecutorCommandRunner:
 
         async def drain(receiver):
             last_seq = 0
+            exit_seen = False
             while True:
-                event = await receiver.recv()
+                try:
+                    event = await receiver.recv()
+                except ExecutorEventsLagged:
+                    recovered = await self.handle.read(after_seq=last_seq, max_bytes=None, wait_ms=0)
+                    if recovered.failure:
+                        raise ExecutorProtocolError(recovered.failure)
+                    for chunk in recovered.chunks:
+                        if chunk.seq != last_seq + 1:
+                            if recovered.exited and not exit_seen and chunk.seq == last_seq + 2:
+                                exit_seen = True
+                                last_seq += 1
+                            else:
+                                raise ExecutorProtocolError(f"executor command output has a sequence gap after {last_seq}; received {chunk.seq}")
+                        await emit(chunk.chunk, chunk.stream)
+                        last_seq = chunk.seq
+                    target = recovered.next_seq - 1
+                    if recovered.closed:
+                        target -= 1
+                    if target == last_seq + 1 and recovered.exited and not exit_seen:
+                        exit_seen = True
+                        last_seq += 1
+                    if target != last_seq:
+                        raise ExecutorProtocolError(f"executor command output has a sequence gap after {last_seq}; recovery reached {target}")
+                    if recovered.closed:
+                        for name in output:
+                            await emit(b"", name, final=True)
+                        return
+                    continue
                 kind = event["method"]
                 if kind == "process/failed":
                     raise ExecutorProtocolError(event["error"])
                 seq = event["seq"]
+                if seq <= last_seq:
+                    continue
                 if seq != last_seq + 1:
                     raise ExecutorProtocolError(f"executor command output has a sequence gap after {last_seq}; received {seq}")
                 last_seq = seq
                 if kind == "process/output":
                     await emit(event["chunk"], event["stream"])
+                elif kind == "process/exited":
+                    exit_seen = True
                 elif kind == "process/closed":
                     for name in output:
                         await emit(b"", name, final=True)

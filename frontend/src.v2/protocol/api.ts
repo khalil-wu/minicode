@@ -433,6 +433,28 @@ export const fetchLLMSettings = async (): Promise<unknown> => {
   return res.json();
 };
 
+export type DraftModelSelection = import("./capabilities").AgentProviderCapabilities & {
+  current_model: string;
+  available_models: string[];
+  models_source: "configured" | "extension";
+  available_permission_modes: import("../stores/types").PermissionMode[];
+  config_version: string;
+  config_cwd: string;
+  feature_flags: NonNullable<import("./capabilities").AgentCapabilitiesPayload["feature_flags"]>;
+  composer_commands: import("./capabilities").AgentCapabilityNamedItem[];
+};
+
+export const fetchDraftModelSelection = async (workspaceRoot: string, model = "", effort = "", signal?: AbortSignal, configCwd = workspaceRoot): Promise<DraftModelSelection> => {
+  const url = new URL(`${apiBase()}/api/llm/draft-selection`);
+  url.searchParams.set("workspace_root", workspaceRoot);
+  if (configCwd) url.searchParams.set("config_cwd", configCwd);
+  if (model) url.searchParams.set("model", model);
+  if (effort) url.searchParams.set("reasoning_effort", effort);
+  const response = await fetchWithTimeout(url, { cache: "no-store", headers: authHeaders(), signal });
+  if (!response.ok) throw new ApiError(response.status, errorMessageFromResponseText(await response.text(), response.statusText));
+  return response.json();
+};
+
 export interface UploadResponse {
   conversation_id: string;
   file_name: string;

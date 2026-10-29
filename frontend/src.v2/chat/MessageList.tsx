@@ -18,6 +18,9 @@ import { loadRevealMessage } from "./revealConversationMessage";
 import { useReplyViewport } from "./useReplyViewport";
 import { conversationReadingState } from "./transcriptReadingState";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
+import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
+import { useShallow } from "zustand/react/shallow";
+import { visibleRetainedComposerInputs } from "../composer/retainedComposerInputs";
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -29,7 +32,16 @@ const estimateTurnHeight = () => ESTIMATED_TURN_HEIGHT;
 export const MessageList = ({ searchActive = false }: { searchActive?: boolean } = {}) => {
   const { t: tr } = useI18n();
   const messages = useAppStore((s) => s.messages);
+  const retainedDraftInputs = useAppStore(useShallow(visibleRetainedComposerInputs));
+  const pendingDraftMessage = useAppStore(state => selectPendingDraftUserMessage(state)
+    ?? (state.conversationId ? state.preparingComposerMessages[state.conversationId] : undefined));
+  const ownedMessages = useMemo(() => {
+    const retained = retainedDraftInputs.filter(input => !messages.some(message => message.id === input.message.id)).map(input => input.message);
+    const next = retained.length ? [...messages, ...retained] : messages;
+    return pendingDraftMessage && !next.some(message => message.id === pendingDraftMessage.id) ? [...next, pendingDraftMessage] : next;
+  }, [messages, pendingDraftMessage, retainedDraftInputs]);
   const isStreaming = useAppStore((s) => s.isStreaming);
+  const reducedMotion = useAppStore((s) => s.reducedMotion);
   const conversationId = useAppStore((s) => s.conversationId);
   const readingState = useMemo(() => conversationId ? conversationReadingState(conversationId) : undefined, [conversationId]);
   const historyPage = useAppStore((s) => conversationId ? s.conversationHistoryPages[conversationId] : undefined);
@@ -51,13 +63,13 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   // Defer settled transcript updates to keep composer input responsive.
   // Owner changes and history commits use the current transcript immediately.
   const deferredTranscript = useDeferredValue(useMemo(
-    () => ({ conversationId, workspaceRoot: workingDirectory, messages }),
-    [conversationId, messages, workingDirectory],
+    () => ({ conversationId, workspaceRoot: workingDirectory, messages: ownedMessages }),
+    [conversationId, ownedMessages, workingDirectory],
   ));
-  const displayMessages = isStreaming || sourceMessage || revealTarget || historyScrollRef.current
+  const displayMessages = isStreaming || pendingDraftMessage || retainedDraftInputs.length || messages.at(-1)?.role === "user" || sourceMessage || revealTarget || historyScrollRef.current
     || deferredTranscript.conversationId !== conversationId
     || deferredTranscript.workspaceRoot !== workingDirectory
-    ? messages : deferredTranscript.messages;
+    ? ownedMessages : deferredTranscript.messages;
   // Queue filtering is performed by the turn projector while it scans only
   // the visible recent window.  Filtering the full transcript here made every
   // streaming token copy an otherwise unchanged multi-thousand-message array.
@@ -82,6 +94,8 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const scrollbarFadeTimerRef = useRef<number | null>(null);
 
   const shouldShowMessages = hasVisibleActiveConversation(conversationId, conversations)
+    || retainedDraftInputs.length > 0
+    || Boolean(pendingDraftMessage)
     || (isStreaming && messages.length > 0);
 
   const projectedTurns = useMemo(
@@ -152,11 +166,11 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
       return;
     }
-    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    target.scrollIntoView({ block: "center", behavior: reducedMotion ? "auto" : "smooth" });
     ref.current?.focus({ preventScroll: true });
     setRevealStatus("");
     if (useAppStore.getState().messageRevealTarget?.requestId === sourceMessage.requestId) useAppStore.setState({ messageRevealTarget: null });
-  }, [sourceMessage, showAllHistory]);
+  }, [sourceMessage, showAllHistory, reducedMotion]);
   const firstHistoricalTurnId = historicalTurns[0]?.id;
   const lastHistoricalTurnId = historicalTurns.at(-1)?.id;
   // TanStack includes getItemKey identity in its measurement cache key. Keep
@@ -371,8 +385,8 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
 
   const scrollToBottom = useCallback(() => {
     setSourceMessage(null);
-    scheduleBottomScroll("smooth", true);
-  }, [scheduleBottomScroll]);
+    scheduleBottomScroll(reducedMotion ? "auto" : "smooth", true);
+  }, [scheduleBottomScroll, reducedMotion]);
 
   useEffect(() => {
     const el = ref.current;

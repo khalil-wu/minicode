@@ -118,6 +118,7 @@ export {
   Lightbulb,
   Link,
   ListChecks,
+  ListEnd,
   LoaderCircle,
   LockKeyhole,
   Maximize2,

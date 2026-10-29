@@ -9,14 +9,16 @@ import {
   fetchAttachmentPreview,
   fetchWithTimeout,
 } from "../protocol/api";
-import { fileWorkspaceScope } from "../protocol/file-workspace";
+import { fileWorkspaceOwner, workspaceFileAbsolutePath } from "../protocol/file-workspace";
 import {
   commandResultSucceeded,
   createClientCommandId,
   sendClientCommandAwaitResult,
 } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
-import type { ArtifactContentState } from "../stores/types";
+import type { ArtifactContentState, WorkspaceFileOwner } from "../stores/types";
+import { openPreferredFile } from "../lib/open-preferred-target";
+import { isDesktop } from "../desktop/runtime";
 import {
   isNativePreviewMediaType,
   isTextMediaType,
@@ -53,7 +55,15 @@ export interface WorkspaceFilePreviewTarget {
   mediaType?: string;
   kind?: string;
   workspaceRoot?: string;
-  conversationId?: string;
+  pathRoot?: string;
+  conversationId?: string | null;
+  environmentId?: string;
+  fileOwner?: WorkspaceFileOwner;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  isPreview?: boolean;
 }
 
 export interface LocalFilePreviewTarget {
@@ -300,12 +310,39 @@ export const openWorkspaceFilePreview = (target: WorkspaceFilePreviewTarget): bo
   const path = target.path.trim();
   if (!path) return false;
   const state = useAppStore.getState();
-  const conversationId = target.conversationId === undefined ? state.conversationId : target.conversationId || null;
+  const conversationId = target.fileOwner ? target.fileOwner.conversationId
+    : target.conversationId === undefined ? state.conversationId : target.conversationId || null;
   const conversation = state.conversations.find(value => value.id === conversationId);
-  const workspaceRoot = target.workspaceRoot || conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || state.workingDirectory;
+  const workspaceRoot = target.fileOwner ? target.fileOwner.executionCwd
+    : target.workspaceRoot || conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || state.workingDirectory;
   if (!workspaceRoot) { pushToast("未找到该文件所属的工作区。", "error"); return false; }
-  state.openWorkspaceFileTab({ scopeId: conversationId ? `conversation:${conversationId}` : fileWorkspaceScope(state),
-    conversationId, executionCwd: workspaceRoot, browserRoot: workspaceRoot }, path, target.name || basename(path));
+  const owner = target.fileOwner ?? { ...fileWorkspaceOwner(state, conversationId, workspaceRoot),
+    ...(target.environmentId ? { environmentId: target.environmentId } : {}) };
+  // Deliverable paths are relative to the run's cwd. Browser API paths are
+  // relative to its separately declared root; carry the exact file between them.
+  const absolute = workspaceFileAbsolutePath({ ...owner, browserRoot: target.pathRoot ?? (target.fileOwner ? owner.browserRoot : workspaceRoot) }, path);
+  state.openWorkspaceFileTab(owner, absolute, target.name || basename(path), target.line, {
+    column: target.column, endLine: target.endLine, endColumn: target.endColumn, isPreview: target.isPreview,
+  });
+  return true;
+};
+
+/** Local assistant references choose the file panel; modifiers explicitly choose the preferred target. */
+export const openWorkspaceFileLink = (target: WorkspaceFilePreviewTarget,
+  gesture?: { button?: number; ctrlKey?: boolean; metaKey?: boolean }, openInPreferredApp?: () => void): boolean => {
+  const modified = gesture?.button === 1 || gesture?.ctrlKey || gesture?.metaKey;
+  if (!modified || !isDesktop()) return openWorkspaceFilePreview({ ...target, isPreview: target.isPreview ?? true });
+  const state = useAppStore.getState();
+  const conversationId = state.conversationId, draftId = state.activeConversationDraftId;
+  const owner = target.fileOwner ?? fileWorkspaceOwner(state,
+    target.conversationId === undefined ? conversationId : target.conversationId || null, target.workspaceRoot);
+  const absolute = workspaceFileAbsolutePath({ ...owner, browserRoot: target.pathRoot ?? target.workspaceRoot ?? owner.browserRoot }, target.path);
+  void openPreferredFile(absolute, owner.executionCwd, target.line, () => {
+    const current = useAppStore.getState();
+    if (current.conversationId !== conversationId || current.activeConversationDraftId !== draftId || current.pendingConversationSwitchId) return;
+    if (openInPreferredApp) openInPreferredApp();
+    else openWorkspaceFilePreview({ ...target, fileOwner: owner, path: absolute, isPreview: false });
+  }, { column: target.column });
   return true;
 };
 
@@ -343,9 +380,7 @@ export const openRegisteredSkillPreview = (target: RegisteredSkillPreviewTarget)
 /** Browse a file without changing the conversation's execution or editor root. */
 export const openConversationBrowserFilePreview = (target: ConversationBrowserFilePreviewTarget): boolean => {
   const state = useAppStore.getState();
-  const conversation = state.conversations.find(value => value.id === target.conversationId);
-  state.openWorkspaceFileTab({ scopeId: `conversation:${target.conversationId}`, conversationId: target.conversationId,
-    executionCwd: target.executionCwd, browserRoot: conversation?.projectlessBrowserRoot || target.executionCwd }, target.path, target.name);
+  state.openWorkspaceFileTab(fileWorkspaceOwner(state, target.conversationId, target.executionCwd), target.path, target.name);
   return true;
 };
 

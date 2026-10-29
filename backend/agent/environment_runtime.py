@@ -158,7 +158,7 @@ async def prepare_run_environments(run_context, *, agent_session, permission_con
 
 async def refresh_run_environment_capabilities(run_context, *, permission_context, config_stack,
         feature_flags, registry, artifact_store, workspace_root, conversation_id: str,
-        turn_id: str, agent_session=None):
+        turn_id: str, agent_session=None, mcp_optional_startup_grace_ms: int = 1000):
     if run_context.environment_manager is None:
         return None
     snapshot = await prepare_run_environments(run_context, agent_session=agent_session,
@@ -167,15 +167,37 @@ async def refresh_run_environment_capabilities(run_context, *, permission_contex
     from backend.mcp.environment_runtime import prepare_environment_capabilities
 
     previous = run_context.environment_capabilities
+    from backend.mcp.connections import MCPConnectionPool
+    connection_owner = run_context.environment_thread_runtime or agent_session or run_context
+    if connection_owner.mcp_connections is None:
+        connection_owner.mcp_connections = MCPConnectionPool()
+    run_context.mcp_connections = connection_owner.mcp_connections
+    run_context.owns_mcp_connections = connection_owner is run_context
+    host_skills = run_context.environment_host_skill_manager
+    context = run_context.context_builder
+    if previous is not None and previous.thread_id == conversation_id and previous.turn_id == turn_id:
+        host_skills = previous.skill_manager
+    elif context is not None and context._skill_snapshot_turn_id == turn_id:
+        # A reused SDK/fork owner can retain an earlier turn's host source.
+        # The current query already captured its own fresh host inventory.
+        host_skills = context.skill_manager
+    if host_skills is not None and context is not None:
+        # Parent host inventory is a discovery source, not the receiving
+        # thread's scope. Bind before registry construction so prompt selection
+        # and skill consumers use the same role/config/workspace projection.
+        context.bind_skill_manager(host_skills, workspace_root, refresh=True, config_stack=config_stack,
+            force_reload=context._skill_snapshot_turn_id != turn_id, turn_id=turn_id)
+        host_skills = context.skill_manager
     prepared = await prepare_environment_capabilities(turn_environments=snapshot,
         environment_manager=run_context.environment_manager,
         host_mcp_manager=run_context.environment_host_mcp_manager,
-        host_skill_manager=run_context.environment_host_skill_manager,
+        host_skill_manager=host_skills,
         feature_flags=feature_flags, thread_id=conversation_id, turn_id=turn_id,
         session_source=run_context.session_source, isolated=run_context.isolated,
         is_subagent=run_context.is_subagent, local_cwd=Path(workspace_root or Path.cwd()).as_uri(),
         selected_capability_roots=snapshot.selected_capability_roots, previous=previous,
-        restriction_product="codex")
+        restriction_product="codex", connection_pool=connection_owner.mcp_connections,
+        optional_startup_grace_ms=mcp_optional_startup_grace_ms)
     try:
         prepared.validate_required_skills()
         prepared.bind_registry(registry, artifact_store)

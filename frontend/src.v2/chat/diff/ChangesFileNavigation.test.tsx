@@ -2,13 +2,13 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MotionValue } from "motion/react";
-import { ChangesFileJump, ChangedFilesTree, type ChangesFileEntry } from "./ChangesFileNavigation";
+import { ChangesFileJump, ChangedFilesTree, buildChangedFilesTree, type ChangesFileEntry } from "./ChangesFileNavigation";
 import { rankChangedFilePaths } from "./changes-file-matcher";
 import { useAppStore } from "../../stores";
 
-const movement = vi.hoisted(() => ({ animate: vi.fn(), reduced: vi.fn(() => true) }));
+const movement = vi.hoisted(() => ({ animate: vi.fn() }));
 vi.mock("motion/react", async original => ({ ...await original<typeof import("motion/react")>(),
-  animate: movement.animate, useReducedMotion: movement.reduced }));
+  animate: movement.animate }));
 
 const entries: ChangesFileEntry[] = [
   { path: "src/chat/ChatPane.tsx", additions: 12, deletions: 3, commentCount: 2 },
@@ -28,7 +28,6 @@ beforeEach(() => {
   vi.stubGlobal("PointerEvent", MouseEvent);
   Object.defineProperty(HTMLElement.prototype, "scrollIntoView", { configurable: true, value: vi.fn() });
   movement.animate.mockReset().mockReturnValue({ stop: vi.fn() });
-  movement.reduced.mockReset().mockReturnValue(true);
   useAppStore.setState({ reducedMotion: true });
 });
 afterEach(() => {
@@ -104,6 +103,35 @@ describe("ChangesFileJump", () => {
 });
 
 describe("ChangedFilesTree", () => {
+  it("does not inspect file paths while the tree is closed, then renders the current entries when opened", () => {
+    const readPath = vi.fn(() => "src/latest.ts");
+    const latest = [{ get path() { return readPath(); } }];
+    const props = { entries: latest, parentWidth: 1000, onSelect: vi.fn(), onClose: vi.fn() };
+    const view = render(<ChangedFilesTree {...props} open={false} />);
+    expect(readPath).not.toHaveBeenCalled();
+    view.rerender(<ChangedFilesTree {...props} entries={[...latest]} open={false} />);
+    expect(readPath).not.toHaveBeenCalled();
+    view.rerender(<ChangedFilesTree {...props} open />);
+    expect(screen.getByRole("treeitem", { name: "src/latest.ts" })).toBeTruthy();
+  });
+
+  it("groups a broad directory tree without changing path identities, directory order or file rank", () => {
+    const paths = Array.from({ length: 2000 }, (_, index) => `packages/pkg-${String(1999 - index).padStart(4, "0")}/src/file.ts`);
+    const input = paths.map(path => ({ path }));
+    const roots = buildChangedFilesTree(input, paths);
+    expect(roots).toHaveLength(1);
+    const root = roots[0];
+    expect(root.kind).toBe("directory");
+    if (root.kind !== "directory") throw new Error("Expected packages");
+    expect(root.children).toHaveLength(2000);
+    expect(root.children[0]).toMatchObject({ key: "packages/pkg-0000/src/", name: "pkg-0000/src" });
+    expect(root.children.at(-1)).toMatchObject({ key: "packages/pkg-1999/src/", name: "pkg-1999/src" });
+    for (const directory of root.children) {
+      if (directory.kind !== "directory") throw new Error("Expected package directory");
+      expect(directory.children).toEqual([{ kind: "file", key: `${directory.key}file.ts`, name: "file.ts", entry: expect.objectContaining({ path: `${directory.key}file.ts` }) }]);
+    }
+  });
+
   it("flattens empty parent chains, expands parents, shows real counts, and allows repeated active selection", () => {
     const choose = vi.fn();
     render(<ChangedFilesTree open entries={entries} activePath={entries[0].path} parentWidth={1000} onSelect={choose} onClose={vi.fn()} />);
@@ -171,7 +199,6 @@ describe("ChangedFilesTree", () => {
   });
 
   it("shares one Source spring progress between width and opacity and retains the closing pane until zero", () => {
-    movement.reduced.mockReturnValue(false);
     useAppStore.setState({ reducedMotion: false });
     const props = { entries, parentWidth: 1000, onSelect: vi.fn(), onClose: vi.fn() };
     const { rerender } = render(<ChangedFilesTree {...props} open />);

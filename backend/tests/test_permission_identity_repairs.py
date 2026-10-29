@@ -115,7 +115,7 @@ def test_exact_remote_consent_clears_default_routing_and_keeps_authored_restrict
 def test_wire_renaming_preserves_only_historical_restrictions(tmp_path):
     manager = SimpleNamespace(
         registry_version=0,
-        get_server_contract=lambda _name: None,
+        get_server_contract=lambda _name: None, catalog_is_cached=lambda _name: False,
         get_server_config=lambda _name: None,
     )
     registry = ToolRegistry()

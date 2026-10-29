@@ -1,0 +1,5 @@
+{
+  "name": "minicode-bundled",
+  "interface": {"displayName": "MiniCode"},
+  "plugins": [{"name": "computer-use", "source": {"source": "local", "path": "./computer-use"}, "category": "Developer Tools", "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"}}]
+}

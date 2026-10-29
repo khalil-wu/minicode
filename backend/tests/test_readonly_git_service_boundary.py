@@ -97,7 +97,7 @@ def test_doctor_services_and_handoff_read_snapshots_use_request_root(monkeypatch
         if argv[1] == "branch":
             return _result(argv, "main\n")
         if argv[1] == "status":
-            return _result(argv)
+            return _result(argv, "# branch.oid abc\0# branch.head main\0" if "--porcelain=v2" in argv else "")
         if argv[1] == "worktree":
             return _result(argv, "worktree /workspace\nHEAD abc\nbranch refs/heads/main\n")
         if argv[1] == "rev-parse":
@@ -174,7 +174,7 @@ def test_host_git_and_model_namespace_failures_remain_distinct(monkeypatch, tmp_
     assert workspace_api_service.workspace_git_diff_payload(tmp_path, "")["error"] == "host Git unavailable"
     doctor = health_service.build_git_doctor_payload(tmp_path)
     assert doctor["available"] is False and doctor["clean"] is False
-    assert handoff._status(tmp_path) == "<status unavailable>"
+    assert handoff._workspace_snapshot(tmp_path).status == "<status unavailable>"
 
 
 @pytest.mark.parametrize("absolute", [False, True])
@@ -300,3 +300,178 @@ def test_doctor_git_thread_does_not_block_async_host(monkeypatch, tmp_path):
         assert payload["git_payload"] == {"available": True}
 
     asyncio.run(oracle())
+
+
+def _real_repository(root, *, branch="main"):
+    from backend.runtime_env import sanitized_git_env
+    from backend.workspace.trust import trust_created_task_directory
+
+    root.mkdir()
+    env = sanitized_git_env(root)
+    for args in (("init", "-b", branch), ("config", "user.name", "Readonly fixture"), ("config", "user.email", "offline@example.invalid")):
+        subprocess.run(["git", *args], cwd=root, env=env, check=True, capture_output=True)
+    (root / "tracked.txt").write_text("initial content\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=root, env=env, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "Initial fixture"], cwd=root, env=env, check=True, capture_output=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, env=env, check=True, capture_output=True, text=True).stdout.strip()
+    trust_created_task_directory(root)
+    return head
+
+
+def test_cold_subdirectory_first_git_read_uses_its_captured_policy_and_authorized_parent_metadata(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from backend.sandbox.policy import FileSystemAccessMode
+    from backend import config
+
+    repo = tmp_path / "repo"
+    head = _real_repository(repo)
+    selected = repo / " sub 中文"
+    selected.mkdir()
+    (selected / "new 中文 file.txt").write_text("untracked\n", encoding="utf-8")
+    capture = Mock(wraps=config.load_config_layer_stack)
+    monkeypatch.setattr(config, "load_config_layer_stack", capture)
+    policy = workspace_service.readonly_git_policy(selected)
+    assert policy.workspace_root == selected
+    assert policy.readable_roots == (selected, repo / ".git", repo)
+    resolved = policy.resolve(cwd=selected)
+    assert resolved.resolve_access(repo / ".git") is FileSystemAccessMode.READ
+    assert resolved.resolve_access(repo) is FileSystemAccessMode.READ
+    assert resolved.resolve_access(selected) is FileSystemAccessMode.READ
+    read = Mock(wraps=workspace_service.run_readonly_git)
+    monkeypatch.setattr(workspace_service, "run_readonly_git", read)
+    assert workspace_service.main_worktree_root(selected) == repo
+    assert read.call_count == 0
+    assert all(call.kwargs["cwd"] == selected for call in capture.call_args_list)
+    result = workspace_service.run_readonly_git(selected, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", sandbox_policy=policy)
+    assert result.returncode == 0, result.stderr
+    assert f"# branch.oid {head}\0" in result.stdout
+    assert "# branch.head main\0" in result.stdout
+    assert "?  sub 中文/new 中文 file.txt\0" in result.stdout
+    assert read.call_count == 1
+
+
+@pytest.mark.parametrize("deny_ancestor", [False, True])
+def test_parent_metadata_admission_never_reopens_the_selected_policy_deny(tmp_path, monkeypatch, deny_ancestor):
+    import json
+    from backend.sandbox.policy import FileSystemAccessMode
+
+    repo = tmp_path / "repo"
+    _real_repository(repo)
+    selected = repo / "selected"
+    selected.mkdir()
+    requirements = tmp_path / "requirements.toml"
+    denied = repo if deny_ancestor else repo / ".git"
+    requirements.write_text("[permissions.filesystem]\ndeny_read = " + json.dumps([str(denied)]) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MINICODE_REQUIREMENTS_FILE", str(requirements))
+    policy = workspace_service.readonly_git_policy(selected)
+    resolved = policy.resolve(cwd=selected)
+    assert repo / ".git" not in policy.readable_roots
+    assert resolved.resolve_access(repo / ".git") is FileSystemAccessMode.DENY
+    if deny_ancestor:
+        assert policy.readable_roots == ()
+        assert resolved.resolve_access(selected) is FileSystemAccessMode.DENY
+    else:
+        assert policy.readable_roots == (selected,)
+        result = workspace_service.run_readonly_git(selected, "status", "--porcelain=v2", "--branch", sandbox_policy=policy)
+        assert result.returncode != 0, result.stdout
+
+
+def test_subdirectory_gitfile_cannot_admit_external_metadata_or_fall_through_to_outer_repo(tmp_path):
+    from backend.workspace.trust import trust_created_task_directory
+
+    outer = tmp_path / "outer"
+    (outer / ".git").mkdir(parents=True)
+    inner = outer / "inner"
+    selected = inner / "selected"
+    selected.mkdir(parents=True)
+    external = tmp_path / "external" / ".git"
+    external.mkdir(parents=True)
+    (inner / ".git").write_text(f"gitdir: {external.as_posix()}\n", encoding="utf-8")
+    trust_created_task_directory(outer)
+    policy = workspace_service.readonly_git_policy(selected)
+    assert policy.readable_roots == (selected,)
+    assert external not in policy.readable_roots
+    assert outer / ".git" not in policy.readable_roots
+
+
+def test_selected_folder_trust_does_not_admit_an_untrusted_ancestor_repository(tmp_path):
+    from backend.workspace.trust import trust_created_task_directory
+
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    selected = repo / "selected"
+    selected.mkdir()
+    trust_created_task_directory(selected)
+    assert workspace_service.readonly_git_policy(selected).readable_roots == (selected,)
+
+
+def test_parent_metadata_discovery_respects_the_existing_home_ceiling(tmp_path, monkeypatch):
+    from backend.workspace.trust import trust_created_task_directory
+
+    home = tmp_path / "home"
+    (home / ".git").mkdir(parents=True)
+    selected = home / "selected"
+    selected.mkdir()
+    trust_created_task_directory(home)
+    monkeypatch.setattr(Path, "home", classmethod(lambda _cls: home))
+    assert workspace_service.readonly_git_policy(selected).readable_roots == (selected,)
+
+
+def test_cold_subdirectory_parent_admission_keeps_the_existing_repository_env_filter(tmp_path, monkeypatch):
+    repo = tmp_path / "target"
+    expected_head = _real_repository(repo)
+    selected = repo / "selected"
+    selected.mkdir()
+    (selected / "target-only.txt").write_text("actual target\n", encoding="utf-8")
+    foreign = tmp_path / "foreign"
+    foreign_head = _real_repository(foreign, branch="foreign")
+    foreign_index = (foreign / ".git" / "index").read_bytes()
+    monkeypatch.setenv("GIT_DIR", str(foreign / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(foreign))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(foreign / ".git" / "index"))
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.worktree")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", str(foreign))
+    policy = workspace_service.readonly_git_policy(selected)
+    result = workspace_service.run_readonly_git(selected, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", sandbox_policy=policy)
+    assert result.returncode == 0, result.stderr
+    assert f"# branch.oid {expected_head}\0" in result.stdout
+    assert "# branch.head main\0" in result.stdout
+    assert "? selected/target-only.txt\0" in result.stdout
+    assert "foreign" not in result.stdout
+    assert (foreign / ".git" / "index").read_bytes() == foreign_index
+    assert (foreign / ".git" / "refs" / "heads" / "foreign").read_text(encoding="utf-8").strip() == foreign_head
+
+
+def test_materialized_parent_worktree_read_keeps_selected_and_sibling_file_denies(tmp_path, monkeypatch):
+    import json
+    from backend.runtime_env import sanitized_git_env
+    from backend.sandbox.policy import FileSystemAccessMode
+
+    repo = tmp_path / "repo"
+    _real_repository(repo)
+    selected = repo / "selected"
+    selected.mkdir()
+    public = selected / "public.txt"
+    public.write_text("readable fixture\n", encoding="utf-8")
+    selected_private = selected / "private.txt"
+    selected_private.write_text("private fixture\n", encoding="utf-8")
+    sibling_private = repo / "sibling-private.txt"
+    sibling_private.write_text("sibling private fixture\n", encoding="utf-8")
+    expected = subprocess.run(["git", "hash-object", "--no-filters", "--", public.name], cwd=selected,
+        env=sanitized_git_env(selected), capture_output=True, check=True, text=True).stdout.strip()
+    requirements = tmp_path / "requirements.toml"
+    requirements.write_text("[permissions.filesystem]\ndeny_read = " + json.dumps([str(selected_private), str(sibling_private)]) + "\n", encoding="utf-8")
+    monkeypatch.setenv("MINICODE_REQUIREMENTS_FILE", str(requirements))
+    policy = workspace_service.readonly_git_policy(selected)
+    resolved = policy.resolve(cwd=selected)
+    assert policy.workspace_root == selected and repo in policy.readable_roots
+    assert resolved.resolve_access(repo) is FileSystemAccessMode.READ
+    assert resolved.resolve_access(public) is FileSystemAccessMode.READ
+    assert resolved.resolve_access(selected_private) is FileSystemAccessMode.DENY
+    assert resolved.resolve_access(sibling_private) is FileSystemAccessMode.DENY
+    allowed = workspace_service.run_readonly_git(selected, "hash-object", "--no-filters", "--", "public.txt", sandbox_policy=policy)
+    assert allowed.returncode == 0 and allowed.stdout.strip() == expected, allowed.stderr
+    for relative in ("private.txt", "../sibling-private.txt"):
+        denied = workspace_service.run_readonly_git(selected, "hash-object", "--no-filters", "--", relative, sandbox_policy=policy)
+        assert denied.returncode != 0, {"path": relative, "stdout": denied.stdout, "stderr": denied.stderr}

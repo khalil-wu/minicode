@@ -1,4 +1,11 @@
 {
+  "安装插件": "Install plugin",
+  "插件设置": "Plugin settings",
+  "插件目录": "Plugin directory",
+  "公开": "Public",
+  "正在加载插件…": "Loading plugins…",
+  "没有找到插件": "No plugins found",
+  "添加 GitHub 仓库、Git 地址或本地插件市场。": "Add a GitHub repository, Git URL, or local plugin marketplace.",
   "插件市场": "Marketplace",
   "管理插件市场": "Manage plugin marketplaces",
   "市场": "Marketplace",
@@ -43,5 +50,6 @@
   "插件网站": "Website",
   "插件隐私政策": "Privacy Policy",
   "插件服务条款": "Terms of Service",
-  "插件信息不可用": "Unavailable"
+  "插件信息不可用": "Unavailable",
+  "技能设置已保存，但当前配置尚未生效。": "Skill settings were saved, but the requested state is not effective."
 }

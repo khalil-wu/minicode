@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ChevronDown, LoaderCircle } from "lucide-react";
 import { desktop, isDesktop } from "../desktop/runtime";
@@ -7,6 +7,7 @@ import { useI18n } from "../i18n";
 import { pushToast } from "./ToastContainer";
 import type { AppearanceVariant } from "../lib/appearance-colors";
 import { cssFontFamily, firstFontFamily, type SystemFontFamily, type ThemeFonts } from "../lib/theme-fonts";
+import { isSettingsNavigationTarget } from "./settingsControlOwner";
 
 const FontCatalog = createContext<{ families: SystemFontFamily[] | null; loading: boolean }>({ families: null, loading: false });
 export function AppearanceFontCatalogProvider({ children }: { children: ReactNode }) {
@@ -22,38 +23,77 @@ export function AppearanceFontCatalogProvider({ children }: { children: ReactNod
   return <FontCatalog.Provider value={catalog}>{children}</FontCatalog.Provider>;
 }
 
-function CustomFontFamily({ label, value, defaultLabel, onChange }: { label: string; value: string | null; defaultLabel: string; onChange: (value: string | null) => void }) {
+function CustomFontFamily({ label, value, defaultLabel, onChange, active }: { label: string; value: string | null; defaultLabel: string; onChange: (value: string | null) => void; active: boolean }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false), [draft, setDraft] = useState(value || "");
-  const [position, setPosition] = useState({ top: 0, right: 0 });
-  const trigger = useRef<HTMLButtonElement>(null), menu = useRef<HTMLDivElement>(null);
-  const close = () => { setOpen(false); trigger.current?.focus(); };
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const trigger = useRef<HTMLButtonElement>(null), menu = useRef<HTMLDivElement>(null), input = useRef<HTMLInputElement>(null);
+  const suspended = useRef(false), activeRef = useRef(active);
+  activeRef.current = active;
+  const close = () => { suspended.current = false; setOpen(false); trigger.current?.focus({ preventScroll: true }); };
   const commit = (next: string | null) => { onChange(next); close(); };
+  const openMenu = () => {
+    if (!suspended.current) setDraft(value || "");
+    suspended.current = false;
+    setOpen(true);
+  };
   useEffect(() => {
-    if (!open) return;
+    if (!active && open) { suspended.current = true; setOpen(false); }
+  }, [active, open]);
+  useEffect(() => {
+    if (!open || !active) return;
+    input.current!.focus({ preventScroll: true });
     const outside = (event: PointerEvent) => {
-      if (!event.composedPath().includes(trigger.current!) && !event.composedPath().includes(menu.current!)) setOpen(false);
+      if (!event.composedPath().includes(trigger.current!) && !event.composedPath().includes(menu.current!)) {
+        suspended.current = isSettingsNavigationTarget(event.target);
+        setOpen(false);
+      }
     };
     document.addEventListener("pointerdown", outside, true);
     return () => document.removeEventListener("pointerdown", outside, true);
-  }, [open]);
+  }, [open, active]);
+  useLayoutEffect(() => {
+    if (!open || !active) return;
+    const place = () => {
+      const anchor = trigger.current!.getBoundingClientRect(), panel = menu.current!.getBoundingClientRect();
+      const below = anchor.bottom + 6;
+      const top = Math.max(8, Math.min(below + panel.height > window.innerHeight - 8 ? anchor.top - panel.height - 6 : below,
+        window.innerHeight - panel.height - 8));
+      const left = Math.max(8, Math.min(anchor.right - panel.width, window.innerWidth - panel.width - 8));
+      setPosition(previous => previous.top === top && previous.left === left ? previous : { top, left });
+    };
+    place();
+    const observer = new ResizeObserver(place);
+    observer.observe(trigger.current!); observer.observe(menu.current!);
+    window.addEventListener("resize", place); window.addEventListener("scroll", place, true);
+    return () => { observer.disconnect(); window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [open, active]);
   return <><button ref={trigger} type="button" className="appearance-custom-font-trigger" aria-label={label} aria-haspopup="menu" aria-expanded={open}
-    onClick={() => {
-      const bounds = trigger.current!.getBoundingClientRect();
-      setPosition({ top: bounds.bottom + 6, right: window.innerWidth - bounds.right }); setDraft(value || ""); setOpen(!open);
+    disabled={!active} onClick={() => { if (open) close(); else openMenu(); }} onKeyDown={event => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); openMenu(); }
     }}>{firstFontFamily(value) || defaultLabel}<ChevronDown size={13} /></button>
-    {open && createPortal(<div ref={menu} className="appearance-custom-font-menu" role="menu" aria-label={label} style={position}
-      onKeyDown={event => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); } }}>
+    {active && open && createPortal(<div ref={menu} className="appearance-custom-font-menu" role="menu" aria-label={label} style={position}
+      onBlur={event => {
+        if (activeRef.current && event.relatedTarget !== trigger.current && !event.currentTarget.contains(event.relatedTarget)) {
+          suspended.current = isSettingsNavigationTarget(event.relatedTarget); setOpen(false);
+        }
+      }} onKeyDown={event => {
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+      }}>
       <button type="button" role="menuitem" onClick={() => commit(null)}>{defaultLabel}</button>
-      <input aria-label={t("{font}自定义值", { font: label })} value={draft} spellCheck={false} onChange={event => setDraft(event.target.value)}
-        onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); commit(draft.trim() || null); } }} />
+      <input ref={input} aria-label={t("{font}自定义值", { font: label })} value={draft} spellCheck={false} onChange={event => setDraft(event.target.value)}
+        onKeyDown={event => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (event.key === "Enter") { event.preventDefault(); event.stopPropagation(); commit(draft.trim() || null); }
+        }} />
       <button type="button" role="menuitem" onClick={() => commit(draft.trim() || null)}>{t("使用自定义字体值")}</button>
     </div>, document.body)}
   </>;
 }
 
-export function AppearanceFonts({ variant, fonts, onChange, advanced = false }: {
-  variant: AppearanceVariant; fonts?: ThemeFonts; onChange: (fonts: ThemeFonts) => Promise<void>; advanced?: boolean;
+export function AppearanceFonts({ variant, fonts, onChange, advanced = false, active = true }: {
+  variant: AppearanceVariant; fonts?: ThemeFonts; onChange: (fonts: ThemeFonts) => Promise<void>; advanced?: boolean; active?: boolean;
 }) {
   const { t } = useI18n();
   const { families, loading } = useContext(FontCatalog);
@@ -76,12 +116,12 @@ export function AppearanceFonts({ variant, fonts, onChange, advanced = false }: 
       <div className="appearance-font-controls">
         {loading ? <span role="status" aria-label={t("正在读取字体…")}><LoaderCircle className="settings-spin" size={13} aria-hidden="true" /></span> : <>
           {!(advanced && key === "ui") && (families?.length ? <SelectMenu className="settings-select appearance-font-picker" value={firstFamily ? cssFontFamily(firstFamily) : value || ""}
-            ariaLabel={familyAria} align="end" onValueChange={family => update(key, family || null)}>
+            ariaLabel={familyAria} align="end" disabled={!active} onValueChange={family => update(key, family || null)}>
             <option value="">{defaultLabel}</option>
             {families.filter(allowed).map(family => <option key={family.family} value={cssFontFamily(family.family)}>{family.family}</option>)}
-          </SelectMenu> : <CustomFontFamily label={familyAria} defaultLabel={defaultLabel} value={value} onChange={family => update(key, family)} />)}
+          </SelectMenu> : <CustomFontFamily label={familyAria} defaultLabel={defaultLabel} value={value} onChange={family => update(key, family)} active={active} />)}
           {advanced && <SelectMenu className="settings-select appearance-font-style-picker" value={selectedFace?.postscriptName || ""} ariaLabel={styleAria} align="end"
-            disabled={!selected || !allowed(selected)} onValueChange={postscriptName => {
+            disabled={!active || !selected || !allowed(selected)} onValueChange={postscriptName => {
               const face = selected!.faces.find(face => face.postscriptName === postscriptName)!;
               update(key, cssFontFamily(selected!.family), face === selected!.faces[0] ? undefined : { family: selected!.family, fullName: face.fullName, postscriptName: face.postscriptName });
             }}>

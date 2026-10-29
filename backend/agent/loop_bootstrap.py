@@ -326,7 +326,9 @@ async def bootstrap_agent_loop(
     from backend.skills.manager import SkillManager
 
     if isinstance(skill_manager, SkillManager):
-        context.bind_skill_manager(skill_manager, workspace_root, refresh=True, config_stack=turn_config_stack)
+        skill_turn_id = str(turn_kernel.metadata["turn_id"])
+        context.bind_skill_manager(skill_manager, workspace_root, refresh=True, config_stack=turn_config_stack,
+            force_reload=context._skill_snapshot_turn_id != skill_turn_id, turn_id=skill_turn_id)
         skill_manager = context.skill_manager
         run_context.skill_manager = skill_manager
     managed_requirements = turn_config_stack.requirements
@@ -414,7 +416,8 @@ async def bootstrap_agent_loop(
             config_stack=turn_config_stack, feature_flags=model_snapshot.config.feature_flags,
             registry=request.tool_registry, artifact_store=request.artifact_store,
             workspace_root=workspace_root, conversation_id=conversation_id,
-            turn_id=str(turn_kernel.metadata["turn_id"]))
+            turn_id=str(turn_kernel.metadata["turn_id"]),
+            mcp_optional_startup_grace_ms=model_snapshot.config.mcp_optional_startup_grace_ms)
         skill_manager = prepared_capabilities.skill_manager
         context.bind_skill_manager(skill_manager, workspace_root, config_stack=turn_config_stack)
         for warning in prepared_capabilities.warnings:

@@ -5,6 +5,7 @@ import { PluginsTab } from "./PluginsTab";
 import { useAppStore } from "../stores";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "./ToastContainer";
+import { handleCommandCatalogEvent } from "../chat/commandCatalogEvents";
 
 vi.mock("../protocol/api", async importOriginal => ({
   ...await importOriginal<typeof import("../protocol/api")>(),
@@ -34,8 +35,13 @@ beforeEach(() => {
   enabled = true; bodyError = false; toggleError = false; skillPrompt = "";
   delete window.__MINICODE_RUNTIME__;
   vi.clearAllMocks();
+  vi.mocked(sendClientCommand).mockImplementation(command => {
+    if (command.type === "skills.list") handleCommandCatalogEvent({ type: "skills.list", conversation_id: command.conversation_id || "",
+      workspace_root: command.workspace_root || "", skills: settings(command.workspace_root).available_skills });
+    return true;
+  });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
-  useAppStore.setState({ workingDirectory: "C:/project", conversationId: "owner", draft: "Keep draft", selectedSkills: [], selectedMentions: [],
+  useAppStore.setState({ workingDirectory: "C:/project", conversationId: "owner", activeConversationDraftId: null, draft: "Keep draft", selectedSkills: [], selectedMentions: [],
     availableSkills: [skill, otherSkill], attachments: [{ id: "keep", name: "Keep.png", type: "image/png", size: 12, status: "ready", dataUrl: "data:image/png;base64,AA==" }],
     mcpServers: [], panelSlots: [{ id: "chat", kind: "chat", label: "Chat", focused: true }], settingsOpen: true, skillsMarketplaceOpen: true });
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -95,6 +101,7 @@ it("opens exact Skill contents and keeps disabled entries visible, readable and 
   expect((within(dialog).getByRole("button", { name: "立即试用" }) as HTMLButtonElement).disabled).toBe(true);
   expect(useAppStore.getState().availableSkills.some(item => item.path === path)).toBe(false);
   expect(within(dialog).getByText("Final body paragraph.")).toBeTruthy();
+  await waitFor(() => expect(within(dialog).getByRole("switch", { name: "启用 Review notes" })).toHaveProperty("disabled", false));
   fireEvent.click(within(dialog).getByRole("switch", { name: "启用 Review notes" }));
   await within(dialog).findByRole("switch", { name: "停用 Review notes" });
   fireEvent.click(within(dialog).getByRole("button", { name: "立即试用" }));
@@ -103,7 +110,8 @@ it("opens exact Skill contents and keeps disabled entries visible, readable and 
   expect(useAppStore.getState().attachments[0].name).toBe("Keep.png");
   expect(useAppStore.getState().conversationId).toBe("owner");
   expect(useAppStore.getState().skillsMarketplaceOpen).toBe(false);
-  expect(sendClientCommand).not.toHaveBeenCalled();
+  expect(sendClientCommand).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(sendClientCommand).mock.calls.every(([command]) => command.type === "skills.list")).toBe(true);
 });
 
 it("shows actual read failures and retries the same registered Skill", async () => {
@@ -177,18 +185,32 @@ it("prefills the first nonblank plugin prompt and renders only real starter prom
   expect(sendClientCommand).not.toHaveBeenCalled();
 });
 
-it("does not apply a prior workspace's pending Skill mutation to the current executable catalog", async () => {
+it("reads the current scoped catalog after a prior workspace's global Skill mutation", async () => {
   await openPlugin();
   const originalFetch = fetch;
   let finish!: (response: Response) => void;
-  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => init?.method === "PUT"
-    ? new Promise<Response>(resolve => { finish = resolve; }) : originalFetch(input, init)));
-  fireEvent.click(screen.getByRole("switch", { name: "停用 Review notes" }));
   const currentSkill = { name: "current", path: "C:/current/SKILL.md", description: "Current workspace" };
-  act(() => useAppStore.setState({ workingDirectory: "C:/other", availableSkills: [currentSkill] }));
+  vi.mocked(sendClientCommand).mockImplementation(command => {
+    if (command.type === "skills.list") handleCommandCatalogEvent({ type: "skills.list", conversation_id: command.conversation_id || "",
+      workspace_root: command.workspace_root || "", skills: [...settings(command.workspace_root).available_skills, currentSkill] });
+    return true;
+  });
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === "PUT") return new Promise<Response>(resolve => { finish = resolve; });
+    const url = new URL(String(input));
+    if (url.pathname === "/api/skills/settings" && url.searchParams.get("workspace_root") === "C:/other") {
+      const current = settings("C:/other");
+      return Promise.resolve(response({ ...current, available_skills: [...current.available_skills, currentSkill] }));
+    }
+    return originalFetch(input, init);
+  }));
+  fireEvent.click(screen.getByRole("switch", { name: "停用 Review notes" }));
+  act(() => useAppStore.setState({ workingDirectory: "C:/other", conversationId: "current-owner", availableSkills: [currentSkill] }));
   enabled = false;
   await act(async () => finish(response(settings())));
-  expect(useAppStore.getState().availableSkills).toEqual([currentSkill]);
+  await waitFor(() => expect(useAppStore.getState().availableSkills.some(item => item.path === otherSkill.path)).toBe(true));
+  expect(useAppStore.getState().availableSkills.some(item => item.path === path)).toBe(false);
+  expect(useAppStore.getState().availableSkills.some(item => item.path === currentSkill.path)).toBe(true);
 });
 
 it("shows the Source More actions and copies the original Markdown with its frontmatter", async () => {

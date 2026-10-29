@@ -28,6 +28,7 @@ import type { DiffCommentContextRef } from "../stores/types";
 import { pushToast } from "../overlays/ToastContainer";
 import type { ClientCommand } from "../protocol/events";
 import { resetQueuedMessageHistoryForTests } from "./queued-message-undo";
+import { openAttachmentPreview, openLocalFilePreview } from "../chat/openAttachmentPreview";
 
 vi.mock("../protocol/ws-outbox", async load => {
   const original = await load<typeof import("../protocol/ws-outbox")>();
@@ -38,6 +39,7 @@ vi.mock("../protocol/ws-outbox", async load => {
   }) };
 });
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../chat/openAttachmentPreview", () => ({ openAttachmentPreview: vi.fn(), openLocalFilePreview: vi.fn() }));
 
 describe("QueuedMessageList", () => {
   beforeEach(() => {
@@ -102,6 +104,24 @@ describe("QueuedMessageList", () => {
       type: "user_message.queue.start", conversation_id: "conv-queue",
       message_id: "assistant-two", user_message_id: "user-two",
     });
+  });
+
+  it("keeps paused actions in each row and shows the actual queued image above the composer", () => {
+    const dataUrl = "data:image/png;base64,aGVsbG8=";
+    useAppStore.setState(state => ({ isStreaming: false, messages: state.messages.map(message => message.id === "user-two"
+      ? { ...message, queuePaused: true, attachmentRefs: [{ id: "image-one", name: "capture.png", kind: "image", mediaType: "image/png", sizeBytes: 5, dataUrl }] }
+      : { ...message, queuePaused: message.queueState === "queued" }) }));
+    const { container } = render(<QueuedMessageList />);
+    const rows = container.querySelectorAll(".queued-message-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[0].querySelector("img")?.getAttribute("src")).toBe(dataUrl);
+    expect(rows[0].textContent).toContain("second request");
+    expect(rows[0].textContent).toContain("已暂停");
+    expect(rows[0].querySelector(".queued-message-steer")?.textContent).toBe("发送");
+    expect(rows[0].querySelector(".queued-message-more")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "预览 capture.png" }));
+    expect(openLocalFilePreview).toHaveBeenCalledWith(expect.objectContaining({ id: "image-one", url: dataUrl, conversationId: "conv-queue" }));
+    expect(openAttachmentPreview).not.toHaveBeenCalled();
   });
 
   it("renders MiniCode numbered rows and exposes steer and delete actions", () => {

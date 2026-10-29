@@ -89,6 +89,7 @@ class AgentSession:
     thread_environments: ThreadEnvironments | None = None
     owns_thread_environments: bool = False
     node_repl_companions: Any | None = None
+    mcp_connections: Any | None = None
     cua_repl_companions: Any | None = None
     command_session_id: str = field(default_factory=lambda: f"agent-{uuid4().hex}", init=False)
     _owned_commands: BackgroundCommandManager | None = field(default=None, init=False, repr=False)
@@ -117,7 +118,7 @@ class AgentSession:
             return
         if (self._owned_commands is not None or self.close_thread_resources is not None or self.close_model is not None
                 or self.guardian_host is not None and self.owns_guardian_host or self.owns_thread_environments or self.owns_artifact_store
-                or self.node_repl_companions is not None or self.cua_repl_companions is not None):
+                or self.node_repl_companions is not None or self.cua_repl_companions is not None or self.mcp_connections is not None):
             async def close_resources() -> None:
                 try:
                     if self._owned_commands is not None:
@@ -134,6 +135,8 @@ class AgentSession:
                         self.close_model = None
                     if self.node_repl_companions is not None:
                         await self.node_repl_companions.aclose()
+                    if self.mcp_connections is not None:
+                        await self.mcp_connections.aclose()
                     if self.cua_repl_companions is not None:
                         await self.cua_repl_companions.aclose()
                     if self.owns_thread_environments and self.thread_environments is not None:
@@ -434,6 +437,7 @@ class QueryEngine:
                 async for update in updates:
                     if isinstance(update, CallbackCompleted):
                         if update.result is not None:
+                            await journal.flush_progress()
                             await to_thread_cancel_safe(journal.record_event, update.result)
                             yield update.result
                         continue
@@ -922,9 +926,6 @@ class QueryEngine:
         from backend.skills.manager import SkillManager
 
         skill_manager = skill_manager or ctx.skill_manager
-        if isinstance(skill_manager, SkillManager):
-            ctx.bind_skill_manager(skill_manager, sc.workspace_root, refresh=True)
-            skill_manager = ctx.skill_manager
 
         # Clear per-turn ephemeral state in the lifecycle owner. Only touch
         # real AgentState instances; compatibility tests may pass mock objects.
@@ -1014,6 +1015,12 @@ class QueryEngine:
             run_record = turn_kernel.run_record
             if run_record.conversation_id:
                 metadata.setdefault("conversation_id", run_record.conversation_id)
+            if isinstance(skill_manager, SkillManager):
+                captured_request = run_context.start_request
+                already_captured = captured_request is not None and skill_manager is captured_request.skill_manager
+                ctx.bind_skill_manager(skill_manager, sc.workspace_root, refresh=True,
+                    force_reload=not already_captured, turn_id=str(metadata["turn_id"]))
+                skill_manager = ctx.skill_manager
 
             recovery = prepare_query_recovery(
                 session_id=session_id,

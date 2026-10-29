@@ -23,6 +23,7 @@ import {
   type AutomationScheduleDraft, type CustomScheduleDraft,
 } from "../lib/automation-schedule";
 import { AutomationFrequencySection } from "./AutomationFrequencySection";
+const EMPTY_CONVERSATIONS: never[] = [];
 import { pushToast } from "./ToastContainer";
 import "./thread-automation-panel.css";
 
@@ -70,7 +71,7 @@ export function ThreadAutomationPanel({ editor, onClose, inSettings = false, var
   const { t: tr, locale } = useI18n();
   const createDialog = variant === "create-dialog";
   const projects = useAppStore(state => state.recentWorkspaces);
-  const conversations = useAppStore(state => state.conversations);
+  const conversations = useAppStore(state => active ? state.conversations : EMPTY_CONVERSATIONS);
   const selectedConversationId = useAppStore(state => state.conversationId);
   const currentProvider = useAppStore(state => state.currentProvider);
   const currentModel = useAppStore(state => state.currentModel);

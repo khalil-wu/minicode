@@ -44,7 +44,9 @@ let notifyTabResize = () => {};
 let browserFixtureCount = 1;
 let browserFixtureMounts = 0;
 
-vi.mock("../desktop/runtime", () => ({
+vi.mock("../desktop/runtime", async load => ({
+  ...await load<typeof import("../desktop/runtime")>(),
+  desktop: () => null,
   isDesktop: () => false,
   runtime: () => null,
   revealPath: vi.fn(),

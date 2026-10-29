@@ -168,6 +168,60 @@ async def _owned_worktree_repository(service):
     return git
 
 
+@pytest.mark.asyncio
+async def test_projectless_browser_file_identity_and_task_relative_new_file_diff_keep_distinct_roots(editor_server, tmp_path):
+    from backend.agent.environment_runtime import resolve_environment_config, thread_environment_defaults
+    from backend.agent.environment_selection import ThreadEnvironments
+
+    server = editor_server
+    if server.host.kind != "local":
+        pytest.skip("Projectless task minting and its declared browser root are local desktop capabilities")
+    conversation = server.session.conversation_repo.create_conversation(projectless_base=str(tmp_path / "projectless-tasks"),
+        initial_prompt="markdown alignment check", permission_mode="bypass")
+    cwd, base = Path(conversation.execution_cwd), Path(conversation.projectless_browser_root)
+    permission = server.session.permission_context_for_conversation(conversation, source="projectless-file-chain")
+    owner = ThreadEnvironments.retarget(server.host.manager,
+        thread_environment_defaults(permission, server.session.config.config_layer_stack), resolve_config=resolve_environment_config,
+        attachment=server.host.environments.primary(), cwd=cwd.as_uri(), workspace_roots=(cwd.as_uri(),))
+    runtime = server.manager.execution_contexts.thread_runtime(server.session.conversation_repo.store_instance_id(), conversation.id)
+    runtime.thread_environments = owner
+    server.session.active_conversation_id = conversation.id
+    server.session.session_lifecycle.workspace_root = cwd
+    content = "# 对齐验收\n右侧栏最近产物验收\n"
+    async with capture_workspace_execution(server.session, conversation.id) as context:
+        assert context.permission.environment_scope.cwd_uri == cwd.as_uri()
+        async with ExecutorEditorService(context) as service:
+            await _owned_worktree_repository(service)
+            await service.write_bytes("outputs/alignment-check.md", content.encode("utf-8"))
+    params = {"session_id": server.session.session_id, "conversation_id": conversation.id, "execution_cwd": str(cwd)}
+    relative_task = cwd.relative_to(base).as_posix()
+    browser_path = f"{relative_task}/outputs/alignment-check.md"
+    tree = await server.client.get("/api/workspace/browser-tree", params={**params, "path": relative_task})
+    assert tree.status_code == 200, tree.text
+    assert tree.json()["workspace_root"] == str(base)
+    assert next(entry for entry in tree.json()["entries"] if entry["name"] == "outputs")["path"] == f"{relative_task}/outputs"
+    for endpoint in ("browser-file", "browser-preview"):
+        result = await server.client.get(f"/api/workspace/{endpoint}", params={**params, "path": browser_path})
+        assert result.status_code == 200 and result.json()["content"] == content, result.text
+        assert result.json()["path_uri"] == (cwd / "outputs/alignment-check.md").as_uri()
+    raw = await server.client.get("/api/workspace/browser-raw", params={**params, "path": browser_path})
+    assert raw.status_code == 200 and raw.content == content.encode("utf-8"), raw.text
+    wrong_namespace = await server.client.get("/api/workspace/browser-preview", params={**params, "path": "outputs/alignment-check.md"})
+    assert wrong_namespace.status_code == 404, "The server must keep its declared browser root instead of searching or moving the cwd"
+    search = await server.client.get("/api/workspace/browser-search", params={**params, "query": "alignment"})
+    assert search.status_code == 200 and browser_path in [entry["path"] for entry in search.json()["results"]], search.text
+    git_params = {"session_id": server.session.session_id, "conversation_id": conversation.id, "workspace_root": str(cwd)}
+    branches = await server.client.get("/api/workspace/git/branches", params=git_params)
+    assert branches.status_code == 200 and branches.json()["is_git_repo"] is True, branches.text
+    diff = await server.client.get("/api/workspace/git/diff", params={**git_params, "file": "outputs/alignment-check.md", "base_ref": "HEAD"})
+    assert diff.status_code == 200 and "outputs/alignment-check.md" in diff.json()["diff"], diff.text
+    assert "+# 对齐验收" in diff.json()["diff"] and browser_path not in diff.json()["diff"]
+    async with capture_workspace_execution(server.session, conversation.id) as context:
+        assert context.permission.environment_scope.cwd_uri == cwd.as_uri()
+    stored = server.session.conversation_repo.get_conversation_summary(conversation.id)
+    assert stored.execution_cwd == str(cwd) and stored.projectless_browser_root == str(base) and stored.workspace_root == ""
+
+
 @pytest.mark.parametrize("checkout", ["main", "linked"])
 @pytest.mark.asyncio
 async def test_http_worktree_nested_paths_identify_checkout_without_retargeting_scope(editor_server, monkeypatch, checkout):

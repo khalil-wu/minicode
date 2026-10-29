@@ -55,6 +55,27 @@ def _session(tmp_path, queue):
 async def _drain(dispatcher):
     while dispatcher.command_tasks or dispatcher.execution_command_tasks:
         await asyncio.gather(*(dispatcher.command_tasks | dispatcher.execution_command_tasks))
+        # gather(done tasks) completes inline; their registered cleanup still needs a loop tick.
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_drain_runs_cleanup_callbacks_for_tasks_registered_after_completion(tmp_path):
+    queue = DurableUserMessageQueue(session_id="recovered-session", root_dir=tmp_path / "queue")
+    session, _ = _session(tmp_path, queue)
+    dispatcher = SessionCommandDispatcher(session, root_dir=tmp_path / "receipts")
+    command = asyncio.create_task(asyncio.sleep(0))
+    execution = asyncio.create_task(asyncio.sleep(0))
+    await asyncio.gather(command, execution)
+    dispatcher.track_command_task(command)
+    dispatcher.track_execution_command_task(execution)
+    try:
+        assert dispatcher.command_tasks == {command}
+        assert dispatcher.execution_command_tasks == {execution}
+        await _drain(dispatcher)
+        assert dispatcher.command_tasks == dispatcher.execution_command_tasks == set()
+    finally:
+        queue.close()
 
 
 @pytest.mark.asyncio

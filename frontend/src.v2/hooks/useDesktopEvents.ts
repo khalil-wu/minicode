@@ -1,11 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useAppStore } from "../stores";
 import { desktopNotificationConversationVisible, isDesktop, onEmbeddedBrowserEvent } from "../desktop/runtime";
 import { discardClosedBrowserPresentation, discardInactiveBrowserPresentation, focusBrowserAddressBar, openNewBrowserTab, presentExistingBrowserPage } from "../chat/openWebInBrowser";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import { openSettings } from "../lib/settings-navigation";
 import { useDesktopTerminalMirror } from "./useDesktopTerminalMirror";
-import { sendClientCommand } from "../protocol/ws-outbox";
+import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { nativeMenuAccelerators, nativeMenuBindings, nativeShortcutOverrides } from "../lib/keyboard-shortcuts";
 import { toggleChangesPanel } from "../lib/changes-panel";
 import { consumeDictationProviderSettings } from "../lib/dictation-preferences";
@@ -14,19 +14,47 @@ import { routeQueuedMessageHistory } from "../composer/queued-message-undo";
 import { installDesktopVoiceControl } from "../desktop/voice-control";
 import { captureThreadActionOwner, executeThreadAction, THREAD_ACTION_EVENTS, THREAD_ACTION_IDS } from "../lib/thread-actions";
 import { isModalTarget, isTopLevelModalOpen } from "../lib/shortcut-context";
+import { browserOwnerId, projectBrowserWorkbenchEvent, readBrowserWorkbench, saveBrowserWorkbenchLayout } from "../stores/browser-workbench";
 
-const markViewedConversationRead = (isWindowFocused: boolean) => {
+const markViewedConversationRead = (isWindowFocused: boolean, pendingReads: Set<string>) => {
   const state = useAppStore.getState();
   const conversationId = state.conversationId;
+  const conversation = state.conversations.find(item => item.id === conversationId);
   if (isWindowFocused && state.isConnected && conversationId
-    && state.conversations.find(item => item.id === conversationId)?.hasUnreadTurn
+    && conversation?.hasUnreadTurn
     && desktopNotificationConversationVisible(conversationId, conversationId, state.settingsOpen, state.pendingConversationSwitchId)) {
-    sendClientCommand({ type: "conversation.read_state.set", conversation_id: conversationId, has_unread_turn: false });
+    // Completion, summary and native focus can all report the same unread
+    // revision before its receipt returns. A newer revision remains readable.
+    const key = JSON.stringify([conversationId, conversation.revision, conversation.updatedAt]);
+    if (pendingReads.has(key)) return;
+    pendingReads.add(key);
+    void sendClientCommandAwaitResult({ type: "conversation.read_state.set", conversation_id: conversationId,
+      has_unread_turn: false }, "conversation.read_state.set")
+      .catch(error => pushToast(error instanceof Error ? error.message : String(error), "error"))
+      .finally(() => pendingReads.delete(key));
   }
 };
 
 export const useDesktopEvents = () => {
+  const pendingReads = useRef(new Set<string>());
   useDesktopTerminalMirror();
+  useEffect(() => {
+    const restore = (state: ReturnType<typeof useAppStore.getState>) => {
+      if (state.conversationId || !state.activeConversationDraftId) return;
+      const layout = readBrowserWorkbench(browserOwnerId(state))?.layout;
+      if (layout) useAppStore.setState(layout);
+    };
+    restore(useAppStore.getState());
+    return useAppStore.subscribe((state, previous) => {
+      if (browserOwnerId(state) !== browserOwnerId(previous)) {
+        saveBrowserWorkbenchLayout(previous);
+        restore(state);
+      } else if (state.rightPanelOpen !== previous.rightPanelOpen || state.rightPanelExpanded !== previous.rightPanelExpanded
+        || state.rightStackTab !== previous.rightStackTab || state.rightStackTabLocked !== previous.rightStackTabLocked) {
+        saveBrowserWorkbenchLayout(state);
+      }
+    });
+  }, []);
   useEffect(() => {
     const navigation = window.__MINICODE_RUNTIME__?.initialNavigation;
     if (!navigation?.popout || !navigation.workspaceRoot) return;
@@ -39,7 +67,7 @@ export const useDesktopEvents = () => {
   useEffect(() => installDesktopVoiceControl(), []);
   useEffect(() => {
     if (isDesktop()) return;
-    const readViewedConversation = () => markViewedConversationRead(document.hasFocus());
+    const readViewedConversation = () => markViewedConversationRead(document.hasFocus(), pendingReads.current);
     const unsubscribe = useAppStore.subscribe((state, previous) => {
       if (state.conversations !== previous.conversations || state.conversationId !== previous.conversationId
         || state.settingsOpen !== previous.settingsOpen || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
@@ -58,7 +86,7 @@ export const useDesktopEvents = () => {
     const consumeProviderSettings = () => { void consumeDictationProviderSettings().catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); };
     const toggleSummary = () => {
       const store = useAppStore.getState();
-      store.setContextCardPinned(!store.contextCardPinned);
+      store.setContextCardPinned(store.contextCardCollapsed || !store.contextCardPinned);
     };
     const navigateThread = (direction: -1 | 1) => {
       const store = useAppStore.getState();
@@ -73,6 +101,10 @@ export const useDesktopEvents = () => {
     };
     const findInActivePane = (action: "find" | "find-next" | "find-previous") => {
       const store = useAppStore.getState();
+      if (store.settingsOpen) {
+        if (action === "find") window.dispatchEvent(new Event("settings:request-search"));
+        return;
+      }
       const editor = store.appMode === "code" && store.panelSlots.find(slot => slot.focused)?.kind === "editor"
         && !document.activeElement?.closest(".mc-sidebar-right");
       window.dispatchEvent(new Event(editor ? `editor:${action}` : action === "find" ? "chat:request-search" : `chat:${action}`));
@@ -91,11 +123,10 @@ export const useDesktopEvents = () => {
       },
       "new-conversation": () => {
         const store = useAppStore.getState();
-        store.createConversation({ appMode: "cowork", bindWorkspace: store.appMode === "code" && Boolean(store.workingDirectory) });
+        store.startConversationDraft({ appMode: "cowork", bindWorkspace: store.appMode === "code" && Boolean(store.workingDirectory) });
       },
       "quick-chat": () => {
-        useAppStore.getState().createConversation({ appMode: "cowork", bindWorkspace: false });
-        window.dispatchEvent(new Event("composer:focus"));
+        useAppStore.getState().startConversationDraft({ appMode: "cowork", bindWorkspace: false });
       },
       "open-settings": (event: Event) => {
         if ((event as CustomEvent<{ tab?: "provider" }>).detail?.tab === "provider") consumeProviderSettings();
@@ -209,7 +240,7 @@ export const useDesktopEvents = () => {
       const conversationId = state.conversationId;
       if (conversationId && desktopNotificationConversationVisible(conversationId, conversationId, state.settingsOpen, state.pendingConversationSwitchId)) {
         void desktopRuntime?.hideNotifications({ conversationId, onlyIfFocused: true });
-        markViewedConversationRead(isNativeWindowFocused);
+        markViewedConversationRead(isNativeWindowFocused, pendingReads.current);
       }
     };
     const removeNotificationOwner = useAppStore.subscribe((state, previous) => {
@@ -225,6 +256,7 @@ export const useDesktopEvents = () => {
     void desktopRuntime?.windowControls.getState().then(updateNativeFocus);
     document.addEventListener("visibilitychange", hideViewedNotifications);
     const removeBrowserListener = onEmbeddedBrowserEvent((event) => {
+      projectBrowserWorkbenchEvent(event);
       if (event.type === "presentation-requested") presentExistingBrowserPage(event);
       if (event.type === "closed") discardClosedBrowserPresentation(event);
     });

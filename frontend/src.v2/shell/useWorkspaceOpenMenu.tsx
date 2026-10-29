@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ContextMenuItem } from "../components/ContextMenu";
 import { FileOpenTargetIcon } from "../components/FileOpenTargetIcon";
-import { getDesktopPreferences, isDesktop, type FileOpenTarget } from "../desktop/runtime";
+import { getDesktopPreferenceTargets, isDesktop, type FileOpenTarget } from "../desktop/runtime";
 import { useI18n } from "../i18n";
 import { openPreferredWorkspace } from "../lib/open-preferred-target";
 import { useAppStore } from "../stores";
@@ -23,8 +23,8 @@ export function useWorkspaceOpenMenu(workspaceRoot: string | undefined, opened: 
       gitBacked = status.is_git_repo === true;
       setDiscovery({ workspaceRoot, gitBacked, targets: null, failed: false });
       if (!gitBacked) return;
-      const preferences = await getDesktopPreferences();
-      if (current) setDiscovery({ workspaceRoot, gitBacked, targets: preferences.fileOpenTargets, failed: false });
+      const targets = await getDesktopPreferenceTargets();
+      if (current) setDiscovery({ workspaceRoot, gitBacked, targets: targets.fileOpenTargets, failed: false });
     })().catch(() => {
       if (current) setDiscovery({ workspaceRoot, gitBacked, targets: null, failed: true });
     });

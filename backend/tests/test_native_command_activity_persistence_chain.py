@@ -103,7 +103,7 @@ def test_actual_started_event_advances_same_journal_call_once_and_survives_missi
 async def test_real_native_producer_to_query_recorder_and_cold_canonical_record(tmp_path, abort):
     host = setup(tmp_path)
     host.context.cancel_event = asyncio.Event()
-    call, auth = authorize(host, command=output_command("JOURNAL_NATIVE_ACTUAL")[0])
+    call, auth = (await authorize(host, command=output_command("JOURNAL_NATIVE_ACTUAL")[0]))
     state = AgentState(user_message='Real native journal task')
     state.ui_tool_started_at[call.id] = time.time() - 30
     builder = ContextBuilder()

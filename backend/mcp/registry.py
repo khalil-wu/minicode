@@ -106,9 +106,8 @@ def _model_visible(tool_def: MCPToolDef) -> bool:
 class MCPToolProxy(BaseTool):
     """Adapter that exposes an MCP tool through the local tool registry.
 
-    Stores a *manager reference* instead of a direct client pointer so that
-    reconnection (which creates a new MCPClient instance) is transparently
-    picked up on the next ``execute()`` call.
+    Discovery resolves through the manager. Admission binds a separate call
+    proxy to the exact live client and catalog reviewed for that invocation.
     """
 
     def __init__(
@@ -132,12 +131,14 @@ class MCPToolProxy(BaseTool):
         self._manager = manager
         self._prepare_call = prepare_call
         self._static_client: MCPClient | None = client_or_manager if manager is None else None
+        self._prepared_client: MCPClient | None = None
         self._catalog_revision = (
             int(getattr(manager, "registry_version", 0) or 0)
             if manager is not None
             else 0
         )
         self._server_contract = manager.get_server_contract(server_name) if manager is not None else None
+        self._from_cached_catalog = manager.catalog_is_cached(server_name) if manager is not None else False
 
         self.model_namespace = f"mcp__{normalize_name_for_mcp(server_name)}"
         self.model_tool_name = normalize_name_for_mcp(tool_def.name)
@@ -233,7 +234,8 @@ class MCPToolProxy(BaseTool):
 
     @property
     def _client(self) -> MCPClient | None:
-        """Dynamic client lookup — survives MCP server reconnections."""
+        if self._prepared_client is not None:
+            return self._prepared_client
         if self._manager is not None:
             return self._manager.get_client(self._server_name)
         return self._static_client
@@ -426,18 +428,56 @@ class MCPToolProxy(BaseTool):
             self._catalog_revision = current_revision
         return same_contract
 
+    async def prepare_for_execution(self, context=None):
+        """Resolve cached definitions before permission review, binding this call to live hints."""
+        if self._prepared_client is not None:
+            if not self._prepared_client.connected or not self._catalog_is_current(context):
+                raise ConnectionError(f"The prepared MCP call for '{self._server_name}' is no longer current")
+            return self
+        if self._prepare_call is not None:
+            if context is not None:
+                from backend.agent.loop_preflight import await_preflight
+                await await_preflight(self._prepare_call(self._server_name),
+                    deadline=context.deadline_monotonic, cancel_event=context.cancel_event,
+                    run_context=context.run_context, llm=context.llm)
+            else:
+                await self._prepare_call(self._server_name)
+        if self._manager is None:
+            return self
+        client = self._manager.get_client(self._server_name)
+        if client is None:
+            raise ConnectionError(f"MCP server '{self._server_name}' has no ready connection")
+        if self._from_cached_catalog:
+            contract = self._manager.get_server_contract(self._server_name)
+            current = next((tool for tool in self._manager.get_all_tools().get(self._server_name, ())
+                if tool.name == self._tool_def.name and _model_visible(tool)), None)
+            if current is None or contract is None or contract[0] != self._server_contract[0]:
+                raise ValueError(f"The advertised MCP tool '{self._server_name}/{self._tool_def.name}' is unavailable")
+            prepared = MCPToolProxy(server_name=self._server_name, tool_def=current, client_or_manager=self._manager,
+                artifact_store=self._artifact_store, manager=self._manager)
+            prepared.name, prepared.model_namespace, prepared.model_tool_name = self.name, self.model_namespace, self.model_tool_name
+            prepared.policy_aliases, prepared.policy_deny_aliases = self.policy_aliases, self.policy_deny_aliases
+        else:
+            if not self._catalog_is_current(context):
+                raise ValueError(f"MCP catalog changed for '{self._server_name}'. Refresh tools before calling '{self._tool_def.name}'.")
+            prepared = copy.copy(self)
+        prepared._prepared_client = client
+        return prepared
+
     async def execute(self, args: dict[str, Any], *, context: Any | None = None) -> ToolResult:
         """Execute the MCP tool and normalize the result into ToolResult.
 
         Tool annotations describe permission risk, not result immutability.
         Every invocation reaches the server so mutable remote state stays fresh.
         """
-        if self._prepare_call is not None:
-            await self._prepare_call(self._server_name)
-        if not self._catalog_is_current(context):
+        try:
+            prepared = await self.prepare_for_execution(context)
+        except (ValueError, ConnectionError) as exc:
             return self._error_result(
-                f"MCP catalog changed for '{self._server_name}'. Refresh tools before calling '{self._tool_def.name}'."
+                str(exc)
             )
+        if prepared is not self:
+            return await prepared.execute(args, context=context)
         client = self._client
         if client is None or not client.connected:
             return self._error_result(
@@ -496,6 +536,9 @@ class MCPToolProxy(BaseTool):
                     "mcp_permission_scope": self._permission_scope,
                 }
                 request_owner.update({key: metadata[key] for key in ("message_id", "turn_id") if key in metadata})
+            if self._approval_config is not None:
+                from backend.mcp.manager import _mcp_tool_timeout_seconds
+                request_owner = {**(request_owner or {}), "mcp_tool_timeout_sec": _mcp_tool_timeout_seconds(self._approval_config)}
             call_started = time.monotonic()
             result: MCPCallResult = await client.call_tool(
                 self._tool_def.name,

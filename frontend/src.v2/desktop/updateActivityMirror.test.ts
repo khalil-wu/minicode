@@ -8,6 +8,7 @@ import { emptyComposerDraft, flushComposerDrafts } from "../stores/composer-draf
 import { flushEditorDrafts } from "../stores/editor-drafts";
 import { cacheEditorStateForWorkspace, clearEditorWorkspaceBufferCacheForTests } from "../stores/shared-helpers";
 import { buildUpdateActivitySnapshot, startUpdateActivityMirror } from "./updateActivityMirror";
+import * as composerDrafts from "../stores/composer-drafts";
 
 describe("update activity snapshot", () => {
   afterEach(() => {
@@ -223,5 +224,58 @@ describe("update activity snapshot", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(reportActivity).toHaveBeenCalledTimes(2);
     stop();
+  });
+
+  it("skips side-chat text and subagent progress while reporting actual stream and worker completion", async () => {
+    const reportActivity = vi.fn().mockResolvedValue({ accepted: true });
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary", desktop: { updates: { reportActivity, onActivityRequest: () => () => {} } } as never };
+    const workers = [{ id: "worker", role: "Ada", status: "running" as const }];
+    useAppStore.setState(state => ({ conversationStreaming: { "conv-background": true }, subagents: workers,
+      conversationAgentStates: { "conv-active": { plan: null, todos: [], agentProgress: [], subagents: workers } },
+      sideChats: { ...state.sideChats, "side-running": { ...state.sideChats["side-running"], messages: [{
+        id: "side-answer", role: "assistant", content: "", timestamp: 1, artifacts: [], isStreaming: true,
+      }] } },
+    }));
+    const stop = startUpdateActivityMirror();
+    await vi.waitFor(() => expect(reportActivity).toHaveBeenCalledOnce());
+    const collect = vi.spyOn(composerDrafts, "collectComposerDrafts");
+    try {
+      for (let index = 0; index < 50; index += 1) {
+        useAppStore.getState().appendAgentMessageDelta("reply", `word ${index} `, "side-running", "side-answer", "reply");
+        useAppStore.getState().updateSubagent("worker", { currentActivity: `working ${index}`, lastProgressAt: index }, "conv-active");
+      }
+      expect(collect).not.toHaveBeenCalled();
+      expect(reportActivity).toHaveBeenCalledOnce();
+      expect(useAppStore.getState().sideChats["side-running"].messages[0].blocks?.some(block => block.type === "text" && block.content.includes("word 49"))).toBe(true);
+      useAppStore.getState().finishStreaming("side-running", undefined, "completed", "side-answer");
+      useAppStore.getState().updateSubagent("worker", { status: "done" }, "conv-active");
+      await vi.waitFor(() => {
+        const snapshot = reportActivity.mock.calls.at(-1)?.[0];
+        expect(snapshot.sideChatStreams).toEqual([]);
+        expect(snapshot.backgroundTasks).not.toContain("worker");
+      });
+      expect(collect).toHaveBeenCalled();
+    } finally { collect.mockRestore(); stop(); }
+  });
+
+  it("still collects authored rich drafts and side attachments without treating their text as task progress", async () => {
+    const reportActivity = vi.fn().mockResolvedValue({ accepted: true });
+    window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary", desktop: { updates: { reportActivity, onActivityRequest: () => () => {} } } as never };
+    const stop = startUpdateActivityMirror();
+    await vi.waitFor(() => expect(reportActivity).toHaveBeenCalledOnce());
+    const collect = vi.spyOn(composerDrafts, "collectComposerDrafts");
+    try {
+      useAppStore.setState({ richDraft: { markdown: "", document: { type: "doc", content: [{ type: "paragraph" }] } } });
+      expect(collect).toHaveBeenCalled();
+      collect.mockClear();
+      useAppStore.setState(state => ({ sideChats: { ...state.sideChats, "side-idle": { ...state.sideChats["side-idle"],
+        attachments: state.sideChats["side-idle"].attachments!.map(attachment => ({ ...attachment, status: "ready" as const })),
+      } } }));
+      expect(collect).toHaveBeenCalled();
+      await vi.waitFor(() => expect(reportActivity.mock.calls.at(-1)?.[0].uploadingAttachments).not.toContain("upload-side"));
+      useAppStore.getState().setSideChatDraft("side-idle", "New side draft");
+      await flushComposerDrafts();
+      await vi.waitFor(() => expect(reportActivity.mock.calls.at(-1)?.[0].draftStates).toContain(JSON.stringify(["primary", "side", "side-idle"])));
+    } finally { collect.mockRestore(); stop(); }
   });
 });

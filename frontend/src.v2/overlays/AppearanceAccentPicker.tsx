@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ContextMenu } from "../components/ContextMenu";
 import { useI18n } from "../i18n";
 import type { AppearanceVariant } from "../lib/appearance-colors";
@@ -17,10 +17,11 @@ const accountAccents = [
   { id: "black", label: "黑色", color: "neutral" },
 ] as const;
 
-export function AppearanceAccentPicker({ variant, onCustomSelect }: { variant: AppearanceVariant; onCustomSelect: () => void }) {
+export function AppearanceAccentPicker({ variant, onCustomSelect, active = true }: { variant: AppearanceVariant; onCustomSelect: () => void; active?: boolean }) {
   const { t } = useI18n();
   const trigger = useRef<HTMLButtonElement>(null);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => { if (!active) setPosition(null); }, [active]);
   const variantLabel = t(variant === "light" ? "浅色" : "深色");
   const ariaLabel = t("{variant}强调色", { variant: variantLabel });
   const open = () => {
@@ -34,7 +35,7 @@ export function AppearanceAccentPicker({ variant, onCustomSelect }: { variant: A
       <span className="mc-select-trigger-value"><span className="mc-select-trigger-label">{t("自定义")}</span></span>
       <SettingsSourceIcon icon="chevronDown" size={14} />
     </button>
-    {position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-accent-menu" ariaLabel={ariaLabel} onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
+    {active && position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-accent-menu" ariaLabel={ariaLabel} onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
       items={[
         ...accountAccents.map(accent => ({
           label: t(accent.id === "black" && variant === "dark" ? "白色" : accent.label),

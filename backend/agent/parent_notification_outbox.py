@@ -1,6 +1,5 @@
-"""Durable parent notification outbox for subagent completion delivery.
+"""Durable child results and explicit mailbox wake requests.
 
-Modeled after cc's enqueueAgentNotification + pending notification queue:
 - durable before notify
 - pending / delivered / acked states
 - idempotent enqueue and replay
@@ -96,6 +95,14 @@ class ParentNotification:
     attempts: int = 0
     last_error: str = ""
 
+    @property
+    def starts_turn(self) -> bool:
+        """A child result queues context; only an explicit follow-up wakes it."""
+        return self.kind == "async_hook" or (
+            self.kind == "mailbox_wake"
+            and self.payload.get("delivery_mode") == "trigger_turn"
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -137,10 +144,8 @@ def subscribe_parent_notification_enqueued(
 ) -> Callable[[], None]:
     """Subscribe to the process-local durable-enqueue signal.
 
-    Claude Code publishes its unified command-queue signal only after the
-    notification has entered the queue.  MiniCode keeps the durable outbox as
-    the source of truth and mirrors that ordering here: subscribers are merely
-    wake hints, while replay always comes from disk.
+    Publish only after persistence: subscribers are wake hints, while replay
+    always reads the durable notification and its delivery authority.
 
     Weak references keep a disconnected WebSocket session from being retained
     by the process-wide signal.  The callback must stay non-blocking and hand

@@ -9,6 +9,7 @@ import { projectMessagesToTurns } from "./chatSurfaceState";
 import { pushToast } from "../overlays/ToastContainer";
 import { rejectClientCommandResult, sendClientCommand } from "../protocol/ws-outbox";
 import { resetPendingUserMessagesForTests } from "./sendChatMessage";
+import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), rejectClientCommandResult: vi.fn(() => false) }));
@@ -78,6 +79,56 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     vi.clearAllMocks();
     vi.mocked(rejectClientCommandResult).mockReturnValue(false);
     seedStreamingAssistant();
+  });
+
+  it("does not recreate confirmed deleted owners from late text, resume, terminal or run error events", async () => {
+    const owner = "deleted-chat-stream-owner";
+    await deleteConversationComposerDrafts(owner);
+    useAppStore.setState({ draft: "keep current draft", conversationMessages: {}, conversationStreaming: { "conv-stream": true } });
+    const before = useAppStore.getState();
+    for (const event of [
+      { type: "agent_message.delta", item_id: "late-text", delta: "late text" },
+      { type: "thinking_delta", content: "late thinking" },
+      { type: "stream_resume", turn_id: "late-turn", stream_status: "running", tool_calls_pending: [],
+        content_blocks: [{ type: "text", item_id: "late-text", content: "late restored text" }] },
+      { type: "done", status: "completed" },
+      { type: "error", message: "late provider error", recoverable: false },
+    ]) expect(handleChatStreamEvent({ ...event, conversation_id: owner, message_id: "late-answer" } as ServerEvent, owner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages).toBe(before.conversationMessages);
+    expect(useAppStore.getState().conversationStreaming).toBe(before.conversationStreaming);
+    expect(useAppStore.getState().messages).toBe(before.messages);
+    expect(useAppStore.getState().draft).toBe("keep current draft");
+    expect(useAppStore.getState().isStreaming).toBe(true);
+  });
+
+  it("abandons an incomplete resume after confirmed deletion while allowing an unlisted live owner to resume", async () => {
+    const owner = "deleted-paged-resume-owner";
+    const page = { type: "stream_resume" as const, conversation_id: owner, message_id: "paged-answer", turn_id: "paged-turn",
+      stream_status: "running", tool_calls_pending: [], snapshot_id: "paged-snapshot", snapshot_part: 0, snapshot_complete: false,
+      content_blocks: [{ type: "text", item_id: "paged-text", content: "first page" }] };
+    expect(handleChatStreamEvent(page as ServerEvent, owner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages[owner]).toBeUndefined();
+    await deleteConversationComposerDrafts(owner);
+    expect(handleChatStreamEvent({ type: "agent_message.delta", conversation_id: owner, message_id: "paged-answer",
+      item_id: "paged-text", delta: "late live delta" } as ServerEvent, owner, handlers)).toBe(true);
+    expect(handleChatStreamEvent({ ...page, snapshot_part: 1, snapshot_complete: true } as ServerEvent, owner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages[owner]).toBeUndefined();
+    expect(useAppStore.getState().conversationStreaming[owner]).toBeUndefined();
+    const liveOwner = "unlisted-resume-owner";
+    expect(handleChatStreamEvent({ type: "stream_resume", conversation_id: liveOwner, message_id: "unlisted-answer",
+      turn_id: "unlisted-turn", stream_status: "running", tool_calls_pending: [],
+    } as ServerEvent, liveOwner, handlers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages[liveOwner]?.[0]).toMatchObject({ id: "unlisted-answer", isStreaming: true });
+  });
+
+  it("still resolves an awaited conversation command error for a deleted owner", async () => {
+    const owner = "deleted-command-error-owner";
+    await deleteConversationComposerDrafts(owner);
+    vi.mocked(rejectClientCommandResult).mockReturnValue(true);
+    expect(handleChatStreamEvent({ type: "error", conversation_id: owner, client_command_type: "conversation.delete",
+      client_command_id: "delete-command-receipt", message: "Deletion receipt error" } as ServerEvent, owner, handlers)).toBe(true);
+    expect(rejectClientCommandResult).toHaveBeenCalledWith("delete-command-receipt", "Deletion receipt error");
+    expect(useAppStore.getState().conversationMessages[owner]).toBeUndefined();
   });
 
   it("rejects an awaited menu error without failing the unrelated active assistant", () => {

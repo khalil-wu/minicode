@@ -90,6 +90,16 @@ class SessionRunManager:
         )
         if queue_store is not None:
             try:
+                # Load the shared migration receipt before looking at legacy
+                # window files. Reopening a session used to re-lock and parse
+                # every historical queue file even after it was already
+                # migrated, adding seconds to the first WebSocket handshake.
+                queue_store.load()
+                migrated_sources = set(queue_store._migrated_sources)
+                self._legacy_queue_paths = {
+                    path for path in self._legacy_queue_paths
+                    if path.name not in migrated_sources
+                }
                 self._migrate_legacy_user_queues()
             except BaseException:
                 self.close_durable_queue()
@@ -991,7 +1001,7 @@ class SessionRunManager:
         )
 
     def watch_conversation_notifications(self, conversation_id: str) -> None:
-        """Bind one conversation to this session's CC-style queue subscriber."""
+        """Bind one conversation to this session's mailbox wake subscriber."""
 
         owner = str(conversation_id or "").strip()
         if not owner or self._notification_wakes_closed:
@@ -1088,6 +1098,8 @@ class SessionRunManager:
         # Enqueue can complete in a background hook/subagent thread.  Never
         # mutate asyncio/session state from that producer; hand the durable
         # signal back to the WebSocket session's event loop.
+        if not notification.starts_turn:
+            return
         conversation_id = str(notification.conversation_id or "").strip()
         if self._notification_owned_by_other_live_session(
             str(notification.session_id or "").strip()
@@ -1171,7 +1183,7 @@ class SessionRunManager:
             return False
         return any(
             str(item.status or "pending") in {"pending", "delivered", "failed"}
-            and (item.kind != "mailbox_wake" or item.payload.get("delivery_mode", "trigger_turn") == "trigger_turn")
+            and item.starts_turn
             and not self._notification_owned_by_other_live_session(
                 str(item.session_id or "")
             )
@@ -1182,8 +1194,7 @@ class SessionRunManager:
         self,
         conversation_id: str,
     ) -> None:
-        # Match CC's queue processor: yield once so already-enqueued human input
-        # can take its higher-priority path before a later task notification.
+        # Already-enqueued human input takes priority over a later mailbox wake.
         await asyncio.sleep(0)
         lifecycle_lock = self._session.conversation_lifecycle_lock()
         async with lifecycle_lock:
@@ -1266,7 +1277,7 @@ class SessionRunManager:
             self._notification_run_task_ids[conversation_id] = str(task_id)
 
     def stop_notification_wake_intake(self) -> None:
-        """Synchronously stop new CC-style queue signals during teardown."""
+        """Synchronously stop new mailbox wake signals during teardown."""
 
         if self._notification_wakes_closed:
             return
@@ -1431,6 +1442,14 @@ class SessionRunManager:
         if persistence_errors:
             raise ExceptionGroup("Stop ended execution but its durable input state could not be saved", persistence_errors)
         return cancelled_any
+
+    async def cancel_mcp_startup(self, conversation_id: str) -> None:
+        manager = self._session.ws_manager
+        context = manager.execution_contexts.context_for(conversation_id) if manager is not None else None
+        if context is not None:
+            owner = context.thread_runtime
+            resources = (owner.mcp_connections, owner.node_repl_companions, owner.cua_repl_companions)
+            await asyncio.gather(*(resource.cancel_startup() for resource in resources if resource is not None))
 
     def _persist_user_stop(
         self, conversation_id: str, message_id: str, run_context: RunContext | None, reason: str,

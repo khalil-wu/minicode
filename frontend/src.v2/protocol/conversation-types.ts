@@ -341,6 +341,7 @@ export interface ConversationSwitchedEvent {
   conversation?: ConversationRecordPayload | null;
   is_hydrating?: boolean;
   context_pending?: boolean;
+  capabilities_deferred?: boolean;
   session?: RuntimeSessionSnapshot | null;
   snapshot_at?: string;
 }
@@ -506,6 +507,7 @@ export interface ConversationCreateCommand {
 export interface ConversationSwitchCommand {
   type: "conversation.switch";
   conversation_id: string;
+  defer_runtime_capabilities?: boolean;
 }
 
 export interface ConversationClearCommand {
@@ -577,6 +579,7 @@ export interface ConversationWorktreeHandoffPreflightCommand {
   conversation_id: string;
   target: "local" | "worktree";
   dirty_action?: "block" | "stash";
+  local_branch?: string;
 }
 
 export interface ConversationWorktreeHandoffExecuteCommand {
@@ -585,6 +588,7 @@ export interface ConversationWorktreeHandoffExecuteCommand {
   target: "local" | "worktree";
   fingerprint: string;
   dirty_action?: "block" | "stash";
+  local_branch?: string;
 }
 
 export interface ConversationArchiveCommand {

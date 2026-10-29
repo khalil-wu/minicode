@@ -139,12 +139,12 @@ def _checker(td: str, **settings_kwargs) -> PermissionChecker:
     )
 
 
-def _authorize_command(root, args, checker, permission, sandbox, *, rule_decision=None):
+async def _authorize_command(root, args, checker, permission, sandbox, *, rule_decision=None):
     tool = RunCommandTool(ArtifactStore(storage_dir=root / "artifacts"))
     context = configure_command_context(tool, ToolExecutionContext(permission, workspace_root=root), sandbox_policy=sandbox)
     context.permission_checker = checker
     call = ToolCallEvent(id="source-command", name=tool.name, arguments=args)
-    original = authorize_command_call(call, context)
+    original = (await authorize_command_call(call, context))
     if rule_decision is not None:
         rules = "\n".join(f'prefix_rule(pattern={json.dumps(list(command))}, decision="{rule_decision}")'
             for command in original.request.exec_policy.parsed_commands)
@@ -153,7 +153,7 @@ def _authorize_command(root, args, checker, permission, sandbox, *, rule_decisio
         (home / "rules/default.rules").write_text(rules, encoding="utf-8")
         stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(home / "settings.json")), {}),))
         context.run_context.exec_policy_owner = ExecPolicyOwner(home=home, stack=stack)
-        return authorize_command_call(call, context)
+        return (await authorize_command_call(call, context))
     return original
 
 
@@ -238,22 +238,24 @@ def test_content_allow_does_not_force_auto_in_plan_mode():
     assert level != PermissionLevel.AUTO
 
 
-def test_content_allow_cannot_bypass_command_escalation_gate(tmp_path):
+@pytest.mark.asyncio
+async def test_content_allow_cannot_bypass_command_escalation_gate(tmp_path):
     checker = _checker(str(tmp_path), content_allow_rules=["run_command(echo approved)"])
-    authorization = _authorize_command(tmp_path,
+    authorization = (await _authorize_command(tmp_path,
         {"command": "echo approved", "sandbox_permissions": "require_escalated"}, checker,
-        checker.build_context(mode="confirm"), SandboxPolicy.workspace_default(tmp_path))
+        checker.build_context(mode="confirm"), SandboxPolicy.workspace_default(tmp_path)))
     assert not authorization.error
     assert authorization.request.exec_policy.kind == "needs_approval"
     assert authorization.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
-def test_session_auto_override_cannot_bypass_command_escalation_gate(tmp_path):
+@pytest.mark.asyncio
+async def test_session_auto_override_cannot_bypass_command_escalation_gate(tmp_path):
     checker = _checker(str(tmp_path))
-    authorization = _authorize_command(tmp_path,
+    authorization = (await _authorize_command(tmp_path,
         {"command": "echo approved", "sandbox_permissions": "require_escalated"}, checker,
         checker.build_context(mode="confirm",
-            session_overrides={"run_command": PermissionLevel.AUTO}), SandboxPolicy.workspace_default(tmp_path))
+            session_overrides={"run_command": PermissionLevel.AUTO}), SandboxPolicy.workspace_default(tmp_path)))
     assert not authorization.error
     assert authorization.request.exec_policy.kind == "needs_approval"
     assert authorization.permission_decision.permission_level == PermissionLevel.CONFIRM
@@ -310,13 +312,14 @@ def test_session_auto_override_cannot_bypass_diff_review_capability_floor():
     ) == PermissionLevel.DIFF_REVIEW
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision,expected", [("prompt", PermissionLevel.CONFIRM), ("forbidden", PermissionLevel.ALWAYS_DENY)])
-def test_local_allows_cannot_override_source_command_rules(tmp_path, decision, expected):
+async def test_local_allows_cannot_override_source_command_rules(tmp_path, decision, expected):
     checker = _checker(str(tmp_path), content_allow_rules=["run_command(git:*)"])
     permission = checker.build_context(mode="confirm",
         session_overrides={"run_command": PermissionLevel.AUTO})
-    authorization = _authorize_command(tmp_path, {"command": "git reset --hard"}, checker, permission,
-        SandboxPolicy.bypass(), rule_decision=decision)
+    authorization = (await _authorize_command(tmp_path, {"command": "git reset --hard"}, checker, permission,
+        SandboxPolicy.bypass(), rule_decision=decision))
     assert authorization.permission_decision.permission_level == expected
     assert authorization.request.exec_policy.kind == ("needs_approval" if decision == "prompt" else "forbidden")
     with pytest.raises(ValueError, match="Protocol command"):
@@ -326,7 +329,8 @@ def test_local_allows_cannot_override_source_command_rules(tmp_path, decision, e
     assert not allowed and reason
 
 
-def test_source_mcp_annotations_and_explicit_asks_remain_distinct(tmp_path):
+@pytest.mark.asyncio
+async def test_source_mcp_annotations_and_explicit_asks_remain_distinct(tmp_path):
     class Client:
         connected = True
 
@@ -353,22 +357,23 @@ def test_source_mcp_annotations_and_explicit_asks_remain_distinct(tmp_path):
     ]
 
     for proxy, expected in zip(proxies, (PermissionLevel.AUTO, PermissionLevel.CONFIRM)):
-        result, _, _ = authorize_mcp(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), ctx,
-            permission_settings=permission_settings_from_config({}), arguments={})
+        result, _, _ = (await authorize_mcp(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), ctx,
+            permission_settings=permission_settings_from_config({}), arguments={}))
         assert result.permission_decision.permission_level == expected
         for rules, required in (({"content_ask_rules": [proxy.policy_identity]}, PermissionLevel.CONFIRM),
             ({"content_deny_rules": [proxy.policy_identity]}, PermissionLevel.ALWAYS_DENY)):
-            restricted, _, _ = authorize_mcp(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), ctx,
-                permission_settings=permission_settings_from_config({"permissions": rules}), arguments={})
+            restricted, _, _ = (await authorize_mcp(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), ctx,
+                permission_settings=permission_settings_from_config({"permissions": rules}), arguments={}))
             assert restricted.permission_decision.permission_level == required
 
 
-def test_source_read_only_mcp_auto_and_configured_prompt(tmp_path):
+@pytest.mark.asyncio
+async def test_source_read_only_mcp_auto_and_configured_prompt(tmp_path):
     for mode, expected in (("auto", PermissionLevel.AUTO), ("prompt", PermissionLevel.CONFIRM)):
         proxy, _, _ = source_mcp_proxy({"readOnlyHint": True}, mode)
-        result, _, _ = authorize_mcp(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path),
+        result, _, _ = (await authorize_mcp(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path),
             PermissionContext(mode="auto", workspace_root=tmp_path),
-            permission_settings=permission_settings_from_config({}), arguments={})
+            permission_settings=permission_settings_from_config({}), arguments={}))
         assert result.permission_decision.permission_level == expected
 
 
@@ -437,7 +442,8 @@ def test_plan_mode_preserves_exit_plan_confirmation_and_plan_file_exception(tmp_
     ) == PermissionLevel.ALWAYS_DENY
 
 
-def test_auto_and_bypass_keep_their_explicit_product_semantics(tmp_path):
+@pytest.mark.asyncio
+async def test_auto_and_bypass_keep_their_explicit_product_semantics(tmp_path):
     td = str(tmp_path)
     checker = _checker(td, content_allow_rules=["edit_file(src/**)", "apply_patch"])
 
@@ -454,39 +460,41 @@ def test_auto_and_bypass_keep_their_explicit_product_semantics(tmp_path):
         tool=ApplyPatchTool(),
     ) == PermissionLevel.AUTO
 
-    allowed = _authorize_command(tmp_path, {"command": "echo approved"}, checker,
-        checker.build_context(mode="bypass"), SandboxPolicy.bypass())
+    allowed = (await _authorize_command(tmp_path, {"command": "echo approved"}, checker,
+        checker.build_context(mode="bypass"), SandboxPolicy.bypass()))
     assert allowed.request.exec_policy.kind == "skip"
     assert allowed.permission_decision.decision == "allow"
-    denied = _authorize_command(tmp_path, {"command": "echo approved"}, checker,
-        checker.build_context(mode="bypass"), SandboxPolicy.bypass(), rule_decision="forbidden")
+    denied = (await _authorize_command(tmp_path, {"command": "echo approved"}, checker,
+        checker.build_context(mode="bypass"), SandboxPolicy.bypass(), rule_decision="forbidden"))
     assert denied.permission_decision.decision == "deny"
 
 
-def test_source_execpolicy_owns_exact_command_approval_without_legacy_sandbox_flags(tmp_path):
+@pytest.mark.asyncio
+async def test_source_execpolicy_owns_exact_command_approval_without_legacy_sandbox_flags(tmp_path):
     from dataclasses import replace
     checker = _checker(str(tmp_path))
     permission = checker.build_context(mode="confirm")
     for legacy in (False, True):
-        captured = _authorize_command(tmp_path, {"command": "git status"}, checker,
+        captured = (await _authorize_command(tmp_path, {"command": "git status"}, checker,
             replace(permission, sandbox_auto_allow_commands=legacy), SandboxPolicy.bypass(),
-            rule_decision="allow")
+            rule_decision="allow"))
         assert captured.request.exec_policy.kind == "skip"
         assert captured.permission_decision.permission_level == PermissionLevel.AUTO
-        prompted = _authorize_command(tmp_path, {"command": "git status"}, checker,
+        prompted = (await _authorize_command(tmp_path, {"command": "git status"}, checker,
             replace(permission, sandbox_auto_allow_commands=legacy), SandboxPolicy.bypass(),
-            rule_decision="prompt")
+            rule_decision="prompt"))
         assert prompted.request.exec_policy.kind == "needs_approval"
         assert prompted.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
-def test_legacy_allows_cannot_replace_actual_source_command_decisions(tmp_path):
+@pytest.mark.asyncio
+async def test_legacy_allows_cannot_replace_actual_source_command_decisions(tmp_path):
     checker = _checker(str(tmp_path), content_allow_rules=["run_command(git:*)", "run_command(echo:*)"])
     permission = checker.build_context(mode="confirm",
         session_overrides={"run_command": PermissionLevel.AUTO})
     for command in ("git clean -fdx", "git reset --hard", "git push --force", "echo $(id)", "echo `id`"):
-        captured = _authorize_command(tmp_path, {"command": command}, checker, permission,
-            SandboxPolicy.bypass(), rule_decision="prompt")
+        captured = (await _authorize_command(tmp_path, {"command": command}, checker, permission,
+            SandboxPolicy.bypass(), rule_decision="prompt"))
         assert captured.request.exec_policy.kind == "needs_approval", captured.request.exec_policy.evidence_json
         assert captured.permission_decision.permission_level == PermissionLevel.CONFIRM
 

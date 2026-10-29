@@ -14,6 +14,7 @@ import { useAppStore } from "../stores";
 import { HooksTab } from "./HooksTab";
 import { ConfigTab } from "./ConfigTab";
 import { StorageTab } from "./StorageTab";
+import { ToastContainer } from "./ToastContainer";
 import { WorktreesTab } from "./WorktreesTab";
 import { SidebarLeft } from "../shell/SidebarLeft";
 
@@ -127,12 +128,13 @@ it.each([false, true])("keeps both Worktrees refresh reads pending and retains a
 
 it("rechecks Storage snapshots through the authoritative delete command and reports skips separately", async () => {
   const chats = ["deleted", "changed", "failed"].map((id, index) => ({ id, title: id, updated_at: "2026-01-01", archived: true, subagent_count: index, snapshot: { revision: index } }));
-  mocks.fetch.mockImplementation(async url => response(new URL(url).pathname.endsWith("/review") ? { cutoff: "2026-07-01", days: 90, archived_only: true, chats } : { path: "C:/data", total_bytes: 1024, categories: [
+  mocks.fetch.mockImplementation(async url => response(new URL(url).pathname.endsWith("/review") ? { cutoff: "2026-07-01", days: 90, archived_only: true, chats, inventory: chats } : { path: "C:/data", total_bytes: 1024, categories: [
     { name: "chats", bytes: 0 }, { name: "archived", bytes: 0 }, { name: "subagents", bytes: 1024 },
     { name: "unclassified", bytes: 0 }, { name: "worktrees", bytes: 0 }, { name: "other", bytes: 0 },
   ] }));
   mocks.command.mockImplementation(async command => ({ level: command.conversation_id === "failed" ? "error" : command.conversation_id === "changed" ? "warning" : "success", data: { deleted: command.conversation_id === "deleted", reason: command.conversation_id === "changed" ? "storage_review_changed" : undefined } }));
-  render(<StorageTab />);
+  render(<><StorageTab /><ToastContainer /></>);
+  await waitFor(() => expect((screen.getByRole("button", { name: "查看" }) as HTMLButtonElement).disabled).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "查看" }));
   const dialog = await screen.findByRole("dialog", { name: "查看旧聊天" });
   await within(dialog).findByText("已选聊天：3 · 子智能体：3");

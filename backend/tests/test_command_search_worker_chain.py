@@ -193,8 +193,8 @@ async def test_foreground_output_cancel_finishes_owned_persistence_and_capture_c
     monkeypatch.setattr(command_tool if fallback else store, "persist_tool_result" if fallback else "save", persist)
     call = ToolCallEvent(id=context.tool_call_id, name=tool.name,
         arguments={"command": "Write-Output 'recorded'", "max_chars": 32, "env": {"TASK_MODE": "audit"}})
-    authorized = _authorize_final_tool_request(call, tool_registry=context.tool_registry,
-        permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+    authorized = (await _authorize_final_tool_request(call, tool_registry=context.tool_registry,
+        permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context))
     assert not authorized.error and authorized.permission_decision.decision == "allow"
     _bind_final_tool_request(call, authorized.request)
     execution_context = tool_context_with_live_output(call, context, context.tool_registry)

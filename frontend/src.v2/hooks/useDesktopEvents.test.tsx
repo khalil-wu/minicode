@@ -35,6 +35,12 @@ vi.mock("../desktop/runtime", async load => ({
 vi.mock("../workspace/openWorkspaceFolder", () => ({
   openWorkspaceFolder: vi.fn(async () => null),
 }));
+vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(),
+  fetchDraftModelSelection: vi.fn(async (root: string) => ({ provider: "custom", current_model: "fixture-model", model: "fixture-model",
+    available_models: ["fixture-model"], models_source: "configured", available_permission_modes: ["confirm"],
+    config_version: "fixture", config_cwd: root, feature_flags: {}, composer_commands: [],
+    default_model_selection: { provider: "custom", model: "fixture-model", reasoning_effort: "off", conversation_id: "", working_directory: root } })),
+}));
 
 const Harness = () => {
   useDesktopEvents();
@@ -76,6 +82,7 @@ describe("useDesktopEvents open actions", () => {
       conversationWorkbenchStates: {},
       isConnected: false, isStreaming: false,
       rightPanelOpen: false, rightPanelExpanded: false, rightStackTab: "tasks", rightStackTabLocked: false,
+      compactPanel: null,
     });
   });
 
@@ -94,6 +101,26 @@ describe("useDesktopEvents open actions", () => {
 
     fireEvent(window, new Event("open-settings"));
     expect(useAppStore.getState().settingsOpen).toBe(true);
+  });
+
+  it("routes native Find to the visible settings scope and keeps hidden chat/editor search idle", () => {
+    const settings = vi.fn(), chat = vi.fn(), editor = vi.fn();
+    window.addEventListener("settings:request-search", settings);
+    window.addEventListener("chat:request-search", chat);
+    window.addEventListener("editor:find", editor);
+    const view = render(<Harness />);
+    act(() => useAppStore.setState({ settingsOpen: true }));
+    fireEvent(window, new Event("find-in-thread"));
+    fireEvent(window, new Event("find-next-in-thread"));
+    expect(settings).toHaveBeenCalledTimes(1);
+    expect(chat).not.toHaveBeenCalled(); expect(editor).not.toHaveBeenCalled();
+    act(() => useAppStore.setState({ settingsOpen: false }));
+    fireEvent(window, new Event("find-in-thread"));
+    expect(chat).toHaveBeenCalledTimes(1);
+    view.unmount();
+    window.removeEventListener("settings:request-search", settings);
+    window.removeEventListener("chat:request-search", chat);
+    window.removeEventListener("editor:find", editor);
   });
 
   it("keeps open-extensions-marketplace as an open action instead of a toggle", () => {
@@ -118,42 +145,63 @@ describe("useDesktopEvents open actions", () => {
     { appMode: "cowork" as const, workingDirectory: "C:\\CurrentProject", bindWorkspace: false },
   ])("native new-conversation uses the shell policy for $appMode with workspace=$workingDirectory", ({ appMode, workingDirectory, bindWorkspace }) => {
     const create = vi.fn(async () => false);
-    useAppStore.setState({ appMode, workingDirectory, createConversation: create });
+    useAppStore.setState({ appMode, workingDirectory, createConversation: create, workspaceComposerDrafts: {},
+      conversationMessages: {}, conversationStreaming: {}, conversationAgentStates: {} });
     const original = useAppStore.getState();
     const focus = vi.fn();
+    const frames: FrameRequestCallback[] = [];
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback => { frames.push(callback); return frames.length; });
     window.addEventListener("composer:focus", focus);
     try {
       render(<Harness />);
       fireEvent(window, new Event("new-conversation"));
-      expect(create).toHaveBeenCalledExactlyOnceWith({ appMode: "cowork", bindWorkspace });
+      expect(create).not.toHaveBeenCalled();
       expect(focus).not.toHaveBeenCalled();
-      expect(useAppStore.getState().conversationId).toBe(original.conversationId);
-      expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
-      expect(useAppStore.getState().workingDirectory).toBe(workingDirectory);
-      expect(useAppStore.getState().draft).toBe(original.draft);
-      expect(useAppStore.getState().messages).toBe(original.messages);
+      const state = useAppStore.getState();
+      const id = state.activeConversationDraftId!;
+      expect(id).toBeTruthy();
+      expect(state.conversationDrafts[id]).toMatchObject({ bindWorkspace, workspaceRoot: bindWorkspace ? workingDirectory : "", appMode: "cowork" });
+      expect(state).toMatchObject({ conversationId: null, pendingConversationSwitchId: null, pendingConversationCreateId: null,
+        appMode: "cowork", workingDirectory: bindWorkspace ? workingDirectory : "", draft: "", messages: [] });
+      expect(state.conversations).toEqual(original.conversations);
+      expect(state.conversationWorkbenchStates[original.conversationId!].draft).toBe(original.draft);
+      expect(state.conversationMessages[original.conversationId!]).toEqual(original.messages);
+      act(() => frames.splice(0).forEach(callback => callback(0)));
+      expect(focus).toHaveBeenCalledTimes(1);
     } finally {
       window.removeEventListener("composer:focus", focus);
+      frame.mockRestore();
     }
   });
 
   it("native quick-chat stays unbound to the open code project and focuses the composer once", () => {
     const create = vi.fn(async () => false);
-    useAppStore.setState({ appMode: "code", workingDirectory: "C:\\CurrentProject", createConversation: create });
+    useAppStore.setState({ appMode: "code", workingDirectory: "C:\\CurrentProject", createConversation: create,
+      workspaceComposerDrafts: {}, conversationMessages: {}, conversationStreaming: {}, conversationAgentStates: {} });
     const original = useAppStore.getState();
     const focus = vi.fn();
+    const frames: FrameRequestCallback[] = [];
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockImplementation(callback => { frames.push(callback); return frames.length; });
     window.addEventListener("composer:focus", focus);
     try {
       render(<Harness />);
       fireEvent(window, new Event("quick-chat"));
-      expect(create).toHaveBeenCalledExactlyOnceWith({ appMode: "cowork", bindWorkspace: false });
+      expect(create).not.toHaveBeenCalled();
+      expect(focus).not.toHaveBeenCalled();
+      const state = useAppStore.getState();
+      const id = state.activeConversationDraftId!;
+      expect(id).toBeTruthy();
+      expect(state.conversationDrafts[id]).toMatchObject({ bindWorkspace: false, workspaceRoot: "", appMode: "cowork" });
+      expect(state).toMatchObject({ conversationId: null, pendingConversationSwitchId: null, pendingConversationCreateId: null,
+        appMode: "cowork", workingDirectory: "", draft: "", messages: [] });
+      expect(state.conversations).toEqual(original.conversations);
+      expect(state.conversationWorkbenchStates[original.conversationId!].draft).toBe(original.draft);
+      expect(state.conversationMessages[original.conversationId!]).toEqual(original.messages);
+      act(() => frames.splice(0).forEach(callback => callback(0)));
       expect(focus).toHaveBeenCalledTimes(1);
-      expect(useAppStore.getState().conversationId).toBe(original.conversationId);
-      expect(useAppStore.getState().draft).toBe(original.draft);
-      expect(useAppStore.getState().messages).toBe(original.messages);
-      expect(useAppStore.getState().workingDirectory).toBe(original.workingDirectory);
     } finally {
       window.removeEventListener("composer:focus", focus);
+      frame.mockRestore();
     }
   });
 
@@ -244,9 +292,9 @@ describe("useDesktopEvents open actions", () => {
     fireEvent(window, new Event("toggle-pinned-summary"));
     expect(useAppStore.getState().contextCardCollapsed).toBe(false);
     fireEvent(window, new Event("toggle-side-panel"));
-    expect(useAppStore.getState().rightPanelOpen).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, contextCardCollapsed: true, contextCardPinned: true });
     fireEvent(window, new Event("toggle-pinned-summary"));
-    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, contextCardCollapsed: true, contextCardPinned: false });
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, contextCardCollapsed: false, contextCardPinned: true });
     fireEvent(window, new Event("toggle-bottom-panel"));
     expect(useAppStore.getState()).toMatchObject({ appMode: "cowork", dockCollapsed: false, activeBottomTab: "terminal" });
     fireEvent(window, new Event("toggle-bottom-panel"));

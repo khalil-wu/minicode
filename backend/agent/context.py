@@ -643,7 +643,8 @@ class ContextBuilder:
         self._skill_config_stack = skill_config_stack
         self._skill_role_features = role_features or {}
         self._source_agent_role = source_agent_role
-        self._skill_snapshot_source: tuple[int, str] | None = None
+        self._skill_snapshot_source: tuple[int, str, str | None] | None = None
+        self._skill_snapshot_turn_id = ""
         if isinstance(skill_manager, SkillManager):
             self.bind_skill_manager(skill_manager, workspace_root)
         self._memory_manager = memory_manager
@@ -740,7 +741,7 @@ class ContextBuilder:
         return self._skill_manager
 
     def bind_skill_manager(
-        self, manager: SkillManager, workspace_root: Path | str | None, *, refresh: bool = False, config_stack: Any = None,
+        self, manager: SkillManager, workspace_root: Path | str | None, *, refresh: bool = False, config_stack: Any = None, force_reload: bool = False, turn_id: str = "",
     ) -> None:
         # The builder can be reused across user turns. The query boundary asks
         # for a fresh snapshot; repeated binds within that turn use this one.
@@ -748,10 +749,12 @@ class ContextBuilder:
             self._skill_config_stack = config_stack
         source = (id(manager), os.path.normcase(os.path.normpath(str(workspace_root or ""))),
             self._skill_config_stack.fingerprint if self._skill_config_stack is not None else None)
-        if not refresh and source == self._skill_snapshot_source:
+        if not refresh and not force_reload and source == self._skill_snapshot_source:
             return
-        self._skill_manager = manager.snapshot(workspace_root, role_config=self._skill_role_config, role_features=self._skill_role_features, config_stack=self._skill_config_stack)
+        self._skill_manager = manager.snapshot(workspace_root, role_config=self._skill_role_config, role_features=self._skill_role_features, config_stack=self._skill_config_stack, force_reload=force_reload)
         self._skill_snapshot_source = source
+        if turn_id:
+            self._skill_snapshot_turn_id = turn_id
         self._skill_executor = SkillExecutor(self._skill_manager)
 
     def configure_skill_stack(self, stack: Any) -> None:
@@ -1020,7 +1023,6 @@ class ContextBuilder:
 
     async def prepare_system_prompt(self, state: AgentState) -> str:
         await self._ensure_environment_project_instructions()
-        await self._ensure_git_status_context(self._workspace_root_for_state(state))
         return self.base_system_prompt(state)
 
     def _get_project_guidelines(
@@ -1229,14 +1231,13 @@ class ContextBuilder:
         return "## Inherited Memory\n" + "\n\n".join(note_blocks)
 
 
-    async def start_turn(self, user_message: str, state: AgentState, *, input_role: str = "user") -> LLMMessage:
+    async def start_turn(self, user_message: str, state: AgentState, *, input_role: str = "user") -> LLMMessage | None:
         """Render and store one model-visible user turn."""
         user_message = str(user_message or "")
         self._sync_realtime_world_state()
         agent_inputs = state.prompt_context.get("agent_input_messages")
         if agent_inputs:
             workspace_root = self._workspace_root_for_state(state)
-            await self._ensure_git_status_context(workspace_root)
             prompt_parts = self._build_prompt_parts(state, workspace_root)
             admitted_message = self.append_agent_input_messages(agent_inputs)
             state.prompt_context.pop("agent_input_messages")
@@ -1248,7 +1249,6 @@ class ContextBuilder:
         invoked_paths = []
         skill_injections = self._consume_skill_injections(state, invoked_paths=invoked_paths)
         workspace_root = self._workspace_root_for_state(state)
-        await self._ensure_git_status_context(workspace_root)
         prompt_parts = self._build_prompt_parts(state, workspace_root)
         attachment_plan = build_attachment_input_plan(
             state.attachments,
@@ -1384,7 +1384,6 @@ class ContextBuilder:
 
         workspace_root = self._workspace_root_for_state(active_state)
         await self._ensure_environment_project_instructions()
-        await self._ensure_git_status_context(workspace_root)
         self._rehydrate_attachment_refs(active_state, workspace_root)
         if (
             self._prepared_prompt_state is active_state
@@ -1969,7 +1968,6 @@ class ContextBuilder:
             skill_context=self._build_skill_catalog(),
             memory_context=self._build_memory_context(),
             persistent_context=self._build_persistent_context(),
-            git_status_context=self._git_status_context,
             model_slug=self._llm.model_id() if isinstance(self._llm, LLMAdapter) else "",
             personality=self._role_personality,
             captured_model_messages=model_messages,

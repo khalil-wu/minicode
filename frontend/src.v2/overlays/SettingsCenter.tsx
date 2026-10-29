@@ -1,11 +1,12 @@
 import { useI18n } from "../i18n";
-import { lazy, memo, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   CalendarClock,
   Cpu,
   FlaskConical,
   Search,
   ServerOff,
+  X,
 } from "../lib/icons";
 import { useAppStore } from "../stores";
 import { visibleLeftSidebarWidth } from "../stores/shared-helpers";
@@ -84,10 +85,12 @@ export const SettingsCenter = memo(function SettingsCenter() {
   }, [settingsOpen]);
 
   const activeTab = useAppStore((s) => s.settingsTab);
+  const browserSettingsSection = useAppStore((s) => s.browserSettingsSection);
   const setActiveTab = useAppStore((s) => s.setSettingsTab);
   const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const shortcutBindings = useAppStore((s) => s.shortcutBindings);
+  const reducedMotion = useAppStore((s) => s.reducedMotion);
   const appMode = useAppStore((s) => s.appMode);
   const { enabled: pluginsEnabled } = usePluginsFeature();
   const computerUse = useComputerUseSettings(settingsOpen);
@@ -101,6 +104,19 @@ export const SettingsCenter = memo(function SettingsCenter() {
   const [settingsLoadState, setSettingsLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [settingsLoadError, setSettingsLoadError] = useState("");
   const [settingsQuery, setSettingsQuery] = useState("");
+  const settingsSearchRef = useRef<HTMLInputElement>(null);
+  const searchResultsRef = useRef<HTMLDivElement>(null);
+  const searchResultsId = useId();
+  const [highlightedSearchIndex, setHighlightedSearchIndex] = useState(-1);
+  const focusSettingsSearch = useCallback(() => {
+    settingsSearchRef.current!.focus();
+    settingsSearchRef.current!.select();
+  }, []);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    window.addEventListener("settings:request-search", focusSettingsSearch);
+    return () => window.removeEventListener("settings:request-search", focusSettingsSearch);
+  }, [settingsOpen, focusSettingsSearch]);
   const activeTabButtonRef = useRef<HTMLButtonElement>(null);
   const contentRef = useRef<HTMLElement>(null);
   const [toolbarHost, setToolbarHost] = useState<HTMLDivElement | null>(null);
@@ -122,7 +138,7 @@ export const SettingsCenter = memo(function SettingsCenter() {
   const [visitedTabs, setVisitedTabs] = useState<Tab[]>([activeTab]);
   const [searchTarget, setSearchTarget] = useState<{ tab: Tab; title: string; sourceTitle: string } | null>(null);
   useEffect(() => {
-    if (settingsOpen) setVisitedTabs((tabs) => [...new Set([...tabs, activeTab])]);
+    if (settingsOpen) setVisitedTabs((tabs) => tabs.includes(activeTab) ? tabs : [...tabs, activeTab]);
   }, [activeTab, settingsOpen]);
 
   useEffect(() => {
@@ -184,16 +200,15 @@ export const SettingsCenter = memo(function SettingsCenter() {
 
   useEffect(() => {
     if (!settingsOpen) return;
-    if (activeTab !== "general" && activeTab !== "provider") return;
+    if (activeTab !== "provider") return;
     if (settingsPayloadRef.current) {
       setSettingsLoadState("ready");
       return;
     }
     let cancelled = false;
-    const delayMs = activeTab === "general" ? 500 : 0;
     const timer = window.setTimeout(() => {
       if (!cancelled) loadSettings();
-    }, delayMs);
+    }, 0);
     return () => {
       cancelled = true;
       settingsLoadEpochRef.current += 1;
@@ -217,13 +232,12 @@ export const SettingsCenter = memo(function SettingsCenter() {
     if (!settingsOpen || !window.matchMedia("(max-width: 760px)").matches) return;
     const activeButton = activeTabButtonRef.current;
     if (!activeButton || typeof activeButton.scrollIntoView !== "function") return;
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     activeButton.scrollIntoView({
-      behavior: reduceMotion ? "auto" : "smooth",
+      behavior: reducedMotion ? "auto" : "smooth",
       block: "nearest",
       inline: "center",
     });
-  }, [activeTab, settingsOpen]);
+  }, [activeTab, settingsOpen, reducedMotion]);
 
   const tabs = [
     { id: "general" as const, group: tr("个人"), label: tr("常规"), description: tr("设置工作方式、消息跟进、过程展示与内容加载。"), keywords: "permissions composer notifications terminal updates", icon: <SettingsSourceIcon icon="general" /> },
@@ -274,6 +288,43 @@ export const SettingsCenter = memo(function SettingsCenter() {
   const matchingOptions = normalizedSettingsQuery ? searchableOptions.filter((option) =>
     (option.tab !== "computerUse" || computerUse.data?.navigation_visible)
       && `${option.title} ${option.description} ${option.keywords}`.toLowerCase().includes(normalizedSettingsQuery)) : [];
+  const searchResultKeys = matchingOptions.map(option => JSON.stringify([option.tab, option.sourceTitle])).join("\0");
+  useEffect(() => { setHighlightedSearchIndex(-1); }, [settingsQuery, searchResultKeys]);
+  useEffect(() => {
+    if (highlightedSearchIndex < 0) return;
+    (searchResultsRef.current!.children[highlightedSearchIndex] as HTMLElement).scrollIntoView({ block: "nearest" });
+  }, [highlightedSearchIndex]);
+  const selectSearchOption = (option: typeof matchingOptions[number]) => {
+    if (option.tab === "provider" && option.sourceTitle === "听写模型" && runtime()?.remoteHost) {
+      void openDictationProviderSettings().catch(error => pushToast(error instanceof Error ? error.message : String(error), "error"));
+      return;
+    }
+    setActiveTab(option.tab);
+    setSearchTarget({ tab: option.tab, title: option.title, sourceTitle: option.sourceTitle });
+  };
+  const clearSettingsSearch = () => {
+    setSettingsQuery("");
+    setSearchTarget(null);
+    setHighlightedSearchIndex(-1);
+  };
+  const navigateSearchResults = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229 || !settingsQuery) return;
+    if (event.key === "Escape") {
+      event.preventDefault(); event.stopPropagation();
+      clearSettingsSearch();
+      return;
+    }
+    const count = matchingOptions.length;
+    if (count === 0) return;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault(); event.stopPropagation();
+      const direction = event.key === "ArrowDown" ? 1 : -1;
+      setHighlightedSearchIndex(current => current < 0 ? (direction > 0 ? 0 : count - 1) : (current + direction + count) % count);
+    } else if (event.key === "Enter" && highlightedSearchIndex >= 0 && !event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      event.preventDefault(); event.stopPropagation();
+      selectSearchOption(matchingOptions[highlightedSearchIndex]);
+    }
+  };
 
   useEffect(() => {
     if (settingsOpen && activeTab === "computerUse" && computerUse.data && !computerUse.data.navigation_visible) setActiveTab("general");
@@ -283,8 +334,11 @@ export const SettingsCenter = memo(function SettingsCenter() {
     setProvider(id);
   };
   const handleSettingsPayloadChange = (payload: LLMSettingsPayload) => {
+    settingsLoadEpochRef.current += 1;
     settingsPayloadRef.current = payload;
     setSettingsPayload(payload);
+    setSettingsLoadState("ready");
+    setSettingsLoadError("");
   };
 
   return (
@@ -295,24 +349,40 @@ export const SettingsCenter = memo(function SettingsCenter() {
       hidden={!settingsOpen}
       aria-label={tr("设置")}
       tabIndex={-1}
+      onKeyDown={event => {
+        if (!event.defaultPrevented && !event.nativeEvent.isComposing && event.keyCode !== 229
+          && (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
+          event.preventDefault(); event.stopPropagation(); focusSettingsSearch();
+        }
+      }}
     >
       <aside className="settings-workspace-sidebar">
         <div className="settings-navigation-heading">
         <h2>{tr("设置")}</h2>
         </div>
-        <label className="settings-search">
+        <div className="settings-search">
           <Search size={16} aria-hidden="true" />
-          <input value={settingsQuery} onChange={(event) => { setSettingsQuery(event.target.value); setSearchTarget(null); }} placeholder={tr("搜索设置…")} aria-label={tr("搜索设置")} />
-        </label>
-        <nav className="settings-center-tabs" aria-label={tr("设置分类")}>
-          {matchingOptions.length > 0 && <div className="settings-search-results" aria-label={tr("设置选项结果")}>
-            {matchingOptions.map((option) => <button key={`${option.tab}:${option.title}`} type="button"
-              className="settings-search-result" onClick={() => {
-                if (option.tab === "provider" && option.sourceTitle === "听写模型" && runtime()?.remoteHost) {
-                  void openDictationProviderSettings().catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); return;
-                }
-                setActiveTab(option.tab); setSearchTarget({ tab: option.tab, title: option.title, sourceTitle: option.sourceTitle });
-              }}>
+          <input ref={settingsSearchRef} role="searchbox" value={settingsQuery}
+            aria-controls={matchingOptions.length ? searchResultsId : undefined}
+            aria-activedescendant={highlightedSearchIndex >= 0 ? `${searchResultsId}-${highlightedSearchIndex}` : undefined}
+            onChange={(event) => { setSettingsQuery(event.target.value); setSearchTarget(null); setHighlightedSearchIndex(-1); }}
+            onKeyDown={navigateSearchResults} placeholder={tr("搜索")} aria-label={tr("搜索设置")} />
+          {settingsQuery.length > 0 && <button type="button" className="settings-search-clear" aria-label={tr("清除搜索")}
+            onClick={() => { settingsSearchRef.current!.focus(); clearSettingsSearch(); }}><X size={14} aria-hidden="true" /></button>}
+        </div>
+        <nav className="settings-center-tabs" aria-label={tr("设置分类")} onKeyDown={event => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          const current = (event.target as Element).closest<HTMLButtonElement>("[data-settings-panel]");
+          if (!current) return;
+          event.preventDefault();
+          const buttons = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("[data-settings-panel]:not(:disabled)"));
+          const next = buttons[buttons.indexOf(current) + (event.key === "ArrowDown" ? 1 : -1)];
+          next?.focus(); next?.click();
+        }}>
+          {matchingOptions.length > 0 && <div ref={searchResultsRef} id={searchResultsId} className="settings-search-results" aria-label={tr("设置选项结果")}>
+            {matchingOptions.map((option, index) => <button key={`${option.tab}:${option.title}`} type="button"
+              id={`${searchResultsId}-${index}`} aria-current={highlightedSearchIndex === index ? "page" : undefined}
+              className="settings-search-result" onClick={() => selectSearchOption(option)}>
               <strong>{tabs.find((tab) => tab.id === option.tab)?.label} / {option.title}</strong><span>{option.description}</span>
             </button>)}
           </div>}
@@ -326,6 +396,7 @@ export const SettingsCenter = memo(function SettingsCenter() {
                   <button
                     type="button"
                     className="settings-center-tab"
+                    data-settings-panel={tab.id}
                     key={tab.id}
                     ref={navigationTab === tab.id ? activeTabButtonRef : undefined}
                     aria-label={tab.label}
@@ -356,6 +427,7 @@ export const SettingsCenter = memo(function SettingsCenter() {
               >{tr("了解更多")}</a></p>}
               {integrationOpen && <p>{tr("管理插件、技能和 MCP。")}</p>}
               {activeTab === "computerUse" && <p>{tr("管理 MiniCode 如何使用电脑上的其他应用。")}</p>}
+              {activeTab === "browser" && browserSettingsSection === "general" && <p>{tr("管理你的 Browser Use 偏好设置和网站访问权限。")}</p>}
               </div>
               <div ref={setToolbarHost} className="settings-page-heading-actions">
                 {integrationOpen && <PluginSettingsToolbar
@@ -384,7 +456,7 @@ export const SettingsCenter = memo(function SettingsCenter() {
               {Array.from(new Set([...visitedTabs, ...(settingsOpen ? [activeTab, ...(integrationOpen ? ["plugins" as const, "connectors" as const, "skills" as const] : [])] : [])])).filter(tab => tab !== "marketplace").map((tab) => <div
                 className="settings-tab-pane" key={tab} data-settings-tab={tab === "plugins" && activeTab === "marketplace" ? "marketplace" : tab} hidden={tab !== activeTab && !(activeTab === "marketplace" && tab === "plugins")}>
               <Suspense fallback={<div className="settings-load-state" role="status" aria-label={tr("正在加载设置")}><span className="settings-load-state-spinner" aria-hidden="true" /></div>}>
-              {tab === "appearance" && <AppearanceTab />}
+              {tab === "appearance" && <AppearanceTab active={settingsOpen && tab === activeTab} />}
               {tab === "import" && <ImportSettingsTab active={settingsOpen && tab === activeTab} />}
               {tab === "config" && <ConfigTab active={settingsOpen && tab === activeTab} />}
               {tab === "hooks" && <HooksTab active={settingsOpen && tab === activeTab} toolbarHost={toolbarHost} />}

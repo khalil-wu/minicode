@@ -3,6 +3,10 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Profiler } from "react";
+import type { SendChatMessageOptions } from "../chat/sendChatMessage";
+import { emptyComposerDraft, flushComposerDrafts } from "../stores/composer-drafts";
+import { retainFailedComposerInput, restoreRetainedComposerInput } from "./retainedComposerInputs";
+import { handleCommandResultEvent } from "../chat/commandResultEvents";
 
 const mocks = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -23,7 +27,7 @@ const mocks = vi.hoisted(() => {
   return {
     sendClientCommand: vi.fn(() => true),
     sendClientCommandAwaitResult: vi.fn(),
-    sendChatMessage: vi.fn((): boolean | Promise<boolean> => true),
+    sendChatMessage: vi.fn((_options: SendChatMessageOptions): boolean | Promise<boolean> => true),
     pushToast: vi.fn(),
     buildContextPayload: vi.fn(async () => "File: src/App.tsx\n```tsx\nexport const value = 1;\n```"),
     buildContextNativeAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], notes: "" })),
@@ -38,9 +42,11 @@ vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommandAwaitResult: mocks.sendClientCommandAwaitResult,
   commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed",
   sendPromptResponseCommand: mocks.promptResponse,
+  resolveClientCommandResult: vi.fn(() => false),
 }));
 
-vi.mock("../chat/sendChatMessage", () => ({
+vi.mock("../chat/sendChatMessage", async load => ({
+  ...await load<typeof import("../chat/sendChatMessage")>(),
   sendChatMessage: mocks.sendChatMessage,
 }));
 
@@ -102,7 +108,8 @@ vi.mock("./FooterRow", () => ({
   ),
 }));
 
-vi.mock("./uploads", () => ({
+vi.mock("./uploads", async load => ({
+  ...await load<typeof import("./uploads")>(),
   uploadComposerFiles: vi.fn(),
 }));
 
@@ -154,6 +161,9 @@ describe("Composer goal bar", () => {
     mocks.promptResponse.mockClear();
     mocks.menuSelection = "/usage";
     useAppStore.setState({
+      activeConversationDraftId: null,
+      retainedComposerInputs: {}, retainedInputEdit: undefined,
+      pendingConversationCreateId: null,
       pendingConversationSwitchId: null,
       pendingApproval: null,
       approvalQueue: [],
@@ -168,6 +178,23 @@ describe("Composer goal bar", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("retires a recalled failed input through its new submission and restores the newer draft", async () => {
+    useAppStore.setState({ conversationId: "retry-owner", workingDirectory: "", draft: "keep newer draft", richDraft: undefined,
+      attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null, isConnected: true, isStreaming: false,
+      messages: [], sideChats: {}, conversationMessages: {}, conversationStreaming: {}, currentModel: "gpt-5", activeGoal: null });
+    retainFailedComposerInput({ owner: { kind: "conversation", id: "retry-owner", workspaceRoot: "" },
+      message: { id: "recalled-failure", role: "user", content: "retry original input", timestamp: 1, artifacts: [], deliveryStatus: "failed" },
+      draft: { ...emptyComposerDraft(), draft: "retry original input" }, comments: [] });
+    restoreRetainedComposerInput("recalled-failure");
+    mocks.sendChatMessage.mockResolvedValueOnce(true);
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(useAppStore.getState().retainedComposerInputs).toEqual({}));
+    expect(mocks.sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ displayContent: "retry original input" }));
+    await waitFor(() => expect(useAppStore.getState().draft).toBe("keep newer draft"));
+    expect(useAppStore.getState().retainedInputEdit).toBeUndefined();
   });
 
   it.each(["build", "plan"] as const)("keeps the %s composer out of 32 transcript frame updates", async (agentMode) => {
@@ -230,6 +257,60 @@ describe("Composer goal bar", () => {
     expect(useAppStore.getState().draft).toBe("next draft");
   });
 
+  it("retains the original input independently when preparation fails after the next draft was typed", async () => {
+    let reject!: (error: Error) => void;
+    mocks.buildContextPayload.mockReturnValueOnce(new Promise((_resolve, failure) => { reject = failure; }));
+    useAppStore.setState({ conversationId: "failed-owner", workingDirectory: "C:/failed-owner", draft: "original unsent input",
+      isConnected: true, isStreaming: false, currentModel: "gpt-5", messages: [], attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false, queuedEdit: undefined });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(useAppStore.getState().draft).toBe("");
+    fireEvent.change(screen.getByRole("textbox", { name: "composer" }), { target: { value: "newer authored input" } });
+    await act(async () => reject(new Error("Actual preparation failure")));
+    expect(useAppStore.getState().draft).toBe("newer authored input");
+    const inputs = Object.values(useAppStore.getState().retainedComposerInputs);
+    expect(inputs).toHaveLength(1);
+    expect(inputs[0]).toMatchObject({ owner: { kind: "conversation", id: "failed-owner", workspaceRoot: "C:/failed-owner" },
+      message: { content: "original unsent input", deliveryStatus: "failed", failureMessage: "Actual preparation failure" }, draft: { draft: "original unsent input" } });
+    expect(useAppStore.getState().messages).toEqual([inputs[0].message]);
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not label an unconfirmed transport result as a retained failed input", async () => {
+    mocks.sendChatMessage.mockImplementationOnce(options => { options.onSubmitted?.(); return Promise.resolve(false); });
+    useAppStore.setState({ conversationId: "unconfirmed-owner", draft: "submitted input", isConnected: true, isStreaming: false,
+      currentModel: "gpt-5", messages: [], attachments: [], selectedMentions: [], selectedSkills: [], queuedEdit: undefined });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalledOnce());
+    await act(async () => {});
+    expect(Object.values(useAppStore.getState().retainedComposerInputs)).toEqual([
+      expect.objectContaining({ unconfirmed: true, message: expect.objectContaining({ deliveryStatus: "sending" }) }),
+    ]);
+  });
+
+  it("does not resurrect a confirmed deleted conversation when its pending preparation rejects", async () => {
+    let reject!: (error: Error) => void;
+    mocks.buildContextPayload.mockReturnValueOnce(new Promise((_resolve, failure) => { reject = failure; }));
+    useAppStore.setState({ conversationId: "deleted-prepare-owner", workingDirectory: "C:/deleted-prepare-owner", draft: "old input",
+      isConnected: true, isStreaming: false, currentModel: "gpt-5", messages: [], attachments: [], selectedMentions: [], selectedSkills: [],
+      slashPanelOpen: false, mentionPanelOpen: false, queuedEdit: undefined });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await act(async () => {
+      handleCommandResultEvent({ type: "command.result", command: "conversation.delete", level: "success", message: "",
+        data: { conversation_id: "deleted-prepare-owner", deleted: true } });
+      await flushComposerDrafts();
+    });
+    act(() => useAppStore.setState({ conversationId: "next-owner", workingDirectory: "C:/next-owner", draft: "new owner input", messages: [] }));
+    await act(async () => reject(new Error("Late context error")));
+    expect(useAppStore.getState().draft).toBe("new owner input");
+    expect(useAppStore.getState().retainedComposerInputs).toEqual({});
+    expect(useAppStore.getState().messages).toEqual([]);
+    expect(mocks.sendChatMessage).not.toHaveBeenCalled();
+  });
+
   it("captures the selected live turn before preparing composer context", async () => {
     let finishContext!: (value: string) => void;
     mocks.buildContextPayload.mockReturnValueOnce(new Promise(resolve => { finishContext = resolve; }));
@@ -254,7 +335,7 @@ describe("Composer goal bar", () => {
     render(<Composer />);
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(mocks.sendChatMessage).toHaveBeenCalled());
-    expect(useAppStore.getState().draft).toBe("A requested task");
+    expect(useAppStore.getState().draft).toBe("");
     act(() => {
       useAppStore.getState().snapshotWorkbenchState("send-owner-a");
       useAppStore.setState({ conversationId: "send-owner-b", workingDirectory: "C:/owner-b", draft: "B unsent task" });
@@ -294,7 +375,7 @@ describe("Composer goal bar", () => {
       ? { quotedMessage: { ...quote, content: "new quote" } }
       : { selectedMentions: [{ ...mention, note: "new note" }] }));
     await act(async () => finishContext(""));
-    expect(useAppStore.getState().draft).toBe("unchanged draft");
+    expect(useAppStore.getState().draft).toBe("");
     expect(changed === "quote" ? useAppStore.getState().quotedMessage?.content : useAppStore.getState().selectedMentions[0]?.kind === "browser_annotation"
       ? useAppStore.getState().selectedMentions[0].note : "").toBe(changed === "quote" ? "new quote" : "new note");
   });

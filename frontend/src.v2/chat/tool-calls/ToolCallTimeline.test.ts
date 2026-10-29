@@ -89,6 +89,26 @@ describe("ToolCallTimeline helpers", () => {
     });
   });
 
+  it("reuses tool timeline rows for an unchanged message identity", () => {
+    const record = { id: "tool-stable", name: "read_file", args: {}, status: "success" as const, startedAt: 100 };
+    const message = {
+      id: "assistant-stable-tool",
+      role: "assistant",
+      content: "",
+      artifacts: [],
+      timestamp: 100,
+      toolCalls: [record],
+    } as ChatMessage;
+
+    const first = buildRunTimelineItems([message], []);
+    const second = buildRunTimelineItems([message], []);
+    expect(second[0]).toBe(first[0]);
+
+    const updated = { ...message, toolCalls: [{ ...record, status: "failed" as const }] } as ChatMessage;
+    expect(buildRunTimelineItems([updated], [])[0]).not.toBe(first[0]);
+    expect(buildRunTimelineItems([updated], [])[0].status).toBe("failed");
+  });
+
   it("preserves pending and timeout in timeline and replay", () => {
     const message = {
       id: "assistant-statuses",

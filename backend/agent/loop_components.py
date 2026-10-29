@@ -31,7 +31,6 @@ from backend.agent.provider_protocol import (
 from backend.agent.response_utils import append_assistant_history
 from backend.agent.tool_schema_derivation import (
     TurnToolSchemaDerivation,
-    derive_turn_tool_schema_state,
     effective_toolset_policy,
     requested_tool_mode,
 )
@@ -54,7 +53,7 @@ from backend.tools.toolset_runtime import restore_toolset_policy
 @dataclass(slots=True)
 class AgentLoopComponents:
     pending_turn_context: list[str]
-    turn_tool_schema_state: TurnToolSchemaDerivation
+    turn_tool_schema_state: TurnToolSchemaDerivation | None
     iteration_runtime: TurnIterationRuntime
     turn_start_tool_call_count: int
     turn_budget_controller: TurnBudgetController
@@ -190,27 +189,10 @@ def build_agent_loop_components(
             collect_mcp_instructions(mcp_manager) if mcp_manager is not None else {},
         )
 
-    mcp_version, mcp_instructions = mcp_catalog(tool_registry)
-    base_tool_schemas = tool_registry.get_schemas(
-        permission_checker=permission_checker,
-        permission_context=tool_context.permission,
-        toolset_policy=active_toolset_policy,
-        mcp_registry_version=mcp_version,
-    )
-    turn_tool_schema_state = derive_turn_tool_schema_state(
-        base_tool_schemas=base_tool_schemas,
-        mcp_instructions=mcp_instructions,
-        tool_registry=tool_registry,
-        permission_checker=permission_checker,
-        permission_context=tool_context.permission,
-        toolset_policy=active_toolset_policy,
-    )
-    state.prompt_context["tool_names"] = turn_tool_schema_state.tool_names
-    state.tool_runtime_guidance = turn_tool_schema_state.runtime_guidance
-    state.prompt_context["deferred_tools_prompt_block"] = (
-        turn_tool_schema_state.deferred_tools_prompt_block
-    )
-
+    # The first iteration captures live model, permission and MCP changes
+    # before deriving schemas. Building them here would immediately repeat
+    # the same work, potentially for an already outdated tool surface.
+    turn_tool_schema_state = None
     iteration_runtime = TurnIterationRuntime(
         context=context,
         state=state,

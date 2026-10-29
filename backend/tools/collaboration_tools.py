@@ -7,9 +7,10 @@ import time
 from dataclasses import replace
 
 from backend.agents.source_roles import source_agent_options
+from backend.agent.runtime_records import source_agent_status_value
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.llm.responses_input import agent_message_response_item
-from backend.tools.agent_control_plane import AgentControlPlane, CHILD_AGENT_OPTIONS_METADATA_KEY, normalize_agent_fork_turns, normalize_agent_task_name
+from backend.tools.agent_control_plane import AgentControlPlane, CHILD_AGENT_OPTIONS_METADATA_KEY, normalize_agent_fork_turns
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
 from backend.tools.contracts import ToolSpec
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY
@@ -17,18 +18,16 @@ from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY
 
 def source_agent_status(record, control):
     status = record["status"]
-    if status == "pending":
-        return "pending_init"
-    if status == "running":
-        return "running"
-    if status in {"cancelled", "interrupted"}:
-        return "interrupted"
+    if status in {"pending", "running", "cancelled", "interrupted"}:
+        return source_agent_status_value(status)
     agent_id = record.get("subagent_id")
     snapshot = control.subagent_snapshot(agent_id, include_result=True) if agent_id else None
     result = snapshot.get("result", {}) if snapshot is not None else {}
-    if status in {"completed", "partial"}:
-        return {"completed": result.get("content") or None}
-    return {"errored": result.get("error") or record.get("summary") or status}
+    error = result.get("error") or record.get("error") or ""
+    if status == "failed" and not error:
+        error = record.get("summary") or ""
+    return source_agent_status_value(status, content=result.get("content") or "", error=error,
+        terminal_reason=result.get("terminal_reason") or record.get("terminal_reason") or "")
 
 
 async def wait_for_coordination(context, *, timeout_seconds: float, agent_ids=()):
@@ -110,7 +109,7 @@ class CollaborationTool(BaseTool):
 
 class SpawnAgentTool(CollaborationTool):
     name = "spawn_agent"
-    description = "Start a child agent and return its identity immediately. Full parent history is inherited by default; use fork_turns=none for independent context or a positive integer for recent turns."
+    description = "Start a child agent and return its identity immediately. Full parent history is inherited by default; use fork_turns=none for independent context."
     display_label = "Start subagent"
 
     def __init__(self, task_tool):
@@ -125,13 +124,19 @@ class SpawnAgentTool(CollaborationTool):
         return ToolSchema(name=self.name, description=self.description, parameters={"type": "object",
             "properties": {"message": {"type": "string", "description": "Complete task instructions."},
                 "task_name": {"type": "string", "description": "Canonical child task name."},
-                "fork_turns": {"type": "string", "description": "all (default), none, or a positive integer string."},
+                "fork_turns": {"type": "string", "description": "all (default) or none. Positive integers are accepted as full history for compatibility."},
                 **{name: task[name] for name in ("agent_type", "model", "reasoning_effort")}},
             "required": ["task_name", "message"], "additionalProperties": False})
 
     async def execute(self, args, context=None):
-        task_name = normalize_agent_task_name(args["task_name"], required=True)
+        task_name = args["task_name"]
+        try:
+            AgentControlPlane._validate_agent_name(task_name)
+        except ValueError as exc:
+            return self._error_result(str(exc))
         fork = normalize_agent_fork_turns(args.get("fork_turns"), default="all")
+        if fork != "none":
+            fork = "all"
         child_context = context
         prompt = args["message"]
         if "source_agent_message_encrypted" in context.metadata:
@@ -175,12 +180,19 @@ class ListAgentsTool(CollaborationTool):
         control = AgentControlPlane(context, source_v2=True)
         if not control.can_use_operation("observe"):
             return self._error_result("Current agent cannot inspect this task tree")
-        prefix = args.get("path_prefix", "")
-        records = control.select_agents(scope="tree", path_prefix=prefix)
+        prefix = args.get("path_prefix")
+        if prefix is not None:
+            try:
+                prefix = control.normalize_public_tree_path(prefix, strict=True)
+            except ValueError as exc:
+                return self._error_result(str(exc))
+        records = control.select_agents(scope="tree")
         paths = control.public_tree_paths()
         agents = [{"agent_name": paths[record["subagent_id"]], "agent_status": source_agent_status(record, control)}
-            for record in sorted(records, key=lambda record: paths[record["subagent_id"]])]
-        if not prefix or "/root".startswith(prefix):
+            for record in sorted(records, key=lambda record: paths[record["subagent_id"]])
+            if prefix is None or prefix == "/root" or paths[record["subagent_id"]] == prefix
+            or paths[record["subagent_id"]].startswith(prefix + "/")]
+        if prefix is None or prefix == "/root":
             root = control.root_tree_record()
             if root is not None:
                 agents.insert(0, {"agent_name": "/root", "agent_status": source_agent_status(root, control)})
@@ -237,6 +249,7 @@ class InterruptAgentTool(CollaborationTool):
             return self._error_result("Agent is not part of the current task tree")
         if target.subagent_id == control.actor_id:
             return self._error_result("An agent cannot interrupt itself; return the result to its parent")
+        previous_status = source_agent_status(target.record, control)
         outcome = control.interrupt(target, reason="interrupted")
-        return ToolResult(content=json.dumps({"previous_status": source_agent_status(target.record, control)}), result_kind="subagent",
+        return ToolResult(content=json.dumps({"previous_status": previous_status}), result_kind="subagent",
             runtime_metadata={"recipient_id": target.subagent_id, "previous_status": outcome.previous_status})

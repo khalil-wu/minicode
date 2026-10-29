@@ -166,7 +166,8 @@ async def test_optional_storage_failure_is_owned_and_other_server_connects(monke
         return credentials.get((service, name))
 
     monkeypatch.setattr("keyring.get_password", read)
-    healthy_client = SimpleNamespace(connect=AsyncMock(), close=AsyncMock(return_value=True), list_tools=AsyncMock(return_value=[]), connected=True, has_valid_token=False)
+    healthy_client = SimpleNamespace(connect=AsyncMock(), close=AsyncMock(return_value=True), list_tools=AsyncMock(return_value=[]),
+        connected=True, has_valid_token=False, tool_catalog_cacheable=True, instructions="")
     monkeypatch.setattr(manager, "_create_client", lambda *args, **kwargs: healthy_client)
     await manager.start_all()
     state = manager._servers[bad.name]

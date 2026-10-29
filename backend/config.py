@@ -373,6 +373,7 @@ class AppConfig:
     token_budget_startup_config: "TokenBudgetStartupConfig | None" = None
     context_window_config: "ContextWindowConfig | None" = None
     application_network_policy: ApplicationNetworkPolicy = field(default_factory=application_network_policy)
+    mcp_optional_startup_grace_ms: int = 1000
 
 
 def _scoped_vault_name(provider: str, base_url: str) -> str:
@@ -651,6 +652,9 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
     network_policy = application_network_policy()
     config_layer_stack = load_config_layer_stack(cwd=cwd)
     settings_data = config_layer_stack.effective_config()
+    mcp_grace = settings_data.get("mcp_optional_startup_grace_ms", 1000)
+    if type(mcp_grace) is not int or not 0 <= mcp_grace <= (1 << 64) - 1:
+        raise SettingsError("mcp_optional_startup_grace_ms must be a non-negative integer")
     feature_flags = load_feature_flags(
         settings_data,
         managed_requirements=config_layer_stack.requirements.feature_requirements,
@@ -794,6 +798,7 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
         memories=memory_settings_from_config(settings_data),
         config_layer_stack=config_layer_stack,
         application_network_policy=network_policy,
+        mcp_optional_startup_grace_ms=mcp_grace,
     )
 
 

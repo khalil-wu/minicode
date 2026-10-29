@@ -6,8 +6,10 @@ import { handleControlEvent } from "./controlEvents";
 import { useDesktopEvents } from "../hooks/useDesktopEvents";
 import type { ServerEvent } from "../protocol/events";
 
-const mocks = vi.hoisted(() => ({ notify: vi.fn(), send: vi.fn(() => true), hide: vi.fn(async () => 0), getState: vi.fn(async () => ({ isMaximized: false, isFocused: false })), removeFocus: vi.fn(), focus: null as null | ((state: { isMaximized: boolean; isFocused: boolean }) => void) }));
-vi.mock("../protocol/ws-outbox", async original => ({ ...await original<Record<string, unknown>>(), sendClientCommand: mocks.send }));
+const mocks = vi.hoisted(() => ({ notify: vi.fn(), send: vi.fn((..._args: unknown[]) => true), hide: vi.fn(async () => 0), getState: vi.fn(async () => ({ isMaximized: false, isFocused: false })), removeFocus: vi.fn(), focus: null as null | ((state: { isMaximized: boolean; isFocused: boolean }) => void) }));
+const readReceipts = vi.hoisted(() => ({ result: vi.fn<() => Promise<unknown>>() }));
+vi.mock("../protocol/ws-outbox", async original => ({ ...await original<Record<string, unknown>>(), sendClientCommand: mocks.send,
+  sendClientCommandAwaitResult: (command: unknown) => { mocks.send(command); return readReceipts.result(); } }));
 vi.mock("../desktop/runtime", async original => ({ ...(await original<Record<string, unknown>>()),
   isDesktop: () => true, onEmbeddedBrowserEvent: () => () => {},
 }));
@@ -24,6 +26,7 @@ const request = (kind: "permission" | "question", conversationId = "conversation
 beforeEach(() => {
   mocks.notify.mockReset(); mocks.hide.mockClear(); mocks.removeFocus.mockClear(); mocks.focus = null;
   mocks.send.mockClear();
+  readReceipts.result.mockReset().mockResolvedValue({ type: "command.result", command: "conversation.read_state.set", level: "success" });
   mocks.getState.mockReset().mockResolvedValue({ isMaximized: false, isFocused: false });
   window.__MINICODE_RUNTIME__ = { desktop: { notify: mocks.notify, hideNotifications: mocks.hide,
     menu: { setState: vi.fn(async () => {}) },
@@ -91,6 +94,7 @@ describe("native window lifecycle instead of renderer DOM focus", () => {
     act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
     expect(mocks.send).toHaveBeenCalledExactlyOnceWith({ type: "conversation.read_state.set", conversation_id: "conversation-A", has_unread_turn: false });
     expect(useAppStore.getState().draft).toBe("Unsent source draft");
+    await act(async () => {});
     mocks.send.mockClear();
     act(() => mocks.focus!({ isMaximized: false, isFocused: false }));
     act(() => useAppStore.setState({ conversations: [{ id: "conversation-A", title: "Actual next turn", updatedAt: "2026-10-14", hasUnreadTurn: true }] }));
@@ -100,6 +104,22 @@ describe("native window lifecycle instead of renderer DOM focus", () => {
     expect(mocks.send).not.toHaveBeenCalled();
     act(() => useAppStore.setState({ settingsOpen: false }));
     expect(mocks.send).toHaveBeenCalledOnce();
+  });
+
+  it("coalesces repeated completion/focus projections while admitting a newer unread revision", async () => {
+    let complete!: (value: unknown) => void;
+    readReceipts.result.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Task", updatedAt: "2026-10-29", revision: 10, hasUnreadTurn: true }] });
+    render(<Harness />); await act(async () => {});
+    act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
+    act(() => useAppStore.setState({ conversations: [...useAppStore.getState().conversations] }));
+    act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
+    expect(mocks.send).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().conversations[0].hasUnreadTurn).toBe(true);
+    await act(async () => { complete({}); });
+    act(() => useAppStore.setState({ conversations: [{ ...useAppStore.getState().conversations[0], revision: 11, hasUnreadTurn: true }] }));
+    expect(mocks.send).toHaveBeenCalledTimes(2);
+    await act(async () => { complete({}); });
   });
 
   it("a native focused window does not read a conversation hidden behind Code", async () => {

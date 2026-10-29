@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 import { File as NativeFile } from "node:buffer";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore, waitComposerDraftRecovery } from "../stores";
 // These cases exercise the supported literal-input mode. Rich editing has its own document/IME suite.
 beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
@@ -11,13 +11,12 @@ import { emptyComposerDraft, flushComposerDrafts, loadComposerDrafts, resetCompo
 import { registerWebSocketSender, resetPendingCommandResultsForTests } from "../protocol/ws-outbox";
 import { resetPendingUserMessagesForTests, sendChatMessage } from "../chat/sendChatMessage";
 import { handleCommandResultEvent } from "../chat/commandResultEvents";
-import { applyUserMessageQueueUpdate } from "../chat/sessionEvents";
+import { applyUserMessageQueueUpdate, handleSessionEvent } from "../chat/sessionEvents";
 import { handleChatStreamEvent } from "../chat/chatStreamEvents";
 import { handleRuntimeEvent } from "../chat/runtimeEvents";
 import { handleNoticeEvent } from "../chat/noticeEvents";
 import { Composer } from "./Composer";
 import { MessageList } from "../chat/MessageList";
-import { acknowledgeClientCommand } from "../hooks/useWebSocket";
 import { SideChatPanel } from "../panels/SideChatPanel";
 import { buildContextNativeAttachments } from "./contextPayload";
 import type { ClientCommand, CommandResultEvent, InterruptCommand, ServerEvent, UserMessageCommand, UserMessageQueueUpdatedEvent } from "../protocol/events";
@@ -26,17 +25,28 @@ import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments
 import { clearDiffCommentScope, getDiffCommentScope, readDiffCommentState, setDiffComments } from "../lib/diff-comment-storage";
 import { hydrateMessages } from "../chat/transcriptHydration";
 import { createCodeReview } from "../protocol/code-review";
+import { enterComposerGoalMode } from "./goal-state";
+import { restoreRetainedComposerInput } from "./retainedComposerInputs";
 
-const wire = vi.hoisted(() => ({ commands: [] as UserMessageCommand[], interrupts: [] as InterruptCommand[], accepted: true, toast: vi.fn() }));
+const wire = vi.hoisted(() => ({ commands: [] as UserMessageCommand[], interrupts: [] as InterruptCommand[], resources: [] as ClientCommand[], heldSwitchOwner: null as string | null, holdCreation: false, accepted: true, toast: vi.fn(), listeners: new Set<(data: unknown) => void>() }));
 vi.hoisted(() => Object.defineProperty(window, "matchMedia", { configurable: true,
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) }));
-vi.mock("../hooks/useWebSocket", async load => ({ ...await load<typeof import("../hooks/useWebSocket")>(), getWebSocket: () => ({ sessionId: "draft-admission-session", send: (command: ClientCommand) => {
+vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "draft-admission-session", send: (command: ClientCommand) => {
   if (command.type === "user_message") wire.commands.push(command);
   return wire.accepted;
-} }) }));
+}, subscribe: (listener: (data: unknown) => void) => { wire.listeners.add(listener); return () => wire.listeners.delete(listener); } }) }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: wire.toast }));
 vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(),
-  fetchWithTimeout: vi.fn(async () => new Response('{"plugins":[]}', { status: 200 })) }));
+  fetchWithTimeout: vi.fn(async () => new Response('{"plugins":[]}', { status: 200 })),
+  fetchDraftModelSelection: vi.fn(async (root: string) => ({ provider: "custom", current_model: "fixture-model", model: "fixture-model",
+    available_models: ["fixture-model"], models_source: "configured", effective_reasoning_effort: "medium",
+    available_permission_modes: ["confirm", "auto", "bypass"], config_version: "fixture", config_cwd: root,
+    feature_flags: {}, composer_commands: [], default_model_selection: { provider: "custom", model: "fixture-model", reasoning_effort: "medium", conversation_id: "", working_directory: root } })),
+}));
+let acknowledgeClientCommand: typeof import("../hooks/useWebSocket")["acknowledgeClientCommand"];
+beforeAll(async () => {
+  ({ acknowledgeClientCommand } = await vi.importActual<typeof import("../hooks/useWebSocket")>("../hooks/useWebSocket"));
+});
 vi.mock("./contextPayload", () => ({
   buildContextPayload: vi.fn(async () => ""),
   buildContextNativeAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], notes: "" })),
@@ -97,12 +107,13 @@ const queueFact = (command: UserMessageCommand, status: UserMessageQueueUpdatedE
 beforeEach(async () => {
   await waitComposerDraftRecovery();
   vi.stubGlobal("File", NativeFile);
-  wire.commands = []; wire.interrupts = []; wire.accepted = true; wire.toast.mockClear(); resetPendingUserMessagesForTests();
+  wire.commands = []; wire.interrupts = []; wire.resources = []; wire.heldSwitchOwner = null; wire.holdCreation = false; wire.accepted = true; wire.toast.mockClear(); resetPendingUserMessagesForTests();
+  wire.listeners.clear();
   clearDiffCommentScope("main"); clearDiffCommentScope("other"); clearDiffCommentScope(getDiffCommentScope(null, root));
   window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary" };
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: "main", workingDirectory: root,
-    conversations: [{ id: "main", title: "owned", workspaceRoot: root }], messages: [], conversationMessages: {},
-    conversationStreaming: {}, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, sideChats: {},
+    conversations: [{ id: "main", title: "owned", workspaceRoot: root }], messages: [], conversationMessages: {}, preparingComposerMessages: {},
+    conversationStreaming: {}, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, retainedComposerInputs: {}, sideChats: {},
     sideChatPendingContext: null, isConnected: true, isStreaming: false, runtimeSession: null, runtimeCapabilities: null,
     currentProvider: "custom", currentModel: "fixture-model", availableModels: ["fixture-model"],
     availableSkills: [], slashCommands: [], selectedMentions: [], selectedSkills: [], pendingPermissionModeChanges: {},
@@ -113,13 +124,35 @@ beforeEach(async () => {
   registerWebSocketSender(command => {
     if (command.type === "user_message") wire.commands.push(command);
     if (command.type === "interrupt") wire.interrupts.push(command);
-    if (command.type === "conversation.create") handleCommandResultEvent({ type: "command.result", command: "conversation.create",
-      client_command_id: command.client_command_id, level: "success", message: "", data: { conversation_id: command.conversation_id } });
+    const resourceCommand = ["conversation.create", "llm.model.set", "llm.config.set", "conversation.permission_mode.set", "conversation.agent_mode.set", "conversation.switch"].includes(command.type);
+    if (resourceCommand) {
+      wire.resources.push(command);
+      if (command.type === "conversation.create" && wire.holdCreation) return wire.accepted;
+      const owner = "conversation_id" in command ? command.conversation_id : undefined;
+      if (command.type === "conversation.switch" && owner === wire.heldSwitchOwner) return wire.accepted;
+      if (command.type === "conversation.switch") {
+        for (const hydrating of [true, false]) {
+          const event = { type: "conversation.switched", conversation_id: owner, is_hydrating: hydrating, context_pending: hydrating,
+            client_command_id: command.client_command_id, client_command_type: command.type,
+            conversation: { id: owner, title: "first created owner", workspace_root: root, execution_cwd: root, messages: [] },
+            session: { active_conversation_id: owner, workspace_root: root, active_stream_conversation_ids: [] },
+          } as ServerEvent;
+          handleSessionEvent(event, { textStreamBuffer: buffer, thinkingStreamBuffer: buffer });
+          for (const listener of [...wire.listeners]) listener(event);
+        }
+        return wire.accepted;
+      }
+      handleCommandResultEvent({ type: "command.result", command: command.type === "llm.model.set" ? "model.set"
+        : command.type === "llm.config.set" ? "effort" : command.type,
+        client_command_id: command.client_command_id, client_command_type: command.type, level: "success", message: "",
+        data: { conversation_id: owner, execution_cwd: root, ...(command.type === "conversation.create" ? { created: true, activated: false } : {}) } });
+    }
     return wire.accepted;
   });
 });
 afterEach(async () => {
   cleanup();
+  useAppStore.setState({ isConnected: false });
   await act(async () => resetPendingCommandResultsForTests());
   registerWebSocketSender(null);
   await resetComposerDraftStorageForTests();
@@ -141,10 +174,10 @@ describe("actual composer durable admission boundary", () => {
     expect(document.querySelector(".composer-container")?.getAttribute("data-goal-mode")).toBe("false");
     expect(screen.queryByRole("button", { name: "编辑目标" })).toBeNull();
     submit();
-    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    await waitFor(() => expect(wire.commands, JSON.stringify(wire.toast.mock.calls)).toHaveLength(1));
     const command = wire.commands[0];
     expect(command).toMatchObject({ type: "user_message", conversation_id: "main", content: "实际普通消息" });
-    expect(useAppStore.getState()).toMatchObject({ activeGoal: goal, draft: "实际普通消息" });
+    expect(useAppStore.getState()).toMatchObject({ activeGoal: goal, draft: "" });
     act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
       command_type: "user_message" } as ServerEvent));
     await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
@@ -178,7 +211,7 @@ describe("actual composer durable admission boundary", () => {
     expect(command.context_refs).toEqual([{ kind: "diff_comment", name: "src/app.ts", path: "src/app.ts", comment }]);
     if (mode !== "idle") expect(command.streaming_behavior).toBe(mode === "steer" ? "steer" : "follow_up");
     if (mode === "steer") expect(command.expected_turn_id).toBe("running-turn");
-    expect(readDiffCommentState("main").comments).toEqual([comment]);
+    expect(readDiffCommentState("main").comments).toEqual([]);
     act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
       command_type: "user_message" } as ServerEvent));
     expect(readDiffCommentState("main").comments).toEqual([]);
@@ -214,6 +247,121 @@ describe("actual composer durable admission boundary", () => {
     expect(readDiffCommentState("main").comments).toEqual([comment]);
   });
 
+  it.each(["enter", "button"] as const)("%s releases an existing composer and shows its captured message while context is preparing", async method => {
+    const mention = { kind: "file" as const, name: "plan.pdf", path: "plan.pdf", workspaceRoot: root };
+    useAppStore.setState({ draft: "first input", selectedMentions: [mention] });
+    let finish!: (value: Awaited<ReturnType<typeof buildContextNativeAttachments>>) => void;
+    vi.mocked(buildContextNativeAttachments).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const view = render(<><MessageList /><Composer /></>);
+    const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;
+    if (method === "enter") fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    else submit();
+    expect(input.value).toBe("");
+    expect(view.container.querySelector(".user-cell-bubble")?.textContent).toBe("first input");
+    expect(wire.commands).toHaveLength(0);
+    fireEvent.change(input, { target: { value: "next unsent input" } });
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    await act(async () => finish({ attachments: [], attachmentRefs: [], notes: "", conversationId: "main" }));
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    expect(wire.commands[0]).toMatchObject({ display_content: "first input", context_refs: [mention] });
+    expect(useAppStore.getState().draft).toBe("next unsent input");
+    expect(view.container.querySelectorAll(".user-cell-bubble")).toHaveLength(1);
+    await act(async () => handleCommandResultEvent(receipt(wire.commands[0], { admitted: true })));
+    expect(useAppStore.getState().draft).toBe("next unsent input");
+  });
+
+  it.each([false, true])("a context preparation failure preserves the submitted input and newer draft=%s", async newer => {
+    useAppStore.setState({ draft: "original input" });
+    setDiffComments("main", [comment]);
+    let fail!: (reason: Error) => void;
+    vi.mocked(buildContextNativeAttachments).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    const view = render(<><MessageList /><Composer /></>); submit();
+    const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;
+    expect(input.value).toBe("");
+    if (newer) {
+      fireEvent.change(input, { target: { value: "newer draft" } });
+      act(() => setDiffComments("main", [secondComment]));
+    }
+    await waitFor(() => expect(fail).toBeTypeOf("function"));
+    await act(async () => fail(new Error("context could not be prepared")));
+    await waitFor(() => expect(wire.toast).toHaveBeenCalledWith("context could not be prepared", "error", 4500));
+    expect(wire.commands).toEqual([]);
+    expect(useAppStore.getState().draft).toBe(newer ? "newer draft" : "original input");
+    if (newer) {
+      expect(useAppStore.getState().messages).toEqual([expect.objectContaining({ content: "original input", deliveryStatus: "failed",
+        contextRefs: [expect.objectContaining({ kind: "diff_comment", comment })] })]);
+      expect(view.container.querySelector(".user-cell-bubble")?.textContent).toBe("original input");
+      expect(readDiffCommentState("main").comments).toEqual([secondComment]);
+    } else {
+      expect(view.container.querySelector(".user-cell-bubble")).toBeNull();
+      expect(readDiffCommentState("main").comments).toEqual([comment]);
+    }
+  });
+
+  it("hands off original file bytes before clearing the composer and keeps its preparing preview alive", async () => {
+    const create = vi.fn(() => "blob:owned-submission"), revoke = vi.fn();
+    vi.stubGlobal("URL", class extends URL { static createObjectURL = create; static revokeObjectURL = revoke; });
+    const file = new File([new Uint8Array([0, 128, 255])], "original.png", { type: "image/png" });
+    useAppStore.setState({ draft: "original image input", attachments: [{ id: "original-image", name: file.name, type: file.type,
+      size: file.size, status: "ready", localFile: file, dataUrl: "blob:editor-preview", conversationId: "main", artifactId: "image-artifact",
+      attachment: { id: "original-image", artifact_id: "image-artifact", file_name: file.name, media_type: file.type, kind: "image" } }] });
+    let finish!: (value: Awaited<ReturnType<typeof buildContextNativeAttachments>>) => void;
+    vi.mocked(buildContextNativeAttachments).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const view = render(<><MessageList /><Composer /></>); submit();
+    expect((screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement).value).toBe("");
+    expect(view.container.querySelector(".user-cell-attachment-image img")?.getAttribute("src")).toBe("blob:owned-submission");
+    expect(revoke).toHaveBeenCalledWith("blob:editor-preview");
+    expect(revoke).not.toHaveBeenCalledWith("blob:owned-submission");
+    act(() => useAppStore.getState().setDraft("newer draft"));
+    await flushComposerDrafts();
+    const saved = await loadComposerDrafts();
+    const pending = saved.find(record => record.retainedInput?.unconfirmed)!;
+    expect(new Uint8Array(await pending.draft.attachments[0].localFile!.arrayBuffer())).toEqual(new Uint8Array([0, 128, 255]));
+    expect(saved.find(record => !record.retainedInput && record.owner.id === "main")?.draft.draft).toBe("newer draft");
+    expect(wire.commands).toEqual([]);
+    await act(async () => finish({ attachments: [], attachmentRefs: [], notes: "" }));
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    await act(async () => handleCommandResultEvent(receipt(wire.commands[0], { admitted: true })));
+    expect(useAppStore.getState().retainedComposerInputs).toEqual({});
+    expect(useAppStore.getState().draft).toBe("newer draft");
+    expect(revoke).toHaveBeenCalledWith("blob:owned-submission");
+  });
+
+  it("restores a preparation failure to its original hidden conversation after the user switches", async () => {
+    useAppStore.setState({ draft: "original hidden input", conversations: [
+      { id: "main", title: "main", workspaceRoot: root }, { id: "other", title: "other", workspaceRoot: root },
+    ] });
+    let fail!: (reason: Error) => void;
+    vi.mocked(buildContextNativeAttachments).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    render(<><MessageList /><Composer /></>); submit();
+    await waitFor(() => expect(fail).toBeTypeOf("function"));
+    act(() => {
+      useAppStore.getState().applyConversationSwitched({ conversationId: "other" });
+      useAppStore.getState().setDraft("other unsent input");
+    });
+    expect(document.querySelector(".user-cell-bubble")).toBeNull();
+    await act(async () => fail(new Error("context preparation failed")));
+    expect(useAppStore.getState().draft).toBe("other unsent input");
+    expect(useAppStore.getState().conversationWorkbenchStates.main.draft).toBe("original hidden input");
+    expect(useAppStore.getState().preparingComposerMessages).toEqual({});
+  });
+
+  it("keeps an edited queued message in its editor while its context is being prepared", async () => {
+    const original = { id: "queued-user", role: "user" as const, content: "queued original", timestamp: 1,
+      artifacts: [], queueState: "queued" as const, queueMessageId: "queued-assistant" };
+    useAppStore.setState({ draft: "editing queued input", isStreaming: true,
+      queuedEdit: { ownerId: "main", workspaceRoot: root, original, backup: emptyComposerDraft(), backupDiffComments: [] } });
+    let fail!: (reason: Error) => void;
+    vi.mocked(buildContextNativeAttachments).mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject; }));
+    render(<Composer />); submit();
+    await waitFor(() => expect(fail).toBeTypeOf("function"));
+    expect(useAppStore.getState().draft).toBe("editing queued input");
+    await act(async () => fail(new Error("queue context failed")));
+    expect(useAppStore.getState().draft).toBe("editing queued input");
+    expect(useAppStore.getState().queuedEdit?.original.id).toBe(original.id);
+    expect(wire.commands).toEqual([]);
+  });
+
   it("restores a rejected cleared input to its hidden owner while preserving the active chat's newer draft", async () => {
     useAppStore.setState({ draft: "main original", conversations: [
       { id: "main", title: "main", workspaceRoot: root }, { id: "other", title: "other", workspaceRoot: root },
@@ -243,7 +391,7 @@ describe("actual composer durable admission boundary", () => {
     await waitFor(() => expect(wire.commands).toHaveLength(1));
     const command = wire.commands[0];
     expect(command).toMatchObject({ conversation_id: "main", content: "authored follow-up\nsecond line", streaming_behavior: "steer", expected_turn_id: running.turnId });
-    expect(useAppStore.getState()).toMatchObject({ followUpBehavior: "queue", sendShortcut: shortcut, draft: "authored follow-up\nsecond line" });
+    expect(useAppStore.getState()).toMatchObject({ followUpBehavior: "queue", sendShortcut: shortcut, draft: "" });
     await act(async () => handleCommandResultEvent(receipt(command, { admitted: false, queued: true, turn_mode: "steer" })));
     await waitFor(() => expect(useAppStore.getState().draft).toBe(""));
     expect(useAppStore.getState().messages.filter(message => message.role === "user")).toHaveLength(1);
@@ -285,7 +433,7 @@ describe("actual composer durable admission boundary", () => {
     expect(wire.commands).toHaveLength(0);
   });
 
-  it.each(["uncommitted", "base-branch"] as const)("review %s keeps attachments and durable mode until its ordinary input is admitted", async mode => {
+  it.each([["uncommitted", false], ["base-branch", false], ["uncommitted", true], ["base-branch", true]] as const)("review %s keeps attachments and durable mode until its ordinary input is admitted; late=%s", async (mode, late) => {
     const { attachment } = fileDraft();
     useAppStore.setState({ draft: "/review", agentMode: "plan", attachments: [attachment],
       slashCommands: [{ name: "review", command: "review", label: "/review", description: "Review", type: "template", source: "builtin" }] });
@@ -303,6 +451,7 @@ describe("actual composer durable admission boundary", () => {
     expect(command.content).toContain("## Code review guidelines:");
     expect(useAppStore.getState().draft).toBe("/review");
     expect(useAppStore.getState().attachments).toHaveLength(1);
+    if (late) await act(async () => resetPendingCommandResultsForTests());
     await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
     await waitFor(() => expect(useAppStore.getState().diffReview?.codeReview?.mode).toBe(mode));
     expect(useAppStore.getState().draft).toBe("");
@@ -315,6 +464,7 @@ describe("actual composer durable admission boundary", () => {
   });
 
   it("starts detached review on its own conversation and preserves the original composer draft", async () => {
+    wire.heldSwitchOwner = "separate-review";
     const { attachment } = fileDraft();
     useAppStore.setState({ draft: "/review", agentMode: "plan", attachments: [attachment],
       slashCommands: [{ name: "review", command: "review", label: "/review", description: "Review", type: "template", source: "builtin" }] });
@@ -341,10 +491,177 @@ describe("actual composer durable admission boundary", () => {
     expect(useAppStore.getState().messages).toHaveLength(0);
     expect(useAppStore.getState().conversationMessages["separate-review"].some(message => message.role === "user")).toBe(true);
     expect(useAppStore.getState().conversationWorkbenchStates["separate-review"].diffReview?.conversationId).toBe("separate-review");
+    const switchCommand = wire.resources.find(command => command.type === "conversation.switch" && command.conversation_id === "separate-review")!;
+    act(() => handleSessionEvent({ type: "conversation.switched", conversation_id: "separate-review",
+      is_hydrating: false,
+      client_command_id: switchCommand.client_command_id, client_command_type: "conversation.switch",
+      conversation: { id: "separate-review", title: "Review", workspace_root: root, execution_cwd: root, messages: [] },
+      session: { active_conversation_id: "separate-review", workspace_root: root, active_stream_conversation_ids: [] },
+    } as ServerEvent, { textStreamBuffer: buffer, thinkingStreamBuffer: buffer }));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "separate-review", pendingConversationSwitchId: null });
+    expect(useAppStore.getState().messages.some(message => message.id === command.user_message_id && message.role === "user")).toBe(true);
+    expect(useAppStore.getState().conversationWorkbenchStates.main).toMatchObject({ draft: "/review", attachments: [{ id: attachment.id }] });
+    expect(useAppStore.getState().conversationMessages.main).toEqual([]);
   });
 
   const received = (command: UserMessageCommand) => acknowledgeClientCommand({ type: "client.command.ack",
     client_command_id: command.client_command_id, command_type: "user_message" } as ServerEvent);
+
+  it("renders the user's prompt and clears the accepted local input before receipt while waiting for the real assistant start", async () => {
+    useAppStore.setState({ draft: "show before server receipt", subagents: [], backgroundTasks: [] });
+    const view = render(<><MessageList /><Composer /></>);
+    submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(view.container.querySelector(".user-cell-bubble")?.textContent).toBe("show before server receipt");
+    expect(useAppStore.getState().messages.map(message => message.role)).toEqual(["user"]);
+    expect(useAppStore.getState().isStreaming).toBe(false);
+    expect(useAppStore.getState().draft).toBe("");
+    expect((screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement).value).toBe("");
+    act(() => received(command));
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().draft).toBe("");
+    act(() => started(command));
+    const assistant = useAppStore.getState().messages[1];
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
+    expect(useAppStore.getState().messages.map(message => message.id)).toEqual([command.user_message_id, command.assistant_message_id]);
+    expect(useAppStore.getState().messages[1]).toBe(assistant);
+  });
+
+  it("keeps newly typed identical text through a late receipt and admission of the earlier local send", async () => {
+    useAppStore.setState({ draft: "same authored text" });
+    render(<><MessageList /><Composer /></>);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(useAppStore.getState().draft).toBe("");
+    expect(document.querySelectorAll(".user-cell-bubble")).toHaveLength(1);
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "same authored text" } });
+    act(() => received(command));
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
+    expect(useAppStore.getState().draft).toBe("same authored text");
+    expect(useAppStore.getState().messages.filter(message => message.role === "user")).toHaveLength(1);
+  });
+
+  it("retains the captured input when the local sender refuses it before any receipt", async () => {
+    const { file, attachment } = fileDraft();
+    useAppStore.setState({ draft: "local transport refused", attachments: [attachment] });
+    wire.accepted = false;
+    render(<Composer />);
+    submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    await act(async () => {});
+    expect(useAppStore.getState().draft).toBe("local transport refused");
+    expect(await useAppStore.getState().attachments[0].localFile!.arrayBuffer()).toEqual(await file.arrayBuffer());
+  });
+
+  it("restores the captured input when the server rejects the transport receipt", async () => {
+    useAppStore.setState({ draft: "server rejected transport receipt" });
+    render(<Composer />);
+    submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(useAppStore.getState().draft).toBe("");
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+      command_type: "user_message", accepted: false, reason: "transport admission rejected" } as ServerEvent));
+    await waitFor(() => expect(useAppStore.getState().draft).toBe("server rejected transport receipt"));
+    expect((screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement).value).toBe("server rejected transport receipt");
+  });
+
+  it.each(["enter", "button"])("%s consumes the first draft before creation and carries one user identity into the real conversation", async method => {
+    useAppStore.setState({ conversationId: null, activeConversationDraftId: null, conversations: [], messages: [] });
+    const draftId = useAppStore.getState().startConversationDraft({ workspaceRoot: root, bindWorkspace: true });
+    await useAppStore.getState().refreshConversationDraftSelection(draftId);
+    useAppStore.getState().setDraft("first prompt before owner creation");
+    wire.holdCreation = true;
+    const view = render(<><MessageList /><Composer /></>);
+    const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;
+    if (method === "enter") fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    else submit();
+    expect(useAppStore.getState().draft).toBe("");
+    expect(input.value).toBe("");
+    expect(view.container.querySelector(".user-cell-bubble")?.textContent).toBe("first prompt before owner creation");
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(wire.resources.some(command => command.type === "conversation.create")).toBe(true));
+    expect(view.container.querySelector(".user-cell-bubble")?.textContent).toBe("first prompt before owner creation");
+    expect(useAppStore.getState().messages).toEqual([]);
+    expect(wire.commands).toEqual([]);
+    expect(useAppStore.getState().isStreaming).toBe(false);
+    const localId = useAppStore.getState().conversationDrafts[draftId].pendingUserMessage!.id;
+    expect((await coldRecords()).find(record => record.owner.id === draftId)?.draftContext?.pendingUserMessage).toBeUndefined();
+    const created = wire.resources.find(command => command.type === "conversation.create")!;
+    expect(wire.resources.filter(command => command.type === "conversation.create")).toHaveLength(1);
+    await act(async () => handleCommandResultEvent({ type: "command.result", command: created.type,
+      client_command_id: created.client_command_id, client_command_type: created.type, level: "success", message: "",
+      data: { conversation_id: (created as { conversation_id: string }).conversation_id, execution_cwd: root, created: true, activated: false } }));
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    expect(command.user_message_id).toBe(localId);
+    expect(view.container.querySelectorAll(".user-cell-bubble")).toHaveLength(1);
+    await act(async () => { started(command, command.conversation_id); handleCommandResultEvent(receipt(command, { admitted: true })); });
+    expect(useAppStore.getState().messages.filter(message => message.id === localId)).toHaveLength(1);
+    expect(useAppStore.getState().conversationDrafts[draftId].pendingUserMessage).toBeUndefined();
+    expect(useAppStore.getState().draft).toBe("");
+    expect((view.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement).value).toBe("");
+  });
+
+  it.each(["untouched", "new-text", "hidden"])("restores a first input after creation fails while the draft is %s", async editing => {
+    useAppStore.setState({ conversationId: null, activeConversationDraftId: null, conversations: [], messages: [] });
+    const draftId = useAppStore.getState().startConversationDraft({ workspaceRoot: root, bindWorkspace: true });
+    await useAppStore.getState().refreshConversationDraftSelection(draftId);
+    useAppStore.getState().setDraft("first creation failed");
+    wire.holdCreation = true;
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter" });
+    expect(input.value).toBe("");
+    await waitFor(() => expect(wire.resources.some(command => command.type === "conversation.create")).toBe(true));
+    if (editing === "new-text") fireEvent.change(input, { target: { value: "new unsent input" } });
+    if (editing === "hidden") act(() => {
+      useAppStore.getState().startConversationDraft({ workspaceRoot: "C:/another-project", bindWorkspace: true });
+      useAppStore.getState().setDraft("other unsent input");
+    });
+    const created = wire.resources.find(command => command.type === "conversation.create")!;
+    await act(async () => handleCommandResultEvent({ type: "command.result", command: created.type,
+      client_command_id: created.client_command_id, client_command_type: created.type, level: "error", message: "Creation rejected", data: { created: false } }));
+    await waitFor(() => expect(useAppStore.getState().conversationDrafts[draftId].materializing).toBe(false));
+    expect(wire.commands).toHaveLength(0);
+    expect(useAppStore.getState().draft).toBe(editing === "untouched" ? "first creation failed" : editing === "new-text" ? "new unsent input" : "other unsent input");
+    if (editing === "hidden") expect(useAppStore.getState().workspaceComposerDrafts[draftId].draft).toBe("first creation failed");
+  });
+
+  it("clears a first message after the implicit draft is materialized", async () => {
+    useAppStore.setState({ conversationId: null, activeConversationDraftId: null, conversations: [], messages: [], draft: "hi" });
+    render(<><MessageList /><Composer /></>);
+    submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    expect(useAppStore.getState().conversationId).toBeTruthy();
+    expect(useAppStore.getState().draft).toBe("");
+    expect((screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement).value).toBe("");
+    expect(useAppStore.getState().conversationWorkbenchStates[useAppStore.getState().conversationId!]?.draft || "").toBe("");
+  });
+
+  it("uses the existing send receipt lock for mode edits and releases it after the first input is durably received", async () => {
+    useAppStore.setState({ draft: "captured build mode", agentMode: "build", runtimeCapabilities: { feature_flags: { goals: { enabled: true } } } });
+    render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0]; expect(command.agent_mode).toBe("build");
+    expect(await useAppStore.getState().setAgentMode("plan")).toBe(false);
+    expect(enterComposerGoalMode()).toBe(false);
+    expect(useAppStore.getState()).toMatchObject({ agentMode: "build", goalMode: false });
+    fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+    expect((screen.getByRole("menuitem", { name: /^计划模式/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("menuitem", { name: /^目标/ }) as HTMLButtonElement).disabled).toBe(true);
+    act(() => received(command));
+    await waitFor(() => expect((screen.getByRole("menuitem", { name: /^计划模式/ }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("menuitem", { name: /^计划模式/ }));
+    await waitFor(() => expect(useAppStore.getState().pendingAgentModeChanges).toEqual({}));
+    expect(useAppStore.getState().agentMode).toBe("plan");
+    expect(wire.resources.find(command => command.type === "conversation.agent_mode.set")).toMatchObject({ conversation_id: "main", agent_mode: "plan" });
+    expect(command.agent_mode).toBe("build");
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
+    expect(useAppStore.getState().conversationId).toBe("main");
+    expect(useAppStore.getState().agentMode).toBe("plan");
+  });
 
   it.each(["send", "menu"] as const)("submits compact through %s, clears on receipt and renders its actual lifecycle while preserving new input", async method => {
     const { attachment } = fileDraft();
@@ -450,10 +767,10 @@ describe("actual composer durable admission boundary", () => {
     expect(restored).toMatchObject({ draft: "", ...context });
   });
 
-  it("allows a second authored input after receipt without waiting for the first model admission", async () => {
+  it("allows a second authored input before the first receipt without waiting for model admission", async () => {
     useAppStore.setState({ draft: "同样的话" });
     render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
-    const first = wire.commands[0]; act(() => received(first));
+    const first = wire.commands[0];
     fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "同样的话" } });
     fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Enter", code: "Enter" });
     await waitFor(() => expect(wire.commands).toHaveLength(2));
@@ -465,16 +782,16 @@ describe("actual composer durable admission boundary", () => {
     await act(async () => handleCommandResultEvent(receipt(second, { admitted: false, queued: true })));
   });
 
-  it("shows actual send waiting only on its original composer and releases only the received input", async () => {
+  it("releases each locally submitted composer before receipt and preserves another owner's new input through late outcomes", async () => {
     useAppStore.setState({ draft: "A original input" });
     render(<Composer />); submit();
     await waitFor(() => expect(wire.commands).toHaveLength(1));
     const first = wire.commands[0];
     let send = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
     expect(send.disabled).toBe(true);
-    expect(send.getAttribute("aria-busy")).toBe("true");
-    expect(send.querySelector("svg.animate-spin")).not.toBeNull();
-    expect(useAppStore.getState().draft).toBe("A original input");
+    expect(send.getAttribute("aria-busy")).toBeNull();
+    expect(send.querySelector("svg.animate-spin")).toBeNull();
+    expect(useAppStore.getState().draft).toBe("");
     fireEvent.click(send);
     fireEvent.keyDown(screen.getByRole("textbox", { name: "消息输入" }), { key: "Enter", code: "Enter" });
     expect(wire.commands).toHaveLength(1);
@@ -486,14 +803,16 @@ describe("actual composer durable admission boundary", () => {
     submit(); await waitFor(() => expect(wire.commands).toHaveLength(2));
     const second = wire.commands[1];
     expect(second.conversation_id).toBe("other");
-    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBe("true");
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBeNull();
+    expect(useAppStore.getState().draft).toBe("");
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "B newer input" } });
 
     act(() => received(first));
-    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBe("true");
-    expect(useAppStore.getState().draft).toBe("B original input");
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBeNull();
+    expect(useAppStore.getState().draft).toBe("B newer input");
     await act(async () => handleCommandResultEvent(receipt(first, { admitted: false }, "error")));
-    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBe("true");
-    expect(useAppStore.getState().draft).toBe("B original input");
+    expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBeNull();
+    expect(useAppStore.getState().draft).toBe("B newer input");
     act(() => received(second));
     expect(screen.getByRole("button", { name: "发送" }).getAttribute("aria-busy")).toBeNull();
     await act(async () => handleCommandResultEvent(receipt(second, { admitted: true })));
@@ -560,17 +879,19 @@ describe("actual composer durable admission boundary", () => {
     expect(useAppStore.getState().messages[0].terminalStatus).toBe("interrupted");
   });
 
-  it.each(["offline", "refused"] as const)("retains %s input and original File bytes through a cold reopen", async mode => {
+  it.each(["offline", "refused"] as const)("retains locally rejected or server-%s input and original File bytes through a cold reopen", async mode => {
     const { file, attachment } = fileDraft();
     const quote = { id: "quoted", role: "assistant" as const, content: "原引用" };
     const mention = { kind: "file" as const, name: "source.ts", path: "source.ts", workspaceRoot: root };
     useAppStore.setState({ draft: "尚未持久准入的原输入", attachments: [attachment], quotedMessage: quote, selectedMentions: [mention], isConnected: mode !== "offline" });
+    if (mode === "offline") wire.accepted = false;
     const view = render(<Composer />);
     submit();
     await waitFor(() => expect(wire.commands).toHaveLength(1));
     const command = wire.commands[0];
-    expect(useAppStore.getState().draft).toBe("尚未持久准入的原输入");
-    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().draft).toBe(mode === "offline" ? "尚未持久准入的原输入" : "");
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ role: "user", deliveryStatus: mode === "offline" ? "failed" : "sending" });
     if (mode === "refused") await act(async () => handleCommandResultEvent(receipt(command, { admitted: false }, "error")));
     view.unmount();
     const records = await coldRecords();
@@ -580,12 +901,12 @@ describe("actual composer durable admission boundary", () => {
     expect(restored.attachments[0].localFile?.name).toBe("中文 空格文件.txt");
   });
 
-  it.each([{ admitted: true }, { admitted: false, queued: true }])("clears only after durable $admitted/$queued and cannot cold resurrect sent text or files", async fact => {
+  it.each([{ admitted: true }, { admitted: false, queued: true }])("keeps locally consumed input empty through durable $admitted/$queued and cannot cold resurrect sent text or files", async fact => {
     const { attachment } = fileDraft();
     useAppStore.setState({ draft: "received input", attachments: [attachment], quotedMessage: { id: "q", role: "user", content: "quote" } });
     const view = render(<Composer />); submit();
     await waitFor(() => expect(wire.commands).toHaveLength(1));
-    expect(useAppStore.getState().draft).toBe("received input");
+    expect(useAppStore.getState().draft).toBe("");
     await act(async () => handleCommandResultEvent(receipt(wire.commands[0], fact)));
     await waitFor(() => expect(useAppStore.getState().draft).toBe(""));
     expect(useAppStore.getState().attachments).toEqual([]);
@@ -593,18 +914,25 @@ describe("actual composer durable admission boundary", () => {
     expect(await coldRecords()).toEqual([]);
   });
 
-  it.each([false, true])("a first CID receipt preserves newer input=%s and binds before immediate item/delta frames", async newer => {
+  it.each([false, true])("a first real draft owner preserves newer input=%s through admission and immediate item/delta frames", async newer => {
     useAppStore.setState({ conversationId: null, conversations: [], draft: "first submitted", attachments: [] });
     render(<Composer />); submit();
     await waitFor(() => expect(wire.commands).toHaveLength(1));
     const command = wire.commands[0];
+    const owner = command.conversation_id!;
+    expect(owner).toBeTruthy();
+    expect(useAppStore.getState().conversationId).toBe(owner);
+    expect(wire.resources.map(command => command.type)).toEqual(["conversation.create", "llm.model.set", "conversation.switch"]);
+    expect(wire.resources[0]).toMatchObject({ conversation_id: owner, activate: false });
+    expect(wire.resources[2]).toMatchObject({ conversation_id: owner, defer_runtime_capabilities: true });
+    expect(wire.resources.every(command => "conversation_id" in command && command.conversation_id === owner)).toBe(true);
     if (newer) fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "newly authored" } });
     act(() => {
-      started(command, "first-owner");
-      handleCommandResultEvent(receipt(command, { admitted: true, conversation_id: "first-owner" }));
-      itemFrames(command, "first-owner");
+      started(command, owner);
+      handleCommandResultEvent(receipt(command, { admitted: true }));
+      itemFrames(command, owner);
     });
-    expect(useAppStore.getState().conversationId).toBe("first-owner");
+    expect(useAppStore.getState().conversationId).toBe(owner);
     expect(useAppStore.getState().messages.map(message => message.id)).toEqual([command.user_message_id, command.assistant_message_id]);
     expect(useAppStore.getState().messages[1].blocks).toEqual(expect.arrayContaining([expect.objectContaining({ content: "real answer" })]));
     await waitFor(() => expect(useAppStore.getState().draft).toBe(newer ? "newly authored" : ""));
@@ -693,7 +1021,8 @@ describe("actual composer durable admission boundary", () => {
     render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
     await act(async () => handleCommandResultEvent(receipt(wire.commands[0], { admitted: false, cancelled: true, reason: "user_interrupted" })));
     expect(useAppStore.getState().draft).toBe("cancelled before first step");
-    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ role: "user", deliveryStatus: "failed" });
     expect(wire.toast.mock.calls.some(([, level]) => level === "error")).toBe(false);
   });
 
@@ -713,10 +1042,141 @@ describe("actual composer durable admission boundary", () => {
     useAppStore.setState({ draft: "unconfirmed input" });
     render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
     await act(async () => resetPendingCommandResultsForTests());
-    expect(useAppStore.getState().draft).toBe("unconfirmed input");
-    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().draft).toBe("");
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ role: "user" });
     expect(wire.commands).toHaveLength(1);
     expect(wire.toast).toHaveBeenCalledWith(expect.stringContaining("接收尚未确认"), "warning", 6000);
+    const command = wire.commands[0];
+    act(() => { started(command); handleCommandResultEvent(receipt(command, { admitted: true })); });
+    expect(useAppStore.getState().messages.map(message => message.id)).toEqual([command.user_message_id, command.assistant_message_id]);
+    expect(useAppStore.getState().messages[0].deliveryStatus).toBe("sent");
+    expect(wire.commands).toHaveLength(1);
+  });
+
+  it.each([true, false])("delivers the definitive admitted=%s outcome once after the actual wait timer expires", async admitted => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const onAdmission = vi.fn(), onRejected = vi.fn();
+    try {
+      const waiting = sendChatMessage({ displayContent: "delayed outcome", conversationId: "main", awaitAdmission: true,
+        onAdmission, onRejected });
+      const command = wire.commands[0];
+      await act(async () => { await vi.advanceTimersByTimeAsync(60_001); });
+      expect(await waiting).toBe(false);
+      expect(onAdmission).not.toHaveBeenCalled(); expect(onRejected).not.toHaveBeenCalled();
+      expect(useAppStore.getState().messages[0].deliveryStatus).toBe("sending");
+      const event = receipt(command, { admitted }, admitted ? "success" : "error");
+      act(() => { handleCommandResultEvent(event); handleCommandResultEvent(event); });
+      expect(admitted ? onAdmission : onRejected).toHaveBeenCalledOnce();
+      expect(admitted ? onRejected : onAdmission).not.toHaveBeenCalled();
+      expect(useAppStore.getState().messages[0].deliveryStatus).toBe(admitted ? "sent" : "failed");
+      expect(wire.commands).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["admission", "transport"])("persists a late %s rejection with rich text and original bytes after its composer has unmounted", async kind => {
+    const { file, attachment } = fileDraft();
+    const richDraft = { markdown: "**Original pending input**", plainTextMode: false, document: { type: "doc", content: [
+      { type: "paragraph", content: [{ type: "text", text: "Original pending input", marks: [{ type: "strong" }] }] }] } };
+    useAppStore.setState({ draft: richDraft.markdown, richDraft, attachments: [attachment] });
+    setDiffComments("main", [comment]);
+    const view = render(<Composer />); submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "newer draft during wait" } });
+    act(() => setDiffComments("main", [secondComment]));
+    await act(async () => resetPendingCommandResultsForTests());
+    expect(useAppStore.getState().retainedComposerInputs[command.user_message_id!]).toMatchObject({ unconfirmed: true });
+    view.unmount();
+    await act(async () => {
+      if (kind === "admission") handleCommandResultEvent(receipt(command, { admitted: false }, "error"));
+      else acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+        accepted: false, reason: "真实准入拒绝", command_type: "user_message" } as ServerEvent);
+    });
+    expect(useAppStore.getState().draft).toBe("newer draft during wait");
+    expect(readDiffCommentState("main").comments).toEqual([secondComment]);
+    const saved = await coldRecords();
+    const retained = saved.find(record => record.retainedInput?.message.id === command.user_message_id)!;
+    expect(retained.draft.richDraft).toEqual(richDraft);
+    expect(retained.retainedInput).toMatchObject({ comments: [comment], message: { failureMessage: "真实准入拒绝" } });
+    expect(await retained.draft.attachments[0].localFile!.arrayBuffer()).toEqual(await file.arrayBuffer());
+    expect(saved.find(record => !record.retainedInput && record.owner.id === "main")!.draft.draft).toBe("newer draft during wait");
+  });
+
+  it("records a late transport acceptance without claiming model admission or losing the later rejection", async () => {
+    useAppStore.setState({ draft: "late transport receipt" });
+    render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    await act(async () => resetPendingCommandResultsForTests());
+    act(() => acknowledgeClientCommand({ type: "client.command.ack", client_command_id: command.client_command_id,
+      accepted: true, command_type: "user_message" } as ServerEvent));
+    expect(useAppStore.getState().messages).toEqual([expect.objectContaining({ id: command.user_message_id, deliveryStatus: "sent" })]);
+    expect(useAppStore.getState().isStreaming).toBe(false);
+    expect(useAppStore.getState().retainedComposerInputs[command.user_message_id!]).toMatchObject({ unconfirmed: true });
+    await act(async () => handleCommandResultEvent(receipt(command, { admitted: false }, "error")));
+    expect(useAppStore.getState().retainedComposerInputs[command.user_message_id!].draft.draft).toBe("late transport receipt");
+    expect(useAppStore.getState().messages[0].deliveryStatus).toBe("failed");
+  });
+
+  it("retires the pending input when its owner is confirmed deleted before a late successful receipt", async () => {
+    useAppStore.setState({ draft: "input for deleted owner" });
+    render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    await act(async () => resetPendingCommandResultsForTests());
+    act(() => {
+      handleCommandResultEvent({ type: "command.result", command: "conversation.delete", level: "success", message: "",
+        data: { conversation_id: "main", deleted: true } });
+      useAppStore.setState({ conversationId: "other", draft: "new owner draft", messages: [], conversationMessages: {}, conversationStreaming: {} });
+    });
+    await act(async () => {
+      handleCommandResultEvent(receipt(command, { admitted: true }));
+      started(command);
+      applyUserMessageQueueUpdate(queueFact(command, "queued"));
+    });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "other", draft: "new owner draft", messages: [],
+      conversationMessages: {}, retainedComposerInputs: {} });
+  });
+
+  it.each(["result", "committed-item", "queued"] as const)("retires a previously failed input when its edited retry is accepted by %s after the wait has ended", async kind => {
+    useAppStore.setState({ draft: "original failed input" });
+    const view = render(<Composer />); submit();
+    await waitFor(() => expect(wire.commands).toHaveLength(1));
+    fireEvent.change(screen.getByRole("textbox", { name: "消息输入" }), { target: { value: "preserved newer draft" } });
+    await act(async () => handleCommandResultEvent(receipt(wire.commands[0], { admitted: false }, "error")));
+    const originalId = wire.commands[0].user_message_id!;
+    act(() => { restoreRetainedComposerInput(originalId); });
+    submit(); await waitFor(() => expect(wire.commands).toHaveLength(2));
+    const retry = wire.commands[1];
+    await act(async () => resetPendingCommandResultsForTests());
+    expect(useAppStore.getState().retainedComposerInputs[originalId]).toBeDefined();
+    await act(async () => {
+      if (kind === "result") handleCommandResultEvent(receipt(retry, { admitted: true }));
+      else if (kind === "committed-item") {
+        started(retry);
+        stream({ type: "item.completed", conversation_id: "main", message_id: retry.assistant_message_id,
+          item: { type: "user_message", id: retry.user_message_id, message: { id: retry.user_message_id, role: "user", content: retry.content } } } as ServerEvent);
+      }
+      else applyUserMessageQueueUpdate(queueFact(retry, "queued"));
+    });
+    expect(useAppStore.getState()).toMatchObject({ draft: "preserved newer draft", retainedInputEdit: undefined, retainedComposerInputs: {} });
+    expect(useAppStore.getState().messages.filter(message => message.role === "user").map(message => message.id)).toEqual([retry.user_message_id]);
+    expect((await coldRecords()).some(record => record.retainedInput)).toBe(false);
+    view.unmount();
+  });
+
+  it.each(["native", "template"] as const)("consumes a late accepted %s slash input using its original owner and attachment semantics", async kind => {
+    const { attachment } = fileDraft();
+    const original = kind === "native" ? "/goal late native task" : "/review original template task";
+    useAppStore.setState({ draft: original, attachments: [attachment],
+      slashCommands: kind === "native" ? [] : [{ name: "review", command: "review", label: "/review", description: "Review", type: "template" }] });
+    render(<Composer />); submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
+    const command = wire.commands[0];
+    await act(async () => resetPendingCommandResultsForTests());
+    expect(useAppStore.getState().draft).toBe(original);
+    await act(async () => handleCommandResultEvent(kind === "native" ? nativeReceipt(command, "completed") : receipt(command, { admitted: true })));
+    expect(useAppStore.getState().draft).toBe("");
+    expect(useAppStore.getState().attachments).toEqual(kind === "native" ? [attachment] : []);
+    expect(wire.commands).toHaveLength(1);
   });
 
   it("a result without admission facts preserves the real started turn without restoring its received draft", async () => {
@@ -851,7 +1311,8 @@ describe("actual composer durable admission boundary", () => {
     await act(async () => handleCommandResultEvent(nativeReceipt(wire.commands[0], "completed")));
     expect(useAppStore.getState().draft).toBe("");
     expect(useAppStore.getState().attachments).toEqual([attachment]);
-    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ role: "user", deliveryStatus: "sent" });
   });
 
   it("a template prepared-prompt result retains the draft until the actual model input is admitted", async () => {
@@ -864,7 +1325,8 @@ describe("actual composer durable admission boundary", () => {
       client_command_type: "user_message", level: "info", message: "Prepared template prompt for '/review'.",
       data: { conversation_id: "main" } } as CommandResultEvent));
     expect(useAppStore.getState().draft).toBe("/review real model task");
-    expect(useAppStore.getState().messages).toEqual([]);
+    expect(useAppStore.getState().messages).toHaveLength(1);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ role: "user", deliveryStatus: "sending" });
     await act(async () => handleCommandResultEvent(receipt(command, { admitted: true })));
     expect(useAppStore.getState().draft).toBe("");
     expect(useAppStore.getState().messages[0]).toMatchObject({ id: command.user_message_id, role: "user" });
@@ -883,7 +1345,8 @@ describe("actual composer durable admission boundary", () => {
     submit(); await waitFor(() => expect(wire.commands).toHaveLength(1));
     await act(async () => handleCommandResultEvent(nativeReceipt(wire.commands[0], completion, completion === "completed" ? "success" : "warning")));
     expect(useAppStore.getState().draft).toBe("main untouched");
-    expect(useAppStore.getState().sideChats.side.messages).toEqual([]);
+    expect(useAppStore.getState().sideChats.side.messages).toHaveLength(1);
+    expect(useAppStore.getState().sideChats.side.messages[0]).toMatchObject({ role: "user" });
     view.unmount();
     const recovered = (await coldRecords()).find(record => record.owner.kind === "side" && record.owner.id === "side")!;
     expect(recovered.draft.draft).toBe(completion === "completed" ? "" : "/goal side original");

@@ -1,5 +1,5 @@
 import type { StateCreator } from "zustand";
-import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft } from "./composer-drafts";
+import { activeComposerDraftKey, composerDraftOf, composerWorkspaceKey, emptyComposerDraft } from "./composer-drafts";
 import type {
   AppStore,
   ArtifactContentState,
@@ -36,6 +36,7 @@ import {
   initialSendShortcut,
   initialFollowUpBehavior,
   initialShortcutBindings,
+  isCompactWorkbenchViewport,
   applyTheme,
   applyTextScale,
   applyCodeTextScale,
@@ -111,6 +112,7 @@ export function emptyConversationWorkbenchState(): ConversationWorkbenchState {
     rightStackTabLocked: false,
     draft: "",
     richDraft: undefined,
+    retainedInputEdit: undefined,
     attachments: [],
     quotedMessage: null,
     selectedMentions: [],
@@ -170,6 +172,7 @@ export function liveConversationWorkbenchState(s: AppStore): ConversationWorkben
     rightStackTabLocked: s.rightStackTabLocked,
     draft: s.draft,
     queuedEdit: s.queuedEdit,
+    retainedInputEdit: s.retainedInputEdit,
     richDraft: s.richDraft,
     attachments: s.attachments.map((attachment) => ({ ...attachment })),
     quotedMessage: s.quotedMessage ? { ...s.quotedMessage } : null,
@@ -307,6 +310,8 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
     return saveAppearanceTheme(variant, snapshot, revision, readAppearanceVariant(variant));
   };
   return ({
+  compactPanel: null,
+  setCompactPanel: (compactPanel) => set({ compactPanel }),
   contextCardCollapsed: true,
   setContextCardCollapsed: (collapsed) => set({ contextCardCollapsed: collapsed }),
   contextCardPinned: readLS("minicode.summary-pinned") === "1",
@@ -316,7 +321,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   },
   toggleContextCard: (width) => {
     const state = get();
-    if (threadSummaryDisplayMode(width) === "overlay") state.setContextCardCollapsed(!state.contextCardCollapsed);
+    if (threadSummaryDisplayMode(width) === "overlay" || state.contextCardCollapsed && state.contextCardPinned) state.setContextCardCollapsed(!state.contextCardCollapsed);
     else state.setContextCardPinned(!state.contextCardPinned);
   },
   themeMode: initialTheme(),
@@ -549,6 +554,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         ...(canonicalTab === "sidechat" ? { sideChatOpen: true } : {}),
         rightStackTabLocked: options?.automatic ? s.rightStackTabLocked : true,
         rightPanelOpen: true,
+        ...(isCompactWorkbenchViewport() ? { compactPanel: "right" as const } : {}),
         ...(canonicalTab === "terminal" && s.activeBottomTab === "terminal" ? { dockCollapsed: true } : {}),
         rightPanelExpanded: s.rightPanelExpanded,
       };
@@ -652,10 +658,14 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   setSlashCommands: (cmds) => set({ slashCommands: cmds }),
   setMarketplaceSkills: (skills) => set({ marketplaceSkills: skills }),
   setWorkingDirectory: (d) => {
+    if (get().activeConversationDraftId && !workspaceRootsEqual(d, get().workingDirectory)) {
+      get().startConversationDraft({ bindWorkspace: Boolean(d), workspaceRoot: d || undefined, appMode: get().appMode });
+      return;
+    }
     set((s) => {
       const workspaceChanged = !workspaceRootsEqual(d, s.workingDirectory);
       const workspaceComposerDrafts = workspaceChanged && !s.conversationId
-        ? { ...s.workspaceComposerDrafts, [composerWorkspaceKey(s.workingDirectory)]: composerDraftOf(s) }
+        ? { ...s.workspaceComposerDrafts, [activeComposerDraftKey(s)]: composerDraftOf(s) }
         : s.workspaceComposerDrafts;
       if (workspaceChanged) {
         cacheEditorStateForWorkspace(
@@ -697,15 +707,18 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
   })),
   snapshotWorkbenchState: (conversationId) =>
     set((s) => {
-      const targetId = conversationId || s.conversationId || undefined;
+      const draftContext = s.activeConversationDraftId ? s.conversationDrafts[s.activeConversationDraftId] : undefined;
+      const targetId = conversationId || s.conversationId || (draftContext?.adopted ? draftContext.conversationId : undefined);
       if (!targetId) return { workspaceComposerDrafts: {
-        ...s.workspaceComposerDrafts, [composerWorkspaceKey(s.workingDirectory)]: composerDraftOf(s),
+        ...s.workspaceComposerDrafts, [activeComposerDraftKey(s)]: composerDraftOf(s),
       } };
       return {
         conversationWorkbenchStates: storeConversationWorkbenchState(
           s,
           targetId,
-          liveConversationWorkbenchState(s),
+          !s.conversationId && draftContext?.adopted && draftContext.conversationId === targetId
+            ? { ...s.conversationWorkbenchStates[targetId], ...composerDraftOf(s) }
+            : liveConversationWorkbenchState(s),
         ),
       };
     }),
@@ -718,7 +731,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
       const next = cloneConversationWorkbenchState(stored ?? {
         ...emptyConversationWorkbenchState(),
         agentMode: targetId ? s.conversations.find(conversation => conversation.id === targetId)?.agentMode ?? "build" : "build",
-        ...(!targetId ? s.workspaceComposerDrafts[composerWorkspaceKey(s.workingDirectory)] : {}),
+        ...(!targetId ? s.workspaceComposerDrafts[activeComposerDraftKey(s)] : {}),
       });
       const terminalSessions = (next.terminalSessions ?? [])
         .filter((session) => session.conversationId === targetId)
@@ -745,6 +758,7 @@ export const createUISlice: StateCreator<AppStore, [], [], UISlice> = (set, get)
         rightStackTabLocked: next.rightStackTabLocked,
         draft: next.draft,
         queuedEdit: next.queuedEdit,
+        retainedInputEdit: next.retainedInputEdit,
         richDraft: next.richDraft,
         agentMode: next.agentMode ?? "build",
         goalMode: next.goalMode ?? false,

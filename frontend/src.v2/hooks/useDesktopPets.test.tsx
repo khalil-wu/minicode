@@ -3,6 +3,7 @@ import { act, cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { useDesktopPets } from "./useDesktopPets";
+import { LS } from "../stores/shared-helpers";
 
 const mocks = vi.hoisted(() => ({
   publish: vi.fn(), update: vi.fn(async () => {}), toast: vi.fn(),
@@ -29,4 +30,25 @@ it("keeps a failed initialization visible without retrying on draft edits, and r
   act(() => useAppStore.setState({ draft: "Keep editing" }));
   expect(mocks.publish).toHaveBeenCalledTimes(2);
   expect(useAppStore.getState().draft).toBe("Keep editing");
+});
+
+it("sends the resolved application motion preference to the Mini owner", async () => {
+  const initial = useAppStore.getState();
+  const saved = localStorage.getItem(LS.reducedMotion);
+  const attribute = document.documentElement.getAttribute("data-reduced-motion");
+  mocks.publish.mockResolvedValue(undefined);
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+  try {
+    useAppStore.getState().setReducedMotionPreference("off");
+    render(<Harness />);
+    await waitFor(() => expect(mocks.update).toHaveBeenLastCalledWith({ reducedMotion: false }));
+    vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
+    act(() => useAppStore.getState().setReducedMotionPreference("on"));
+    await waitFor(() => expect(mocks.update).toHaveBeenLastCalledWith({ reducedMotion: true }));
+  } finally {
+    cleanup(); vi.unstubAllGlobals();
+    if (saved === null) localStorage.removeItem(LS.reducedMotion); else localStorage.setItem(LS.reducedMotion, saved);
+    if (attribute === null) document.documentElement.removeAttribute("data-reduced-motion"); else document.documentElement.setAttribute("data-reduced-motion", attribute);
+    useAppStore.setState({ reducedMotion: initial.reducedMotion, reducedMotionPreference: initial.reducedMotionPreference });
+  }
 });

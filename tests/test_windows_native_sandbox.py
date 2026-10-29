@@ -33,15 +33,19 @@ _CURRENT_USER_SID = windows_native._current_user_sid
 @pytest.mark.skipif(sys.platform != "win32", reason="Requires the actual Windows restricted-token runtime")
 @pytest.mark.asyncio
 async def test_restricted_runner_keeps_source_desktop_alive_and_preserves_write_boundary(monkeypatch):
-    import tempfile
+    import shutil
+    import uuid
 
     executable = Path(__file__).resolve().parents[1] / "desktop/windows-sandbox-runtime/codex.exe"
     if not executable.is_file():
         pytest.skip("Bundled Windows sandbox runtime has not been built")
     arena = Path(os.environ.get("MINICODE_SANDBOX_TEST_ROOT", "C:/minicode-sbx-test"))
     arena.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="restricted-launcher-", dir=arena) as directory:
-        root = Path(directory)
+    # mkdir inherits the arena ACL; TemporaryDirectory's private ACL prevents
+    # the restricted token from exercising the intended workspace write grant.
+    root = arena.resolve() / f"restricted-launcher-{uuid.uuid4().hex}"
+    root.mkdir()
+    try:
         workspace, home = root / "workspace", root / "home"
         workspace.mkdir()
         # Use the actual helper/home/SID discovery without elevated account setup.
@@ -70,6 +74,9 @@ async def test_restricted_runner_keeps_source_desktop_alive_and_preserves_write_
         assert await runner.cleanup()
         assert not (home / ".sandbox-secrets/sandbox_users.json").exists()
         assert not (home / ".sandbox/setup_marker.json").exists()
+    finally:
+        assert root.resolve().parent == arena.resolve()
+        shutil.rmtree(root)
 
 
 def test_native_profile_encodes_the_effective_exact_path_grant(tmp_path):
@@ -108,7 +115,9 @@ def test_native_private_temp_does_not_create_deny_write_for_a_readable_peer(tmp_
         return args, SimpleNamespace(close=lambda: None), tmp_path / "not-created"
     monkeypatch.setattr(windows_native, "prepare_command", prepare)
     runner = SandboxRunner(policy)
-    runner._wrap_command("git status", SimpleNamespace(backend="windows-elevated-wfp"), cwd=workspace)
+    runtime = object()
+    runner._wrap_command("git status", SimpleNamespace(backend="windows-elevated-wfp", windows_runtime=runtime), cwd=workspace)
+    assert captured["runtime"] is runtime
     assert peer not in captured["deny_write_paths"]
     assert workspace / ".git" in captured["deny_write_paths"]
 

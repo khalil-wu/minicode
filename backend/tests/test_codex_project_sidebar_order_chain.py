@@ -202,7 +202,7 @@ def test_actual_inventory_producer_restores_saved_project_order_and_common_mode(
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
     session.session_lifecycle = SessionLifecycle(session)
     session.ws_manager = None
-    session.runtime_snapshot = lambda: {"session_id": "real-sidebar-inventory"}
+    session.runtime_snapshot = lambda **_: {"session_id": "real-sidebar-inventory"}
     session.send_payload = AsyncMock(return_value=True)
     session.conversation_repo = ConversationRepository(repository.storage_root)
     assert asyncio.run(session.send_conversation_list()) is True

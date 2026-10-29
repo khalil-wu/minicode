@@ -8,11 +8,15 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import Future
 from dataclasses import dataclass
+from functools import lru_cache
+import os
+import ssl
 import threading
 from urllib.parse import urlsplit
 from weakref import WeakSet
 
 import httpx
+import certifi
 from websockets.asyncio.client import connect as WebSocketConnect
 
 
@@ -267,6 +271,9 @@ class ApplicationResponse(httpx.Response):
 class ApplicationHttpClient(httpx.AsyncClient):
     """Check each URL before lazily resolving its proxy/transport route."""
     def __init__(self, policy, factory, *, owns_clients=True, **kwargs):
+        # send() delegates to admitted route clients. A second TLS transport
+        # here is unused and reloads the complete CA bundle on Windows.
+        kwargs["transport"] = httpx.AsyncBaseTransport()
         super().__init__(trust_env=False, **kwargs)
         self.policy, self.factory = policy, factory
         self.owns_clients = owns_clients
@@ -306,12 +313,34 @@ class ApplicationHttpClient(httpx.AsyncClient):
             await asyncio.gather(*(client.aclose() for client in set(self.routes.values())))
         await super().aclose()
 
+    async def __aexit__(self, exc_type=None, exc_value=None, traceback=None):
+        # HTTPX's context exit closes only its own transport; admitted route
+        # clients are owned here and must follow the same close boundary.
+        await self.aclose()
+
+
+@lru_cache(maxsize=1)
+def _load_http_ssl_context(cafile: str, modified_ns: int, size: int) -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=cafile)
+
+
+def application_http_ssl_context() -> ssl.SSLContext:
+    """Reuse HTTPX's verified, environment-independent default CA bundle."""
+    cafile = certifi.where()
+    stat = os.stat(cafile)
+    return _load_http_ssl_context(cafile, stat.st_mtime_ns, stat.st_size)
+
 
 def application_http_client(url, *, policy=None, proxy_mode="inherit", **kwargs):
     from backend.llm.proxy_policy import provider_httpx_proxy_kwargs
     policy = policy if policy is not None else application_network_policy()
     def create(destination):
-        return httpx.AsyncClient(**kwargs, **provider_httpx_proxy_kwargs(destination, proxy_mode=proxy_mode))
+        options = dict(kwargs)
+        # Explicit TLS contexts/roots and client certificates keep their own
+        # ownership. HTTPX may mutate a context when loading a client identity.
+        if options.get("transport") is None and options.get("verify", True) is True and not options.get("cert"):
+            options["verify"] = application_http_ssl_context()
+        return httpx.AsyncClient(**options, **provider_httpx_proxy_kwargs(destination, proxy_mode=proxy_mode))
     return ApplicationHttpClient(policy, create, **kwargs) if policy.managed else create(url)
 
 

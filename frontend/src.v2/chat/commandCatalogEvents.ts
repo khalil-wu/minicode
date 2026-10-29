@@ -1,4 +1,5 @@
 import { useAppStore } from "../stores";
+import { invalidateConversationDraftSelection } from "../stores/conversation-drafts";
 import type { CommandsListEvent, ServerEvent } from "../protocol/events";
 import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-normalizers";
 import { addInspectorPayload } from "./inspectorEntries";
@@ -9,6 +10,10 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "skills/changed": {
+      if (s.activeConversationDraftId) {
+        void invalidateConversationDraftSelection(s.activeConversationDraftId);
+        return true;
+      }
       const owner = { conversation_id: s.conversationId || undefined, workspace_root: s.workingDirectory };
       sendClientCommand({ type: "skills.list", ...owner }, { silent: true });
       sendClientCommand({ type: "commands.list", ...owner }, { silent: true });
@@ -16,6 +21,7 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "skills.list": {
+      if (s.activeConversationDraftId) return true;
       if (e.conversation_id !== (s.conversationId || "") || typeof e.workspace_root !== "string"
         || !workspaceRootsEqual(e.workspace_root, s.workingDirectory)) return true;
       if (e.skills) {
@@ -24,6 +30,7 @@ export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
       return true;
     }
     case "commands.list": {
+      if (s.activeConversationDraftId) return true;
       const ev = e as CommandsListEvent;
       const activeConversationId = String(s.conversationId || "").trim() || null;
       const owner = typeof ev.conversation_id === "string"

@@ -41,6 +41,7 @@ from backend.agent.tool_execution import (
     _invalidate_workspace_views_after_mutation,
     _permission_decision_denial,
     _remember_hook_model_context,
+    _tool_for_call,
     _tool_hook_manager,
     _tool_output_was_streamed,
     _tool_streams_output,
@@ -119,7 +120,7 @@ def _context_before_dispatch(tc, context, tool_registry, context_builder):
     from backend.agent.tool_environments import execution_context_for_call
     from backend.skills.implicit import admit_implicit_skill_invocation
 
-    context = execution_context_for_call(tc, context, tool_registry.get_tool(tc.name))
+    context = execution_context_for_call(tc, context, _tool_for_call(tc, tool_registry))
     admit_implicit_skill_invocation(tool_name=tc.name, args=tc.arguments,
         tool_context=context, context_builder=context_builder)
     return context
@@ -207,7 +208,7 @@ def batch_tool_calls(
         return []
     batches: list[tuple[bool, list[ToolCallEvent]]] = []
     for tc in tool_calls:
-        tool = tool_registry.get_tool(tc.name)
+        tool = _tool_for_call(tc, tool_registry)
         try:
             # A third-party/MCP classifier is metadata, not turn control.
             # Claude Code falls back to serial execution when it throws; do
@@ -533,12 +534,12 @@ def _parallel_fallback_result(
             "timed_out": False,
             "pending": 0,
             "side_effect_kind": _tool_side_effect_kind(
-                tc.name, tool_registry, tc.arguments
+                tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)
             ),
             "request_digest": _final_tool_request_digest(tc)
             or canonical_tool_request_digest(tc.name, tc.arguments or {}),
             "retry_safe": not requested
-            and _tool_is_idempotent(tc.name, tool_registry, tc.arguments),
+            and _tool_is_idempotent(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)),
             "manual_recovery_required": bool(requested),
         }
         tool_ctx.cleanup_receipts[tc.id] = receipt
@@ -582,15 +583,15 @@ def _bind_parallel_cleanup_receipt(
         {
             "requested": bool(requested),
             "side_effect_kind": _tool_side_effect_kind(
-                tc.name, tool_registry, tc.arguments
+                tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)
             ),
             "request_digest": _final_tool_request_digest(tc)
             or canonical_tool_request_digest(tc.name, tc.arguments or {}),
             "retry_safe": bool(task.done())
-            and _tool_is_idempotent(tc.name, tool_registry, tc.arguments),
+            and _tool_is_idempotent(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)),
             "manual_recovery_required": bool(
                 (not task.done())
-                or not _tool_is_idempotent(tc.name, tool_registry, tc.arguments)
+                or not _tool_is_idempotent(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry))
             ),
         }
     )
@@ -640,6 +641,8 @@ async def _execute_tool_batch(
     prepared_tool_calls: list[ToolCallEvent] | None = None,
     execution_limit: int | None = None, execution_limit_reason: str = "",
 ) -> AsyncIterator[AgentEvent]:
+    from backend.mcp.registry import MCPToolProxy
+
     tool_ctx.tool_registry = tool_registry
     auto_queue: list[ToolCallEvent] = []
     iteration_id = tool_ctx.iteration_id or f"iter:{max(1, state.iterations)}"
@@ -717,7 +720,9 @@ async def _execute_tool_batch(
                 yield ev
             continue
 
-        required_reason = missing_required_tool_argument_reason(
+        advertised_tool = _tool_for_call(tc, tool_registry)
+        cached_mcp_call = isinstance(advertised_tool, MCPToolProxy) and advertised_tool._from_cached_catalog
+        required_reason = "" if cached_mcp_call else missing_required_tool_argument_reason(
             state, tc, tool_registry
         )
         if required_reason:
@@ -772,7 +777,7 @@ async def _execute_tool_batch(
                 yield ev
             continue
 
-        scope_guard_reason = subagent_scope_guard_reason(tc, tool_registry, tool_ctx)
+        scope_guard_reason = "" if cached_mcp_call else subagent_scope_guard_reason(tc, tool_registry, tool_ctx)
         if scope_guard_reason:
             yield AgentEvent.permission_decision(
                 tool_call_id=tc.id,
@@ -815,7 +820,7 @@ async def _execute_tool_batch(
                 yield ev
             continue
 
-        authorization = _authorize_final_tool_request(
+        authorization = await _authorize_final_tool_request(
             tc,
             tool_registry=tool_registry,
             permission_checker=permission_checker,
@@ -1472,7 +1477,7 @@ async def execute_serial(
 ) -> AsyncIterator[AgentEvent]:
     from backend.agent.tool_environments import execution_context_for_call
 
-    tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
+    tool_ctx = execution_context_for_call(tc, tool_ctx, _tool_for_call(tc, tool_registry))
     diff: dict[str, Any] | None = None
     turn_id = _tool_turn_id(tool_ctx)
     started_epoch = _tool_start_times(state).get(tc.id, time.time())
@@ -1506,7 +1511,7 @@ async def execute_serial(
         # authorized, even though it is host-owned rather than model-authored.
         # Bind permission and approval to that exact payload.
         tc.arguments = dict(approval_args)
-        proposal_authorization = _authorize_final_tool_request(
+        proposal_authorization = await _authorize_final_tool_request(
             tc,
             tool_registry=tool_registry,
             permission_checker=permission_checker,
@@ -1562,7 +1567,7 @@ async def execute_serial(
         perm = permission_decision.permission_level
         execution_args = deepcopy(dict(tc.arguments))
         approval_args = dict(execution_args)
-    declared_permission = getattr(tool_registry.get_tool(tc.name), "permission", None)
+    declared_permission = getattr(_tool_for_call(tc, tool_registry), "permission", None)
     needs_diff_review = (
         perm == PermissionLevel.DIFF_REVIEW
         or declared_permission == PermissionLevel.DIFF_REVIEW
@@ -1655,7 +1660,7 @@ async def execute_serial(
                     # replace the old decision/digest before considering the
                     # hook's allow/ask response.
                     tc.arguments = dict(permission_hook.updated_input)
-                    authorization = _authorize_final_tool_request(
+                    authorization = await _authorize_final_tool_request(
                         tc,
                         tool_registry=tool_registry,
                         permission_checker=permission_checker,
@@ -1704,7 +1709,7 @@ async def execute_serial(
                     execution_args = deepcopy(dict(tc.arguments))
                     approval_args = dict(execution_args)
                     declared_permission = getattr(
-                        tool_registry.get_tool(tc.name), "permission", None
+                        _tool_for_call(tc, tool_registry), "permission", None
                     )
                     needs_diff_review = (
                         perm == PermissionLevel.DIFF_REVIEW
@@ -1852,10 +1857,10 @@ async def execute_serial(
             yield final_tool_call_event()
             tool_call_emitted = True
         if not permission_allowed_by_hook:
-            tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
+            tool_ctx = execution_context_for_call(tc, tool_ctx, _tool_for_call(tc, tool_registry))
             approval_request = _bound_final_tool_request(tc)
             if approval_request is None:
-                captured_tool = tool_registry.get_tool(tc.name)
+                captured_tool = _tool_for_call(tc, tool_registry)
                 approval_request = FinalExecutableToolRequest.freeze(tc,
                     policy_identity=captured_tool.policy_identity if captured_tool is not None else tc.name,
                     environment_identity=(tool_ctx.permission.environment_scope.identity()
@@ -1899,7 +1904,7 @@ async def execute_serial(
                 yield final_tool_call_event(status="pending")
             from backend.mcp.registry import MCPToolProxy
 
-            captured_mcp_tool = tool_registry.get_tool(tc.name)
+            captured_mcp_tool = _tool_for_call(tc, tool_registry)
             if isinstance(captured_mcp_tool, MCPToolProxy):
                 approval_event.data["mcp_approval"] = captured_mcp_tool.approval_snapshot()
             if (tool_ctx.permission.strict_auto_review or tool_ctx.permission_grants.strict_auto_review_enabled(tool_ctx.turn_id)) and tc.name in {"run_command", "apply_patch"}:
@@ -2131,7 +2136,7 @@ async def execute_serial(
                         return
 
                 if tc.name == "exit_plan_mode":
-                    edited_authorization = _authorize_final_tool_request(
+                    edited_authorization = await _authorize_final_tool_request(
                         tc,
                         tool_registry=tool_registry,
                         permission_checker=permission_checker,

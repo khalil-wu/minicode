@@ -15,6 +15,18 @@ from backend.tools.base import PermissionLevel
 from backend.tools.registry import ToolRegistry
 
 
+@pytest.mark.parametrize("config, identity", [
+    (MCPServerConfig(name="local", source="user"), (None, None)),
+    (MCPServerConfig(name="plugin:review@local:worker", source="plugin:review@local", plugin_id="review@local", plugin_server_name="worker"), ("review@local", "worker")),
+    (MCPServerConfig(name="cua_repl", source="builtin:cua_repl:local", plugin_id="computer-use@local", plugin_server_name="cua_repl"), ("computer-use@local", "cua_repl")),
+    (MCPServerConfig(name="worker", source="plugin:remote/review", plugin_id="remote/review", plugin_server_name="worker"), ("remote/review", "worker")),
+])
+def test_mcp_status_preserves_real_plugin_identity(config, identity):
+    status = MCPServerState(config=config).to_status_dict()
+    assert (status["plugin_id"], status["plugin_server_name"]) == identity
+    assert status["name"] == config.name
+
+
 @pytest.mark.parametrize(
     "transport,url",
     [("http", "file:///invalid"), ("sse", "wss://invalid/mcp"), ("ws", "https://invalid/mcp")],

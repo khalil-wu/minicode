@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from backend.agent.context import ContextBuilder
+from backend.agent.agent_identity import coordination_agent_id
 from backend.agent.message import AgentEvent
 from backend.agent.checkpoint import (
     clear_checkpoints,
@@ -106,7 +107,7 @@ class TurnBoundaryInput:
     content: str
     attachments: tuple[dict[str, Any], ...] | None
     consumed_steer: TurnInput | None
-    should_start_turn: bool
+    has_new_input: bool
 
 
 class TurnKernel:
@@ -294,7 +295,7 @@ class TurnKernel:
             else "completed"
         )
         self.state.terminal_status = normalized_status
-        self.defer_mailbox_to_next_turn()
+        self._turn_input_queue.finish_turn(self.run_record.run_id)
         self.runtime.message_boards.unbind_turn(self.run_record)
         if self._run_completed_emitted:
             return None
@@ -322,7 +323,13 @@ class TurnKernel:
         return self._completion_event
 
     def defer_mailbox_to_next_turn(self) -> bool:
-        return bool(self._turn_input_queue.defer_mailbox_to_next_turn(self.run_record.run_id))
+        pending_trigger = self.runtime.has_pending_agent_input(
+            agent_id=coordination_agent_id(self.metadata), conversation_id=self.run_record.conversation_id,
+            trigger_turn_only=True,
+        )
+        return self._turn_input_queue.defer_mailbox_to_next_turn(
+            self.run_record.run_id, has_trigger_turn_mail=pending_trigger,
+        )
 
     def observe_completed_assistant_item(self, item: dict[str, Any]) -> bool:
         """Codex final/untagged completed messages defer late mailbox input."""
@@ -890,7 +897,12 @@ class TurnKernel:
             content=content,
             attachments=attachments,
             consumed_steer=consumed_steer,
-            should_start_turn=initial_turn_pending or bool(content) or bool(attachments),
+            has_new_input=bool(content.strip()) or bool(attachments) or (
+                initial_turn_pending and bool(
+                    self.state.attachments
+                    or self.state.prompt_context.get("agent_input_messages")
+                )
+            ),
         )
 
     async def acknowledge_boundary_input(self, boundary_input: TurnBoundaryInput) -> None:

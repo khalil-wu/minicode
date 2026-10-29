@@ -43,6 +43,9 @@ test("timed-out PTY termination retains its session, permits retry and blocks re
     getWindowByInstanceId: () => ({ isDestroyed: () => false, webContents: { send() {} } }),
   });
   const session = manager.spawnSession(__dirname, "owned-fixture", "fixture-window");
+  assert.equal(await manager.killSession(session.session_id, "other-owner", "fixture-window"), false);
+  assert.equal(await manager.killSession(session.session_id, "owned-fixture", "other-window"), false);
+  assert.equal(killCalls, 0);
   assert.equal(await manager.killSession(session.session_id, "owned-fixture", "fixture-window"), false);
   assert.notEqual(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);
   assert.equal(await manager.restartSession(session.session_id, "owned-fixture", "fixture-window"), null);
@@ -50,6 +53,9 @@ test("timed-out PTY termination retains its session, permits retry and blocks re
   assert.equal(killCalls, 2);
   await assert.rejects(manager.killAllSessions(), /Terminal cleanup did not finish/);
   assert.equal(manager.listActiveSessions().length, 1);
+  fakePty.kill = () => { throw new Error("Native PTY stop failure"); };
+  await assert.rejects(manager.killSession(session.session_id, "owned-fixture", "fixture-window"), /Native PTY stop failure/);
+  assert.notEqual(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);
   fakePty.kill = () => exitHandler({ exitCode: 0 });
   await manager.killAllSessions();
   assert.equal(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);

@@ -18,9 +18,12 @@ import sys
 import tempfile
 import time
 from uuid import uuid4
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Awaitable, BinaryIO, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, BinaryIO, Callable
+
+if TYPE_CHECKING:
+    from backend.sandbox.windows_native import WindowsNativeRuntime
 
 from backend.config import DATA_ROOT
 from backend.runtime_env import powershell_script, shell_subprocess_env
@@ -94,6 +97,8 @@ class SandboxCapability:
     deny_read_isolated: bool = False
     protected_paths_isolated: bool = False
     reason: str = ""
+    # Carry this inspection into the same launch; every new launch probes anew.
+    windows_runtime: WindowsNativeRuntime | None = field(default=None, repr=False, compare=False)
 
 
 class SandboxUnavailableError(RuntimeError):
@@ -530,13 +535,13 @@ class SandboxRunner:
             if selection == "restricted-token":
                 return SandboxCapability(True, "windows-restricted-token", True,
                     not resolved.allow_network, deny_read_isolated=False,
-                    protected_paths_isolated=_protected_paths_fully_isolated(resolved))
+                    protected_paths_isolated=_protected_paths_fully_isolated(resolved), windows_runtime=runtime)
             if _sandbox_policy_preflight_error(resolved) or _has_filesystem_root_write(resolved) or not resolved.root_read_baseline:
                 return SandboxCapability(False, "windows-elevated-wfp", False, False,
                     reason=_sandbox_policy_preflight_error(resolved) or "elevated Windows sandbox cannot enforce this filesystem profile")
             return SandboxCapability(True, "windows-elevated-wfp", True,
                 resolved.enforce_managed_network or not resolved.allow_network, deny_read_isolated=True,
-                protected_paths_isolated=_protected_paths_fully_isolated(resolved))
+                protected_paths_isolated=_protected_paths_fully_isolated(resolved), windows_runtime=runtime)
         if (
             sys.platform == "darwin"
             and shutil.which("sandbox-exec")
@@ -579,6 +584,7 @@ class SandboxRunner:
                     network_isolated=not resolved.allow_network,
                     deny_read_isolated=True,
                     protected_paths_isolated=_protected_paths_fully_isolated(resolved),
+                    windows_runtime=native_runtime,
                 )
         elif sys.platform == "win32" and not resolved.root_read_baseline:
             windows_native_reason = "elevated Windows sandbox requires effective :root read access"
@@ -634,12 +640,15 @@ class SandboxRunner:
         host_command: str = "",
         argv: list[str] | None = None,
         tty: bool = False,
+        on_capability: Callable[[SandboxCapability], None] | None = None,
     ) -> tuple[str | list[str], SandboxCapability]:
         """Return an enforceable command wrapper or fail before process creation."""
         self._cleanup_sandbox_setup_state()
         if self._windows_cleanup_pending:
             raise SandboxUnavailableError("Native Windows sandbox TEMP cleanup is still pending")
         capability = self.capability(cwd=cwd)
+        if on_capability is not None:
+            on_capability(capability)
         if not capability.available:
             raise SandboxUnavailableError(capability.reason)
         try:
@@ -668,6 +677,7 @@ class SandboxRunner:
         creationflags: int | None = None,
         on_created: Callable[[asyncio.subprocess.Process], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_capability: Callable[[SandboxCapability], None] | None = None,
     ) -> asyncio.subprocess.Process:
         """Start a long-lived stdio process behind the same sandbox boundary.
 
@@ -679,6 +689,8 @@ class SandboxRunner:
         if not argv or not str(argv[0]).strip():
             raise ValueError("Sandbox process argv must not be empty")
         capability = self.capability(cwd=cwd)
+        if on_capability is not None:
+            on_capability(capability)
         if not capability.available:
             raise SandboxUnavailableError(capability.reason)
 
@@ -1305,12 +1317,10 @@ class SandboxRunner:
                 argv=list(argv) if argv is not None else ["sh", "-c", command])
 
         if capability.backend == "windows-restricted-token":
-            from backend.sandbox.windows_native import discover_restricted_runtime, _permission_profile
+            from backend.sandbox.windows_native import _permission_profile
             import json
 
-            runtime, reason = discover_restricted_runtime()
-            if runtime is None:
-                raise SandboxUnavailableError(reason)
+            runtime = capability.windows_runtime
             effective_cwd = Path(cwd or self._policy.policy_cwd or Path.cwd()).resolve()
             request = {"codexHome": str(runtime.home), "commandCwd": str(effective_cwd),
                 "workspaceRoots": [str(root) for root in self._policy.workspace_roots],
@@ -1380,6 +1390,7 @@ class SandboxRunner:
                 deny_write_paths=deny_write,
                 argv=argv,
                 tty=tty,
+                runtime=capability.windows_runtime,
             )
             self._windows_private_desktop = desktop
             self._windows_native_temp_dir = private_temp

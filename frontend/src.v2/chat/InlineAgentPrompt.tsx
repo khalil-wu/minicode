@@ -47,6 +47,7 @@ import { RequestUserInputCard } from "./RequestUserInputCard";
 import { McpUrlElicitationCard } from "./McpUrlElicitationCard";
 import { ComputerUseApprovalCard, isComputerUseApproval } from "./ComputerUseApprovalCard";
 import { permissionRequestDetails } from "./permissionRequest";
+import { useApprovalShortcuts } from "./useApprovalShortcuts";
 
 export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string } = {}) => {
   const { t: tr } = useI18n();
@@ -484,22 +485,7 @@ const ApprovalActions = ({ responding, onDeny, onAllow, onAllowConversation, onA
   allowLabel?: string;
 }) => {
   const { t: tr } = useI18n();
-  const actionsRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (document.querySelector(".inline-approval-actions") !== actionsRef.current) return;
-      if (responding || event.defaultPrevented || event.isComposing || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-      const target = event.target as HTMLElement;
-      if (target.closest('input, textarea, select, button, [contenteditable="true"], [role="menu"], [role="listbox"]')) return;
-      if (event.key === "Escape" || event.key === "Enter") {
-        if (event.key === "Enter" && !onAllow) return;
-        event.preventDefault();
-        (event.key === "Escape" ? onDeny : onAllow!)();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [responding, onDeny, onAllow]);
+  const actionsRef = useApprovalShortcuts({ responding, onDeny, onAllow });
   return <div ref={actionsRef} className="inline-approval-actions">
     {leadingApproval && <Button variant="secondary" size="sm" className="inline-approval-leading" disabled={responding}
       onClick={leadingApproval.onAllow}>{leadingApproval.label}</Button>}

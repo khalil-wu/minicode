@@ -49,7 +49,7 @@ import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } 
 import { openWebTarget } from "./openWebTarget";
 import { useTurnChanges } from "./useTurnChanges";
 import { collectConversationSources, markdownSourceLabelKey } from "./conversationSources";
-import { threadSummaryDisplayMode } from "./thread-summary-layout";
+import { threadSummaryDisplayMode, threadSummarySurface } from "./thread-summary-layout";
 import { openSettings } from "../lib/settings-navigation";
 import { handoffConversationWorktree } from "../lib/handoff-worktree";
 import "./ChatContextCard.css";
@@ -340,7 +340,9 @@ function ContextAttachmentThumbnail({ attachment }: { attachment: ContextAttachm
   );
 }
 
-export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.innerWidth) }: { displayMode?: ReturnType<typeof threadSummaryDisplayMode> } = {}) => {
+export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.innerWidth) }: {
+  displayMode?: ReturnType<typeof threadSummaryDisplayMode>;
+} = {}) => {
   const { t: tr } = useI18n();
   const contextInputs = useAppStore(useShallow((state) => state.messages.flatMap((message) => [
     message.id, message.isStreaming ? "" : markdownSourceLabelKey(message.content), message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
@@ -360,12 +362,13 @@ export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.
   const [browserTargets, setBrowserTargets] = useState<EmbeddedBrowserState[]>([]);
   const [summaryMenu, setSummaryMenu] = useState<{ x: number; y: number } | null>(null);
   const [showAllSources, setShowAllSources] = useState(false);
-  const popover = displayMode === "overlay" && !collapsed;
+  const surface = threadSummarySurface(displayMode, pinned, !collapsed);
+  const popover = surface === "popover";
   useEffect(() => {
     if (!popover) return;
     const dismiss = (event: PointerEvent) => {
       const target = event.target as Element;
-      if (!target.closest('#thread-summary-panel, [aria-controls="thread-summary-panel"], .context-menu-surface')) setCollapsed(true);
+      if (!target.closest('#thread-summary-panel, [aria-controls="thread-summary-panel"], #workbench-right-sidebar, [aria-controls="workbench-right-sidebar"], #right-panel-drawer, [aria-controls="right-panel-drawer"], .context-menu-surface')) setCollapsed(true);
     };
     const escape = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !event.defaultPrevented && !summaryMenu) setCollapsed(true);
@@ -515,14 +518,14 @@ export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.
   };
   const openBackgroundTasks = () => useAppStore.getState().setRightStackTab("tasks");
 
-  if (contextCount === 0 || !(pinned && displayMode !== "overlay") && !popover) return null;
+  if (contextCount === 0 || surface === null) return null;
 
   return (
     <aside
       id="thread-summary-panel"
       className="mc-chat-context-card"
       role={popover ? "dialog" : undefined}
-      data-surface={popover ? "popover" : "inline"}
+      data-surface={surface}
       data-display-mode={displayMode}
       data-state="visible"
       data-collapsed={collapsed ? "true" : "false"}

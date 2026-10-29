@@ -79,7 +79,7 @@ it("opens from the home project title and shows the selected project check",()=>
 
 it("opens named project creation and starts a projectless conversation without editing the original draft",()=>{
   const create = vi.fn(async()=>true);
-  useAppStore.setState({createConversation:create});
+  useAppStore.setState({startConversationDraft:create});
   render(<ProjectScopePicker />);
   fireEvent.click(screen.getByRole("button",{name:"选择项目"}));
   fireEvent.click(screen.getByRole("button",{name:"新建项目"}));

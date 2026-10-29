@@ -39,7 +39,7 @@ beforeEach(() => {
   Object.defineProperty(navigator, "mediaDevices", { configurable: true, value: { getUserMedia: vi.fn() } });
   vi.stubGlobal("AudioContext", class {}); vi.stubGlobal("AudioWorkletNode", class {});
   useAppStore.setState({ conversationId: "A", isConnected: true, pendingConversationSwitchId: null, pendingConversationCreateId: null,
-    pendingComposerConversationAdoption: null, messages: [], conversationMessages: {}, conversationAgentStates: {}, conversationWorkbenchStates: {},
+    messages: [], conversationMessages: {}, conversationAgentStates: {}, conversationWorkbenchStates: {},
     draft: "A unsaved draft", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null,
     isStreaming: false, settingsOpen: false, projectsOpen: false, skillsMarketplaceOpen: false,
     conversations: [{ id: "A", title: "Original" }, { id: "B", title: "Target" }] as never, workingDirectory: "" });

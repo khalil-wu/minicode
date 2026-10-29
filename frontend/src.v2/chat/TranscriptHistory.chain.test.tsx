@@ -65,6 +65,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.projections.length = 0;
   useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A",
+    activeConversationDraftId: null, conversationDrafts: {}, pendingConversationSwitchId: null, pendingConversationCreateId: null,
     conversations: [{ id: "A", title: "A", updatedAt: "" }, { id: "B", title: "B", updatedAt: "" }],
     messages: pair("current"), conversationMessages: {}, conversationStreaming: { A: false },
     conversationHistoryPages: { A: { beforeMessageId: "user-current", hasMore: true, loading: false } },

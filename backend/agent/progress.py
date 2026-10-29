@@ -4,6 +4,7 @@ from typing import Any
 
 from backend.agent.message import AgentEvent
 from backend.agent.provider_attempt import ProviderAttempt
+from backend.secret_redaction import redact_secrets
 
 
 def provider_stream_error_progress(
@@ -36,6 +37,16 @@ def provider_stream_error_progress(
         status_code=status_code,
         provider_error_code=provider_error_code,
         visibility="timeline",
+    )
+
+
+def provider_failure_detail_progress(message: str, *, attempt: ProviderAttempt, progress_id: str) -> AgentEvent:
+    """Retain the provider's real, redacted denial reason in process detail."""
+    detail = redact_secrets(message)
+    return AgentEvent.progress(
+        "模型请求详情", stage="status", status="failed", phase="recover",
+        id=f"{progress_id}:error:{attempt.span_id}:terminal", operation_id=progress_id,
+        provider_state="failed", error_message=detail, detail=detail, visibility="timeline",
     )
 
 

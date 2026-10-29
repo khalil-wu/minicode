@@ -9,6 +9,7 @@ import { getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
+import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
 
 vi.mock("../overlays/ToastContainer", () => ({
   pushToast: vi.fn(),
@@ -80,6 +81,31 @@ describe("handleSessionEvent", () => {
       guidelineReloadsByConversation: {},
       providerOAuthFlowsByConversation: {},
     });
+  });
+
+  it.each(["queued", "dequeued", "cancelled"])("ignores %s queue events for confirmed deleted owners without rebuilding even an empty cache", async status => {
+    const owner = `deleted-queue-${status}`;
+    await deleteConversationComposerDrafts(owner);
+    useAppStore.setState({ sideChats: {}, draft: "keep this reader draft" });
+    const before = useAppStore.getState();
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    expect(handleSessionEvent({ type: "user_message.queue.updated", conversation_id: owner, message_id: "queued-answer",
+      user_message_id: "queued-user", status, position: 1, input: { content: "late queued input", attachments: [] } } as ServerEvent, buffers)).toBe(true);
+    expect(useAppStore.getState().conversationMessages).toBe(before.conversationMessages);
+    expect(useAppStore.getState().conversationStreaming).toBe(before.conversationStreaming);
+    expect(useAppStore.getState().messages).toBe(before.messages);
+    expect(useAppStore.getState().draft).toBe("keep this reader draft");
+  });
+
+  it("retains another window's queue input when its owner is only absent from the inventory", () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    const owner = "uncached-queue-owner";
+    handleSessionEvent({ type: "user_message.queue.updated", conversation_id: owner, message_id: "uncached-queue-answer",
+      user_message_id: "uncached-queue-user", status: "queued", position: 1, input: { content: "actual input", attachments: [] } } as ServerEvent, buffers);
+    expect(useAppStore.getState().conversationMessages[owner]).toEqual([
+      expect.objectContaining({ id: "uncached-queue-user", content: "actual input", queueState: "queued" }),
+      expect.objectContaining({ id: "uncached-queue-answer", queueState: "queued" }),
+    ]);
   });
 
   it("initializes a first history cursor even when inventory metadata has a newer revision", () => {
@@ -291,7 +317,7 @@ describe("handleSessionEvent", () => {
     expect(useAppStore.getState().currentModel).toBe("main-model");
   });
 
-  it("records the backend hydration phase from conversation switched events", () => {
+  it("records the backend hydration phase and refreshes catalogs after the switch", async () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
     useAppStore.setState({ pendingConversationSwitchId: "conv-hydrating" });
 
@@ -312,11 +338,74 @@ describe("handleSessionEvent", () => {
       updatedAt: expect.any(Number),
     });
     expect(useAppStore.getState().pendingConversationSwitchId).toBeNull();
-    expect(sendClientCommand).toHaveBeenCalledTimes(3);
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(sendClientCommand).toHaveBeenCalledTimes(3));
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "commands.list" });
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list", conversation_id: "conv-hydrating", workspace_root: "C:/repo" }, { silent: true });
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "mcp.list", conversation_id: "conv-hydrating",
       workspace_root: "C:/repo" }, { silent: true });
+  });
+
+  it("does not request a stale catalog when the user selects another conversation before the refresh", async () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "first-owner", is_hydrating: false, capabilities_deferred: true,
+      conversation: { id: "first-owner", title: "First", workspace_root: "C:/repo", messages: [] },
+    } as unknown as ServerEvent, buffers);
+    useAppStore.setState({ pendingConversationSwitchId: "second-owner" });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sendClientCommand).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "interaction", "not-sent", "switched"] as const)("keeps the first submitted turn ahead of catalog discovery until %s", async outcome => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ isConnected: true, conversationDrafts: { draft: {
+      id: "draft", conversationId: "first-owner", adopted: true,
+      pendingUserMessage: { id: "first-user", role: "user", content: "First message", timestamp: 1, artifacts: [] },
+    } } as never });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "first-owner", is_hydrating: false, capabilities_deferred: true,
+      conversation: { id: "first-owner", title: "First", workspace_root: "C:/repo", messages: [] },
+    } as unknown as ServerEvent, buffers);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    if (outcome === "completed" || outcome === "interaction") {
+      useAppStore.setState({ isStreaming: true });
+      expect(sendClientCommand).not.toHaveBeenCalled();
+      useAppStore.setState({ messages: [{ id: "answer", role: "assistant", content: "", timestamp: 1,
+        artifacts: [], isStreaming: true, runStartedAt: 2 }] });
+      expect(sendClientCommand).not.toHaveBeenCalled();
+      useAppStore.setState({ conversationDrafts: {} });
+      expect(sendClientCommand).not.toHaveBeenCalled();
+      if (outcome === "completed") useAppStore.setState({ isStreaming: false });
+      else {
+        const composer = document.createElement("div");
+        composer.className = "composer-container";
+        document.body.appendChild(composer);
+        composer.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+        expect(sendClientCommand).not.toHaveBeenCalled();
+        composer.dispatchEvent(new KeyboardEvent("keydown", { key: "/", bubbles: true }));
+        composer.remove();
+      }
+    }
+    else if (outcome === "not-sent") useAppStore.setState({ conversationDrafts: {} });
+    else useAppStore.setState({ pendingConversationSwitchId: "second-owner" });
+    if (outcome === "switched") expect(sendClientCommand).not.toHaveBeenCalled();
+    else {
+      expect(sendClientCommand).toHaveBeenCalledWith({ type: "commands.list" });
+      expect(sendClientCommand).toHaveBeenCalledWith({ type: "runtime.capabilities.inspect", source: "workspace.activate.conversation.switch" }, { silent: true });
+      expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list", conversation_id: "first-owner", workspace_root: "C:/repo" }, { silent: true });
+      expect(sendClientCommand).toHaveBeenCalledWith({ type: "mcp.list", conversation_id: "first-owner", workspace_root: "C:/repo" }, { silent: true });
+    }
+  });
+
+  it("refreshes deferred capabilities immediately when the pending submission ended before the switch", async () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ conversationDrafts: {} });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "first-owner", is_hydrating: false,
+      capabilities_deferred: true,
+      conversation: { id: "first-owner", title: "First", workspace_root: "C:/repo", messages: [] },
+    } as unknown as ServerEvent, buffers);
+    await vi.waitFor(() => expect(sendClientCommand).toHaveBeenCalledWith({ type: "runtime.capabilities.inspect",
+      source: "workspace.activate.conversation.switch" }, { silent: true }));
   });
 
   it("does not refresh the command catalog for a replayed conversation switch", () => {

@@ -13,7 +13,9 @@ import { workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import mermaid from "mermaid";
 import { openWebInBrowser } from "../openWebInBrowser";
 import { FileViewerPanel } from "../../panels/FileViewerPanel";
-import { workspaceFileAbsolutePath } from "../../protocol/file-workspace";
+import { readFileWorkspacePreview, workspaceFileAbsolutePath } from "../../protocol/file-workspace";
+import * as protocolApi from "../../protocol/api";
+import type { WorkspaceFileOwner } from "../../stores/types";
 
 const { sendMock, openPathMock, revealPathMock, socketState } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -88,6 +90,126 @@ afterEach(() => {
 });
 
 describe("MarkdownRenderer", () => {
+  it.each(["absolute", "base-relative"] as const)("keeps a projectless file-viewer %s link and local image with its captured execution owner", async location => {
+    const base = "C:/tasks", cwd = `${base}/2026-10-25/report`;
+    const owner: WorkspaceFileOwner = { scopeId: "conversation:file-owner", conversationId: "file-owner", executionCwd: cwd, browserRoot: base, environmentId: "local" };
+    const file = `${cwd}/outputs/linked.md`, image = `${cwd}/outputs/pixel.png`;
+    const link = location === "absolute" ? file : "2026-10-25/report/outputs/linked.md";
+    const source = location === "absolute" ? image : "2026-10-25/report/outputs/pixel.png";
+    useAppStore.setState({ conversationId: "file-owner", workingDirectory: cwd, isConnected: true, workspaceFileTabs: [], pendingConversationSwitchId: null,
+      conversations: [{ id: "file-owner", title: "File owner", updatedAt: "", executionCwd: cwd, projectlessBrowserRoot: base }], draft: "retained file-view draft" });
+    const fetch = vi.spyOn(protocolApi, "fetchWithTimeout").mockResolvedValue(Response.json({ content: "exact linked file" }));
+    try {
+      render(<MarkdownRenderer content={`[Linked](<${link}>)\n\n![Local](<${source}>)`} workspaceRoot={base} conversationId="file-owner" fileOwner={owner} />);
+      fireEvent.click(screen.getByRole("button", { name: "Linked" }));
+      const linked = useAppStore.getState().workspaceFileTabs[0];
+      expect(linked.owner).toEqual(owner);
+      expect(workspaceFileAbsolutePath(linked.owner, linked.path)).toBe(file);
+      await readFileWorkspacePreview(linked.owner, linked.path);
+      const preview = new URL(String(fetch.mock.calls.at(-1)![0]));
+      expect(Object.fromEntries(preview.searchParams)).toMatchObject({ conversation_id: "file-owner", execution_cwd: cwd,
+        environment_id: "local", path: "2026-10-25/report/outputs/linked.md" });
+      const img = screen.getByRole("img", { name: "Local" });
+      const raw = new URL(img.getAttribute("src")!);
+      expect(raw.pathname).toBe("/api/workspace/browser-raw");
+      expect(Object.fromEntries(raw.searchParams)).toMatchObject({ session_id: "session-markdown", conversation_id: "file-owner", execution_cwd: cwd,
+        environment_id: "local", path: "2026-10-25/report/outputs/pixel.png" });
+      expect(raw.searchParams.has("workspace_root")).toBe(false);
+      fireEvent.click(img.closest("button")!);
+      const openedImage = useAppStore.getState().workspaceFileTabs.at(-1)!;
+      expect(openedImage.owner).toEqual(owner);
+      expect(workspaceFileAbsolutePath(openedImage.owner, openedImage.path)).toBe(image);
+      expect(useAppStore.getState()).toMatchObject({ conversationId: "file-owner", workingDirectory: cwd, draft: "retained file-view draft" });
+    } finally { fetch.mockRestore(); }
+  });
+
+  it("keeps an explicit Home file-viewer scope out of the current chat for links and local image bytes", () => {
+    const home: WorkspaceFileOwner = { scopeId: "home:C:/home-files", conversationId: null, executionCwd: "C:/home-files", browserRoot: "C:/home-files" };
+    useAppStore.setState({ conversationId: "current-chat", workingDirectory: "C:/chat", isConnected: true, workspaceFileTabs: [], pendingConversationSwitchId: null,
+      conversations: [{ id: "current-chat", title: "Current", updatedAt: "", executionCwd: "C:/chat" }], draft: "chat draft" });
+    render(<MarkdownRenderer content="[Home report](notes/report.md)\n\n![Home image](images/pixel.png)" workspaceRoot={home.browserRoot} fileOwner={home} />);
+    fireEvent.click(screen.getByRole("button", { name: "Home report" }));
+    expect(useAppStore.getState().workspaceFileTabs[0]).toMatchObject({ owner: home, path: "notes/report.md" });
+    const img = screen.getByRole("img", { name: "Home image" });
+    const raw = new URL(img.getAttribute("src")!);
+    expect(raw.pathname).toBe("/api/workspace/raw");
+    expect(raw.searchParams.get("workspace_root")).toBe(home.browserRoot);
+    expect(raw.searchParams.has("conversation_id")).toBe(false);
+    expect(raw.searchParams.has("session_id")).toBe(false);
+    fireEvent.click(img.closest("button")!);
+    expect(useAppStore.getState().workspaceFileTabs.at(-1)).toMatchObject({ owner: home, path: "images/pixel.png" });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "current-chat", workingDirectory: "C:/chat", draft: "chat draft" });
+  });
+
+  it("keeps an external browsing owner in its conversation layout and carries the referenced line", async () => {
+    const owner: WorkspaceFileOwner = { scopeId: "conversation:current-chat", conversationId: null,
+      executionCwd: "C:/external-files", browserRoot: "C:/external-files" };
+    useAppStore.setState({ conversationId: "current-chat", workingDirectory: "C:/chat", isConnected: true, workspaceFileTabs: [], pendingConversationSwitchId: null,
+      conversations: [{ id: "current-chat", title: "Current", updatedAt: "", executionCwd: "C:/chat" }], draft: "chat draft" });
+    const fetch = vi.spyOn(protocolApi, "fetchWithTimeout").mockResolvedValue(Response.json({ content: "external report" }));
+    try {
+      render(<MarkdownRenderer content="[External report](notes/report.md#L7)\n\n![External image](images/pixel.png)" workspaceRoot={owner.browserRoot} fileOwner={owner} />);
+      fireEvent.click(screen.getByRole("button", { name: "External report" }));
+      const linked = useAppStore.getState().workspaceFileTabs[0];
+      expect(linked).toMatchObject({ owner, path: "notes/report.md", line: 7, pane: "right" });
+      expect(workspaceFileAbsolutePath(linked.owner, linked.path)).toBe("C:/external-files/notes/report.md");
+      expect(useAppStore.getState().rightStackTab).toBe(`file:${linked.id}`);
+      await readFileWorkspacePreview(linked.owner, linked.path);
+      const preview = new URL(String(fetch.mock.calls.at(-1)![0]));
+      expect(preview.pathname).toBe("/api/workspace/preview");
+      expect(Object.fromEntries(preview.searchParams)).toMatchObject({ workspace_root: owner.browserRoot, path: "notes/report.md" });
+      expect(preview.searchParams.has("conversation_id")).toBe(false);
+      expect(preview.searchParams.has("session_id")).toBe(false);
+      const img = screen.getByRole("img", { name: "External image" });
+      const raw = new URL(img.getAttribute("src")!);
+      expect(raw.pathname).toBe("/api/workspace/raw");
+      expect(Object.fromEntries(raw.searchParams)).toMatchObject({ workspace_root: owner.browserRoot, path: "images/pixel.png" });
+      expect(raw.searchParams.has("conversation_id")).toBe(false);
+      fireEvent.click(img.closest("button")!);
+      const image = useAppStore.getState().workspaceFileTabs.at(-1)!;
+      expect(image).toMatchObject({ owner, path: "images/pixel.png", pane: "right" });
+      expect(useAppStore.getState()).toMatchObject({ conversationId: "current-chat", workingDirectory: "C:/chat", draft: "chat draft",
+        pendingConversationSwitchId: null, rightStackTab: `file:${image.id}` });
+    } finally { fetch.mockRestore(); }
+  });
+
+  it("opens assistant code and document links in the owner's right pane without changing its draft or editor", () => {
+    useAppStore.setState({ conversationId: "reply-owner", activeConversationDraftId: null,
+      workingDirectory: "C:/reply", workspaceFileTabs: [], editorTabs: [], rightPanelOpen: false,
+      conversations: [{ id: "reply-owner", title: "Reply", updatedAt: "", executionCwd: "C:/reply" }], draft: "Keep this draft" });
+    render(<MarkdownRenderer content="[Source](src/report.ts#L7)\n\n[Report](outputs/report.pdf)"
+      workspaceRoot="C:/reply" conversationId="reply-owner" openFileLinksInSidePanel />);
+    fireEvent.click(screen.getByRole("button", { name: "Source" }));
+    const source = useAppStore.getState().workspaceFileTabs.at(-1)!;
+    expect(source).toMatchObject({ owner: { conversationId: "reply-owner" }, path: "src/report.ts", line: 7, pane: "right" });
+    expect(useAppStore.getState().rightStackTab).toBe(`file:${source.id}`);
+    fireEvent.click(screen.getByRole("button", { name: "Report" }));
+    const document = useAppStore.getState().workspaceFileTabs.at(-1)!;
+    expect(document).toMatchObject({ owner: { conversationId: "reply-owner" }, path: "outputs/report.pdf", pane: "right" });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "reply-owner", workingDirectory: "C:/reply",
+      rightPanelOpen: true, rightStackTab: `file:${document.id}`, draft: "Keep this draft", editorTabs: [] });
+  });
+
+  it("keeps a regular file-view owner unchanged and does not repair a genuinely stale execution owner", async () => {
+    const current = "C:/regular", stale = "C:/old-regular";
+    const owner: WorkspaceFileOwner = { scopeId: "conversation:regular", conversationId: "regular", executionCwd: current, browserRoot: current };
+    useAppStore.setState({ conversationId: "regular", workingDirectory: current, isConnected: true, workspaceFileTabs: [], pendingConversationSwitchId: null,
+      conversations: [{ id: "regular", title: "Regular", updatedAt: "", executionCwd: current, workspaceRoot: current }] });
+    const view = render(<MarkdownRenderer content="[Regular](outputs/report.md)" workspaceRoot={current} conversationId="regular" fileOwner={owner} />);
+    fireEvent.click(screen.getByRole("button", { name: "Regular" }));
+    expect(useAppStore.getState().workspaceFileTabs[0]).toMatchObject({ owner, path: "outputs/report.md" });
+    view.rerender(<MarkdownRenderer content="[Stale](outputs/report.md)" workspaceRoot={stale} conversationId="regular" fileOwner={{ ...owner, executionCwd: stale, browserRoot: stale }} />);
+    fireEvent.click(screen.getByRole("button", { name: "Stale" }));
+    const tab = useAppStore.getState().workspaceFileTabs.at(-1)!;
+    expect(tab.owner.executionCwd).toBe(stale);
+    const fetch = vi.spyOn(protocolApi, "fetchWithTimeout").mockResolvedValue(Response.json({ detail: "Workspace execution owner is stale." }, { status: 409 }));
+    try {
+      await expect(readFileWorkspacePreview(tab.owner, tab.path)).rejects.toMatchObject({ status: 409 });
+      expect(new URL(String(fetch.mock.calls[0][0])).searchParams.get("execution_cwd")).toBe(stale);
+      expect(useAppStore.getState()).toMatchObject({ conversationId: "regular", workingDirectory: current });
+    } finally { fetch.mockRestore(); }
+  });
+
   it("passes supported colors to Mermaid in both themes and retains a scrollable full-size diagram", async () => {
     const style = document.documentElement.style;
     style.setProperty("--text-primary", "oklch(93% .002 250)");

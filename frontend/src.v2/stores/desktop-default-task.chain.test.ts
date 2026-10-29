@@ -5,26 +5,37 @@ import { emptyComposerDraft, composerWorkspaceKey } from "./composer-drafts";
 import { clearEditorWorkspaceBufferCacheForTests } from "./shared-helpers";
 import { handleSessionEvent } from "../chat/sessionEvents";
 import { sendChatMessage, resetPendingUserMessagesForTests } from "../chat/sendChatMessage";
-import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { latestProjectionCommandIds } from "../protocol/command-projection";
 import { isWorkspaceConversation, groupByWorkspace } from "../shell/ConversationsTab";
 import type { CommandResultEvent } from "../protocol/events";
 
-const native = vi.hoisted(() => ({ get: vi.fn(), trust: vi.fn(), wire: [] as Record<string, unknown>[] }));
+const native = vi.hoisted(() => ({ get: vi.fn(), trust: vi.fn(), wire: [] as Record<string, unknown>[], listeners: new Set<(data: unknown) => void>() }));
 vi.mock("../desktop/runtime", async importOriginal => ({
   ...await importOriginal<typeof import("../desktop/runtime")>(),
   desktop: () => ({ preferences: { get: native.get }, trustWorkspace: native.trust }),
 }));
-vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ send: (command: Record<string, unknown>) => { native.wire.push(command); return true; }, sessionId: "default-task" }) }));
+vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ send: (command: Record<string, unknown>) => { native.wire.push(command); return true; }, sessionId: "default-task",
+  subscribe: (listener: (data: unknown) => void) => { native.listeners.add(listener); return () => native.listeners.delete(listener); },
+}) }));
 vi.mock("../protocol/ws-outbox", () => ({ createClientCommandId: vi.fn(() => "task-chain-command"), sendClientCommand: vi.fn(() => true), sendClientCommandAwaitResult: vi.fn(), commandResultSucceeded: (result: {level:string}) => result.level === "success", sendConversationDeleteCommand: vi.fn() }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(), fetchDraftModelSelection: vi.fn(async (root: string) => ({
+  provider: "custom", current_model: "fixture", model: "fixture", available_models: ["fixture"], models_source: "configured", config_version: "fixture", config_cwd: root, effective_reasoning_effort: "off",
+  default_model_selection: { provider: "custom", model: "fixture", reasoning_effort: "off", conversation_id: "", working_directory: root },
+  available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+})) }));
 const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never;
 const taskDirectory = "C:/TaskBase/2026-10-13/new-chat";
-const activate = (id: string, cwd = taskDirectory) => handleSessionEvent({ type: "conversation.switched", conversation_id: id,
+const activate = (id: string, cwd = taskDirectory, commandId?: string, commandType?: string, hydrating = false) => {
+  const event = { type: "conversation.switched", conversation_id: id, is_hydrating: hydrating, context_pending: hydrating,
+  client_command_id: commandId, client_command_type: commandType,
   conversation: { id, title: id, updated_at: "2026-10-13", workspace_root: "", execution_cwd: cwd,
     projectless_output_dir: `${cwd}/outputs`, projectless_browser_root: "C:/TaskBase", messages: [] },
   session: { active_conversation_id: id, workspace_root: cwd, permission_mode: "confirm" },
-} as never, buffers);
+  } as never;
+  handleSessionEvent(event, buffers); for (const listener of [...native.listeners]) listener(event);
+};
 const ok = (): CommandResultEvent => ({ type: "command.result", command: "conversation.create", level: "success", message: "", data: {} });
 
 beforeEach(() => {
@@ -33,13 +44,21 @@ beforeEach(() => {
   clearEditorWorkspaceBufferCacheForTests();
   resetPendingUserMessagesForTests();
   native.wire.length = 0;
+  native.listeners.clear();
   native.get.mockResolvedValue({ defaultTaskDirectory: "C:/TaskBase", defaultPermissionMode: "auto" });
   native.trust.mockResolvedValue(taskDirectory);
-  vi.mocked(sendClientCommandAwaitResult).mockResolvedValue(ok());
+  vi.mocked(sendClientCommandAwaitResult).mockImplementation(async (command, expected) => {
+    if (command.type === "conversation.switch") throw new Error("Switch success is a canonical notification, not command.result");
+    return { ...ok(), command: expected, data: { conversation_id: "conversation_id" in command ? command.conversation_id : undefined, execution_cwd: taskDirectory } };
+  });
+  vi.mocked(sendClientCommand).mockImplementation(command => { if (command.type === "conversation.switch") {
+    activate(command.conversation_id, taskDirectory, command.client_command_id, command.type, true);
+    activate(command.conversation_id, taskDirectory, command.client_command_id, command.type, false);
+  } return true; });
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: null, conversations: [], conversationMessages: {},
     conversationStreaming: {}, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, conversationAgentStates: {},
     messages: [], sideChats: {}, workingDirectory: "", appMode: "cowork", isConnected: true, isStreaming: false,
-    pendingConversationCreateId: null, pendingConversationSwitchId: null, pendingComposerConversationAdoption: null,
+    pendingConversationCreateId: null, pendingConversationSwitchId: null,
     editorTabs: [], activeTabPath: null, activeEditorPath: null, permissionMode: "bypass", runtimeSession: null });
 });
 
@@ -56,12 +75,11 @@ it("adopts authored input while creation changes the actual cwd and keeps projec
   let finish!: (result: CommandResultEvent) => void;
   vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
   const create = useAppStore.getState().ensureComposerConversation();
-  const id = useAppStore.getState().pendingConversationCreateId!;
   await vi.waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalled());
-  expect(vi.mocked(sendClientCommandAwaitResult).mock.calls[0][0]).toMatchObject({ initial_prompt: "继续实现这个功能", permission_mode: "bypass" });
+  const id = vi.mocked(sendClientCommandAwaitResult).mock.calls[0][0].conversation_id!;
+  expect(vi.mocked(sendClientCommandAwaitResult).mock.calls[0][0]).toMatchObject({ activate: false, initial_prompt: "继续实现这个功能", permission_mode: "auto" });
   useAppStore.getState().setDraft("创建期间继续输入");
-  activate(id);
-  finish(ok());
+  finish({ ...ok(), data: { conversation_id: id, execution_cwd: taskDirectory } });
   expect(await create).toBe(id);
   const state = useAppStore.getState();
   expect(state).toMatchObject({ workingDirectory: taskDirectory, draft: "创建期间继续输入", attachments: [{ id: "draft-image" }] });

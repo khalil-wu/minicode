@@ -1061,12 +1061,6 @@ body:has(.settings-workspace.settings-center) .toast-container {
     display: none !important;
   }
 
-  .mc-icon-button,
-  .mc-icon-button-compact,
-  .mc-icon-button-accent {
-    --mc-icon-button-size: 44px;
-  }
-
   .mc-header {
     gap: 4px;
     padding-inline: 4px;
@@ -1094,12 +1088,21 @@ body:has(.settings-workspace.settings-center) .toast-container {
     width: 44px;
   }
 
-  .mc-sidebar-action {
-    min-height: 44px;
-  }
-
   .mc-sidebar-nav {
     gap: 8px !important;
+  }
+
+}
+
+@media (max-width: 768px) and (pointer: coarse) {
+  .mc-icon-button,
+  .mc-icon-button-compact,
+  .mc-icon-button-accent {
+    --mc-icon-button-size: 44px;
+  }
+
+  .mc-sidebar-action {
+    min-height: 44px;
   }
 
   .mc-sidebar-right[data-embedded="true"] {

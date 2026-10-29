@@ -9,9 +9,12 @@ import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { pushToast } from "./ToastContainer";
 
 const native = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), listeners: new Set<(value: never) => void>() }));
-vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(), isDesktop: () => true,
-  getDesktopPreferences: native.get, setDesktopPreferences: native.set,
-  onDesktopPreferencesChanged: (listener: (value: never) => void) => { native.listeners.add(listener); return () => native.listeners.delete(listener); } }));
+vi.mock("../desktop/runtime", async load => {
+  const onChanged = (listener: (value: never) => void) => { native.listeners.add(listener); return () => native.listeners.delete(listener); };
+  const api = { preferences: { get: native.get, set: native.set, onChanged } };
+  return { ...await load<typeof import("../desktop/runtime")>(), isDesktop: () => true, desktop: () => api,
+    getDesktopPreferences: native.get, setDesktopPreferences: native.set, onDesktopPreferencesChanged: onChanged };
+});
 vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
 vi.mock("../protocol/ws-outbox", async load => ({ ...await load<typeof import("../protocol/ws-outbox")>(), sendClientCommand: vi.fn(() => true) }));
 const Behavior = () => { useDesktopBehaviorPreferences(); return null; };

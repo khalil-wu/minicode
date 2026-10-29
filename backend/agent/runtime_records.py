@@ -41,6 +41,24 @@ AgentRole = Literal["primary", "subagent", "side_query", "background"]
 SwarmTaskStatus = Literal["pending", "in_progress", "blocked", "completed", "cancelled"]
 
 
+def source_agent_status_value(
+    status: str, *, content: str = "", error: str = "", terminal_reason: str = "",
+) -> str | dict[str, str | None]:
+    """Project durable turn evidence to Source's AgentStatus."""
+    if status in {"pending", "pending_init"}:
+        return "pending_init"
+    if status in {"running", "shutdown", "not_found"}:
+        return status
+    if status in {"cancelled", "interrupted"} or terminal_reason == "goal_budget_exhausted":
+        return "interrupted"
+    if status == "completed" and not error:
+        return {"completed": content or None}
+    if status == "partial":
+        error = (f"status: partial\nterminal_reason: {terminal_reason}\n"
+            f"error: {error}\npartial_output:\n{content}")
+    return {"errored": error or terminal_reason or status}
+
+
 
 def epoch_ms() -> int:
     return int(time.time() * 1000)

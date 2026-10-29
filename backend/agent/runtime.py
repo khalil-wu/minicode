@@ -37,6 +37,7 @@ from backend.agent.runtime_records import (
     SwarmTaskStatus,
     epoch_ms,
     new_run_id,
+    source_agent_status_value,
     AgentRunRecord,
     SubagentRunRecord,
     SubagentResultRecord,
@@ -3258,10 +3259,17 @@ class AgentRuntime:
         is_detach = bool(getattr(record, "detach_from_parent", False)) if record else False
         if not (is_background or is_detach):
             return None
+        source_v2 = record is not None and record.resume_config.get("source_spawn_version") == "v2"
+        guardian_denials = result.terminal_reason == "guardian_denials"
+        if source_v2 and not guardian_denials and source_agent_status_value(result.status,
+            terminal_reason=result.terminal_reason) in ("pending_init", "running", "interrupted"):
+            # Source does not send a completion message for Interrupted.
+            return None
         payload = {
             "status": result.status,
             "content": result.content,
             "error": result.error,
+            "terminal_reason": result.terminal_reason,
             "duration_ms": result.duration_ms,
             "iterations": result.iterations,
             "tool_call_count": result.tool_call_count,
@@ -3273,6 +3281,12 @@ class AgentRuntime:
             "agent_type": str(getattr(record, "agent_type", "") or "") if record else "",
             "prompt_summary": str(getattr(record, "prompt_summary", "") or "") if record else "",
         }
+        if source_v2:
+            child_path = AgentPath.parse(record.agent_path)
+            payload.update(source_spawn_version="v2", author_agent_path=child_path.logical_name,
+                recipient_agent_path=AgentPath(child_path.segments[:-1]).logical_name)
+            if guardian_denials:
+                payload["codex_error_info"] = "too_many_denials"
         notification = enqueue_parent_notification(
             parent_run_id=parent_run_id,
             conversation_id=conversation_id,
@@ -3280,7 +3294,7 @@ class AgentRuntime:
             subagent_id=subagent_id,
             payload=payload,
             kind="subagent_completed",
-            idempotency_key=f"subagent_completed:{subagent_id}:{result.status}:{result.completed_at}",
+            idempotency_key=f"subagent_completed:{subagent_id}:{result.mailbox_epoch}:{result.status}:{result.completed_at}",
             base_dir=self._outbox_root,
             mailbox_epoch=int(getattr(record, "mailbox_epoch", 0) or 0) if record else 0,
         )
@@ -3307,11 +3321,13 @@ class AgentRuntime:
             parent_run_id=parent_run_id,
             conversation_id=conversation_id,
         )
+        parent_is_subagent = bool(self.get_subagent(parent_run_id) or self.load_persisted_subagent(parent_run_id))
         return [
             item.to_dict() for item in outbox.list_notifications(status=status)
             if not parent_run_id
             or item.parent_run_id == parent_run_id
-            or (self.get_subagent(parent_run_id) is None and self.get_subagent(item.parent_run_id) is None)
+            or (not parent_is_subagent and not (
+                self.get_subagent(item.parent_run_id) or self.load_persisted_subagent(item.parent_run_id)))
         ]
 
     def ack_parent_notification(
@@ -3713,14 +3729,16 @@ class AgentRuntime:
             ))
         return claims
 
-    def has_pending_agent_input(self, *, agent_id: str, conversation_id: str) -> bool:
+    def has_pending_agent_input(self, *, agent_id: str, conversation_id: str, trigger_turn_only: bool = False) -> bool:
         from backend.agent.mailbox_delivery import _STRUCTURED_PROTOCOL_TYPES
 
         record = self.get_subagent(agent_id)
         if self._swarm_store.has_pending_messages(participant_id=agent_id if record is not None else "parent",
             mailbox_epoch=record.mailbox_epoch if record is not None else 0, conversation_id=conversation_id,
-            excluded_message_kinds=tuple(_STRUCTURED_PROTOCOL_TYPES)):
+            excluded_message_kinds=tuple(_STRUCTURED_PROTOCOL_TYPES), trigger_turn_only=trigger_turn_only):
             return True
+        if trigger_turn_only:
+            return False
         return any(item["status"] in {"pending", "failed"} and item["kind"] != "mailbox_wake"
             and self.accepts_parent_notification(subagent_id=item["subagent_id"],
                 mailbox_epoch=item["mailbox_epoch"], parent_run_id=agent_id)

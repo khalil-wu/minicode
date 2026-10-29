@@ -98,7 +98,7 @@ async def test_mode_switch_retains_frozen_source_request_until_its_explicit_resp
     if kind == "command":
         tool = command_tool
         args = {"command": "echo original-owned"}
-        captured = authorize_command_call(ToolCallEvent(id="inspect-command", name=tool.name, arguments=args), context)
+        captured = (await authorize_command_call(ToolCallEvent(id="inspect-command", name=tool.name, arguments=args), context))
         home = tmp_path / "native-policy"
         (home / "rules").mkdir(parents=True)
         (home / "rules/default.rules").write_text("\n".join(

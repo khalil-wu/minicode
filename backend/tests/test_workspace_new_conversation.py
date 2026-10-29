@@ -8,6 +8,7 @@ import pytest
 
 from backend.conversations.repository import ConversationRepository
 from backend.artifact.store import ArtifactStore
+from backend.config import AppConfig, LLMSettings
 from backend.ws.handlers import conversation, workspace
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.session_lifecycle import SessionLifecycle
@@ -25,6 +26,7 @@ def test_open_project_creates_new_owned_history(monkeypatch, tmp_path, command, 
     request.addfinalizer(artifacts.shutdown)
     session = SimpleNamespace(
         active_conversation_id=old.id, conversation_repo=repo, ws_manager=None,
+        config=AppConfig(llm=LLMSettings(api_key="")),
         # Direct handler calls have no durable client-command claim.
         event_outbox=SimpleNamespace(client_command_id=""),
         artifact_store=artifacts,
@@ -70,6 +72,7 @@ def test_failed_workspace_initialization_keeps_previous_owner(monkeypatch, tmp_p
         return False
     session = SimpleNamespace(
         active_conversation_id=old.id, conversation_repo=repo,
+        config=AppConfig(llm=LLMSettings(api_key="")),
         event_outbox=SimpleNamespace(client_command_id=""),
         git_branch_for=Mock(return_value="main"), switch_workspace_for_conversation=fail_activation,
         send_payload=AsyncMock(), load_active_conversation_snapshot=Mock(),
@@ -86,7 +89,7 @@ def test_failed_workspace_initialization_keeps_previous_owner(monkeypatch, tmp_p
 
 def test_invalid_workspace_does_not_create_or_move_conversation(tmp_path):
     repo = SimpleNamespace(create_conversation=Mock())
-    session = SimpleNamespace(active_conversation_id="old", conversation_repo=repo, send_event=AsyncMock())
+    session = SimpleNamespace(active_conversation_id="old", conversation_repo=repo, send_event=AsyncMock(), config=AppConfig(llm=LLMSettings(api_key="")))
     asyncio.run(conversation.handle_conversation_create(session, {"workspace_root": str(tmp_path / "missing")}))
     repo.create_conversation.assert_not_called()
     assert session.active_conversation_id == "old"
@@ -107,3 +110,20 @@ def test_stale_message_cannot_rebind_an_existing_project(monkeypatch, tmp_path):
     assert repo.get_conversation(old.id).workspace_root == str(old_root)
     session.activate_workspace_path.assert_not_awaited()
     assert session.send_event.await_args.args[0].data["error_code"] == "workspace_owner_mismatch"
+
+
+def test_owned_message_workspace_check_does_not_load_the_conversation_history(monkeypatch, tmp_path):
+    root = tmp_path / "project"
+    root.mkdir()
+    repo = ConversationRepository(tmp_path / "conversations")
+    conversation = repo.create_conversation(workspace_root=str(root),
+        transcript=[{"role": "user", "content": "existing history"} for _ in range(50)])
+    monkeypatch.setattr(repo, "get_conversation", Mock(side_effect=AssertionError("history must not be read")))
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _: True)
+    session = SimpleNamespace(conversation_repo=repo, send_event=AsyncMock(), activate_workspace_path=AsyncMock())
+    dispatcher = object.__new__(SessionCommandDispatcher)
+    dispatcher._session = session
+
+    assert asyncio.run(dispatcher._handle_user_message_workspace(str(root), conversation.id)) == (True, conversation.id)
+    session.send_event.assert_not_awaited()
+    session.activate_workspace_path.assert_not_awaited()

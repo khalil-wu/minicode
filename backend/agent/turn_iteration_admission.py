@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class IterationAdmissionResult:
     action: Literal["proceed", "retry", "terminate"]
-    tool_schema_state: TurnToolSchemaDerivation
+    tool_schema_state: TurnToolSchemaDerivation | None
     initial_turn_pending: bool
     tool_schemas: list[dict[str, Any]] | None = None
     messages: list[LLMMessage] | None = None
@@ -92,7 +92,7 @@ class TurnIterationAdmission:
     async def admit(
         self,
         *,
-        previous_tool_schema_state: TurnToolSchemaDerivation,
+        previous_tool_schema_state: TurnToolSchemaDerivation | None,
         initial_turn_pending: bool,
         pending_turn_context: list[str],
     ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
@@ -151,7 +151,7 @@ class TurnIterationAdmission:
     async def _admit(
         self,
         *,
-        previous_tool_schema_state: TurnToolSchemaDerivation,
+        previous_tool_schema_state: TurnToolSchemaDerivation | None,
         initial_turn_pending: bool,
         pending_turn_context: list[str],
     ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
@@ -318,7 +318,7 @@ class TurnIterationAdmission:
     def _result(
         *,
         action: Literal["proceed", "retry", "terminate"],
-        tool_schema_state: TurnToolSchemaDerivation,
+        tool_schema_state: TurnToolSchemaDerivation | None,
         initial_turn_pending: bool,
         tool_schemas: list[dict[str, Any]] | None = None,
         messages: list[LLMMessage] | None = None,

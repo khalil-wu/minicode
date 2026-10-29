@@ -16,7 +16,7 @@ import type { ChatMessage, ComposerAttachment } from "../stores/types";
 import type { ClientCommand, CommandResultEvent } from "../protocol/events";
 
 const wire = vi.hoisted(() => ({ commands: [] as ClientCommand[], toast: vi.fn() }));
-vi.mock("../hooks/useWebSocket", async load => ({ ...await load<typeof import("../hooks/useWebSocket")>(),
+vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "plan-prompt-session", send: (command: ClientCommand) => { wire.commands.push(command); return true; } }) }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: wire.toast }));
 vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(),
@@ -161,7 +161,7 @@ describe("Codex Wr completed-plan request", () => {
     await waitFor(() => expect(modeCommands()).toHaveLength(1));
     await reply(modeCommands()[0]);
     await waitFor(() => expect(screen.queryByText("执行这个计划吗？")).toBeNull());
-    expect(useAppStore.getState().messages.filter(message => message.role === "user")).toHaveLength(1);
+    expect(useAppStore.getState().messages.filter(message => message.role === "user")).toHaveLength(2);
   });
 
   it("applies a late admission only to its hidden owner while preserving both drafts and attachments", async () => {
@@ -182,6 +182,7 @@ describe("Codex Wr completed-plan request", () => {
   it("does not replace a newer hidden-owner mode choice when the old admission completes", async () => {
     renderPrompt(); chooseImplement();
     await waitFor(() => expect(userCommands()).toHaveLength(1));
+    act(() => notifyClientCommandReceived(userCommands()[0].client_command_id!));
     act(() => useAppStore.getState().applyConversationSwitched({ conversationId: "other-owner" }));
     let setting!: Promise<boolean>;
     act(() => { setting = useAppStore.getState().setAgentMode("explore", "plan-owner"); });
@@ -213,6 +214,7 @@ describe("Codex Wr completed-plan request", () => {
   it("does not overwrite a newer choice that changed away and back to Plan during admission", async () => {
     renderPrompt(); chooseImplement();
     await waitFor(() => expect(userCommands()).toHaveLength(1));
+    act(() => notifyClientCommandReceived(userCommands()[0].client_command_id!));
     let change!: Promise<boolean>;
     act(() => { change = useAppStore.getState().setAgentMode("build", "plan-owner"); });
     await reply(modeCommands()[0]);

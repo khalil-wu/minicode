@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import asyncio
+from contextlib import AsyncExitStack
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -101,6 +103,10 @@ class Session:
     async def send_event(self, event):
         self.events.append(event)
 
+    async def send_payload(self, payload, **kwargs):
+        self.events.append(payload)
+        return True
+
 
 @pytest.mark.asyncio
 async def test_handlers_publish_canonical_metadata_to_peer_windows_without_activating_or_rebinding(tmp_path, monkeypatch):
@@ -122,6 +128,9 @@ async def test_handlers_publish_canonical_metadata_to_peer_windows_without_activ
     await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True})
     await handle_project(session, {"conversation_id": "conv-sidebar", "project_id": str(root_b)})
     assert len(session.events) == len(peer.events) == 3
+    assert peer.events[1]["type"] == "conversation.summary.updated"
+    assert peer.events[1]["has_unread_turn"] is True
+    assert "transcript" not in peer.events[1]
     assert peer.events[-1][0]["project_id"] == str(root_b.resolve())
     assert peer.events[-1][0]["has_unread_turn"] is True
     assert peer.events[-1][0]["pinned"] is False
@@ -129,6 +138,28 @@ async def test_handlers_publish_canonical_metadata_to_peer_windows_without_activ
     assert session.active_conversation_id == "other-reader"
     assert peer.active_conversation_id == "another-reader"
     assert repo.get_conversation("conv-sidebar").execution_cwd == str(root_a)
+
+
+@pytest.mark.asyncio
+async def test_read_receipt_releases_send_lock_before_peer_projection(tmp_path):
+    from backend.ws.lifecycle_scope import bind_command_lifecycle_prefix
+
+    repo = ConversationRepository(tmp_path / "conversations")
+    conversation(repo, tmp_path / "A")
+    session = Session(repo, "reader", "conv-sidebar")
+    lock = asyncio.Lock()
+    async def publish(payload, **kwargs):
+        assert not lock.locked(), "Metadata projection must not block the next Enter"
+        assert repo.get_conversation("conv-sidebar").has_unread_turn is True
+        session.events.append(payload)
+        return True
+    session.send_payload = publish
+    async with AsyncExitStack() as scope:
+        await scope.enter_async_context(lock)
+        with bind_command_lifecycle_prefix(session.session_id, scope):
+            await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True})
+    assert len(session.events) == 1
+    assert session.results[-1]["level"] == "success"
 
 
 @pytest.mark.asyncio

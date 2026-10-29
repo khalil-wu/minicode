@@ -441,15 +441,23 @@ function registerIpcHandlers() {
   ipcMain.handle("minicode:notifications:hide", withMainSender("minicode:notifications:hide", (_event, selector) => {
     return hideDesktopNotifications(selector, getWin(_event));
   }));
-  const preferencesSnapshot = async () => {
-    const fileOpenTargets = await Promise.all(ctx.desktopPreferences.fileOpenTargets().map(async ({ id, label, icon, iconPath, kind, hidden }) => {
-      const nativeIcon = iconPath ? await app.getFileIcon(iconPath, { size: "small" }) : null;
-      return { id, label, kind, hidden, icon: nativeIcon && !nativeIcon.isEmpty() ? nativeIcon.toDataURL() : icon };
-    }));
-    return { ...ctx.desktopPreferences.getPreferences(), systemLocale: app.getLocale(), fileOpenTargets,
-      terminalShellTargets: ctx.desktopPreferences.terminalShellTargets().map(({ id, label }) => ({ id, label })) };
+  const preferencesSnapshot = () => ({ ...ctx.desktopPreferences.getPreferences(), systemLocale: app.getLocale() });
+  let discoveringPreferenceTargets;
+  const preferenceTargets = () => {
+    if (!discoveringPreferenceTargets) {
+      discoveringPreferenceTargets = (async () => {
+        const installed = await ctx.desktopPreferences.fileOpenTargets();
+        const fileOpenTargets = await Promise.all(installed.map(async ({ id, label, icon, iconPath, kind, hidden }) => {
+          const nativeIcon = iconPath ? await app.getFileIcon(iconPath, { size: "small" }) : null;
+          return { id, label, kind, hidden, icon: nativeIcon && !nativeIcon.isEmpty() ? nativeIcon.toDataURL() : icon };
+        }));
+        return { fileOpenTargets, terminalShellTargets: ctx.desktopPreferences.terminalShellTargets().map(({ id, label }) => ({ id, label })) };
+      })().finally(() => { discoveringPreferenceTargets = undefined; });
+    }
+    return discoveringPreferenceTargets;
   };
   ipcMain.handle("minicode:preferences:get", withMainSender("minicode:preferences:get", () => preferencesSnapshot()));
+  ipcMain.handle("minicode:preferences:getTargets", withMainSender("minicode:preferences:getTargets", () => preferenceTargets()));
   ipcMain.handle("minicode:dictation:get", withMainSender("minicode:dictation:get", () => ctx.dictationHotkeys.get()));
   ipcMain.handle("minicode:dictation:getLocalRuntime", withMainSender("minicode:dictation:getLocalRuntime", () => {
     const { apiBaseUrl, runtimeToken, revision } = ctx.getBackendRuntimeConfig();
@@ -559,7 +567,7 @@ function registerIpcHandlers() {
       if (fs.statSync(resolved).isDirectory()) targetId = "fileManager";
       else if (nativeFileExtensions.includes(path.extname(resolved).slice(1).toLowerCase())) targetId = "system";
     }
-    const opener = ctx.desktopPreferences.fileOpenTargets().find(item => item.id === targetId);
+    const opener = await ctx.desktopPreferences.fileOpenTarget(targetId);
     if (!opener) throw new Error("The selected file application is no longer installed.");
     if (options.persistPreferredTargetPath && opener.kind === "editor") await persistPreferredTarget();
     await openInTarget(opener, resolved, line, options.column);
@@ -710,7 +718,7 @@ function registerIpcHandlers() {
     if (target.workspace_root !== undefined) {
       const targetId = ctx.desktopPreferences.preferredFileOpenTarget(target.workspace_root || undefined);
       if (targetId === "minicode") return { openInEditor: true, path: target.path, workspaceRoot: target.workspace_root };
-      const opener = ctx.desktopPreferences.fileOpenTargets().find(item => item.id === targetId);
+      const opener = await ctx.desktopPreferences.fileOpenTarget(targetId);
       if (!opener) throw new Error("The selected file application is no longer installed.");
       await openInTarget(opener, target.path);
       return true;
@@ -827,11 +835,13 @@ function registerIpcHandlers() {
 
   const embeddedBrowser = ctx.embeddedBrowserManager;
   ipcMain.handle("minicode:embeddedBrowser:create", withMainSender("minicode:embeddedBrowser:create", async (_event, payload) => {
-    return embeddedBrowser?.create(browserPayload(_event, payload));
+    return embeddedBrowser?.create(browserPayload(_event, payload), { manualNavigation: true });
   }));
   ipcMain.handle("minicode:embeddedBrowser:list", withMainSender("minicode:embeddedBrowser:list", (_event, payload) => {
     return embeddedBrowser?.listTargets(payload?.conversationId || payload?.conversation_id, getWindowInstanceId(_event)) ?? [];
   }));
+  ipcMain.handle("minicode:embeddedBrowser:transferOwner", withMainSender("minicode:embeddedBrowser:transferOwner", (event, payload) =>
+    embeddedBrowser.transferOwner(payload.fromOwner, payload.toOwner, getWindowInstanceId(event))));
   ipcMain.handle("minicode:embeddedBrowser:activate", withMainSender("minicode:embeddedBrowser:activate", (_event, payload) => {
     return embeddedBrowser?.activate(payload?.id, payload?.conversationId || payload?.conversation_id, getWindowInstanceId(_event)) ?? false;
   }));
@@ -839,10 +849,10 @@ function registerIpcHandlers() {
     return embeddedBrowser?.setBounds(browserPayload(_event, payload)) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:navigate", withMainSender("minicode:embeddedBrowser:navigate", async (_event, payload) => {
-    return embeddedBrowser?.navigate(browserPayload(_event, payload));
+    return embeddedBrowser?.navigate(browserPayload(_event, payload), { manualNavigation: true });
   }));
   ipcMain.handle("minicode:embeddedBrowser:runAction", withMainSender("minicode:embeddedBrowser:runAction", (_event, payload) => {
-    return embeddedBrowser?.runNavigationAction(browserPayload(_event, payload)) ?? false;
+    return embeddedBrowser?.runNavigationAction(browserPayload(_event, payload), { manualNavigation: true }) ?? false;
   }));
   ipcMain.handle("minicode:embeddedBrowser:pageCommand", withMainSender("minicode:embeddedBrowser:pageCommand", (event, payload) => embeddedBrowser.runPageCommand(browserPayload(event, payload))));
   ipcMain.handle("minicode:embeddedBrowser:downloads", withMainSender("minicode:embeddedBrowser:downloads", () => embeddedBrowser.listDownloads()));

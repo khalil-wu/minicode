@@ -134,6 +134,7 @@ const runtimeConfig = {
       previewNotificationSound: sound => ipcRenderer.invoke("minicode:preferences:previewNotificationSound", sound),
       chooseTaskDirectory: () => ipcRenderer.invoke("minicode:preferences:chooseTaskDirectory"),
       get: () => ipcRenderer.invoke("minicode:preferences:get"),
+      getTargets: () => ipcRenderer.invoke("minicode:preferences:getTargets"),
       set: (patch) => ipcRenderer.invoke("minicode:preferences:set", patch),
       onChanged: (callback) => {
         const listener = (_event, value) => callback(value);
@@ -325,6 +326,7 @@ const runtimeConfig = {
       clearBrowsingData: dataTypes => ipcRenderer.invoke("minicode:embeddedBrowser:clearBrowsingData", dataTypes),
       create: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:create", payload),
       list: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:list", payload),
+      transferOwner: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:transferOwner", payload),
       activate: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:activate", payload),
       setBounds: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:setBounds", payload),
       navigate: (payload) => ipcRenderer.invoke("minicode:embeddedBrowser:navigate", payload),

@@ -20,7 +20,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from enum import Enum
 from pathlib import Path
@@ -484,6 +484,8 @@ class MCPClient:
         execution_binding=None,
         bearer_token_env_var: str | None = None,
         oauth_credential_name: str | None = None,
+        feature_flags=None,
+        requires_read_only_tools: bool = False,
     ) -> None:
         self.server_name = server_name
         self._command = command
@@ -495,6 +497,9 @@ class MCPClient:
         self._oauth_callback_port = oauth_callback_port
         self._cwd = cwd
         self._execution_binding = execution_binding
+        self._execution_lease_released = False
+        self._feature_flags = feature_flags
+        self._requires_read_only_tools = requires_read_only_tools
         self._bearer_token_env_var = bearer_token_env_var
         self._oauth_credential_name = oauth_credential_name if oauth_credential_name is not None else server_name
         # Roots are owned by the client instance.  A client must never resolve
@@ -542,6 +547,7 @@ class MCPClient:
         self._subscribed_resources: set[str] = set()
         self._resource_notifications: list[dict[str, Any]] = []
         self._read_only_tools: set[str] = set()
+        self.tool_catalog_cacheable = True
         self._tool_owner_seq = itertools.count(1)
         self._active_tool_request_owners: dict[int, dict[str, Any]] = {}
         self._active_request_tasks: set[asyncio.Task[Any]] = set()
@@ -553,10 +559,15 @@ class MCPClient:
         self._cleanup_reason = ""
         self._cleanup_requested_at: float | None = None
         self._cleanup_completed_at: float | None = None
+        if execution_binding is not None:
+            self._execution_binding = replace(execution_binding, lease=execution_binding.lease.clone())
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    def _feature_enabled(self, name: str) -> bool:
+        return self._feature_flags.enabled(name) if self._feature_flags is not None else feature_enabled(name)
 
     @property
     def cleanup_status(self) -> dict[str, Any]:
@@ -607,7 +618,7 @@ class MCPClient:
         try:
             await asyncio.wait_for(
                 asyncio.shield(ready),
-                timeout=max(self._startup_timeout, 1.0),
+                timeout=self._startup_timeout,
             )
         except BaseException:
             self._closing = True
@@ -634,10 +645,10 @@ class MCPClient:
                 transport_closed = asyncio.Event()
                 elicitation_callback = (
                     self._sdk_elicitation_callback
-                    if feature_enabled("mcp_elicitation") and self._elicitation_handler is not None
+                    if self._feature_enabled("mcp_elicitation") and self._elicitation_handler is not None
                     else None
                 )
-                roots_callback = self._sdk_list_roots if feature_enabled("mcp_roots") else None
+                roots_callback = self._sdk_list_roots if self._feature_enabled("mcp_roots") else None
                 async with _LifecycleClientSession(
                     read_stream,
                     write_stream,
@@ -754,7 +765,7 @@ class MCPClient:
                 auth=await self._http_oauth_auth(),
             )
         if self._transport == MCPTransport.HTTP:
-            if not feature_enabled("mcp_streamable_http_transport"):
+            if not self._feature_enabled("mcp_streamable_http_transport"):
                 raise ConnectionError("MCP Streamable HTTP transport is disabled by feature flag")
             return streamablehttp_client(
                 self._url,
@@ -764,7 +775,7 @@ class MCPClient:
                 auth=await self._http_oauth_auth(),
             )
         if self._transport == MCPTransport.WEBSOCKET:
-            if not feature_enabled("mcp_websocket_transport"):
+            if not self._feature_enabled("mcp_websocket_transport"):
                 raise ConnectionError("MCP WebSocket transport is disabled by feature flag")
             return _websocket_client_with_headers(self._url, headers)
         raise ConnectionError(f"Unsupported MCP transport: {self._transport.value}")
@@ -864,6 +875,9 @@ class MCPClient:
 
     def _apply_initialize_result(self, result: Any) -> None:
         raw = _model_dict(result)
+        experimental = raw.get("capabilities", {}).get("experimental")
+        cache = experimental.get("codex/tool-catalog-cache") if isinstance(experimental, dict) else None
+        self.tool_catalog_cacheable = not (isinstance(cache, dict) and cache.get("cacheable") is False)
         caps = getattr(result, "capabilities", None)
         if caps is not None and not isinstance(caps, dict):
             resources = getattr(caps, "resources", None)
@@ -930,7 +944,9 @@ class MCPClient:
         return _bounded_response(self.server_name, method, result)
 
     def _tool_request_timeout_seconds(self, params: dict[str, Any]) -> float:
-        return self._tool_timeout
+        owner = _request_owner.get()
+        timeout = owner.get("mcp_tool_timeout_sec") if owner is not None else None
+        return timeout if timeout is not None else self._tool_timeout
 
     async def _page(
         self, method: str, result_key: str, cursor: str | None = None,
@@ -1028,6 +1044,8 @@ class MCPClient:
         self._read_only_tools = {
             tool.name for tool in tools if bool(tool.annotations.get("readOnlyHint", False))
         }
+        if self._requires_read_only_tools:
+            tools = [tool for tool in tools if tool.name in self._read_only_tools]
         return tools
 
     def pending_requests(self) -> tuple[asyncio.Task, ...]:
@@ -1049,6 +1067,8 @@ class MCPClient:
     ) -> MCPCallResult:
         if not self._connected:
             return self._tool_error(f"MCP server '{self.server_name}' is not connected")
+        if self._requires_read_only_tools and tool_name not in self._read_only_tools:
+            return self._tool_error("This MCP connection only allows read-only tools")
         params: dict[str, Any] = {"name": tool_name}
         if arguments is not None:
             params["arguments"] = arguments
@@ -1328,12 +1348,12 @@ class MCPClient:
         return "\n\n".join(lines).strip()
 
     async def _sdk_list_roots(self, _context: Any) -> types.ListRootsResult | types.ErrorData:
-        if not feature_enabled("mcp_roots"):
+        if not self._feature_enabled("mcp_roots"):
             return types.ErrorData(code=types.INVALID_REQUEST, message="roots not supported")
         return types.ListRootsResult(roots=[types.Root.model_validate(root) for root in self._client_roots()])
 
     async def _sdk_elicitation_callback(self, context: Any, params: Any) -> Any:
-        if not feature_enabled("mcp_elicitation") or self._elicitation_handler is None:
+        if not self._feature_enabled("mcp_elicitation") or self._elicitation_handler is None:
             return types.ErrorData(code=types.INVALID_REQUEST, message="elicitation not supported")
         correlated = _callback_owner.get()
         owner = correlated[1] if correlated is not None else self._active_callback_owner()
@@ -1510,6 +1530,9 @@ class MCPClient:
         self._session = None
         self._cleanup_pending = False
         self._cleanup_completed_at = time.time()
+        if self._execution_binding is not None and not self._execution_lease_released:
+            await self._execution_binding.lease.aclose()
+            self._execution_lease_released = True
         return True
 
     async def finish_pending_cleanup(self) -> bool:

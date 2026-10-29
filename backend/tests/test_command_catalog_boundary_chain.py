@@ -1,4 +1,5 @@
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
+from types import SimpleNamespace
 
 import pytest
 
@@ -7,6 +8,25 @@ from backend.commands.slash_commands import _substitute_command_arguments
 from backend.feature_flags import load_feature_flags
 from backend.tests.test_user_input_presentation_chain import session_for
 from backend.agent.message import UserCommand
+
+
+@pytest.mark.asyncio
+async def test_catalog_read_reuses_published_context_but_dispatch_rebinds_current_owner(tmp_path, monkeypatch):
+    session, conversation, _ = session_for(tmp_path, monkeypatch)
+    runner = SimpleNamespace(active=True)
+    monkeypatch.setattr(session, "_ensure_lifecycle_runtime", AsyncMock(return_value=runner))
+    monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
+    bind = Mock()
+    monkeypatch.setattr(session, "_bind_lifecycle_runtime_command_snapshot", bind)
+    monkeypatch.setattr(session, "_mark_lifecycle_runtime_host_actions_bound", Mock())
+    try:
+        assert await session._ensure_extension_commands_for_conversation(conversation.id, bind_command_context=False) is runner
+        bind.assert_not_called()
+        assert await session._ensure_extension_commands_for_conversation(conversation.id) is runner
+        bind.assert_called_once()
+        assert bind.call_args.kwargs["conversation"].id == conversation.id
+    finally:
+        await session.session_lifecycle.shutdown(reason="catalog_audit")
 
 
 @pytest.mark.asyncio

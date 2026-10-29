@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { InlineDiff } from "./InlineDiff";
 import { TranscriptReadingContext } from "../transcriptReadingState";
+import { TranscriptSearchContext } from "../TranscriptSearchContext";
 import { useColorizedLines } from "../../lib/monaco-colorize";
 
 vi.mock("../../lib/monaco-colorize", async (original) => ({
@@ -20,6 +21,31 @@ vi.mock("../../lib/monaco-colorize", async (original) => ({
 afterEach(() => { cleanup(); vi.clearAllMocks(); });
 
 describe("InlineDiff", () => {
+  it("collapses files independently, skips hidden syntax work, and preserves context choices through search", () => {
+    const patch = [
+      "diff --git a/one.ts b/one.ts", "--- a/one.ts", "+++ b/one.ts", "@@ -1,3 +1,3 @@", " stable", " context", "-old", "+new",
+      "diff --git a/two.py b/two.py", "--- a/two.py", "+++ b/two.py", "@@ -1 +1 @@", "-before", "+after",
+    ].join("\n");
+    const view = (searching = false) => <TranscriptSearchContext.Provider value={searching}>
+      <InlineDiff patch={patch} contextLines={0} />
+    </TranscriptSearchContext.Provider>;
+    const rendered = render(view());
+    fireEvent.click(screen.getByRole("button", { name: "展开 2 行未修改内容" }));
+    fireEvent.click(screen.getByRole("button", { name: "文件：one.ts" }));
+    expect(screen.queryByText("stable")).toBeNull();
+    expect(screen.getByText("after")).toBeTruthy();
+    vi.mocked(useColorizedLines).mockClear();
+    rendered.rerender(view());
+    expect(vi.mocked(useColorizedLines).mock.calls.every(([, language]) => language === "python")).toBe(true);
+    rendered.rerender(view(true));
+    expect(screen.getByText("stable")).toBeTruthy();
+    rendered.rerender(view());
+    expect(screen.getByRole("button", { name: "文件：one.ts" }).getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "文件：one.ts" }));
+    expect(screen.getByText("stable")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "收起 2 行未修改内容" })).toBeTruthy();
+  });
+
   it("shows header-shaped changed lines and keeps newline markers out of line numbering", () => {
     const { container } = render(<InlineDiff patch={[
       "--- a/sample.txt", "+++ b/sample.txt", "@@ -1,2 +1,2 @@",

@@ -4,13 +4,14 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GeneralTab } from "./GeneralTab";
 import { initialSendShortcut } from "../stores/shared-helpers";
 import { useAppStore } from "../stores";
-import type { DesktopPreferences } from "../desktop/runtime";
+import type { DesktopPreferences, DesktopPreferenceTargets } from "../desktop/runtime";
 
-const native = vi.hoisted(() => ({ preferences: null as DesktopPreferences | null, update: vi.fn(), openExternal: vi.fn(),
+const native = vi.hoisted(() => ({ preferences: null as DesktopPreferences | null, targets: null as DesktopPreferenceTargets | null, update: vi.fn(), openExternal: vi.fn(),
   pickNotificationSound: vi.fn(), importNotificationSound: vi.fn(), previewNotificationSound: vi.fn(), getStartupStatus: vi.fn(), openStartupSettings: vi.fn() }));
 const pluginsFeature = vi.hoisted(() => ({ state: { enabled: true, locked: false, error: "" }, set: vi.fn() }));
 vi.mock("../hooks/usePluginsFeature", () => ({ usePluginsFeature: () => pluginsFeature.state, setPluginsFeatureEnabled: pluginsFeature.set }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ ...native, error: "" }) }));
+vi.mock("../hooks/useDesktopPreferenceTargets", () => ({ useDesktopPreferenceTargets: () => ({ targets: native.targets, error: "" }) }));
 vi.mock("../desktop/runtime", () => ({ isDesktop: () => true, desktop: () => ({ platformInfo: { platform: "win32" },
   preferences: { pickNotificationSound: native.pickNotificationSound, importNotificationSound: native.importNotificationSound, previewNotificationSound: native.previewNotificationSound,
     getStartupStatus: native.getStartupStatus, openStartupSettings: native.openStartupSettings },
@@ -19,14 +20,16 @@ vi.mock("../desktop/runtime", () => ({ isDesktop: () => true, desktop: () => ({ 
 } }) }));
 
 beforeEach(() => {
-  native.preferences = {
-    fileOpenTarget: "vscode", fileOpenTargetPerPath: { "C:/original-owner": "cursor" },
+  native.targets = {
     fileOpenTargets: [
       { id: "vscode", label: "VS Code", kind: "editor", icon: "apps/vscode.svg" },
       { id: "visualStudio", label: "Visual Studio", kind: "editor", icon: "apps/visual-studio.png" },
       { id: "system", label: "Default app", kind: "systemDefault", icon: "apps/file-explorer.png", hidden: true },
     ],
-    terminalShell: "powershell", terminalShellTargets: [{ id: "powershell", label: "PowerShell" }, { id: "cmd", label: "Command Prompt" }],
+    terminalShellTargets: [{ id: "powershell", label: "PowerShell" }, { id: "cmd", label: "Command Prompt" }],
+  };
+  native.preferences = {
+    fileOpenTarget: "vscode", fileOpenTargetPerPath: { "C:/original-owner": "cursor" }, terminalShell: "powershell",
     defaultTaskDirectory: "C:/QA/long-real-original-task-directory", taskDirectoryOverride: null, defaultPermissionMode: "confirm", showFullAccess: true,
     localeOverride: "zh-CN", systemLocale: "en-US", confirmBeforeClose: "keyboardOnly", turnCompletionNotifications: "onlyWhenUnfocused",
     permissionNotifications: true, questionNotifications: true, autoArchiveAfterDays: 0, localHistoryCompression: false, notificationSound: "default", showBottomPanel: true,

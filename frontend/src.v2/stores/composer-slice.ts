@@ -6,8 +6,10 @@ import { pushToast } from "../overlays/ToastContainer";
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { LS, readLS, writeLS } from "./shared-helpers";
 import { uniqueMessageId } from "./shared-helpers";
-import { composerDraftOf, composerWorkspaceKey } from "./composer-drafts";
+import { activeComposerDraftKey, composerDraftOf, updateComposerDraftAttachment } from "./composer-drafts";
 import { emptyConversationWorkbenchState, liveConversationWorkbenchState } from "./ui-slice";
+import { editConversationDraftModel, isConversationDraftMaterializing } from "./conversation-drafts";
+import { isConversationMessageAwaitingReceipt } from "../chat/sendChatMessage";
 
 /**
  * The permission mode and reasoning effort pills only move when the backend
@@ -66,6 +68,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   composerDraftRevision: 0,
   draft: "",
   richDraft: undefined,
+  retainedInputEdit: undefined,
   goalMode: false,
   attachments: [],
   quotedMessage: null,
@@ -92,24 +95,18 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   addAttachment: (a) =>
     set((s) => ({ attachments: [...s.attachments, a] })),
   updateAttachment: (id, patch) =>
-    set((s) => ({
-      attachments: s.attachments.map((a) => (a.id === id ? { ...a, ...patch } : a)),
+    set((s) => {
+      const live = updateComposerDraftAttachment(composerDraftOf(s), id, patch);
+      return { attachments: live.attachments, queuedEdit: live.queuedEdit, retainedInputEdit: live.retainedInputEdit,
       workspaceComposerDrafts: Object.fromEntries(Object.entries(s.workspaceComposerDrafts).map(([root, draft]) => [root,
-        { ...draft, attachments: draft.attachments.map(attachment => attachment.id === id ? { ...attachment, ...patch } : attachment) }])),
+        updateComposerDraftAttachment(draft, id, patch)])),
       conversationWorkbenchStates: Object.fromEntries(
         Object.entries(s.conversationWorkbenchStates).map(([conversationId, state]) => [
           conversationId,
-          (state.attachments ?? []).some((attachment) => attachment.id === id)
-            ? {
-                ...state,
-                attachments: (state.attachments ?? []).map((attachment) =>
-                  attachment.id === id ? { ...attachment, ...patch } : attachment,
-                ),
-              }
-            : state,
+          updateComposerDraftAttachment(state, id, patch),
         ]),
       ),
-    })),
+    }; }),
   removeAttachment: (id) =>
     set((s) => {
       const removed = s.attachments.find((a) => a.id === id);
@@ -147,6 +144,15 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   setPermissionMode: (m) => {
     const before = get();
     const conversationId = String(before.conversationId || "").trim();
+    if (!conversationId) {
+      const id = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+      if (get().conversationDrafts[id].materializing) return Promise.resolve(false);
+      set(state => ({ permissionMode: m, conversationDrafts: { ...state.conversationDrafts,
+        [id]: { ...state.conversationDrafts[id], permissionMode: m, permissionEdited: true } },
+        ...(state.runtimeCapabilities?.permission ? { runtimeCapabilities: { ...state.runtimeCapabilities,
+          permission: { ...state.runtimeCapabilities.permission, mode: m } } } : {}) }));
+      return Promise.resolve(true);
+    }
     const workspaceRoot = before.workingDirectory;
     const previous = before.pendingPermissionModeChanges[conversationId];
     const confirmation = (async () => {
@@ -182,9 +188,10 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   setAgentMode: async (m, conversationId) => {
     const before = get();
     const owner = conversationId ?? before.conversationId;
+    if (isConversationDraftMaterializing(before, owner) || (owner && isConversationMessageAwaitingReceipt(owner))) return false;
     if (!owner) {
       set(state => ({ agentMode: m, workspaceComposerDrafts: { ...state.workspaceComposerDrafts,
-        [composerWorkspaceKey(state.workingDirectory)]: composerDraftOf({ ...state, agentMode: m }) } }));
+        [activeComposerDraftKey(state)]: composerDraftOf({ ...state, agentMode: m }) } }));
       return true;
     }
     const commandId = uniqueMessageId("cmd");
@@ -228,6 +235,11 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   }),
   setEffortLevel: (e) => {
     const before = get();
+    if (!before.conversationId) {
+      const id = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+      if (get().conversationDrafts[id].materializing) return Promise.resolve(false);
+      return editConversationDraftModel({ mode: "model", model: before.currentModel, effort: e });
+    }
     return reportCommandOutcome(
       sendClientCommandAwaitResult({
         type: "llm.config.set",
@@ -241,6 +253,14 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   },
   setModelSelection: (selection) => {
     const before = get();
+    if (!before.conversationId) {
+      const id = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+      if (get().conversationDrafts[id].materializing) return Promise.resolve(false);
+      if (selection.mode === "default") return editConversationDraftModel({ mode: "default" });
+      const option = before.availableModelOptions.find(item => item.model === selection.model);
+      const effort = option?.reasoningEffortLevels.includes(before.effortLevel) ? before.effortLevel : option?.defaultReasoningEffort;
+      return editConversationDraftModel({ mode: "model", model: selection.model, effort });
+    }
     return reportCommandOutcome(sendClientCommandAwaitResult({
       type: "llm.model.set",
       selection_mode: selection.mode,

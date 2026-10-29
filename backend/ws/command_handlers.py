@@ -364,6 +364,7 @@ class SessionCommandHandlersMixin:
         from backend.config import load_config
 
         owner_id = conversation_id or self.active_conversation_id
+        scoped_config = None
         if owner_id == self.active_conversation_id:
             self.refresh_llm_selection()
             provider, current_model = self.provider, self.selected_model
@@ -371,14 +372,15 @@ class SessionCommandHandlersMixin:
             conversation = self.conversation_repo.get_conversation_summary(owner_id)
             if conversation is None:
                 raise ValueError("The conversation selected for this model change no longer exists")
-            config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(conversation),
+            scoped_config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(conversation),
                                  resolve_credentials=False)
-            provider = conversation.model_selection.get("provider", config.llm.provider)
-            current_model = conversation.model_selection.get("model", config.llm.model)
+            provider = conversation.model_selection.get("provider", scoped_config.llm.provider)
+            current_model = conversation.model_selection.get("model", scoped_config.llm.model)
         return await self._set_selected_provider_model(
             provider, model or current_model, manual_override=manual_override,
             conversation_id=owner_id, reasoning_effort=reasoning_effort,
             selection_mode=selection_mode,
+            config_override=scoped_config,
         )
 
     def default_model_selection(self, conversation_id: str | None = None) -> tuple[Any, dict[str, str] | None]:

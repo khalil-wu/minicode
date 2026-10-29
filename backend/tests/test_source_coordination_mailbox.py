@@ -222,7 +222,7 @@ def test_claim_skips_acked_and_live_claimed_history_but_replays_older_expired_ma
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prefix", ["", "/root/worker"])
+@pytest.mark.parametrize("prefix", [None, "/root/worker_00"])
 async def test_agent_listing_reuses_paths_and_does_not_read_shared_boards(tmp_path, monkeypatch, prefix):
     runtime = _runtime(tmp_path)
     runtime.start_run(run_id="root", conversation_id="conversation")
@@ -246,10 +246,38 @@ async def test_agent_listing_reuses_paths_and_does_not_read_shared_boards(tmp_pa
     for method in ("list_swarm_messages", "list_swarm_tasks", "list_swarm_teams"):
         monkeypatch.setattr(runtime, method, unrelated_read)
     try:
-        result = json.loads((await ListAgentsTool().execute({"path_prefix": prefix}, _context(runtime))).content)
+        args = {} if prefix is None else {"path_prefix": prefix}
+        result = json.loads((await ListAgentsTool().execute(args, _context(runtime))).content)
         expected = [f"/root/worker_{index:02}" for index in range(12)]
-        assert [agent["agent_name"] for agent in result["agents"]] == (expected if prefix else ["/root", *expected])
+        assert [agent["agent_name"] for agent in result["agents"]] == ([expected[0]] if prefix else ["/root", *expected])
         assert len(reads) <= 4 and all(read["include_swarm"] is False for read in reads)
+    finally:
+        await runtime.aclose(release_lease=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_listing_resolves_relative_prefix_as_path_segments(tmp_path):
+    runtime = _runtime(tmp_path)
+    runtime.start_run(run_id="root", conversation_id="conversation")
+    runtime.configure_subagent_limit("conversation", 20, source_v2=True)
+    runtime.start_subagent(subagent_id="branch", parent_run_id="root", agent_type="default",
+        task_id="branch", agent_path_segment="branch")
+    runtime.start_subagent(subagent_id="worker", parent_run_id="branch", agent_type="default",
+        task_id="worker", agent_path_segment="worker")
+    runtime.start_subagent(subagent_id="nested", parent_run_id="worker", agent_type="default",
+        task_id="nested", agent_path_segment="nested")
+    runtime.start_subagent(subagent_id="worker_other", parent_run_id="branch", agent_type="default",
+        task_id="worker_other", agent_path_segment="worker_other")
+    context = _context(runtime, "branch", child=True)
+    context.metadata["_agent_execution_profile"] = {"agent_lifecycle": True}
+    try:
+        listing = await ListAgentsTool().execute({"path_prefix": "worker"}, context)
+        assert [item["agent_name"] for item in json.loads(listing.content)["agents"]] == [
+            "/root/branch/worker", "/root/branch/worker/nested"]
+        listing = await ListAgentsTool().execute({"path_prefix": "/root/branch/work"}, context)
+        assert json.loads(listing.content)["agents"] == []
+        invalid = await ListAgentsTool().execute({"path_prefix": ""}, context)
+        assert invalid.is_error and "agent path must not be empty" in invalid.content
     finally:
         await runtime.aclose(release_lease=True)
 

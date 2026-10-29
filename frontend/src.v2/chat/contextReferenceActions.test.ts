@@ -6,7 +6,7 @@ import { buildContextPayload } from "../composer/contextPayload";
 import { contextReferenceLabel, openContextReference } from "./contextReferenceActions";
 import type { FileContextRef } from "../stores/types";
 
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false }));
+vi.mock("../desktop/runtime", () => ({ desktop: () => undefined, isDesktop: () => false }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 const range = { startLineNumber: 40, startColumn: 3, endLineNumber: 56, endColumn: 1 };

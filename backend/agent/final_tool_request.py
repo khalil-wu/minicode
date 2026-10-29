@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -94,6 +94,7 @@ class FinalExecutableToolRequest:
     arguments_digest: str = ""
     exec_policy: Any | None = None
     environment_identity: Mapping[str, Any] | None = None
+    prepared_tool: Any | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def freeze(cls, tc: ToolCallEvent, *, policy_identity: str = "", environment_identity: Mapping[str, Any] | None = None) -> "FinalExecutableToolRequest":
@@ -126,3 +127,10 @@ class FinalExecutableToolRequest:
 
     def argument_values(self) -> dict[str, Any]:
         return _thaw_value(self.arguments)
+
+
+def executable_tool_for_call(tc, registry):
+    request = getattr(tc, "_final_tool_request", None)
+    if isinstance(request, FinalExecutableToolRequest) and request.prepared_tool is not None:
+        return request.prepared_tool
+    return registry.get_tool(tc.name) if registry is not None else None

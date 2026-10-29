@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
-from backend.runtime_env import sanitized_subprocess_env
+from backend.runtime_env import sanitized_git_env
 from backend.subprocesses import communicate, spawn_exec
 from backend.services.github_service import (
     GitHubCommandError, github_cli_command, github_connection_status, github_repository_context,
@@ -37,7 +37,7 @@ async def run_delivery_command(
             *command,
             cwd=root,
             env={
-                **sanitized_subprocess_env(),
+                **sanitized_git_env(root),
                 "GIT_TERMINAL_PROMPT": "0",
                 "GH_PROMPT_DISABLED": "1",
             },

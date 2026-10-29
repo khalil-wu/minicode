@@ -3,20 +3,21 @@ import { ChevronDown, ChevronRight, LoaderCircle, FileDiff, Search } from "../..
 import { ContextMenu } from "../../components/ContextMenu";
 import { uploadComposerFiles } from "../../composer/uploads";
 import { useDesktopPreferences } from "../../hooks/useDesktopPreferences";
+import { useDesktopPreferenceTargets } from "../../hooks/useDesktopPreferenceTargets";
 import { desktop, pickWorkspaceDirectory, type FileOpenTargetId } from "../../desktop/runtime";
 import { FileOpenTargetIcon } from "../../components/FileOpenTargetIcon";
 import { isNativeExternalFile, preferredFileTargetForWorkspace } from "../../lib/open-preferred-target";
 import { useI18n } from "../../i18n";
 import { copyText } from "../../lib/clipboard";
 import { fileIcon, folderIcon } from "../../lib/file-icons";
-import { normalizeWorkspacePath, workspacePathWithin, workspaceRootsEqual } from "../../lib/workspace-path";
+import { workspacePathWithin, workspaceRootsEqual } from "../../lib/workspace-path";
 import { isTextMediaType } from "../../lib/media-types";
 import { saveBlobFile } from "../../lib/save-blob";
 import { pushToast } from "../../overlays/ToastContainer";
 import {
   type ConversationBrowserEntry, type ConversationBrowserTree,
 } from "../../protocol/conversation-browser";
-import { readFileWorkspaceBranches, readFileWorkspaceOriginal, readFileWorkspaceTree, searchFileWorkspace, type FileWorkspaceBranches } from "../../protocol/file-workspace";
+import { readFileWorkspaceBranches, readFileWorkspaceOriginal, readFileWorkspaceTree, searchFileWorkspace, workspaceFileAbsolutePath, type FileWorkspaceBranches } from "../../protocol/file-workspace";
 import { workspaceRequestPath } from "../../protocol/workspace-request-path";
 import type { WorkspaceFileOwner } from "../../stores/types";
 import { openWorkspaceSourceFile } from "../../workspace/openWorkspaceFolder";
@@ -24,9 +25,9 @@ import { useAppStore } from "../../stores";
 import { ROW_HEIGHT } from "../fileTreeTypes";
 import "./ConversationFilesTree.css";
 
-export function ConversationFilesTree({ owner, browserRoot, connected, version, onRootChange, comparison, comparisonBase }: {
+export function ConversationFilesTree({ owner, browserRoot, connected, version, onRootChange, comparison, comparisonBase, rootSelected = false }: {
   owner: WorkspaceFileOwner; browserRoot: string; connected: boolean; version: number; onRootChange?: (path: string) => void;
-  comparison?: FileWorkspaceBranches | null; comparisonBase?: string;
+  comparison?: FileWorkspaceBranches | null; comparisonBase?: string; rootSelected?: boolean;
 }) {
   const { t } = useI18n();
   const { preferences } = useDesktopPreferences();
@@ -38,6 +39,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
   const [error, setError] = useState<{ path: string; message: string } | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ entry: ConversationBrowserEntry; x: number; y: number } | null>(null);
+  const { targets: openTargets } = useDesktopPreferenceTargets(Boolean(menu));
   const controller = useRef<AbortController | null>(null);
   const [filter, setFilter] = useState("");
   const [matches, setMatches] = useState<ConversationBrowserEntry[]>([]);
@@ -49,6 +51,11 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
     : { ...owner, conversationId: null, executionCwd: browserRoot, browserRoot };
   const basePath = workspaceRequestPath(browserRoot, owner.browserRoot);
   const projects = useAppStore(state => state.conversations);
+  const conversation = projects.find(value => value.id === owner.conversationId);
+  const browsesTaskCollection = Boolean(!rootSelected && conversation?.projectlessBrowserRoot
+    && workspaceRootsEqual(owner.browserRoot, conversation.projectlessBrowserRoot)
+    && workspaceRootsEqual(browserRoot, owner.browserRoot)
+    && !workspaceRootsEqual(browserRoot, owner.executionCwd) && workspacePathWithin(owner.executionCwd, browserRoot));
   const projectRoots = [...new Set(projects.map(value => value.executionCwd || value.worktreePath || value.workspaceRoot).filter((value): value is string => Boolean(value)))];
 
   const loadDirectory = async (path: string, signal: AbortSignal) => {
@@ -89,16 +96,19 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
   }, [filter, connected, owner.conversationId, owner.executionCwd, owner.browserRoot, basePath]);
   useEffect(() => {
     if (!connected || !owner.browserRoot || comparison !== undefined) return;
+    // The shared task browser root is a filesystem namespace, not this
+    // conversation's execution/Git workspace. Explicit repository roots
+    // continue through their own comparison owner below.
+    if (browsesTaskCollection) { setOwnComparison(null); return; }
     const operation = new AbortController();
     void readFileWorkspaceBranches(comparisonOwner, operation.signal, undefined, browserRoot).then(value => { if (!operation.signal.aborted) setOwnComparison(value); })
       .catch(reason => { if (!operation.signal.aborted) setError({ path: basePath, message: reason instanceof Error ? reason.message : String(reason) }); });
     return () => operation.abort();
-  }, [owner.conversationId, owner.executionCwd, owner.browserRoot, browserRoot, connected, version, comparison]);
+  }, [owner.conversationId, owner.executionCwd, owner.browserRoot, browserRoot, browsesTaskCollection, connected, version, comparison]);
 
-  const root = owner.browserRoot;
   const preferredTarget = preferences ? preferredFileTargetForWorkspace(preferences, owner.executionCwd) : "minicode";
   const fileTarget = (entry: ConversationBrowserEntry) => preferredTarget !== "minicode" && isNativeExternalFile(entry.path) ? "system" : preferredTarget;
-  const absolutePath = (entry: ConversationBrowserEntry) => `${normalizeWorkspacePath(root).replace(/\/$/, "")}/${entry.path}`;
+  const absolutePath = (entry: ConversationBrowserEntry) => workspaceFileAbsolutePath(owner, entry.path);
   const ownerIsCurrent = () => {
     const state = useAppStore.getState();
     const conversation = state.conversations.find((item) => item.id === owner.conversationId);
@@ -190,8 +200,8 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
       <button type="button" className="btn-ghost" disabled={!connected} onClick={() => void loadDirectory(error.path, controller.current!.signal)}>{t("重试")}</button></div>}
     {menu && <ContextMenu position={{ x: menu.x, y: menu.y }} onClose={() => setMenu(null)} items={[
       { label: t("打开"), onClick: () => { menu.entry.is_dir ? toggle(menu.entry) : openFile(menu.entry); } },
-      ...(!menu.entry.is_dir ? [{ label: t("在 {v0} 中打开", { v0: fileTarget(menu.entry) === "system" ? t("默认应用") : preferences?.fileOpenTargets.find(target => target.id === fileTarget(menu.entry))?.label ?? "MiniCode" }), onClick: () => void runFileAction(menu.entry, "open-in") },
-        ...(preferences?.fileOpenTargets.some(target => !target.hidden) ? [{ label: t("文件打开方式"), submenu: preferences.fileOpenTargets.filter(target => isNativeExternalFile(menu.entry.path) ? target.id === "system" || target.kind === "fileManager" : !target.hidden).map(target => ({
+      ...(!menu.entry.is_dir ? [{ label: t("在 {v0} 中打开", { v0: fileTarget(menu.entry) === "system" ? t("默认应用") : openTargets?.fileOpenTargets.find(target => target.id === fileTarget(menu.entry))?.label ?? "MiniCode" }), onClick: () => void runFileAction(menu.entry, "open-in") },
+        ...(openTargets?.fileOpenTargets.some(target => !target.hidden) ? [{ label: t("文件打开方式"), submenu: openTargets.fileOpenTargets.filter(target => isNativeExternalFile(menu.entry.path) ? target.id === "system" || target.kind === "fileManager" : !target.hidden).map(target => ({
           label: target.label, icon: <FileOpenTargetIcon target={target} />, onClick: () => void runFileAction(menu.entry, "open-in", target.id),
         })) }] : []),
         { separator: true, label: "" },

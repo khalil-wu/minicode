@@ -56,7 +56,7 @@ beforeEach(() => {
     isStreaming: false, runtimeSession: null, sideChats: {}, composerDraftsReady: true, draft: "", attachments: [], richDraft: undefined,
     conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, conversationAgentStates: {}, conversationHistoryPages: {},
     conversationHydration: {}, pendingProviderProgress: {}, inspectorEntries: [], agentProgress: [], plan: null, todos: [], subagents: [],
-    pendingConversationSwitchId: null, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
+    pendingConversationSwitchId: null, pendingConversationCreateId: null,
     pendingApproval: null, approvalQueue: [], pendingAskUser: null, askUserQueue: [], pendingDiffReview: null, diffReviewQueue: [],
     connectionPhase: "connecting", reconnectAttempt: 0, reconnectMaxAttempts: null, connectionError: null, isConnected: false,
     permissionMode: "bypass", runtimeCapabilities: null, backgroundTasks: [], pendingPermissionModeChanges: {},

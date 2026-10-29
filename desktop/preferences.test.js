@@ -143,6 +143,59 @@ test("owned preference IPC broadcasts saved values and rejects a foreign frame",
   assert.equal(preferences.getPreferences().showFullUrl, false);
 });
 
+test("live preference reads and writes finish independently of a shared fresh application discovery", async () => {
+  fixture();
+  const handlers = new Map(), broadcasts = [];
+  const webContents = { mainFrame: {}, send: (channel, payload) => broadcasts.push({ channel, payload }) };
+  const window = { webContents, isDestroyed: () => false };
+  let discoveries = 0, icons = 0, complete, fail;
+  const moduleValue = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "ipc-handlers.js"), "utf8"), { module: moduleValue, process, console,
+    require(name) { return name === "electron" ? {
+      app: { getLocale: () => "zh-CN", getFileIcon: async () => { icons++; return { isEmpty: () => false, toDataURL: () => "data:image/png;base64,actual-icon" }; } },
+      ipcMain: { on() {}, handle: (channel, handler) => handlers.set(channel, handler) },
+    } : require(name); },
+  });
+  moduleValue.exports.init({ desktopPreferences: { ...preferences,
+    fileOpenTargets: () => { discoveries++; return new Promise((resolve, reject) => { complete = resolve; fail = reject; }); },
+    terminalShellTargets: () => [{ id: preferences.getPreferences().terminalShell, label: "Selected shell" }],
+  }, getMainWindows: () => [window], getWindowForSender: sender => sender === webContents ? window : null,
+  getWindowRecord: () => ({ windowInstanceId: "preference-discovery-owner" }) });
+  moduleValue.exports.registerIpcHandlers();
+  const event = { sender: webContents, senderFrame: webContents.mainFrame };
+  const get = handlers.get("minicode:preferences:get");
+  const set = handlers.get("minicode:preferences:set");
+  const getTargets = handlers.get("minicode:preferences:getTargets");
+  const first = getTargets(event), second = getTargets(event);
+  assert.equal(discoveries, 1);
+  const before = await get(event);
+  const saved = await set(event, { showBottomPanel: false, terminalShell: "cmd" });
+  assert.equal(before.showBottomPanel, true);
+  assert.equal(saved.showBottomPanel, false);
+  assert.equal(broadcasts[0].payload, saved);
+  assert.equal("fileOpenTargets" in saved, false);
+  assert.equal("terminalShellTargets" in saved, false);
+  assert.equal(icons, 0);
+  complete([{ id: "cursor", label: "Cursor", kind: "editor", executable: "private-native-path", iconPath: "fixture.exe" }]);
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(a, b);
+  assert.equal(icons, 1);
+  assert.equal(a.fileOpenTargets[0].icon, "data:image/png;base64,actual-icon");
+  assert.equal("executable" in a.fileOpenTargets[0], false);
+  assert.equal("iconPath" in a.fileOpenTargets[0], false);
+  assert.equal(a.terminalShellTargets[0].id, "cmd");
+  assert.throws(() => getTargets({ sender: webContents, senderFrame: {} }), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+  const failed = getTargets(event);
+  assert.equal(discoveries, 2);
+  fail(new Error("Actual discovery error"));
+  await assert.rejects(failed, /Actual discovery error/);
+  const refreshed = getTargets(event);
+  assert.equal(discoveries, 3);
+  complete([]);
+  assert.equal((await refreshed).fileOpenTargets.length, 0);
+  assert.equal(icons, 1);
+});
+
 test("native projectless Change, cancel and Reset publish effective paths to every window through the existing IPC", async () => {
   const { directory, file } = fixture();
   const selected = path.join(directory, "selected-folder");

@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { LoaderCircle } from "lucide-react";
 import { MessageList } from "./MessageList";
 import { Composer } from "../composer/Composer";
@@ -12,23 +12,28 @@ import { TurnChangeSummary } from "./TurnChangeSummary";
 import { useAppStore } from "../stores";
 import { TranscriptSearchContext } from "./TranscriptSearchContext";
 import { threadSummaryDisplayMode } from "./thread-summary-layout";
+import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
 
-const ThreadSummary = ({ paneRef }: { paneRef: RefObject<HTMLDivElement> }) => {
-  const [displayMode, setDisplayMode] = useState(() => threadSummaryDisplayMode(window.innerWidth));
-  useEffect(() => {
-    const pane = paneRef.current!;
+const ThreadSummary = ({ pane }: { pane: HTMLDivElement }) => {
+  const [displayMode, setDisplayMode] = useState(() => threadSummaryDisplayMode(pane.clientWidth));
+  useLayoutEffect(() => {
     setDisplayMode(threadSummaryDisplayMode(pane.clientWidth));
     const observer = new ResizeObserver(([entry]) => setDisplayMode(threadSummaryDisplayMode(entry.contentRect.width)));
     observer.observe(pane);
     return () => observer.disconnect();
-  }, [paneRef]);
+  }, [pane]);
   return <ChatContextCard displayMode={displayMode} />;
 };
 
 export const ChatPane = memo(function ChatPane() {
   const { t: tr } = useI18n();
   const [showSearch, setShowSearch] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [pane, setPane] = useState<HTMLDivElement | null>(null);
+  const attachPane = useCallback((element: HTMLDivElement | null) => {
+    containerRef.current = element;
+    setPane(element);
+  }, []);
   const messageContainerRef = useRef<HTMLDivElement>(null);
   const conversationId = useAppStore((state) => state.conversationId);
   const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
@@ -38,7 +43,8 @@ export const ChatPane = memo(function ChatPane() {
     conversationId && state.conversationHydration[conversationId]?.isHydrating,
   ));
   const hasMessages = useAppStore((state) => state.messages.length > 0);
-  const showLoading = Boolean(pendingConversationSwitchId) || (isHydrating && !hasMessages);
+  const pendingDraftMessage = useAppStore(selectPendingDraftUserMessage);
+  const showLoading = !pendingDraftMessage && (Boolean(pendingConversationSwitchId) || (isHydrating && !hasMessages));
 
   const handleCloseSearch = useCallback(() => {
     setShowSearch(false);
@@ -80,9 +86,9 @@ export const ChatPane = memo(function ChatPane() {
 
   return (
     <div
-      ref={containerRef}
+      ref={attachPane}
       className="chat-pane flex-1 min-h-0 overflow-hidden w-full"
-      data-switching={pendingConversationSwitchId ? "true" : "false"}
+      data-switching={showLoading ? "true" : "false"}
       aria-busy={showLoading}
       style={{
         position: "relative",
@@ -141,7 +147,7 @@ export const ChatPane = memo(function ChatPane() {
             </SafeBoundary>
           </div>
         </div>
-        <ThreadSummary paneRef={containerRef} />
+        {pane && <ThreadSummary pane={pane} />}
         </div>
     </div>
   );

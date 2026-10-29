@@ -362,9 +362,8 @@ export const subTabBarStyle: React.CSSProperties = { width: "fit-content", displ
 export const subTabStyle = (active: boolean): React.CSSProperties => ({ display: "inline-flex", alignItems: "center", gap: 7, height: 38, padding: "0 13px", border: 0, borderRadius: "var(--radius-sm, 8px)", backgroundColor: active ? "var(--surface-base)" : "transparent", color: active ? "var(--text-primary)" : "var(--text-secondary)", cursor: "pointer", fontSize: "var(--mc-font-secondary)", fontWeight: "var(--fw-semibold)", boxShadow: active ? "0 1px 3px color-mix(in oklch, black 7%, transparent)" : "none" });
 export const subTabCountStyle: React.CSSProperties = { color: "var(--text-muted)", fontSize: "var(--mc-font-caption)", fontFamily: "var(--font-ui)", fontVariantNumeric: "tabular-nums" };
 export const emptyInlineStyle: React.CSSProperties = { padding: "12px 0", color: "var(--text-muted)", fontSize: "var(--text-sm)" };
-export const mcpServerRowStyle: React.CSSProperties = { minHeight: 62, padding: "9px 12px", backgroundColor: "var(--surface-base)", border: "1px solid var(--border-subtle)", borderRadius: 8 };
 export const mcpNameStyle: React.CSSProperties = { flexShrink: 1, minWidth: 0, fontWeight: "var(--fw-semibold)", fontSize: "var(--text-sm)", color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
-export const mcpErrorStyle: React.CSSProperties = { fontSize: "var(--mc-font-secondary)", color: "var(--state-danger)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+export const mcpErrorStyle: React.CSSProperties = { fontSize: "var(--mc-font-secondary)", color: "var(--state-danger)", marginTop: 3, whiteSpace: "pre-wrap", overflowWrap: "anywhere" };
 const mcpTone = (state: string): string => {
   if (state === "connected") return "var(--state-success)";
   if (state === "error" || state === "failed" || state === "expired") return "var(--state-danger)";

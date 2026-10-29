@@ -232,13 +232,14 @@ export const WorkbenchShell = memo(function WorkbenchShell() {
   const setRightPanelExpanded = useAppStore((s) => s.setRightPanelExpanded);
   const editorOpenRequestId = useAppStore((s) => s.activeEditorOpenRequestId);
   const rightStackTab = useAppStore((s) => s.rightStackTab);
-  const previewRequestAt = useAppStore((s) => selectPreviewSurface(s).previewArtifact?.loadedAt ?? 0);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const toggleRightPanel = useAppStore((s) => s.toggleRightPanel);
   const compact = useCompactWorkbench();
-  const [compactPanel, setCompactPanel] = useState<"left" | "right" | null>(null);
+  const compactPanel = useAppStore((s) => s.compactPanel);
+  const setCompactPanel = useAppStore((s) => s.setCompactPanel);
   const previousRightPanelOpenRef = useRef(rightPanelOpen);
   const previousRightStackTabRef = useRef(rightStackTab);
+  const previousCompactRef = useRef(false);
   const activeCodeSlot =
     panelSlots.find((slot) => slot.focused) ??
     panelSlots.find((slot) => slot.kind !== "chat") ??
@@ -253,7 +254,7 @@ export const WorkbenchShell = memo(function WorkbenchShell() {
 
   useEffect(() => {
     if (!compact) setCompactPanel(null);
-  }, [compact]);
+  }, [compact, setCompactPanel]);
 
   useEffect(() => {
     const revealComposer = () => {
@@ -262,16 +263,16 @@ export const WorkbenchShell = memo(function WorkbenchShell() {
     };
     window.addEventListener("composer:focus", revealComposer);
     return () => window.removeEventListener("composer:focus", revealComposer);
-  }, [setRightPanelExpanded]);
+  }, [setCompactPanel, setRightPanelExpanded]);
 
   useEffect(() => {
     if (editorOpenRequestId && compact) setCompactPanel(null);
-  }, [editorOpenRequestId, compact]);
+  }, [editorOpenRequestId, compact, setCompactPanel]);
 
   useEffect(() => {
     if (compactPanel === "left" && !leftPanelAvailable) setCompactPanel(null);
     if (compactPanel === "right" && !rightPanelAvailable) setCompactPanel(null);
-  }, [compactPanel, leftPanelAvailable, rightPanelAvailable]);
+  }, [compactPanel, leftPanelAvailable, rightPanelAvailable, setCompactPanel]);
 
   useEffect(() => {
     const panelWasOpened = !previousRightPanelOpenRef.current && rightPanelOpen;
@@ -281,16 +282,19 @@ export const WorkbenchShell = memo(function WorkbenchShell() {
     previousRightStackTabRef.current = rightStackTab;
     if (compact && rightPanelAvailable && (panelWasOpened || requestedTabChanged)) setCompactPanel("right");
     if (compact && panelWasClosed) setCompactPanel(null);
-  }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab]);
+  }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab, setCompactPanel]);
 
   useEffect(() => {
-    if (compact && rightPanelAvailable && previewRequestAt > 0) setCompactPanel("right");
-  }, [compact, previewRequestAt, rightPanelAvailable]);
+    const enteringCompact = compact && !previousCompactRef.current;
+    previousCompactRef.current = compact;
+    if (enteringCompact && rightPanelAvailable && rightPanelOpen && rightStackTab === "preview"
+      && selectPreviewSurface(useAppStore.getState()).previewArtifact) setCompactPanel("right");
+  }, [compact, rightPanelAvailable, rightPanelOpen, rightStackTab, setCompactPanel]);
 
   const toggleLeftPanel = () => {
     if (automationsOpen) { toggleAutomationsSidebar(); return; }
     if (compact) {
-      setCompactPanel((current) => current === "left" ? null : "left");
+      setCompactPanel(compactPanel === "left" ? null : "left");
       return;
     }
     setLeftSidebarWidth(leftSidebarWidth > 0 ? 0 : leftSidebarExpandedWidth);
@@ -300,7 +304,7 @@ export const WorkbenchShell = memo(function WorkbenchShell() {
     if (expandedRight) { toggleRightPanel(); return; }
     if (compact) {
       if (compactPanel !== "right" && !rightPanelOpen) toggleRightPanel();
-      setCompactPanel((current) => current === "right" ? null : "right");
+      setCompactPanel(compactPanel === "right" ? null : "right");
       return;
     }
     toggleRightPanel();

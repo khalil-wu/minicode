@@ -38,7 +38,8 @@ def test_interactive_argv_preserves_shell_metacharacters(tmp_path, monkeypatch, 
                 return kwargs["argv"], None, None
 
             runner = SandboxRunner(SandboxPolicy(workspace_root=tmp_path, env_overrides=policy.env_overrides))
-            monkeypatch.setattr(runner, "capability", lambda **_kwargs: SimpleNamespace(available=True, backend="windows-elevated-wfp"))
+            monkeypatch.setattr(runner, "capability", lambda **_kwargs: SimpleNamespace(available=True,
+                backend="windows-elevated-wfp", windows_runtime=object()))
             monkeypatch.setattr(windows_native, "prepare_command", native_launch)
             # This fixture launches the literal child argv to test quoting;
             # native policy/identity transport is covered by native wire tests.

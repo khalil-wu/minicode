@@ -161,7 +161,7 @@ def test_cleared_user_directory_does_not_leak_into_next_turn(monkeypatch) -> Non
     assert state.prompt_context["environment"]["user_directories"] == {}
 
 
-def test_git_snapshot_is_session_owned_and_round_trips(monkeypatch, tmp_path) -> None:
+def test_start_turn_does_not_generate_or_inject_a_git_snapshot(monkeypatch, tmp_path) -> None:
     calls: list[str] = []
 
     async def fake_git_status(root, *, context=None) -> str:
@@ -181,12 +181,16 @@ def test_git_snapshot_is_session_owned_and_round_trips(monkeypatch, tmp_path) ->
 
     asyncio.run(builder.start_turn("first", state))
     asyncio.run(builder.start_turn("second", state))
-    assert len(calls) == 1
+    assert calls == []
 
     restored = ContextBuilder()
-    restored.load_snapshot(builder.export_snapshot())
+    snapshot = builder.export_snapshot()
+    snapshot["git_status_context"] = "old git snapshot"
+    restored.load_snapshot(snapshot)
     asyncio.run(restored.start_turn("third", state))
-    assert len(calls) == 2
+    messages = asyncio.run(restored.build(state))
+    assert calls == []
+    assert all("old git snapshot" not in str(message.content) for message in messages)
 
 
 def test_post_compaction_restore_bounds_oversized_single_line(tmp_path) -> None:

@@ -1,0 +1,18 @@
+.mc-new-tab-recents { display: flex; min-width: 0; width: 100%; max-width: 768px; flex-direction: column; gap: 12px; margin: 40px auto 0; text-align: left; }
+.mc-new-tab-recents header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mc-new-tab-recents h3 { margin: 0; font-size: var(--text-sm); font-weight: var(--fw-medium); }
+.mc-new-tab-recents header > div { display: flex; gap: 4px; }
+.mc-browser-empty .mc-new-tab-recents header button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: transparent; }
+.mc-new-tab-recents ul { margin: 0; padding: 0; list-style: none; overflow-y: auto; overscroll-behavior-y: contain; overflow-anchor: none; scrollbar-width: none; mask-image: linear-gradient(to bottom, black calc(100% - var(--recent-row-height, 0px) / 2), transparent); }
+.mc-new-tab-recents ul[data-at-bottom="true"] { mask-image: none; }
+.mc-new-tab-recents ul[data-interacted="true"] { scroll-snap-type: y mandatory; }
+.mc-new-tab-recents li { scroll-snap-align: start; border-bottom: 1px solid var(--border-subtle); border-radius: 12px; }
+.mc-new-tab-recents li:hover, .mc-new-tab-recents li:focus-within { border-bottom-color: transparent; background: var(--surface-hover); }
+.mc-new-tab-recents li:has(+ li:hover), .mc-new-tab-recents li:has(+ li:focus-within) { border-bottom-color: transparent; }
+.mc-browser-empty .mc-new-tab-recents li > button { display: flex; align-items: center; box-sizing: border-box; min-height: 56px; width: 100%; min-width: 0; gap: 12px; padding: 8px 12px; border: 0; border-radius: 12px; background: transparent; text-align: left; color: var(--text-primary); }
+.mc-new-tab-recent-icon { display: grid; place-items: center; flex: 0 0 28px; width: 28px; height: 28px; border-radius: 8px; background: var(--surface-raised); color: var(--text-secondary); }
+.mc-new-tab-recent-copy { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.mc-new-tab-recent-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: var(--fw-medium); }
+.mc-new-tab-recent-copy small { color: var(--text-muted); font-size: var(--text-xs); }
+.mc-new-tab-recents time { flex: 0 0 auto; color: var(--text-muted); font-size: var(--text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.mc-new-tab-recents button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; }

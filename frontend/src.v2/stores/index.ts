@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import type { AppStore } from "./types";
+import { changedTranscriptOwner, conversationTranscriptMembership } from "./conversation-transcript-cache";
+import { activeDraftStorageKey, conversationDraftTargetKey, draftSelectionView, newConversationDraftContext } from "./conversation-drafts";
 
 import { createUISlice } from "./ui-slice";
 import { createWorkspaceSlice } from "./workspace-slice";
@@ -12,31 +14,46 @@ import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
 import { applyWorkbenchPreferences, migrateWorkbenchPreferences, dictationPreferencesOf, usesDesktopDictationPreferences } from "../lib/workbench-preferences";
-import { applyCodeTextScale, applyReducedMotion, applyPointerCursors, applyDiffMarkerStyle, applyTheme, applyTextScale, initialTheme, readAppearancePreferences, reducedMotionFor, LS, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
+import { getDiffCommentScope, transferDiffComments } from "../lib/diff-comment-storage";
+import { applyCodeTextScale, applyReducedMotion, applyPointerCursors, applyDiffMarkerStyle, applyTheme, applyTextScale, initialTheme, readAppearancePreferences, reducedMotionFor, LS, readLS, writeLS, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
 import { isAppearanceStorageKey, readAppearanceStorage } from "../lib/appearance-storage";
 import { flushEditorDrafts, hasPendingEditorDrafts, cachedEditorDrafts } from "./editor-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { dictationController } from "../composer/dictation-controller";
 import { pushToast } from "../overlays/ToastContainer";
 import { emptyConversationWorkbenchState } from "./ui-slice";
+import { mergeRetainedComposerMessages, reconcileRecoveredInputOutcomes, retainedInputMessage } from "../composer/retainedComposerInputs";
 import {
   loadComposerDrafts, collectComposerDrafts, persistComposerDrafts, watchComposerDraftStorage,
   selectComposerDraftInputs, composerDraftInputsEqual, composerWorkspaceKey,
-  hasComposerDraft, hasPendingComposerDrafts, flushComposerDrafts,
+  hasComposerDraft, hasPendingComposerDrafts, flushComposerDrafts, composerDraftOf,
 } from "./composer-drafts";
 
 export const useAppStore = create<AppStore>()(
-  subscribeWithSelector((...a) => ({
-    ...createUISlice(...a),
-    ...createWorkspaceSlice(...a),
-    ...createChatSlice(...a),
-    ...createComposerSlice(...a),
-    ...createAgentSlice(...a),
-    ...createApprovalSlice(...a),
-    ...createControlPlaneSlice(...a),
-    ...createInspectorSlice(...a),
-    ...createEditorSlice(...a),
-  })),
+  subscribeWithSelector((...a) => {
+    const state = {
+      ...createUISlice(...a),
+      ...createWorkspaceSlice(...a),
+      ...createChatSlice(...a),
+      ...createComposerSlice(...a),
+      ...createAgentSlice(...a),
+      ...createApprovalSlice(...a),
+      ...createControlPlaneSlice(...a),
+      ...createInspectorSlice(...a),
+      ...createEditorSlice(...a),
+    };
+    return { ...state, contextCardCollapsed: state.rightPanelOpen || !state.contextCardPinned };
+  }),
+);
+
+useAppStore.subscribe(
+  state => [state.rightPanelOpen, state.compactPanel] as const,
+  ([open, compactPanel], [wasOpen, previousCompactPanel]) => {
+    if ((open && !wasOpen) || (compactPanel === "right" && previousCompactPanel !== "right")) {
+      useAppStore.getState().setContextCardCollapsed(true);
+    }
+  },
+  { equalityFn: (left, right) => left[0] === right[0] && left[1] === right[1] },
 );
 
 let composerSnapshotRevision = 0;
@@ -46,34 +63,107 @@ watchComposerDraftStorage(status => {
   if (status.error) pushToast(`无法保存输入草稿：${status.error}。请保留窗口和未发送内容。`, "error");
 });
 const composerRecovery = loadComposerDrafts().then(records => {
+  const legacyCommentMigrations: { root: string; draftId: string }[] = [];
   useAppStore.setState(state => {
     const workspaceComposerDrafts = { ...state.workspaceComposerDrafts };
     const conversationWorkbenchStates = { ...state.conversationWorkbenchStates };
     const sideChats = { ...state.sideChats };
+    const conversationDrafts = { ...state.conversationDrafts };
+    const homeConversationDraftIds = { ...state.homeConversationDraftIds };
+    const retainedComposerInputs = { ...state.retainedComposerInputs };
     for (const record of records) {
-      if (record.owner.kind === "workspace") workspaceComposerDrafts[record.owner.id] = record.draft;
-      else if (record.owner.kind === "conversation") conversationWorkbenchStates[record.owner.id] = {
-        ...emptyConversationWorkbenchState(), ...conversationWorkbenchStates[record.owner.id], ...record.draft,
-      };
+      if (record.retainedInput) {
+        retainedComposerInputs[record.retainedInput.message.id] = { ...record.retainedInput, draft: record.draft, recovered: true,
+          owner: { ...record.owner, kind: record.owner.kind as "conversation" | "draft" },
+          message: retainedInputMessage(record.retainedInput.message, record.draft, record.retainedInput.unconfirmed) };
+        continue;
+      }
+      if (record.owner.kind === "draft") {
+        const context = conversationDrafts[record.owner.id]
+          ?? { ...record.draftContext!, materializing: false, selectionLoading: true, preferencesLoading: false };
+        conversationDrafts[context.id] = context;
+        const body = state.workspaceComposerDrafts[record.owner.id] ?? record.draft;
+        workspaceComposerDrafts[context.id] = { ...body, attachments: body.attachments.map(item => ({ ...item, draftId: context.id })) };
+        const key = conversationDraftTargetKey(context.workspaceRoot, context.sidebarSectionId);
+        if (!homeConversationDraftIds[key] || state.activeConversationDraftId === context.id) homeConversationDraftIds[key] = context.id;
+      } else if (record.owner.kind === "workspace") {
+        const context = newConversationDraftContext(state, record.owner.workspaceRoot, Boolean(record.owner.workspaceRoot));
+        legacyCommentMigrations.push({ root: context.workspaceRoot, draftId: context.id });
+        conversationDrafts[context.id] = context;
+        const body = state.workspaceComposerDrafts[record.owner.id] ?? record.draft;
+        workspaceComposerDrafts[context.id] = { ...body, attachments: body.attachments.map(item => ({ ...item, draftId: context.id })) };
+        delete workspaceComposerDrafts[record.owner.id];
+        homeConversationDraftIds[conversationDraftTargetKey(context.workspaceRoot)] = context.id;
+      }
+      else if (record.owner.kind === "conversation") {
+        conversationWorkbenchStates[record.owner.id] = {
+          ...emptyConversationWorkbenchState(), ...conversationWorkbenchStates[record.owner.id], ...record.draft,
+        };
+        if (record.draftContext) conversationDrafts[record.draftContext.id] = {
+          ...record.draftContext, materializing: false, selectionLoading: false, preferencesLoading: false,
+        };
+      }
       else sideChats[record.owner.id] = {
         ...(sideChats[record.owner.id] ?? { id: record.owner.id, messages: [], isStreaming: false }),
         workspaceRoot: record.owner.workspaceRoot, ...record.side,
         draft: record.draft.draft, richDraft: record.draft.richDraft, attachments: record.draft.attachments,
       };
     }
+    let activeConversationDraftId = state.activeConversationDraftId;
+    if (activeConversationDraftId && !conversationDrafts[activeConversationDraftId]) activeConversationDraftId = null;
+    if (!state.conversationId && !activeConversationDraftId && !readLS(LS.conversation.activeId)
+      && !window.__MINICODE_RUNTIME__?.initialNavigation?.conversationId) {
+      activeConversationDraftId = homeConversationDraftIds[conversationDraftTargetKey(state.workingDirectory)] ?? null;
+      if (!activeConversationDraftId) {
+        const context = newConversationDraftContext(state, state.workingDirectory, Boolean(state.workingDirectory), { appMode: state.appMode });
+        activeConversationDraftId = context.id;
+        conversationDrafts[context.id] = context;
+        homeConversationDraftIds[conversationDraftTargetKey(context.workspaceRoot)] = context.id;
+        workspaceComposerDrafts[context.id] = composerDraftOf(state);
+      }
+    }
+    const context = activeConversationDraftId ? conversationDrafts[activeConversationDraftId] : undefined;
     const active = state.conversationId ? conversationWorkbenchStates[state.conversationId]
-      : workspaceComposerDrafts[composerWorkspaceKey(state.workingDirectory)];
-    return { workspaceComposerDrafts, conversationWorkbenchStates, sideChats, composerDraftsReady: true,
+      : context?.adopted && context.conversationId ? conversationWorkbenchStates[context.conversationId]
+        : context ? workspaceComposerDrafts[context.id] : workspaceComposerDrafts[composerWorkspaceKey(state.workingDirectory)];
+    const recoveredInputs = { ...state, retainedComposerInputs, conversationWorkbenchStates,
+      retainedInputEdit: !hasComposerDraft(state) && active ? active.retainedInputEdit : state.retainedInputEdit };
+    return { workspaceComposerDrafts, conversationWorkbenchStates, conversationDrafts, homeConversationDraftIds,
+      activeConversationDraftId, sideChats, retainedComposerInputs, composerDraftsReady: true,
+      messages: state.conversationId ? mergeRetainedComposerMessages(recoveredInputs, state.conversationId, state.messages) : state.messages,
+      conversationMessages: Object.fromEntries(Object.entries(state.conversationMessages)
+        .map(([owner, messages]) => [owner, mergeRetainedComposerMessages(recoveredInputs, owner, messages)])),
+      ...(context ? { workingDirectory: context.workspaceRoot, ...draftSelectionView(context) } : {}),
       ...(!hasComposerDraft(state) && active ? {
         agentMode: active.agentMode ?? "build",
         goalMode: active.goalMode ?? false,
         draft: active.draft, richDraft: active.richDraft, attachments: active.attachments, quotedMessage: active.quotedMessage,
         queuedEdit: active.queuedEdit,
+        retainedInputEdit: active.retainedInputEdit,
         selectedMentions: active.selectedMentions, selectedSkills: active.selectedSkills,
         allowedRemoteImageDomains: active.allowedRemoteImageDomains,
       } : {}),
     };
   });
+  reconcileRecoveredInputOutcomes();
+  for (const migration of legacyCommentMigrations) transferDiffComments(getDiffCommentScope(null, migration.root), getDiffCommentScope(migration.draftId, migration.root));
+  const recovered = useAppStore.getState();
+  if (recovered.activeConversationDraftId) {
+    writeLS(activeDraftStorageKey(), recovered.activeConversationDraftId);
+    const recoveredId = recovered.activeConversationDraftId;
+    const context = recovered.conversationDrafts[recoveredId];
+    if (context.adopted && context.conversationId) {
+      if (recovered.isConnected) recovered.requestConversationSwitch(context.conversationId);
+      else {
+        const stop = useAppStore.subscribe(state => {
+          if (state.activeConversationDraftId !== recoveredId) { stop(); return; }
+          if (!state.isConnected) return;
+          stop();
+          state.requestConversationSwitch(context.conversationId!);
+        });
+      }
+    } else void recovered.refreshConversationDraftSelection(recoveredId);
+  }
 }).catch(error => {
   const message = error instanceof Error ? error.message : String(error);
   useAppStore.setState({ composerDraftStorageError: message });
@@ -158,14 +248,18 @@ const selectConversationTranscriptPruneSnapshot = (
 });
 
 const conversationTranscriptPruneSnapshotEqual = (
-  left: ConversationTranscriptPruneSnapshot,
-  right: ConversationTranscriptPruneSnapshot,
-) => (
-  left.conversationId === right.conversationId
-  && left.conversationMessages === right.conversationMessages
-  && left.conversationStreaming === right.conversationStreaming
-  && left.conversations === right.conversations
-);
+  previous: ConversationTranscriptPruneSnapshot,
+  next: ConversationTranscriptPruneSnapshot,
+) => {
+  if (previous.conversationId !== next.conversationId || previous.conversationStreaming !== next.conversationStreaming
+    || previous.conversations !== next.conversations) return false;
+  if (previous.conversationMessages === next.conversationMessages) return true;
+  const updatedOwner = changedTranscriptOwner(next.conversationMessages);
+  // Active/running transcripts are pinned. Their text does not change the LRU
+  // membership; record their final access when selection or run state changes.
+  return updatedOwner !== undefined && (updatedOwner === next.conversationId || Boolean(next.conversationStreaming[updatedOwner]))
+    && conversationTranscriptMembership(previous.conversationMessages) === conversationTranscriptMembership(next.conversationMessages);
+};
 
 useAppStore.subscribe(
   selectConversationTranscriptPruneSnapshot,

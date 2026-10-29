@@ -35,6 +35,7 @@ class SkillManager:
     ) -> None:
         self._loader = loader or SkillLoader()
         self._discovered = False
+        self._is_snapshot = False
         self.executor_catalog = None
         self._implicit_invocations: set[tuple[str, str, str, str]] = set()
         self._implicit_invocation_turn_id = None
@@ -54,6 +55,10 @@ class SkillManager:
         self._ensure_discovered()
         clone = SkillManager(deepcopy(self._loader))
         clone._discovered = self._discovered
+        clone._is_snapshot = True
+        clone.runtime_roots = self.runtime_roots
+        clone._runtime_roots_revision = self._runtime_roots_revision
+        clone.executor_catalog = self.executor_catalog
         clone._implicit_invocations = set(self._implicit_invocations)
         clone._implicit_invocation_turn_id = self._implicit_invocation_turn_id
         return clone
@@ -97,25 +102,41 @@ class SkillManager:
         self._discovered = False
         self.discover()
 
-    def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT, *, role_config: dict[str, Any] | None = None, role_features: dict[str, bool] | None = None, config_stack: Any = None) -> SkillManager:
+    def adopt_project_snapshot(self, snapshot: SkillManager) -> None:
+        """Publish a discovered workspace catalog without changing its owner."""
+        self._loader = snapshot._loader
+        self._discovered = snapshot._discovered
+
+    def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT, *, role_config: dict[str, Any] | None = None, role_features: dict[str, bool] | None = None, config_stack: Any = None, force_reload: bool = False) -> SkillManager:
         """Capture discovery for a task without rebinding the window's loader."""
         self._ensure_discovered()
-        if self.executor_catalog is not None:
-            snapshot = self.clone_host_catalog()
-            snapshot.attach_executor_catalog(self.executor_catalog)
-            return snapshot
         loader = deepcopy(self._loader)
         snapshot = SkillManager(loader)
         snapshot._discovered = self._discovered
+        snapshot._is_snapshot = True
+        if self.executor_catalog is not None:
+            snapshot._implicit_invocations = set(self._implicit_invocations)
+            snapshot._implicit_invocation_turn_id = self._implicit_invocation_turn_id
         if isinstance(loader, SkillLoader) and project_root is not _KEEP_PROJECT_ROOT:
             loader.set_project_root(project_root)
         if isinstance(loader, SkillLoader):
+            config_changed = config_stack is not None and (
+                loader._config_stack is None or loader._config_stack.fingerprint != config_stack.fingerprint
+            )
             if config_stack is not None:
                 loader._config_stack = config_stack
-            loader.restrict_role(role_config or {}, role_features or {})
+            role_changed = loader.restrict_role(role_config or {}, role_features or {})
+            if (self._is_snapshot or self.executor_catalog is not None) and loader._discovered and not config_changed and not force_reload:
+                # One turn owns one discovered host inventory. Later prompt,
+                # role and executor projections narrow that captured scan.
+                if role_changed:
+                    loader.restrict_discovered_catalog()
+                snapshot.attach_executor_catalog(self.executor_catalog)
+                return snapshot
         # Discovery belongs to the turn boundary. A new turn sees installed,
         # edited and removed skills; the in-flight snapshot remains stable.
         snapshot.discover()
+        snapshot.attach_executor_catalog(self.executor_catalog)
         return snapshot
 
     def detect(

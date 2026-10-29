@@ -295,7 +295,8 @@ def test_committed_call_protocol_or_auth_failure_never_replays_the_action(tmp_pa
                 yield committed(tool.name, "once")
                 await asyncio.wait_for(tool.started.wait(), timeout=2)
                 if failure == "auth":
-                    yield StreamEvent(type=StreamEventType.ERROR, content="Request rejected", raw={"provider_error_type":"auth","status_code":401})
+                    yield StreamEvent(type=StreamEventType.ERROR, content="Request rejected", raw={"provider_error_type":"auth","status_code":401,
+                        "provider_error_message": "Workspace policy denied this request"})
                 else:
                     changed = committed(tool.name, "once")
                     changed.tool_calls[0].arguments = {"changed":True}
@@ -303,10 +304,14 @@ def test_committed_call_protocol_or_auth_failure_never_replays_the_action(tmp_pa
                 yield StreamEvent(type=StreamEventType.DONE)
             async def simple_chat(self, messages): return ""
         provider = Provider()
-        state, _, _ = await run_case(tmp_path, provider, [tool])
+        state, _, events = await run_case(tmp_path, provider, [tool])
         assert provider.calls == 1
         assert tool.executions == 1
         assert state.terminal_status == "failed"
+        if failure == "auth":
+            detail, = [event for event in events if event.type == "agent.progress" and event.data.get("error_message")]
+            assert detail.data["error_message"] == "Workspace policy denied this request"
+            assert any(event.type == "error" for event in events)
     asyncio.run(scenario())
 
 

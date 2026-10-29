@@ -188,9 +188,10 @@ async def stream_provider_response(
                 except (asyncio.TimeoutError, ProviderStreamFailure) as failure:
                     settle_attempt_usage()
                     if stream_state.committed_tool_ids:
-                        yield await committed_provider_error(failure, state=state,
+                        async for update in committed_provider_error(failure, state=state,
                             turn_kernel=turn_kernel, provider_attempt=provider_attempt,
-                            progress_id=provider_progress_key)
+                            progress_id=provider_progress_key):
+                            yield update
                         break
                     transport_result = None
                     async for transport_update in handle_provider_transport_failure(
@@ -321,9 +322,10 @@ async def stream_provider_response(
                     break
                 if dispatch_result.action == "error":
                     if stream_state.committed_tool_ids:
-                        yield await committed_provider_error(event, state=state,
+                        async for update in committed_provider_error(event, state=state,
                             turn_kernel=turn_kernel, provider_attempt=provider_attempt,
-                            progress_id=provider_progress_key)
+                            progress_id=provider_progress_key):
+                            yield update
                         break
                     error_result = None
                     async for error_update in handle_provider_error_event(
@@ -436,8 +438,7 @@ async def stream_provider_response(
             raise
         retry_budget_boundary = exception_result.retry_budget_boundary
     else:
-        # Normal EOF is settled before the consumer-close fallback. Only a
-        # consumer that interrupts acquisition owns a cancelled request span.
+        # Settle EOF before consumer-close cancellation.
         settle_attempt_usage()
         async for event in settle_provider_eof(turn_kernel=turn_kernel, provider_attempt=provider_attempt,
             stream_state=stream_state, finish_reason=finish_reason, tool_tracker=tool_tracker,

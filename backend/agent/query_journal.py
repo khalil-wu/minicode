@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -47,6 +49,20 @@ class QueryJournalRecorder:
         default_factory=dict
     )
     projection_base_snapshot: dict[str, Any] = field(default_factory=dict)
+    _progress_queue: deque[dict[str, Any]] = field(default_factory=deque)
+    _progress_task: asyncio.Task[None] | None = None
+
+    async def _write_progress(self) -> None:
+        while self._progress_queue:
+            payload = self._progress_queue.popleft()
+            await to_thread_cancel_safe(self.journal.append, "progress", payload)
+
+    async def flush_progress(self) -> None:
+        task = self._progress_task
+        if task is not None:
+            await asyncio.shield(task)
+            if self._progress_task is task:
+                self._progress_task = None
 
     @property
     def terminal_intent_event_id(self) -> str:
@@ -102,6 +118,7 @@ class QueryJournalRecorder:
                 "message_id": message_id,
                 "status": status,
                 "reason": reason,
+                **({"error": event.data["error"]} if "error" in event.data else {}),
                 "assistant_message": {
                     "id": message_id,
                     "role": "assistant",
@@ -253,13 +270,21 @@ class QueryJournalRecorder:
         """Keep memory-only stream reduction on the owning event loop.
 
         Tool claims, results and terminal evidence still await their durable
-        write. Text deltas only cross to a worker when the next progress
-        receipt is due; ignored transport/thinking frames require no worker.
+        write. Text receipts are written in order while live deltas continue;
+        the next durable boundary waits for their completion.
         """
         if self.journal is None:
             return
         data = event.data
         nested = (data.get("call_source") or {}).get("kind") in {"code_mode", "extension"}
+        durable_boundary = (event.type == "runtime.span" and data.get("event") == "tool.started") or (
+            nested and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user", "request_user_input"}
+        ) or (event.type == "item.started" and data["item"]["type"] == "context_compaction") or event.type in {
+            "agent.lifecycle.cleanup", "turn.diff.updated", "artifact.preview", "item.completed", "tool_call", "tool_result",
+            "context_compacted", "approval_request", "ask_user", "request_user_input", "error", "agent.terminal.intent", "agent.run.completed",
+        }
+        if durable_boundary:
+            await self.flush_progress()
         if event.type == "runtime.span" and data.get("event") == "tool.started":
             await to_thread_cancel_safe(self.record_event, event)
         elif nested and event.type not in {"tool_call", "tool_result", "approval_request", "ask_user", "request_user_input"}:
@@ -270,13 +295,23 @@ class QueryJournalRecorder:
             else:
                 self.record_event(event)
         elif event.type == "agent_message.delta":
+            if self._progress_task is not None and self._progress_task.done():
+                await self.flush_progress()
             receipt = self._agent_message_delta_receipt(data)
             if receipt is not None:
                 payload, now = receipt
-                await to_thread_cancel_safe(self.journal.append, "progress", payload)
                 self.agent_message_receipts[payload["item_id"]] = (
                     payload["content_offset"] + len(payload["content_delta"]), now,
                 )
+                previous = self._progress_queue[-1] if self._progress_queue else None
+                if (previous is not None and previous["item_id"] == payload["item_id"]
+                        and previous["source"] == payload["source"]
+                        and previous["content_offset"] + len(previous["content_delta"]) == payload["content_offset"]):
+                    previous["content_delta"] += payload["content_delta"]
+                else:
+                    self._progress_queue.append(payload)
+                if self._progress_task is None:
+                    self._progress_task = asyncio.create_task(self._write_progress(), name="query-journal-progress")
         elif event.type in {
             "agent.lifecycle.cleanup", "turn.diff.updated", "artifact.preview",
             "item.completed", "tool_call", "tool_result", "context_compacted",
@@ -380,6 +415,7 @@ class QueryJournalRecorder:
                 "conversation_id": self.conversation_id,
                 "message_id": str(self.metadata.get("assistant_message_id") or ""),
                 "unresolved_tool_uses": unresolved,
+                **({"error": event.data["error"]} if "error" in event.data else {}),
                 "uncertain_tool_uses": uncertain,
                 "tool_pairs_complete": not unresolved,
                 "manual_recovery_required": any(

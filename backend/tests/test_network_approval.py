@@ -47,8 +47,8 @@ def network_host(tmp_path):
     host.context.artifact_store.shutdown()
 
 
-def register(host, *, ident="execution", context=None, persist=None, command="Write-Output 'original payload'"):
-    _, authorization = authorize(host, ident=f"call-{ident}", command=command)
+async def register(host, *, ident="execution", context=None, persist=None, command="Write-Output 'original payload'"):
+    _, authorization = (await authorize(host, ident=f"call-{ident}", command=command))
     context = context or host.context
     request = authorization.request
     command = replace(request.exec_policy.command, environment_id=context.environment_id)
@@ -77,7 +77,7 @@ async def test_original_process_decision_and_source_session_scope(network_host, 
     host = network_host
     response = {"action": "reject" if decision == "abort" else "approve", "decision": decision}
     host.context.approval_handler = AsyncMock(return_value=response)
-    registration = register(host)
+    registration = (await register(host))
     result = await registration.decide(native_request(registration))
     assert (result["type"] == "allow") is allowed
     prompt = next(payload for kind, payload in host.events if kind == "approval_request")
@@ -106,7 +106,7 @@ async def test_pending_dedup_is_same_process_not_same_domain_only(network_host):
         return await asyncio.shield(response)
 
     host.context.approval_handler = review
-    first, second = register(host, ident="one"), register(host, ident="two")
+    first, second = (await register(host, ident="one")), (await register(host, ident="two"))
     pending = [asyncio.create_task(first.decide(native_request(first))) for _ in range(3)]
     pending.append(asyncio.create_task(second.decide(native_request(second))))
     ids = {await entered.get(), await entered.get()}
@@ -122,11 +122,11 @@ async def test_pending_dedup_is_same_process_not_same_domain_only(network_host):
 async def test_session_approval_environment_protocol_and_port_are_independent(network_host):
     host = network_host
     host.context.approval_handler = AsyncMock(return_value={"action": "approve", "decision": "approved_for_session"})
-    first = register(host)
+    first = (await register(host))
     await first.decide(native_request(first))
     for changes in ({"port": 8081}, {"protocol": "https_connect"}):
         assert await first.decide(native_request(first, **changes)) == {"type": "allow"}
-    remote = register(host, ident="other-env", context=replace(host.context, environment_id="other"))
+    remote = (await register(host, ident="other-env", context=replace(host.context, environment_id="other")))
     assert await remote.decide(native_request(remote)) == {"type": "allow"}
     assert host.context.approval_handler.await_count == 4
     mismatch = native_request(first)
@@ -145,7 +145,7 @@ async def test_real_policy_admission_does_not_make_an_autoallow_for_misses(netwo
     host.context.permission = replace(host.context.permission, approval_policy=policy,
         granular_approval={"sandbox_approval": False, "rules": False, "mcp_elicitations": False} if policy == "granular" else None)
     host.context.approval_handler = AsyncMock(return_value={"action": "approve"})
-    registration = register(host)
+    registration = (await register(host))
     registration.command = replace(registration.command, managed_profile=managed)
     if not active:
         host.service.bind_review_source(lambda: None)
@@ -169,7 +169,7 @@ async def test_source_runtime_applied_then_disk_failure_preserves_true_result(ne
 
     host.context.approval_handler = AsyncMock(return_value={"action": "approve" if action == "allow" else "reject",
         "decision": {"network_policy_amendment": {"network_policy_amendment": {"host": "Example.COM", "action": action}}}})
-    registration = register(host, persist=persist)
+    registration = (await register(host, persist=persist))
     result = await registration.decide(native_request(registration, protocol="socks5_tcp"))
     assert (result["type"] == "allow") is allowed
     assert seen[0]["protocol"] == "socks5_tcp"
@@ -196,7 +196,7 @@ async def test_amendment_host_equivalence_is_owned_by_native_callback_not_python
 
     host.context.approval_handler = AsyncMock(return_value={"action": "approve", "decision": {
         "network_policy_amendment": {"network_policy_amendment": {"host": "example.com", "action": "allow"}}}})
-    registration = register(host, persist=persist)
+    registration = (await register(host, persist=persist))
     assert await registration.decide(native_request(registration)) == {"type": "allow"}
     assert captured[0]["host"] == "example.com" and captured[0]["approved_host"] == "Example.COM"
     await registration.finish()
@@ -212,7 +212,7 @@ async def test_process_finished_cancels_pending_review_without_new_failure(netwo
         await asyncio.Future()
 
     host.context.approval_handler = review
-    registration = register(host)
+    registration = (await register(host))
     pending = asyncio.create_task(registration.decide(native_request(registration)))
     await entered.wait()
     assert await registration.finish() is None
@@ -234,7 +234,7 @@ async def test_ready_review_commit_precedes_concurrent_process_finished(network_
 
     host.context.approval_handler = AsyncMock(return_value={"action": "approve", "decision": {
         "network_policy_amendment": {"network_policy_amendment": {"host": "Example.COM", "action": "allow"}}}})
-    registration = register(host, persist=persist)
+    registration = (await register(host, persist=persist))
     pending = asyncio.create_task(registration.decide(native_request(registration)))
     await committing.wait()
     finished = asyncio.create_task(registration.finish()) if cancel_source == "process_finished" else None
@@ -252,7 +252,7 @@ async def test_current_reviewer_uses_original_trigger_and_source_bash_hook(netwo
     host = network_host
     pending = asyncio.get_running_loop().create_future()
     host.context.metadata["actual_future"] = pending
-    registration = register(host)
+    registration = (await register(host))
     hook = ReviewHook(HookResult())
     received = []
 
@@ -293,7 +293,7 @@ async def test_hook_denial_precedes_guardian_and_user(network_host):
     host.context.run_context.hook_manager = ReviewHook(HookResult(permission_decision="deny", message="Actual configured network veto"))
     guardian = host.context.run_context.guardian_review_service = SimpleNamespace(decide=AsyncMock())
     host.context.approval_handler = AsyncMock()
-    registration = register(host)
+    registration = (await register(host))
     assert (await registration.decide(native_request(registration)))["type"] == "deny"
     assert registration.outcome == "Actual configured network veto"
     guardian.decide.assert_not_awaited()
@@ -305,7 +305,7 @@ async def test_hook_denial_precedes_guardian_and_user(network_host):
 async def test_native_block_observer_retains_original_explicit_denial_and_never_cancels_turn(network_host):
     host = network_host
     turn_cancel = host.context.cancel_event = asyncio.Event()
-    registration = register(host)
+    registration = (await register(host))
     registration.record_outcome("Automatic approval review rejected this original action", explicit=True)
     await registration.observe_blocked('Network access to "blocked.invalid" was blocked by policy.')
     assert host.cancelled == [("execution", "Automatic approval review rejected this original action")]
@@ -402,7 +402,7 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
     argv = [sys.executable, "-I", "-S", "-u", "-c", code]
     command = ("& '" + sys.executable.replace("'", "''") + "' -I -S -u -c '" + code.replace("'", "''") + "'"
         if sys.platform == "win32" else shlex.join(argv))
-    registration = register(host, command=command)
+    registration = (await register(host, command=command))
     backend = LocalProcessBackend()
     borrowers, processes = [], []
 
@@ -510,7 +510,7 @@ async def test_actual_native_proxy_pauses_original_post_and_never_replays_body(n
 async def test_native_remote_constraints_precede_consumer_and_persisted_source_rules_are_reusable(network_host):
     host = network_host
     host.context.approval_handler = AsyncMock(return_value={"action": "approve", "decision": "approved"})
-    registration = register(host)
+    registration = (await register(host))
     runtime = native_runtime()
     lease = None
     try:

@@ -408,7 +408,13 @@ export const ProviderTab = ({
       onSettingsPayloadChange?.(savedPayload);
       const section = savedPayload.custom!;
       const active = section.model!;
-      if (conversationId || isCurrentOwner()) {
+      // A blank composer draft has no durable conversation owner yet. The
+      // HTTP save above updates the global provider profile; applying an
+      // empty owner through the websocket would race the session's last
+      // durable conversation and is rejected by the backend as a stale blank
+      // conversation. Apply the per-conversation override only once an
+      // actual conversation id exists.
+      if (conversationId) {
         const result = await sendClientCommandAwaitResult({ type: "llm.config.set", provider: "custom", model: active,
           conversation_id: conversationId, workspace_root: workspaceRoot, source: "settings.provider.bedrock" }, "llm.config.set", { silent: true });
         if (!commandResultSucceeded(result)) throw new Error(result.message || tr("无法应用到发起会话"));
@@ -766,7 +772,7 @@ export const ProviderTab = ({
       applyCapabilitySection(draft.provider, section, active || draft.modelName);
       // Persisting a global profile and applying it to this conversation are
       // separate operations. The latter retains the initiating owner across IO.
-      if (conversationId || isCurrentOwner()) {
+      if (conversationId) {
         const result = await sendClientCommandAwaitResult({
           type: "llm.config.set", provider: bp, model: active || draft.modelName,
           conversation_id: conversationId, workspace_root: workspaceRoot,

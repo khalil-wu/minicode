@@ -2,7 +2,7 @@ import type { AppStore } from "../stores/types";
 import { useAppStore } from "../stores";
 import { desktop, type UpdateActivitySnapshot } from "./runtime";
 import { dirtyEditorFiles } from "../stores/shared-helpers";
-import { collectComposerDrafts, composerWindowOwnerId } from "../stores/composer-drafts";
+import { collectComposerDrafts, composerDraftAttachments, composerWindowOwnerId, selectComposerDraftInputs, composerDraftInputsEqual } from "../stores/composer-drafts";
 import { hasPendingEditorDrafts } from "../stores/editor-drafts";
 
 const sortedUnique = (values: Array<string | null | undefined>): string[] => (
@@ -40,11 +40,11 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
     promptIds.push(`runtime-pending-approvals:${runtimePendingApprovalCount}`);
   }
   const allAttachments = [
-    ...state.attachments,
+    ...composerDraftAttachments(state),
     ...Object.values(state.sideChats).flatMap((thread) => thread.attachments ?? []),
     ...Object.values(state.conversationWorkbenchStates)
-      .flatMap((workbench) => workbench.attachments ?? []),
-    ...Object.values(state.workspaceComposerDrafts).flatMap(draft => draft.attachments),
+      .flatMap(composerDraftAttachments),
+    ...Object.values(state.workspaceComposerDrafts).flatMap(composerDraftAttachments),
   ];
   const runtimeTaskIds = (state.runtimeSession?.running_tasks ?? []).map((item, index) => {
     if (typeof item === "string") return item;
@@ -106,13 +106,12 @@ export const buildUpdateActivitySnapshot = (state: AppStore): UpdateActivitySnap
 let stopUpdateActivityMirror: (() => void) | null = null;
 
 /**
- * Exactly the slices `buildUpdateActivitySnapshot` reads. Subscribing to the
- * whole store ran the snapshot build (flat-mapping every workbench's
- * attachments, string-comparing every open editor tab) plus a JSON.stringify on
- * every streaming token. All of these are replaced immutably, so reference
- * equality is a sound and very cheap gate.
+ * Track authoring and activity facts rather than side-chat text or subagent
+ * progress. Those streams replace their owning objects without changing the
+ * update/close blockers or stored drafts.
  */
 const selectUpdateActivityInputs = (state: AppStore) => ({
+  composerDrafts: selectComposerDraftInputs(state),
   isConnected: state.isConnected,
   runtimeSession: state.runtimeSession,
   conversationId: state.conversationId,
@@ -125,23 +124,14 @@ const selectUpdateActivityInputs = (state: AppStore) => ({
   diffReviewQueue: state.diffReviewQueue,
   pendingAskUser: state.pendingAskUser,
   askUserQueue: state.askUserQueue,
-  attachments: state.attachments,
-  conversationWorkbenchStates: state.conversationWorkbenchStates,
   editorTabs: state.editorTabs,
-  workingDirectory: state.workingDirectory,
   backgroundTasks: state.backgroundTasks,
   subagents: state.subagents,
   conversationAgentStates: state.conversationAgentStates,
-  workspaceComposerDrafts: state.workspaceComposerDrafts,
   composerDraftsReady: state.composerDraftsReady,
   composerDraftStoragePending: state.composerDraftStoragePending,
   composerDraftStorageError: state.composerDraftStorageError,
   composerDraftRevision: state.composerDraftRevision,
-  draft: state.draft,
-  quotedMessage: state.quotedMessage,
-  selectedMentions: state.selectedMentions,
-  selectedSkills: state.selectedSkills,
-  allowedRemoteImageDomains: state.allowedRemoteImageDomains,
 });
 
 type UpdateActivityInputs = ReturnType<typeof selectUpdateActivityInputs>;
@@ -149,9 +139,22 @@ type UpdateActivityInputs = ReturnType<typeof selectUpdateActivityInputs>;
 const updateActivityInputsEqual = (
   left: UpdateActivityInputs,
   right: UpdateActivityInputs,
-): boolean => (Object.keys(left) as (keyof UpdateActivityInputs)[]).every(
-  (key) => left[key] === right[key],
-);
+): boolean => (Object.keys(left) as (keyof UpdateActivityInputs)[]).every(key => {
+  if (key === "composerDrafts") return composerDraftInputsEqual(left.composerDrafts, right.composerDrafts);
+  if (key === "sideChats") return left.sideChats === right.sideChats || Object.keys(left.sideChats).length === Object.keys(right.sideChats).length
+    && Object.keys(left.sideChats).every(id => right.sideChats[id] && left.sideChats[id].id === right.sideChats[id].id
+      && left.sideChats[id].isStreaming === right.sideChats[id].isStreaming);
+  if (key === "subagents") return sameAgentActivity(left.subagents, right.subagents);
+  if (key === "conversationAgentStates") return left.conversationAgentStates === right.conversationAgentStates
+    || Object.keys(left.conversationAgentStates).length === Object.keys(right.conversationAgentStates).length
+      && Object.keys(left.conversationAgentStates).every(id => right.conversationAgentStates[id]
+        && sameAgentActivity(left.conversationAgentStates[id].subagents, right.conversationAgentStates[id].subagents));
+  return left[key] === right[key];
+});
+
+const activeAgent = (status: string) => status === "pending" || status === "running" || status === "blocked";
+const sameAgentActivity = (left: AppStore["subagents"], right: AppStore["subagents"]) => left === right
+  || left.length === right.length && left.every((agent, index) => agent.id === right[index].id && activeAgent(agent.status) === activeAgent(right[index].status));
 
 export const startUpdateActivityMirror = (): (() => void) => {
   if (stopUpdateActivityMirror) return stopUpdateActivityMirror;

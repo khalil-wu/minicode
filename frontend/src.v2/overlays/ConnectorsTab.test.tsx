@@ -1,10 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import { ConnectorsTab } from "./ConnectorsTab";
+import { handlePeripheralEvent } from "../chat/peripheralEvents";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -91,6 +93,32 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull();
     expect(screen.queryByRole("tablist", { name: "MCP 视图" })).toBeNull();
     expect(screen.queryByText(/^市场/)).toBeNull();
+  });
+
+  it("groups the backend's actual plugin servers and opens their original runtime evidence", async () => {
+    const event = normalizeInboundServerEvent({ type: "mcp_status", servers: [
+      { name: "node_repl", status: "connected", source: "user", plugin_id: null, plugin_server_name: null },
+      { name: "plugin:review@local:code-review", status: "error", source: "plugin:review@local",
+        plugin_id: "review@local", plugin_server_name: "code-review", phase: "failed", error: "actual plugin server error" },
+      { name: "cua_repl", status: "connected", source: "builtin:cua_repl:local", plugin_id: "computer-use@local", plugin_server_name: "cua_repl" },
+    ] });
+    expect(event).toBeTruthy();
+    expect(handlePeripheralEvent(event!)).toBe(true);
+    render(<ConnectorsTab />);
+    const servers = screen.getByRole("region", { name: "MCP 服务" });
+    const plugins = screen.getByRole("region", { name: "来自插件" });
+    expect(within(servers).getByText("node_repl")).toBeTruthy();
+    expect(within(servers).queryByText("code-review")).toBeNull();
+    expect(within(plugins).getByText("code-review")).toBeTruthy();
+    expect(within(plugins).getByText("cua_repl")).toBeTruthy();
+    fireEvent.click(within(plugins).getByRole("button", { name: "编辑 code-review" }));
+    expect(screen.getByText("actual plugin server error").style.whiteSpace).toBe("pre-wrap");
+    expect(screen.getByRole("heading", { name: "code-review" })).toBeTruthy();
+    expect(screen.queryByRole("textbox", { name: "启动命令" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "重启 code-review" }));
+    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({
+      type: "mcp.restart", name: "plugin:review@local:code-review",
+    }), "mcp.restart", expect.anything()));
   });
 
   it("offers app data clearing only with its native sandbox and waits for its actual result", async () => {

@@ -1,6 +1,8 @@
 import { useI18n } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Keyboard, Pencil, RotateCcw, Search, Trash2, X } from "lucide-react";
+import { Pencil, RotateCcw, Search, Trash2, X } from "lucide-react";
+import { SettingsSourceIcon } from "./SettingsSourceIcon";
+import "./ShortcutsTab.css";
 import { findShortcutConflict, formatShortcut, isCodeShortcut, nativeShortcutOverrides, shortcutFromEvent, SHORTCUT_DEFINITIONS, type ShortcutActionId } from "../lib/keyboard-shortcuts";
 import { useAppStore } from "../stores";
 import { showConfirm } from "./DialogService";
@@ -49,7 +51,7 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
     .map(shortcut => ({ ...shortcut, label: tr(shortcut.label), description: tr(shortcut.description) }))
     .filter(shortcut => !normalizedQuery || (byKeystrokes
       ? bindings[shortcut.id].some(binding => binding === query)
-      : `${shortcut.label} ${shortcut.description} ${shortcut.action} ${formatShortcut(bindings[shortcut.id])}`.toLowerCase().includes(normalizedQuery))),
+      : `${shortcut.label} ${shortcut.description} ${shortcut.action} ${formatShortcut(bindings[shortcut.id])} ${formatShortcut(bindings[shortcut.id]).replaceAll(" + ", "+")}`.toLowerCase().includes(normalizedQuery))),
   [appMode, bindings, byKeystrokes, normalizedQuery, query, tr]);
 
   const cancel = () => { setRecording(null); setError(""); };
@@ -77,22 +79,7 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
     return () => window.removeEventListener("keydown", capture, true);
   }, [active, bindings, recording, setShortcutBinding, tr]);
 
-  return <section className="settings-group">
-    {showPreference(`${copy.number} ${copy.numberDescription} ${copy.tabs} ${copy.chats}`) && <div className="settings-card"><div className="settings-row">
-      <div className="settings-row-copy"><div className="settings-row-title">{copy.number}</div><div className="settings-row-description">{copy.numberDescription}</div>
-        {Object.values(bindings).flat().some(binding => /^(Mod|Alt)\+(Digit)?[1-9]$/.test(binding)) && <div className="settings-row-description">{copy.conflicts}</div>}</div>
-      <SelectMenu ariaLabel={copy.number} className="settings-select settings-select-regular" align="end" disabled={!preferences || savingPreferences}
-        value={preferences?.primaryNumberShortcutTarget || "tabs"} onValueChange={value => void savePreference({ primaryNumberShortcutTarget: value as PrimaryNumberShortcutTarget })}>
-        <option value="tabs">{copy.tabs}</option><option value="sidebar">{copy.chats}</option>
-      </SelectMenu>
-    </div></div>}
-    {showPreference(`${copy.external} ${copy.externalDescription}`) && <div className="settings-card"><div className="settings-row">
-      <div className="settings-row-copy"><div className="settings-row-title">{copy.external}</div><div className="settings-row-description">{copy.externalDescription}</div></div>
-      <SelectMenu ariaLabel={copy.external} className="settings-select settings-select-regular" align="end" disabled={!preferences || savingPreferences}
-        value={preferences?.externalBrowserLinkShortcut || "primary"} onValueChange={value => void savePreference({ externalBrowserLinkShortcut: value as ExternalBrowserLinkShortcut })}>
-        <option value="unassigned">{copy.unassigned}</option><option value="primary">{primary}{copy.click}</option><option value="alt">{mac ? "⌥" : "Alt+"}{copy.click}</option><option value="primaryShift">{primary}{mac ? "⇧" : "Shift+"}{copy.click}</option>
-      </SelectMenu>
-    </div></div>}
+  return <section className="settings-group settings-shortcuts">
     <div className="settings-section-heading settings-section-heading-row">
       <label className="settings-shortcut-search">
         <Search aria-hidden="true" />
@@ -109,12 +96,27 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
           }} />
         {query && <button type="button" className="settings-shortcut-search-action" aria-label={tr("清除搜索")} onClick={() => { setQuery(""); searchRef.current!.focus(); }}><X size={14} /></button>}
         <button type="button" className="settings-shortcut-search-action" aria-label={tr("按键搜索")} title={tr("按键搜索")}
-          aria-pressed={byKeystrokes} onClick={() => { cancel(); setQuery(""); setByKeystrokes(!byKeystrokes); searchRef.current!.focus(); }}><Keyboard size={16} /></button>
+          aria-pressed={byKeystrokes} onClick={() => { cancel(); setQuery(""); setByKeystrokes(!byKeystrokes); searchRef.current!.focus(); }}><SettingsSourceIcon icon="shortcuts" size={16} /></button>
       </label>
       {(nativeShortcutOverrides(bindings).length > 0 || preferences && preferences.externalBrowserLinkShortcut !== "primary") && <button type="button" className="settings-action-button settings-shortcut-reset" onClick={async () => {
         if (await showConfirm({ title: tr("恢复默认"), message: tr("将所有快捷键恢复为默认绑定？"), confirmLabel: tr("恢复默认") })) { resetShortcutBindings(); if (isDesktop()) await savePreference({ externalBrowserLinkShortcut: "primary" }); }
       }}><RotateCcw size={14} />{tr("恢复默认")}</button>}
     </div>
+    {showPreference(`${copy.number} ${copy.numberDescription} ${copy.tabs} ${copy.chats}`) && <div className="settings-card settings-shortcut-preference"><div className="settings-row">
+      <div className="settings-row-copy"><div className="settings-row-title">{copy.number}</div><div className="settings-row-description">{copy.numberDescription}</div>
+        {Object.values(bindings).flat().some(binding => /^(Mod|Alt)\+(Digit)?[1-9]$/.test(binding)) && <div className="settings-row-description">{copy.conflicts}</div>}</div>
+      <SelectMenu ariaLabel={copy.number} className="settings-select settings-select-regular" align="end" disabled={!preferences || savingPreferences}
+        value={preferences?.primaryNumberShortcutTarget || "tabs"} onValueChange={value => void savePreference({ primaryNumberShortcutTarget: value as PrimaryNumberShortcutTarget })}>
+        <option value="tabs">{copy.tabs}</option><option value="sidebar">{copy.chats}</option>
+      </SelectMenu>
+    </div></div>}
+    {showPreference(`${copy.external} ${copy.externalDescription}`) && <div className="settings-card settings-shortcut-preference"><div className="settings-row">
+      <div className="settings-row-copy"><div className="settings-row-title">{copy.external}</div><div className="settings-row-description">{copy.externalDescription}</div></div>
+      <SelectMenu ariaLabel={copy.external} className="settings-select settings-select-regular" align="end" disabled={!preferences || savingPreferences}
+        value={preferences?.externalBrowserLinkShortcut || "primary"} onValueChange={value => void savePreference({ externalBrowserLinkShortcut: value as ExternalBrowserLinkShortcut })}>
+        <option value="unassigned">{copy.unassigned}</option><option value="primary">{primary}{copy.click}</option><option value="alt">{mac ? "⌥" : "Alt+"}{copy.click}</option><option value="primaryShift">{primary}{mac ? "⇧" : "Shift+"}{copy.click}</option>
+      </SelectMenu>
+    </div></div>}
     {error && <div className="settings-shortcut-error" role="alert">{error}</div>}
     <div className="settings-card settings-shortcuts-card">
       {shortcuts.map(shortcut => <div className="settings-shortcut-row" key={shortcut.id}>
@@ -125,7 +127,7 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
             {capturing ? <><input autoFocus readOnly className="settings-shortcut-capture" aria-label={tr("编辑 {v0}", { v0: shortcut.label })}
               data-shortcut-recording={active ? "true" : undefined} placeholder={tr("请按快捷键")} /><button type="button" className="settings-action-button" onClick={cancel}>{tr("取消")}</button></>
               : <><button type="button" className="settings-shortcut-binding" aria-label={tr("编辑 {v0}", { v0: shortcut.label })}
-                onClick={() => { setRecording({ action: shortcut.id, index }); setError(""); }}><kbd data-unassigned={!binding}>{formatShortcut(binding) || tr("未设置")}</kbd><Pencil aria-hidden="true" /></button>
+                onClick={() => { setRecording({ action: shortcut.id, index }); setError(""); }}><kbd data-unassigned={!binding}>{formatShortcut(binding).replaceAll(" + ", "+") || tr("未设置")}</kbd><Pencil aria-hidden="true" /></button>
               {binding && <button type="button" className="settings-shortcut-delete" title={tr("删除绑定")} aria-label={tr("删除 {v0} 快捷键", { v0: shortcut.label })}
                 onClick={() => setShortcutBinding(shortcut.id, "", index)}><Trash2 aria-hidden="true" /></button>}</>}
           </div>;

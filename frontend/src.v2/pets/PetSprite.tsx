@@ -28,13 +28,6 @@ export function PetSprite({ pet, state = "idle", size = 64, reducedMotion = fals
   const [spriteUrl, setSpriteUrl] = useState("");
   const [error, setError] = useState("");
   const [frame, setFrame] = useState({ row: 0, column: 0 });
-  const [systemReducedMotion, setSystemReducedMotion] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const changed = () => setSystemReducedMotion(media.matches);
-    media.addEventListener("change", changed);
-    return () => media.removeEventListener("change", changed);
-  }, []);
   useEffect(() => {
     if (!active) return;
     setError("");
@@ -49,7 +42,7 @@ export function PetSprite({ pet, state = "idle", size = 64, reducedMotion = fals
     if (lookDirection !== undefined && pet.spriteVersionNumber === 2 && ["idle", "running", "waving"].includes(state)) {
       setFrame(petLookFrame(lookDirection)); return;
     }
-    const sequence = petAnimationFrames(state, reducedMotion || systemReducedMotion, loop);
+    const sequence = petAnimationFrames(state, reducedMotion, loop);
     let index = 0;
     let timer: ReturnType<typeof setTimeout>;
     const next = () => {
@@ -59,7 +52,7 @@ export function PetSprite({ pet, state = "idle", size = 64, reducedMotion = fals
     };
     next();
     return () => clearTimeout(timer);
-  }, [active, state, reducedMotion, systemReducedMotion, lookDirection, loop, pet.spriteVersionNumber]);
+  }, [active, state, reducedMotion, lookDirection, loop, pet.spriteVersionNumber]);
   const rows = pet.spriteVersionNumber === 2 ? 11 : 9;
   return <span className="mc-pet-sprite" role="img" aria-label={pet.displayName} title={error || pet.displayName}
     data-pet-id={pet.id} data-pet-state={state} data-pet-row={frame.row} data-pet-column={frame.column}

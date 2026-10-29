@@ -240,8 +240,15 @@ class TurnInputQueue:
             self._phase = MailboxDeliveryPhase.CURRENT_TURN
             return self._turn_epoch
 
-    def defer_mailbox_to_next_turn(self, turn_id: str = "") -> bool:
-        """Atomically close current-turn mailbox delivery before final output."""
+    def defer_mailbox_to_next_turn(self, turn_id: str = "", *, has_trigger_turn_mail: bool = False) -> bool:
+        """A final item defers queue-only mail while explicit input stays current."""
+        with self._lock:
+            if self._steering or has_trigger_turn_mail:
+                return False
+            return self.finish_turn(turn_id)
+
+    def finish_turn(self, turn_id: str = "") -> bool:
+        """Close mailbox delivery and retain pending user commands for cleanup."""
         normalized = str(turn_id or "").strip()
         with self._lock:
             if normalized and self._turn_id and normalized != self._turn_id:

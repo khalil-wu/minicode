@@ -273,12 +273,36 @@ async def test_role_and_mode_reach_actual_root_and_child_prompt_composition(tmp_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["Writer", "worker name", " root ", "root", "worker/name"])
+async def test_real_spawn_rejects_names_that_cannot_be_addressed(tmp_path, name):
+    config, registry, snapshot, policy = v2_case(tmp_path)
+    runtime = AgentRuntime(swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+    runtime.start_run(run_id="parent", session_id="session", conversation_id="conversation")
+    context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), workspace_root=tmp_path,
+        session_id="session", conversation_id="conversation", model_execution=snapshot, tool_registry=registry,
+        run_context=RunContext(agent_runtime=runtime, model_execution=snapshot, multi_agent_version="v2"),
+        metadata={"run_id": "parent", ACTIVE_TOOLSET_POLICY_METADATA_KEY: policy})
+    try:
+        result = await run_tool(ToolCallEvent("bad-name", "spawn_agent", {"task_name": name, "message": "Work", "fork_turns": "none"},
+            native_namespace="collaboration", native_name="spawn_agent", encrypted_function_args=[]), registry, context)
+        assert result.is_error
+        assert runtime.list_runs(conversation_id="conversation", include_subagents=True, include_swarm=False)["subagents"] == []
+    finally:
+        await runtime.aclose(release_lease=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("hide", [True, False])
-async def test_real_spawn_keeps_actual_agent_id_in_runtime_metadata_and_source_model_result(tmp_path, hide):
+@pytest.mark.parametrize("fork_turns", ["none", "1"])
+async def test_real_spawn_keeps_actual_agent_id_in_runtime_metadata_and_source_model_result(tmp_path, hide, fork_turns):
+    from backend.agent.context import ContextBuilder
+
     config, registry, snapshot, policy = v2_case(tmp_path, hide_spawn_agent_metadata=hide)
+    requests = []
     class Model(LLMAdapter):
         _settings = config.llm
         async def stream_chat(self, messages, tools=None, metadata=None):
+            requests.append(messages)
             yield StreamEvent(StreamEventType.TEXT_CHUNK, content="Actual child completed.", phase="final_answer")
             yield StreamEvent(StreamEventType.DONE, finish_reason="stop")
         async def simple_chat(self, messages, *, max_tokens=None):
@@ -290,13 +314,17 @@ async def test_real_spawn_keeps_actual_agent_id_in_runtime_metadata_and_source_m
     snapshot = replace(snapshot, llm=model)
     runtime = AgentRuntime(swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
     runtime.start_run(run_id="parent", session_id="session", conversation_id="conversation")
+    builder = ContextBuilder()
+    builder.append_user("Earlier instruction must remain available")
+    builder.append_assistant("Earlier response")
+    builder.append_user("Current request")
     checker = PermissionChecker(config.permissions, workspace_root=tmp_path)
     context = ToolExecutionContext(permission=checker.build_context(mode="bypass"), permission_checker=checker, workspace_root=tmp_path,
         session_id="session", conversation_id="conversation", llm=model, model_execution=snapshot,
-        tool_registry=registry, run_context=RunContext(agent_runtime=runtime, model_execution=snapshot,
+        tool_registry=registry, run_context=RunContext(agent_runtime=runtime, model_execution=snapshot, context_builder=builder,
             multi_agent_version="v2"), metadata={"run_id": "parent", ACTIVE_TOOLSET_POLICY_METADATA_KEY: policy})
     try:
-        result = await run_tool(ToolCallEvent("spawn-real", "spawn_agent", {"task_name": "worker", "message": "Complete the isolated child task.", "fork_turns": "none"},
+        result = await run_tool(ToolCallEvent("spawn-real", "spawn_agent", {"task_name": "worker", "message": "Complete the isolated child task.", "fork_turns": fork_turns},
             native_namespace="collaboration", native_name="spawn_agent", encrypted_function_args=[]), registry, context)
         assert not result.is_error, result.content
         output = json.loads(result.content)
@@ -305,6 +333,9 @@ async def test_real_spawn_keeps_actual_agent_id_in_runtime_metadata_and_source_m
         assert runtime.get_subagent(agent_id) is not None
         await runtime.wait_for_subagent_execution(agent_id)
         assert runtime.get_subagent(agent_id).status == "completed"
+        rendered = "\n".join(str(message.content) for message in requests[0])
+        assert ("Earlier instruction must remain available" in rendered) is (fork_turns == "1")
+        assert ("Current request" in rendered) is (fork_turns == "1")
     finally:
         await runtime.aclose(release_lease=True)
 

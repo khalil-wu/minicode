@@ -37,6 +37,8 @@ from backend.llm.errors import (
 )
 
 
+from backend.secret_redaction import redact_secrets
+
 logger = logging.getLogger(__name__)
 
 
@@ -251,17 +253,19 @@ async def handle_provider_transport_failure(
             progress_message = f"连接中断，正在重连（{retry_label}）"
             progress_retry_attempt = new_attempt
             progress_max_retries = effective_max_retries
+        failure_data = llm_error_raw(cause, provider="")
+        diagnostic = redact_secrets(str(failure_data.get("provider_error_message") or error_message))
         yield provider_stream_error_progress(
             progress_message,
             attempt=provider_attempt,
             progress_id=progress_id or provider_progress_id(iteration_id_value),
-            detail=f"{error_message[:320]} · {retry_delay:.1f} 秒后重试",
+            detail=f"{diagnostic} · {retry_delay:.1f} 秒后重试",
             retry_attempt=progress_retry_attempt,
             max_retries=progress_max_retries,
             retry_after_ms=max(0, int(round(retry_delay * 1000))),
-            error_message=error_message[:320],
+            error_message=diagnostic,
             status_code=llm_error_status_code(cause, allow_text=False),
-            provider_error_code=llm_error_raw(cause, provider="").get("provider_error_code", ""),
+            provider_error_code=failure_data.get("provider_error_code", ""),
         )
         if close_stream is not None:
             await close_stream()

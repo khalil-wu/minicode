@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../stores/types";
+import type { SendChatMessageOptions } from "../chat/sendChatMessage";
 import { File as NativeFile } from "node:buffer";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", {
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   awaitResult: vi.fn(),
   deleteConversation: vi.fn(async () => true),
   sendCommand: vi.fn((_command: unknown) => true),
-  sendChatMessage: vi.fn((): boolean | Promise<boolean> => true),
+  sendChatMessage: vi.fn((_options: SendChatMessageOptions): boolean | Promise<boolean> => true),
   promptResponse: vi.fn(async () => ({ type: "command.result", level: "success", message: "", data: {} })),
 }));
 
@@ -129,7 +130,10 @@ describe("SideChatPanel server lifecycle", () => {
 
   it.each([true, false])("keeps the side draft until a delayed submission returns %s", async (accepted) => {
     let finishSend!: (value: boolean) => void;
-    mocks.sendChatMessage.mockReturnValueOnce(new Promise((resolve) => { finishSend = resolve; }));
+    mocks.sendChatMessage.mockImplementationOnce(options => new Promise(resolve => { finishSend = value => {
+      if (value) options.onModelAccepted?.();
+      resolve(value);
+    }; }));
     useAppStore.setState({ isConnected: true, draft: "main unsent draft" });
     render(<SideChatPanel />);
     await waitFor(() => expect(mocks.awaitResult).toHaveBeenCalled());
@@ -145,6 +149,10 @@ describe("SideChatPanel server lifecycle", () => {
   });
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.sendChatMessage.mockImplementation(options => {
+      options.onModelAccepted?.();
+      return true;
+    });
     mocks.awaitResult.mockImplementation(async (command) => ({ ...successfulCreate, data: { conversation_id: command.conversation_id, side_chat_transcript: [] } }));
     useAppStore.setState({
       sideChats: {},

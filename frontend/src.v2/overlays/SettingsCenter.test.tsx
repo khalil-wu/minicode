@@ -12,6 +12,7 @@ import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { installAppThemeTokens } from "../../test/app-theme-tokens";
 import { openSettings } from "../lib/settings-navigation";
 import type { ComputerUseSettingsSnapshot } from "../protocol/computer-use-settings";
+import { handleCommandCatalogEvent } from "../chat/commandCatalogEvents";
 
 let removeThemeTokens: () => void;
 beforeEach(() => { removeThemeTokens = installAppThemeTokens(); });
@@ -22,6 +23,7 @@ const memoryFixture = vi.hoisted(() => ({ value: { feature_enabled: true, memori
 const computerUseFixture = vi.hoisted(() => ({ sessionId: null as string | null, data: null as ComputerUseSettingsSnapshot | null }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => computerUseFixture.sessionId ? { sessionId: computerUseFixture.sessionId } : null }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: desktopPreferences.value, error: "", update: vi.fn() }) }));
+vi.mock("../hooks/useDesktopPreferenceTargets", () => ({ useDesktopPreferenceTargets: () => ({ targets: { fileOpenTargets: [], terminalShellTargets: [] }, error: "" }) }));
 vi.mock("../hooks/usePluginsFeature", () => ({ usePluginsFeature: () => ({ enabled: pluginsFeature.enabled, locked: false, error: "" }), setPluginsFeatureEnabled: vi.fn() }));
 
 vi.hoisted(() => {
@@ -36,7 +38,7 @@ vi.hoisted(() => {
 });
 
 const fetchLLMSettingsMock = vi.fn();
-const desktopModeMock = vi.fn(() => false);
+const desktopModeMock = vi.hoisted(() => vi.fn(() => false));
 const openExternalMock = vi.fn(async () => true);
 const embeddedBrowserSetSettingsMock = vi.fn(async (payload: { downloadPolicy?: string; browserEnabled?: boolean }) => ({ downloadPolicy: payload.downloadPolicy || "block", browserEnabled: payload.browserEnabled ?? true, origin: "", permissions: [], revision: 1 }));
 const awaitCommandResultMock = vi.fn(async (command: { type: string }) => ({ type: "command.result", command: command.type, level: "info", message: "", data: {} }));
@@ -268,7 +270,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.getByRole("button", { name: "移除 Actual App" })).toBeTruthy();
     expect(screen.queryByText("控制")).toBeNull();
     expect(useAppStore.getState().draft).toBe("Keep this draft");
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
     expect(screen.getByRole("button", { name: /电脑操控 \/ 始终允许的应用/ })).toBeTruthy();
   });
 
@@ -281,18 +283,29 @@ describe("SettingsCenter reasoning effort visibility", () => {
     render(<SettingsCenter />);
     await waitFor(() => expect(useAppStore.getState().settingsTab).toBe("general"));
     expect(screen.queryByRole("button", { name: "电脑操控" })).toBeNull();
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), { target: { value: "始终允许" } });
     expect(screen.queryByRole("button", { name: /电脑操控 \/ 始终允许的应用/ })).toBeNull();
     expect(screen.queryByRole("heading", { name: "始终允许的应用" })).toBeNull();
   });
 
-  it("hides reasoning effort for DeepSeek chat completions because runtime will ignore it", async () => {
+  it("does not fetch provider settings while General is open", async () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout", "setInterval", "clearInterval"] });
     render(<SettingsCenter />);
+    expect(screen.getByRole("heading", { name: "常规", level: 2 })).toBeTruthy();
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-    expect(fetchLLMSettingsMock).toHaveBeenCalled();
+    expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
 
     expect(screen.queryByText("推理强度")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Low" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Max" })).toBeNull();
+  });
+
+  it("hides reasoning effort for DeepSeek chat completions because runtime will ignore it", async () => {
+    useAppStore.setState({ settingsTab: "provider" });
+    render(<SettingsCenter />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText("推理强度")).toBeNull();
     expect(screen.queryByRole("button", { name: "Low" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Max" })).toBeNull();
   });
@@ -312,13 +325,39 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState().themeMode).toBe("system");
   });
 
+  it("hides portals from the retained Appearance page without discarding its unsubmitted input", async () => {
+    act(() => useAppStore.getState().setThemeMode("light"));
+    render(<SettingsCenter />);
+    fireEvent.click(screen.getByRole("button", { name: "外观", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "导入浅色主题" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "浅色主题分享字符串" }), { target: { value: "retained import draft" } });
+    act(() => useAppStore.setState({ settingsOpen: false }));
+    expect(screen.queryByRole("dialog", { name: "导入主题" })).toBeNull();
+    act(() => useAppStore.setState({ settingsOpen: true }));
+    expect(screen.queryByRole("dialog", { name: "导入主题" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "导入浅色主题" }));
+    expect(screen.getByRole("textbox", { name: "浅色主题分享字符串" })).toHaveProperty("value", "retained import draft");
+    fireEvent.click(screen.getByRole("button", { name: "取消", exact: true }));
+    const color = screen.getByRole("textbox", { name: "浅色背景颜色" });
+    fireEvent.click(screen.getByRole("button", { name: "选择浅色背景颜色" }));
+    fireEvent.change(color, { target: { value: "#AB" } });
+    const general = screen.getByRole("button", { name: "常规", exact: true });
+    fireEvent.pointerDown(general);
+    fireEvent.blur(color, { relatedTarget: general });
+    fireEvent.click(general);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "外观", exact: true }));
+    expect(screen.getByRole("textbox", { name: "浅色背景颜色" })).toBe(color);
+    expect(color).toHaveProperty("value", "#AB");
+  });
+
   it("keeps a directly opened settings category visible in the narrow navigation", async () => {
     const mediaMock = vi.spyOn(window, "matchMedia");
     const previousMediaImplementation = mediaMock.getMockImplementation();
     const scrollDescriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "scrollIntoView");
     const scrollIntoView = vi.fn();
     mediaMock.mockImplementation((query) => ({
-      matches: query === "(max-width: 760px)",
+      matches: query === "(max-width: 760px)" || query === "(prefers-reduced-motion: reduce)",
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
     }) as unknown as MediaQueryList);
@@ -326,7 +365,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
       configurable: true,
       value: scrollIntoView,
     });
-    useAppStore.setState({ settingsTab: "advanced" });
+    useAppStore.setState({ settingsTab: "advanced", reducedMotion: false });
 
     try {
       render(<SettingsCenter />);
@@ -336,6 +375,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
         behavior: "smooth",
         block: "nearest",
         inline: "center",
+      }));
+      act(() => useAppStore.setState({ reducedMotion: true }));
+      await waitFor(() => expect(scrollIntoView).toHaveBeenLastCalledWith({
+        behavior: "auto", block: "nearest", inline: "center",
       }));
     } finally {
       if (previousMediaImplementation) mediaMock.mockImplementation(previousMediaImplementation);
@@ -369,7 +412,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     const opener = screen.getByRole("button", { name: "Open settings" });
     const rail = screen.getByRole("button", { name: "Rail destination" });
     opener.focus(); fireEvent.click(opener);
-    const search = screen.getByRole("textbox", { name: "搜索设置" });
+    const search = screen.getByRole("searchbox", { name: "搜索设置" });
     await waitFor(() => expect(document.activeElement).toBe(search));
     rail.focus(); expect(document.activeElement).toBe(rail);
     const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
@@ -394,7 +437,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     cancel.focus(); fireEvent.keyDown(cancel, { key: "Escape" });
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "恢复默认" })).toBeNull());
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: true, draft: "Retained chat draft" });
-    const search = screen.getByRole("textbox", { name: "搜索设置" });
+    const search = screen.getByRole("searchbox", { name: "搜索设置" });
     search.focus(); fireEvent.keyDown(search, { key: "Escape" });
     expect(useAppStore.getState().settingsOpen).toBe(false);
   });
@@ -501,7 +544,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState().settingsTab).toBe("import");
     expect(screen.getByRole("heading", { name: "导入", exact: true })).toBeTruthy();
     const importPage = document.querySelector('[data-settings-tab="import"]');
-    fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入", exact: true }));
     expect(screen.getByRole("switch", { name: "Claude Code" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     expect(screen.getByRole("dialog", { name: "选择要导入的内容" })).toBeTruthy();
@@ -509,16 +552,16 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST")).toBe(false);
     fireEvent.click(within(navigation).getByRole("button", { name: "常规", exact: true }));
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "自动同步" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), { target: { value: "自动同步" } });
     fireEvent.click(within(navigation).getByRole("button", { name: /^导入 \/ 自动同步/ }));
     expect(useAppStore.getState().settingsTab).toBe("import");
     expect(document.querySelector('[data-settings-tab="import"]')).toBe(importPage);
-    fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+    fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入" }));
     expect(screen.getByRole("dialog", { name: "从其他 AI 应用导入" })).toBeTruthy();
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), { target: { value: "" } });
     fireEvent.click(within(navigation).getByRole("button", { name: "常规", exact: true }));
     expect(screen.queryByRole("dialog")).toBeNull();
-    fireEvent.keyDown(screen.getByRole("textbox", { name: "搜索设置" }), { key: "Escape" });
+    fireEvent.keyDown(screen.getByRole("searchbox", { name: "搜索设置" }), { key: "Escape" });
     expect(useAppStore.getState()).toMatchObject({ settingsOpen: false, workingDirectory: "C:/existing-project", draft: "Unsaved workspace draft" });
   });
 
@@ -537,17 +580,19 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState()).toMatchObject({ remoteImagePolicy: "block", allowedRemoteImageDomains: ["images.example.com"] });
   });
 
-  it("filters the existing shortcut list", () => {
+  it("filters the existing shortcut list", async () => {
     useAppStore.setState({ appMode: "code" });
     render(<SettingsCenter />);
 
     fireEvent.click(screen.getByRole("button", { name: "键盘快捷键" }));
-    const search = screen.getByRole("textbox", { name: "搜索快捷键" });
+    const search = await screen.findByRole("textbox", { name: "搜索快捷键" });
     fireEvent.change(search, { target: { value: "terminal" } });
 
     expect(screen.getByText("打开终端")).toBeTruthy();
     expect(screen.queryByText("发送消息")).toBeNull();
-    expect(screen.getByRole("button", { name: "编辑 打开终端" }).textContent).toContain("Ctrl + `");
+    expect(screen.getByRole("button", { name: "编辑 打开终端" }).textContent).toContain("Ctrl+`");
+    fireEvent.change(search, { target: { value: "Ctrl+`" } });
+    expect(screen.getByRole("button", { name: "编辑 打开终端" })).toBeTruthy();
     fireEvent.change(search, { target: { value: "工作区" } });
     expect(screen.getByRole("button", { name: "编辑 全局搜索" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "编辑 搜索项目内容" })).toBeTruthy();
@@ -624,7 +669,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("finds setting pages by their actual controls", () => {
     render(<SettingsCenter />);
 
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "下载" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), { target: { value: "下载" } });
 
     expect(screen.getByRole("heading", { name: "常规", level: 2 })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /浏览器 \/ 浏览数据/ }));
@@ -680,17 +725,141 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.getByLabelText("API 密钥")).toHaveProperty("value", "unsaved-credential");
   });
 
+  it.each(["resolved", "rejected"] as const)("keeps a saved provider authoritative when an older reopen GET is %s", async outcome => {
+    const initial = await fetchLLMSettingsMock() as LLMSettingsPayload;
+    fetchLLMSettingsMock.mockClear();
+    const saved: LLMSettingsPayload = { ...initial,
+      custom: { ...initial.custom, display_name: "Saved gateway" },
+      provider_history: initial.provider_history?.map(entry => entry.provider_id === "deepseek"
+        ? { ...entry, display_name: "Saved gateway" } : entry),
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT") return Response.json(saved);
+      throw new Error(`Unexpected fetch: ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    useAppStore.setState({ settingsTab: "provider" });
+    render(<SettingsCenter />);
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    fireEvent.keyDown(screen.getByRole("main", { name: "设置" }), { key: "Escape" });
+
+    let resolveRead!: (payload: LLMSettingsPayload) => void;
+    let rejectRead!: (reason: Error) => void;
+    const pendingRead = new Promise<LLMSettingsPayload>((resolve, reject) => { resolveRead = resolve; rejectRead = reject; });
+    fetchLLMSettingsMock.mockReturnValueOnce(pendingRead);
+    act(() => useAppStore.setState({ settingsOpen: true }));
+    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByLabelText("提供商显示名称"), { target: { value: "Saved gateway" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await screen.findByRole("button", { name: "编辑 Saved gateway" });
+    const saveCall = fetchMock.mock.calls.find(([input, init]) => new URL(String(input)).pathname === "/api/llm/settings" && init?.method === "PUT")!;
+    expect(JSON.parse(String(saveCall[1]!.body)).custom.display_name).toBe("Saved gateway");
+    // A provider profile can be saved while the composer is still a blank
+    // draft. There is no durable conversation to apply an override to yet.
+    expect(awaitCommandResultMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "llm.config.set", source: "settings.provider.save" }));
+
+    await act(async () => {
+      if (outcome === "resolved") resolveRead(initial);
+      else rejectRead(new Error("late stale read failed"));
+      await pendingRead.catch(() => undefined);
+    });
+    expect(screen.getByRole("button", { name: "编辑 Saved gateway" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "编辑 DeepSeek" })).toBeNull();
+    expect(screen.queryByText("模型设置刷新失败，编辑草稿已保留")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "编辑 Saved gateway" }));
+    expect(screen.getByLabelText("提供商显示名称")).toHaveProperty("value", "Saved gateway");
+    fireEvent.click(screen.getByRole("button", { name: "返回提供商列表" }));
+
+    const external: LLMSettingsPayload = { ...saved,
+      custom: { ...saved.custom, display_name: "Fresh external gateway" },
+      provider_history: saved.provider_history?.map(entry => entry.provider_id === "deepseek"
+        ? { ...entry, display_name: "Fresh external gateway" } : entry),
+    };
+    fireEvent.keyDown(screen.getByRole("main", { name: "设置" }), { key: "Escape" });
+    fetchLLMSettingsMock.mockResolvedValueOnce(external);
+    act(() => useAppStore.setState({ settingsOpen: true }));
+    await screen.findByRole("button", { name: "编辑 Fresh external gateway" });
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(1);
+  });
+
   it("finds reduced motion by an animation synonym and focuses the real option", async () => {
     render(<SettingsCenter />);
-    fireEvent.change(screen.getByRole("textbox", { name: "搜索设置" }), { target: { value: "减少动画" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "搜索设置" }), { target: { value: "减少动画" } });
     fireEvent.click(screen.getByRole("button", { name: /外观 \/ 减少动态效果/ }));
     expect(screen.getByRole("heading", { name: "外观", level: 2 })).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(within(screen.getByRole("radiogroup", { name: "减少动态效果" })).getByRole("radio", { name: "系统" })));
   });
 
+  it.each(["altKey", "ctrlKey", "metaKey", "shiftKey"] as const)("does not select a settings search result with %s + Enter", modifier => {
+    render(<SettingsCenter />);
+    const search = screen.getByRole("searchbox", { name: "搜索设置" });
+    fireEvent.change(search, { target: { value: "字体" } });
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    const selected = search.getAttribute("aria-activedescendant");
+    expect(selected).toBeTruthy();
+    const event = new KeyboardEvent("keydown", { key: "Enter", [modifier]: true, bubbles: true, cancelable: true });
+    fireEvent(search, event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(useAppStore.getState().settingsTab).toBe("general");
+    expect(search.getAttribute("aria-activedescendant")).toBe(selected);
+    expect(search).toHaveProperty("value", "字体");
+  });
+
+  it("navigates search results without moving input focus and clears before closing settings", async () => {
+    const scroll = vi.fn();
+    const previousScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scroll;
+    const view = render(<SettingsCenter />);
+    const search = screen.getByRole("searchbox", { name: "搜索设置" }) as HTMLInputElement;
+    search.focus();
+    fireEvent.change(search, { target: { value: "字体" } });
+    const results = Array.from(document.querySelectorAll<HTMLButtonElement>(".settings-search-result"));
+    expect(results.length).toBeGreaterThan(1);
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(useAppStore.getState().settingsTab).toBe("general");
+    fireEvent.keyDown(search, { key: "ArrowUp" });
+    expect(search.getAttribute("aria-activedescendant")).toBe(results.at(-1)!.id);
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    expect(search.getAttribute("aria-activedescendant")).toBe(results[0].id);
+    expect(document.activeElement).toBe(search);
+    fireEvent.keyDown(search, { key: "ArrowDown", isComposing: true });
+    expect(search.getAttribute("aria-activedescendant")).toBe(results[0].id);
+    fireEvent.click(screen.getByRole("button", { name: "清除搜索" }));
+    expect(search.value).toBe(""); expect(document.activeElement).toBe(search);
+    fireEvent.change(search, { target: { value: "no-setting-matches-987654" } });
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(search.value).toBe(""); expect(useAppStore.getState().settingsOpen).toBe(true);
+    fireEvent.change(search, { target: { value: "字体" } });
+    fireEvent.keyDown(search, { key: "ArrowDown" });
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(useAppStore.getState().settingsTab).toBe("appearance");
+    fireEvent(window, new Event("settings:request-search"));
+    expect(document.activeElement).toBe(search);
+    expect([search.selectionStart, search.selectionEnd]).toEqual([0, search.value.length]);
+    fireEvent.keyDown(search, { key: "Escape" });
+    fireEvent.keyDown(search, { key: "Escape" });
+    expect(useAppStore.getState().settingsOpen).toBe(false);
+    view.unmount(); HTMLElement.prototype.scrollIntoView = previousScroll;
+  });
+
+  it("selects adjacent visible categories with arrows and stops at both boundaries", () => {
+    render(<SettingsCenter />);
+    const categories = Array.from(document.querySelectorAll<HTMLButtonElement>("[data-settings-panel]"));
+    categories[0].focus();
+    fireEvent.keyDown(categories[0], { key: "ArrowUp" });
+    expect(document.activeElement).toBe(categories[0]);
+    fireEvent.keyDown(categories[0], { key: "ArrowDown" });
+    expect(document.activeElement).toBe(categories[1]);
+    expect(useAppStore.getState().settingsTab).toBe(categories[1].dataset.settingsPanel);
+    categories.at(-1)!.focus();
+    fireEvent.keyDown(categories.at(-1)!, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(categories.at(-1));
+  });
+
   it("searches the actual advanced typography and pointer controls without stale size entries", async () => {
     render(<SettingsCenter />);
-    const search = screen.getByRole("textbox", { name: "搜索设置" });
+    const search = screen.getByRole("searchbox", { name: "搜索设置" });
     fireEvent.change(search, { target: { value: "字号" } });
     expect(screen.queryByRole("button", { name: /外观 \/ 正文字号/ })).toBeNull();
     expect(screen.queryByRole("button", { name: /外观 \/ 编辑器字号/ })).toBeNull();
@@ -813,30 +982,42 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("shows the real installed-user-skill settings route and toggles its effective state", async () => {
+    const installed = { name: "code-review", display_name: "代码审查", description: "审查当前修改", source_level: "user",
+      path: "C:\\Users\\ago\\.minicode\\skills\\code-review\\SKILL.md" };
+    let enabled = true;
+    skillsSettingsRequest.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const body = init?.body ? JSON.parse(String(init.body)) : null;
+      if (init?.method === "PUT") enabled = body.enabled;
+      return Response.json({ skills: [{ ...installed, enabled }], plugin_skills: [], available_skills: enabled ? [installed] : [],
+        workspace_root: body?.workspace_root ?? new URL(String(input)).searchParams.get("workspace_root") ?? "" });
+    });
     useAppStore.setState({
       settingsTab: "skills",
-      availableSkills: [{
-        name: "code-review",
-        display_name: "代码审查",
-        description: "审查当前修改",
-        source_level: "user",
-        path: "C:\\Users\\ago\\.minicode\\skills\\code-review\\SKILL.md",
-      }],
+      conversationId: "settings-skill-owner", activeConversationDraftId: null, workingDirectory: "C:/settings-skills",
+      availableSkills: [installed],
     });
-    render(<SettingsCenter />);
-
-    expect(screen.getByRole("heading", { name: "插件", level: 2 })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "技能管理", exact: true })).toBeNull();
-    expect(screen.queryByText("插件是能力包；技能是工作流；MCP 是外部工具服务。")).toBeNull();
-    const toggle = await screen.findByRole("switch", { name: "停用 代码审查" });
-    expect(screen.getByRole("button", { name: "已安装技能" }).getAttribute("aria-pressed")).toBe("true");
-    expect(screen.queryByRole("button", { name: "使用" })).toBeNull();
-    fireEvent.click(toggle);
-    await screen.findByRole("switch", { name: "启用 代码审查" });
-    expect(skillsSettingsRequest).toHaveBeenCalledWith(expect.stringContaining("/api/skills/settings"), expect.objectContaining({ method: "PUT" }));
-    expect(useAppStore.getState().availableSkills).toEqual([]);
-    expect(useAppStore.getState().selectedSkills).toEqual([]);
-    expect(useAppStore.getState().settingsOpen).toBe(true);
+    await vi.mocked(sendClientCommand).withImplementation(command => {
+      if (command.type === "skills.list") handleCommandCatalogEvent({ type: "skills.list", conversation_id: command.conversation_id || "",
+        workspace_root: command.workspace_root || "", skills: enabled ? [installed] : [] });
+      return true;
+    }, async () => {
+      render(<SettingsCenter />);
+      expect(screen.getByRole("heading", { name: "插件", level: 2 })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "技能管理", exact: true })).toBeNull();
+      expect(screen.queryByText("插件是能力包；技能是工作流；MCP 是外部工具服务。")).toBeNull();
+      const toggle = await screen.findByRole("switch", { name: "停用 代码审查" });
+      expect(screen.getByRole("button", { name: "已安装技能" }).getAttribute("aria-pressed")).toBe("true");
+      expect(screen.queryByRole("button", { name: "使用" })).toBeNull();
+      fireEvent.click(toggle);
+      await screen.findByRole("switch", { name: "启用 代码审查" });
+      expect(skillsSettingsRequest).toHaveBeenCalledWith(expect.stringContaining("/api/skills/settings"), expect.objectContaining({ method: "PUT" }));
+      expect(skillsSettingsRequest.mock.calls.filter(([, init]) => init?.method === "PUT")).toHaveLength(1);
+      expect(skillsSettingsRequest.mock.calls.filter(([, init]) => !init?.method || init.method === "GET")).toHaveLength(2);
+      expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list", conversation_id: "settings-skill-owner", workspace_root: "C:/settings-skills" }, { silent: true });
+      expect(useAppStore.getState().availableSkills).toEqual([]);
+      expect(useAppStore.getState().selectedSkills).toEqual([]);
+      expect(useAppStore.getState().settingsOpen).toBe(true);
+    });
   });
 
   it("keeps host memories available on Home without creating a conversation", async () => {
@@ -943,9 +1124,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("opens the Source browser-history subpage", async () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "浏览器" }));
+    expect(screen.getByText("管理你的 Browser Use 偏好设置和网站访问权限。")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "管理浏览历史" }));
     await waitFor(() => expect(useAppStore.getState().browserSettingsSection).toBe("history"));
     expect(screen.getByRole("textbox", { name: "搜索浏览历史" })).toBeTruthy();
+    expect(screen.queryByText("管理你的 Browser Use 偏好设置和网站访问权限。")).toBeNull();
   });
 
   it("keeps unsupported workspace launchers out of Browser settings", () => {
@@ -981,7 +1164,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("omits redundant navigation and section subtitles", async () => {
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
+    expect(await screen.findByRole("heading", { name: "常规", level: 2 })).toBeTruthy();
+    expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
     expect(screen.queryByText("Approvals and status")).toBeNull();
     expect(screen.queryByText("Control how tools and edits are approved")).toBeNull();
 
@@ -1007,16 +1191,18 @@ describe("SettingsCenter reasoning effort visibility", () => {
       availableModels: ["gpt-5"],
     });
 
+    useAppStore.setState({ settingsTab: "provider" });
     render(<SettingsCenter />);
-
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 OpenAI" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Prompt Style")).toBeNull();
   });
 
   it("renders as a standalone settings page and returns to the workspace", async () => {
     const { container } = render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
+    expect(await screen.findByRole("heading", { name: "常规", level: 2 })).toBeTruthy();
+    expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
 
     expect(screen.getByRole("main", { name: "设置" })).toBeTruthy();
     expect(screen.queryByRole("dialog", { name: "设置" })).toBeNull();
@@ -1031,9 +1217,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("hydrates the Models tab from saved provider settings", async () => {
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     expect(sendClientCommand).toHaveBeenCalledWith({
       type: "runtime.capabilities.inspect",
@@ -1131,9 +1317,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 Provider Catalog" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 Provider Catalog" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     expect(screen.queryByLabelText("推理强度")).toBeNull();
     expect(screen.getByDisplayValue("128000")).toBeTruthy();
@@ -1161,9 +1347,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     expect(screen.queryByText("Provider Capabilities")).toBeNull();
     expect(screen.queryByText("Tool calling")).toBeNull();
@@ -1172,9 +1358,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("restores a provider from recent configuration history", async () => {
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 OpenRouter" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 OpenRouter" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     expect(screen.getByDisplayValue("https://openrouter.ai/api/v1")).toBeTruthy();
     expect((screen.getByLabelText("默认模型") as HTMLSelectElement).value).toBe("anthropic/claude-sonnet-4");
@@ -1233,10 +1419,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-
-    expect(screen.getByRole("button", { name: "api.bbe.to 已启用" })).toBeTruthy();
+    expect(await screen.findByRole("button", { name: "api.bbe.to 已启用" })).toBeTruthy();
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "编辑 api.bbe.to" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "编辑 自定义" })).toBeNull();
 
@@ -1299,10 +1484,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-
-    const activeCard = screen.getByRole("button", { name: "api.bbe.to 已启用" }).parentElement?.parentElement as HTMLElement;
+    const activeCard = (await screen.findByRole("button", { name: "api.bbe.to 已启用" })).parentElement?.parentElement as HTMLElement;
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     expect(activeCard.dataset.active).toBe("true");
     expect(activeCard.classList.contains("provider-card")).toBe(true);
     expect(screen.getAllByRole("button", { name: "编辑 api.bbe.to" })).toHaveLength(1);
@@ -1352,10 +1536,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-
-    expect(screen.getAllByRole("button", { name: "编辑 api.deepseek.com" })).toHaveLength(2);
+    expect(await screen.findAllByRole("button", { name: "编辑 api.deepseek.com" })).toHaveLength(2);
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     expect(document.body.textContent).toContain("deepseek-v4-pro");
     expect(screen.queryByText("claude-sonnet-4-6")).toBeNull();
   });
@@ -1391,9 +1574,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 api.bbe.to" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 api.bbe.to" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     expect((screen.getByLabelText("API 格式") as HTMLSelectElement).value).toBe("chat");
     expect(screen.queryByText(/GPT 类模型使用 OpenAI Responses/)).toBeNull();
@@ -1440,10 +1623,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-
-    expect(screen.getByText("尚未配置提供商")).toBeTruthy();
+    expect(await screen.findByText("尚未配置提供商")).toBeTruthy();
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "编辑 OpenAI" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "添加提供商" }));
@@ -1507,10 +1689,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-
-    fireEvent.click(screen.getByRole("button", { name: /删除已保存的提供商 OpenRouter/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /删除已保存的提供商 OpenRouter/i }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "删除" }));
 
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => new URL(String(input)).pathname === "/api/llm/provider-history" && init?.method === "DELETE")).toBe(true));
@@ -1531,10 +1712,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("shows explicit API formats for OpenAI and fixed Anthropic Messages", async () => {
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-
-    fireEvent.click(screen.getByRole("button", { name: "编辑 OpenAI" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 OpenAI" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     const openAiFormat = screen.getByLabelText("API 格式") as HTMLSelectElement;
     expect(openAiFormat.value).toBe("responses");
     expect(Array.from(openAiFormat.options).map((option) => option.text)).toEqual([
@@ -1575,9 +1755,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 OpenAI" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 OpenAI" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     fireEvent.change(screen.getByLabelText("API 格式"), { target: { value: "chat" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
@@ -1610,9 +1790,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 DeepSeek" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole("button", { name: "获取模型列表" }));
 
     await waitFor(() => expect(screen.getByText(/已获取 2 个候选模型/)).toBeTruthy());
@@ -2082,9 +2262,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "编辑 TokenRhythm" }));
+    fireEvent.click(await screen.findByRole("button", { name: "编辑 TokenRhythm" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     const networkSelect = screen.getByLabelText("网络连接") as HTMLSelectElement;
     expect(networkSelect.value).toBe("inherit");
@@ -2109,6 +2289,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
   });
 
   it("syncs the active session when using a provider card", async () => {
+    useAppStore.setState({ conversationId: "settings-provider-owner", workingDirectory: "C:/settings-provider",
+      conversations: [{ id: "settings-provider-owner", title: "Provider owner", updatedAt: "2026-10-28T00:00:00.000Z" }] });
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
       if (url.includes("/api/llm/settings") && init?.method === "PUT") {
@@ -2146,9 +2328,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("provider"));
-    fireEvent.click(screen.getByRole("button", { name: "使用 OpenAI" }));
+    fireEvent.click(await screen.findByRole("button", { name: "使用 OpenAI" }));
+    expect(fetchLLMSettingsMock).toHaveBeenCalledTimes(1);
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     await waitFor(() => expect(awaitCommandResultMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -2224,11 +2406,11 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     act(() => useAppStore.getState().setSettingsTab("features"));
     await waitFor(() => expect(screen.getByRole("button", { name: /^界面/ })).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: /^界面/ }));
     await waitFor(() => expect(screen.getByText("全局搜索")).toBeTruthy());
+    expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: /^覆盖 全局搜索，当前：/ }));
     fireEvent.click(screen.getByRole("option", { name: "关闭" }));
@@ -2288,9 +2470,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
     render(<SettingsCenter />);
 
-    await waitFor(() => expect(fetchLLMSettingsMock).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /插件/ }));
     await waitFor(() => expect(screen.getByText("demo-plugin")).toBeTruthy());
+    expect(fetchLLMSettingsMock).not.toHaveBeenCalled();
     expect(screen.queryByText("1 个技能")).toBeNull();
 
     fireEvent.click(screen.getByLabelText("停用插件 demo-plugin"));
@@ -2338,6 +2520,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(useAppStore.getState().skillsMarketplaceOpen).toBe(false);
     expect(await screen.findByRole("button", { name: "插件市场", exact: true })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "浏览目录" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "个人", exact: true }));
     const install = await screen.findByRole("button", { name: "安装插件 review@local-team" });
     await waitFor(() => expect(install).toHaveProperty("disabled", false));
     fireEvent.click(install);

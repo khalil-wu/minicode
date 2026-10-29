@@ -63,6 +63,20 @@ html[data-diff-marker-style="symbols"] .inline-diff .inline-diff-line { border-l
 }
 
 .inline-diff-file-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: 0;
   padding: 4px 8px;
+  background: transparent;
   color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  text-align: left;
+  cursor: pointer;
 }
+
+.inline-diff-file-title:hover { color: var(--text-primary); background: var(--surface-soft); }
+.inline-diff-file-title > svg { flex: 0 0 auto; }
+.inline-diff-file-title > span { min-width: 0; overflow-wrap: anywhere; }

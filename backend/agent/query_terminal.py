@@ -132,6 +132,16 @@ class QueryTerminalTransaction:
         evidence_events: list[AgentEvent] = []
         status = str(terminal_event.data.get("status") or "completed")
         reason = str(terminal_event.data.get("reason") or "")
+        abort_error = self.turn_ctx.run_context.turn_abort_error
+        abort_message = ""
+        if status == "cancelled" and abort_error is not None and abort_error["turn_id"] == str(
+            self.turn_ctx.metadata.get("turn_id") or self.turn_ctx.metadata.get("run_id") or ""
+        ):
+            reason = "guardian_denials"
+            abort_message = abort_error["message"]
+            terminal_event.data["error"] = {"message": abort_message,
+                "codex_error_info": abort_error["codex_error_info"]}
+            self._apply_status(terminal_event, status, reason)
         if validate:
             validation = validate_terminal_outcome(
                 status=status,
@@ -181,6 +191,7 @@ class QueryTerminalTransaction:
         journal_errors: list[BaseException] = []
         terminal_event.data.update(self.turn_ctx.run_context.lifecycle_cleanup_evidence())
         try:
+            await self.journal.flush_progress()
             await to_thread_cancel_safe(self.journal.record_terminal_intent, terminal_event)
         except Exception as exc:
             journal_errors.append(exc)
@@ -191,7 +202,7 @@ class QueryTerminalTransaction:
                 exc_info=True,
             )
 
-        completion_event = self._commit_runtime(status=status, reason=reason,
+        completion_event = self._commit_runtime(status=status, reason=reason, error_message=abort_message,
             terminal_intent_event_id=(self.journal.terminal_intent_event_id
                 if self.turn_ctx.turn_kernel is not None and not journal_errors else ""))
         commit_failed = terminal_commit_failed(completion_event)
@@ -312,7 +323,8 @@ class QueryTerminalTransaction:
         self._apply_status(terminal_event, status, reason)
         return status, reason
 
-    def _commit_runtime(self, *, status: str, reason: str, terminal_intent_event_id: str) -> AgentEvent | None:
+    def _commit_runtime(self, *, status: str, reason: str, terminal_intent_event_id: str,
+        error_message: str) -> AgentEvent | None:
         turn_kernel = self.turn_ctx.turn_kernel
         if turn_kernel is None:
             return None
@@ -330,7 +342,7 @@ class QueryTerminalTransaction:
             run_status,
             summary=reason,
             terminal_reason=reason,
-            error=reason if run_status == "failed" else "",
+            error=error_message or (reason if run_status == "failed" else ""),
             terminal_intent_event_id=terminal_intent_event_id,
         )
         return event or turn_kernel.completion_event

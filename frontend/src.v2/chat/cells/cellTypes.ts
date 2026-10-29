@@ -102,6 +102,7 @@ export interface ActivityCellState {
     providerState?: ProgressContentBlock["providerState"];
     errorMessage?: string;
     detail?: string;
+    errorDetails?: string[];
   };
   skill?: SkillProcessMetadata;
   startedAt: number;
@@ -141,6 +142,7 @@ export interface ExecCellState {
   stderrPreview: string[];
   stdoutFull?: string;
   stderrFull?: string;
+  diagnostic?: string;
   durationMs?: number;
   cleanupReceipt?: ToolCallRecord["cleanupReceipt"];
   collapsed: boolean;

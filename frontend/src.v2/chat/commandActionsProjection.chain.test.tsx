@@ -23,8 +23,18 @@ import { useAppStore } from "../stores";
 import { CollaborationCell } from "./cells/CollaborationCell";
 import { CLIENT_COMMAND_TYPES } from "../protocol/events";
 
-beforeEach(() => vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("prefers-reduced-motion"), addEventListener() {}, removeEventListener() {} })));
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+const previousReducedMotion = useAppStore.getState().reducedMotion;
+const previousAnimate = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "animate");
+beforeEach(() => {
+  useAppStore.setState({ reducedMotion: true });
+  vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("prefers-reduced-motion"), addEventListener() {}, removeEventListener() {} }));
+});
+afterEach(() => {
+  cleanup(); vi.useRealTimers(); vi.unstubAllGlobals();
+  if (previousAnimate) Object.defineProperty(HTMLElement.prototype, "animate", previousAnimate);
+  else delete (HTMLElement.prototype as Partial<HTMLElement>).animate;
+  useAppStore.setState({ reducedMotion: previousReducedMotion });
+});
 
 const command = "Get-Content -LiteralPath src/app.ts";
 const actions: NonNullable<ToolCallRecord["commandActions"]> = [{ type: "read", command, name: "app.ts", path: "C:/project/src/app.ts" }];
@@ -245,6 +255,7 @@ describe("source-backed Codex activity disclosure transitions", () => {
 
   it("retains the body during the real 300 ms height and opacity closing transition", () => {
     vi.stubGlobal("matchMedia", () => ({ matches: false }));
+    useAppStore.setState({ reducedMotion: false });
     const motions: { onfinish: null | (() => void); cancel: ReturnType<typeof vi.fn> }[] = [];
     const animate = vi.fn((_frames: Keyframe[], _options: KeyframeAnimationOptions) => { const motion = { onfinish: null as null | (() => void), cancel: vi.fn() }; motions.push(motion); return motion; });
     Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: animate });

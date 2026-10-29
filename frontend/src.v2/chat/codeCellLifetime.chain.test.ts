@@ -68,7 +68,7 @@ beforeEach(() => {
   vi.clearAllMocks(); resetStreamResumePages(); localStorage.clear();
   useAppStore.setState({ conversationId: owner, messages: [], conversationMessages: {}, conversationStreaming: {}, isStreaming: false,
     sideChats: {}, runtimeSession: null, conversationAgentStates: {}, conversationHistoryPages: {}, conversationHydration: {},
-    pendingProviderProgress: {}, pendingConversationSwitchId: null, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
+    pendingProviderProgress: {}, pendingConversationSwitchId: null, pendingConversationCreateId: null,
     inspectorEntries: [], plan: null, todos: [], subagents: [], agentProgress: [], backgroundTasks: [],
     draft: "keep visible draft", richDraft: undefined, attachments: [], quotedMessage: null, selectedMentions: [], selectedSkills: [],
     conversationWorkbenchStates: {}, workspaceComposerDrafts: {},

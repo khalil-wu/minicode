@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import os
 import re
 import signal
@@ -401,6 +402,11 @@ app.include_router(create_workspace_router())
 # ── Static file serving ──
 
 # Prefer Vite build artifacts (dist/), proxy to Vite dev server in development
+_public_dir = FRONTEND_DIST if IS_PRODUCTION else FRONTEND_SRC / "public"
+mimetypes.add_type("image/svg+xml", ".svg")
+mimetypes.add_type("image/webp", ".webp")
+app.mount("/apps", StaticFiles(directory=str(_public_dir / "apps")), name="app-icons")
+app.mount("/pets", StaticFiles(directory=str(_public_dir / "pets")), name="pet-assets")
 if IS_PRODUCTION:
     # Production: serve static assets from dist/
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
@@ -531,6 +537,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     from backend.workspace.state import get_explicit_active_workspace_root
 
     workspace_root = get_explicit_active_workspace_root()
+    await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
     config = load_config(cwd=workspace_root)
 
     # The transport hosts settings, files and catalogs before a model is chosen.
@@ -565,6 +572,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             memory_manager=_state.bootstrap.memory_manager,
             mcp_manager=_state.bootstrap.mcp_manager,
             environment_manager=_state.bootstrap.environment_manager,
+            websocket_accepted=True,
         )
     except WebSocketDisconnect:
         return

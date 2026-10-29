@@ -1,4 +1,6 @@
 import { useAppStore } from "../stores";
+import { isComposerConversationDeleted } from "../stores/composer-drafts";
+import { captureCommittedUserMessage } from "./sendChatMessage";
 import type {
   CommandOutputChunkEvent,
   DoneEvent,
@@ -756,6 +758,7 @@ const applyChatStreamEvent = (
         flushLiveBuffers({ textStreamBuffer, thinkingStreamBuffer });
         const item = ev.item as unknown as UserMessageItem;
         s.recordTurnUserInput(hydrateMessages([item.message as BackendTranscriptMessage])[0], conversationId!, messageId!);
+        captureCommittedUserMessage(conversationId!, item.id);
       } else if (ev.item?.type === "agent_message") {
         // An item start is an ordered content boundary. Settle reasoning first
         // so a pending final reasoning delta cannot land behind the empty text
@@ -808,6 +811,7 @@ const applyChatStreamEvent = (
       if (ev.item?.type === "user_message") {
         const item = ev.item as unknown as UserMessageItem;
         s.recordTurnUserInput(hydrateMessages([item.message as BackendTranscriptMessage])[0], conversationId!, messageId!);
+        captureCommittedUserMessage(conversationId!, item.id);
       } else if (ev.item?.type === "agent_message") {
         s.completeAgentMessage(
           {
@@ -1451,6 +1455,7 @@ const applyChatStreamEvent = (
       });
       if (!replayed && !messageId && !turnId && e.client_command_type?.startsWith("conversation.")
         && e.client_command_id && rejectClientCommandResult(e.client_command_id, (e as { message?: string }).message || "会话操作失败。")) return true;
+      if (conversationId && isComposerConversationDeleted(conversationId)) return true;
       const switchErrorCode = (e as { error_code?: string }).error_code;
       if (
         !replayed && !messageId && !turnId
@@ -1650,6 +1655,12 @@ export const handleChatStreamEvent = (
   handlers: ChatStreamHandlers,
 ): boolean => {
   const owner = String((event as { conversation_id?: string }).conversation_id || conversationId || "");
+  if (isComposerConversationDeleted(owner) && CHAT_SCOPED_EVENT_TYPES.has(event.type)) {
+    for (const [pendingKey, pending] of pendingResumePages) {
+      if (pending.snapshot.conversation_id === owner) pendingResumePages.delete(pendingKey);
+    }
+    return true;
+  }
   const key = turnEventKey(owner, eventMessageId(event));
   if (event.type !== "stream_resume") {
     const pending = pendingResumePages.get(key);

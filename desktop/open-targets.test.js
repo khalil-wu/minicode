@@ -27,17 +27,27 @@ function fixture(t) {
     ProgramFiles: path.join(root, "Programs"), "ProgramFiles(x86)": path.join(root, "Programs32"),
     ProgramData: path.join(root, "ProgramData"), SystemRoot: path.join(root, "Windows"),
     Path: path.join(root, "bin"), PATHEXT: ".com;.exe;.bat;.cmd", CMDER_ROOT: "" };
-  const launches = [], reveals = [], openPaths = [];
+  const launches = [], probes = [], reveals = [], openPaths = [];
   const shell = { readShortcutLink: file => ({ target: fs.readFileSync(file, "utf8") }),
     showItemInFolder: file => reveals.push(file), openPath: async file => { openPaths.push(file); return ""; } };
   const childProcess = {
-    spawnSync: () => ({ status: 1, stdout: "" }),
+    probe: () => ({ status: 1, stdout: "" }),
     spawn(command, args, options) {
       const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = { resume() {} };
       const record = { command, args: Array.from(args), options, unref: false };
       child.unref = () => { record.unref = true; };
-      launches.push(record);
-      queueMicrotask(() => { child.emit("spawn"); child.emit("close", 0); });
+      if (["--status", "--list", "-products"].includes(args[0])) {
+        probes.push(record);
+        Promise.resolve(childProcess.probe(command, args)).then(result => {
+          if (result.stdout) child.stdout.emit("data", Buffer.from(result.stdout));
+          child.emit("close", result.status);
+        }, error => child.emit("error", error));
+      } else {
+        launches.push(record);
+        queueMicrotask(() => { child.emit("spawn"); child.emit("close", 0); });
+      }
       return child;
     },
   };
@@ -50,10 +60,10 @@ function fixture(t) {
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(workspace);
   const file = install(path.join(workspace, "app.ts"), "export const value = 1;");
-  return { root, env, targets, preferences, preferencesFile, testProcess, childProcess, shell, launches, reveals, openPaths, install, workspace, file };
+  return { root, env, targets, preferences, preferencesFile, testProcess, childProcess, shell, launches, probes, reveals, openPaths, install, workspace, file };
 }
 
-test("Windows discovery finds system installs, CLI executables, shortcuts and current JetBrains versions without advertising other platforms", t => {
+test("Windows discovery finds system installs, CLI executables, shortcuts and current JetBrains versions without advertising other platforms", async t => {
   const f = fixture(t);
   const code = f.install(path.join(f.env.ProgramFiles, "Microsoft VS Code", "Code.exe"));
   f.install(path.join(f.env.LOCALAPPDATA, "Programs", "Microsoft VS Code Insiders", "Code - Insiders.exe"));
@@ -68,7 +78,7 @@ test("Windows discovery finds system installs, CLI executables, shortcuts and cu
   const terminal = f.install(path.join(f.root, "Terminal", "WindowsTerminal.exe"));
   f.install(path.join(f.env.APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Terminals", "Windows Terminal.lnk"), terminal);
   f.install(path.join(f.env.ProgramFiles, "Windsurf", "Windsurf.exe"));
-  const discovered = f.targets.fileOpenTargets();
+  const discovered = await f.targets.fileOpenTargets();
   assert.equal(discovered.find(target => target.id === "vscode").executable, code);
   assert.equal(discovered.find(target => target.id === "vscodeInsiders").executable, insidersCli);
   assert.equal(discovered.find(target => target.id === "cursor").executable, path.join(f.env.ProgramFiles, "Cursor", "Cursor.exe"));
@@ -84,7 +94,8 @@ test("source target arguments distinguish directories, locations, file reveal an
   for (const parts of [["Microsoft VS Code", "Code.exe"], ["Zed", "Zed.exe"], ["Git", "git-bash.exe"]]) f.install(path.join(f.env.ProgramFiles, ...parts));
   f.install(path.join(f.env.ProgramFiles, "JetBrains", "IntelliJ IDEA 2026.2", "bin", "idea64.exe"));
   f.install(path.join(f.env.LOCALAPPDATA, "Microsoft", "WindowsApps", "wt.exe"));
-  const target = id => f.targets.fileOpenTargets().find(target => target.id === id);
+  const targets = await f.targets.fileOpenTargets();
+  const target = id => targets.find(target => target.id === id);
   await f.targets.openInTarget(target("vscode"), f.workspace);
   await f.targets.openInTarget(target("vscode"), f.file, 7, 3);
   await f.targets.openInTarget(target("zed"), f.file, 7, 3);
@@ -103,14 +114,14 @@ test("source target arguments distinguish directories, locations, file reveal an
   assert.deepEqual(f.openPaths, [f.workspace]);
 });
 
-test("actual target facade preserves the Source catalog slot for Default app without sorting later editor factories", t => {
+test("actual target facade preserves the Source catalog slot for Default app without sorting later editor factories", async t => {
   const f = fixture(t);
   f.install(path.join(f.env.ProgramFiles, "Microsoft VS Code", "Code.exe"));
   f.install(path.join(f.env.ProgramFiles, "Cursor", "Cursor.exe"));
   f.install(path.join(f.env.ProgramFiles, "Antigravity", "Antigravity.exe"));
   f.install(path.join(f.env.LOCALAPPDATA, "Microsoft", "WindowsApps", "wt.exe"));
   f.install(path.join(f.env.ProgramFiles, "JetBrains", "WebStorm 2026.2", "bin", "webstorm64.exe"));
-  const ids = f.targets.fileOpenTargets().map(target => target.id);
+  const ids = (await f.targets.fileOpenTargets()).map(target => target.id);
   assert.deepEqual(Array.from(ids), ["minicode", "vscode", "cursor", "antigravity", "system", "fileManager", "terminal", "webstorm"]);
   f.preferences.setPreferences({ fileOpenTarget: "system" });
   assert.equal(f.preferences.getPreferences().fileOpenTarget, "system");
@@ -130,6 +141,41 @@ test("workspace preferences retain each path while global selection changes and 
   assert.equal(f.preferences.preferredFileOpenTarget(workspaceB), "cursor");
 });
 
+test("slow WSL probes yield the event loop and do not delay a selected editor or retain removed installs", { timeout: 3000 }, async t => {
+  const f = fixture(t);
+  const code = f.install(path.join(f.env.ProgramFiles, "Microsoft VS Code", "Code.exe"));
+  f.install(path.join(f.env.Path, "wsl.exe"));
+  f.install(path.join(f.env.LOCALAPPDATA, "Microsoft", "WindowsApps", "wt.exe"));
+  let releaseStatus;
+  f.childProcess.probe = (_command, args) => args[0] === "--status"
+    ? new Promise(resolve => { releaseStatus = resolve; })
+    : { status: 0, stdout: Buffer.from("* Ubuntu Running 2\r\n", "utf16le") };
+  const discovery = f.targets.fileOpenTargets();
+  const selected = await f.targets.fileOpenTarget("vscode");
+  assert.equal(selected.executable, code);
+  await f.targets.openInTarget(selected, f.file, 8, 2);
+  assert.equal(f.launches[0].command, code);
+  while (!releaseStatus) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.probes.length, 1);
+  releaseStatus({ status: 0, stdout: "" });
+  const discovered = await discovery;
+  assert.equal(discovered.some(target => target.id === "wsl"), true);
+  assert.equal(f.probes.length, 2);
+  assert.equal(f.probes.every(probe => probe.options.windowsHide && probe.options.stdio[1] === "pipe"), true);
+  fs.unlinkSync(code);
+  assert.equal(await f.targets.fileOpenTarget("vscode"), null);
+});
+
+test("asynchronous vswhere discovery preserves the first actual IDE path and propagates probe errors", async t => {
+  const f = fixture(t);
+  f.install(path.join(f.env.ProgramFiles, "Microsoft Visual Studio", "Installer", "vswhere.exe"));
+  const executable = f.install(path.join(f.root, "CustomVisualStudio", "devenv.exe"));
+  f.childProcess.probe = () => ({ status: 0, stdout: `${path.join(f.root, "removed.exe")}\r\n${executable}\r\n` });
+  assert.equal((await f.targets.fileOpenTarget("visualStudio")).executable, executable);
+  f.childProcess.probe = () => Promise.reject(new Error("Actual vswhere spawn failure"));
+  await assert.rejects(f.targets.fileOpenTarget("visualStudio"), /Actual vswhere spawn failure/);
+});
+
 for (const layout of ["bin", "resources/app/bin", "cli-only"]) {
   test(`Antigravity ${layout} preserves its CLI driver and publishes the existing Source brand asset`, async t => {
     const f = fixture(t);
@@ -138,7 +184,7 @@ for (const layout of ["bin", "resources/app/bin", "cli-only"]) {
     const launcher = f.install(path.join(directory, "antigravity.cmd"));
     if (layout !== "cli-only") f.install(path.join(root, "Antigravity.exe"));
     f.env.Path = directory;
-    const target = f.targets.fileOpenTargets().find(target => target.id === "antigravity");
+    const target = (await f.targets.fileOpenTargets()).find(target => target.id === "antigravity");
     assert.equal(target.executable, launcher);
     assert.equal(target.iconPath, null);
     assert.equal(target.icon, "apps/antigravity.png");
@@ -162,6 +208,8 @@ test("preload forwards one-time target and workspace persistence fields without 
   const options = { targetId: "terminal", workspaceRoot: "C:/workspace", persistPreferredTargetPath: "C:/workspace" };
   await runtime.desktop.openPreferredPath("C:/workspace", undefined, options);
   assert.deepEqual(calls[0], ["minicode:openPreferredPath", "C:/workspace", undefined, options]);
+  await runtime.desktop.preferences.getTargets();
+  assert.deepEqual(calls[1], ["minicode:preferences:getTargets"]);
 });
 
 test("actual IPC consumer persists workspace choice and broadcasts it, but explicit file selection stays temporary", async t => {
@@ -189,7 +237,7 @@ test("actual IPC consumer persists workspace choice and broadcasts it, but expli
   assert.equal(broadcasts.length, 1);
   assert.equal(broadcasts[0].channel, "minicode:preferences:changed");
   assert.equal(broadcasts[0].payload.fileOpenTargetPerPath[f.workspace], "vscode");
-  assert.equal(broadcasts[0].payload.fileOpenTargets.find(target => target.id === "vscode").icon, "data:image/png;base64,fixture");
+  assert.equal("fileOpenTargets" in broadcasts[0].payload, false);
   await open(event, f.file, 11, { targetId: "cursor", workspaceRoot: f.workspace });
   assert.equal(f.preferences.preferredFileOpenTarget(f.workspace), "vscode");
   assert.equal(broadcasts.length, 1);

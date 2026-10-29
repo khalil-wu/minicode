@@ -120,13 +120,14 @@ export const AgentEditor = () => {
   const currentProviderId = useAppStore((s) => s.currentProviderId);
   const availableModels = useAppStore((s) => s.availableModels);
   const conversationId = useAppStore((s) => s.conversationId);
-  const conversations = useAppStore((s) => s.conversations);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
-  const ownerWorkspaceRoot = useMemo(() => {
-    const active = conversations.find((conversation) => conversation.id === conversationId);
-    return String(active ? active.executionCwd || active.worktreePath || active.workspaceRoot || "" : workingDirectory).trim();
-  }, [conversationId, conversations, workingDirectory]);
+  // Agent settings only depend on the active conversation's execution root.
+  // Subscribing to the full conversation catalog made every streamed summary
+  // update rerender this hidden overlay.
+  const ownerWorkspaceRoot = useAppStore((s) => {
+    const active = s.conversations.find((conversation) => conversation.id === s.conversationId);
+    return String(active ? active.executionCwd || active.worktreePath || active.workspaceRoot || "" : s.workingDirectory).trim();
+  });
   const newAgentDraft = useMemo<AgentRecord>(() => ({ ...EMPTY_DRAFT,
     source: ownerWorkspaceRoot ? "project" : "user", location: ownerWorkspaceRoot ? "project" : "user",
   }), [ownerWorkspaceRoot]);

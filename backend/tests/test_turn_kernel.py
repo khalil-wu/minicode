@@ -96,6 +96,23 @@ def test_turn_kernel_and_mailbox_consumer_share_the_same_turn_owner(tmp_path: Pa
         kernel.runtime.close(release_lease=True)
 
 
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+def test_terminal_commit_closes_mailbox_without_discarding_pending_steer(tmp_path, status):
+    from backend.agent.message import UserCommand
+
+    kernel = _kernel(tmp_path)
+    queue = kernel.run_context.turn_input_queue
+    command = UserCommand(type="user_message", data={"content": "Preserve the next instruction"})
+    try:
+        assert queue.enqueue_command(command) is not None
+        assert kernel.complete_run_record(status, terminal_reason=status) is not None
+        assert not queue.mailbox_deliverable(kernel.run_record.run_id)
+        assert queue.pending_count() == 1
+        assert queue.seal_and_drain_commands() == [command]
+    finally:
+        kernel.runtime.close(release_lease=True)
+
+
 def test_success_lifecycle_does_not_encode_an_empty_error_object() -> None:
     event = AgentEvent.agent_run_completed({
         "run_id": "run-completed",
@@ -144,6 +161,25 @@ def test_turn_kernel_consumes_initial_input_before_queued_steer(tmp_path: Path) 
     assert steered.attachments == ({"name": "evidence.txt"},)
     assert steered.consumed_steer == queued
     assert persisted == ["assistant-steer"]
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("continuation", False), ("whitespace", False),
+    ("text", True), ("attachment", True), ("agent", True),
+])
+def test_turn_boundary_admits_actual_input_instead_of_an_empty_wake(tmp_path, kind, expected):
+    kernel = _kernel(tmp_path, initial_user_message="continue" if kind == "text" else " " if kind == "whitespace" else "")
+    if kind == "attachment":
+        kernel.state.attachments = [{"artifact_id": "image-evidence", "kind": "image"}]
+    elif kind == "agent":
+        kernel.state.prompt_context["agent_input_messages"] = [{"content": "", "provider_items": [{"type": "agent_message"}]}]
+    try:
+        boundary = asyncio.run(kernel.take_boundary_input(initial_turn_pending=True))
+        assert boundary.has_new_input is expected
+        next_boundary = asyncio.run(kernel.take_boundary_input(initial_turn_pending=False))
+        assert not next_boundary.has_new_input
+    finally:
+        kernel.runtime.close(release_lease=True)
 
 
 def test_turn_kernel_applies_structured_context_from_steer(monkeypatch, tmp_path: Path) -> None:
@@ -266,7 +302,7 @@ def test_turn_kernel_starts_turn_for_attachment_only_steer(tmp_path: Path) -> No
     assert queued is not None
     assert attachment_input.content == ""
     assert attachment_input.attachments == ({"name": "trace.log"},)
-    assert attachment_input.should_start_turn is True
+    assert attachment_input.has_new_input is True
 
 
 def test_preaccepted_attachment_steer_is_not_overwritten_by_next_fifo_item(

@@ -9,6 +9,7 @@ from pathlib import Path
 from backend.atomic_io import canonical_file_path_key
 from backend.config import STATE_ROOT
 from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_manifest_path
+from backend.plugins.manifest import plugin_directory_for_manifest
 
 
 def default_plugin_roots() -> list[Path]:
@@ -52,13 +53,12 @@ def _iter_plugin_manifests(plugin_roots: Iterable[Path]) -> list[Path]:
             if root.name == PLUGIN_MANIFEST_DIRECTORY:
                 candidates.append(root / "plugin.json")
             else:
-                candidates.extend(root.glob(f"*/{PLUGIN_MANIFEST_DIRECTORY}/plugin.json"))
                 candidates.extend(plugin_manifest_path(child) for child in root.iterdir() if child.is_dir())
                 candidates.append(plugin_manifest_path(root))
                 candidates.extend(_active_versioned_manifests(root))
-                candidates.extend(root.glob(f"cache/*/*/*/{PLUGIN_MANIFEST_DIRECTORY}/plugin.json"))
                 candidates.extend(plugin_manifest_path(child) for child in root.glob("cache/*/*/*") if child.is_dir())
         for candidate in candidates:
+            candidate = plugin_manifest_path(plugin_directory_for_manifest(candidate))
             if not candidate.is_file():
                 continue
             key = canonical_file_path_key(candidate)

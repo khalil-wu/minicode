@@ -34,7 +34,7 @@ vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "ses
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 vi.mock("../overlays/DialogService", () => ({ showConfirm: mocks.confirm }));
 vi.mock("./openAttachmentPreview", () => ({
-  openWorkspaceFilePreview: mocks.preview, openArtifactPreview: vi.fn(),
+  openWorkspaceFilePreview: mocks.preview, openWorkspaceFileLink: mocks.preview, openArtifactPreview: vi.fn(),
   openAttachmentPreview: vi.fn(), openLocalFilePreview: vi.fn(),
 }));
 vi.mock("../desktop/runtime", () => ({
@@ -95,8 +95,8 @@ describe("repaired transcript and resource contracts", () => {
       kind: "assistant_markdown", id: "reply", markdownSource: "[child](src/main.ts:12)", phase: "final", copyable: true, createdAt: 1,
     }} />);
     fireEvent.click(screen.getByRole("button", { name: "child" }));
-    await waitFor(() => expect(mocks.preview).toHaveBeenCalledWith(expect.objectContaining({ path: "src/main.ts", workspaceRoot: "C:/child", conversationId: "child" })));
-    expect(mocks.openPreferredPath).toHaveBeenCalledWith("C:/child/src/main.ts", 12, { workspaceRoot: "C:/child" });
+    await waitFor(() => expect(mocks.preview).toHaveBeenCalledWith(expect.objectContaining({ path: "src/main.ts", workspaceRoot: "C:/child", conversationId: "child", line: 12 }), expect.anything(), expect.any(Function)));
+    expect(mocks.openPreferredPath).not.toHaveBeenCalled();
     expect(useAppStore.getState().editorOpenRequests).toEqual([]);
   });
 

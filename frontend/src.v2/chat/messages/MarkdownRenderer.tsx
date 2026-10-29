@@ -15,13 +15,17 @@ import { pushToast } from "../../overlays/ToastContainer";
 import { isPreviewableHttpUrl } from "../openWebInBrowser";
 import { openWebInBrowser } from "../openWebInBrowser";
 import { openWebTarget } from "../openWebTarget";
-import { openArtifactPreview, openLocalFilePreview, openWorkspaceFilePreview } from "../openAttachmentPreview";
+import { openArtifactPreview, openLocalFilePreview, openWorkspaceFileLink, openWorkspaceFilePreview } from "../openAttachmentPreview";
 import { artifactIdFromReference, artifactResourceUrl } from "../../lib/artifact-resource";
 import { getWebSocket } from "../../hooks/useWebSocket";
 import { removeCitationMarkers } from "./citationText";
 import { BrandIcon } from "../../components/BrandIcon";
 import { apiBase, workspaceRawResourceUrlWithToken } from "../../protocol/api";
 import { workspaceRequestOwner } from "../../protocol/workspace-owner";
+import { workspaceRequestPath } from "../../protocol/workspace-request-path";
+import { conversationBrowserRawUrl } from "../../protocol/conversation-browser";
+import { workspaceFileAbsolutePath } from "../../protocol/file-workspace";
+import type { WorkspaceFileOwner } from "../../stores/types";
 import { isDesktop, openPath, revealPath } from "../../desktop/runtime";
 import { useContextMenu } from "../../components/useContextMenu";
 import { copyText } from "../../lib/clipboard";
@@ -48,8 +52,10 @@ interface Props {
   isStreaming?: boolean;
   citations?: Citation[];
   workspaceRoot?: string;
+  fileOwner?: WorkspaceFileOwner;
   conversationId?: string;
   knownFilePaths?: string[];
+  openFileLinksInSidePanel?: boolean;
 }
 
 type MarkdownNode = {
@@ -789,7 +795,7 @@ const workspacePathFromHref = (
   return candidate;
 };
 
-const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversationId?: string): { path: string; src: string } | null => {
+const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversationId?: string, fileOwner?: WorkspaceFileOwner): { path: string; src: string } | null => {
   if (isWorkspaceRawResourceUrl(url)) {
     try {
       const parsed = new URL(url, window.location.href);
@@ -806,6 +812,16 @@ const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversa
   const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
   if (!absolutePath) return null;
   const relativePath = workspaceRelativePath(absolutePath, workingDirectory);
+  if (relativePath && fileOwner) {
+    const absolute = workspaceFileAbsolutePath({ ...fileOwner, browserRoot: workingDirectory }, relativePath);
+    const path = workspaceRequestPath(absolute, fileOwner.browserRoot);
+    if (fileOwner.conversationId) {
+      return { path: relativePath, src: getWebSocket()?.sessionId ? conversationBrowserRawUrl({
+        conversationId: fileOwner.conversationId, executionCwd: fileOwner.executionCwd, environmentId: fileOwner.environmentId,
+      }, path) : "" };
+    }
+    return { path: relativePath, src: workspaceRawResourceUrlWithToken(path, fileOwner.browserRoot, undefined, null) };
+  }
   const owner = workspaceRequestOwner();
   return relativePath
     ? { path: relativePath, src: workspaceRawResourceUrlWithToken(relativePath, workingDirectory, undefined,
@@ -929,7 +945,10 @@ const absoluteEditorTitlePath = (path: string, workingDirectory: string): string
   return root ? `${root}/${normalizedPath.replace(/^\/+/, "")}` : normalizedPath;
 };
 
-type MessageResourceScope = { workspaceRoot?: string; conversationId?: string; knownFilePaths?: string[] };
+type MessageResourceScope = { workspaceRoot?: string; conversationId?: string; knownFilePaths?: string[]; fileOwner?: WorkspaceFileOwner; openFileLinksInSidePanel?: boolean };
+
+const filePreviewScope = (workspaceRoot: string, conversationId: string | undefined, fileOwner: WorkspaceFileOwner | undefined) =>
+  fileOwner ? { fileOwner, pathRoot: workspaceRoot } : { workspaceRoot, conversationId };
 
 // Implicit file references need successful tool evidence. Explicit Markdown
 // targets retain their exact meaning; ambiguous short names remain ordinary text.
@@ -953,25 +972,33 @@ function knownFileTarget<T extends FileTarget>(target: T | null, scope: MessageR
   return matches.size === 1 ? { ...target, path: [...matches.values()][0] } : requireKnown ? null : target;
 }
 
-const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, presentation = "link" }: { target: EditorTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
+const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel, presentation = "link" }: { target: EditorTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
   const { t } = useI18n();
   const activeWorkspace = useAppStore((s) => s.workingDirectory);
   const workingDirectory = workspaceRoot ?? activeWorkspace;
-  const opensInPreview = workspaceRoot !== undefined && !workspacePathsEqual(workspaceRoot, activeWorkspace);
+  const opensInPreview = openFileLinksInSidePanel || Boolean(fileOwner) || workspaceRoot !== undefined && !workspacePathsEqual(workspaceRoot, activeWorkspace);
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
   const { fileName, meta } = splitFileLabelMeta(name);
-  const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const titlePath = fileOwner ? workspaceFileAbsolutePath({ ...fileOwner, browserRoot: workingDirectory }, target.path)
+    : absoluteEditorTitlePath(target.path, workingDirectory || "");
   const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
   const openInEditor = () => {
-    if (workingDirectory && !workspacePathsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
-      openWorkspaceFilePreview({ path: target.path, name: fileName, workspaceRoot: workingDirectory, conversationId });
+    if (openFileLinksInSidePanel || fileOwner || workingDirectory && !workspacePathsEqual(workingDirectory, useAppStore.getState().workingDirectory)) {
+      openWorkspaceFilePreview({ path: target.path, name: fileName, ...filePreviewScope(workingDirectory, conversationId, fileOwner),
+        line: target.line, column: target.column });
     } else {
       useAppStore.getState().openEditorFile(target.path, undefined, { line: target.line, column: target.column });
     }
   };
-  const openFile = () => {
-    if (isDesktop()) void openPreferredFile(target.path, workingDirectory, target.line, openInEditor);
+  const openFile = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (openFileLinksInSidePanel) {
+      openWorkspaceFileLink({ path: target.path, name: fileName, ...filePreviewScope(workingDirectory, conversationId, fileOwner),
+        line: target.line, column: target.column }, event,
+      () => { void openPreferredFile(fileOwner ? titlePath : target.path, fileOwner?.executionCwd ?? workingDirectory, target.line, openInEditor); });
+      return;
+    }
+    if (isDesktop()) void openPreferredFile(fileOwner ? titlePath : target.path, fileOwner?.executionCwd ?? workingDirectory, target.line, openInEditor);
     else openInEditor();
   };
   const { onContextMenu, menu } = useContextMenu(() => [
@@ -995,6 +1022,7 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, pr
       <button
         type="button"
         onClick={openFile}
+        onAuxClick={event => { if (event.button === 1) openFile(event); }}
         disabled={workspaceRoot === ""}
         title={`${t(opensInPreview ? "预览" : "在编辑器中打开")} ${titlePath}`}
         aria-label={label}
@@ -1016,14 +1044,26 @@ const FileReferenceChip = ({ target, children, workspaceRoot, conversationId, pr
   );
 };
 
-const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId, presentation = "link" }: { target: FileTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
+const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel, presentation = "link" }: { target: FileTarget; children: React.ReactNode; presentation?: "link" | "code" } & MessageResourceScope) => {
   const { t } = useI18n();
   const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
   const label = textFromReactNode(children) || target.path;
   const { directory, name } = displayPathParts(label);
-  const titlePath = absoluteEditorTitlePath(target.path, workingDirectory || "");
+  const titlePath = fileOwner ? workspaceFileAbsolutePath({ ...fileOwner, browserRoot: workingDirectory }, target.path)
+    : absoluteEditorTitlePath(target.path, workingDirectory || "");
   const previewInsideWorkspace = pathWithinWorkspace(titlePath, workingDirectory || "");
   const extension = fileExtensionFromPath(target.path) || fileExtensionFromPath(label);
+  const openFile = (event: React.MouseEvent<HTMLButtonElement>) => {
+    const openInApp = () => {
+      if (previewInsideWorkspace) openWorkspaceFilePreview({ path: target.path, name, ...filePreviewScope(workingDirectory, conversationId, fileOwner) });
+      else void openPath(titlePath);
+    };
+    const openPreferred = () => { void openPreferredFile(titlePath, fileOwner?.executionCwd ?? workingDirectory, undefined, openInApp); };
+    if (openFileLinksInSidePanel && previewInsideWorkspace) openWorkspaceFileLink({ path: target.path, name,
+      ...filePreviewScope(workingDirectory, conversationId, fileOwner) }, event, openPreferred);
+    else if (isDesktop()) openPreferred();
+    else openInApp();
+  };
   const { onContextMenu, menu } = useContextMenu(() => [
     {
       label: t("在编辑器中打开（仅文本文件）"),
@@ -1044,14 +1084,8 @@ const GenericFileReferenceChip = ({ target, children, workspaceRoot, conversatio
       <button
         type="button"
         disabled={workspaceRoot === ""}
-        onClick={() => {
-          const openInApp = () => {
-            if (previewInsideWorkspace) openWorkspaceFilePreview({ path: target.path, name, workspaceRoot: workingDirectory, conversationId });
-            else void openPath(titlePath);
-          };
-          if (isDesktop()) void openPreferredFile(titlePath, workingDirectory, undefined, openInApp);
-          else openInApp();
-        }}
+        onClick={openFile}
+        onAuxClick={event => { if (event.button === 1) openFile(event); }}
         title={t("打开 {path}", { path: titlePath })}
         aria-label={label}
         className={`${fileChipClassName}${presentation === "code" ? " md-file-code-reference" : ""}`}
@@ -1093,7 +1127,7 @@ const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: Fold
   );
 };
 
-const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
+const MarkdownImage = ({ workspaceRoot, conversationId, fileOwner, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
   const { t } = useI18n();
   const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
   const rawSrc = typeof props.src === "string" ? props.src : "";
@@ -1101,7 +1135,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
   const artifactId = artifactIdFromReference(rawSrc);
   const isConnected = useAppStore((s) => s.isConnected);
   const sessionId = getWebSocket()?.sessionId;
-  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot, conversationId);
+  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot, conversationId, fileOwner);
   const blockedLocalImage = !artifactId && Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
   const src = artifactId ? artifactResourceUrl({ artifactId, conversationId, sessionId, source: "artifact", isConnected })
     : workspaceLocalImage?.src ?? rawSrc;
@@ -1167,8 +1201,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, ...props }: React.ImgHTM
       openWorkspaceFilePreview({
         path: workspaceLocalImage.path,
         name: alt,
-        workspaceRoot: workspaceRoot ?? useAppStore.getState().workingDirectory,
-        conversationId,
+        ...filePreviewScope(workspaceRoot ?? useAppStore.getState().workingDirectory, conversationId, fileOwner),
       });
       return;
     }
@@ -1426,7 +1459,7 @@ const mdComponents = (
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
     const resourceScope = useContext(MarkdownResourceContext);
-    return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} conversationId={resourceScope.conversationId} />;
+    return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} conversationId={resourceScope.conversationId} fileOwner={resourceScope.fileOwner} />;
   },
   });
 };
@@ -1651,7 +1684,7 @@ const CommittedMarkdown = memo(({ parts, count, ...props }: {
   parts: MarkdownPart[]; count: number; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins;
 }) => <>{parts.slice(0, count).map((part) => <MarkdownPiece key={part.start} part={part} {...props} />)}</>);
 
-function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths }: Props) {
+function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths, fileOwner, openFileLinksInSidePanel }: Props) {
   content = withoutCodeCommentDirectives(content);
   const resolved = useResolvedTheme();
   const rawId = useId();
@@ -1666,7 +1699,8 @@ function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot,
   const deferredTail = useDeferredValue(view.tail);
   const tail = isStreaming && view.tail.content.length > 8192 ? deferredTail : view.tail;
   const pathsKey = JSON.stringify(knownFilePaths);
-  const resources = useMemo(() => ({ workspaceRoot, conversationId, knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, conversationId, pathsKey]);
+  const resources = useMemo(() => ({ workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel,
+    knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel, pathsKey]);
   const boundCitationIndexes = useMemo(() => new Set(
     (citations ?? []).flatMap((citation, index) => citation.source || citation.url ? [index + 1] : []),
   ), [citations]);

@@ -151,6 +151,7 @@ export const AgentTurn = memo(function AgentTurn({
                 renderCell={renderCell}
                 isRunning={turn.status === "running" && item === turn.workItems?.at(-1)}
                 expandWorkGroups={false}
+                showCompletedReasoning={processExpanded}
                 showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
                 onHistoryStartReached={item === turn.workItems?.find((entry) => entry.kind === "process") ? onLoadHistory : undefined}
               />
@@ -160,6 +161,7 @@ export const AgentTurn = memo(function AgentTurn({
               renderCell={renderCell}
               isRunning={turn.status === "running"}
               expandWorkGroups={false}
+              showCompletedReasoning={processExpanded}
               showAllOpenWork={turn.status !== "running" && !turn.hasCompleteFinalAnswer}
               onHistoryStartReached={onLoadHistory}
             />

@@ -52,6 +52,58 @@ it("does not expose an old owner's actions during a switch or after its read set
   expect(send).not.toHaveBeenCalled();
 });
 
+it("keeps one environment read while runtime progress and capabilities change for the same owner", async () => {
+  useAppStore.setState({ runtimeSession: { session_id: "session-A", active_conversation_id: "A" } });
+  let settle!: (value: ReturnType<typeof payload>) => void;
+  read.mockReturnValueOnce(new Promise(resolve => { settle = resolve; }));
+  render(<LocalEnvironmentActions />);
+  await waitFor(() => expect(read).toHaveBeenCalledOnce());
+  const signal = read.mock.calls[0][1] as AbortSignal;
+  for (const session of [
+    { session_id: "session-A", active_conversation_id: "A", active_task_id: "run-A", active_stream_conversation_ids: ["A"] },
+    { session_id: "session-A", active_conversation_id: "A", selected_model: "another-model", pending_approval_count: 1,
+      capabilities: { version: 2, mcp_registry_version: 3, skills: [] } },
+    { session_id: "session-A", active_conversation_id: "A", task_summary: { completed: 1 }, active_stream_conversation_ids: [] },
+  ]) {
+    act(() => useAppStore.setState({ runtimeSession: session }));
+  }
+  expect(read).toHaveBeenCalledOnce();
+  expect(signal.aborted).toBe(false);
+  await act(async () => settle(payload()));
+  expect(screen.getByRole("button", { name: "Run tests" })).toBeTruthy();
+});
+
+it("reads a new runtime owner instead of retaining the preceding session's actions", async () => {
+  useAppStore.setState({ runtimeSession: { session_id: "session-A", active_conversation_id: "A" } });
+  render(<LocalEnvironmentActions />);
+  await screen.findByRole("button", { name: "Run tests" });
+  let settle!: (value: ReturnType<typeof payload>) => void;
+  read.mockReturnValueOnce(new Promise(resolve => { settle = resolve; }));
+  act(() => {
+    owner.current = { session_id: "session-B", conversation_id: "A" };
+    useAppStore.setState({ runtimeSession: { session_id: "session-B", active_conversation_id: "A" } });
+  });
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(screen.queryByRole("button")).toBeNull();
+  await act(async () => settle(payload("session-B-revision")));
+  fireEvent.click(screen.getByRole("button", { name: "Run tests" }));
+  expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+    local_environment_action: expect.objectContaining({ revision: "session-B-revision" }),
+  }));
+});
+
+it("refreshes environment changes made outside the window when focus returns", async () => {
+  render(<LocalEnvironmentActions />);
+  await screen.findByRole("button", { name: "Run tests" });
+  read.mockResolvedValueOnce(payload("external-revision"));
+  act(() => window.dispatchEvent(new Event("focus")));
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole("button", { name: "Run tests" }));
+  expect(send).toHaveBeenLastCalledWith(expect.objectContaining({
+    local_environment_action: expect.objectContaining({ revision: "external-revision" }),
+  }));
+});
+
 it("refreshes the committed action revision after save and keeps a rejected send from opening the terminal", async () => {
   render(<LocalEnvironmentActions />);
   await screen.findByRole("button", { name: "Run tests" });

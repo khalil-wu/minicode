@@ -23,6 +23,7 @@ from backend.ws.command_scope import CommandScope, bind_execution_command_scope
 from backend.ws.conversation_errors import emit_conversation_not_found
 from backend.ws.event_outbox import EventOutbox
 from backend.ws.conversation_stream import bind_response_origin
+from backend.ws.lifecycle_scope import bind_command_lifecycle_prefix
 from backend.ws.utils import normalize_attachment_payloads, normalize_permission_mode, normalize_user_input_metadata
 from backend.agent.conversation_query_guard import ConversationTransition, conversation_query_guards
 
@@ -866,19 +867,21 @@ class SessionCommandDispatcher:
           try:
             if _is_conversation_lifecycle_command(command.type):
                 manager = self._session.ws_manager
-                async with AsyncExitStack() as scope:
+                async with AsyncExitStack() as maintenance, AsyncExitStack() as scope:
                     # A window's model/project selection and its following send
                     # remain ordered. Separate windows only share task resources.
-                    await scope.enter_async_context(self._session.conversation_lifecycle_lock())
                     if manager is not None:
-                        await scope.enter_async_context(manager.conversation_lifecycle_scope(
-                            _command_lifecycle_conversations(self._session, command),
+                        await maintenance.enter_async_context(manager.conversation_maintenance_scope(
                             exclusive=command.type == "memory.reset" or (
                                 command.type == "llm.config.set" and not is_conversation_effort_command(
                                     command.data, command.data.get("conversation_id") or self._session.active_conversation_id,
                                 )
                             ),
                         ))
+                    await scope.enter_async_context(self._session.conversation_lifecycle_lock())
+                    if manager is not None:
+                        await scope.enter_async_context(manager.conversation_resource_scope(
+                            _command_lifecycle_conversations(self._session, command)))
                     if manager is not None:
                         fenced_conversation_id = next(
                             (
@@ -902,7 +905,8 @@ class SessionCommandDispatcher:
                                 },
                             )
                             return True
-                    await self._handle_command_inner(command)
+                    with bind_command_lifecycle_prefix(self._session.session_id, scope):
+                        await self._handle_command_inner(command)
             else:
                 await self._handle_command_inner(command)
             if command.type in {"session.restore", "session.sync", "conversation.switch", "conversation.activate"}:
@@ -1036,7 +1040,7 @@ class SessionCommandDispatcher:
             return False, target_conversation_id
 
         target_conversation = (
-            self._session.conversation_repo.get_conversation(target_conversation_id)
+            await to_thread_cancel_safe(self._session.conversation_repo.get_conversation_summary, target_conversation_id)
             if target_conversation_id
             else self._session.active_conversation
         )

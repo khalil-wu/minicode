@@ -1,7 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, KeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 import { createPortal } from "react-dom";
-import { animate, motion, useMotionValue, useReducedMotion, useTransform } from "motion/react";
+import { animate, motion, useMotionValue, useTransform } from "motion/react";
 import { ChevronRight, MessageCircle, Search } from "../../lib/icons";
 import { fileIcon, folderIcon } from "../../lib/file-icons";
 import { useI18n } from "../../i18n";
@@ -66,10 +66,12 @@ export function ChangesFileJump({ anchor, entries, onSelect, onClose }: ChangesF
       const below = window.innerHeight - rect.bottom - 7;
       const above = rect.top - 7;
       const flip = below < menu.scrollHeight && above > below;
-      setPlacement({ left: Math.max(6, Math.min(rect.right - width, window.innerWidth - width - 6)),
+      const next = { left: Math.max(6, Math.min(rect.right - width, window.innerWidth - width - 6)),
         top: flip ? undefined : rect.bottom + 1,
         bottom: flip ? window.innerHeight - rect.top + 1 : undefined,
-        maxHeight: Math.max(0, Math.min(250, flip ? above : below, window.innerHeight - 16)) });
+        maxHeight: Math.max(0, Math.min(250, flip ? above : below, window.innerHeight - 16)) };
+      setPlacement(previous => previous.left === next.left && previous.top === next.top
+        && previous.bottom === next.bottom && previous.maxHeight === next.maxHeight ? previous : next);
     };
     place();
     const observer = new ResizeObserver(place);
@@ -153,8 +155,9 @@ type DirectoryNode = { kind: "directory"; key: string; name: string; children: T
 type TreeNode = FileNode | DirectoryNode;
 type VisibleRow = { node: TreeNode; depth: number; parent?: string };
 
-function buildTree(entries: readonly ChangesFileEntry[], rankedPaths: readonly string[]): TreeNode[] {
+export function buildChangedFilesTree(entries: readonly ChangesFileEntry[], rankedPaths: readonly string[]): TreeNode[] {
   const root: DirectoryNode = { kind: "directory", key: "", name: "", children: [] };
+  const directories = new Map<string, DirectoryNode>();
   const byPath = new Map(entries.map(entry => [entry.path, entry]));
   const rank = new Map(rankedPaths.map((path, index) => [path, index]));
   for (const path of rankedPaths) {
@@ -162,9 +165,10 @@ function buildTree(entries: readonly ChangesFileEntry[], rankedPaths: readonly s
     let current = root;
     for (let index = 0; index < segments.length - 1; index++) {
       const key = segments.slice(0, index + 1).join("/") + "/";
-      let directory = current.children.find((node): node is DirectoryNode => node.kind === "directory" && node.key === key);
+      let directory = directories.get(key);
       if (!directory) {
         directory = { kind: "directory", key, name: segments[index], children: [] };
+        directories.set(key, directory);
         current.children.push(directory);
       }
       current = directory;
@@ -214,17 +218,16 @@ export function ChangedFilesTree({ open, entries, activePath, parentWidth, onSel
   const [width, setWidth] = useState(DEFAULT_TREE_WIDTH);
   const [resizing, setResizing] = useState(false);
   const [mounted, setMounted] = useState(open);
-  const systemReducedMotion = useReducedMotion();
-  const applicationReducedMotion = useAppStore(state => state.reducedMotion);
-  const reducedMotion = systemReducedMotion || applicationReducedMotion;
+  const reducedMotion = useAppStore(state => state.reducedMotion);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const resize = useRef<{ x: number; width: number; stop: () => void } | null>(null);
-  const rankedPaths = useMemo(() => rankChangedFilePaths(entries.map(entry => entry.path), query), [entries, query]);
+  const renderTree = mounted || open;
+  const rankedPaths = useMemo(() => renderTree ? rankChangedFilePaths(entries.map(entry => entry.path), query) : [], [renderTree, entries, query]);
   const matchingPaths = useMemo(() => new Set(rankedPaths), [rankedPaths]);
-  const nodes = useMemo(() => buildTree(entries, rankedPaths), [entries, rankedPaths]);
+  const nodes = useMemo(() => renderTree ? buildChangedFilesTree(entries, rankedPaths) : [], [renderTree, entries, rankedPaths]);
   const rows = useMemo(() => visibleTreeRows(nodes, collapsed), [nodes, collapsed]);
-  const selectedPath = matchingPaths.has(activePath ?? "") ? activePath : entries.find(entry => matchingPaths.has(entry.path))?.path;
+  const selectedPath = !renderTree ? undefined : matchingPaths.has(activePath ?? "") ? activePath : entries.find(entry => matchingPaths.has(entry.path))?.path;
   const focusKey = rows.some(row => row.node.key === focusedKey) ? focusedKey
     : rows.some(row => row.node.key === selectedPath) ? selectedPath : rows[0]?.node.key;
   const boundedWidth = Math.min(Math.max(width, MIN_TREE_WIDTH), Math.max(MIN_TREE_WIDTH, parentWidth * MAX_TREE_RATIO));

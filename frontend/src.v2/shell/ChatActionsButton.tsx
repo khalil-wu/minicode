@@ -9,7 +9,6 @@ import { pushToast } from "../overlays/ToastContainer";
 import { copyText } from "../lib/clipboard";
 import { canOpenThreadWindow, openThreadWindow } from "./threadWindowActions";
 import { useWorkspaceOpenMenu } from "./useWorkspaceOpenMenu";
-import { loadConversationMarkdown } from "../chat/conversationMarkdown";
 import { formatShortcut } from "../lib/keyboard-shortcuts";
 import { captureThreadActionOwner, executeThreadAction, type ThreadActionId, type ThreadActionOwner } from "../lib/thread-actions";
 import { loadThreadAutomations, openThreadAutomationEditor } from "../lib/automations-navigation";
@@ -58,7 +57,12 @@ export function ChatActionsButton() {
     finally { setBusy(false); }
   };
   const copyMarkdown = async (owner: MenuOwner) => {
-    try { const markdown = await loadConversationMarkdown(owner); if (markdown !== null) await copyText(markdown, tr("复制为 Markdown")); }
+    const captured = { ...owner };
+    try {
+      const { loadConversationMarkdown } = await import("../chat/conversationMarkdown");
+      const markdown = await loadConversationMarkdown(captured);
+      if (markdown !== null) await copyText(markdown, tr("复制为 Markdown"));
+    }
     catch (error) { pushToast(error instanceof Error ? error.message : String(error), "error"); }
   };
   const fork = (owner: MenuOwner, createBranch: boolean) => runCommand({

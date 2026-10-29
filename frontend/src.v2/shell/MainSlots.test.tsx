@@ -117,6 +117,7 @@ describe("MainSlots", () => {
       activeTabPath: null,
       contextCardCollapsed: true,
       contextCardPinned: false,
+      compactPanel: null,
       workspaceFileTabs: [],
       rightPanelOpen: false,
       rightPanelExpanded: false,
@@ -140,6 +141,15 @@ describe("MainSlots", () => {
     expect(screen.queryByRole("button", { name: "Preview" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Activity" })).toBeNull();
     expect(screen.queryByRole("button", { name: /side panel/i })).toBeNull();
+  });
+
+  it("keeps the empty home canvas free of conversation-only controls", () => {
+    useAppStore.setState({ conversationId: null, pendingConversationSwitchId: null });
+    const { container } = render(<MainSlots />);
+    expect(container.querySelector(".mc-workbench-toolbar")?.getAttribute("data-home")).toBe("true");
+    expect(screen.queryByRole("button", { name: "聊天操作" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "切换摘要" })).toBeNull();
+    expect(screen.getByRole("button", { name: "新建标签页" })).toBeTruthy();
   });
 
   it("focuses the floating composer without leaving the full workspace view", () => {
@@ -599,7 +609,7 @@ describe("MainSlots", () => {
     render(<MainSlots forceChat />);
     const chat = screen.getByTestId("chat-owner-fixture");
     fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
-    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, appMode: "chat", contextCardCollapsed: false });
+    expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, appMode: "chat", contextCardCollapsed: true });
     expect(screen.getByTestId("chat-owner-fixture")).toBe(chat);
     act(() => useAppStore.getState().toggleRightPanel());
     expect(screen.getByRole("button", { name: "新建标签页" })).toBeTruthy();
@@ -607,7 +617,7 @@ describe("MainSlots", () => {
   });
 
   it("opens a narrow summary without replacing the selected right content or mounted chat", () => {
-    useAppStore.setState({ appMode: "chat", rightPanelOpen: false, contextCardCollapsed: true });
+    useAppStore.setState({ appMode: "chat", conversationId: "summary-owner", rightPanelOpen: false, contextCardCollapsed: true });
     render(<MainSlots forceChat />);
     Object.defineProperty(document.querySelector('.mc-main-slot-frame[data-panel-slot-kind="chat"]'), "clientWidth", { value: 600 });
     const chat = screen.getByTestId("chat-owner-fixture");

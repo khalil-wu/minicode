@@ -4,9 +4,10 @@ import { PromptSourceIcon } from "../lib/prompt-source-icons";
 import { BrandIcon } from "../components/BrandIcon";
 import { useComposerPlugins } from "./useComposerPlugins";
 
-export function ComposerAddMenu({ workspaceRoot, planMode, showGoal, goalAvailable, onFiles, onRemoteFiles, onGoal, onPlan, onPlugin, onClose }: {
+export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGoal, goalAvailable, onFiles, onRemoteFiles, onGoal, onPlan, onPlugin, onClose }: {
   workspaceRoot: string;
   planMode: boolean;
+  planAvailable: boolean;
   showGoal: boolean;
   goalAvailable: boolean;
   onFiles: () => void;
@@ -55,8 +56,8 @@ export function ComposerAddMenu({ workspaceRoot, planMode, showGoal, goalAvailab
       onMouseMove={() => setHighlighted("remote-files")} onClick={() => choose(onRemoteFiles)}><PromptSourceIcon icon="paperclip" /><span>{tr("添加远程文件")}</span></button>}
     {showGoal && <button type="button" role="menuitem" disabled={!goalAvailable} data-add-menu-item="goal" data-highlighted={goalAvailable && highlighted === "goal" || undefined} aria-current={goalAvailable && highlighted === "goal" || undefined}
       onMouseMove={() => { if (goalAvailable) setHighlighted("goal"); }} onClick={() => choose(onGoal)}><PromptSourceIcon icon="target" /><span>{tr("目标")}</span><small>{tr("设置持续追求的目标")}</small></button>}
-    <button type="button" role="menuitem" data-add-menu-item="plan" data-highlighted={highlighted === "plan" || undefined} aria-current={highlighted === "plan" || undefined}
-      onMouseMove={() => setHighlighted("plan")} onClick={() => choose(onPlan)}><PromptSourceIcon icon="lightbulb" /><span>{tr("计划模式")}</span><small>{planMode ? tr("关闭计划模式") : tr("开启计划模式")}</small></button>
+    <button type="button" role="menuitem" disabled={!planAvailable} data-add-menu-item="plan" data-highlighted={planAvailable && highlighted === "plan" || undefined} aria-current={planAvailable && highlighted === "plan" || undefined}
+      onMouseMove={() => { if (planAvailable) setHighlighted("plan"); }} onClick={() => choose(onPlan)}><PromptSourceIcon icon="lightbulb" /><span>{tr("计划模式")}</span><small>{planMode ? tr("关闭计划模式") : tr("开启计划模式")}</small></button>
     <div className="composer-add-section"><span>{tr("插件")}</span></div>
     {loading && <div className="composer-add-status" role="status">{tr("正在读取插件…")}</div>}
     {error && <div className="composer-add-status" role="alert">{error}</div>}

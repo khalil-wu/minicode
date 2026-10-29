@@ -272,12 +272,14 @@ class GuardianReviewService:
         if denied and not state["interrupted"] and (consecutive >= (1 if cyber else 3) or recent >= (1 if cyber else 10)):
             state["interrupted"] = True
             message = f"Automatic approval review rejected too many approval requests for this turn ({consecutive} consecutive, {recent} in the last 50 reviews); interrupting the turn."
+            if context.run_context is not None:
+                context.run_context.cancel_reason = "guardian_denials"
+                context.run_context.turn_abort_error = {"turn_id": turn_id, "message": message,
+                    "codex_error_info": "too_many_denials"}
             await self._emit(context, "guardian_warning", {"message": message, "turn_id": turn_id, "interruption": True})
             if self.interruption_handler is not None:
                 await self.interruption_handler(turn_id, message)
             elif context.cancel_event is not None:
-                if context.run_context is not None:
-                    context.run_context.cancel_reason = "guardian_denials"
                 context.cancel_event.set()
 
     async def aclose(self):

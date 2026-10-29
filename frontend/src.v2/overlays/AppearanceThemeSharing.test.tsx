@@ -116,6 +116,44 @@ it("keeps an asynchronous import pending until the actual save finishes and prev
   expect(mocks.toast).toHaveBeenCalledWith("已导入浅色主题", "success");
 });
 
+it("hides the import portal without clearing its unfinished string and restores it only when reopened", () => {
+  const onImport = vi.fn(() => true);
+  const view = render(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} />);
+  fireEvent.click(screen.getByRole("button", { name: "导入浅色主题" }));
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: "unfinished authored theme" } });
+  view.rerender(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(onImport).not.toHaveBeenCalled();
+  view.rerender(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "导入浅色主题" }));
+  expect(screen.getByRole("textbox")).toHaveProperty("value", "unfinished authored theme");
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  fireEvent.click(screen.getByRole("button", { name: "导入浅色主题" }));
+  expect(screen.getByRole("textbox")).toHaveProperty("value", "");
+});
+
+it("retains the original pending import owner through hide and reopen without submitting twice", async () => {
+  let complete!: (committed: boolean) => void;
+  const onImport = vi.fn(() => new Promise<boolean>(resolve => { complete = resolve; }));
+  const view = render(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} />);
+  fireEvent.click(screen.getByRole("button", { name: "导入浅色主题" }));
+  const text = exportThemeString(snapshot, "light");
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: text } });
+  fireEvent.submit(screen.getByRole("button", { name: "导入主题" }).closest("form")!);
+  view.rerender(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  view.rerender(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} />);
+  fireEvent.click(screen.getByRole("button", { name: "导入浅色主题" }));
+  expect(screen.getByRole("textbox")).toHaveProperty("value", text);
+  expect(screen.getByRole("textbox")).toHaveProperty("disabled", true);
+  fireEvent.submit(screen.getByRole("button", { name: "导入主题" }).closest("form")!);
+  expect(onImport).toHaveBeenCalledOnce();
+  await act(async () => complete(true));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(mocks.toast).toHaveBeenCalledWith("已导入浅色主题", "success");
+});
+
 it("retains an import retired by a newer edit and only announces success after a committed retry", async () => {
   const onImport = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
   render(<AppearanceThemeSharing variant="light" snapshot={snapshot} onImport={onImport} />);

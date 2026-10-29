@@ -1,4 +1,5 @@
 .mc-file-viewer { display:flex; flex-direction:column; flex:1; width:100%; height:100%; min-width:0; min-height:0; color:var(--text-primary); font-family:var(--font-ui); }
+.mc-file-viewer-header { flex-shrink:0; min-width:0; }
 .mc-file-viewer-path { display:flex; align-items:center; gap:3px; min-height:38px; padding:4px 14px; overflow:hidden; flex-shrink:0; }
 .mc-file-viewer-path button { padding:3px 4px; border:0; background:transparent; border-radius:5px; white-space:nowrap; color:var(--text-secondary); font:inherit; font-size:var(--text-sm); }
 .mc-file-viewer-path button:last-child { color:var(--text-primary); }
@@ -7,6 +8,15 @@
 .mc-file-viewer-toolbar > button { display:inline-flex; align-items:center; gap:5px; padding:5px; border:0; background:transparent; border-radius:6px; color:var(--text-secondary); font:inherit; font-size:var(--text-sm); white-space:nowrap; }
 .mc-file-viewer-toolbar > button:hover,.mc-file-viewer-toolbar > button[aria-pressed=true] { color:var(--text-primary); background:var(--surface-hover); }
 .mc-file-viewer-toolbar-spacer { flex:1; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-header { display:flex; align-items:center; gap:4px; padding:8px; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-path { min-height:32px; max-width:35%; padding:0; border:1px solid var(--border-subtle); border-radius:999px; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-path > button { overflow:hidden; text-overflow:ellipsis; padding:5px 10px; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-toolbar { flex:1; padding:0; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-source-toggle { padding:6px 10px; border:1px solid var(--border-subtle); border-radius:999px; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-open-target { padding:6px 10px; border:1px solid var(--border-subtle); border-radius:999px; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-body { border-top:0; }
+.mc-file-viewer-markdown { padding:20px; }
+.mc-file-viewer[data-compact-markdown] .mc-file-viewer-markdown { padding:7px 16px 12px; }
 .mc-file-viewer-body { display:flex; flex:1; min-height:0; min-width:0; border-top:1px solid var(--border-subtle); }
 .mc-file-viewer-content { flex:1; min-width:0; min-height:0; overflow:auto; position:relative; }
 .mc-file-viewer-tree { width:250px; min-width:190px; max-width:40%; border-left:1px solid var(--border-subtle); overflow:auto; flex-shrink:0; padding-top:5px; }

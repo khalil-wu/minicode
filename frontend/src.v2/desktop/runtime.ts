@@ -383,9 +383,7 @@ export interface DesktopPreferences extends DictationPreferences {
   systemLocale: string;
   fileOpenTarget: FileOpenTargetId;
   fileOpenTargetPerPath: Record<string, FileOpenTargetId>;
-  fileOpenTargets: FileOpenTarget[];
   terminalShell: "powershell" | "pwsh" | "cmd" | "gitBash" | "wsl" | "system";
-  terminalShellTargets: Array<{ id: DesktopPreferences["terminalShell"]; label: string }>;
   confirmBeforeClose: "never" | "keyboardOnly" | "always";
   turnCompletionNotifications: "never" | "onlyWhenUnfocused" | "always";
   permissionNotifications: boolean;
@@ -396,8 +394,12 @@ export interface DesktopPreferences extends DictationPreferences {
   annotationScreenshotsMode: "always" | "necessary";
 }
 export type DesktopPreferencesPatch = Partial<Omit<DesktopPreferences,
-  "fileOpenTargets" | "fileOpenTargetPerPath" | "terminalShellTargets" | "systemLocale" | "taskDirectoryOverride" | "defaultTaskDirectory">
+  "fileOpenTargetPerPath" | "systemLocale" | "taskDirectoryOverride" | "defaultTaskDirectory">
   & { defaultTaskDirectory: string | null }>;
+export interface DesktopPreferenceTargets {
+  fileOpenTargets: FileOpenTarget[];
+  terminalShellTargets: Array<{ id: DesktopPreferences["terminalShell"]; label: string }>;
+}
 export interface BrowserHistoryVisit { id: string; url: string; title: string; visitTime: number; source: "agent" | "other" }
 export interface BrowserCaptureRequest { id: string; conversationId: string; expectedUrl: string; rect?: { x: number; y: number; width: number; height: number }; viewport?: { width: number; height: number } }
 export interface BrowserCaptureImage { data: string; mimeType: "image/png"; width: number; height: number; url: string }
@@ -428,7 +430,7 @@ export type DesktopVoiceRequest = { type: "cancel"; requestId: string } | {
   threadId?: string; transferId?: string; context?: string; capability?: import("../protocol/realtime-types").RealtimeCapability;
 };
 
-interface MiniCodeDesktop {
+export interface MiniCodeDesktop {
   personalizations?: {
     listHosts(): Promise<PersonalizationHost[]>;
     request(hostId: string, action: PersonalizationAction, payload?: unknown): Promise<unknown>;
@@ -502,6 +504,7 @@ interface MiniCodeDesktop {
     previewNotificationSound(sound: NotificationSound): Promise<void>;
     chooseTaskDirectory(): Promise<DesktopPreferences | null>;
     get(): Promise<DesktopPreferences>;
+    getTargets(): Promise<DesktopPreferenceTargets>;
     set(patch: DesktopPreferencesPatch): Promise<DesktopPreferences>;
     onChanged(callback: (preferences: DesktopPreferences) => void): () => void;
   };
@@ -632,6 +635,7 @@ interface MiniCodeDesktop {
     clearBrowsingData(dataTypes?: BrowserDataType[]): Promise<boolean>;
     create(payload: { id: string; url: string; conversationId: string }): Promise<EmbeddedBrowserState>;
     list(payload: { conversationId: string }): Promise<EmbeddedBrowserState[]>;
+    transferOwner(payload: { fromOwner: string; toOwner: string }): Promise<number>;
     activate(payload: { id: string; conversationId: string }): Promise<boolean>;
     setBounds(payload: EmbeddedBrowserBounds): Promise<boolean>;
     navigate(payload: { id: string; url: string; conversationId: string }): Promise<EmbeddedBrowserState>;
@@ -668,6 +672,7 @@ export const runtime = () =>
 
 export const desktop = (): MiniCodeDesktop | undefined => runtime()?.desktop;
 export const getDesktopPreferences = () => desktop()!.preferences.get();
+export const getDesktopPreferenceTargets = () => desktop()!.preferences.getTargets();
 export const setDesktopPreferences = (patch: DesktopPreferencesPatch) => desktop()!.preferences.set(patch);
 
 export function desktopNotificationConversationVisible(conversationId: string, activeConversationId: string | null, settingsOpen: boolean, switchingConversationId: string | null): boolean {

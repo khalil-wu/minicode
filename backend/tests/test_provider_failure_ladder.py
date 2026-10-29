@@ -153,6 +153,24 @@ def test_real_http_retry_preserves_status_and_provider_code(status, code):
         notice = next(item for item in progress if item.get("visibility") == "timeline" and item.get("error_message"))
         assert notice["status_code"] == status
         assert notice["provider_error_code"] == code
+        assert notice["error_message"] == "Actual provider failure"
+
+    asyncio.run(scenario())
+
+
+def test_real_http_denial_preserves_provider_reason_in_terminal_process_evidence():
+    async def scenario():
+        adapter, client = _openai("chat", lambda request: httpx.Response(403,
+            json={"error": {"code": "policy_denied", "type": "permission_error",
+                "message": "Project policy does not allow this model"}}))
+        async with client:
+            event = await _first_error(adapter, wrapped=True)
+        progress = []
+        result = await _drive(event, retry_state=StreamRetryState(), attempt=0, waits=[], progress=progress)
+        assert result.action == "finish"
+        notice, = [item for item in progress if item.get("visibility") == "timeline" and item.get("status") == "failed"]
+        assert notice["error_message"] == "Project policy does not allow this model"
+        assert notice["detail"] == notice["error_message"]
 
     asyncio.run(scenario())
 

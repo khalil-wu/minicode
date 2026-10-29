@@ -16,6 +16,8 @@ from backend.agent.loop_runtime_helpers import (
     terminal_reason_from_error_type,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.progress import provider_failure_detail_progress
+from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.recovery_controller import RecoveryProfile
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.agent.tool_events import (
@@ -24,7 +26,7 @@ from backend.agent.tool_events import (
 )
 from backend.agent.turn_kernel import _set_terminal_reason
 from backend.llm.base import UsageInfo
-from backend.llm.errors import classify_llm_error
+from backend.llm.errors import classify_llm_error, llm_error_raw
 from backend.secret_redaction import redact_secrets
 
 
@@ -238,6 +240,10 @@ async def recover_provider_failure(
             "provider_error_type": classification.provider_error_type,
         },
     )
+    provider_message = llm_error_raw(exc, provider="").get("provider_error_message")
+    if provider_message:
+        yield provider_failure_detail_progress(provider_message, attempt=provider_attempt,
+            progress_id=provider_progress_id(provider_attempt.iteration_id))
     async for recovery_event in degrade_and_finish(
         state=state,
         ctx=context_builder,

@@ -8,7 +8,7 @@ import { useAppStore } from "../stores";
 const native = vi.hoisted(() => ({ preferences: vi.fn(), openPath: vi.fn(), openWindow: vi.fn(), git: vi.fn(), platform: "win32" }));
 vi.mock("../protocol/workspace", async load => ({ ...await load<typeof import("../protocol/workspace")>(), fetchWorkspaceGitStatus: native.git }));
 vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(),
-  isDesktop: () => true, getDesktopPreferences: native.preferences,
+  isDesktop: () => true, getDesktopPreferenceTargets: native.preferences,
   desktop: () => ({ openPreferredPath: native.openPath, windowControls: { openConversation: native.openWindow }, platformInfo: { platform: native.platform } }),
 }));
 const targets = [{ id: "vscode", label: "VS Code", kind: "editor", icon: "data:image/png;base64,native" },

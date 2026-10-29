@@ -58,4 +58,45 @@ describe("real Source mailbox destination projection", () => {
       expect(useAppStore.getState().focusedSubagentId).toBe(recipientId);
     }
   });
+
+  it.each(["send_message", "followup_task", "interrupt_agent", "spawn_agent"])(
+    "keeps %s as a tool record until an actual success or start is known",
+    (name) => {
+      const args = name === "spawn_agent" ? { task_name: "review", message: "Actual request" }
+        : { target: "/root/review", message: "Actual request" };
+      for (const status of ["pending", "running", "failed"] as const) {
+        const record = { id: `${name}-${status}`, name, args, status, startedAt: 1,
+          ...(status === "failed" ? { outputPreview: "Actual rejection" } : {}) };
+        const original: ChatMessage = { id: record.id, role: "assistant", content: "", artifacts: [], timestamp: 1,
+          blocks: [{ type: "tool_call", record }] };
+        const restored = hydrateMessages([{ id: record.id, role: "assistant", content: "", timestamp: 1,
+          blocks: [{ type: "tool_call", record }] } as unknown as BackendTranscriptMessage]);
+        for (const messages of [[original], restored]) {
+          const cells = projectMessagesToTurns(messages, status !== "failed")[0].committedCells;
+          expect(cells.some(cell => cell.kind === "collaboration")).toBe(false);
+          expect(cells).toEqual([expect.objectContaining({ kind: "activity",
+            toolCallRecords: [expect.objectContaining(record)] })]);
+        }
+      }
+    },
+  );
+
+  it("uses the resolved interrupt receiver in live and restored history", () => {
+    useAppStore.setState({ subagents: [{ id: "child-id", displayName: "Review", agentPath: "/root/review", role: "subagent", status: "running" }] });
+    const record = { id: "interrupt", name: "interrupt_agent", args: { target: "/root/review" },
+      recipientId: "child-id", status: "success" as const, startedAt: 1, finishedAt: 2 };
+    const original: ChatMessage = { id: "answer", role: "assistant", content: "", artifacts: [], timestamp: 1,
+      blocks: [{ type: "tool_call", record }] };
+    const restored = hydrateMessages([{ id: "answer", role: "assistant", content: "", timestamp: 1,
+      blocks: [{ type: "tool_call", record }] } as unknown as BackendTranscriptMessage]);
+    for (const messages of [[original], restored]) {
+      const cell = projectMessagesToTurns(messages, false)[0].committedCells[0];
+      expect(cell).toMatchObject({ kind: "collaboration", action: "closed", entries: [{ agentId: "child-id" }] });
+      if (cell.kind !== "collaboration") throw new Error("Missing interrupt fact");
+      const view = render(<CollaborationCell cell={cell} conversationId={captured.conversationId} />);
+      fireEvent.click(screen.getByRole("button", { name: "打开子智能体：Review" }));
+      expect(useAppStore.getState().focusedSubagentId).toBe("child-id");
+      view.unmount();
+    }
+  });
 });

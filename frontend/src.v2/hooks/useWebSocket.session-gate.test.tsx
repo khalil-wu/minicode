@@ -51,6 +51,7 @@ import {
   getLastReceivedServerSeqForTests,
   resetPendingClientCommandAcksForTests,
   resetRecentInboundEventIdsForTests,
+  isSupersededCommandProjection,
   useWebSocketConnection,
 } from "./useWebSocket";
 
@@ -186,7 +187,7 @@ describe("session gate replay", () => {
   });
   afterEach(() => { cleanup(); vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
-  it("recovers the captured d6 skills gap through completed snapshot 170 and the full replay 172", () => {
+  it("recovers the captured d6 skills gap through completed snapshot 170 and the full replay 172", async () => {
     const fixture = JSON.parse(gunzipSync(fs.readFileSync(path.resolve(__dirname,
       "../../test/fixtures/ui-reconnect-d6b825b3-20261023.json.gz"))).toString("utf8")) as {
       before_failure: Wire[]; recovery: Wire[];
@@ -203,12 +204,12 @@ describe("session gate replay", () => {
     render(<Harness />);
     act(() => vi.advanceTimersByTime(0));
     const first = MockWebSocket.instances[0];
-    act(() => first.emit("open"));
+    await act(async () => first.emit("open"));
     const firstRestore = first.sent.find(command => command.type === "session.restore")!;
     const rekey = (event: Wire, snapshot: Wire, command: Wire) => event.client_command_id === snapshot.client_command_id
       ? { ...event, client_command_id: command.client_command_id } : event;
     for (const event of fixture.before_failure) {
-      act(() => first.emitMessage(rekey(event, initial, firstRestore)));
+      await act(async () => first.emitMessage(rekey(event, initial, firstRestore)));
     }
     expect(getLastReceivedServerSeqForTests()).toBe(124);
     expect(first.close).toHaveBeenCalledWith(4002, "event replay required");
@@ -220,7 +221,7 @@ describe("session gate replay", () => {
     act(() => first.emit("close", 4002));
     act(() => vi.advanceTimersByTime(1_250));
     const second = MockWebSocket.instances[1];
-    act(() => second.emit("open"));
+    await act(async () => second.emit("open"));
     const secondRestore = second.sent.find(command => command.type === "session.restore")!;
     expect(secondRestore).toMatchObject({ last_seq: 124, last_conversation_id: owner, last_workspace_root: root });
     const replay = fixture.recovery.find(event => event.type === "session.replay")!;
@@ -231,7 +232,7 @@ describe("session gate replay", () => {
     expect(getLastReceivedServerSeqForTests()).toBe(124);
     expect(useAppStore.getState().messages.find(message => message.role === "assistant")?.content).not.toBe("HARNESS_RECONNECT_COMPLETE");
     for (const event of fixture.recovery) {
-      act(() => second.emitMessage(rekey(event, recovered, secondRestore)));
+      await act(async () => second.emitMessage(rekey(event, recovered, secondRestore)));
     }
 
     const state = useAppStore.getState();
@@ -239,12 +240,43 @@ describe("session gate replay", () => {
     expect(second.close).not.toHaveBeenCalled();
     expect(getLastReceivedServerSeqForTests()).toBe(164);
     expect(state).toMatchObject({ conversationId: owner, draft: "Retain recovery draft", isStreaming: false, isConnected: true });
-    expect(state.availableSkills.map(skill => skill.name)).toEqual(["browser", "code-review", "plugin-creator", "skill-creator", "verify"]);
     const turns = projectMessagesToTurns(state.messages, state.isStreaming, root);
     expect(turns.at(-1)?.finalAnswerCell?.markdownSource).toBe("HARNESS_RECONNECT_COMPLETE");
     const assistant = state.messages.find(message => message.role === "assistant");
     expect(assistant).toMatchObject({ terminalStatus: "completed" });
     expect(assistant?.isStreaming).not.toBe(true);
+
+    // This old capture contains only the prior renderer's Skill request ids.
+    // Current restore/switch handling sends a fresh scoped read. Historical
+    // data still fills the durable chain, while only that actual read may
+    // rebuild the executable catalog after recovery.
+    const capturedCatalogs = replayEvents.filter(event => event.type === "skills.list");
+    const freshRead = second.sent.filter(command => command.type === "skills.list").at(-1)!;
+    expect(freshRead).toBeDefined();
+    expect(typeof freshRead.client_command_id).toBe("string");
+    expect(capturedCatalogs.map(event => event.client_command_id)).not.toContain(freshRead.client_command_id);
+    expect(capturedCatalogs.every(event => isSupersededCommandProjection(event as never))).toBe(true);
+    expect(state.availableSkills).toEqual([]);
+    const capturedCatalog = capturedCatalogs.at(-1)!;
+    const capturedResult = replayEvents.find(event => event.type === "command.result" && event.client_command_id === capturedCatalog.client_command_id)!;
+    const { replayed: _replayed, ...liveCatalog } = capturedCatalog;
+    const { replayed: _resultReplayed, ...liveResult } = capturedResult;
+    const freshAckSeq = Math.max(...fixture.recovery.map(event => Number(event.seq))) + 1;
+    const freshSeq = freshAckSeq + 1;
+    const freshId = String(freshRead.client_command_id);
+    await act(async () => second.emitMessage({ type: "client.command.ack", client_command_id: freshId, command_type: "skills.list", accepted: true,
+      seq: freshAckSeq, event_id: `session-gate-fresh:${freshAckSeq}`, timestamp: new Date().toISOString() }));
+    expect(getLastReceivedServerSeqForTests()).toBe(164);
+    await act(async () => second.emitMessage({ ...liveCatalog, client_command_id: freshId, client_command_type: "skills.list",
+      seq: freshSeq, previous_replay_seq: 164, event_id: `session-gate-fresh:${freshSeq}`, timestamp: new Date().toISOString() }));
+    expect(getLastReceivedServerSeqForTests()).toBe(freshSeq);
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["browser", "code-review", "plugin-creator", "skill-creator", "verify"]);
+    await act(async () => second.emitMessage({ ...liveResult, client_command_id: freshId, client_command_type: "skills.list",
+      data: { ...(liveResult.data as Wire), request_id: freshId, client_command_id: freshId },
+      seq: freshSeq + 1, previous_replay_seq: freshSeq, event_id: `session-gate-fresh:${freshSeq + 1}`, timestamp: new Date().toISOString() }));
+    expect(getLastReceivedServerSeqForTests()).toBe(freshSeq + 1);
+    expect(errors).toHaveLength(1);
+    expect(second.close).not.toHaveBeenCalled();
   });
 
   it.each(process.env.MINICODE_SESSION_GATE_FIXTURE

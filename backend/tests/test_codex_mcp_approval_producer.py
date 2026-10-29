@@ -57,7 +57,8 @@ def proxy(annotations, mode="auto", *, parallel=False):
     config = MCPServerConfig(name="source-server", command="python", default_tools_approval_mode=mode,
         supports_parallel_tool_calls=parallel)
     manager = SimpleNamespace(registry_version=0, get_server_contract=lambda name: (name, mode),
-        get_server_config=lambda name: config, get_client=lambda name: client)
+        get_server_config=lambda name: config, get_client=lambda name: client,
+        catalog_is_cached=lambda name: False, get_all_tools=lambda: {"source-server": [definition]})
     return MCPToolProxy("source-server", definition, client, manager=manager), client, manager
 
 
@@ -80,7 +81,7 @@ def policy(workspace, kind):
     return SandboxPolicy(workspace_root=workspace, permission_profile=profile)
 
 
-def authorize(tool, workspace, sandbox, permission, *, permission_settings=None, context=None, arguments=None):
+async def authorize(tool, workspace, sandbox, permission, *, permission_settings=None, context=None, arguments=None):
     registry = ToolRegistry()
     registry.register(tool)
     checker = PermissionChecker(permission_settings or settings(), workspace)
@@ -88,66 +89,71 @@ def authorize(tool, workspace, sandbox, permission, *, permission_settings=None,
         session_id="owned-session", conversation_id="owned-thread", turn_id="owned-turn")
     call = ToolCallEvent(id="frozen-mcp-call", name=tool.name,
         arguments={"value": "original"} if arguments is None else arguments)
-    return _authorize_final_tool_request(call, tool_registry=registry, permission_checker=checker,
-        permission_context=permission, tool_ctx=context), context, registry
+    return (await _authorize_final_tool_request(call, tool_registry=registry, permission_checker=checker,
+        permission_context=permission, tool_ctx=context)), context, registry
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("read,destructive,world", itertools.product((None, False, True), repeat=3))
-def test_source_auto_preserves_three_state_annotations(tmp_path, read, destructive, world):
+async def test_source_auto_preserves_three_state_annotations(tmp_path, read, destructive, world):
     annotations = {key: value for key, value in (("readOnlyHint", read), ("destructiveHint", destructive), ("openWorldHint", world)) if value is not None}
     tool, _, _ = proxy(annotations)
     expected = destructive is True or read is not True and not (destructive is False and world is False)
-    result, _, _ = authorize(tool, tmp_path, policy(tmp_path, "managed-workspace"), PermissionContext(workspace_root=tmp_path))
+    result, _, _ = (await authorize(tool, tmp_path, policy(tmp_path, "managed-workspace"), PermissionContext(workspace_root=tmp_path)))
     assert result.permission_decision.permission_level is (PermissionLevel.CONFIRM if expected else PermissionLevel.AUTO)
     assert tool.is_concurrency_safe() is (read is True)
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode,read,destructive,world,expected", [
     ("writes", True, True, True, PermissionLevel.AUTO),
     ("writes", False, False, False, PermissionLevel.CONFIRM),
     ("prompt", True, False, False, PermissionLevel.CONFIRM),
     ("approve", False, True, True, PermissionLevel.AUTO),
 ])
-def test_source_mode_and_parallel_overrides_are_independent(tmp_path, mode, read, destructive, world, expected):
+async def test_source_mode_and_parallel_overrides_are_independent(tmp_path, mode, read, destructive, world, expected):
     tool, _, _ = proxy({"readOnlyHint": read, "destructiveHint": destructive, "openWorldHint": world}, mode, parallel=True)
-    result, _, _ = authorize(tool, tmp_path, policy(tmp_path, "managed-workspace"), PermissionContext(workspace_root=tmp_path))
+    result, _, _ = (await authorize(tool, tmp_path, policy(tmp_path, "managed-workspace"), PermissionContext(workspace_root=tmp_path)))
     assert result.permission_decision.permission_level is expected
     assert tool.is_concurrency_safe() is True
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind,allowed", [("disabled", True), ("external", True), ("managed-full", True), ("managed-workspace", False), ("missing", False)])
-def test_never_uses_captured_real_profile_and_not_bypass_or_network_labels(tmp_path, kind, allowed):
+async def test_never_uses_captured_real_profile_and_not_bypass_or_network_labels(tmp_path, kind, allowed):
     tool, _, _ = proxy({"destructiveHint": True, "openWorldHint": True}, "prompt")
     permission = PermissionContext(mode="bypass", approval_policy="never", sandbox_mode="danger-full-access", workspace_root=tmp_path)
-    result, _, _ = authorize(tool, tmp_path, None if kind == "missing" else policy(tmp_path, kind), permission)
+    result, _, _ = (await authorize(tool, tmp_path, None if kind == "missing" else policy(tmp_path, kind), permission))
     assert (result.permission_decision.decision == "allow") is allowed
     assert result.request.arguments == {"value": "original"}
     assert len(result.request.digest) == 64
 
 
-def test_dynamic_final_authorization_rechecks_the_actual_issuing_profile(tmp_path):
+@pytest.mark.asyncio
+async def test_dynamic_final_authorization_rechecks_the_actual_issuing_profile(tmp_path):
     tool, _, _ = proxy({"destructiveHint": True})
     permission = PermissionContext(mode="bypass", approval_policy="never", workspace_root=tmp_path)
-    first, context, _ = authorize(tool, tmp_path, policy(tmp_path, "disabled"), permission)
+    first, context, _ = (await authorize(tool, tmp_path, policy(tmp_path, "disabled"), permission))
     assert first.permission_decision.decision == "allow"
     context.sandbox_policy = policy(tmp_path, "managed-workspace")
-    second, _, _ = authorize(tool, tmp_path, context.sandbox_policy, permission, context=context)
+    second, _, _ = (await authorize(tool, tmp_path, context.sandbox_policy, permission, context=context))
     assert second.request.digest == first.request.digest
     assert second.permission_decision.decision == "deny"
 
 
-def test_explicit_asks_denies_and_plan_are_not_removed_by_source_preapproval(tmp_path):
+@pytest.mark.asyncio
+async def test_explicit_asks_denies_and_plan_are_not_removed_by_source_preapproval(tmp_path):
     tool, _, _ = proxy({"readOnlyHint": True}, "approve")
     permission = PermissionContext(approval_policy="never", workspace_root=tmp_path)
     actual = policy(tmp_path, "disabled")
     for rules in (settings(always_deny=[tool.policy_identity]),
         replace(settings(), require_confirm=["mcp__*"]),
         replace(settings(), require_diff_review=[tool.policy_identity])):
-        result, _, _ = authorize(tool, tmp_path, actual, permission, permission_settings=rules)
+        result, _, _ = (await authorize(tool, tmp_path, actual, permission, permission_settings=rules))
         assert result.permission_decision.decision == "deny"
-    denied, _, _ = authorize(tool, tmp_path, actual, replace(permission, tool_deny_rules=[tool.policy_identity]))
+    denied, _, _ = (await authorize(tool, tmp_path, actual, replace(permission, tool_deny_rules=[tool.policy_identity])))
     assert denied.permission_decision.decision == "deny"
-    planned, _, _ = authorize(tool, tmp_path, actual, replace(permission, mode="plan"))
+    planned, _, _ = (await authorize(tool, tmp_path, actual, replace(permission, mode="plan")))
     assert planned.permission_decision.decision == "deny"
 
 
@@ -158,7 +164,7 @@ async def test_real_strict_turn_grant_requires_guardian_even_for_approve_and_nev
     context = ToolExecutionContext(permission, workspace_root=tmp_path, sandbox_policy=policy(tmp_path, "disabled"),
         session_id="owned-session", conversation_id="owned-thread", turn_id="owned-turn", run_context=RunContext())
     context.permission_grants.record(PermissionGrantResponse(AdditionalPermissionProfile(network=NetworkPermissions(enabled=True)), "turn", True), "local", context.turn_id)
-    result, _, registry = authorize(tool, tmp_path, context.sandbox_policy, permission, context=context)
+    result, _, registry = (await authorize(tool, tmp_path, context.sandbox_policy, permission, context=context))
     assert result.permission_decision.permission_level is PermissionLevel.CONFIRM
     assert (result.permission_decision.matched_rule_source, result.permission_decision.matched_rule) == ("tool", "strict_auto_review")
     model = SourceModel(LLMSettings(provider="openai", model="fixture", api_key=""), tool.name)
@@ -309,20 +315,21 @@ async def test_real_query_remembers_only_source_auto_tool_across_changed_argumen
     assert len(owner.mcp_tool_approvals.session_approved) == int(mode == "auto")
 
 
-def test_remembered_tool_does_not_bypass_strict_review_explicit_ask_or_other_thread(tmp_path):
+@pytest.mark.asyncio
+async def test_remembered_tool_does_not_bypass_strict_review_explicit_ask_or_other_thread(tmp_path):
     tool, _, _ = proxy({})
     store = MCPApprovalStore({tool.session_approval_key()})
     permission = PermissionContext(workspace_root=tmp_path)
     context = ToolExecutionContext(permission, workspace_root=tmp_path, sandbox_policy=policy(tmp_path, "managed-workspace"),
         run_context=RunContext(mcp_tool_approvals=store))
-    allowed, _, _ = authorize(tool, tmp_path, context.sandbox_policy, permission, context=context)
+    allowed, _, _ = (await authorize(tool, tmp_path, context.sandbox_policy, permission, context=context))
     assert allowed.permission_decision.permission_level is PermissionLevel.AUTO
-    explicit, _, _ = authorize(tool, tmp_path, context.sandbox_policy, permission, context=context,
-        permission_settings=replace(settings(), require_confirm=[tool.policy_identity]))
+    explicit, _, _ = (await authorize(tool, tmp_path, context.sandbox_policy, permission, context=context,
+        permission_settings=replace(settings(), require_confirm=[tool.policy_identity])))
     assert explicit.permission_decision.permission_level is PermissionLevel.CONFIRM
     context.turn_id = "cache-strict-turn"
     context.permission_grants.record(PermissionGrantResponse(AdditionalPermissionProfile(network=NetworkPermissions(enabled=True)), "turn", True), "local", context.turn_id)
-    reviewed, _, _ = authorize(tool, tmp_path, context.sandbox_policy, permission, context=context)
+    reviewed, _, _ = (await authorize(tool, tmp_path, context.sandbox_policy, permission, context=context))
     assert reviewed.permission_decision.permission_level is PermissionLevel.CONFIRM
-    fresh, _, _ = authorize(tool, tmp_path, context.sandbox_policy, permission)
+    fresh, _, _ = (await authorize(tool, tmp_path, context.sandbox_policy, permission))
     assert fresh.permission_decision.permission_level is PermissionLevel.CONFIRM

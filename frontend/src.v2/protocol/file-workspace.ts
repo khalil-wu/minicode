@@ -1,7 +1,7 @@
 import { getWebSocket } from "../hooks/useWebSocket";
-import type { AppStore, GitChangeFile, GitComparisonState, GitReviewSelection, WorkspaceFileOwner } from "../stores/types";
+import type { AppStore, GitChangeFile, GitComparisonState, GitReviewSelection, WorkspaceFileOwner, WorkspaceFileTab } from "../stores/types";
 import type { GitReviewOptions } from "../chat/diff/git-review-options";
-import { normalizeWorkspacePath } from "../lib/workspace-path";
+import { normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
 import { ApiError, apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "./api";
 import { workspaceRequestPath } from "./workspace-request-path";
 import type { ConversationBrowserTree } from "./conversation-browser";
@@ -12,16 +12,47 @@ export function fileWorkspaceScope(state: Pick<AppStore, "conversationId" | "wor
 }
 
 export function currentFileWorkspaceOwner(state: AppStore): WorkspaceFileOwner {
-  const conversation = state.conversations.find(value => value.id === state.conversationId);
-  const executionCwd = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || state.workingDirectory;
-  return { scopeId: fileWorkspaceScope(state), conversationId: state.conversationId, executionCwd,
-    browserRoot: conversation?.projectlessBrowserRoot || executionCwd };
+  return fileWorkspaceOwner(state, state.conversationId);
+}
+
+export function fileWorkspaceOwner(state: Pick<AppStore, "conversations" | "workingDirectory">,
+  conversationId: string | null, executionCwd?: string): WorkspaceFileOwner {
+  const conversation = state.conversations.find(value => value.id === conversationId);
+  const bound = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot;
+  const cwd = executionCwd ?? (bound || state.workingDirectory);
+  return { scopeId: conversationId ? `conversation:${conversationId}` : `home:${normalizeWorkspacePath(cwd)}`,
+    conversationId, executionCwd: cwd,
+    browserRoot: conversation?.projectlessBrowserRoot && workspaceRootsEqual(cwd, bound)
+      ? conversation.projectlessBrowserRoot : cwd };
 }
 
 export function workspaceFileAbsolutePath(owner: WorkspaceFileOwner, path: string): string {
+  if (path.startsWith("file:")) return path;
   const value = normalizeWorkspacePath(path);
-  return value.startsWith("file:") || value.startsWith("/") || /^[a-z]:\//i.test(value)
-    ? value : `${owner.browserRoot.replace(/[\\/]+$/, "")}/${value.replace(/^\.\//, "")}`;
+  if (value.startsWith("/") || /^[a-z]:\//i.test(value)) return value;
+  const root = owner.browserRoot.replace(/[\\/]+$/, "");
+  if (root.startsWith("file:")) {
+    return new URL(value.split("/").map(encodeURIComponent).join("/"), `${root}/`).href;
+  }
+  return normalizeWorkspacePath(`${root}/${value}`);
+}
+
+/** Refresh only an authoritative browser root, retaining the exact execution owner and file. */
+export function reconcileWorkspaceFileReference(owner: WorkspaceFileOwner, path: string,
+  state: Pick<AppStore, "conversations" | "workingDirectory">): { owner: WorkspaceFileOwner; path: string } {
+  const conversation = state.conversations.find(value => value.id === owner.conversationId);
+  if (!owner.conversationId || !conversation?.projectlessBrowserRoot) return { owner, path };
+  const canonical = fileWorkspaceOwner(state, owner.conversationId);
+  if (!workspaceRootsEqual(canonical.executionCwd, owner.executionCwd)
+    || workspaceRootsEqual(canonical.browserRoot, owner.browserRoot)) return { owner, path };
+  const absolute = workspaceFileAbsolutePath(owner, path);
+  return { owner: { ...owner, browserRoot: canonical.browserRoot },
+    path: workspaceRequestPath(absolute, canonical.browserRoot).replaceAll("\\", "/") };
+}
+
+export function reconcileWorkspaceFileTab(tab: WorkspaceFileTab, state: Pick<AppStore, "conversations" | "workingDirectory">): WorkspaceFileTab {
+  const reference = reconcileWorkspaceFileReference(tab.owner, tab.path, state);
+  return reference.owner === tab.owner ? tab : { ...tab, ...reference };
 }
 
 function fileUrl(owner: WorkspaceFileOwner, method: string, path?: string, params: Record<string, string> = {}) {

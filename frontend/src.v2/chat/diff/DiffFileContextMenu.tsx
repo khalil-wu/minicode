@@ -9,6 +9,7 @@ import { openPreferredFile, openPreferredWebLink, preferredFileTargetForWorkspac
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath } from "../../lib/workspace-path";
 import { openWorkspaceSourceFile } from "../../workspace/openWorkspaceFolder";
 import { useDiffViewPreference } from "./diff-view-preferences";
+import { useDesktopPreferenceTargets } from "../../hooks/useDesktopPreferenceTargets";
 
 type RequestChanges = (location?: DiffLineLocation) => void;
 const RequestChangesContext = createContext<MutableRefObject<RequestChanges | undefined> | null>(null);
@@ -59,12 +60,13 @@ export function DiffFileContextMenu({ path, workspaceRoot, deleted = false, firs
   const { t, locale } = useI18n();
   const requestChanges = useRef<RequestChanges>();
   const [menu, setMenu] = useState<MenuState>();
+  const { targets: openTargets } = useDesktopPreferenceTargets(Boolean(menu));
   const [wrap, setWrap] = useDiffViewPreference("wrap");
   const zh = locale === "zh-CN";
   const validPath = path.length > 0 && path !== "/dev/null";
   const canOpen = canOpenFile && validPath && workspaceRoot !== "";
   const paths = pathsForMenu(path, workspaceRoot);
-  const targets = isDesktop() && !runtime()?.remoteHost ? preferences?.fileOpenTargets ?? [] : [];
+  const targets = isDesktop() && !runtime()?.remoteHost ? openTargets?.fileOpenTargets ?? [] : [];
   const preferred = preferences ? preferredFileTargetForWorkspace(preferences, workspaceRoot) : undefined;
   const primary = canOpen ? targets.find(target => target.id === preferred) : undefined;
   const newTab = canOpen && !deleted;

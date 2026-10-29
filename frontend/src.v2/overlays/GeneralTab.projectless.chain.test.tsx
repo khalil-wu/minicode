@@ -4,19 +4,35 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GeneralTab } from "./GeneralTab";
 import { useAppStore } from "../stores";
 import type { DesktopPreferences, DesktopPreferencesPatch } from "../desktop/runtime";
+import { handleSessionEvent } from "../chat/sessionEvents";
 
-const mocks = vi.hoisted(() => ({ toast: vi.fn(), command: vi.fn() }));
+const mocks = vi.hoisted(() => ({ toast: vi.fn(), command: vi.fn(), send: vi.fn(), listeners: new Set<(data: unknown) => void>() }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
 vi.mock("../hooks/usePluginsFeature", () => ({ usePluginsFeature: () => ({ enabled: false, locked: false, error: "" }), setPluginsFeatureEnabled: vi.fn() }));
-vi.mock("../protocol/ws-outbox", async load => ({ ...await load<typeof import("../protocol/ws-outbox")>(), sendClientCommandAwaitResult: mocks.command }));
+vi.mock("../protocol/ws-outbox", async load => ({ ...await load<typeof import("../protocol/ws-outbox")>(), sendClientCommand: mocks.send, sendClientCommandAwaitResult: mocks.command }));
+vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({
+  sessionId: "general-draft", send: mocks.send, subscribe: (listener: (data: unknown) => void) => { mocks.listeners.add(listener); return () => mocks.listeners.delete(listener); },
+}) }));
+vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(), fetchDraftModelSelection: vi.fn(async (root: string) => ({
+  provider: "custom", current_model: "fixture", model: "fixture", available_models: ["fixture"], models_source: "configured", config_version: "fixture", config_cwd: root, effective_reasoning_effort: "off",
+  default_model_selection: { provider: "custom", model: "fixture", reasoning_effort: "off", conversation_id: "", working_directory: root },
+  available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [],
+})) }));
+const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never;
+const switchProjection = (command: { type: string; conversation_id: string; client_command_id?: string }, hydrating: boolean) => {
+  const event = { type: "conversation.switched", conversation_id: command.conversation_id, is_hydrating: hydrating, context_pending: hydrating,
+    client_command_id: command.client_command_id, client_command_type: command.type,
+    conversation: { id: command.conversation_id, title: "New", workspace_root: "C:/ExistingWorkspace", messages: [] } } as never;
+  handleSessionEvent(event, buffers);
+  for (const listener of [...mocks.listeners]) listener(event);
+};
 
 const runtimeDefault = "C:/RuntimeDocuments/MiniCode";
 const selectedFolder = "C:/Selected task data";
 function bindNative(initialOverride: string | null = null) {
   let current: DesktopPreferences = {
     defaultTaskDirectory: initialOverride ?? runtimeDefault, taskDirectoryOverride: initialOverride,
-    fileOpenTarget: "minicode", fileOpenTargetPerPath: {}, fileOpenTargets: [{ id: "minicode", label: "MiniCode", kind: "editor", icon: "apps/minicode.svg" }],
-    terminalShell: "powershell", terminalShellTargets: [{ id: "powershell", label: "PowerShell" }],
+    fileOpenTarget: "minicode", fileOpenTargetPerPath: {}, terminalShell: "powershell",
     defaultPermissionMode: "confirm", showFullAccess: true, showContextWindowUsage: false, showBottomPanel: true,
     defaultWorkspaceFullView: false, popoutWindowShortcut: null, popoutWindowProjectlessDefault: false, confettiEnabled: false,
     defaultTerminalLocation: "bottom", composerPlainTextMode: false, localeOverride: "zh-CN", systemLocale: "zh-CN",
@@ -39,6 +55,7 @@ function bindNative(initialOverride: string | null = null) {
   window.__MINICODE_RUNTIME__ = { desktop: {
     platformInfo: { isDesktop: true, platform: "win32", arch: "x64" },
     preferences: { get, set, chooseTaskDirectory, getStartupStatus: async () => false,
+      getTargets: async () => ({ fileOpenTargets: [{ id: "minicode", label: "MiniCode", kind: "editor", icon: "apps/minicode.svg" }], terminalShellTargets: [{ id: "powershell", label: "PowerShell" }] }),
       onChanged: (listener: (preferences: DesktopPreferences) => void) => { listeners.add(listener); return () => listeners.delete(listener); } },
     updates: { getStatus: async () => ({ status: "unavailable" }), onStatus: () => () => {} },
   } } as never;
@@ -49,13 +66,18 @@ const renderGeneral = () => render(<GeneralTab />);
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.command.mockResolvedValue({ level: "success", command: "conversation.create", data: {} });
+  mocks.listeners.clear(); mocks.command.mockReset(); mocks.send.mockReset();
+  mocks.command.mockImplementation(async (command, expected) => {
+    if (command.type === "conversation.switch") throw new Error("Switch success is a canonical notification, not command.result");
+    return { type: "command.result", level: "success", command: expected, data: { conversation_id: command.conversation_id, execution_cwd: "C:/ExistingWorkspace" } };
+  });
+  mocks.send.mockImplementation(command => { if (command.type === "conversation.switch") { switchProjection(command, true); switchProjection(command, false); } return true; });
   useAppStore.setState({ draft: "保留未发送草稿", attachments: [{ id: "keep-image", name: "draft.png", type: "image/png", size: 12, status: "ready" }],
     workingDirectory: "C:/ExistingWorkspace", workspaceComposerDrafts: {}, conversationId: "existing-chat", conversations: [{ id: "existing-chat", title: "Existing chat", updatedAt: "2026-10-20", workspaceRoot: "C:/ExistingWorkspace" }],
-    pendingConversationCreateId: null, pendingConversationSwitchId: null, pendingComposerConversationAdoption: null,
+    pendingConversationCreateId: null, pendingConversationSwitchId: null,
     settingsOpen: true, settingsTab: "general", appMode: "cowork", isConnected: true, isStreaming: false, permissionMode: "confirm", runtimeSession: null });
 });
-afterEach(() => { cleanup(); delete window.__MINICODE_RUNTIME__; });
+afterEach(() => { cleanup(); useAppStore.setState({ isConnected: false }); delete window.__MINICODE_RUNTIME__; });
 
 it.each(["files", "browser"] as const)("initializes only a new workspace's full view and retains it on its first %s tab", async (target) => {
   const native = bindNative();
@@ -90,31 +112,41 @@ it("keeps a new full-view task's initialized layout when adopting an unsent work
     draft: "Adopt this unsent draft", workingDirectory: "C:/ExistingWorkspace", workspaceComposerDrafts: {} });
   const attachments = useAppStore.getState().attachments;
   let complete!: (value: unknown) => void;
-  mocks.command.mockImplementationOnce(() => new Promise(resolve => { complete = resolve; }));
+  let switchCommand: { type: string; conversation_id: string; client_command_id?: string } | undefined;
+  const execute = mocks.command.getMockImplementation()!;
+  mocks.command.mockImplementation((command, expected) => {
+    if (command.type === "conversation.create") return new Promise(resolve => { complete = resolve; });
+    return execute(command, expected);
+  });
+  mocks.send.mockImplementation(command => { if (command.type === "conversation.switch") { switchCommand = command; switchProjection(command, true); } return true; });
   const ensure = useAppStore.getState().ensureComposerConversation();
   await waitFor(() => expect(mocks.command).toHaveBeenCalledOnce());
   const id = mocks.command.mock.calls[0][0].conversation_id;
-  expect(mocks.command.mock.calls[0][0]).toMatchObject({ type: "conversation.create", workspace_root: "C:/ExistingWorkspace", conversation_id: id });
-  expect(useAppStore.getState()).toMatchObject({ draft: "Adopt this unsent draft",
-    pendingComposerConversationAdoption: { conversationId: id, workspaceRoot: "C:/ExistingWorkspace" } });
-  useAppStore.setState({ conversations: [{ id, title: "New", updatedAt: "now", workspaceRoot: "C:/ExistingWorkspace" }] });
-  useAppStore.getState().applyConversationSwitched({ conversationId: id });
-  expect(useAppStore.getState()).toMatchObject({ conversationId: id, rightPanelExpanded: true, draft: "Adopt this unsent draft", pendingComposerConversationAdoption: null });
-  expect(useAppStore.getState().attachments).toEqual(attachments);
-  complete({ type: "command.result", level: "success", command: "conversation.create", message: "Conversation created.", data: { conversation_id: id, created: true, activated: true } });
+  expect(mocks.command.mock.calls[0][0]).toMatchObject({ type: "conversation.create", activate: false, workspace_root: "C:/ExistingWorkspace", conversation_id: id });
+  expect(useAppStore.getState()).toMatchObject({ conversationId: null, draft: "Adopt this unsent draft" });
+  expect(useAppStore.getState().conversationWorkbenchStates[id].rightPanelExpanded).toBe(true);
+  handleSessionEvent({ type: "conversation.list", active_conversation_id: null, conversations: [{ id, title: "New",
+    workspace_root: "C:/ExistingWorkspace", agent_mode: "build" }] } as never, buffers);
+  expect(useAppStore.getState().conversationWorkbenchStates[id]).toMatchObject({ rightPanelExpanded: true, agentMode: "build" });
+  complete({ type: "command.result", level: "success", command: "conversation.create", message: "Conversation created.", data: { conversation_id: id, execution_cwd: "C:/ExistingWorkspace", created: true, activated: false } });
+  await waitFor(() => expect(switchCommand).toBeDefined());
+  useAppStore.getState().setDraft("New input after real owner binding");
+  switchProjection(switchCommand!, false);
   expect(await ensure).toBe(id);
-  expect(useAppStore.getState()).toMatchObject({ conversationId: id, rightPanelExpanded: true, draft: "Adopt this unsent draft" });
+  expect(useAppStore.getState()).toMatchObject({ conversationId: id, rightPanelExpanded: true, draft: "New input after real owner binding" });
   expect(useAppStore.getState().attachments).toEqual(attachments);
   useAppStore.getState().setRightStackTab("files");
   expect(useAppStore.getState()).toMatchObject({ rightPanelOpen: true, rightPanelExpanded: true });
 });
 
-it("clears a rejected new task's adoption marker while retaining the unsent workspace draft", async () => {
+it("retains the local draft after real task creation is rejected", async () => {
   bindNative();
   useAppStore.setState({ conversationId: null, conversations: [], draft: "Keep this unsent draft", workingDirectory: "C:/ExistingWorkspace" });
   mocks.command.mockResolvedValueOnce({ level: "error", command: "conversation.create", message: "Actual creation rejection", data: {} });
-  expect(await useAppStore.getState().createConversation({ bindWorkspace: false, adoptDraft: true })).toBe(false);
-  expect(useAppStore.getState()).toMatchObject({ conversationId: null, draft: "Keep this unsent draft", pendingComposerConversationAdoption: null });
+  const draft = useAppStore.getState().startConversationDraft({ bindWorkspace: false });
+  useAppStore.getState().setDraft("Keep this unsent draft");
+  expect(await useAppStore.getState().materializeConversationDraft(draft)).toBeNull();
+  expect(useAppStore.getState()).toMatchObject({ activeConversationDraftId: draft, conversationId: null, draft: "Keep this unsent draft" });
   expect(mocks.toast).toHaveBeenCalledWith("Actual creation rejection", "error", 4000);
 });
 

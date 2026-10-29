@@ -17,9 +17,11 @@ import {
   loadInitialLayout,
   normalizeEditorPath,
   uniqueMessageId,
+  isCompactWorkbenchViewport,
 } from "./shared-helpers";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
 import { workspaceRequestPath } from "../protocol/workspace-request-path";
+import { reconcileWorkspaceFileReference, reconcileWorkspaceFileTab } from "../protocol/file-workspace";
 import { draftWindowOwnerId } from "./draft-window-owner";
 import type { WorkspaceFileTab } from "./types";
 import { emptyConversationWorkbenchState } from "./ui-slice";
@@ -61,20 +63,32 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     workspaceFileTabs: JSON.parse(readLS(filesStorageKey) ?? "[]") as WorkspaceFileTab[],
     fileBrowserRoots: {},
     pendingWorkspaceFileTabId: null,
-    openWorkspaceFileTab: (owner, path, title, line) => {
+    reconcileWorkspaceFileTabs: () => set(state => {
+      const tabs = state.workspaceFileTabs.map(tab => reconcileWorkspaceFileTab(tab, state));
+      return tabs.every((tab, index) => tab === state.workspaceFileTabs[index]) ? state : { workspaceFileTabs: saveFiles(tabs) };
+    }),
+    openWorkspaceFileTab: (owner, path, title, line, options) => {
+      get().reconcileWorkspaceFileTabs();
+      const reference = reconcileWorkspaceFileReference(owner, path, get());
+      owner = reference.owner;
+      path = reference.path;
       const relativePath = workspaceRequestPath(path, owner.browserRoot).replaceAll("\\", "/");
       const current = get().workspaceFileTabs.find(tab => tab.owner.scopeId === owner.scopeId
         && tab.owner.conversationId === owner.conversationId && tab.owner.environmentId === owner.environmentId
         && workspaceRootsEqual(tab.owner.executionCwd, owner.executionCwd)
         && workspaceRootsEqual(tab.owner.browserRoot, owner.browserRoot) && tab.path === relativePath);
       const id = current?.id ?? uniqueMessageId("file");
+      const location = line !== undefined ? { line, column: options?.column, endLine: options?.endLine,
+        endColumn: options?.endColumn, locationRequestId: uniqueMessageId("file-location") } : {};
+      const previewMode = options?.isPreview === undefined ? {} : { isPreview: current?.isPreview === false || current?.pinned ? false : options.isPreview };
       set(state => ({ workspaceFileTabs: saveFiles(current
-        ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, open: true, ...(line ? { line } : {}) } : tab)
-        : [...state.workspaceFileTabs, { id, owner, path: relativePath, title: title ?? relativePath.split("/").at(-1)!, open: true, pinned: false, pane: "right", line }]) }));
+        ? state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, open: true, ...location, ...previewMode } : tab)
+        : [...state.workspaceFileTabs, { id, owner, path: relativePath, title: title ?? relativePath.split("/").at(-1)!, open: true, pinned: false, pane: "right", ...location, ...previewMode }]) }));
       get().activateWorkspaceFileTab(id);
       return id;
     },
     activateWorkspaceFileTab: id => {
+      get().reconcileWorkspaceFileTabs();
       const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
       set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, open: true } : value)) }));
       const layoutConversationId = tab.owner.scopeId.startsWith("conversation:") ? tab.owner.scopeId.slice(13) : tab.owner.conversationId;
@@ -95,7 +109,7 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.flatMap(tab => tab.id !== id ? [tab] : tab.pinned ? [{ ...tab, open: false }] : [])) }));
       if (wasFocused && next) get().activateWorkspaceFileTab(next.id);
     },
-    pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned } : tab)) })),
+    pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned, ...(pinned ? { isPreview: false } : {}) } : tab)) })),
     moveWorkspaceFileTab: (id, pane) => {
       const tab = get().workspaceFileTabs.find(tab => tab.id === id)!;
       set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(value => value.id === id ? { ...value, pane, open: true } : value)) }));
@@ -142,9 +156,12 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
     },
     toggleRightPanel: () =>
       set((s) => {
-        const rightPanelOpen = !s.rightPanelOpen;
+        const compact = isCompactWorkbenchViewport();
+        const rightPanelOpen = compact && !s.rightPanelExpanded ? s.compactPanel !== "right" : !s.rightPanelOpen;
         writeLS(LS.layout.rightOpen, rightPanelOpen ? "1" : "0");
-        return { rightPanelOpen, rightPanelExpanded: false, ...(!rightPanelOpen ? { rightStackTabLocked: true } : {}) };
+        return { rightPanelOpen, rightPanelExpanded: false,
+          ...(compact ? { compactPanel: rightPanelOpen ? "right" as const : null } : {}),
+          ...(!rightPanelOpen ? { rightStackTabLocked: true } : {}) };
       }),
     setRightPanelExpanded: (expanded) => set({ rightPanelExpanded: expanded }),
     openGitReview: (request) => {
@@ -199,7 +216,10 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         if (state.activeBottomTab === "terminal") state.closeBottomDock();
         state.setRightStackTab("terminal");
       } else {
-        if (state.rightPanelOpen && state.rightStackTab === "terminal") state.toggleRightPanel();
+        if (state.rightPanelOpen && state.rightStackTab === "terminal") {
+          writeLS(LS.layout.rightOpen, "0");
+          set({ rightPanelOpen: false, compactPanel: null });
+        }
         state.openBottomTab("terminal");
       }
     },

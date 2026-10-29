@@ -5,6 +5,7 @@ import { Copy, ExternalLink, Globe, Plus, RotateCcw, Square, Trash2 } from "luci
 import "@xterm/xterm/css/xterm.css";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useAppStore } from "../stores";
+import { useShallow } from "zustand/react/shallow";
 import { desktop, isDesktop, ptyAckExit, ptyClear, ptyKill, ptyList, ptyResize, ptyRestart, ptySnapshot, ptySpawn, ptyWrite } from "../desktop/runtime";
 import type { TerminalSessionInfo } from "../stores/types";
 import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -201,19 +202,26 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
   const webLineRef = useRef("");
   const mountedRef = useRef(true);
   const refreshSessionsRef = useRef<() => Promise<void>>(async () => {});
-  const terminalSessions = useAppStore((s) => s.terminalSessions);
+  const terminalSessions = useAppStore(useShallow((s) => s.terminalSessions
+    .filter((session) => session.conversationId === s.conversationId)));
   const activeTerminalSessionId = useAppStore((s) => s.activeTerminalSessionId);
   const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const resolvedTheme = useAppStore((s) => s.resolvedTheme);
-  const terminalSnapshots = useAppStore((s) => s.terminalSnapshots);
-  const conversations = useAppStore((s) => s.conversations);
+  const terminalSnapshots = useAppStore(useShallow((s) => Object.values(s.terminalSnapshots)
+    .filter((snapshot) => snapshot.conversationId === s.conversationId)));
+  // The terminal only needs conversation identity for retiring orphaned
+  // xterm views. Subscribing to the full conversation objects makes every
+  // streamed message re-render this panel, even while it is hidden.
+  const conversationIdsKey = useAppStore((s) => s.conversations.map((conversation) => conversation.id).join("\0"));
   const [booting, setBooting] = useState(true);
   const [loadedConversationId, setLoadedConversationId] = useState<string | null>(null);
   const [autoCreating, setAutoCreating] = useState(false);
   const creatingRef = useRef(false);
   const [terminalReady, setTerminalReady] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
+  const [removalFeedback, setRemovalFeedback] = useState<{ conversationId: string; message: string } | null>(null);
+  const removalMessage = removalFeedback?.conversationId === conversationId ? removalFeedback.message : "";
   const [terminatingSessionIds, setTerminatingSessionIds] = useState<Set<string>>(() => new Set());
   const terminatingSessionIdsRef = useRef(new Set<string>());
   const [detectedUrls, setDetectedUrls] = useState<string[]>([]);
@@ -377,6 +385,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
 
   useEffect(() => {
     autoCreateAttemptedRef.current = false;
+    setRemovalFeedback(null);
     webLineRef.current = "";
     delete outputBufferRef.current["web-fallback"];
     disposeTerminalView(`fallback:${conversationId || ""}`);
@@ -597,6 +606,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
     terminatingSessionIdsRef.current.add(sessionId);
     setTerminatingSessionIds((current) => new Set(current).add(sessionId));
     const owner = useAppStore.getState().conversationId || "";
+    setRemovalFeedback(null);
     try {
       if (isDesktop()) {
         const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
@@ -608,7 +618,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
             : await ptyKill(sessionId, session.conversationId);
           if (!removed) {
             if (isCurrentConversation(owner)) {
-              setStatusMessage("无法删除终端，因为该会话已不属于当前对话。");
+              setRemovalFeedback({ conversationId: owner, message: tr("未能确认终端已删除，请重试。") });
               await refreshSessionsRef.current();
             }
             return false;
@@ -620,7 +630,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
           if (isCurrentConversation(owner)) useAppStore.getState().removeTerminalSession(sessionId);
           return true;
         } catch (error) {
-          if (isCurrentConversation(owner)) setStatusMessage(`停止终端失败：${String(error)}`);
+          if (isCurrentConversation(owner)) setRemovalFeedback({ conversationId: owner, message: `停止终端失败：${String(error)}` });
           return false;
         }
       }
@@ -636,12 +646,12 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
           "terminal.kill",
         );
         if (!commandResultSucceeded(result)) {
-          if (isCurrentConversation(owner)) setStatusMessage(result.message || "停止终端失败。");
+          if (isCurrentConversation(owner)) setRemovalFeedback({ conversationId: owner, message: result.message || "停止终端失败。" });
           return false;
         }
         return true;
       } catch (error) {
-        if (isCurrentConversation(owner)) setStatusMessage(`停止终端失败：${String(error)}`);
+        if (isCurrentConversation(owner)) setRemovalFeedback({ conversationId: owner, message: `停止终端失败：${String(error)}` });
         return false;
       }
     } finally {
@@ -920,8 +930,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
   useEffect(() => {
     if (!terminalReady) return;
     let activeSnapshotWasApplied = false;
-    for (const snapshot of Object.values(terminalSnapshots)) {
-      if (snapshot.conversationId !== conversationId) continue;
+    for (const snapshot of terminalSnapshots) {
       // Electron snapshots own PTY hydration; the backend mirror has a
       // separate lifetime and must not replace its authoritative scrollback.
       if (isDesktop() && snapshot.terminalMode === "pty") continue;
@@ -948,7 +957,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
   }, [terminalSessions, booting, loadedConversationId, conversationId]);
 
   useEffect(() => {
-    const owners = new Set(conversations.map((conversation) => conversation.id));
+    const owners = new Set(conversationIdsKey ? conversationIdsKey.split("\0") : []);
     for (const [key, view] of terminalViewsRef.current) {
       if (view.owner !== conversationId && !owners.has(view.owner)) {
         disposeTerminalView(key);
@@ -956,7 +965,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
         delete outputCursorRef.current[key];
       }
     }
-  }, [conversations, conversationId]);
+  }, [conversationIdsKey, conversationId]);
 
   const writeToSession = (sessionId: string, data: string) => {
     const session = useAppStore.getState().terminalSessions.find((item) => item.id === sessionId);
@@ -1240,7 +1249,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
             <ExternalLink size={14} />
           </button>
         )}
-        <IconButton label={tr("刷新终端列表")} onClick={() => void refreshSessions()}>
+        <IconButton label={tr("刷新终端列表")} onClick={() => { setRemovalFeedback(null); void refreshSessions(); }}>
           <RotateCcw size={14} />
         </IconButton>
         <IconButton label={tr("复制选中的终端文本")} onClick={() => void copyTerminalSelection()}>
@@ -1258,7 +1267,7 @@ export const TerminalPanel = ({ visible = true }: { visible?: boolean } = {}) =>
           </IconButton>
         )}
       </div>
-      {statusMessage && <div role="status" style={{ color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{statusMessage}</div>}
+      {(statusMessage || removalMessage) && <div role="status" style={{ color: "var(--text-secondary)", fontSize: "var(--text-xs)" }}>{removalMessage && <span>{removalMessage}</span>}{removalMessage && statusMessage ? " " : null}{statusMessage}</div>}
       <div
         ref={containerRef}
         className="flex-1 w-full min-h-0 p-0.5 overflow-hidden"

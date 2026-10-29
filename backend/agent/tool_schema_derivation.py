@@ -249,6 +249,7 @@ def derive_turn_tool_schema_state(
     toolset_policy: Any | None = None,
     mcp_registry_version: int = 0,
     previous: TurnToolSchemaDerivation | None = None,
+    permission_decisions: dict[str, Any] | None = None,
 ) -> TurnToolSchemaDerivation:
     permission_key = permission_context_cache_key(permission_context)
     derivation_key = (
@@ -278,6 +279,7 @@ def derive_turn_tool_schema_state(
         permission_checker=permission_checker,
         permission_context=permission_context,
         materialize_schema=False,
+        permission_decisions=permission_decisions,
     ) if tool_registry is not None else []
     reachable_mcp_tools = set()
     reachable_mcp_servers = None

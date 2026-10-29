@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -22,7 +22,9 @@ import type { ChatTurnState, HistoryCellState } from "../cells/cellTypes";
 import { ChatTurn, HistoryCellRenderer } from "./ChatTurn";
 import { useAppStore } from "../../stores";
 
-afterEach(() => cleanup());
+const previousReducedMotion = useAppStore.getState().reducedMotion;
+beforeEach(() => useAppStore.setState({ reducedMotion: true }));
+afterEach(() => { cleanup(); useAppStore.setState({ reducedMotion: previousReducedMotion }); });
 
 it("keeps progress explanations in completed work until the user expands its disclosure", () => {
   render(<ChatTurn turn={{
@@ -375,9 +377,9 @@ describe("ChatTurn", () => {
   it("opens a shortened file reference using the successful read in the owning turn", () => {
     const root = "E:/记得日记";
     const path = `${root}/remember-diary/src/backup/backupService.native.ts`;
-    const original = useAppStore.getState().openEditorFile;
-    const openEditorFile = vi.fn();
-    useAppStore.setState({ workingDirectory: root, openEditorFile });
+    const original = useAppStore.getState().openWorkspaceFileTab;
+    const openWorkspaceFileTab = vi.fn();
+    useAppStore.setState({ workingDirectory: root, openWorkspaceFileTab });
     try {
       render(<ChatTurn workspaceRoot={root} turn={{
         id: "nested-project", userCell: null, activeCell: null, status: "completed", startedAt: 1,
@@ -388,9 +390,10 @@ describe("ChatTurn", () => {
         finalAnswerCell: { kind: "assistant_markdown", id: "answer", messageId: "answer", markdownSource: "依据 `src/backup/backupService.native.ts`。", copyable: true, createdAt: 2 },
       }} />);
       fireEvent.click(screen.getByRole("button", { name: "src/backup/backupService.native.ts" }));
-      expect(openEditorFile).toHaveBeenCalledWith(path, undefined, { line: undefined, column: undefined });
+      expect(openWorkspaceFileTab).toHaveBeenCalledWith(expect.objectContaining({ executionCwd: root }), path,
+        "backupService.native.ts", undefined, expect.objectContaining({ column: undefined, isPreview: true }));
     } finally {
-      useAppStore.setState({ openEditorFile: original });
+      useAppStore.setState({ openWorkspaceFileTab: original });
     }
   });
 

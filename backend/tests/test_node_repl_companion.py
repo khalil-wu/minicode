@@ -13,6 +13,8 @@ import pytest
 
 from backend.agent.environment_selection import EnvironmentConfig, EnvironmentConfigState, ThreadEnvironmentDefaults, ThreadEnvironments, TurnEnvironmentRequest, TurnEnvironmentSelection
 from backend.environments import EnvironmentManager
+from backend.config import AppConfig, LLMSettings
+from backend.feature_flags import FeatureFlags
 from backend.mcp.environment_runtime import MCPEnvironmentRuntime
 from backend.mcp.manager import MCPServerManager
 from backend.mcp.node_repl import NodeReplCompanions
@@ -33,16 +35,17 @@ async def companion(tmp_path, *, environment_config=None):
     owner = NodeReplCompanions()
     runtime = MCPEnvironmentRuntime(environments, snapshot, local_cwd=tmp_path.as_uri())
     runtime.node_repl_companions = owner
-    registered = await owner.admit(snapshot.primary(), None)
+    flags = FeatureFlags({})
+    registered = await owner.admit(snapshot.primary(), None, feature_flags=flags)
     assert registered is not None, "This real-process suite requires the installed Node runtime"
     manager = MCPServerManager(config_path=tmp_path / "mcp.json", workspace_root=tmp_path,
-        environment_runtime=runtime, runtime_configs=(registered,))
+        environment_runtime=runtime, runtime_configs=(registered,), optional_startup_grace_ms=0, feature_flags=flags)
     try:
         await manager.start_all()
         client = manager.get_client("node_repl")
         assert client is not None, manager.get_all_status()
         yield SimpleNamespace(owner=owner, manager=manager, client=client, runtime=runtime,
-            environments=environments, backend=backend, thread=thread, snapshot=snapshot, config=registered)
+            environments=environments, backend=backend, thread=thread, snapshot=snapshot, config=registered, flags=flags)
     finally:
         await manager.stop_all()
         await owner.aclose()
@@ -243,7 +246,7 @@ async def test_retiring_manager_reuses_original_process_and_permission_change_ha
             assert len(fixture.backend.process.processes) == 1
             narrowed = replace(fixture.snapshot.primary(), selection=replace(fixture.snapshot.primary().selection,
                 config=EnvironmentConfigState.ready(replace(fixture.snapshot.primary().config, workspace_roots=(tmp_path.parent.as_uri(),)))))
-            changed = await fixture.owner.admit(narrowed, None)
+            changed = await fixture.owner.admit(narrowed, None, feature_flags=fixture.flags)
             assert changed.source != fixture.config.source
         finally:
             await manager.stop_all()
@@ -339,12 +342,13 @@ async def test_real_builtin_registration_obeys_captured_environment_mcp_authorit
     prepared = PreparedEnvironmentCapabilities(manager, None, (), (), runtime, True, "authority", "turn")
     run = RunContext(turn_environments=snapshot, environment_capabilities=prepared, environment_thread_runtime=host,
         network_step=SimpleNamespace(policy_for=lambda attachment: None),
-        model_execution=SimpleNamespace(config=SimpleNamespace(config_layer_stack=ConfigLayerStack(())), model_info=SimpleNamespace(extra={"node_repl_disabled": model_disabled})),
-        active_model_execution=SimpleNamespace(config=SimpleNamespace(config_layer_stack=ConfigLayerStack((
+        model_execution=SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key=""), config_layer_stack=ConfigLayerStack(())), model_info=SimpleNamespace(extra={"node_repl_disabled": model_disabled})),
+        active_model_execution=SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key=""), config_layer_stack=ConfigLayerStack((
             ConfigLayer(ConfigLayerSource("policy"), {"denied_mcp_servers": [{"name": "node_repl"}]}),))),
             model_info=SimpleNamespace(extra={"node_repl_disabled": not model_disabled})))
     try:
         await register_node_companion(run, registry, None, execution=run.model_execution)
+        await manager.wait_for_server_startup("node_repl")
         if allowed_server == "node_repl" and not model_disabled:
             client = manager.get_client("node_repl")
             assert client is not None and client.connected, manager.get_all_status()
@@ -386,7 +390,7 @@ async def test_scope_retirement_waits_for_original_call_then_stops_its_timer(tmp
         moved = replace(original, selection=replace(original.selection, config=EnvironmentConfigState.ready(changed_config)))
         await fixture.thread.update_selections([moved.selection])
         changed_snapshot = await fixture.thread.snapshot()
-        changed = await fixture.owner.admit(changed_snapshot.primary(), None)
+        changed = await fixture.owner.admit(changed_snapshot.primary(), None, feature_flags=fixture.flags)
         assert changed.source != fixture.config.source and old.connected
         retiring = PreparedEnvironmentCapabilities(fixture.manager, None, (), (), fixture.runtime, True, "conversation", "turn").retire(RunContext())
         observed = await running
@@ -402,6 +406,7 @@ async def test_scope_retirement_waits_for_original_call_then_stops_its_timer(tmp
             environment_runtime=runtime, runtime_configs=(changed,))
         try:
             await manager.start_all()
+            await manager.wait_for_server_startup("node_repl")
             current = manager.get_client("node_repl")
             if scope_change == "mcp-authority":
                 assert current is None and not fixture.backend.process.processes
@@ -431,14 +436,14 @@ async def test_prepared_capabilities_re_admit_node_after_scope_and_preserve_user
         fixture.manager._runtime_configs += (user_config,)
         await fixture.manager.start_server(user_config)
         prepared = await prepare_environment_capabilities(turn_environments=fixture.snapshot,
-            host_skill_manager=None, host_mcp_manager=fixture.manager, feature_flags=FeatureFlags({}),
+            host_skill_manager=None, host_mcp_manager=fixture.manager, feature_flags=fixture.flags,
             thread_id="receiving", turn_id="next", session_source="subagent" if is_subagent else "sdk",
             isolated=True, is_subagent=is_subagent, environment_manager=fixture.environments, local_cwd=tmp_path.as_uri())
         store = ArtifactStore(storage_dir=tmp_path / "prepared-artifacts")
         host = SimpleNamespace(node_repl_companions=None if is_subagent else fixture.owner)
         try:
             assert prepared.mcp_manager.get_server_config("node_repl") is None
-            assert "node_repl" not in prepared.mcp_manager._cached_catalog
+            assert "node_repl" not in prepared.mcp_manager._catalog_snapshots
             assert "node_repl" not in prepared.mcp_manager.get_all_tools()
             assert prepared.mcp_manager.get_server_config("configured_tools").source == "user"
             if is_subagent:
@@ -446,13 +451,18 @@ async def test_prepared_capabilities_re_admit_node_after_scope_and_preserve_user
                 assert "configured_tools" in prepared.mcp_manager._lazy_servers
                 assert prepared.mcp_manager.get_all_tools()["configured_tools"]
             else:
+                await prepared.mcp_manager.wait_for_server_startup("configured_tools")
                 assert prepared.mcp_manager.get_client("configured_tools") is not None
             registry = ToolRegistry()
             prepared.bind_registry(registry, store)
             run = RunContext(turn_environments=fixture.snapshot, environment_capabilities=prepared,
                 environment_thread_runtime=host, network_step=SimpleNamespace(policy_for=lambda attachment:None))
-            execution = SimpleNamespace(config=SimpleNamespace(config_layer_stack=ConfigLayerStack(())), model_info=None)
+            execution = SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key=""), config_layer_stack=ConfigLayerStack(()), feature_flags=fixture.flags), model_info=None)
             await register_node_companion(run, registry, None, execution=execution)
+            # A child may borrow the catalog while its own kernel is dormant.
+            # Invoking that capability triggers its exact producer; waiting for
+            # an already-triggered attempt alone must not create a kernel.
+            await prepared.mcp_manager.prepare_server_call("node_repl")
             current = prepared.mcp_manager.get_client("node_repl")
             assert current is not None
             if is_subagent:
@@ -565,7 +575,7 @@ async def test_elevated_account_rejected_node_start_closes_original_handle_and_t
     runtime.node_repl_companions = owner
     registered = await owner.admit(snapshot.primary(), None)
     manager = MCPServerManager(config_path=tmp_path / "native-rejected.json", workspace_root=tmp_path,
-        environment_runtime=runtime, runtime_configs=(registered,))
+        environment_runtime=runtime, runtime_configs=(registered,), optional_startup_grace_ms=0)
     try:
         await manager.start_all()
         [companion] = owner.instances.values()

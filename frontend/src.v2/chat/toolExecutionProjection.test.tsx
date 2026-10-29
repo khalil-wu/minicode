@@ -17,7 +17,7 @@ const buffer = createStreamBuffer(() => {});
 const emit = (event: ServerEvent) => handleChatStreamEvent(event, owner, { textStreamBuffer: buffer });
 
 beforeEach(() => {
-  useAppStore.setState({ ...initialStore, conversationId: owner, isStreaming: true,
+  useAppStore.setState({ ...initialStore, reducedMotion: true, conversationId: owner, isStreaming: true,
     conversationStreaming: { [owner]: true }, conversationMessages: {}, sideChats: {},
     messages: [{ id: "answer", role: "assistant", content: "", timestamp: 1, artifacts: [], blocks: [], isStreaming: true }],
   });

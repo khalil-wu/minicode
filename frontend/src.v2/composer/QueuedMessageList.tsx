@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { CornerDownLeft, Copy, MoreHorizontal, Pencil, Trash2 } from "../lib/icons";
+import { CornerDownLeft, Copy, ListEnd, MoreHorizontal, Pencil, Trash2 } from "../lib/icons";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
@@ -11,6 +11,10 @@ import type { ChatMessage } from "../stores/types";
 import { captureSteerTurnId } from "../lib/steer-command";
 import { pushToast } from "../overlays/ToastContainer";
 import { beginQueuedMessageEdit, deleteQueuedMessage } from "./queued-message-edit";
+import { artifactResourceUrl } from "../lib/artifact-resource";
+import { fileIcon } from "../lib/file-icons";
+import { getWebSocket } from "../hooks/useWebSocket";
+import { openAttachmentPreview, openLocalFilePreview } from "../chat/openAttachmentPreview";
 const NO_MESSAGES: ChatMessage[] = [];
 
 export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { wide?: boolean; minimal?: boolean; ownerId?: string }) => {
@@ -19,6 +23,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
     .filter((message) => message.role === "user" && message.queueState === "queued")));
   const conversationId = useAppStore((state) => ownerId ?? state.conversationId);
   const isStreaming = useAppStore((state) => ownerId ? state.sideChats[ownerId]?.isStreaming : state.isStreaming);
+  const isConnected = useAppStore((state) => state.isConnected);
   const [menuFor, setMenuFor] = useState<string | null>(null);
   const menuRootRef = useRef<HTMLDivElement>(null);
   const menuTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -97,7 +102,7 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
     <div
       className="queued-message-list"
       aria-label={tr("排队中的消息")}
-      style={{ width: minimal ? "100%" : wide ? "var(--chat-code-composer-width)" : "var(--chat-composer-axis-width)" }}
+      style={{ width: minimal ? "calc(100% - 24px)" : wide ? "calc(var(--chat-code-composer-width) - 24px)" : "calc(var(--chat-composer-axis-width) - 24px)" }}
     >
       <DndContext sensors={sensors} onDragStart={() => { dragging.current = { ownerId: conversationId, ids: queued.map(message => message.queueMessageId!) }; }}
         onDragCancel={() => { dragging.current = null; }} onDragEnd={({ active, over }) => {
@@ -120,10 +125,25 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
         const label = message.content.trim() || attachmentNames.join(", ") || (commentCount ? commentLabel : "Attachment");
         const displayNumber = (message.queuePosition ?? index + 1) + 1;
         return (
-          <SortableQueuedRow key={message.id} id={message.queueMessageId!} number={displayNumber}
+          <SortableQueuedRow key={message.id} id={message.queueMessageId!}
             numberLabel={tr("队列第 {count} 项", { count: displayNumber })} dragLabel={tr("拖动以重新排序排队消息")}>
+            {Boolean(message.attachmentRefs?.length) && <span className="queued-message-attachments" aria-label={tr("附件")}>
+              {message.attachmentRefs!.map(attachment => {
+                const imageUrl = attachment.kind === "image" ? artifactResourceUrl({ artifactId: attachment.artifactId,
+                  originalUrl: attachment.dataUrl, source: "attachment", conversationId, sessionId: getWebSocket()?.sessionId, isConnected }) : "";
+                const contents = imageUrl ? <img src={imageUrl} alt="" /> : fileIcon(attachment.name, { size: 16 });
+                return attachment.artifactId || attachment.dataUrl
+                  ? <button type="button" className="queued-message-attachment" key={attachment.id} title={tr("预览 {v0}", { v0: attachment.name })}
+                    aria-label={tr("预览 {v0}", { v0: attachment.name })} onClick={() => {
+                      const target = { name: attachment.name, mediaType: attachment.mediaType, kind: attachment.kind, conversationId };
+                      if (attachment.artifactId) openAttachmentPreview({ ...target, artifactId: attachment.artifactId });
+                      else openLocalFilePreview({ ...target, id: attachment.id, url: attachment.dataUrl });
+                    }}>{contents}</button>
+                  : <span className="queued-message-attachment" key={attachment.id} title={attachment.name}>{contents}</span>;
+              })}
+            </span>}
             <span className="queued-message-text" title={label}>{label}</span>
-            {message.queuePaused ? <span>{tr("已暂停")}</span> : null}
+            {message.queuePaused ? <span className="queued-message-paused">{tr("已暂停")}</span> : null}
             <button
               type="button"
               className="queued-message-steer"
@@ -181,13 +201,13 @@ export const QueuedMessageList = ({ wide = false, minimal = false, ownerId }: { 
   );
 };
 
-function SortableQueuedRow({ id, number, numberLabel, dragLabel, children }: {
-  id: string; number: number; numberLabel: string; dragLabel: string; children: ReactNode;
+function SortableQueuedRow({ id, numberLabel, dragLabel, children }: {
+  id: string; numberLabel: string; dragLabel: string; children: ReactNode;
 }) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition } = useSortable({ id });
   return <div className="queued-message-row" ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }}>
     <span className="queued-message-number" ref={setActivatorNodeRef} {...attributes} {...listeners}
-      aria-label={numberLabel} title={dragLabel} style={{ cursor: "grab", touchAction: "none" }}>{number}</span>
+      aria-label={numberLabel} title={dragLabel} style={{ cursor: "grab", touchAction: "none" }}><ListEnd size={15} aria-hidden="true" /></span>
     {children}
   </div>;
 }

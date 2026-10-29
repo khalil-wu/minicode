@@ -10,6 +10,8 @@ import { PromptSourceIcon } from "../../lib/prompt-source-icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
 import { ChatTurn } from "../../chat/components/ChatTurn";
+import type { ChatTurnState } from "../../chat/cells/cellTypes";
+import { projectChatTurnToAgentLoop } from "../../agent-loop/projection/project-turn";
 import {
   hydrateMessages,
   type BackendTranscriptMessage,
@@ -20,9 +22,11 @@ import { formatModelLabel } from "../../lib/model-label";
 import { workspaceRootsEqual } from "../../lib/workspace-path";
 import { MarkdownRenderer } from "../../chat/messages/MarkdownRenderer";
 import { fromMarkdown, markdownNodeText } from "../../lib/markdown";
+import { useSharedSecondTick } from "../../lib/shared-tick";
 import { SubagentPlanReviewCard } from "../../chat/InlineAgentPrompt";
 import {
   projectAgentViews,
+  agentRelativeTimeLabel,
   type AgentView,
   type AgentLink,
 } from "../../lib/agent-view-model";
@@ -98,6 +102,13 @@ const relativeTimeText = (value: string, t: Translate): string => {
 };
 
 const statusText = (view: AgentView, t: Translate): string => t(agentUiText(view.statusLabel) as TranslationKey);
+const reasoningLabels: Record<string, TranslationKey | "Ultra"> = {
+  none: "关闭", minimal: "最低", low: "低", medium: "中", high: "高", xhigh: "极高", max: "最大", ultra: "Ultra",
+};
+const reasoningText = (effort: string, t: Translate): string => {
+  const label = reasoningLabels[effort];
+  return label && label !== "Ultra" ? t(label) : label ?? effort;
+};
 const agentElapsedText = (startedAt: number | undefined, now: number, t: Translate): string => {
   if (!startedAt) return "";
   const seconds = Math.max(0, Math.floor((now - startedAt) / 1000));
@@ -124,19 +135,19 @@ const AgentGlyph = ({ view, large = false }: { view: AgentView; large?: boolean 
 const AgentRow = ({
   view,
   source,
-  now,
   onOpen,
 }: {
   view: AgentView;
   source: SubagentState;
-  now: number;
   onOpen: () => void;
 }) => {
   const { t } = useI18n();
   const active = view.canStop;
-  const objective = source.objective
+  const now = useSharedSecondTick(active ? Boolean(view.startedAt) : Boolean(source.completedAt || source.lastProgressAt || source.lastEventAt));
+  const objective = useMemo(() => source.objective
     ? markdownNodeText(fromMarkdown(source.objective)).replace(/\s+/g, " ").trim().slice(0, 60)
-    : "";
+    : "", [source.objective]);
+  const relativeTimeLabel = active ? "" : agentRelativeTimeLabel(source, now);
   const preview = objective && objective !== view.title ? objective : !objective && active && view.status === "running" ? t("正在执行") : "";
   const waiting = active && view.status !== "running";
   const elapsed = active ? agentElapsedText(view.startedAt, now, t) : "";
@@ -157,8 +168,8 @@ const AgentRow = ({
         {active ? <span className="subagents-row-trailing">
           {waiting && <span className="subagents-row-status">{statusText(view, t)}</span>}
           {elapsed && <span className="subagents-row-time">{elapsed}</span>}
-        </span> : view.relativeTimeLabel && (
-          <span className="subagents-row-time">{relativeTimeText(view.relativeTimeLabel, t)}</span>
+        </span> : relativeTimeLabel && (
+          <span className="subagents-row-time">{relativeTimeText(relativeTimeLabel, t)}</span>
         )}
       </span>
       {preview && <span className="subagents-row-preview">{preview}</span>}
@@ -179,6 +190,8 @@ const AgentDetail = ({
   view,
   onBack,
   transcriptMessages,
+  turns,
+  hasCompleteFinalAnswer,
   workspaceRoot,
   conversationId,
   transcriptLoading,
@@ -189,6 +202,8 @@ const AgentDetail = ({
   view: AgentView;
   onBack: () => void;
   transcriptMessages: ChatMessage[];
+  turns: ChatTurnState[];
+  hasCompleteFinalAnswer: boolean;
   workspaceRoot: string;
   /** The parent conversation owns the child journal's persisted artifacts. */
   conversationId?: string;
@@ -200,17 +215,14 @@ const AgentDetail = ({
   const { t } = useI18n();
   const isLive = view.status === "running" || view.status === "waiting";
   const executionWorkspaceRoot = source.workspaceRoot ?? "";
-  const turns = useMemo(
-    () => projectMessagesToTurns(
-      transcriptMessages,
-      isLive,
-      executionWorkspaceRoot,
-    ),
-    [isLive, transcriptMessages, executionWorkspaceRoot],
-  );
   const finalAnswer = turns.at(-1)?.finalAnswerCell;
-  const hasCanonicalResult = Boolean(finalAnswer && !finalAnswer.isStreaming
-    && (finalAnswer.markdownSource.trim() || finalAnswer.artifacts?.length));
+  // A preceding answer or interrupted partial cannot replace a newer retained
+  // result. Only the same complete final answer makes that extra copy redundant.
+  const hasCanonicalResult = hasCompleteFinalAnswer
+    && finalAnswer?.markdownSource.trim() === view.resultContent?.trim();
+  const hasCanonicalError = turns.some(turn => turn.committedCells.some(cell => cell.kind === "error"
+    && (view.resultError?.trim() === cell.message.trim()
+      || view.resultError?.trim() === `RuntimeError: ${cell.message.trim()}`)));
 
   return (
     <section className="subagents-detail" aria-label={t("子智能体任务详情：{name}", { name: view.title })}>
@@ -228,7 +240,7 @@ const AgentDetail = ({
           <strong title={view.title}>{view.title}</strong>
         </span>
         {view.model && <span className="subagents-detail-model" title={[view.provider, view.model, view.reasoningEffort].filter(Boolean).join(" · ")}>
-          {formatModelLabel(view.model)}{view.reasoningEffort ? ` · ${view.reasoningEffort}` : ""}
+          {formatModelLabel(view.model)}{view.reasoningEffort ? ` · ${reasoningText(view.reasoningEffort, t)}` : ""}
         </span>}
       </header>
 
@@ -247,7 +259,7 @@ const AgentDetail = ({
         {view.canStop && view.effectiveStatus !== "running" && view.statusLabel === t("清理未完成") && (
           <div className="subagents-transcript-error" role="status">{view.summary}</div>
         )}
-        {view.resultError && (
+        {view.resultError && !hasCanonicalError && (
           <div className="subagents-transcript-error" role="alert">
             <span>{view.resultError}</span>
           </div>
@@ -290,15 +302,7 @@ const AgentDetail = ({
 export const SubagentsTab = () => {
   const { t } = useI18n();
   const subagents = useAppStore((state) => state.subagents);
-  const [now, setNow] = useState(Date.now);
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
-  const hasStartedActive = subagents.some((agent) => ["running", "blocked"].includes(agent.status) && Boolean(agent.startedAt));
-  useEffect(() => {
-    if (!hasStartedActive) return;
-    setNow(Date.now());
-    const timer = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(timer);
-  }, [hasStartedActive]);
   const selectedAgentId = useAppStore((state) => state.focusedSubagentId);
   const setSelectedAgentId = useAppStore((state) => state.setFocusedSubagentId);
   const pendingActionRef = useRef<{ id: string; conversationId: string; workspaceRoot: string } | null>(null);
@@ -310,9 +314,10 @@ export const SubagentsTab = () => {
   const transcriptRequestRef = useRef(0);
   const actionRequestRef = useRef(0);
   const transcriptPresentationRef = useRef<TranscriptPresentation>(emptyTranscriptPresentation());
-  const views = projectAgentViews(subagents);
+  const views = useMemo(() => projectAgentViews(subagents), [subagents]);
+  const subagentsById = useMemo(() => new Map(subagents.map(agent => [agent.id, agent])), [subagents]);
   const selectedView = views.find((view) => view.id === selectedAgentId);
-  const selectedAgent = subagents.find((agent) => agent.id === selectedAgentId);
+  const selectedAgent = selectedAgentId ? subagentsById.get(selectedAgentId) : undefined;
   const pendingAskUser = useAppStore((state) => state.pendingAskUser);
   const askUserQueue = useAppStore((state) => state.askUserQueue);
   const conversationId = useAppStore((state) => state.conversationId);
@@ -496,8 +501,13 @@ export const SubagentsTab = () => {
     }
   }, [conversationId, workingDirectory]);
 
-  const transcriptHasResult = visibleTranscript.messages.some((message) => message.role === "assistant"
-    && !message.isStreaming && Boolean(message.content.trim()));
+  const transcriptIsLive = selectedView?.status === "running" || selectedView?.status === "waiting";
+  const transcriptWorkspaceRoot = selectedAgent?.workspaceRoot ?? "";
+  const transcriptTurns = useMemo(() => projectMessagesToTurns(visibleTranscript.messages, transcriptIsLive, transcriptWorkspaceRoot),
+    [visibleTranscript.messages, transcriptIsLive, transcriptWorkspaceRoot]);
+  const latestTranscriptTurn = transcriptTurns.at(-1);
+  const transcriptHasResult = useMemo(() => Boolean(latestTranscriptTurn
+    && projectChatTurnToAgentLoop(latestTranscriptTurn).hasCompleteFinalAnswer), [latestTranscriptTurn]);
   useEffect(() => {
     if (selectedView?.needsResult && !transcriptLoading && !transcriptHasResult
       && (visibleTranscript.source !== "none" || transcriptError)) void fetchResult(selectedView.id);
@@ -517,6 +527,8 @@ export const SubagentsTab = () => {
         planRequest={planRequest}
         onBack={() => setSelectedAgentId(null)}
         transcriptMessages={visibleTranscript.messages}
+        turns={transcriptTurns}
+        hasCompleteFinalAnswer={transcriptHasResult}
         workspaceRoot={workingDirectory}
         conversationId={conversationId || undefined}
         transcriptLoading={transcriptLoading}
@@ -527,7 +539,7 @@ export const SubagentsTab = () => {
 
   const overviewViews = views.filter((view) => {
     if (["error", "cancelled"].includes(view.effectiveStatus)) return false;
-    const source = subagents.find((agent) => agent.id === view.id)!;
+    const source = subagentsById.get(view.id)!;
     const latestStatus = source.transcriptMessages?.filter((message) => message.role === "assistant").at(-1)?.terminalStatus;
     return view.canStop || (latestStatus !== "failed" && latestStatus !== "interrupted");
   });
@@ -565,8 +577,7 @@ export const SubagentsTab = () => {
                   <AgentRow
                     key={view.id}
                     view={view}
-                    source={subagents.find((agent) => agent.id === view.id)!}
-                    now={now}
+                    source={subagentsById.get(view.id)!}
                     onOpen={() => {
                       setSelectedAgentId(view.id);
                     }}

@@ -640,6 +640,20 @@ async def handle_conversation_create(
             })
             return True
         workspace_root = source_fields["workspace_root"]
+    from backend.services.conversation_permission_service import plan_permission_mode_update
+
+    permission = plan_permission_mode_update(
+        {"mode": source_fields.get("permission_mode", request.permission_mode)},
+        config=session.config,
+    )
+    if permission.error_event is not None:
+        from backend.agent.plans import cleanup_plan_file
+        from backend.ws.command_results import emit_command_error
+
+        cleanup_plan_file(copied_plan_path)
+        await emit_command_error(session, command, permission.error_event,
+                                 data={"conversation_id": request.conversation_id or ""})
+        return True
     remote_activation = None
     if workspace_root.startswith("file:"):
         from fastapi import HTTPException
@@ -813,6 +827,7 @@ async def handle_conversation_create(
         data={
             "conversation_id": created.id,
             "workspace_root": created.workspace_root,
+            "execution_cwd": created.execution_cwd or created.worktree_path or created.workspace_root,
             "conversation_type": created.conversation_type,
             **(build_side_chat_created_data(created, request.source_conversation_id)
                if request.conversation_type == "side_chat" else {}),
@@ -1111,7 +1126,6 @@ async def _publish_conversation_switch(
         return
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
-    session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")
     session.refresh_llm_selection()
 
     async def restored(owner: str) -> None:
@@ -1120,6 +1134,8 @@ async def _publish_conversation_switch(
         error = session.conversation_runtime.hydration_error
         if error is not None:
             await session._on_conversation_hydration_complete(owner)
+            if owner == session.active_conversation_id and session.session_lifecycle.foreground_navigation_is_current():
+                session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")
             return
         generation = session.conversation_runtime._hydration_generation
         if data.get("_reconcile_agent_state", True):
@@ -1132,18 +1148,46 @@ async def _publish_conversation_switch(
                 current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
             if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation or not session.session_lifecycle.foreground_navigation_is_current():
                 return
-            runtime_snapshot = session.runtime_snapshot()
+            runtime_snapshot = session.runtime_snapshot(include_capabilities=False)
             if owner != session.active_conversation_id:
                 return
             await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
                                         "conversation": current_view, "is_hydrating": False,
+                                        **({"capabilities_deferred": True} if data.get("defer_runtime_capabilities") else {}),
                                         "session": runtime_snapshot,
                                         "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")},
                                        log_context="conversation.switched", wait_for_delivery=False)
+        if (not data.get("defer_runtime_capabilities") and owner == session.active_conversation_id
+                and session.session_lifecycle.foreground_navigation_is_current()):
+            session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")
         if data.get("_reemit_pending", True):
             await session.reemit_pending_state(conversation_id=owner)
 
-    session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
+    # Empty transcripts are common for the first message of a new draft. Load
+    # their actual checkpoint once under the same projection boundary used by
+    # normal hydration; short checkpoints need no background continuation.
+    pending_hydration = True
+    if view.get("message_count") == 0:
+        record = await asyncio.to_thread(session.conversation_repo.get_conversation_for_resume, target.id)
+        if target.id != session.active_conversation_id or not session.session_lifecycle.foreground_navigation_is_current():
+            return
+        if record is not None:
+            async with session._conversation_projection_lock(target.id):
+                if target.id != session.active_conversation_id or not session.session_lifecycle.foreground_navigation_is_current():
+                    return
+                pending_hydration = session.conversation_runtime.load_active_conversation_snapshot(
+                    target.id, record.context_snapshot, snapshot_revision=record.revision,
+                    notify=True, on_hydration_complete=restored, defer_start=True,
+                )
+            if not pending_hydration:
+                if session.ws_manager is not None:
+                    await session.ws_manager.observe_conversation_stream(session, target.id)
+                await restored(target.id)
+                return
+    else:
+        record = None
+    if record is None:
+        session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
     await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
                                 "conversation": view, "is_hydrating": True, "context_pending": True,
                                 "session": session.runtime_snapshot(include_capabilities=False),
@@ -2115,6 +2159,7 @@ async def handle_conversation_worktree_handoff_preflight(session: "WebSocketSess
         main_worktree_root=session.main_worktree_root,
         has_running_turn=_conversation_has_active_run(session, conversation_id),
         dirty_action=str(data.get("dirty_action") or "block"),
+        local_branch=str(data.get("local_branch") or ""),
     )
     preflight = _apply_handoff_runtime_blockers(
         preflight,
@@ -2149,6 +2194,7 @@ async def handle_conversation_worktree_handoff_execute(session: "WebSocketSessio
         main_worktree_root=session.main_worktree_root,
         has_running_turn=_conversation_has_active_run(session, conversation_id),
         dirty_action=dirty_action,
+        local_branch=str(data.get("local_branch") or ""),
     )
     preflight = _apply_handoff_runtime_blockers(
         preflight,
@@ -2244,15 +2290,53 @@ async def _handle_conversation_worktree_handoff_claimed(
 
     if target_kind == "worktree":
         base_root = await to_thread_cancel_safe(session.main_worktree_root, source_path)
+        reuse_branch = bool(preflight.get("reuse_branch"))
+        main_checkout = dict(preflight.get("main_checkout") or {})
+        previous_main_branch = str(main_checkout.get("branch") or "")
+        previous_main_head = str(main_checkout.get("head") or "")
+        if reuse_branch:
+            await _release_active_sessions_from_conversation_workspace(session, conversation_id)
+            switched, switch_error = await to_thread_cancel_safe(
+                switch_main_checkout, base_root, preflight["local_checkout_branch"],
+            )
+            if not switched:
+                rollback_errors: list[str] = []
+                if stash_ref:
+                    restored, restore_error = await to_thread_cancel_safe(restore_workspace_stash, source_path, stash_ref)
+                    if not restored:
+                        rollback_errors.append(f"restore_source_stash:{restore_error}")
+                projection_errors = await _switch_active_sessions_to_conversation_workspace(
+                    session, conversation, announce_initiator=False, source="conversation.worktree.handoff.rollback_checkout",
+                )
+                rollback_errors.extend(f"project_session:{session_id}" for session_id in projection_errors)
+                await session.emit_command_result(
+                    "conversation.worktree.handoff.execute", f"Failed to switch the local checkout: {switch_error}",
+                    level="error", data={**preflight, "reason": "local_checkout_failed", "stash_ref": stash_ref,
+                        "rollback_completed": not rollback_errors, "rollback_errors": rollback_errors,
+                        "recovery_required": bool(rollback_errors)},
+                )
+                return True
         creation = await asyncio.to_thread(
             create_isolated_worktree_binding,
             conversation,
             current_workspace_root=source_path,
             main_worktree_root=session.main_worktree_root,
+            **({"branch": preflight["destination"]["branch"], "new_branch": False} if reuse_branch else {}),
         )
         if not creation.created:
             rollback_errors: list[str] = []
-            if stash_ref:
+            checkout_restored = True
+            if reuse_branch:
+                checkout_restored, checkout_error = await to_thread_cancel_safe(
+                    restore_main_checkout, base_root, branch=previous_main_branch, head=previous_main_head,
+                )
+                if not checkout_restored:
+                    rollback_errors.append(f"restore_main_checkout:{checkout_error}")
+                projection_errors = await _switch_active_sessions_to_conversation_workspace(
+                    session, conversation, announce_initiator=False, source="conversation.worktree.handoff.rollback_create",
+                )
+                rollback_errors.extend(f"project_session:{session_id}" for session_id in projection_errors)
+            if stash_ref and checkout_restored:
                 restored, restore_error = await to_thread_cancel_safe(
                     restore_workspace_stash,
                     source_path,
@@ -2307,7 +2391,7 @@ async def _handle_conversation_worktree_handoff_claimed(
                 error.startswith("remove_created_worktree:") for error in rollback_errors
             ):
                 rollback_errors.append("remove_created_worktree:failed")
-            if removed:
+            if removed and not reuse_branch:
                 branch_deleted, branch_error = await to_thread_cancel_safe(
                     delete_local_branch,
                     base_root,
@@ -2315,7 +2399,19 @@ async def _handle_conversation_worktree_handoff_claimed(
                 )
                 if not branch_deleted:
                     rollback_errors.append(f"delete_created_branch:{branch_error}")
-            if stash_ref:
+            checkout_restored = not reuse_branch
+            if reuse_branch and removed:
+                checkout_restored, checkout_error = await to_thread_cancel_safe(
+                    restore_main_checkout, base_root, branch=previous_main_branch, head=previous_main_head,
+                )
+                if not checkout_restored:
+                    rollback_errors.append(f"restore_main_checkout:{checkout_error}")
+            if reuse_branch:
+                projection_errors = await _switch_active_sessions_to_conversation_workspace(
+                    session, conversation, announce_initiator=False, source="conversation.worktree.handoff.rollback_binding",
+                )
+                rollback_errors.extend(f"project_session:{session_id}" for session_id in projection_errors)
+            if stash_ref and checkout_restored:
                 restored, restore_error = await to_thread_cancel_safe(
                     restore_workspace_stash,
                     source_path,

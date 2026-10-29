@@ -38,7 +38,7 @@ export const useKeyboardShortcuts = () => {
       const mod = e.metaKey || e.ctrlKey;
       const s = useAppStore.getState();
       const createConversationInCurrentMode = () => {
-        s.createConversation({ appMode: "cowork", bindWorkspace: s.appMode === "code" && Boolean(s.workingDirectory) });
+        s.startConversationDraft({ appMode: "cowork", bindWorkspace: s.appMode === "code" && Boolean(s.workingDirectory) });
       };
       const match = (action: ShortcutActionId) => (s.appMode === "code" || !isCodeShortcut(action)) && matchesShortcut(e, s.shortcutBindings[action]);
       const editorFocused = Boolean(document.activeElement?.closest(".monaco-editor"));

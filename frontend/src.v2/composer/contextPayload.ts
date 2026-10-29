@@ -7,6 +7,7 @@ import { MAX_IMAGE_SOURCE_BYTES, prepareNativeImageFile } from "./imagePreparati
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import { mediaTypeForPath } from "../lib/media-types";
 import { formatBytes } from "../lib/format-bytes";
+import type { WorkspaceRequestOwner } from "../protocol/workspace-owner";
 
 // Match MiniCode's provider-facing media envelope. Anthropic's 5 MiB
 // encoded-image cap leaves 3.75 MiB for raw bytes after base64 expansion; PDFs
@@ -19,11 +20,7 @@ interface NativeContextAttachments {
   attachments: Record<string, unknown>[];
   attachmentRefs: MessageAttachmentRef[];
   notes: string;
-  /**
-   * The conversation that owns the uploaded native attachments.  A blank
-   * composer has no conversation yet; the first successful upload creates one
-   * and every subsequent upload in this batch must use it.
-   */
+  /** The real conversation selected before native context preparation. */
   conversationId?: string;
 }
 
@@ -42,7 +39,8 @@ export const buildContextNativeAttachments = async (
   const initialOwner = conversationId.trim();
   if (!sessionId) return emptyNativeContextAttachments(initialOwner);
 
-  const candidates = await collectNativeContextCandidates(refs, workspaceRoot);
+  const owner = initialOwner ? { session_id: sessionId, conversation_id: initialOwner } : undefined;
+  const candidates = await collectNativeContextCandidates(refs, workspaceRoot, owner);
   if (candidates.length === 0) return emptyNativeContextAttachments(initialOwner);
 
   const attachments: Record<string, unknown>[] = [];
@@ -69,7 +67,7 @@ export const buildContextNativeAttachments = async (
     }
 
     try {
-      const blob = await fetchWorkspaceBlob(candidate.path, workspaceRoot);
+      const blob = await fetchWorkspaceBlob(candidate.path, workspaceRoot, owner);
       if (blob.size > sourceLimit) {
         notes.push(`Native attachment skipped: ${candidate.path} is ${formatBytes(blob.size)}, above ${formatBytes(sourceLimit)}.`);
         continue;
@@ -80,10 +78,8 @@ export const buildContextNativeAttachments = async (
       const file = candidate.mediaType.startsWith("image/")
         ? await prepareNativeImageFile(originalFile)
         : originalFile;
-      // The upload endpoint may create a conversation for the first native
-      // attachment. Pin that owner immediately and pass it explicitly for all
-      // later uploads; relying on server-side "current conversation" state is
-      // what caused pasted PDFs to land in a different turn after a switch.
+      // Every file in this batch uses the captured resource owner, including
+      // reads and uploads that finish after the user selects another chat.
       const result = await uploadAttachment(sessionId, ownerConversationId, file, { workspaceRoot });
       const returnedOwner = String(result.conversation_id || "").trim();
       if (!returnedOwner) {
@@ -164,6 +160,7 @@ const emptyNativeContextAttachments = (conversationId = ""): NativeContextAttach
 const collectNativeContextCandidates = async (
   refs: MessageContextRef[],
   workspaceRoot: string,
+  owner?: WorkspaceRequestOwner,
 ): Promise<NativeContextCandidate[]> => {
   const candidates: NativeContextCandidate[] = [];
   for (const ref of refs) {
@@ -179,14 +176,16 @@ const collectNativeContextCandidates = async (
       continue;
     }
     if (ref.kind === "folder") {
-      candidates.push(...await nativeFolderCandidates(ref.path, workspaceRoot));
+      candidates.push(...await nativeFolderCandidates(ref.path, workspaceRoot, owner));
     }
   }
   return candidates;
 };
 
-const nativeFolderCandidates = async (path: string, workspaceRoot: string): Promise<NativeContextCandidate[]> => {
-  const entries = isDesktop()
+const nativeFolderCandidates = async (path: string, workspaceRoot: string, owner?: WorkspaceRequestOwner): Promise<NativeContextCandidate[]> => {
+  const entries = owner ? (await listWorkspaceTree(workspaceRoot, path, owner))?.children?.map(entry => ({
+    name: entry.name, path: entry.path, isDirectory: entry.is_dir, sizeBytes: entry.size_bytes,
+  })) ?? [] : isDesktop()
     ? (await fsListTree(path)).map((entry) => ({
         name: entry.name,
         path: entry.path,
@@ -210,13 +209,13 @@ const nativeFolderCandidates = async (path: string, workspaceRoot: string): Prom
     }));
 };
 
-const fetchWorkspaceBlob = async (path: string, workspaceRoot: string): Promise<Blob> => {
+const fetchWorkspaceBlob = async (path: string, workspaceRoot: string, owner?: WorkspaceRequestOwner): Promise<Blob> => {
   const params = new URLSearchParams({ path });
   if (workspaceRoot.trim()) params.set("workspace_root", workspaceRoot.trim());
   const { appendWorkspaceOwner, workspaceRequestPath } = await import("../protocol/workspace-owner");
   params.set("path", workspaceRequestPath(path, workspaceRoot));
   const url = new URL(`${apiBase()}/api/workspace/raw?${params.toString()}`);
-  appendWorkspaceOwner(url);
+  appendWorkspaceOwner(url, owner);
   const response = await fetchWithTimeout(url, { headers: authHeaders() });
   if (!response.ok) {
     throw new Error(`Workspace raw request failed (${response.status}).`);

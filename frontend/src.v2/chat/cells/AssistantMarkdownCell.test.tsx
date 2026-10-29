@@ -47,6 +47,7 @@ vi.mock("../../desktop/runtime", () => ({
   openPath: openPathMock,
   revealPath: revealPathMock,
   isDesktop: () => false,
+  desktop: () => undefined,
 }));
 
 vi.mock("../openAttachmentPreview", () => ({

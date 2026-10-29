@@ -20,6 +20,7 @@ import { safeJsonParse } from "../lib/safe-parse";
 import { cachedEditorDrafts, cachedEditorWorkspaceIndex, loadEditorDrafts, persistEditorDrafts, type EditorWorkspaceIndex } from "./editor-drafts";
 import { canClaimLegacyEditorDrafts, draftWindowOwnerId, windowDraftWorkspaceKey } from "./draft-window-owner";
 import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
+import { cacheConversationTranscript } from "./conversation-transcript-cache";
 import {
   isTerminalToolCallStatus,
   type ToolCallRecord,
@@ -642,14 +643,10 @@ export const cacheMessagesForConversation = (
     };
   }
   return {
-    conversationMessages: {
-      ...state.conversationMessages,
-      [id]: messages,
-    },
-    conversationStreaming: {
-      ...state.conversationStreaming,
-      [id]: isStreaming,
-    },
+    conversationMessages: cacheConversationTranscript(state.conversationMessages, id, messages),
+    conversationStreaming: state.conversationStreaming[id] === isStreaming
+      ? state.conversationStreaming
+      : { ...state.conversationStreaming, [id]: isStreaming },
   };
 };
 
@@ -695,10 +692,7 @@ export const updateMessagesForConversation = (
 
   return {
     ...(isActive ? { messages: nextMessages, isStreaming: streaming ?? state.isStreaming } : {}),
-    conversationMessages: {
-      ...state.conversationMessages,
-      [targetId]: nextMessages,
-    },
+    conversationMessages: cacheConversationTranscript(state.conversationMessages, targetId, nextMessages),
     conversationStreaming: state.conversationStreaming[targetId] === nextStreaming
       ? state.conversationStreaming
       : { ...state.conversationStreaming, [targetId]: nextStreaming },

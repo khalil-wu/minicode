@@ -62,6 +62,39 @@ test("sandboxed renderer preload only imports Electron's supported bridge", () =
   assert.deepEqual(imports, ["electron"]);
 });
 
+test("manual browser authority is supplied by the authenticated main IPC rather than its payload", async () => {
+  const handlers = new Map(), calls = [];
+  const moduleBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "ipc-handlers.js"), "utf8"), {
+    module: moduleBox, process, console,
+    require(name) {
+      if (name === "electron") return { ipcMain: { on() {}, handle(channel, handler) { handlers.set(channel, handler); } } };
+      return require(name);
+    },
+  });
+  const mainFrame = { url: "file:///minicode/index.html" };
+  const webContents = { mainFrame, getURL: () => mainFrame.url };
+  const win = { webContents, isDestroyed: () => false };
+  const embeddedBrowserManager = Object.fromEntries(["create", "navigate", "runNavigationAction"].map(name => [name,
+    (payload, control) => { calls.push({ name, payload: structuredClone(payload), control: structuredClone(control) }); return true; }]));
+  moduleBox.exports.init({ getWindowForSender: sender => sender === webContents ? win : null,
+    getWindowRecord: () => ({ windowInstanceId: "actual-window" }), embeddedBrowserManager });
+  moduleBox.exports.registerIpcHandlers();
+  const event = { sender: webContents, senderFrame: mainFrame };
+  for (const channel of ["create", "navigate", "runAction"]) {
+    const invoke = handlers.get(`minicode:embeddedBrowser:${channel}`);
+    assert.throws(() => invoke({ ...event, senderFrame: {} }, {}), { code: "ERR_UNTRUSTED_IPC_SENDER" });
+    await invoke(event, { id: "page", conversation_id: "actual-owner", window_instance_id: "forged-window",
+      manualNavigation: false, control: { agentControl: { id: "forged-agent" } } });
+  }
+  assert.equal(calls.length, 3);
+  for (const call of calls) {
+    assert.deepEqual(call.control, { manualNavigation: true });
+    assert.equal(call.payload.window_instance_id, "actual-window");
+    assert.equal(call.payload.manualNavigation, false);
+  }
+});
+
 test("IPC capability manifest permits declared channels and rejects unknown channels", () => {
   assert.equal(security.assertIpcCapability("minicode:window:minimize"), "minicode:window:minimize");
   assert.equal(security.assertIpcCapability("minicode:embeddedBrowser:list"), "minicode:embeddedBrowser:list");

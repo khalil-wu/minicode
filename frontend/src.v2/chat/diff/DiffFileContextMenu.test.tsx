@@ -13,13 +13,18 @@ vi.mock("../../workspace/openWorkspaceFolder", async original => ({
 }));
 
 const prefs = {
-  fileOpenTarget: "cursor", fileOpenTargetPerPath: {}, fileOpenTargets: [
+  fileOpenTarget: "cursor", fileOpenTargetPerPath: {},
+} as DesktopPreferences;
+const targets = {
+  fileOpenTargets: [
     { id: "minicode", label: "MiniCode", kind: "editor" },
     { id: "cursor", label: "Cursor", kind: "editor" },
     { id: "system", label: "Default application", kind: "systemDefault" },
     { id: "terminal", label: "Terminal", kind: "terminal", hidden: true },
   ],
-} as DesktopPreferences;
+  terminalShellTargets: [],
+};
+vi.mock("../../hooks/useDesktopPreferenceTargets", () => ({ useDesktopPreferenceTargets: () => ({ targets }) }));
 const originalRuntime = window.__MINICODE_RUNTIME__;
 const clipboard = vi.fn();
 beforeEach(() => {

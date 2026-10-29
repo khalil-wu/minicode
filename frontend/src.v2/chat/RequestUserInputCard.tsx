@@ -19,7 +19,7 @@ export function RequestUserInputCard({ request }: { request: PendingAskUser & { 
     setResponding(true); setError("");
     const response = answers === null ? null : Object.fromEntries(questions.flatMap(question => {
       const answer = answers[question.id];
-      const value = answer?.selectedOptionId ?? answer?.freeformText.trim();
+      const value = answer?.selectedOptionId ?? (answer?.freeformText.trim() ? answer.freeformText : undefined);
       return value ? [[question.id, { answers: [value] }]] : [];
     }));
     try {

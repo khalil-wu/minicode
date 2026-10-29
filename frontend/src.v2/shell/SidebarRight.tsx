@@ -590,7 +590,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
     <aside
       ref={sidebarRef}
       id="workbench-right-sidebar"
-      className="mc-sidebar-right relative flex flex-col overflow-hidden"
+      className="mc-sidebar-right relative flex flex-col"
       data-embedded={embedded ? "true" : "false"}
       data-expanded={expanded ? "true" : "false"}
       data-open={visible && (embedded || rightPanelOpen) ? "true" : "false"}
@@ -603,7 +603,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         zIndex: embedded ? undefined : "var(--z-content)",
         display: "flex",
         flexDirection: "column",
-        overflow: "hidden",
+        overflow: "visible",
         width: sidebarWidthStyle,
         minWidth: 0,
         flex: expanded || embedded ? "1 1 auto" : "0 0 auto",
@@ -637,6 +637,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           style={resizeHandleStyle}
         />
       )}
+      <div className="mc-sidebar-right-content">
       <div className="mc-sidebar-right-header">
         {expanded && <button type="button" className="mc-sidebar-return-chat" aria-label={tr("返回主聊天")} title={tr("返回主聊天")}
           onClick={() => setRightPanelExpanded(false)}><MessageCircle size={15} /><span>{mainConversationTitle}</span></button>}
@@ -822,6 +823,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           </Suspense>
         </div>;
       })}
+      </div>
     </aside>
   );
 };
@@ -832,11 +834,13 @@ const resizeHandleStyle: React.CSSProperties = {
   position: "absolute",
   top: 0,
   bottom: 0,
-  left: 0,
-  width: 16,
+  // The native browser is composited above the renderer and can drift left
+  // under host zoom. Keep the hit area in the main stage so every vertical
+  // point remains draggable even when the view overlaps the sidebar edge.
+  left: -20,
+  width: 12,
   cursor: "col-resize",
   zIndex: "var(--z-composer)",
   background: "transparent",
-  transform: "translateX(-8px)",
   touchAction: "none",
 };

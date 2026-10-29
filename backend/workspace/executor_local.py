@@ -149,11 +149,12 @@ class LocalExecutorProcess:
             task = asyncio.create_task(self.aclose(), name=f"expired-local-process-{self.process_id}")
             self.owner.cleanup_tasks.add(task)
 
-    async def _start(self, argv: list[str], cwd: str, arg0: str | None) -> None:
-        native_cwd = local_path(cwd)
-        capability = self.runner.capability(cwd=native_cwd)
+    def _record_sandbox_capability(self, capability) -> None:
         self.sandbox_backend = capability.backend
         self.sandbox_type = _source_sandbox_type(capability.backend)
+
+    async def _start(self, argv: list[str], cwd: str, arg0: str | None) -> None:
+        native_cwd = local_path(cwd)
         executable = list(argv)
         if arg0 is not None:
             executable = [sys.executable, "-I", "-S", str(Path(__file__).with_name("executor_process_shim.py")),
@@ -169,7 +170,8 @@ class LocalExecutorProcess:
         if self.tty:
             command = subprocess.list2cmdline(executable) if os.name == "nt" else shlex.join(executable)
             wrapped, _capability = self.runner.prepare_command(command, cwd=native_cwd,
-                host_command=command, argv=executable, tty=True)
+                host_command=command, argv=executable, tty=True,
+                on_capability=self._record_sandbox_capability)
             pass_fds = (self.runner._bubblewrap_mount_targets.preserved_fds
                 if self.runner._bubblewrap_mount_targets is not None else ())
             try:
@@ -183,7 +185,8 @@ class LocalExecutorProcess:
         else:
             self.process = await self.runner.spawn_interactive(executable, cwd=native_cwd,
                 stdin=asyncio.subprocess.PIPE if self.pipe_stdin else asyncio.subprocess.DEVNULL,
-                creationflags=flags, on_created=created, on_exit=self.exit_observed.set)
+                creationflags=flags, on_created=created, on_exit=self.exit_observed.set,
+                on_capability=self._record_sandbox_capability)
         self.accepted = True
         self.watch_task = asyncio.create_task(self._watch(), name=f"local-process-watch-{self.process_id}")
 

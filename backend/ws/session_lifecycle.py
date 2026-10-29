@@ -891,7 +891,20 @@ class SessionLifecycle:
                 refresh_commands(project_path)
                 skill_manager = self._session.skill_manager
                 if skill_manager is not None:
-                    skill_manager.set_project_root(project_path)
+                    # Discovery reads the workspace and plugin trees. Build a
+                    # detached catalog off the event loop, then publish only
+                    # if this workspace still owns the foreground projection.
+                    while True:
+                        roots = skill_manager.runtime_roots
+                        revision = roots.revision if roots is not None else None
+                        source = skill_manager.clone_host_catalog()
+                        source.runtime_roots = None
+                        skills = await to_thread_cancel_safe(source.snapshot, project_path, force_reload=True)
+                        if not activation_is_current():
+                            return
+                        if roots is skill_manager.runtime_roots and (roots is None or roots.revision == revision):
+                            break
+                    skill_manager.adopt_project_snapshot(skills)
                 if not activation_is_current():
                     return
                 await self._session._run_cwd_changed_hook(
@@ -1386,7 +1399,15 @@ class SessionLifecycle:
 
         try:
             self.ensure_workspace_context_task()
-            await self.recover_orphaned_background_commands()
+            # Durable background-command reconciliation can inspect and reap
+            # process state from the previous desktop instance. It must remain
+            # owned by the session, but it cannot delay the first control-plane
+            # projection or the user's next input.
+            recovery_task = asyncio.create_task(
+                self.recover_orphaned_background_commands(),
+                name=f"background-recovery:{self._session.session_id}",
+            )
+            retain_cleanup_task(recovery_task, self._retired_workspace_tasks)
             from backend.services.mcp_service import get_mcp_status
             from backend.ws.mcp_projection import send_mcp_projection
 

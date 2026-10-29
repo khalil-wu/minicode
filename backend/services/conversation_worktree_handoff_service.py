@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 from typing import Any, TYPE_CHECKING
@@ -33,29 +34,60 @@ def _git_snapshot(root: Path, *args: str, sandbox_policy: SandboxPolicy | None =
     try:
         result = run_readonly_git(root, *args, timeout=10, sandbox_policy=sandbox_policy)
         result.check_returncode()
-        return True, result.stdout.strip()
+        return True, result.stdout.rstrip("\r\n")
     except (OSError, subprocess.SubprocessError, SandboxUnavailableError) as exc:
         return False, str(getattr(exc, "stderr", "") or exc)
 
 
-def _status(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> str:
-    ok, output = _git_snapshot(root, "status", "--porcelain=v1", "--untracked-files=all", sandbox_policy=sandbox_policy)
-    return output if ok else "<status unavailable>"
+@dataclass(frozen=True)
+class HandoffGitSnapshot:
+    status: str
+    head: str
+    branch: str
+    ignored: list[str]
 
 
-def _head(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> str:
-    ok, output = _git_snapshot(root, "rev-parse", "HEAD", sandbox_policy=sandbox_policy)
-    return output if ok else ""
-
-
-def _branch(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> str:
-    ok, output = _git_snapshot(root, "branch", "--show-current", sandbox_policy=sandbox_policy)
-    return output if ok else ""
-
-
-def _ignored_sample(root: Path, *, sandbox_policy: SandboxPolicy | None = None) -> list[str]:
-    ok, output = _git_snapshot(root, "ls-files", "--others", "--ignored", "--exclude-standard", sandbox_policy=sandbox_policy)
-    return output.splitlines()[:20] if ok and output else []
+def _workspace_snapshot(
+    root: Path,
+    *,
+    sandbox_policy: SandboxPolicy | None = None,
+    relative_prefix: str | None = "",
+    collect_ignored: bool = True,
+) -> HandoffGitSnapshot:
+    # Porcelain paths are repository-relative. ls-files' old ignored-file
+    # sample was cwd-relative, so a source inside another linked checkout
+    # needs its actual prefix; the main checkout's prefix is already known.
+    if relative_prefix is None:
+        prefix_ok, relative_prefix = _git_snapshot(root, "rev-parse", "--show-prefix", sandbox_policy=sandbox_policy)
+        if not prefix_ok:
+            return HandoffGitSnapshot("<status unavailable>", "", "", [])
+    args = ["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"]
+    if collect_ignored:
+        args.append("--ignored=traditional")
+    ok, output = _git_snapshot(root, *args, sandbox_policy=sandbox_policy)
+    if not ok:
+        return HandoffGitSnapshot("<status unavailable>", "", "", [])
+    head = ""
+    branch = ""
+    changes: list[str] = []
+    ignored: list[str] = []
+    records = iter(output.split("\0"))
+    for record in records:
+        if record.startswith("# branch.oid "):
+            value = record.removeprefix("# branch.oid ")
+            head = "" if value == "(initial)" else value
+        elif record.startswith("# branch.head "):
+            value = record.removeprefix("# branch.head ")
+            branch = "" if value == "(detached)" else value
+        elif record.startswith("! "):
+            path = record[2:]
+            if len(ignored) < 20 and path.startswith(relative_prefix):
+                ignored.append(path.removeprefix(relative_prefix))
+        elif record and not record.startswith("# "):
+            changes.append(record)
+            if record.startswith("2 "):
+                changes.append(next(records))
+    return HandoffGitSnapshot("\0".join(changes), head, branch, ignored)
 
 
 def _check(code: str, severity: str, message: str, **details: Any) -> dict[str, Any]:
@@ -70,6 +102,7 @@ def build_handoff_preflight(
     main_worktree_root: Any,
     has_running_turn: bool,
     dirty_action: str = "block",
+    local_branch: str = "",
 ) -> dict[str, Any]:
     conversation_id = str(getattr(conversation, "id", "") or "")
     isolated = bool(getattr(conversation, "git_isolated", False))
@@ -90,16 +123,17 @@ def build_handoff_preflight(
     if not base_root.exists():
         checks.append(_check("repository.missing", "blocking", "The main Git checkout no longer exists.", path=str(base_root)))
 
-    source_status = _status(source_path, sandbox_policy=source_policy) if source_path.exists() else "<missing>"
-    source_head = _head(source_path, sandbox_policy=source_policy) if source_path.exists() else ""
-    source_branch = _branch(source_path, sandbox_policy=source_policy) if source_path.exists() else ""
+    source_prefix = "" if getattr(conversation, "worktree_path", "") or source_path == base_root else (
+        source_path.relative_to(base_root).as_posix() + "/" if source_path.is_relative_to(base_root) else None
+    )
+    source_snapshot = _workspace_snapshot(source_path, sandbox_policy=source_policy, relative_prefix=source_prefix) if source_path.exists() else HandoffGitSnapshot("<missing>", "", "", [])
+    source_status, source_head, source_branch = source_snapshot.status, source_snapshot.head, source_snapshot.branch
     worktree_branch = generated_branch_name(conversation_id) if target == "worktree" else source_branch
     if source_path == base_root:
         main_status, main_head, main_branch = source_status, source_head, source_branch
     else:
-        main_status = _status(base_root, sandbox_policy=main_policy) if base_root.exists() else "<missing>"
-        main_head = _head(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
-        main_branch = _branch(base_root, sandbox_policy=main_policy) if base_root.exists() else ""
+        main_snapshot = _workspace_snapshot(base_root, sandbox_policy=main_policy, collect_ignored=False) if base_root.exists() else HandoffGitSnapshot("<missing>", "", "", [])
+        main_status, main_head, main_branch = main_snapshot.status, main_snapshot.head, main_snapshot.branch
     if source_status and source_status != "<missing>" and source_status != "<status unavailable>":
         if dirty_action == "stash":
             checks.append(_check("source.dirty.stash", "warning", "Local changes will be stashed and restored in the destination workspace."))
@@ -108,10 +142,37 @@ def build_handoff_preflight(
     if source_status == "<status unavailable>":
         checks.append(_check("source.status_unavailable", "blocking", "Could not verify source Git status."))
 
+    reuse_branch = False
+    local_branches: list[str] = []
+    local_checkout_branch = ""
+    local_checkout_head = ""
     if direction == "local_to_worktree":
         ok, branch_ref = _git_snapshot(base_root, "show-ref", "--verify", f"refs/heads/{worktree_branch}", sandbox_policy=main_policy) if base_root.exists() else (False, "")
         if ok and branch_ref:
-            checks.append(_check("branch.collision", "blocking", "The isolated branch already exists.", branch=worktree_branch))
+            reuse_branch = source_branch == worktree_branch == str(getattr(conversation, "git_branch", "") or "")
+            if reuse_branch:
+                refs_ok, refs = _git_snapshot(base_root, "for-each-ref", "--sort=-committerdate", "--format=%(refname)%00%(worktreepath)%00%(objectname)%00%(symref)", "refs/heads", "refs/remotes", sandbox_policy=main_policy)
+                available: dict[str, str] = {}
+                default_branch = ""
+                if refs_ok:
+                    for row in refs.splitlines():
+                        name, checked_out, head, symref = row.split("\0")
+                        if name.startswith("refs/heads/") and not checked_out:
+                            available[name.removeprefix("refs/heads/")] = head
+                        elif name == "refs/remotes/origin/HEAD":
+                            default_branch = symref.removeprefix("refs/remotes/origin/")
+                    local_branches = list(available)
+                    preferred = default_branch or next((name for name in ("main", "master") if name in available), "")
+                    if preferred in available:
+                        local_branches = [preferred, *[name for name in local_branches if name != preferred]]
+                    local_checkout_branch = local_branch or next(iter(local_branches), "")
+                    local_checkout_head = available.get(local_checkout_branch, "")
+                    if not local_checkout_head:
+                        checks.append(_check("local.branch_unavailable", "blocking", "Select another available local branch before moving this task.", branch=local_checkout_branch))
+                else:
+                    checks.append(_check("local.branches_unavailable", "blocking", "Could not load the available local checkout branches."))
+            else:
+                checks.append(_check("branch.collision", "blocking", "The isolated branch already exists.", branch=worktree_branch))
         if worktree_path.exists():
             checks.append(_check("path.collision", "blocking", "The isolated workspace path already exists.", path=str(worktree_path)))
     else:
@@ -119,6 +180,8 @@ def build_handoff_preflight(
             checks.append(_check("target.dirty", "blocking", "The local checkout must be clean before switching branches."))
         if main_status == "<status unavailable>":
             checks.append(_check("target.status_unavailable", "blocking", "Could not verify local checkout Git status."))
+
+    if direction == "worktree_to_local" or reuse_branch:
         shared = []
         for item in conversation_repo.list_conversations():
             if str(getattr(item, "id", "")) == conversation_id or getattr(item, "archived", False) or getattr(item, "git_isolated", False):
@@ -129,7 +192,7 @@ def build_handoff_preflight(
         if shared:
             checks.append(_check("target.shared", "blocking", "Another active task uses the local checkout; switching its branch would affect that task.", conversation_ids=shared))
 
-    ignored = _ignored_sample(source_path, sandbox_policy=source_policy) if source_path.exists() else []
+    ignored = source_snapshot.ignored
     if ignored:
         checks.append(_check("ignored.files", "warning", "Ignored dependencies and local files are not copied between workspaces.", sample=ignored))
 
@@ -146,6 +209,9 @@ def build_handoff_preflight(
         "target_branch": worktree_branch,
         "target_status": main_status,
         "dirty_action": dirty_action,
+        "reuse_branch": reuse_branch,
+        "local_checkout_branch": local_checkout_branch,
+        "local_checkout_head": local_checkout_head,
     }
     fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, sort_keys=True).encode("utf-8")).hexdigest()
     return {
@@ -163,6 +229,9 @@ def build_handoff_preflight(
         "allowed": not any(check["severity"] == "blocking" for check in checks),
         "fingerprint": fingerprint,
         "dirty_action": dirty_action,
+        "reuse_branch": reuse_branch,
+        "local_branches": local_branches,
+        "local_checkout_branch": local_checkout_branch,
     }
 
 

@@ -265,6 +265,71 @@ async def test_real_pty_stream_and_owner_close(tmp_path):
         await backend.close()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended process ownership")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tty", [False, True])
+async def test_windows_child_runs_inside_original_job_without_thread_enumeration(tmp_path, monkeypatch, tty):
+    def enumerate_threads(_process):
+        raise AssertionError("Starting a captured child must not enumerate system threads")
+
+    monkeypatch.setattr(psutil.Process, "threads", enumerate_threads)
+    code = """import ctypes
+from ctypes import wintypes
+kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+kernel.GetCurrentProcess.restype = wintypes.HANDLE
+kernel.IsProcessInJob.argtypes = [wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+kernel.IsProcessInJob.restype = wintypes.BOOL
+contained = wintypes.BOOL()
+assert kernel.IsProcessInJob(kernel.GetCurrentProcess(), None, ctypes.byref(contained))
+assert contained.value
+print('contained-before-first-output', flush=True)
+"""
+    backend = LocalProcessBackend()
+    try:
+        process = await backend.start(python("-c", code), tmp_path.as_uri(), sandbox=None, tty=tty)
+        chunks, result = await collect(process)
+        assert result.exit_code == 0
+        assert b"contained-before-first-output" in b"".join(chunk.chunk for chunk in chunks)
+        await process.aclose()
+        assert process.group_owner.closed and not backend.processes
+    finally:
+        await backend.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows suspended process ownership")
+@pytest.mark.asyncio
+async def test_windows_resume_rejection_never_runs_payload_and_reaps_original_child(tmp_path, monkeypatch):
+    import ctypes
+
+    load_library = ctypes.WinDLL
+
+    def rejected_resume(_handle):
+        return -1073741790  # STATUS_ACCESS_DENIED
+
+    def library(name, *args, **kwargs):
+        loaded = load_library(name, *args, **kwargs)
+        if name == "ntdll":
+            loaded.NtResumeProcess = rejected_resume
+        return loaded
+
+    monkeypatch.setattr(ctypes, "WinDLL", library)
+    backend = LocalProcessBackend()
+    captured = []
+    marker = tmp_path / "unresumed-payload"
+    try:
+        with pytest.raises(OSError) as rejected:
+            await backend.start(python("-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"),
+                tmp_path.as_uri(), sandbox=None, process_observer=captured.append)
+        assert rejected.value.winerror == 5
+        [process] = captured
+        assert process.group_owner.pid is not None
+        assert process.closed and process.group_owner.closed and not backend.processes
+        assert not psutil.pid_exists(process.group_owner.pid)
+        assert not marker.exists()
+    finally:
+        await backend.close()
+
+
 @pytest.mark.asyncio
 async def test_actual_sandbox_captured_scope_denial_and_no_controller_write(tmp_path):
     workspace, outside = tmp_path / "workspace", tmp_path / "outside"

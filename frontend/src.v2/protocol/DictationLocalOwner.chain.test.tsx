@@ -25,10 +25,12 @@ const bridge = {
 const nativePreferences = {
   get: vi.fn(async () => preferences),
   set: vi.fn(async (patch: Partial<DesktopPreferences>) => { preferences = { ...preferences, ...patch }; preferenceListeners.forEach(listener => listener(preferences)); return preferences; }),
+  onChanged: (listener: (value: DesktopPreferences) => void) => { preferenceListeners.add(listener); return () => { preferenceListeners.delete(listener); }; },
 };
+var nativeDesktop = { dictation: bridge, preferences: nativePreferences };
 vi.mock("../desktop/runtime", async original => ({
   ...await original<typeof import("../desktop/runtime")>(),
-  desktop: () => ({ dictation: bridge, preferences: nativePreferences }), isDesktop: () => true,
+  desktop: () => nativeDesktop, isDesktop: () => true,
   runtime: () => ({ remoteHost: { id: "fixture-remote-host" } }),
   getDesktopPreferences: () => nativePreferences.get(),
   setDesktopPreferences: (patch: Partial<DesktopPreferences>) => nativePreferences.set(patch),

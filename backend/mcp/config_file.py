@@ -20,7 +20,7 @@ _MCP_CONFIG_WRITE_LOCK = threading.RLock()
 _SERVER_FIELDS = frozenset({
     "transport", "command", "args", "env", "env_vars", "cwd", "url",
     "headers", "headers_helper", "oauth", "auto_start", "startup_timeout_sec",
-    "tool_timeout_sec", "required", "supports_parallel_tool_calls",
+    "tool_timeout_sec", "required", "startup_readiness", "supports_parallel_tool_calls",
     "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools",
     "requires_user_action", "setup_hint", "docs_url",
     "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
@@ -310,6 +310,8 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
     for field in ("required", "supports_parallel_tool_calls"):
         if field in normalized and not isinstance(normalized[field], bool):
             raise ValueError(f"MCP server '{name}' {field} must be a boolean.")
+    if "startup_readiness" in normalized and normalized["startup_readiness"] not in ("connection", "catalog"):
+        raise ValueError(f"MCP server '{name}' startup_readiness must be connection or catalog.")
     for field in ("enabled_tools", "disabled_tools"):
         if field not in normalized:
             continue

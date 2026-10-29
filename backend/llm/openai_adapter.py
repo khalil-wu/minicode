@@ -2475,7 +2475,7 @@ class OpenAIAdapter(LLMAdapter):
         # rejection is paid once per adapter, not on every turn.
         self._chat_unsupported_fields: set[str] = set()
         if http_client is None:
-            http_options: dict[str, Any] = {"trust_env": False}
+            http_options: dict[str, Any] = {}
             if settings.aws is not None:
                 from backend.llm.bedrock import BedrockRequestAuth
                 http_options["auth"] = BedrockRequestAuth(settings.aws, api_key=settings.api_key,
@@ -2483,18 +2483,8 @@ class OpenAIAdapter(LLMAdapter):
                     **({"network_policy": self._application_network} if self._application_network.managed else {}),
                     explicit_authorization=any(key.lower() == "authorization" for key in self._default_headers))
                 self._bedrock_auth = http_options["auth"]
-            if self._application_network.managed:
-                http_options.pop("trust_env")
-                http_client = application_http_client(_normalized_openai_base_url(settings.base_url),
-                    policy=self._application_network, proxy_mode=settings.proxy_mode, **http_options)
-            else:
-                proxy_url = _proxy_url_for_base_url(
-                    _normalized_openai_base_url(settings.base_url),
-                    str(getattr(settings, "proxy_mode", "inherit") or "inherit"),
-                )
-                if proxy_url:
-                    http_options["proxy"] = proxy_url
-                http_client = httpx.AsyncClient(**http_options)
+            http_client = application_http_client(_normalized_openai_base_url(settings.base_url),
+                policy=self._application_network, proxy_mode=settings.proxy_mode, **http_options)
             self._http_client = http_client
         elif self._application_network.managed:
             self._http_client = ApplicationHttpClient(self._application_network, lambda _url: http_client, owns_clients=False)

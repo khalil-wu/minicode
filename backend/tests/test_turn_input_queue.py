@@ -75,6 +75,28 @@ def test_completed_tool_receipt_reopens_same_turn_mailbox_without_new_epoch():
     assert queue.sealed
 
 
+def test_queued_user_input_prevents_final_item_from_deferring_current_turn():
+    queue = TurnInputQueue()
+    epoch = queue.begin_turn("owned-turn")
+    command = _command("already-steering", "Use this new instruction")
+    pending = queue.enqueue_command(command)
+    assert not queue.defer_mailbox_to_next_turn("owned-turn")
+    assert queue.mailbox_deliverable("owned-turn") and queue.turn_epoch == epoch
+    assert queue.pop_steer() is pending
+    assert queue.defer_mailbox_to_next_turn("owned-turn")
+
+
+def test_terminal_mailbox_closure_preserves_pending_input_for_cleanup():
+    queue = TurnInputQueue()
+    queue.begin_turn("owned-turn")
+    command = _command("unconsumed-steer", "Keep this input")
+    assert queue.enqueue_command(command) is not None
+    assert queue.finish_turn("owned-turn")
+    assert not queue.mailbox_deliverable("owned-turn") and queue.pop_steer() is None
+    assert queue.pending_count() == 1
+    assert queue.seal_and_drain_commands() == [command]
+
+
 def test_turn_input_preserves_structured_skill_and_plugin_mentions() -> None:
     queue = TurnInputQueue()
     command = UserCommand(
@@ -155,7 +177,7 @@ def test_persistent_teammate_reopens_mailbox_when_reusing_one_run_id() -> None:
     assert queue.mailbox_deliverable("teammate-run") is True
     assert queue.enqueue_command(_command("steer-2", "next turn steer")) is not None
 
-    assert queue.defer_mailbox_to_next_turn("teammate-run") is True
+    assert queue.finish_turn("teammate-run") is True
     assert queue.begin_turn("teammate-run") == first_epoch
     assert queue.mailbox_deliverable("teammate-run") is True
 

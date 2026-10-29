@@ -7,7 +7,14 @@ let migration: Promise<void> | undefined;
 
 export function mirrorDictationPreferences(preferences: DictationPreferences) {
   if (!usesDesktopDictationPreferences()) return;
-  useAppStore.setState(state => ({ workbenchPreferences: { ...state.workbenchPreferences, ...dictationPreferencesOf(preferences) } }));
+  const next = dictationPreferencesOf(preferences);
+  useAppStore.setState(state => {
+    const previous = state.workbenchPreferences;
+    const unchanged = (Object.keys(next) as Array<keyof DictationPreferences>).every(key => key === "dictationDictionary"
+      ? next[key].length === previous[key].length && next[key].every((word, index) => word === previous[key][index])
+      : next[key] === previous[key]);
+    return unchanged ? state : { workbenchPreferences: { ...previous, ...next } };
+  });
 }
 
 export function ensureDesktopDictationPreferences(): Promise<void> {

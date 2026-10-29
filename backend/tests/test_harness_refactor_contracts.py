@@ -85,7 +85,8 @@ def test_model_schema_and_host_execution_schema_have_owners() -> None:
     assert {"expected_hash", "replace_all"} <= set(execution_props)
 
 
-def test_authorization_remains_stable_after_guard_injection(tmp_path):
+@pytest.mark.asyncio
+async def test_authorization_remains_stable_after_guard_injection(tmp_path):
     target = tmp_path / "auth.py"
     target.write_text("value = 1\n", encoding="utf-8")
     ctx = _ctx(tmp_path)
@@ -103,7 +104,7 @@ def test_authorization_remains_stable_after_guard_injection(tmp_path):
         tool_registry=registry,
         tool_ctx=ctx,
     )
-    authorization = _authorize_final_tool_request(
+    authorization = (await _authorize_final_tool_request(
         tc,
         tool_registry=registry,
         permission_checker=PermissionChecker(
@@ -112,7 +113,7 @@ def test_authorization_remains_stable_after_guard_injection(tmp_path):
         ),
         permission_context=ctx.permission,
         tool_ctx=ctx,
-    )
+    ))
 
     assert authorization.error == ""
     assert authorization.request is not None

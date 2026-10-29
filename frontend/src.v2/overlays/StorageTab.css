@@ -118,3 +118,31 @@
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+.settings-storage-review-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 16px; background: #0002; font-family: var(--font-ui); }
+/* Source default dialog: w-130, spacing=.25rem; app/browser zoom remains global. */
+.settings-storage-review { position: relative; box-sizing: border-box; width: calc(.25rem * 130); max-width: 92vw; overflow: hidden; border: .5px solid var(--border-subtle); border-radius: 1.25rem; background: color-mix(in srgb, var(--surface-raised) 90%, transparent); backdrop-filter: blur(24px); color: var(--text-primary); box-shadow: 0 4px 8px -2px #0000001a; }
+.settings-storage-review form { display: flex; flex-direction: column; box-sizing: border-box; max-height: min(85dvh, 44rem); overflow: hidden; margin: 0; padding: 1.25rem; font-size: var(--mc-font-body); line-height: var(--leading-normal); }
+.settings-storage-review header { flex: 0 0 auto; padding-right: 24px; }
+.settings-storage-review h2 { margin: 0; font-size: 18px; line-height: 28px; font-weight: var(--fw-semibold); letter-spacing: -.36px; }
+.settings-storage-review header p { margin: 4px 0 0; color: var(--text-muted); }
+.settings-storage-review-section { min-height: 0; padding-top: .75rem; }
+.settings-storage-review-filters, .settings-storage-review footer { flex: 0 0 auto; }
+.settings-storage-review .settings-row { gap: 16px; padding: 8px 16px; }
+.settings-storage-review .settings-card { border-radius: 16px; }
+.settings-storage-review-results { overflow-y: auto; overscroll-behavior: contain; }
+.settings-storage-review-empty { margin: 0; color: var(--text-muted); font-size: var(--mc-font-secondary); }
+.settings-storage-review-chat { cursor: pointer; }
+.settings-storage-review-chat-title { display: -webkit-box; min-width: 0; flex: 1; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-weight: var(--fw-medium); }
+.settings-storage-review-chat-control { display: flex; flex: 0 0 auto; align-items: center; gap: 12px; }
+.settings-storage-review-size { color: var(--text-muted); font-size: var(--mc-font-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.settings-storage-review-checkbox { position: relative; display: inline-grid; place-items: center; width: 14px; height: 14px; }
+.settings-storage-review-checkbox input { appearance: none; box-sizing: border-box; width: 14px; height: 14px; margin: 0; border: .5px solid var(--border-subtle); border-radius: 4px; background: var(--surface-raised); cursor: inherit; }
+.settings-storage-review-checkbox svg { position: absolute; pointer-events: none; opacity: 0; }
+.settings-storage-review-checkbox input:checked + svg { opacity: 1; }
+.settings-storage-review-checkbox input:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 2px; }
+.settings-storage-review footer p { margin: 0; color: var(--text-muted); font-size: var(--mc-font-secondary); }
+.settings-storage-review-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.settings-storage-review-close { position: absolute; top: 16px; right: 16px; display: grid; place-items: center; box-sizing: border-box; width: 20px; height: 20px; padding: 4px; border: 0; border-radius: 4px; background: transparent; color: var(--text-secondary); }
+.settings-storage-review-close:hover:not(:disabled) { background: var(--surface-hover); }
+.settings-storage-review-close:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 0; }

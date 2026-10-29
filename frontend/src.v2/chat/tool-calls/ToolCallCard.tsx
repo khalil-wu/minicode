@@ -24,7 +24,7 @@ import { openArtifactPreview } from "../openAttachmentPreview";
 import { CommandToolRenderer } from "./renderers/CommandRenderer";
 import { WebSearchResultsView } from "./renderers/WebSearchRenderer";
 import { isUserQuestionRecord, ToolResultText, UserQuestionResult } from "./renderers/ToolTextRenderer";
-import { getRecordOutputText, isBrowserRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, recordPresentationStatus } from "../cells/activityCellHelpers";
+import { getRecordOutputText, isAgentWaitRecord, isHiddenAgentWaitRecord, isBrowserRecord, isHttpUrl, isWebFetchRecord, readableRecordLabel, recordInputTarget, recordPresentationStatus } from "../cells/activityCellHelpers";
 import { formatCellDuration } from "../cells/cellStatus";
 import { InlineDiff } from "../diff/InlineDiff";
 import { workspaceRelativeDiffPath } from "../diffPaths";
@@ -103,7 +103,7 @@ export const ToolCallCard = memo(({
   const userToggled = useRef(false);
   const isActive = isToolCallExecuting(record);
   // Shared 1s tick — one interval for all running tool cards, not N.
-  const now = useSharedSecondTick(isActive);
+  const now = useSharedSecondTick(isActive && !isAgentWaitRecord(record));
   useEffect(() => {
     if (viewMode === "verbose") {
       // Verbose auto-expands, but a user collapse must stick instead of being
@@ -114,7 +114,7 @@ export const ToolCallCard = memo(({
     if (!userToggled.current) {
       setOpen(shouldAutoOpen(viewMode) || hasFailure);
     }
-  }, [hasFailure, record, record.status, viewMode]);
+  }, [hasFailure, record.status, viewMode]);
   const duration = formatCellDuration(
     record.finishedAt !== undefined && record.startedAt !== undefined
       ? record.finishedAt - record.startedAt
@@ -164,6 +164,8 @@ export const ToolCallCard = memo(({
     if (!previewUrl) return;
     openWebInBrowser(previewUrl);
   };
+
+  if (isHiddenAgentWaitRecord(record)) return null;
 
   if (viewMode === "summary") {
     return (

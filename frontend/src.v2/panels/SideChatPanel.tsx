@@ -22,6 +22,7 @@ import { ChatTurn } from "../chat/components/ChatTurn";
 import { projectMessagesToTurns } from "../chat/chatSurfaceState";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
+import { isComputerUseApproval } from "../chat/ComputerUseApprovalCard";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import {
   commandResultSucceeded,
@@ -77,7 +78,6 @@ export const SideChatPanel = ({ active = true }: { active?: boolean }) => {
 
 const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideChatOwner }) => {
   const { t: tr } = useI18n();
-  const sideChats = useAppStore((s) => s.sideChats);
   const ensureSideChat = useAppStore((s) => s.ensureSideChat);
   const removeSideChat = useAppStore((s) => s.removeSideChat);
   const setDraft = useAppStore((s) => s.setSideChatDraft);
@@ -87,17 +87,21 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   const sendShortcut = useAppStore((s) => s.sendShortcut);
 
   const id = owner.id;
-  const thread = sideChats[id];
+  // Each mounted side-chat thread should observe only its own projection;
+  // another agent's stream must not rerender every hidden side panel.
+  const thread = useAppStore((s) => s.sideChats[id]);
   const waitingForInput = useAppStore((s) => hasLocalPendingPromptForConversation([
     s.pendingApproval, ...s.approvalQueue, s.pendingAskUser, ...s.askUserQueue,
     s.pendingDiffReview, ...s.diffReviewQueue,
   ], id));
   const hasPendingApproval = useAppStore((s) => hasLocalPendingPromptForConversation([
     s.pendingApproval, ...s.approvalQueue, s.pendingDiffReview, ...s.diffReviewQueue,
+    ...[s.pendingAskUser, ...s.askUserQueue].filter((request) => request && isComputerUseApproval(request)),
   ], id));
   const submittedContextRef = useRef<CodeSelectionContext>();
   const hasPendingContext = Boolean(thread?.selectedContext && thread.selectedContext !== submittedContextRef.current);
   const [submitting, setSubmitting] = useState(false);
+  const submittingOperationRef = useRef<object | null>(null);
   const [mentionFilter, setMentionFilter] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -227,13 +231,49 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
       ? `Selected context${thread.selectedContext.source ? ` (${thread.selectedContext.source})` : ""}:\n\n${thread.selectedContext.text}\n\n`
       : "";
     const contextRefs = [...(thread.contextRefs ?? []), ...(selectionRef ? [selectionRef] : [])];
+    const capturedInput = { draft: thread.draft, richDraft: thread.richDraft, selectedContext: thread.selectedContext };
+    const operation = {};
+    submittingOperationRef.current = operation;
+    const finishSubmission = () => {
+      if (submittingOperationRef.current !== operation) return;
+      submittingOperationRef.current = null;
+      if (mountedRef.current) setSubmitting(false);
+    };
+    // The input owner outlives the UI's command-result wait and this panel.
+    // A late definitive admission consumes only the captured authoring state.
+    const consumeNativeInput = (event: CommandResultEvent) => {
+      if (event.data?.native_completion !== "completed") return;
+      useAppStore.setState(state => {
+        const current = state.sideChats[id];
+        return current?.draft === capturedInput.draft && current.richDraft === capturedInput.richDraft ? { sideChats: { ...state.sideChats,
+          [id]: { ...current, draft: "", richDraft: undefined },
+        } } : state;
+      });
+      finishSubmission();
+    };
+    const consumeModelInput = () => {
+      for (const attachment of attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
+      submittedContextRef.current = capturedInput.selectedContext;
+      isFollowingRef.current = true;
+      if (mountedRef.current) setShowScrollButton(false);
+      useAppStore.setState((state) => {
+        const current = state.sideChats[id];
+        if (!current) return state;
+        return { sideChats: { ...state.sideChats, [id]: { ...current,
+          ...(current.draft === capturedInput.draft && current.richDraft === capturedInput.richDraft ? { draft: "", richDraft: undefined } : {}),
+          selectedContext: current.selectedContext === capturedInput.selectedContext ? undefined : current.selectedContext,
+          contextRefs: current.contextRefs?.filter((ref) => !contextRefs.includes(ref)),
+          attachments: current.attachments?.filter((attachment) => !attachments.includes(attachment)),
+        } } };
+      });
+      finishSubmission();
+    };
     setSubmitting(true);
     try {
-      const accepted: { result?: CommandResultEvent } = {};
       const nativeContext = await buildContextNativeAttachments(contextRefs, getWebSocket()?.sessionId, id, workingDirectory);
       const prefix = await buildContextPayload(contextRefs);
       if (!mountedRef.current) return;
-      const sent = await sendChatMessage({
+      await sendChatMessage({
         displayContent: content,
         backendContent: [selectedPrefix, prefix, nativeContext.notes, content].filter(Boolean).join("\n\n"),
         conversationId: id,
@@ -245,36 +285,12 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
         busyBehavior,
         expectedTurnId,
         awaitAdmission: true,
-        onAdmission: event => { accepted.result = event; },
+        onAdmission: consumeNativeInput,
+        onModelAccepted: consumeModelInput,
       });
-      if (sent) {
-        if (accepted.result?.data?.native_completion === "completed") {
-          useAppStore.setState(state => {
-            const current = state.sideChats[id];
-            return current?.draft === thread.draft && current.richDraft === thread.richDraft ? { sideChats: { ...state.sideChats,
-              [id]: { ...current, draft: "", richDraft: undefined },
-            } } : state;
-          });
-          return;
-        }
-        for (const attachment of attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
-        submittedContextRef.current = thread.selectedContext;
-        isFollowingRef.current = true;
-        setShowScrollButton(false);
-        useAppStore.setState((state) => {
-          const current = state.sideChats[id];
-          if (!current) return state;
-          return { sideChats: { ...state.sideChats, [id]: { ...current,
-            ...(current.draft === thread.draft && current.richDraft === thread.richDraft ? { draft: "", richDraft: undefined } : {}),
-            selectedContext: current.selectedContext === thread.selectedContext ? undefined : current.selectedContext,
-            contextRefs: current.contextRefs?.filter((ref) => !contextRefs.includes(ref)),
-            attachments: current.attachments?.filter((attachment) => !attachments.includes(attachment)),
-          } } };
-        });
-      }
     } catch (error) {
       pushToast(error instanceof Error ? error.message : tr("侧边消息发送失败，请重试。"), "error");
-    } finally { setSubmitting(false); }
+    } finally { finishSubmission(); }
   };
 
   const stop = () => {
@@ -320,7 +336,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
 
   return (
     <div className="side-chat-panel chat-pane" data-conversation-id={id} onKeyDown={(event) => {
-      if (event.defaultPrevented || event.key !== "Escape" || event.nativeEvent.isComposing || event.keyCode === 229) return;
+      if (hasPendingApproval || event.defaultPrevented || event.key !== "Escape" || event.nativeEvent.isComposing || event.keyCode === 229) return;
       event.stopPropagation();
       if (thread.isStreaming) {
         event.preventDefault();

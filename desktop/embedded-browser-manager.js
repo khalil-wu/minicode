@@ -85,7 +85,10 @@ function publishDownloads() {
   for (const window of getMainWindows()) window.webContents.send("minicode:embeddedBrowser:downloadsChanged", listDownloads());
 }
 function claimAgentControl(entry, control) {
-  if (control.agentControl) entry.agentControls.set(control.agentControl.id, control.agentControl);
+  if (control.agentControl) {
+    entry.agentControls.set(control.agentControl.id, control.agentControl);
+    entry.manualNavigation = false;
+  }
 }
 
 function consumeAllowedDownload(entry, url) {
@@ -142,7 +145,10 @@ function releaseAgentControl({ conversation_id, window_instance_id, control }) {
     entry.agentControls.delete(control.id);
     if (entry.allowedDownload?.control.id === control.id) entry.allowedDownload = null;
     if (entry.blobDownload?.control.id === control.id) entry.blobDownload = null;
-    if (entry.agentControls.size === 0) closeDownloadDebugger(entry);
+    if (entry.agentControls.size === 0) {
+      entry.manualNavigation = true;
+      closeDownloadDebugger(entry);
+    }
     released++;
   }
   return released;
@@ -679,7 +685,12 @@ function ownedPreviewTarget(value, conversationId) {
   try { return Boolean(isOwnedPreviewUrl(value, conversationId)); } catch { return false; }
 }
 
-function assessNavigationTarget(value, conversationId = "", entry = null) {
+function isManualNavigation(entry, control = {}) {
+  return !control.agentControl && !entry?.agentControls?.size
+    && (control.manualNavigation === true || entry?.manualNavigation === true);
+}
+
+function assessNavigationTarget(value, conversationId = "", entry = null, control = {}) {
   if (value === "about:blank") return { allowed: true, risk: "blank", reason: "" };
   if (!isAllowedNavigationUrl(value)) {
     return { allowed: false, risk: "invalid", reason: "Only HTTP and HTTPS pages can be opened in the embedded browser." };
@@ -693,6 +704,9 @@ function assessNavigationTarget(value, conversationId = "", entry = null) {
   if (parsed.username || parsed.password) {
     return { allowed: false, risk: "credentials", reason: "Embedded browser URLs must not contain credentials." };
   }
+  // Only the authenticated main-renderer IPC supplies this control option.
+  // Page navigation keeps that mode until authenticated Agent control claims it.
+  if (isManualNavigation(entry, control)) return { allowed: true, risk: "manual", reason: "" };
   let assessment = null;
   if (typeof assessBrowserNavigationPolicy === "function") {
     try { assessment = assessBrowserNavigationPolicy(value); } catch (error) {
@@ -743,8 +757,8 @@ async function hostResolvesToPrivateNetwork(host) {
   }
 }
 
-async function assessNavigationTargetForRequest(value, conversationId = "", entry = null) {
-  const decision = assessNavigationTarget(value, conversationId, entry);
+async function assessNavigationTargetForRequest(value, conversationId = "", entry = null, control = {}) {
+  const decision = assessNavigationTarget(value, conversationId, entry, control);
   if (!decision.allowed || decision.risk !== "public") return decision;
   let parsed;
   try { parsed = new URL(value); } catch { return decision; }
@@ -770,6 +784,7 @@ async function assessNavigationTargetForRequest(value, conversationId = "", entr
 }
 
 function actualPeerNavigationError(entry, url, peerIp, proxyResolution = "DIRECT") {
+  if (isManualNavigation(entry)) return "";
   const peer = String(peerIp || "").trim().replace(/^\[|\]$/g, "");
   if (!peer || (!isLoopbackHost(peer) && !isPrivateOrLinkLocalHost(peer))) return "";
   // Chromium reports the proxy server as the connected peer.  A loopback or
@@ -785,7 +800,7 @@ function actualPeerNavigationError(entry, url, peerIp, proxyResolution = "DIRECT
 
 async function confirmNavigationUrl(value, conversationId = "", entry = null, control = {}) {
   const url = typeof value === "string" ? value.trim() : "";
-  const decision = await assessNavigationTargetForRequest(url, conversationId, entry);
+  const decision = await assessNavigationTargetForRequest(url, conversationId, entry, control);
   if (decision.allowed) {
     return {
       url,
@@ -1331,6 +1346,7 @@ function attachViewEvents(entry) {
         const child = createViewEntry({ id: randomUUID(), conversationId: entry.conversationId,
           windowInstanceId: entry.windowInstanceId, mainWindow: entry.window, url }, options);
         child.agentControls = new Map(entry.agentControls);
+        child.manualNavigation = entry.manualNavigation;
         if (approvedPrivateOrigin(entry, url)) child.approvedPrivateOrigins.add(normalizeOrigin(url));
         emit(child, "page", { active: disposition !== "background-tab", insertToRightOfTabId: entry.id });
         if (!options.webContents) {
@@ -1469,7 +1485,7 @@ function createViewEntry({ id, conversationId, windowInstanceId, mainWindow, url
     id, key: viewKey(windowInstanceId, id), windowInstanceId, window: mainWindow,
     conversationId, view, url, title: "新标签页", faviconUrl: "", visitSource: "other",
     consoleLogs: [], networkLogs: [], navigationVersion: 0, documentGrants: new Map(),
-    permissionRequests: new Set(), permissionPrompt: null, agentControls: new Map(), allowedDownload: null,
+    permissionRequests: new Set(), permissionPrompt: null, agentControls: new Map(), manualNavigation: false, allowedDownload: null,
     blobDownload: null, downloadDebugger: null,
     approvedPrivateOrigins: new Set(),
     layoutBound: false, presented: false, captureWaiters: new Set(), captureInFlight: false,
@@ -1514,11 +1530,12 @@ async function create(payload = {}, control = {}) {
     // Approval/DNS can yield; only this still-owned request may publish a view.
     entry = views.get(key);
     if (!entry) {
-      entry = createViewEntry({ id: requestedId, conversationId, windowInstanceId, mainWindow, url: requestedUrl });
+      entry = createViewEntry({ id: requestedId, conversationId: request.conversationId, windowInstanceId, mainWindow, url: requestedUrl });
     }
     if (navigation.privateNetworkApproved) {
       entry.approvedPrivateOrigins.add(normalizeOrigin(requestedUrl));
     }
+    if (control.manualNavigation === true) entry.manualNavigation = true;
     claimAgentControl(entry, control);
     control.signal?.throwIfAborted();
     control.onSubmitted?.();
@@ -1799,9 +1816,10 @@ async function executeControlCommand(payload = {}, control = {}) {
   throw new Error(`Unsupported embedded browser action: ${action}`);
 }
 
-function runNavigationAction(payload = {}) {
+function runNavigationAction(payload = {}, control = {}) {
   const { id, action } = payload;
   const entry = selectEntry(id, conversationIdFrom(payload), payload.window_instance_id);
+  if (control.manualNavigation === true) entry.manualNavigation = true;
   const webContents = entry.view.webContents;
   const history = webContents.navigationHistory;
   entry.visitSource = "other";
@@ -1829,6 +1847,7 @@ function runMenuCommand(window, focusedContents, action) {
   if (!entry) return false;
   const contents = entry.view.webContents;
   if (action === "reload" || action === "hard-reload") {
+    entry.manualNavigation = true;
     entry.visitSource = "other";
     if (action === "hard-reload") contents.reloadIgnoringCache(); else contents.reload();
   } else if (action === "close") {
@@ -1850,6 +1869,7 @@ function runMenuCommand(window, focusedContents, action) {
     contents.setZoomFactor(percent / 100);
     emit(entry, "updated", { zoomFactor: percent / 100 });
   } else if (action === "back" || action === "forward") {
+    entry.manualNavigation = true;
     const history = contents.navigationHistory;
     if (action === "back" && history.canGoBack()) history.goBack();
     if (action === "forward" && history.canGoForward()) history.goForward();
@@ -1956,6 +1976,25 @@ function closeConversation(conversationId, windowInstanceId) {
   return closed;
 }
 
+function transferOwner(fromOwner, toOwner, windowInstanceId) {
+  const source = requireConversationId(fromOwner);
+  const target = requireConversationId(toOwner);
+  requireWindow(windowInstanceId);
+  if (!source.startsWith("client-draft:") || target.startsWith("client-draft:")) {
+    throw new Error("Browser ownership transfer requires a client draft and a materialized conversation.");
+  }
+  for (const request of pendingNavigations.values()) {
+    if (request.windowInstanceId === windowInstanceId && request.conversationId === source) request.conversationId = target;
+  }
+  let transferred = 0;
+  for (const entry of views.values()) {
+    if (entry.windowInstanceId !== windowInstanceId || entry.conversationId !== source) continue;
+    entry.conversationId = target;
+    transferred++;
+  }
+  return transferred;
+}
+
 function disposeAll() {
   pendingNavigations.clear();
   for (const entry of Array.from(views.values())) closeEntry(entry);
@@ -1988,6 +2027,7 @@ module.exports = {
   releaseAgentControl,
   close,
   closeConversation,
+  transferOwner,
   clearSiteData,
   clearBrowsingData,
   capture,

@@ -18,6 +18,7 @@ import { CommandPalette } from "../overlays/CommandPalette";
 import { QueuedMessageList } from "./QueuedMessageList";
 import { collectComposerDrafts, emptyComposerDraft, flushComposerDrafts, loadComposerDrafts, persistComposerDrafts } from "../stores/composer-drafts";
 import { clearDiffCommentScope, getDiffCommentScope, readDiffCommentState, setDiffComments } from "../lib/diff-comment-storage";
+import { completeRetainedInputEdit, retainFailedComposerInput, restoreRetainedComposerInput } from "./retainedComposerInputs";
 
 const wire = vi.hoisted(() => ({ commands: [] as ClientCommand[], toast: vi.fn() }));
 vi.hoisted(() => Object.defineProperty(window, "matchMedia", { configurable: true,
@@ -57,7 +58,7 @@ beforeEach(async () => {
   resetQueuedMessageHistoryForTests();
   queue = [{ ...first }, { ...second }];
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: owner, workingDirectory: root,
-    conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, composerDraftsReady: true,
+    conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, retainedComposerInputs: {}, composerDraftsReady: true,
     messages: [{ id: "actual-active-assistant", role: "assistant", content: "working", artifacts: [], timestamp: 0,
       isStreaming: true, turnId: "actual-active-turn" }, ...queue.map(message => ({ ...message }))],
     conversationMessages: {}, pendingConversationSwitchId: null,
@@ -173,9 +174,63 @@ it("retains a newer draft typed during acceptance and returns its predecessor on
   expect(await saving).toBe(true);
   expect(useAppStore.getState().draft).toBe("newer input before receipt");
   expect(useAppStore.getState().queuedEdit?.completed).toBe(true);
-  useAppStore.setState({ draft: "" });
+  useAppStore.setState({ draft: "", goalMode: true });
+  await act(async () => {});
+  expect(useAppStore.getState()).toMatchObject({ draft: "", goalMode: true, queuedEdit: { completed: true } });
+  useAppStore.setState({ goalMode: false });
   await waitFor(() => expect(useAppStore.getState().draft).toBe("prior unsent input"));
   unsubscribe();
+});
+
+it.each(["send", "cancel", "undo"] as const)("keeps upload completion in the draft backup while queue %s is awaiting its receipt", async operation => {
+  useAppStore.setState({ draft: "prior upload draft", attachments: [{ id: "backup-upload", name: "backup.txt", type: "text/plain", size: 6,
+    status: "uploading", localFile: new File(["backup"], "backup.txt") }] });
+  await beginQueuedMessageEdit(owner, first);
+  const captured = useAppStore.getState().queuedEdit!;
+  hold = true;
+  let result: boolean | Promise<boolean> | Promise<void>;
+  if (operation === "send") result = sendChatMessage({ queuedEdit: captured, conversationId: owner, displayContent: "saved replacement",
+    onReceived: () => useAppStore.setState({ draft: "", attachments: [], quotedMessage: null, selectedSkills: [] }) });
+  else if (operation === "cancel") result = cancelQueuedMessageEdit();
+  else {
+    expect(dispatchQueuedMessageHistory("undo")).toBe(true);
+    result = waitForQueuedMessageHistory();
+  }
+  await waitFor(() => expect(pending).toHaveLength(1));
+  useAppStore.getState().updateAttachment("backup-upload", { status: "ready", artifactId: "completed-backup" });
+  expect(useAppStore.getState().queuedEdit).not.toBe(captured);
+  hold = false; pending.splice(0).forEach(execute => execute());
+  await result;
+  expect(useAppStore.getState()).toMatchObject({ draft: "prior upload draft", queuedEdit: undefined,
+    attachments: [expect.objectContaining({ id: "backup-upload", status: "ready", artifactId: "completed-backup" })] });
+  if (operation === "undo") {
+    useAppStore.getState().updateAttachment("backup-upload", { artifactId: "updated-after-undo" });
+    expect(dispatchQueuedMessageHistory("redo")).toBe(true);
+    await waitForQueuedMessageHistory();
+    expect(useAppStore.getState().queuedEdit?.backup.attachments[0].artifactId).toBe("updated-after-undo");
+    await cancelQueuedMessageEdit();
+    expect(useAppStore.getState().attachments[0].artifactId).toBe("updated-after-undo");
+  } else {
+    expect(dispatchQueuedMessageHistory("undo")).toBe(false);
+  }
+});
+
+it("does not overwrite a retained retry receipt received while a queued edit is being prepared", async () => {
+  useAppStore.setState({ draft: "earlier authored draft" });
+  retainFailedComposerInput({ owner: { kind: "conversation", id: owner, workspaceRoot: root },
+    message: { id: "retained-before-queue", role: "user", content: "failed input", timestamp: 0, artifacts: [] },
+    draft: { ...emptyComposerDraft(), draft: "failed input" }, comments: [] });
+  restoreRetainedComposerInput("retained-before-queue");
+  useAppStore.setState({ draft: "typed while retry was sending" });
+  hold = true;
+  const editing = beginQueuedMessageEdit(owner, first);
+  completeRetainedInputEdit("retained-before-queue");
+  hold = false; pending.splice(0).forEach(execute => execute());
+  await editing;
+  expect(useAppStore.getState()).toMatchObject({ draft: "typed while retry was sending", queuedEdit: undefined,
+    retainedInputEdit: { completed: true, backup: { draft: "earlier authored draft" } } });
+  expect(queue.map(message => message.id)).toEqual([first.id, second.id]);
+  expect(useAppStore.getState().retainedComposerInputs).toEqual({});
 });
 
 it("exposes the source edit action and semantic drag handle through the existing numbered queue rows", async () => {

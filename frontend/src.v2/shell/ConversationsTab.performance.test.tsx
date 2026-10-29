@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { useState } from "react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { Profiler, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { sessionRowRenderMock } = vi.hoisted(() => ({
@@ -14,7 +14,7 @@ vi.mock("./SessionRow", async () => {
     sessionRowRenderMock(props.conversation.id);
     return React.createElement(
       "div",
-      { "data-testid": `mock-session-row-${props.conversation.id}` },
+      { "data-testid": `mock-session-row-${props.conversation.id}`, "data-status": props.sessionStatus },
       React.createElement(
         "button",
         {
@@ -31,6 +31,7 @@ vi.mock("./SessionRow", async () => {
 
 vi.mock("../desktop/runtime", () => ({
   isDesktop: () => false,
+  desktop: () => undefined,
   revealPath: vi.fn(),
 }));
 
@@ -53,6 +54,7 @@ vi.mock("../protocol/ws-outbox", () => ({
 
 import { useAppStore } from "../stores";
 import { ConversationsTab } from "./ConversationsTab";
+import * as markdown from "../lib/markdown";
 
 function ParentWithUnrelatedUpdates() {
   const [, setTick] = useState(0);
@@ -97,7 +99,33 @@ describe("ConversationsTab row rendering performance", () => {
     });
   });
 
-  afterEach(() => cleanup());
+  afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+  it("ignores progress-only runtime updates but projects the actual approval owner", () => {
+    const committed = vi.fn();
+    render(<Profiler id="sidebar" onRender={committed}><ConversationsTab conversationId="conv-a" onSetConfirmDialog={vi.fn()} /></Profiler>);
+    committed.mockClear(); sessionRowRenderMock.mockClear();
+    act(() => useAppStore.setState({ runtimeSession: { active_conversation_id: "conv-a", task_summary: { phase: "plan" }, pending_approvals: [], pending_approval_count: 0 } }));
+    act(() => useAppStore.setState({ runtimeSession: { active_conversation_id: "conv-a", task_summary: { phase: "execute" }, pending_approvals: [], pending_approval_count: 0 } }));
+    expect(committed).not.toHaveBeenCalled();
+    expect(sessionRowRenderMock).not.toHaveBeenCalled();
+    act(() => useAppStore.setState({ runtimeSession: { active_conversation_id: "conv-a", pending_approval_count: 1,
+      pending_approvals: [{ request_id: "question-b", type: "control_request", subtype: "elicitation", conversation_id: "conv-b" }] } }));
+    expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toEqual(["conv-b"]);
+    expect(screen.getByTestId("mock-session-row-conv-b").getAttribute("data-status")).toBe("waiting");
+    expect(screen.getByTestId("mock-session-row-conv-a").getAttribute("data-status")).toBe("idle");
+  });
+
+  it("does not reparse activity summaries when opening an unrelated row menu", () => {
+    useAppStore.setState(state => ({ conversations: state.conversations.map(chat => ({ ...chat, summary: `Assistant: **${chat.title}** actual result` })) }));
+    const parse = vi.spyOn(markdown, "fromMarkdown");
+    render(<ConversationsTab conversationId="conv-a" activityView onSetConfirmDialog={vi.fn()} />);
+    expect(parse).toHaveBeenCalledTimes(3);
+    parse.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "打开菜单 Task A" }));
+    expect(parse).not.toHaveBeenCalled();
+    expect(screen.getByText("Task B actual result")).toBeTruthy();
+  });
 
   it("re-renders only the affected row when a menu opens or the active session changes", () => {
     render(<ParentWithUnrelatedUpdates />);

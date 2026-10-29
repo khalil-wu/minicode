@@ -17,7 +17,8 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from copy import deepcopy
 from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any
@@ -45,7 +46,7 @@ from backend.agent.provider_activity import (
 from backend.agent.query_engine import AgentSession, QuerySubmission
 from backend.agent.runtime import default_runtime
 from backend.agent.run_context import RunContext
-from backend.agent.model_execution import ModelExecutionSnapshot
+from backend.agent.model_execution import ModelExecutionSnapshot, capture_model_config
 from backend.agent.turn_state import AgentTurnState, record_user_input_block
 from backend.artifact.store import MAX_CONTENT_LENGTH as MAX_ARTIFACT_CONTENT_CHARS
 from backend.config import AppConfig, get_available_models, get_llm_provider, load_config
@@ -1391,6 +1392,25 @@ async def _commit_automatic_compaction(
         return await _commit()
 
 
+@dataclass(frozen=True)
+class AgentRunRequest:
+    config: AppConfig
+    workspace_root: Path | None
+    model_selection: dict
+    selected_provider: str
+    selected_model: str
+    provider_override: bool
+    model_override: bool
+    agent_mode: str
+    permission: Any
+    tool_registry: Any
+    skill_manager: Any
+    skill_executor: Any
+    mcp_manager: Any
+    memory_manager: Any
+    skill_snapshot_pending: bool = False
+
+
 class SessionAgentRunnerMixin:
     """Agent run logic for WebSocketSession.
 
@@ -1400,6 +1420,38 @@ class SessionAgentRunnerMixin:
     approval handling, run ownership, interruption state, and related session
     services.
     """
+
+    def capture_agent_run_request(self, conversation_id: str) -> AgentRunRequest:
+        """Resolve window-dependent inputs before handing startup to the registered run."""
+        conversation = self.conversation_repo.get_conversation_summary(conversation_id)
+        if conversation is None:
+            raise ValueError(f"Conversation '{conversation_id}' was not found")
+        conversation = self.session_lifecycle.bind_execution_for_operation(conversation)
+        root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        config = capture_model_config(load_config(cwd=root))
+        skills = self.skill_manager
+        from backend.skills.manager import SkillManager
+        skill_snapshot_pending = isinstance(skills, SkillManager)
+        if isinstance(skills, SkillManager):
+            # Capture the host-owned inventory synchronously, but discover the
+            # turn's workspace files on a worker while history is hydrating.
+            host_skills = skills
+            skills = host_skills.clone_host_catalog()
+            skills._is_snapshot = host_skills._is_snapshot
+            skills.runtime_roots = None
+        active = conversation_id == self.active_conversation_id
+        return AgentRunRequest(config=config, workspace_root=root,
+            model_selection=deepcopy(conversation.model_selection),
+            selected_provider=str(self.provider or "") if active else "",
+            selected_model=str(self.selected_model or "") if active else "",
+            provider_override=bool(self._provider_override_active) if active else False,
+            model_override=bool(self._model_override_active) if active else False,
+            agent_mode=conversation.agent_mode,
+            permission=self.permission_context_for_conversation(conversation, source="agent.run"),
+            tool_registry=self._conversation_tool_registry(conversation_id, workspace_root=root).fork(),
+            skill_manager=skills, skill_executor=self.skill_executor,
+            mcp_manager=self._mcp_manager_for_workspace(root), memory_manager=self.memory_manager,
+            skill_snapshot_pending=skill_snapshot_pending)
 
     @property
     def ui_agent_state_store(self) -> UiAgentStateStore:
@@ -1536,6 +1588,13 @@ class SessionAgentRunnerMixin:
         data: dict[str, Any],
     ) -> None:
         if not conversation_id:
+            return
+        # Tool output, terminal spans, assistant deltas and ordinary timeline
+        # events do not own the subagent/plan/todo projection. Return before
+        # touching the conversation repository; otherwise every high-volume
+        # output chunk causes a synchronous full conversation read merely to
+        # discover that no UI-state handler applies.
+        if event_type not in _UI_AGENT_STATE_HANDLERS:
             return
         terminal_fences = self.ui_agent_state_store.terminal_fences
         fenced_message_id = terminal_fences.get(conversation_id)
@@ -2006,6 +2065,8 @@ class SessionAgentRunnerMixin:
         conversation_id: str,
         workspace_root: Path | None,
         tool_registry: Any,
+        config: AppConfig | None = None,
+        skill_manager: Any | None = None,
         force_reload: bool = False,
         reload_reason: str = "reload",
         defer_previous_shutdown_until: asyncio.Task[Any] | None = None,
@@ -2032,7 +2093,7 @@ class SessionAgentRunnerMixin:
         conversation_repo = getattr(self, "conversation_repo", None)
         if conversation_repo is None:
             raise RuntimeError("conversation repository is required to load extensions")
-        conversation = conversation_repo.get_conversation(owner_id)
+        conversation = await to_thread_cancel_safe(conversation_repo.get_conversation_summary, owner_id)
         if conversation is None:
             raise RuntimeError(
                 f"Conversation {owner_id!r} disappeared while loading extensions"
@@ -2094,6 +2155,12 @@ class SessionAgentRunnerMixin:
                     and runtime_fingerprint == generation_fingerprint
                 ):
                     return runtime
+            # Only a replacement generation binds an executable context.
+            # Its snapshot includes history; the unchanged-generation path
+            # above needs only the owner's existence and metadata.
+            conversation = await to_thread_cancel_safe(conversation_repo.get_conversation, owner_id)
+            if conversation is None:
+                raise RuntimeError(f"Conversation {owner_id!r} disappeared while loading extensions")
             # The source owns discovery, trust-scoped path expansion, loader
             # cache partitioning and provider capability construction. The WS
             # owner only receives an unpublished candidate.
@@ -2123,7 +2190,7 @@ class SessionAgentRunnerMixin:
                     tool_registry = self._build_conversation_tool_registry(
                         owner_id,
                         workspace_root=workspace_root,
-                        config=load_config(cwd=workspace_root),
+                        config=config if config is not None else load_config(cwd=workspace_root),
                         mcp_manager=self._mcp_manager_for_workspace(workspace_root),
                     )
             candidate_model_runtime = capability.model_runtime
@@ -2178,6 +2245,8 @@ class SessionAgentRunnerMixin:
                     tool_registry=tool_registry,
                     model_runtime=candidate_model_runtime,
                     model_registry=candidate_model_registry,
+                    skill_manager=skill_manager,
+                    config=config,
                 )
                 command_registry = getattr(self, "command_registry", None)
                 if command_registry is not None:
@@ -3447,6 +3516,8 @@ class SessionAgentRunnerMixin:
         tool_registry: Any,
         model_runtime: Any | None = None,
         model_registry: Any | None = None,
+        skill_manager: Any | None = None,
+        config: AppConfig | None = None,
     ) -> None:
         """Bind a conversation-owned MiniCode command context outside an Agent turn.
 
@@ -3462,7 +3533,7 @@ class SessionAgentRunnerMixin:
             raise ValueError("conversation id is required to bind extension actions")
         workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         config = _config_with_runtime_model_budget(
-            load_config(cwd=workspace_root),
+            config if config is not None else load_config(cwd=workspace_root),
             model_runtime=model_runtime,
             provider=str(getattr(self, "provider", "") or ""),
             model=str(getattr(self, "selected_model", "") or ""),
@@ -3486,7 +3557,7 @@ class SessionAgentRunnerMixin:
             skill_executor=getattr(self, "skill_executor", None),
             memory_manager=run_memory_manager,
             llm=run_llm,
-            skill_manager=self.skill_manager,
+            skill_manager=skill_manager if skill_manager is not None else self.skill_manager,
             conversation_id=conversation_id,
             workspace_root=workspace_root,
             skill_config_stack=config.config_layer_stack,
@@ -3514,7 +3585,7 @@ class SessionAgentRunnerMixin:
         )
 
     async def _ensure_extension_commands_for_conversation(
-        self, conversation_id: str
+        self, conversation_id: str, *, bind_command_context: bool = True,
     ) -> Any | None:
         """Materialize the MiniCode command surface before slash dispatch/catalog reads."""
 
@@ -3539,6 +3610,11 @@ class SessionAgentRunnerMixin:
         )
         if runner is None:
             return None
+        # Catalog readers need the published generation, not a new executable
+        # context. Candidate generations are already bound before publication;
+        # actual slash dispatch below still captures the latest conversation.
+        if not bind_command_context:
+            return runner
         tool_registry = (
             self._extension_runtime_state(clean_id).get("registry") or tool_registry
         )
@@ -3808,16 +3884,17 @@ class SessionAgentRunnerMixin:
         )
         query_guards = conversation_query_guards()
         run_context = run_context or RunContext()
-        run_context.prepare_turn_owner()
+        if run_context.turn_owner_task is None:
+            run_context.prepare_turn_owner()
         run_context.turn_kind = "review" if run_metadata.get("code_review") is not None else "regular"
         run_context.accept_scheduled_input = lambda command: self.run_manager.enqueue_scheduled_input(target_conversation_id, command,
             expected_turn_id=str(run_metadata.get("run_id") or "").strip())
         transition = run_metadata.pop("_conversation_transition", None)
-        query_claim = (
-            query_guards.handoff(transition, owner_id=owner_id)
-            if transition is not None
-            else query_guards.try_start(target_conversation_id, owner_id=owner_id, owner=run_context)
-        )
+        query_claim = run_context.reserved_query_claim
+        run_context.reserved_query_claim = None
+        if query_claim is None:
+            query_claim = (query_guards.handoff(transition, owner_id=owner_id) if transition is not None
+                else query_guards.try_start(target_conversation_id, owner_id=owner_id, owner=run_context))
         if query_claim is None:
             active_claim = query_guards.active_claim(target_conversation_id)
             message_id = _client_assistant_message_id(run_metadata)
@@ -3856,8 +3933,11 @@ class SessionAgentRunnerMixin:
         try:
             run_metadata["conversation_run_generation"] = query_claim.generation
             from backend.services.goal_runtime import GoalTurnAccounting
-            goal_record = self.conversation_repo.get_conversation(target_conversation_id)
-            goal_config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(goal_record), resolve_credentials=False)
+            if run_context.start_request is not None:
+                goal_config = run_context.start_request.config
+            else:
+                goal_record = await to_thread_cancel_safe(self.conversation_repo.get_conversation_summary, target_conversation_id)
+                goal_config = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(goal_record), resolve_credentials=False)
             goals_enabled = goal_config.feature_flags.enabled("goals")
             run_context.goal_accounting = (GoalTurnAccounting(self.conversation_repo, target_conversation_id,
                 automatic=bool(run_metadata.get("_goal_continuation"))) if goals_enabled else None)
@@ -4045,14 +4125,26 @@ class SessionAgentRunnerMixin:
         run_context.lifecycle_cleanup_tasks = self.run_manager.lifecycle_cleanup_tasks_for(
             target_conversation_id
         )
-        conversation = self.conversation_repo.get_conversation(target_conversation_id)
+        conversation = await to_thread_cancel_safe(self.conversation_repo.get_conversation, target_conversation_id)
         if conversation is None:
             await emit_conversation_not_found(self, target_conversation_id)
             return
 
         # A turn's explicit mode belongs to this exact conversation. Resumed
         # or scheduled turns inherit its durable selection, never another tab.
-        run_metadata.setdefault("agent_mode", conversation.agent_mode)
+        request_snapshot = run_context.start_request
+        if request_snapshot is None:
+            request_snapshot = self.capture_agent_run_request(target_conversation_id)
+            run_context.start_request = request_snapshot
+        run_metadata.setdefault("agent_mode", request_snapshot.agent_mode)
+
+        if request_snapshot.skill_snapshot_pending:
+            skill_snapshot_task = asyncio.create_task(to_thread_cancel_safe(
+                request_snapshot.skill_manager.snapshot, request_snapshot.workspace_root,
+                config_stack=request_snapshot.config.config_layer_stack,
+            ))
+            run_context.skill_snapshot_task = skill_snapshot_task
+            retain_cleanup_task(skill_snapshot_task, run_context.lifecycle_cleanup_tasks)
 
         # A restored conversation may have only its newest entries loaded
         # synchronously.  Do not construct or send a provider request until
@@ -4061,6 +4153,12 @@ class SessionAgentRunnerMixin:
         wait_for_hydration = getattr(conversation_runtime, "wait_for_hydration", None)
         if callable(wait_for_hydration):
             await wait_for_hydration(conversation.id)
+
+        if run_context.skill_snapshot_task is not None:
+            skills = await asyncio.shield(run_context.skill_snapshot_task)
+            request_snapshot = replace(request_snapshot, skill_manager=skills, skill_snapshot_pending=False)
+            run_context.start_request = request_snapshot
+            run_context.skill_snapshot_task = None
 
         def _owns_query_claim() -> bool:
             return query_claim is None or conversation_query_guards().owns(query_claim)
@@ -4111,7 +4209,7 @@ class SessionAgentRunnerMixin:
         run_context.execution_journal = execution_journal
 
         conversation = self.session_lifecycle.bind_execution_for_operation(conversation)
-        run_workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
+        run_workspace_root = request_snapshot.workspace_root
         if conversation.execution_cwd.startswith("file:"):
             run_context.execution_cwd_uri = conversation.execution_cwd
         if not conversation.workspace_root and getattr(conversation, "projectless_output_dir", ""):
@@ -4120,12 +4218,8 @@ class SessionAgentRunnerMixin:
                 "output_directory": conversation.projectless_output_dir,
                 "browser_root": conversation.projectless_browser_root,
             }
-        run_tool_registry = self._conversation_tool_registry(
-            conversation.id,
-            workspace_root=run_workspace_root,
-        )
+        run_tool_registry = request_snapshot.tool_registry
         previous_turn_aborted = _consume_previous_turn_aborted(self, conversation.id)
-        is_active_conversation_run = conversation.id == self.active_conversation_id
         async with self._conversation_projection_lock(conversation.id):
             await _replay_pending_conversation_projections(
                 self.conversation_repo,
@@ -4186,6 +4280,8 @@ class SessionAgentRunnerMixin:
             conversation_id=conversation.id,
             workspace_root=run_workspace_root,
             tool_registry=run_tool_registry,
+            config=request_snapshot.config,
+            skill_manager=request_snapshot.skill_manager,
         )
         run_context.lifecycle_runtime = lifecycle_runtime
         run_model_runtime = self._model_runtime_for_conversation(conversation.id)
@@ -4198,7 +4294,7 @@ class SessionAgentRunnerMixin:
         # Each run uses a local LLM/provider/model/config snapshot to avoid overwriting
         # session fields that concurrent runs might be reading
         try:
-            run_config = load_config(cwd=run_workspace_root)
+            run_config = request_snapshot.config
             if not run_config.feature_flags.enabled("goals"):
                 run_context.goal_accounting = None
             run_settings = (
@@ -4232,10 +4328,10 @@ class SessionAgentRunnerMixin:
                 else config_provider or resolved_provider
             )
             conversation = self.conversation_repo.get_conversation(conversation.id)
-            task_selection = conversation.model_selection
-            selected_provider = str(getattr(self, "provider", "") or "").strip()
+            task_selection = request_snapshot.model_selection
+            selected_provider = request_snapshot.selected_provider.strip()
             preserve_provider_override = bool(
-                getattr(self, "_provider_override_active", False)
+                request_snapshot.provider_override
                 and run_model_runtime is not None
                 and run_model_runtime.get_provider(selected_provider) is not None
             )
@@ -4307,19 +4403,19 @@ class SessionAgentRunnerMixin:
             config_model = getattr(run_config.llm, "model", "").strip()
             if task_selection.get("model"):
                 run_model = task_selection["model"]
-            elif run_provider != self.provider:
+            elif run_provider != request_snapshot.selected_provider:
                 # Provider changed: use config model, not any previous override
                 run_model = config_model
-            elif not self._model_override_active:
+            elif not request_snapshot.model_override:
                 # Track config changes, while retaining the conversation's
                 # already-selected model when a partial config snapshot omits
                 # ``model``.  This is the canonical session selection, not a
                 # provider/catalog fallback; a completely empty selection is
                 # still rejected below.
-                run_model = config_model or str(self.selected_model or "").strip()
+                run_model = config_model or request_snapshot.selected_model.strip()
             else:
                 # Override active: keep using selected_model
-                run_model = self.selected_model
+                run_model = request_snapshot.selected_model
 
             if run_available_models and run_model and run_model not in run_available_models:
                 raise RuntimeError(
@@ -4382,7 +4478,7 @@ class SessionAgentRunnerMixin:
 
             # Only update session fields if this is the active conversation run
             # This keeps the UI in sync without breaking concurrent background runs
-            if is_active_conversation_run:
+            if conversation.id == self.active_conversation_id:
                 self.config = run_config
                 self.provider = run_provider
                 self.available_models = run_available_models
@@ -4523,7 +4619,7 @@ class SessionAgentRunnerMixin:
         from backend.tools.memory_tools import memory_tools_for_run
         run_memory_policy = memory_policy_snapshot(run_config)
         run_metadata["memory_settings"] = run_memory_policy
-        run_memory_manager = getattr(self, "memory_manager", None) if run_memory_policy["enabled"] and run_memory_policy["use_memories"] else None
+        run_memory_manager = request_snapshot.memory_manager if run_memory_policy["enabled"] and run_memory_policy["use_memories"] else None
         if run_workspace_root is not None and run_memory_policy["enabled"] and run_memory_policy["use_memories"]:
             from backend.memory.file_memory import FileMemory
             from backend.memory.manager import MemoryManager
@@ -4534,7 +4630,7 @@ class SessionAgentRunnerMixin:
         run_context_builder = ContextBuilder(
             token_budget=run_config.token_budget,
             agent_settings=run_config.agent,
-            skill_executor=getattr(self, "skill_executor", None),
+            skill_executor=request_snapshot.skill_executor,
             memory_manager=run_memory_manager,
             llm=run_llm,
             conversation_id=conversation.id,
@@ -4660,7 +4756,7 @@ class SessionAgentRunnerMixin:
         run_context.conversation_repository = self.conversation_repo
         run_context.cost_session_id = str(self.session_id or "")
         run_context.requires_explicit_workspace = True
-        mcp_manager = self._mcp_manager_for_workspace(run_workspace_root)
+        mcp_manager = request_snapshot.mcp_manager
         run_context.mcp_manager = mcp_manager
         run_context.mcp_owner_session_id = str(
             getattr(self, "session_id", "") or ""
@@ -4677,10 +4773,7 @@ class SessionAgentRunnerMixin:
             except Exception as exc:
                 logger.debug("Unable to snapshot connected MCP servers: %s", exc)
         run_context.connected_mcp_servers = tuple(connected_mcp_servers)
-        run_permission_context = self.permission_context_for_conversation(
-            conversation,
-            source="agent.run",
-        )
+        run_permission_context = request_snapshot.permission
         if run_permission_context.mode == "plan":
             from backend.agent.plans import bind_plan_owner, merge_plan_constraints
 
@@ -5103,7 +5196,6 @@ class SessionAgentRunnerMixin:
             if isinstance(admission_future, asyncio.Future) and not admission_future.done():
                 admission_future.set_result(None)
             if consumed_steer is None and run_metadata.get("_retry_projection") is not None:
-                self.run_manager.clear_user_message_queue(conversation.id, preserve_turn_input_queue=True)
                 run_metadata.pop("_retry_projection")
 
         run_metadata["report_turn_admission"] = _report_turn_admission
@@ -5222,12 +5314,18 @@ class SessionAgentRunnerMixin:
                         "output": payload.get("output", payload.get("content", ""))})
                 elif event_type == "runtime.span" and payload.get("event") == "tool.started":
                     turn_state.record_tool_execution_started(payload)
-                async with self._conversation_projection_lock(conversation.id):
-                    snapshot = turn_state.finalize(terminal_status="completed", live_tool_call_ids=_live_code_call_ids())
-                    tool_record = next((record for record in snapshot.tool_calls if record["id"] == call_id), None)
-                    if tool_record is not None:
-                        await to_thread_cancel_safe(self.conversation_repo.update_tool_call,
-                            conversation.id, message_id=assistant_message_id, tool_call=tool_record)
+                if event_type in {"tool_output_delta", "command_output_chunk"} and accepts_parent_projection:
+                    # The active turn coalesces its derived transcript. A
+                    # retained cell outlives that turn's projection fence and
+                    # must update its original tool item independently below.
+                    await _persist_partial_turn()
+                else:
+                    async with self._conversation_projection_lock(conversation.id):
+                        snapshot = turn_state.finalize(terminal_status="completed", live_tool_call_ids=_live_code_call_ids())
+                        tool_record = next((record for record in snapshot.tool_calls if record["id"] == call_id), None)
+                        if tool_record is not None:
+                            await to_thread_cancel_safe(self.conversation_repo.update_tool_call,
+                                conversation.id, message_id=assistant_message_id, tool_call=tool_record)
                 await self.send_event(AgentEvent(type=event_type, data=payload))
                 return
             payload.setdefault("conversation_id", conversation.id)
@@ -5318,6 +5416,7 @@ class SessionAgentRunnerMixin:
         partial_persist_task: asyncio.Task[None] | None = None
         partial_persist_pending = False
         partial_persist_forced = False
+        partial_persist_wake = asyncio.Event()
         partial_history_revision: int | None = None
 
         def _remember_turn_diff(payload: dict[str, Any]) -> None:
@@ -5359,6 +5458,8 @@ class SessionAgentRunnerMixin:
             nonlocal partial_persist_task, partial_persist_pending, partial_persist_forced
             partial_persist_pending = True
             partial_persist_forced |= force
+            if force:
+                partial_persist_wake.set()
             if partial_persist_task is None or partial_persist_task.done():
                 partial_persist_task = asyncio.create_task(_flush_partial_turns())
 
@@ -5367,6 +5468,16 @@ class SessionAgentRunnerMixin:
             while partial_persist_pending:
                 force = partial_persist_forced
                 partial_persist_pending = partial_persist_forced = False
+                if not force:
+                    remaining = 1.0 - (time.monotonic() - last_partial_persisted_at)
+                    if remaining > 0:
+                        try:
+                            await asyncio.wait_for(partial_persist_wake.wait(), timeout=remaining)
+                        except asyncio.TimeoutError:
+                            pass
+                        force |= partial_persist_forced
+                        partial_persist_pending = partial_persist_forced = False
+                partial_persist_wake.clear()
                 await _write_partial_turn(force=force)
 
         async def _write_partial_turn(*, force: bool = False) -> None:
@@ -5530,12 +5641,7 @@ class SessionAgentRunnerMixin:
                 if raw_status in {"completed", "partial", "failed", "cancelled"}
                 else ""
             )
-            reason = str(
-                payload.get("terminal_reason")
-                or payload.get("summary")
-                or payload.get("error")
-                or ""
-            ).strip()
+            reason = str(payload.get("terminal_reason") or "").strip()
             return status, reason
 
         async def _send_done_once() -> bool:
@@ -5629,7 +5735,7 @@ class SessionAgentRunnerMixin:
                     session=run_agent_session,
                     state=agent_state,
                     runtime=AgentLoopSessionContext(
-                        skill_manager=self.skill_manager,
+                        skill_manager=request_snapshot.skill_manager,
                         permission_context=run_permission_context,
                         workspace_root=run_workspace_root,
                         session_id=self.session_id,
@@ -5851,18 +5957,19 @@ class SessionAgentRunnerMixin:
                     effective_terminal_status = durable_status or raw_terminal_status
                     if effective_terminal_status in {"completed", "partial", "failed", "cancelled", "interrupted"}:
                         query_terminal_status = effective_terminal_status
-                    if durable_reason:
-                        query_terminal_reason = durable_reason
                     if durable_status:
+                        query_terminal_reason = durable_reason
                         query_done_payload["status"] = durable_status
                         if durable_reason:
                             query_done_payload["reason"] = durable_reason
+                        else:
+                            query_done_payload.pop("reason", None)
                     if effective_terminal_status == "completed":
                         run_failed_message = ""
                         run_failure_recoverable = None
                     elif isinstance(event.data.get("failure_recoverable"), bool):
                         run_failure_recoverable = bool(event.data["failure_recoverable"])
-                    if not durable_reason:
+                    if not durable_status:
                         query_terminal_reason = str(event.data.get("reason") or "").strip()
                 elif event.type == "error":
                     run_failed_message = turn_state.record_error(event.data)
@@ -5969,6 +6076,8 @@ class SessionAgentRunnerMixin:
             if partial_persist_task is not None:
                 # Repeated stop requests cannot detach the writer and let an
                 # older partial projection commit after this turn's terminal.
+                partial_persist_forced = True
+                partial_persist_wake.set()
                 while not partial_persist_task.done():
                     try:
                         await asyncio.shield(partial_persist_task)
@@ -5994,8 +6103,13 @@ class SessionAgentRunnerMixin:
             durable_status, durable_reason = _durable_terminal_projection()
             if durable_status:
                 query_terminal_status = durable_status
-                if durable_reason:
-                    query_terminal_reason = durable_reason
+                query_terminal_reason = durable_reason
+                if query_done_payload:
+                    query_done_payload["status"] = durable_status
+                    if durable_reason:
+                        query_done_payload["reason"] = durable_reason
+                    else:
+                        query_done_payload.pop("reason", None)
             terminal_status = (
                 durable_status if durable_status
                 else "cancelled" if run_interrupted

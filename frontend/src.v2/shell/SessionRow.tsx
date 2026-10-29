@@ -78,11 +78,13 @@ const SessionRowComponent = ({
 }: SessionRowProps) => {
   const { t: tr } = useI18n();
   const c = conversation;
+  const rowRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
   const presentationId = rowId || c.id;
   const menuId = `conversation-actions-${presentationId}`;
   return (
     <div
+      ref={rowRef}
       className="session-row-hover"
       data-session-row="true"
       data-session-presentation={presentationId}
@@ -105,15 +107,18 @@ const SessionRowComponent = ({
               onChange={(e) => onSetRenameValue(e.target.value)}
               onBlur={onCommitRename}
               onKeyDown={(e) => {
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 if (e.key === "Enter") {
                   e.preventDefault();
                   e.stopPropagation();
                   onCommitRename();
+                  queueMicrotask(() => rowRef.current?.querySelector<HTMLButtonElement>(":scope > button")?.focus({ preventScroll: true }));
                 }
                 if (e.key === "Escape") {
                   e.preventDefault();
                   e.stopPropagation();
                   onCancelRename();
+                  queueMicrotask(() => rowRef.current?.querySelector<HTMLButtonElement>(":scope > button")?.focus({ preventScroll: true }));
                 }
               }}
               style={renameInputStyle}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -265,3 +266,69 @@ def test_background_workspace_index_failure_keeps_the_committed_new_owner(
         (new_root.resolve(), bootstrap.new_manager, False),
     ]
     assert session.events and "index failed" in session.events[-1].data["message"]
+
+
+@pytest.mark.parametrize("outcome", ["current", "superseded", "roots-changed"])
+def test_workspace_skill_discovery_does_not_block_the_event_loop_or_publish_a_stale_owner(
+    monkeypatch, tmp_path: Path, outcome: str,
+) -> None:
+    from backend.api import _state
+    from backend.skills.loader import SkillLoader
+    from backend.skills.manager import SkillManager
+
+    old_root, new_root = tmp_path / "old-skills", tmp_path / "new-skills"
+    old_root.mkdir()
+    new_root.mkdir()
+    old_extra, new_extra = tmp_path / "old-extra", tmp_path / "new-extra"
+    for root, name in ((old_extra, "old-extra-skill"), (new_extra, "new-extra-skill")):
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test {name}\n---\nInstructions", encoding="utf-8")
+    roots = SimpleNamespace(roots=(old_extra,), revision=1)
+    session = _Session(_Context(old_root))
+    manager = SkillManager(SkillLoader(old_root), runtime_roots=roots)
+    manager.discover()
+    session.skill_manager = manager
+    bootstrap = _Bootstrap(old_root, new_root)
+    session.mcp_manager = bootstrap.old_manager
+    monkeypatch.setattr(_state, "bootstrap", bootstrap)
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _path: True)
+    monkeypatch.setattr("backend.services.workspace_service.create_workspace_context", lambda root: _Context(root))
+    entered, release = threading.Event(), threading.Event()
+    snapshot = SkillManager.snapshot
+    worker_threads: list[int] = []
+
+    def held_snapshot(target, *args, **kwargs):
+        worker_threads.append(threading.get_ident())
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5), "skill discovery was not released"
+        return snapshot(target, *args, **kwargs)
+
+    monkeypatch.setattr(SkillManager, "snapshot", held_snapshot)
+
+    async def scenario():
+        loop_thread = threading.get_ident()
+        assert await session.session_lifecycle.activate_workspace_path(str(new_root), wait_for_initialize=False)
+        task = session.session_lifecycle.workspace_context_task
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
+            assert worker_threads == [worker_threads[0]] and worker_threads[0] != loop_thread
+            if outcome == "superseded":
+                session.session_lifecycle.workspace_generation += 1
+            elif outcome == "roots-changed":
+                roots.roots = (new_extra,)
+                roots.revision += 1
+        finally:
+            release.set()
+            await task
+        assert manager._loader._project_root == (old_root if outcome == "superseded" else new_root).resolve()
+        if outcome == "roots-changed":
+            assert len(worker_threads) == 2
+            names = {meta.name for meta in manager.list_metas()}
+            assert "new-extra-skill" in names and "old-extra-skill" not in names
+        mcp_task = session.session_lifecycle.workspace_mcp_task
+        if mcp_task is not None:
+            await mcp_task
+
+    asyncio.run(scenario())

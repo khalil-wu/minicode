@@ -96,8 +96,11 @@ class AppBootstrap:
         self._sandbox_probe_task = asyncio.create_task(
             to_thread_cancel_safe(refresh_native_os_sandbox)
         )
-        from backend.application_network import bind_application_network_owner
+        from backend.application_network import bind_application_network_owner, application_http_ssl_context
         bind_application_network_owner(self.application_network)
+        # CA parsing takes hundreds of milliseconds on Windows. Prepare the
+        # shared verified context off the event loop while services start.
+        http_tls_warmup = asyncio.create_task(to_thread_cancel_safe(application_http_ssl_context))
         self.config = self.application_network.load_config(load_config)
         from backend.config import STATE_ROOT
         from backend.environments.manager import EnvironmentManager
@@ -162,11 +165,26 @@ class AppBootstrap:
                 # startup opens a project. Prepare it without waiting on its
                 # external servers before activating the initial workspace.
                 await self._prepare_mcp_manager(None, activate=False)
-            await self.ensure_mcp_manager(
+            # Bind the workspace owner immediately and let external MCP
+            # servers finish their own startup in the background.  The app
+            # server must become available before a slow or unavailable
+            # optional server finishes its initialize handshake; individual
+            # turns still await required readiness through their captured
+            # manager and preserve the same error projection.
+            _manager, ready_task = await self.begin_mcp_workspace_activation(
                 initial_workspace,
-                activate=True,
             )
-            logger.info("MCP manager initialized")
+
+            def report_mcp_startup(completed: asyncio.Task[Any]) -> None:
+                try:
+                    completed.result()
+                except asyncio.CancelledError:
+                    return
+                except Exception:
+                    logger.warning("MCP manager background startup failed", exc_info=True)
+
+            ready_task.add_done_callback(report_mcp_startup)
+            logger.info("MCP manager bound; external startup continues in background")
         except Exception as exc:
             logger.warning("MCP init failed: %s", exc)
 
@@ -199,6 +217,14 @@ class AppBootstrap:
         except Exception as exc:
             logger.warning("Task scheduler init failed: %s", exc)
 
+        # Import the complete WebSocket command surface while the backend is
+        # booting. The first renderer connection must not pay the one-time
+        # import cost for terminal, preview, MCP, diff and guardian handlers.
+        from backend.commands import slash_commands as _slash_commands
+        from backend.ws import handlers as _ws_handlers
+        _ = _slash_commands, _ws_handlers
+
+        await http_tls_warmup
         self._pr_monitor_task = asyncio.create_task(self._run_pr_automation_monitor())
 
     async def _run_scheduled_task(self, task: Any, run: Any) -> dict[str, Any]:
@@ -454,10 +480,12 @@ class AppBootstrap:
         async def on_status_change(server_name: str, status: Any) -> None:
             await self._handle_scoped_mcp_status_change(manager, server_name, status)
 
+        config = load_config(cwd=workspace_root, resolve_credentials=False)
         manager = MCPServerManager(
             on_status_change=on_status_change,
             elicitation_handler=self._handle_mcp_elicitation,
             workspace_root=workspace_root,
+            optional_startup_grace_ms=config.mcp_optional_startup_grace_ms, feature_flags=config.feature_flags,
         )
         return manager
 

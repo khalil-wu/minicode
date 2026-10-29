@@ -47,6 +47,25 @@ it("restores and coalesces 429, ordinary 503 and absent HTTP evidence without re
   expect(summary.textContent).not.toContain("Server is busy");
 });
 
+it("keeps each actual retry failure in the shared expanded detail after history hydration", () => {
+  const first = retry(1, { detail: "First gateway failure", error_message: "First gateway failure" });
+  const second = retry(2, { detail: "Second gateway failure", error_message: "Second gateway failure" });
+  const cell = projected([first, second]);
+  const result = render(view(cell));
+  fireEvent.click(screen.getByRole("button", { name: /Reconnecting 2\/5/ }));
+  expect(result.container.querySelectorAll(".stream-error-details")).toHaveLength(2);
+  expect(result.container.textContent).toContain("First gateway failure");
+  expect(result.container.textContent).toContain("Second gateway failure");
+});
+
+it("keeps failures from different provider operations in separate rows", () => {
+  const first = retry(1, { operation_id: "request-first", detail: "First operation failed" });
+  const second = retry(1, { operation_id: "request-second", detail: "Second operation failed" });
+  const messages = hydrateMessages([{ id: "answer", role: "assistant", content: "", timestamp: 1000, blocks: [first, second] }]);
+  const activities = projectMessagesToTurns(messages, true)[0].committedCells.filter(cell => cell.kind === "activity");
+  expect(activities).toHaveLength(2);
+});
+
 it.each([
   [{ status_code: 503, provider_error_code: "server_is_overloaded" }, "Server is busy, reconnecting"],
   [{ provider_error_code: "rate_limit", message: "server overloaded HTTP 429" }, "Reconnecting"],

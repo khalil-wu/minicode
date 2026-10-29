@@ -28,7 +28,7 @@ export function FilesPanel({ active = true }: { active?: boolean }) {
       : null}
     <div hidden={Boolean(pendingSwitch)}>
       <ConversationFilesTree key={`${owner.scopeId}:${owner.executionCwd}:${browserRoot}`}
-        owner={owner} browserRoot={browserRoot} onRootChange={path => useAppStore.getState().setFileBrowserRoot(owner.scopeId, path)}
+        owner={owner} browserRoot={browserRoot} rootSelected={Boolean(selectedRoot)} onRootChange={path => useAppStore.getState().setFileBrowserRoot(owner.scopeId, path)}
         connected={active && connected && !pendingSwitch} version={version} />
     </div>
   </div>;

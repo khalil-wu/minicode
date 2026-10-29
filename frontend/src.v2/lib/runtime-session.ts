@@ -65,3 +65,27 @@ export const runtimePendingUserActionLabelForConversation = (
   if (!hasRuntimePendingUserActionForConversation(runtimeSession, conversationId)) return null;
   return pendingLabel(null, runtimeSession.pending_approval_count);
 };
+
+/** Sidebar projection: one pass over approvals, independent of progress fields.
+ * An empty key retains the existing unscoped, no-active-thread contract. */
+const pendingActionLabels = new WeakMap<RuntimeSessionSnapshot, ReadonlyMap<string, string | null>>();
+const noPendingActionLabels: ReadonlyMap<string, string | null> = new Map();
+export const runtimePendingUserActionLabels = (
+  runtimeSession: RuntimeSessionSnapshot | null | undefined,
+): ReadonlyMap<string, string | null> => {
+  if (!runtimeSession) return noPendingActionLabels;
+  const cached = pendingActionLabels.get(runtimeSession);
+  if (cached) return cached;
+  const labels = new Map<string, string | null>();
+  const pending = runtimeSession.pending_approvals ?? [];
+  if (pending.some(item => item.conversation_id)) {
+    for (const item of pending) {
+      if (item.conversation_id && !labels.has(item.conversation_id)) labels.set(item.conversation_id, pendingLabel(item));
+    }
+  } else {
+    const label = pending.length ? pendingLabel(pending[0]) : pendingLabel(null, runtimeSession.pending_approval_count);
+    if (label) labels.set(runtimeSession.active_conversation_id || "", label);
+  }
+  pendingActionLabels.set(runtimeSession, labels);
+  return labels;
+};

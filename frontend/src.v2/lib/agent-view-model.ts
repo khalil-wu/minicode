@@ -174,7 +174,7 @@ export const agentStatusSummary = (views: AgentView[]): string => {
   return [...counts].map(([label, count]) => `${count} ${label}`).join(" · ");
 };
 
-const relativeTimeLabelFor = (agent: SubagentState, now: number): string => {
+export const agentRelativeTimeLabel = (agent: SubagentState, now: number): string => {
   const timestamp = agent.completedAt || agent.lastProgressAt || agent.lastEventAt;
   if (!timestamp || !Number.isFinite(timestamp)) return "";
   const elapsedMs = Math.max(0, now - timestamp);
@@ -241,7 +241,7 @@ export function projectAgentViews(
         summary: summaryFor(source),
         status,
         statusLabel: statusLabelFor(source, status),
-        relativeTimeLabel: relativeTimeLabelFor(source, now),
+        relativeTimeLabel: agentRelativeTimeLabel(source, now),
         startedAt: source.startedAt,
         identityKey: source.agentPath || source.id,
         teammateName: source.teammateName,

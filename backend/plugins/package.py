@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from uuid import uuid4
 
 from backend.feature_flags import feature_enabled
-from backend.plugins.identity import parse_plugin_id
 from backend.plugins.layout import (
     PLUGIN_MANIFEST_DIRECTORY,
     plugin_install_root,
@@ -104,7 +103,7 @@ def validate_plugin_directory(source_path: str | Path) -> dict[str, Any]:
         errors.extend(manifest_result["errors"])
 
     skill_count = _count_plugin_skills(source)
-    component_counts = _manifest_component_counts(manifest_paths[0]) if manifest_paths else {
+    component_counts = _manifest_component_counts(manifest_paths[0]) if manifest_paths and not errors else {
         "mcp_server_count": 0,
         "app_count": 0,
         "hook_count": 0,
@@ -330,13 +329,6 @@ def _safe_zip_member_path(name: str) -> str | None:
     if re.match(r"^[A-Za-z]:", parts[0]):
         return None
     return "/".join(parts)
-
-def _safe_plugin_data_segment(plugin_identity: str) -> str:
-    parsed = parse_plugin_id(plugin_identity)
-    name = parsed.name or "plugin"
-    marketplace = parsed.marketplace or "local"
-    # Keep the segment stable across platforms and independent of user input.
-    return "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in f"{name}-{marketplace}")
 
 def _normalized_extracted_plugin_dir(extract_root: Path) -> Path:
     if _is_plugin_directory(extract_root):

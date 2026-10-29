@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from backend.agent.context import ContextBuilder
-from backend.agent.message import AgentEvent
+from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.query_engine import QueryEngine
 from backend.agent.runtime import default_runtime
 from backend.artifact.store import ArtifactStore
@@ -367,6 +367,9 @@ class _Session(SessionAgentRunnerMixin, SessionApprovalRuntimeMixin):
         self.available_models = ["gpt-test"]
         self.selected_model = "gpt-test"
         self._model_override_active = False
+        self._provider_override_active = False
+        self.skill_executor = None
+        self.memory_manager = None
         self.skill_manager = None
         self.environment_manager = None
         self.vector_memory = None
@@ -1562,6 +1565,55 @@ def test_late_terminal_turn_events_are_fenced_but_next_turn_is_accepted(tmp_path
     assert saved.context_snapshot["ui_agent_state"]["subagents"][0]["mailboxEpoch"] == 2
 
 
+@pytest.mark.parametrize("paused", [False, True])
+def test_regeneration_keeps_accepted_queued_inputs_across_admission_and_restart(tmp_path, monkeypatch, paused):
+    from backend.ws.durable_user_queue import DurableUserMessageQueue
+
+    session = _Session(tmp_path, [])
+    session.refresh_llm_selection = lambda: None
+    async def runner(**kwargs):
+        await _admit_runner_turn(kwargs)
+        await kwargs["metadata"]["publish_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
+        yield AgentEvent.agent_message_completed("Actual reply", source="model_final")
+        yield AgentEvent.done()
+    session.query_engine = QueryEngine(runner=runner)
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
+    queue_path = session.run_manager.durable_queue.path.parent
+
+    async def scenario():
+        await session._run_agent_locked("original", conversation_id="conv_runnerdone",
+            metadata={"assistant_message_id": "first-answer", "user_message_id": "first-user"})
+        conversation = session.conversation_repo.get_conversation("conv_runnerdone")
+        retry = session.conversation_runtime.prepare_retry_from_message(conversation=conversation, retry_from_message_id="first-user")
+        assert retry is not None
+        for index in (1, 2):
+            session.run_manager.add_queued_user_message("conv_runnerdone", UserCommand("user_message", {
+                "content": f"queued {index}", "conversation_id": "conv_runnerdone",
+                "user_message_id": f"queued-user-{index}", "assistant_message_id": f"queued-answer-{index}",
+            }))
+        if paused:
+            session.run_manager.set_user_queue_paused("conv_runnerdone", "previous-stop")
+        assert len(session.run_manager.queued_user_messages("conv_runnerdone")) == 2
+        await session._run_agent_locked("original", conversation_id="conv_runnerdone", metadata={
+            "assistant_message_id": "retry-answer", "user_message_id": "retry-user", "_retry_projection": retry,
+            "retry_from_message_id": "first-user"})
+        transcript = session.conversation_repo.get_conversation("conv_runnerdone").transcript
+        assert any(item.get("id") == "retry-answer" for item in transcript)
+        assert [item.data["content"] for item in session.run_manager.queued_user_messages("conv_runnerdone")] == ["queued 1", "queued 2"]
+        assert session.run_manager.user_queue_pause_token("conv_runnerdone") == ("previous-stop" if paused else "")
+
+    _run_session_scenario(session, scenario())
+    reopened = DurableUserMessageQueue(session_id="shared", root_dir=queue_path, shared_inputs=True)
+    try:
+        assert [item.data["content"] for item in reopened.pending_user_messages("conv_runnerdone")] == ["queued 1", "queued 2"]
+        assert reopened.paused_user_queues().get("conv_runnerdone", "") == ("previous-stop" if paused else "")
+    finally:
+        reopened.close()
+
+
 @pytest.mark.parametrize("retry", [False, True])
 def test_completed_parent_callback_keeps_child_history_through_next_turn_and_retry(tmp_path, monkeypatch, retry):
     events: list[dict] = []
@@ -1968,6 +2020,140 @@ def test_runner_projects_durable_terminal_over_conflicting_provider_done(
     saved = session.conversation_repo.get_conversation("conv_runnerdone")
     assert saved is not None
     assert saved.transcript[-1]["terminal_status"] == "failed"
+
+
+@pytest.mark.parametrize("completion_first", [True, False])
+@pytest.mark.parametrize(("status", "reason", "summary"), [
+    ("completed", "", "Preparing final answer"),
+    ("failed", "provider_rejected", "Run ended: provider_rejected"),
+    ("partial", "max_iterations", "Partial result retained"),
+    ("cancelled", "interrupted", "Interrupted"),
+])
+def test_runner_terminal_projections_use_the_committed_reason_not_the_phase_summary(
+    tmp_path, monkeypatch, completion_first, status, reason, summary,
+):
+    events: list[dict] = []
+    session = _Session(tmp_path, events, runner_events=None)
+
+    class _TerminalQueryEngine:
+        async def submit(self, submission):
+            await _admit_query_submission(submission)
+            completed = AgentEvent.agent_run_completed(SimpleNamespace(public_dict=lambda: {
+                "run_id": "terminal-reason", "conversation_id": "conv_runnerdone",
+                "status": status, "summary": summary, "terminal_reason": reason,
+            }))
+            done = AgentEvent.done(status="completed", reason="provider_done_reason")
+            yield AgentEvent.agent_message_completed("Captured answer", source="model_final")
+            if completion_first:
+                yield completed
+                yield done
+            else:
+                yield done
+                yield completed
+
+    session.query_engine = _TerminalQueryEngine()
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
+    _run_session_scenario(session, session._run_agent_locked(
+        "terminal reason", conversation_id="conv_runnerdone",
+        metadata={"assistant_message_id": "answer-reason", "user_message_id": "user-reason"},
+    ))
+
+    done = next(event for event in events if event.get("type") == "done")
+    completion = next(event for event in events if event.get("type") == "agent.run.completed")
+    saved = session.conversation_repo.get_conversation("conv_runnerdone")
+    assert done["status"] == completion["status"] == saved.transcript[-1]["terminal_status"] == status
+    assert done.get("reason", "") == completion.get("terminal_reason", "") == saved.transcript[-1].get("termination_reason", "") == reason
+    assert completion["summary"] == summary
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_run_discovers_captured_workspace_skills_off_loop_while_history_hydrates(tmp_path, monkeypatch, cancel):
+    from backend.skills.loader import SkillLoader
+    from backend.skills.manager import SkillManager
+
+    def install(root: Path, name: str) -> None:
+        directory = root / ".minicode" / "skills" / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test {name}\n---\nInstructions", encoding="utf-8")
+
+    workspace = tmp_path / "original"
+    other = tmp_path / "other"
+    install(workspace, "original-only")
+    install(other, "other-only")
+    extra_old, extra_new = tmp_path / "old-roots", tmp_path / "new-roots"
+    for root, name in ((extra_old, "original-extra"), (extra_new, "later-extra")):
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: test {name}\n---\nInstructions", encoding="utf-8")
+    runtime_roots = SimpleNamespace(roots=(extra_old,), revision=1)
+    events: list[dict] = []
+    session = _Session(workspace, events)
+    session.skill_manager = SkillManager(SkillLoader(workspace), runtime_roots=runtime_roots)
+    session.skill_manager.discover()
+    entered, release = threading.Event(), threading.Event()
+    snapshot = SkillManager.snapshot
+    worker_threads: list[int] = []
+    names: list[set[str]] = []
+
+    def held_snapshot(manager, *args, **kwargs):
+        if not entered.is_set():
+            worker_threads.append(threading.get_ident())
+            entered.set()
+            assert release.wait(5), "workspace skill discovery was not released"
+        return snapshot(manager, *args, **kwargs)
+
+    class _CapturingQueryEngine:
+        async def submit(self, submission):
+            names.append({meta.name for meta in submission.runtime.skill_manager.list_metas()})
+            await _admit_query_submission(submission)
+            yield AgentEvent.agent_message_completed("Actual answer", source="model_final")
+            yield AgentEvent.done()
+
+    session.query_engine = _CapturingQueryEngine()
+    monkeypatch.setattr(SkillManager, "snapshot", held_snapshot)
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
+    monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
+
+    async def scenario():
+        hydration_entered, hydration_release = asyncio.Event(), asyncio.Event()
+        async def wait_for_hydration(_owner):
+            hydration_entered.set()
+            await hydration_release.wait()
+        monkeypatch.setattr(session.conversation_runtime, "wait_for_hydration", wait_for_hydration)
+        task = asyncio.create_task(session._run_agent_locked("run captured scope", conversation_id="conv_runnerdone",
+            metadata={"assistant_message_id": "skills-answer", "user_message_id": "skills-user"}))
+        try:
+            await asyncio.wait_for(hydration_entered.wait(), 3)
+            assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
+            assert worker_threads[0] != threading.get_ident()
+            runtime_roots.roots = (extra_new,)
+            runtime_roots.revision += 1
+            session.skill_manager.set_project_root(other)
+            if cancel:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+                assert not names
+            else:
+                release.set()
+                hydration_release.set()
+                await asyncio.wait_for(task, 10)
+                assert len(names) == 1 and {"original-only", "original-extra"} <= names[0]
+                assert not {"other-only", "later-extra"} & names[0]
+                assert any(event.get("type") == "done" for event in events)
+        finally:
+            release.set()
+            hydration_release.set()
+            await asyncio.gather(task, return_exceptions=True)
+            pending = tuple(session.run_manager.lifecycle_cleanup_tasks_for("conv_runnerdone"))
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    _run_session_scenario(session, scenario())
 
 
 def test_runner_downgrades_tool_only_success_to_partial_and_persists_status(tmp_path, monkeypatch):

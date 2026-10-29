@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from backend.mcp.cua_repl import CuaReplCompanions, plugin_cua_declaration
+from backend.mcp.connections import MCPConnection
 from backend.mcp.environment_runtime import MCPEnvironmentRuntime
 from backend.mcp.manager import MCPServerConfig, MCPServerManager, ServerStatus
 from backend.plugins.manager import PluginManager, PluginSnapshot
@@ -39,7 +40,7 @@ async def test_real_plugin_manifest_produces_canonical_offline_cua_and_keeps_ord
     ordinary = next(config for config in configs if config.name.endswith(":ordinary"))
     assert (cua.plugin_id, cua.plugin_server_name, cua.source) == (plugin["id"], "cua_repl", "plugin:" + plugin["id"])
     assert ordinary.name == "plugin:" + plugin["id"] + ":ordinary"
-    assert ordinary.plugin_id is None and ordinary.plugin_server_name is None
+    assert (ordinary.plugin_id, ordinary.plugin_server_name) == (plugin["id"], "ordinary")
     try:
         await manager.start_server(cua)
         assert manager._servers["cua_repl"].status == ServerStatus.OFFLINE
@@ -97,6 +98,21 @@ def test_environment_policy_matches_captured_declaration_not_generated_bootstrap
     assert not runtime.apply_authority(generated).enabled
 
 
+def test_installed_plugin_server_obeys_plugin_environment_policy(tmp_path, monkeypatch):
+    plugin = declared_plugin(tmp_path)
+    inventory(monkeypatch, [plugin])
+    manager = MCPServerManager(config_path=tmp_path / "mcp.json", workspace_root=tmp_path)
+    ordinary = next(config for config in manager.load_config() if config.name.endswith(":ordinary"))
+    selection = SimpleNamespace(environment_id="local", config=SimpleNamespace(kind="Ready", value=SimpleNamespace(
+        mcp_policy={"plugins": {plugin["id"]: {"mcp_servers": {"ordinary": {"identity": {
+            "command": {"executable": "ordinary-cli", "args": []}}}}}}})))
+    runtime = MCPEnvironmentRuntime(None, None, local_cwd=str(tmp_path))
+    runtime.snapshot = SimpleNamespace(all_selections=lambda: (selection,))
+    assert runtime.apply_authority(ordinary).enabled
+    selection.config.value.mcp_policy = {"plugins": {plugin["id"]: {"mcp_servers": {}}}}
+    assert not runtime.apply_authority(ordinary).enabled
+
+
 @pytest.mark.asyncio
 async def test_same_receiving_scope_cannot_reuse_another_plugins_companion(tmp_path):
     selected = MCPServerConfig("cua_repl", command="node", source="plugin:first@fixture", plugin_id="first@fixture",
@@ -110,6 +126,10 @@ async def test_same_receiving_scope_cannot_reuse_another_plugins_companion(tmp_p
     first = await owner.admit(attachment, None, selected)
     original = owner.instances[owner.active_key]
     original.client = SimpleNamespace(close_thread=AsyncMock())
+    async def close(client):
+        await client.close_thread()
+    original.connection = MCPConnection(factory=AsyncMock(), close=close, identity=original.key)
+    original.connection.client = original.client
     second = await owner.admit(attachment, None, replace(selected, source="plugin:second@fixture", plugin_id="second@fixture"))
     assert first.source != second.source and second.plugin_id == "second@fixture"
     original.client.close_thread.assert_awaited_once()

@@ -1,5 +1,5 @@
 import { useI18n, type Translate } from "../i18n";
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useAppStore } from "../stores";
 import { pendingPlanImplementation, PlanImplementationPrompt } from "../chat/PlanImplementationPrompt";
 import { promptDraftKey } from "../stores/prompt-drafts";
@@ -17,6 +17,7 @@ import { ProjectScopePicker } from "./ProjectScopePicker";
 import { PromptHistoryOverlay } from "./PromptHistoryOverlay";
 import { QueuedMessageList } from "./QueuedMessageList";
 import { cancelQueuedMessageEdit, installQueuedEditRecovery } from "./queued-message-edit";
+import { cancelRetainedInputEdit, completeRetainedInputEdit, discardRetainedComposerInput, installRetainedInputEditRecovery, retainFailedComposerInput, retainPendingComposerInput } from "./retainedComposerInputs";
 import { appendPromptHistory, clearPromptHistory, readPromptHistory } from "./prompt-history";
 import { acceptAttachmentConversationOwner, uploadComposerFiles } from "./uploads";
 import { InlineAgentPrompt } from "../chat/InlineAgentPrompt";
@@ -37,10 +38,10 @@ import { buildInterruptCommand, hasInterruptFence } from "../lib/interrupt-comma
 import { workspaceFilePathsEqual, workspaceRootsEqual } from "../lib/workspace-path";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { uniqueMessageId } from "../stores/shared-helpers";
-import { composerWorkspaceKey } from "../stores/composer-drafts";
+import { composerDraftOf, composerWorkspaceKey, isComposerConversationDeleted } from "../stores/composer-drafts";
 import type { CommandResultEvent } from "../protocol/events";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
-import { CodeReviewMenu, type CodeReviewOwner } from "./CodeReviewMenu";
+import type { CodeReviewOwner } from "./CodeReviewMenu";
 import { createCodeReview } from "../protocol/code-review";
 import type { CodeReviewOptions } from "../protocol/code-review-types";
 import { publishCodeReview } from "../chat/codeReview";
@@ -59,13 +60,14 @@ import { enterComposerGoalMode, submitComposerGoal } from "./goal-state";
 import { hasRichComposerContent, type RichComposerDocument } from "./rich-composer-document";
 
 let initialCatalogRequested = false;
+const CodeReviewMenu = lazy(() => import("./CodeReviewMenu").then(module => ({ default: module.CodeReviewMenu })));
 
 // Agent prompts and template slash commands share the context pipeline:
 // resolves the target conversation, uploads @mention/skill context attachments,
 // and guards against conversation switches mid-upload. Returns null when the
 // send must abort (a toast has already been shown).
-const buildOutgoingContext = async (requestedConversationId: string, tr: Translate) => {
-  const stateAtSend = useAppStore.getState();
+const buildOutgoingContext = async (requestedConversationId: string, tr: Translate, stateAtSend = useAppStore.getState(),
+  submittedComments?: readonly DiffComment[], onFailure?: (reason: string) => void) => {
   const targetConversationId = String(
     requestedConversationId || stateAtSend.conversationId || "",
   ).trim();
@@ -73,8 +75,8 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
     ...stateAtSend.selectedMentions,
     ...stateAtSend.selectedSkills,
   ];
-  const comments = cloneDiffComments(readDiffCommentState(getDiffCommentScope(
-    targetConversationId, stateAtSend.workingDirectory)).comments);
+  const comments = cloneDiffComments(submittedComments ?? readDiffCommentState(getDiffCommentScope(
+    targetConversationId || stateAtSend.activeConversationDraftId, stateAtSend.workingDirectory)).comments);
   const skillInvocations = buildSkillInvocationLine(stateAtSend.selectedSkills);
   const contextPayload = await buildContextPayload(contextRefs);
   let nativeContext: Awaited<ReturnType<typeof buildContextNativeAttachments>> = {
@@ -91,6 +93,7 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
       stateAtSend.workingDirectory,
     );
   } catch (error) {
+    onFailure?.(error instanceof Error ? error.message : String(error));
     console.warn("Failed to build native context attachments:", error);
     pushToast(
       error instanceof Error ? error.message : tr("上下文附件上传失败，请重试。"),
@@ -125,7 +128,7 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
   if (
     !targetConversationId
     && resolvedConversationId
-    && !acceptAttachmentConversationOwner(resolvedConversationId)
+    && !await acceptAttachmentConversationOwner(resolvedConversationId)
   ) {
     pushToast(tr("附件已绑定到另一个会话，请切回该会话后发送。"), "warning", 4500);
     return null;
@@ -145,6 +148,7 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
 
 export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   useEffect(installQueuedEditRecovery, []);
+  useEffect(installRetainedInputEditRecovery, []);
   const { t: tr } = useI18n();
   const draft = useAppStore((s) => s.draft);
   const richDraft = useAppStore(s => s.richDraft);
@@ -183,6 +187,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const goalMode = useAppStore((s) => s.goalMode && capabilityFeatureEnabled(s.runtimeCapabilities, "goals"));
   const currentModel = useAppStore((s) => s.currentModel);
   const conversationId = useAppStore(state => state.conversationId);
+  const activeDraftId = useAppStore(state => state.activeConversationDraftId);
   const planMessages = useAppStore(state => state.agentMode === "plan" && !state.isStreaming ? state.messages : null);
   const agentMode = useAppStore(state => state.agentMode);
   const promptDrafts = useAppStore(state => state.promptDrafts);
@@ -192,17 +197,18 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     return plan && !promptDrafts[promptDraftKey({ conversationId, requestId: `implement-plan:${plan.turnId || plan.messageId}` })]?.planImplementationSettled ? plan : null;
   }, [conversationId, pendingConversationSwitchId, planMessages, agentMode, isStreaming, promptDrafts]);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const editorOwner = useRef({ conversationId, workingDirectory, document: richDraft,
-    key: conversationId || composerWorkspaceKey(workingDirectory) });
+  const editorOwner = useRef({ conversationId, draftId: activeDraftId, workingDirectory, document: richDraft,
+    key: conversationId || activeDraftId || composerWorkspaceKey(workingDirectory) });
   let editorKey = editorOwner.current.key;
-  if (editorOwner.current.conversationId !== conversationId || editorOwner.current.workingDirectory !== workingDirectory) {
-    const adopted = !editorOwner.current.conversationId && conversationId
-      && editorOwner.current.workingDirectory === workingDirectory
-      && richDraft && richDraft === editorOwner.current.document;
-    if (!adopted) editorKey = conversationId || composerWorkspaceKey(workingDirectory);
+  if (editorOwner.current.conversationId !== conversationId || editorOwner.current.draftId !== activeDraftId || editorOwner.current.workingDirectory !== workingDirectory) {
+    const boundDraft = editorOwner.current.draftId && conversationId
+      && useAppStore.getState().conversationDrafts[editorOwner.current.draftId]?.conversationId === conversationId;
+    const adopted = !editorOwner.current.conversationId && conversationId && (boundDraft
+      || (editorOwner.current.workingDirectory === workingDirectory && richDraft && richDraft === editorOwner.current.document));
+    if (!adopted) editorKey = conversationId || activeDraftId || composerWorkspaceKey(workingDirectory);
   }
-  editorOwner.current = { conversationId, workingDirectory, document: richDraft, key: editorKey };
-  const commentScope = getDiffCommentScope(conversationId, workingDirectory);
+  editorOwner.current = { conversationId, draftId: activeDraftId, workingDirectory, document: richDraft, key: editorKey };
+  const commentScope = getDiffCommentScope(conversationId || activeDraftId, workingDirectory);
   const commentState = useSyncExternalStore(subscribeDiffComments, () => readDiffCommentState(commentScope));
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -243,7 +249,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
   const hasComposerAttachments = useAppStore((s) => s.attachments.length > 0);
   const reviewPermissionPending = useAppStore(s => Boolean(s.conversationId && s.pendingPermissionModeChanges[s.conversationId]));
-  useEffect(() => { setReviewOwner(undefined); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
+  useEffect(() => { setReviewOwner(undefined); }, [conversationId, activeDraftId, workingDirectory, pendingConversationSwitchId]);
   useEffect(() => { setGuardianApprovalOwner(undefined); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
 
   const openGuardianApproval = () => {
@@ -264,9 +270,17 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   const openCodeReview = () => {
-    const state = useAppStore.getState();
-    setReviewOwner({ conversationId: state.conversationId || undefined, cwd: state.workingDirectory, input: state.draft, selectedCommand: selectedSlashCommandRef.current });
+    const captured = useAppStore.getState();
+    const selectedCommand = selectedSlashCommandRef.current;
     closeSlashPanel(); closeMentionPanel(); setSkillPanelOpen(false); setHistoryOpen(false); setMenuFilter("");
+    void (async () => {
+      const owner = captured.conversationId || await captured.ensureComposerConversation();
+      if (!owner) return;
+      const state = useAppStore.getState();
+      if (state.conversationId !== owner || state.pendingConversationSwitchId) return;
+      setReviewOwner({ conversationId: owner, draftId: captured.activeConversationDraftId,
+        cwd: state.workingDirectory, input: captured.draft, selectedCommand });
+    })().catch(error => pushToast(error instanceof Error ? error.message : String(error), "error"));
   };
 
   const dismissCodeReview = () => {
@@ -286,17 +300,25 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       }
       const userMessageId = uniqueMessageId("u");
       let admittedOwner = prepared.reviewThreadId;
+      const submittedOperation = submittingRef.current.get(editorKey);
+      let published = false;
+      const completeReviewAdmission = () => {
+        if (published || isComposerConversationDeleted(admittedOwner)) return;
+        published = true;
+        if (prepared.delivery === "inline") clearSubmittedInput(owner.input, owner.conversationId || "", owner.cwd, owner.selectedCommand, admittedOwner, owner.draftId);
+        publishCodeReview(prepared, admittedOwner, userMessageId);
+        setReviewOwner(current => current === owner ? undefined : current);
+        completeSubmission(editorKey, submittedOperation);
+        if (prepared.delivery === "detached" && useAppStore.getState().conversationId === owner.conversationId) {
+          useAppStore.getState().requestConversationSwitch(admittedOwner);
+        }
+      };
       const sent = await sendChatMessage({ displayContent: prepared.requestMessage, backendContent: prepared.prompt,
         conversationId: prepared.reviewThreadId, codeReview: prepared.scope, userMessageId, awaitAdmission: true,
         onAdmission: event => { if (typeof event.data?.conversation_id === "string") admittedOwner = event.data.conversation_id; },
+        onModelAccepted: completeReviewAdmission,
       });
-      if (!sent) return;
-      if (prepared.delivery === "inline") clearSubmittedInput(owner.input, owner.conversationId || "", owner.cwd, owner.selectedCommand, admittedOwner);
-      publishCodeReview(prepared, admittedOwner, userMessageId);
-      setReviewOwner(undefined);
-      if (prepared.delivery === "detached" && useAppStore.getState().conversationId === owner.conversationId) {
-        useAppStore.getState().requestConversationSwitch(admittedOwner);
-      }
+      if (sent) completeReviewAdmission();
     });
   };
 
@@ -375,6 +397,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   );
 
   const escapeInterrupt = useCallback((): boolean => {
+    if (useAppStore.getState().retainedInputEdit) { cancelRetainedInputEdit(); return true; }
     if (useAppStore.getState().queuedEdit) { void cancelQueuedMessageEdit(); return true; }
     if (!useAppStore.getState().isStreaming) return false;
     void stopRun();
@@ -396,15 +419,42 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       skipLocalAppend?: boolean;
       userMessageId?: string;
       awaitAdmission?: boolean;
+      onPreparing?: () => void;
       onAdmission?: (event: CommandResultEvent) => void;
+      onModelAccepted?: () => void;
+      onSubmitted?: () => void;
       onReceived?: () => void;
-      onRejected?: () => void;
+      onRejected?: (reason?: string) => void;
+      onConversationCreated?: (conversationId: string) => void;
     },
   ) => {
+    let capturedState = useAppStore.getState();
+    if (!options?.conversationId && !capturedState.conversationId && !capturedState.activeConversationDraftId) {
+      capturedState.startConversationDraft({ bindWorkspace: Boolean(capturedState.workingDirectory), appMode: capturedState.appMode });
+      capturedState = useAppStore.getState();
+    }
+    let owner = options?.conversationId || capturedState.conversationId || "";
+    const comments = cloneDiffComments(readDiffCommentState(getDiffCommentScope(
+      owner || capturedState.activeConversationDraftId, capturedState.workingDirectory)).comments);
+    let materializing: Promise<string | null> | undefined;
+    if (!owner && capturedState.activeConversationDraftId) {
+      // Materialization captures the submitted body synchronously. The editor
+      // can now accept the next draft while resource creation runs separately.
+      materializing = capturedState.materializeConversationDraft(capturedState.activeConversationDraftId);
+    }
+    // Context and attachment preparation can take time for existing chats too.
+    // Capture their owner and context above, then release the submitted draft.
+    options?.onPreparing?.();
+    if (materializing) {
+      owner = await materializing || "";
+      if (!owner) return false;
+      options?.onConversationCreated?.(owner);
+    }
     const expectedTurnId = options && Object.hasOwn(options, "expectedTurnId") ? options.expectedTurnId
       : options?.allowWhileStreaming && options.busyBehavior === "steer"
         ? captureSteerTurnId(useAppStore.getState(), options.conversationId) : undefined;
-    const outgoing = await buildOutgoingContext(options?.conversationId || "", tr);
+    const outgoing = await buildOutgoingContext(owner, tr, capturedState, comments, options?.onRejected);
+    if (owner && isComposerConversationDeleted(owner)) return false;
     if (!outgoing) return false;
     const mergedAttachments = [...readyAttachments, ...outgoing.attachments];
     const mergedAttachmentRefs = [...(options?.attachmentRefs ?? []), ...outgoing.attachmentRefs];
@@ -430,8 +480,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       userMessageId: options?.userMessageId,
       awaitAdmission: options?.awaitAdmission,
       onAdmission: options?.onAdmission,
+      onModelAccepted: options?.onModelAccepted,
+      onSubmitted: options?.onSubmitted,
       onReceived: options?.onReceived,
       onRejected: options?.onRejected,
+      onConversationCreated: options?.onConversationCreated,
     });
   };
 
@@ -440,7 +493,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     backendContent: string;
     skipLocalAppend: boolean;
   }, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null },
-    admission?: { userMessageId: string; onAdmission: (event: CommandResultEvent) => void; onReceived?: () => void },
+    admission?: { userMessageId: string; onAdmission: (event: CommandResultEvent) => void; onModelAccepted?: () => void; onReceived?: () => void;
+      onConversationCreated?: (conversationId: string) => void },
     busyBehavior: FollowUpBehavior = useAppStore.getState().followUpBehavior) => {
     const state = useAppStore.getState();
     // Compaction acts on its conversation. Draft attachments, mentions and
@@ -507,79 +561,90 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   const composerFingerprint = (state = useAppStore.getState(), comments = readDiffCommentState(
-    getDiffCommentScope(state.conversationId, state.workingDirectory)).comments) => {
-    return JSON.stringify({
-      conversationId: String(state.conversationId || ""),
-      workspaceRoot: state.workingDirectory,
-      draft: state.draft,
-      richDraft: state.richDraft,
-      attachments: state.attachments.map((item) => ({
-        id: item.id,
-        status: item.status,
-        artifactId: item.artifactId || item.attachment?.artifact_id || item.attachment?.id || "",
-      })),
-      mentions: state.selectedMentions,
-      skills: state.selectedSkills,
-      quotedMessage: state.quotedMessage,
-      selectedSlashCommand: selectedSlashCommandRef.current,
-      comments,
+    getDiffCommentScope(state.conversationId || state.activeConversationDraftId, state.workingDirectory)).comments,
+    command = selectedSlashCommandRef.current) => JSON.stringify({
+      conversationId: String(state.conversationId || ""), draftId: state.activeConversationDraftId || "",
+      workspaceRoot: state.workingDirectory, draft: state.draft, richDraft: state.richDraft,
+      attachments: state.attachments.map(item => ({ id: item.id, status: item.status,
+        artifactId: item.artifactId || item.attachment?.artifact_id || item.attachment?.id || "" })),
+      mentions: state.selectedMentions, skills: state.selectedSkills, quotedMessage: state.quotedMessage,
+      selectedSlashCommand: command, comments,
     });
-  };
 
-  const clearSubmittedComposer = (fingerprint: string, originalOwner: string, workspace: string, userId: string, admittedOwner: string, historyContent?: string,
-    submittedComments: readonly DiffComment[] = []) => {
-    const state = useAppStore.getState();
+  const clearSubmittedComposer = (fingerprint: string, originalOwner: string, workspace: string, userId: string,
+    admittedOwner: string, historyContent?: string, submittedComments: readonly DiffComment[] = [],
+    captured?: { draftId: string | null; command: string | null }) => {
+    const state = useAppStore.getState(), draftId = captured?.draftId ?? null;
+    const command = captured ? captured.command : selectedSlashCommandRef.current;
+    const boundOwner = (draftId ? state.conversationDrafts[draftId]?.conversationId : null) || admittedOwner;
     const currentOwner = String(state.conversationId || "").trim();
-    const sameOwner = currentOwner === originalOwner || (!originalOwner && currentOwner === admittedOwner
-      && state.messages.some(message => message.id === userId));
-    if (sameOwner && workspaceRootsEqual(state.workingDirectory, workspace)
-      && composerFingerprint({ ...state, conversationId: originalOwner, workingDirectory: workspace }, readDiffCommentState(
-        getDiffCommentScope(currentOwner, workspace)).comments) === fingerprint) {
+    const sameOwner = draftId ? state.activeConversationDraftId === draftId || Boolean(boundOwner && currentOwner === boundOwner)
+      : currentOwner === originalOwner || (!originalOwner && currentOwner === admittedOwner
+        && state.messages.some(message => message.id === userId));
+    const originalView = { ...state, activeConversationDraftId: draftId, conversationId: originalOwner, workingDirectory: workspace };
+    if (sameOwner && (draftId || workspaceRootsEqual(state.workingDirectory, workspace))
+      && composerFingerprint(originalView, readDiffCommentState(getDiffCommentScope(currentOwner || draftId, workspace)).comments, command) === fingerprint) {
       if (historyContent?.trim()) appendPromptHistory(workspace, historyContent);
       resetComposer();
-    } else if (!sameOwner && admittedOwner) {
-      const saved = state.conversationWorkbenchStates[admittedOwner];
-      if (saved && composerFingerprint({ ...state, ...saved, conversationId: originalOwner, workingDirectory: workspace },
-        readDiffCommentState(getDiffCommentScope(admittedOwner, workspace)).comments) === fingerprint) {
+      // Materializing a blank conversation adopts the submitted composer into
+      // its workbench before the user_message is sent. Once the transport has
+      // accepted that message, the active draft is cleared above, but the
+      // adopted workbench copy must be cleared as well or the conversation
+      // switch projection restores the submitted text into the composer.
+      if (boundOwner && boundOwner !== originalOwner) {
+        const saved = useAppStore.getState().conversationWorkbenchStates[boundOwner];
+        if (saved) {
+          for (const attachment of saved.attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
+          useAppStore.setState(current => ({ conversationWorkbenchStates: { ...current.conversationWorkbenchStates,
+            [boundOwner]: { ...saved, draft: "", richDraft: undefined, attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
+          } }));
+        }
+      }
+    } else if (boundOwner) {
+      // Conversation switching can reset the visible rich draft before this
+      // callback runs; the adopted hidden snapshot still owns the submission.
+      const saved = state.conversationWorkbenchStates[boundOwner];
+      if (saved && composerFingerprint({ ...originalView, ...saved, workingDirectory: workspace },
+        readDiffCommentState(getDiffCommentScope(boundOwner, workspace)).comments, command) === fingerprint) {
         for (const attachment of saved.attachments) if (attachment.dataUrl?.startsWith("blob:")) URL.revokeObjectURL?.(attachment.dataUrl);
         useAppStore.setState(current => ({ conversationWorkbenchStates: { ...current.conversationWorkbenchStates,
-          [admittedOwner]: { ...saved, draft: "", richDraft: undefined, attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
+          [boundOwner]: { ...saved, draft: "", richDraft: undefined, attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null },
         } }));
       }
     }
     if (!originalOwner) {
-      const key = composerWorkspaceKey(workspace);
+      const key = draftId || composerWorkspaceKey(workspace);
       const saved = useAppStore.getState().workspaceComposerDrafts[key];
-      if (saved && composerFingerprint({ ...state, ...saved, conversationId: "", workingDirectory: workspace }) === fingerprint) {
+      if (saved && composerFingerprint({ ...originalView, ...saved }, undefined, command) === fingerprint) {
         useAppStore.setState(current => {
           const drafts = { ...current.workspaceComposerDrafts }; delete drafts[key];
           return { workspaceComposerDrafts: drafts };
         });
       }
     }
-    clearSubmittedDiffComments(getDiffCommentScope(originalOwner, workspace), submittedComments);
-    if (admittedOwner && admittedOwner !== originalOwner) clearSubmittedDiffComments(getDiffCommentScope(admittedOwner, workspace), submittedComments);
+    clearSubmittedDiffComments(getDiffCommentScope(originalOwner || draftId, workspace), submittedComments);
+    if (boundOwner && boundOwner !== originalOwner) clearSubmittedDiffComments(getDiffCommentScope(boundOwner, workspace), submittedComments);
   };
 
-  const clearSubmittedInput = (input: string, originalOwner: string, workspace: string, selectedCommand: string | null, acceptedOwner: string) => {
+  const clearSubmittedInput = (input: string, originalOwner: string, workspace: string, selectedCommand: string | null,
+    acceptedOwner: string, draftId: string | null = null) => {
     const state = useAppStore.getState();
+    const boundOwner = (draftId ? state.conversationDrafts[draftId]?.conversationId : null) || acceptedOwner;
     const currentOwner = String(state.conversationId || "").trim();
-    if ((currentOwner === originalOwner || (!originalOwner && currentOwner === acceptedOwner))
-      && workspaceRootsEqual(state.workingDirectory, workspace) && state.draft === input
+    const sameOwner = draftId ? state.activeConversationDraftId === draftId || Boolean(boundOwner && currentOwner === boundOwner)
+      : currentOwner === originalOwner || (!originalOwner && currentOwner === acceptedOwner);
+    if (sameOwner && (draftId || workspaceRootsEqual(state.workingDirectory, workspace)) && state.draft === input
       && selectedSlashCommandRef.current === selectedCommand) {
-      setDraft("");
-      setSelectedSlashCommand(null);
-      closeSlashPanel();
-      setMenuFilter("");
-    } else if (originalOwner) {
-      const saved = state.conversationWorkbenchStates[originalOwner];
+      setDraft(""); setSelectedSlashCommand(null); closeSlashPanel(); setMenuFilter("");
+    } else if (originalOwner || boundOwner) {
+      const owner = originalOwner || boundOwner;
+      const saved = state.conversationWorkbenchStates[owner];
       if (saved?.draft === input) useAppStore.setState(current => ({ conversationWorkbenchStates: {
-        ...current.conversationWorkbenchStates, [originalOwner]: { ...saved, draft: "", richDraft: undefined },
+        ...current.conversationWorkbenchStates, [owner]: { ...saved, draft: "", richDraft: undefined },
       } }));
     }
     if (!originalOwner) {
-      const key = composerWorkspaceKey(workspace);
-      const saved = useAppStore.getState().workspaceComposerDrafts[key];
+      const key = draftId || composerWorkspaceKey(workspace), saved = useAppStore.getState().workspaceComposerDrafts[key];
       if (saved?.draft === input) useAppStore.setState(current => ({ workspaceComposerDrafts: {
         ...current.workspaceComposerDrafts, [key]: { ...saved, draft: "", richDraft: undefined },
       } }));
@@ -661,7 +726,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       return;
     }
 
-    const readyComposerAttachments = useAppStore.getState().attachments
+    const readyComposerAttachments = composerAttachments
       .filter((a) => a.status === "ready" && a.attachment);
     const missingOwner = readyComposerAttachments.find((attachment) => (
       !String(attachment.conversationId || "").trim()
@@ -692,7 +757,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     if (
       attachmentConversationId
       && !currentConversationId
-      && !acceptAttachmentConversationOwner(attachmentConversationId)
+      && !await acceptAttachmentConversationOwner(attachmentConversationId)
     ) {
       pushToast(tr("附件已绑定到另一个会话，请切回该会话后发送。"), "warning", 4500);
       return;
@@ -719,19 +784,33 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     });
 
     const finalContent = content;
-    const composerStateAtSend = composerFingerprint();
-    const capturedComposer = useAppStore.getState();
+    // Establish the draft owner before capturing the submission fingerprint.
+    // sendUserMessage also materializes a draft for a blank workspace, but
+    // doing it there is too late for clearSubmittedComposer: the owner changes
+    // from the blank surface to the new conversation while the original
+    // submission still needs to be claimed and cleared.
+    const stateBeforeSubmission = useAppStore.getState();
+    if (!stateBeforeSubmission.conversationId && !stateBeforeSubmission.activeConversationDraftId) {
+      stateBeforeSubmission.startConversationDraft({ bindWorkspace: Boolean(stateBeforeSubmission.workingDirectory), appMode: stateBeforeSubmission.appMode });
+    }
+    const submissionState = useAppStore.getState();
+    const composerStateAtSend = composerFingerprint(submissionState);
+    const capturedComposer = composerDraftOf(submissionState);
+    const capturedDraft = { draftId: submissionState.activeConversationDraftId, command: selectedSlashCommandRef.current };
     const submittedComments = cloneDiffComments(readDiffCommentState(getDiffCommentScope(
-      capturedComposer.conversationId, capturedComposer.workingDirectory)).comments);
-    const composerInputAtSend = useAppStore.getState().draft;
-    const selectedCommandAtSend = selectedSlashCommandRef.current;
-    const conversationAtSend = String(useAppStore.getState().conversationId || "").trim();
-    const workspaceAtSend = useAppStore.getState().workingDirectory;
+      submissionState.conversationId || submissionState.activeConversationDraftId, submissionState.workingDirectory)).comments);
+    const conversationAtSend = (submissionState.conversationId || "").trim();
+    const workspaceAtSend = submissionState.workingDirectory;
     const submittedUserMessageId = uniqueMessageId("u");
     const submittedOperation = submittingRef.current.get(editorKey);
     let admittedConversationId = conversationAtSend;
     const accepted: { result?: CommandResultEvent } = {};
     let draftClaim: ReturnType<typeof claimSubmittedDraft> | undefined;
+    let locallySubmitted = false;
+    let explicitlyRejected = false;
+    let failureReason: string | undefined;
+    let draftRestored = false;
+    let draftRetained = false;
     const quoteContext = quotedMessage ? formatQuotedMessageForBackend(quotedMessage) : "";
     const displayContent = content;
 
@@ -741,7 +820,73 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       return;
     }
 
-    let sent: boolean;
+    const submittedContextRefs = [...capturedComposer.selectedMentions, ...capturedComposer.selectedSkills,
+      ...submittedComments.map(comment => ({ kind: "diff_comment" as const, name: comment.position.path,
+        path: comment.position.path, comment }))];
+    const submittedUserMessage = {
+      id: submittedUserMessageId, role: "user" as const, content: displayContent, timestamp: Date.now(), artifacts: [],
+      attachmentRefs, quotedMessage, contextRefs: submittedContextRefs, deliveryStatus: "sending" as const,
+    };
+    if (capturedDraft.draftId) useAppStore.setState(state => ({ conversationDrafts: { ...state.conversationDrafts,
+      [capturedDraft.draftId!]: { ...state.conversationDrafts[capturedDraft.draftId!], pendingUserMessage: submittedUserMessage } } }));
+    else if (conversationAtSend && !capturedComposer.queuedEdit) useAppStore.setState(state => ({
+      preparingComposerMessages: { ...state.preparingComposerMessages, [conversationAtSend]: submittedUserMessage },
+    }));
+    const clearPreparingMessage = () => useAppStore.setState(state => {
+      if (state.preparingComposerMessages[conversationAtSend]?.id !== submittedUserMessageId) return state;
+      const preparingComposerMessages = { ...state.preparingComposerMessages };
+      delete preparingComposerMessages[conversationAtSend];
+      return { preparingComposerMessages };
+    });
+    const consumeDraft = () => {
+      if (!capturedComposer.queuedEdit) retainPendingComposerInput({
+        owner: conversationAtSend ? { kind: "conversation", id: conversationAtSend, workspaceRoot: workspaceAtSend }
+          : { kind: "draft", id: capturedDraft.draftId!, workspaceRoot: workspaceAtSend },
+        message: submittedUserMessage, draft: capturedComposer, comments: submittedComments,
+        sourceInputId: !capturedComposer.retainedInputEdit?.completed ? capturedComposer.retainedInputEdit?.inputId : undefined,
+      });
+      clearSubmittedComposer(composerStateAtSend, conversationAtSend, workspaceAtSend, submittedUserMessageId,
+        admittedConversationId, finalContent, submittedComments, capturedDraft);
+      draftClaim = claimSubmittedDraft({ conversationId: conversationAtSend, draftId: capturedDraft.draftId,
+        workspaceRoot: workspaceAtSend, userMessageId: submittedUserMessageId,
+        selectedCommand: () => selectedSlashCommandRef.current });
+      submittedDraftClaims.current.add(draftClaim);
+    };
+    const restoreDraft = () => {
+      if (draftRestored) return true;
+      if (!draftClaim?.canRestore()) return false;
+      const { owner, active, scope } = draftClaim.location();
+      const state = useAppStore.getState();
+      if (locallySubmitted && owner && state.getVisibleMessages(owner).filter(message => message.role === "user").at(-1)?.id !== submittedUserMessageId) return false;
+      const restored = { draft: capturedComposer.draft, richDraft: capturedComposer.richDraft, attachments: capturedComposer.attachments.map(attachment => ({ ...attachment,
+        ...(attachment.localFile && attachment.dataUrl?.startsWith("blob:") ? { dataUrl: URL.createObjectURL(attachment.localFile) } : {}),
+      })), selectedMentions: capturedComposer.selectedMentions, selectedSkills: capturedComposer.selectedSkills, quotedMessage: capturedComposer.quotedMessage };
+      if (active) useAppStore.setState(restored);
+      else if (owner && !(capturedDraft.draftId && !state.conversationDrafts[capturedDraft.draftId]?.adopted)) useAppStore.setState(current => ({ conversationWorkbenchStates: { ...current.conversationWorkbenchStates,
+        [owner]: { ...emptyConversationWorkbenchState(), ...current.conversationWorkbenchStates[owner], ...restored } } }));
+      else useAppStore.setState(current => ({ workspaceComposerDrafts: { ...current.workspaceComposerDrafts,
+        [capturedDraft.draftId || composerWorkspaceKey(workspaceAtSend)]: { ...emptyComposerDraft(), ...current.workspaceComposerDrafts[capturedDraft.draftId || composerWorkspaceKey(workspaceAtSend)], ...restored } } }));
+      restoreSubmittedDiffComments(scope, submittedComments);
+      draftRestored = true;
+      return true;
+    };
+    const preserveRejectedDraft = () => {
+      if (!draftClaim || draftRetained) return;
+      if (restoreDraft()) { discardRetainedComposerInput(submittedUserMessageId); return; }
+      if (capturedComposer.queuedEdit) return;
+      const state = useAppStore.getState();
+      const context = capturedDraft.draftId ? state.conversationDrafts[capturedDraft.draftId] : undefined;
+      const owner = context && !context.adopted ? { kind: "draft" as const, id: context.id, workspaceRoot: context.workspaceRoot }
+        : { kind: "conversation" as const, id: admittedConversationId || conversationAtSend, workspaceRoot: context?.executionCwd ?? workspaceAtSend };
+      if (owner.id && (!capturedDraft.draftId || context)) {
+        retainFailedComposerInput({ owner,
+          message: { ...submittedUserMessage, failureMessage: failureReason || context?.selectionError || undefined },
+          draft: composerDraftOf(capturedComposer), comments: submittedComments,
+          sourceInputId: !capturedComposer.retainedInputEdit?.completed ? capturedComposer.retainedInputEdit?.inputId : undefined });
+        draftRetained = true;
+      }
+    };
+    let sent = false;
     try { sent = await sendUserMessage(finalContent, readyAttachments, {
       attachmentRefs,
       conversationId: sendConversationId || undefined,
@@ -752,43 +897,43 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       busyBehavior,
       awaitAdmission: true,
       userMessageId: submittedUserMessageId,
+      onPreparing: capturedComposer.queuedEdit ? undefined : consumeDraft,
       onAdmission: event => {
         accepted.result = event;
         if (typeof event.data?.conversation_id === "string") admittedConversationId = event.data.conversation_id;
+        if (event.data?.native_completion === "completed") completeRetainedInputEdit(submittedUserMessageId);
       },
-      onReceived: () => {
-        clearSubmittedComposer(composerStateAtSend, conversationAtSend, workspaceAtSend, submittedUserMessageId, admittedConversationId, finalContent, submittedComments);
-        if (!draftClaim) {
-          draftClaim = claimSubmittedDraft({ conversationId: conversationAtSend, workspaceRoot: workspaceAtSend,
-            userMessageId: submittedUserMessageId, selectedCommand: () => selectedSlashCommandRef.current });
-          submittedDraftClaims.current.add(draftClaim);
-        }
+      onModelAccepted: () => {
+        completeRetainedInputEdit(submittedUserMessageId);
+      },
+      onConversationCreated: owner => { admittedConversationId = owner; },
+      onSubmitted: () => {
+        locallySubmitted = true;
+        if (!draftClaim) consumeDraft();
+        clearPreparingMessage();
         completeSubmission(editorKey, submittedOperation);
       },
-      onRejected: () => {
-        if (!draftClaim?.canRestore()) return;
-        const { owner, active, scope } = draftClaim.location();
-        const state = useAppStore.getState();
-        if (owner && state.getVisibleMessages(owner).filter(message => message.role === "user").at(-1)?.id !== submittedUserMessageId) return;
-        const restored = { draft: capturedComposer.draft, richDraft: capturedComposer.richDraft, attachments: capturedComposer.attachments.map(attachment => ({ ...attachment,
-          ...(attachment.localFile && attachment.dataUrl?.startsWith("blob:") ? { dataUrl: URL.createObjectURL(attachment.localFile) } : {}),
-        })), selectedMentions: capturedComposer.selectedMentions, selectedSkills: capturedComposer.selectedSkills, quotedMessage: capturedComposer.quotedMessage };
-        if (active) useAppStore.setState(restored);
-        else if (owner) useAppStore.setState(current => ({ conversationWorkbenchStates: { ...current.conversationWorkbenchStates,
-          [owner]: { ...emptyConversationWorkbenchState(), ...current.conversationWorkbenchStates[owner], ...restored } } }));
-        else useAppStore.setState(current => ({ workspaceComposerDrafts: { ...current.workspaceComposerDrafts,
-          [composerWorkspaceKey(workspaceAtSend)]: { ...emptyComposerDraft(), ...current.workspaceComposerDrafts[composerWorkspaceKey(workspaceAtSend)], ...restored } } }));
-        restoreSubmittedDiffComments(scope, submittedComments);
-      },
-    }); } finally {
+      onRejected: reason => { explicitlyRejected = true; failureReason = reason; preserveRejectedDraft(); },
+    }); } catch (error) {
+      failureReason = error instanceof Error ? error.message : String(error);
+      throw error;
+    } finally {
+      if (!sent && (!locallySubmitted || explicitlyRejected)) preserveRejectedDraft();
+      clearPreparingMessage();
       if (draftClaim) { draftClaim.release(); submittedDraftClaims.current.delete(draftClaim); }
+      if (capturedDraft.draftId) useAppStore.setState(state => {
+        const context = state.conversationDrafts[capturedDraft.draftId!];
+        return context?.pendingUserMessage?.id === submittedUserMessageId ? { conversationDrafts: { ...state.conversationDrafts,
+          [context.id]: { ...context, pendingUserMessage: undefined } } } : state;
+      });
     }
     if (!sent) return;
+    completeRetainedInputEdit(submittedUserMessageId);
     if (accepted.result?.data?.native_completion === "completed") {
-      clearSubmittedInput(composerInputAtSend, conversationAtSend, workspaceAtSend, selectedCommandAtSend, admittedConversationId);
+      clearSubmittedInput(capturedComposer.draft, conversationAtSend, workspaceAtSend, capturedDraft.command, admittedConversationId, capturedDraft.draftId);
       return;
     }
-    clearSubmittedComposer(composerStateAtSend, conversationAtSend, workspaceAtSend, submittedUserMessageId, admittedConversationId, finalContent, submittedComments);
+    if (!locallySubmitted && !draftClaim) clearSubmittedComposer(composerStateAtSend, conversationAtSend, workspaceAtSend, submittedUserMessageId, admittedConversationId, finalContent, submittedComments, capturedDraft);
   };
 
   const executeSlashCommand = async (commandLine: string, prepared?: { attachments: Record<string, unknown>[]; attachmentRefs: MessageAttachmentRef[]; conversationId?: string; quotedMessage?: ComposerQuote | null },
@@ -797,14 +942,22 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     const originalState = useAppStore.getState();
     const originalInput = originalState.draft;
     const originalSelectedCommand = selectedSlashCommandRef.current;
-    const originalOwner = String(originalState.conversationId || "").trim();
+    const originalOwner = (originalState.conversationId || "").trim();
+    const capturedDraft = { draftId: originalState.activeConversationDraftId, command: originalSelectedCommand };
     const workspace = originalState.workingDirectory;
-    const submittedComments = cloneDiffComments(readDiffCommentState(getDiffCommentScope(originalOwner, workspace)).comments);
+    const submittedComments = cloneDiffComments(readDiffCommentState(getDiffCommentScope(originalOwner || capturedDraft.draftId, workspace)).comments);
     const userMessageId = uniqueMessageId("u");
     const submittedOperation = submittingRef.current.get(editorKey);
     let admittedOwner = originalOwner;
     let compactReceived = false;
-    const accepted: { result?: CommandResultEvent } = {};
+    let inputConsumed = false;
+    const consumeSlashInput = (wholeComposer: boolean) => {
+      if (inputConsumed || isComposerConversationDeleted(admittedOwner)) return;
+      inputConsumed = true;
+      if (wholeComposer) clearSubmittedComposer(composerStateAtSend, originalOwner, workspace, userMessageId, admittedOwner, undefined, submittedComments, capturedDraft);
+      else clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner, capturedDraft.draftId);
+      completeSubmission(editorKey, submittedOperation);
+    };
     const result = await executeRuntimeSlashCommand(commandLine, {
       getState: useAppStore.getState,
       setState: useAppStore.setState,
@@ -812,12 +965,13 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       sendChatMessage: (options) => sendRuntimeSlashMessage(options, prepared, { userMessageId, onReceived: () => {
         if (!options.skipLocalAppend || parseRuntimeSlashInput(commandLine)?.command !== "/compact") return;
         compactReceived = true;
-        clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
-        completeSubmission(editorKey, submittedOperation);
+        consumeSlashInput(false);
       }, onAdmission: event => {
-        accepted.result = event;
         if (typeof event.data?.conversation_id === "string") admittedOwner = event.data.conversation_id;
-      } }, busyBehavior),
+        if (event.data?.native_completion === "completed") consumeSlashInput(false);
+      }, onModelAccepted: () => {
+        consumeSlashInput(true);
+      }, onConversationCreated: owner => { admittedOwner = owner; } }, busyBehavior),
       sendUserMessage,
       confirmClear: async () => {
         const { showConfirm } = await import("../overlays/DialogService");
@@ -829,17 +983,13 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         });
       },
     });
-    if (compactReceived) return;
-    if (accepted.result?.data?.native_completion === "completed") {
-      clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
-      return;
-    }
-    if (result.reset === "composer" || accepted.result?.data?.admitted === true || accepted.result?.data?.queued === true) {
-      clearSubmittedComposer(composerStateAtSend, originalOwner, workspace, userMessageId, admittedOwner, undefined, submittedComments);
+    if (compactReceived || inputConsumed) return;
+    if (result.reset === "composer") {
+      consumeSlashInput(true);
       return;
     }
     if (result.reset === "input") {
-      clearSubmittedInput(originalInput, originalOwner, workspace, originalSelectedCommand, admittedOwner);
+      consumeSlashInput(false);
     }
   };
 
@@ -1018,6 +1168,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   useEffect(() => {
     if (minimal || initialCatalogRequested) return;
     initialCatalogRequested = true;
+    if (useAppStore.getState().activeConversationDraftId) return;
     sendClientCommand({ type: "commands.list" });
     sendClientCommand({ type: "skills.list" });
   }, [minimal]);
@@ -1121,12 +1272,13 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         onSelect={handleMenuSelect}
         placement={minimal ? "below" : "above"}
       />
-      {reviewOwner && !reviewOwner.dismissed && !pendingConversationSwitchId && <CodeReviewMenu owner={reviewOwner} pending={submitting || reviewPermissionPending || !isConnected || !currentModel}
-        onClose={dismissCodeReview} onSelect={startCodeReview} />}
+      {reviewOwner && !reviewOwner.dismissed && !pendingConversationSwitchId && <Suspense fallback={null}><CodeReviewMenu owner={reviewOwner} pending={submitting || reviewPermissionPending || !isConnected || !currentModel}
+        onClose={dismissCodeReview} onSelect={startCodeReview} /></Suspense>}
       {guardianApprovalOwner && !pendingConversationSwitchId && <GuardianApprovalMenu conversationId={guardianApprovalOwner.conversationId}
         onClose={() => setGuardianApprovalOwner(undefined)} onApproved={finishGuardianApproval} />}
       <FooterRow
         sendState={sendState}
+        submitting={submitting}
         isStopping={isStopping}
         onSend={sendState === "stop" ? stopRun : submit}
         onStop={stopRun}

@@ -14,6 +14,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.tasks.manager import TaskManager
 from backend.tools.registry import ToolRegistry
 from backend.ws.handler import WebSocketSession
+from backend.ws.agent_runner import AgentRunRequest
 from backend.ws.run_manager import SessionRunManager
 from backend.ws.stream_state import create_stream_state
 
@@ -81,7 +82,8 @@ def test_parent_notification_probe_reads_outbox_without_runtime_hydration(
         conversation_id="conv-notification-replay",
         session_id="session-notification-replay",
         subagent_id="worker-1",
-        payload={"status": "completed"},
+        kind="mailbox_wake",
+        payload={"message_id": "followup", "delivery_mode": "trigger_turn"},
     )
     manager = SessionRunManager(
         SimpleNamespace(session_id="session-notification-replay")
@@ -156,6 +158,11 @@ def test_scheduler_fallback_projects_existing_durable_completion(
         _command_tasks=set(),
         execution_cleanup_tasks=set(),
         _conversation_streams={},
+        capture_agent_run_request=lambda _owner: AgentRunRequest(
+            config=AppConfig(llm=LLMSettings(api_key="")), workspace_root=tmp_path, model_selection={},
+            selected_provider="", selected_model="", provider_override=False, model_override=False,
+            agent_mode="react", permission=None, tool_registry=ToolRegistry(), skill_manager=None,
+            skill_executor=None, mcp_manager=None, memory_manager=None),
         schedule_task_runtime_update=lambda: None,
         schedule_next_queued_user_message=lambda _conversation_id: None,
         # SessionRunManager now notifies the lifecycle owner whenever run
@@ -439,6 +446,7 @@ def test_queued_user_messages_run_in_fifo_order(tmp_path: Path, monkeypatch):
         return True
 
     monkeypatch.setattr(session, "send_event", capture_event)
+    monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
     monkeypatch.setattr(session, "_run_agent", fake_run_agent)
     monkeypatch.setattr(
         session.command_dispatcher,
@@ -522,6 +530,7 @@ def test_steered_message_promotes_into_current_turn_without_interrupting(tmp_pat
         return True
 
     monkeypatch.setattr(session, "send_event", capture_event)
+    monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
     monkeypatch.setattr(session, "_run_agent", fake_run_agent)
     monkeypatch.setattr(
         session.command_dispatcher,
@@ -779,6 +788,7 @@ def test_message_sent_while_stop_is_finishing_preserves_paused_work_and_consents
         noop_permission,
     )
     monkeypatch.setattr(session, "_cancel_pending_approvals", hold_approval_cleanup)
+    monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
     monkeypatch.setattr(session, "_run_agent", fake_run_agent)
 
     async def scenario():
@@ -884,6 +894,7 @@ def test_stopping_current_run_preserves_next_input_until_explicit_queue_start(tm
         "_handle_user_message_permission",
         noop_permission,
     )
+    monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
     monkeypatch.setattr(session, "_run_agent", fake_run_agent)
 
     async def scenario():

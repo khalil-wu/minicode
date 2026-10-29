@@ -34,10 +34,11 @@ describe("release input ownership", () => {
     expect(transport.send).toHaveBeenCalledWith(expect.objectContaining({ workspace_root: "C:/workspace", primary_file: "src/main.py", active_tab_path: "src/main.py" }));
   });
 
-  it("fences Stop using the optimistic message before a conversation ID arrives", () => {
+  it("fences Stop using the optimistic message of the created conversation", () => {
+    useAppStore.setState({ conversationId: "first", conversations: [{ id: "first", workspaceRoot: "C:/workspace" }] });
     expect(sendChatMessage({ displayContent: "Start work" })).toBe(true);
     const sent = transport.send.mock.calls[0][0];
-    expect(buildInterruptCommand(useAppStore.getState()).message_id).toBe(sent.assistant_message_id);
+    expect(buildInterruptCommand(useAppStore.getState())).toMatchObject({ conversation_id: "first", message_id: sent.assistant_message_id });
   });
 
   it("keeps side-chat file references separate from the main editor", () => {

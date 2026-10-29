@@ -23,6 +23,7 @@ from backend.agent.lifecycle_observer import resolve_lifecycle_runtime
 from backend.agent.final_tool_request import (
     FinalExecutableToolRequest,
     canonical_tool_request_digest,
+    executable_tool_for_call as _tool_for_call,
 )
 from backend.tools.contracts import EvidenceRecord
 from backend.tools.base import execution_exception_result as _execution_exception_result
@@ -37,7 +38,7 @@ from backend.agent.tool_events import (
     tool_start_times as _tool_start_times,
 )
 from backend.agent.tool_issues import classify_tool_issue
-from backend.tools.catalog import tool_spec_for
+from backend.tools.catalog import tool_spec_for, tool_spec_from_instance
 from backend.agent.control_tools import CONTROL_TOOL_NAMES
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
@@ -192,7 +193,7 @@ def _permission_decision_denial(decision: PermissionDecision) -> str:
     return ""
 
 
-def _authorize_final_tool_request(
+async def _authorize_final_tool_request(
     tc: ToolCallEvent,
     *,
     tool_registry: ToolRegistry,
@@ -203,10 +204,9 @@ def _authorize_final_tool_request(
 ) -> FinalToolAuthorization:
     """Validate and authorize the exact arguments that will be executed.
 
-    This helper is deliberately synchronous and side-effect free with respect
-    to the permission evaluator: it gives that evaluator a detached copy and
-    rejects it if it mutates the copy.  Hooks and user edits call this helper
-    again instead of reusing an earlier decision.
+    MCP readiness resolves before permission review. The evaluator receives a
+    detached argument copy, and hooks or user edits reauthorize the same
+    prepared call rather than substituting another live connection.
     """
 
     invalid_reason = invalid_tool_call_guard_reason(tc, tool_registry)
@@ -215,7 +215,13 @@ def _authorize_final_tool_request(
             error=invalid_reason, error_kind="validation_error"
         )
 
-    tool = tool_registry.get_tool(tc.name)
+    tool = _tool_for_call(tc, tool_registry)
+    from backend.mcp.registry import MCPToolProxy
+    if isinstance(tool, MCPToolProxy):
+        try:
+            tool = await tool.prepare_for_execution(tool_ctx)
+        except (ValueError, ConnectionError) as exc:
+            return FinalToolAuthorization(error=str(exc), error_kind="mcp_unavailable")
     policy_identity = tool.policy_identity if tool is not None else tc.name
     from backend.agent.tool_environments import execution_context_for_call, execution_environment_identity
     from backend.environments.errors import ExecutorError
@@ -224,8 +230,6 @@ def _authorize_final_tool_request(
     from backend.permissions.grants import permission_context_with_grants
 
     permission_context = permission_context_with_grants(permission_context or tool_ctx.permission, tool_ctx)
-    from backend.mcp.registry import MCPToolProxy
-
     if isinstance(tool, MCPToolProxy):
         permission_context = replace(permission_context,
             captured_mcp_approval_store=tool_ctx.run_context.mcp_tool_approvals if tool_ctx.run_context is not None else None,
@@ -251,7 +255,7 @@ def _authorize_final_tool_request(
                 error_kind="validation_error",
             )
 
-    required_reason = missing_required_tool_argument_reason(None, tc, tool_registry)
+    required_reason = missing_required_tool_argument_reason(None, tc, tool_registry, tool=tool)
     if required_reason:
         try:
             rejected_request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
@@ -283,7 +287,7 @@ def _authorize_final_tool_request(
         tool_ctx = replace(tool_ctx, permission=permission_context)
         environment_identity = execution_environment_identity(tool_ctx)
     if check_scope:
-        scope_reason = subagent_scope_guard_reason(tc, tool_registry, tool_ctx)
+        scope_reason = subagent_scope_guard_reason(tc, tool_registry, tool_ctx, tool=tool)
         if scope_reason:
             try:
                 rejected_request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity)
@@ -297,6 +301,8 @@ def _authorize_final_tool_request(
 
     try:
         request = FinalExecutableToolRequest.freeze(tc, policy_identity=policy_identity, environment_identity=environment_identity)
+        if isinstance(tool, MCPToolProxy):
+            request = replace(request, prepared_tool=tool)
     except Exception as exc:
         return FinalToolAuthorization(
             error=f"Tool '{tc.name}' arguments could not be frozen ({type(exc).__name__}).",
@@ -386,7 +392,7 @@ async def _detached_tool_diff(
     if tool_ctx.environment_bindings is not None:
         from backend.agent.tool_environments import execution_context_for_call
 
-        tool_ctx = execution_context_for_call(tc, tool_ctx, tool_ctx.tool_registry.get_tool(tc.name))
+        tool_ctx = execution_context_for_call(tc, tool_ctx, _tool_for_call(tc, tool_ctx.tool_registry))
     if tool_ctx.turn_environment is not None:
         from backend.workspace.executor_tool_io import generate_executor_tool_diff
 
@@ -467,7 +473,7 @@ def _invalidate_workspace_views_after_mutation(
 
     if tc.name in _EXACT_TURN_DIFF_TOOLS:
         return
-    if _tool_side_effect_kind(tc.name, tool_registry, tc.arguments) not in {
+    if _tool_side_effect_kind(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)) not in {
         "workspace",
         "external",
         "destructive",
@@ -479,7 +485,7 @@ def _invalidate_workspace_views_after_mutation(
     # worktree, extension, or a future workspace tool), so keep the shared
     # read/list/fuzzy views conservative at the runtime boundary too.  Do this
     # even for an error result: a command can partially mutate before failing.
-    tool = tool_registry.get_tool(tc.name)
+    tool = _tool_for_call(tc, tool_registry)
     if bool(getattr(tool, "mutates_workspace", False)):
         from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
@@ -662,14 +668,14 @@ def _store_tool_cleanup_evidence(
     return existing
 
 
-def _tool_call_is_read_only(tc: ToolCallEvent, tool_registry: ToolRegistry) -> bool:
-    tool = tool_registry.get_tool(tc.name)
+def _tool_call_is_read_only(tc: ToolCallEvent, tool_registry: ToolRegistry, *, tool=None) -> bool:
+    tool = tool if tool is not None else _tool_for_call(tc, tool_registry)
     if tool is not None:
         try:
             return bool(tool.is_read_only(tc.arguments))
         except Exception:
             return bool(getattr(tool, "read_only", False))
-    return not _tool_mutates(tc.name, tool_registry, tc.arguments)
+    return not _tool_mutates(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry))
 
 
 def _resolve_workspace_path_for_scope(
@@ -729,7 +735,9 @@ def subagent_scope_guard_reason(
     tc: ToolCallEvent,
     tool_registry: ToolRegistry,
     tool_ctx: ToolExecutionContext,
+    *, tool=None,
 ) -> str:
+    tool = tool if tool is not None else _tool_for_call(tc, tool_registry)
     metadata = tool_ctx.metadata if isinstance(tool_ctx.metadata, dict) else {}
     read_only = _metadata_bool(metadata, "read_only")
     write_scope = _metadata_string_list(metadata, "write_scope")
@@ -740,11 +748,11 @@ def subagent_scope_guard_reason(
         from backend.environments.errors import ExecutorError
 
         try:
-            tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
+            tool_ctx = execution_context_for_call(tc, tool_ctx, tool)
         except (ValueError, ExecutorError) as error:
             return str(error)
 
-    if read_only and not _tool_call_is_read_only(tc, tool_registry):
+    if read_only and not _tool_call_is_read_only(tc, tool_registry, tool=tool):
         return (
             f"Blocked tool '{tc.name}' because this subagent is marked read_only. "
             "Return findings without modifying files, running mutating commands, or changing external state."
@@ -753,9 +761,8 @@ def subagent_scope_guard_reason(
     if not write_scope:
         return ""
 
-    tool = tool_registry.get_tool(tc.name)
     may_mutate_workspace = bool(getattr(tool, "mutates_workspace", False))
-    if not may_mutate_workspace or _tool_call_is_read_only(tc, tool_registry):
+    if not may_mutate_workspace or _tool_call_is_read_only(tc, tool_registry, tool=tool):
         return ""
 
     raw_targets = _workspace_write_targets(tc)
@@ -847,7 +854,7 @@ def missing_required_tool_argument_names(
     # also written to history. Reassigning tc.arguments here was a hidden source
     # of request-signature drift (args rewritten after collection).
     args = dict(tc.arguments) if isinstance(tc.arguments, dict) else {}
-    tool = tool_registry.get_tool(tc.name)
+    tool = _tool_for_call(tc, tool_registry)
     if tool is None:
         return []
     try:
@@ -866,13 +873,15 @@ def missing_required_tool_argument_reason(
     state: AgentState | None,
     tc: ToolCallEvent,
     tool_registry: ToolRegistry,
+    *, tool=None,
 ) -> str:
     del state
     if tc.name == "task" and task_parallel_tasks_have_value(tc.arguments):
         return ""
+    spec = tool_spec_from_instance(tool, name=tc.name) if tool is not None else tool_spec_for(tc.name, tool_registry)
     missing = [
         name
-        for name in tool_spec_for(tc.name, tool_registry).required_args
+        for name in spec.required_args
         if not argument_has_value(tc.arguments or {}, name)
     ]
     if not missing:
@@ -1174,7 +1183,7 @@ async def run_tool(
     hook_mgr = _tool_hook_manager(tool_ctx)
 
     gate = tool_ctx.run_context.tool_execution_gate if tool_ctx.run_context is not None else None
-    tool = tool_registry.get_tool(tc.name)
+    tool = _tool_for_call(tc, tool_registry)
     if gate is not None and (tool is None or not tool.orchestrates_tools):
         async with gate.hold(read_only=_tool_call_is_read_only(tc, tool_registry)):
             return await _run_authorized_tool(tc, tool_registry, tool_ctx, initial_permission, hook_mgr)
@@ -1206,7 +1215,7 @@ async def _run_authorized_tool(
     # capture; their results must say so.
     checkpoint_limitation = ""
     if not snapshot_error:
-        mutating_tool = tool_registry.get_tool(tc.name)
+        mutating_tool = _tool_for_call(tc, tool_registry)
         if (
             mutating_tool is not None
             and bool(getattr(mutating_tool, "mutates_workspace", False))
@@ -1254,6 +1263,7 @@ async def _run_authorized_tool(
                     awaitable=tool_registry.execute(
                         tc.name, execution_args, context=tool_ctx,
                         expected_policy_identity=_bound_final_tool_request(tc).policy_identity if _bound_final_tool_request(tc) is not None else "",
+                        prepared_tool=_bound_final_tool_request(tc).prepared_tool if _bound_final_tool_request(tc) is not None else None,
                     ),
                 )
                 # This caller owns the execution, unlike independent manager
@@ -1268,6 +1278,7 @@ async def _run_authorized_tool(
             result = await tool_registry.execute(
                 tc.name, execution_args, context=tool_ctx,
                 expected_policy_identity=_bound_final_tool_request(tc).policy_identity if _bound_final_tool_request(tc) is not None else "",
+                prepared_tool=_bound_final_tool_request(tc).prepared_tool if _bound_final_tool_request(tc) is not None else None,
             )
     finally:
         if owner_token is not None:
@@ -1760,7 +1771,7 @@ async def run_tool_with_timeout(
         cleanup_evidence.update(
             {
                 "side_effect_kind": _tool_side_effect_kind(
-                    tc.name, tool_registry, tc.arguments
+                    tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)
                 ),
                 "request_digest": _final_tool_request_digest(tc)
                 or canonical_tool_request_digest(tc.name, tc.arguments or {}),
@@ -1811,13 +1822,14 @@ async def run_tool_with_timeout(
             tc.name,
             tool_registry,
             tc.arguments,
+            tool=_tool_for_call(tc, tool_registry),
         )
         cleanup_evidence["request_digest"] = _final_tool_request_digest(
             tc
         ) or canonical_tool_request_digest(tc.name, tc.arguments or {})
         cleanup_evidence["retry_safe"] = bool(
             cleanup_evidence.get("completed")
-            and _tool_is_idempotent(tc.name, tool_registry, tc.arguments)
+            and _tool_is_idempotent(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry))
         )
         cleanup_evidence["manual_recovery_required"] = bool(
             cleanup_evidence.get("pending") or not cleanup_evidence.get("retry_safe")
@@ -2031,7 +2043,7 @@ def tool_context_with_live_output(
 ) -> ToolExecutionContext:
     from backend.agent.tool_environments import execution_context_for_call
 
-    tool_ctx = execution_context_for_call(tc, tool_ctx, tool_registry.get_tool(tc.name))
+    tool_ctx = execution_context_for_call(tc, tool_ctx, _tool_for_call(tc, tool_registry))
     if tool_ctx.turn_environment is not None:
         tool_ctx.metadata.setdefault("_executor_read_file_hashes", {})
     shared_streamed_ids = tool_ctx.metadata.setdefault(
@@ -2181,7 +2193,7 @@ def store_result(
     # the backstop, so their compact summary isn't truncated a second time.
     cap: int | None = MAX_TOOL_RESULT_CHARS
     if tool_registry is not None:
-        tool_obj = tool_registry.get_tool(tc.name)
+        tool_obj = _tool_for_call(tc, tool_registry)
         if tool_obj is not None:
             cap = getattr(tool_obj, "max_result_chars", MAX_TOOL_RESULT_CHARS)
     result_for_issue = result
@@ -2213,15 +2225,15 @@ def store_result(
         if final_status == "success" and not truncated.is_error
         else "timeline"
     )
-    side_effect_kind = _tool_side_effect_kind(tc.name, tool_registry, tc.arguments)
+    side_effect_kind = _tool_side_effect_kind(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry))
     idempotent = (
-        _tool_is_idempotent(tc.name, tool_registry, tc.arguments)
+        _tool_is_idempotent(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry))
         if tool_registry is not None
         else False
     )
     idempotency_key = ""
     if tool_registry is not None:
-        tool_obj = tool_registry.get_tool(tc.name)
+        tool_obj = _tool_for_call(tc, tool_registry)
         get_key = getattr(tool_obj, "idempotency_key", None)
         if callable(get_key):
             try:
@@ -2273,7 +2285,7 @@ def store_result(
         context_result.content if tc.name == "request_user_input" or tc.name in CONTEXT_TOOL_NAMES else context_result.to_context_string(),
         artifact_id=truncated.artifact_id,
         is_error=truncated.is_error,
-        mutates=_tool_mutates(tc.name, tool_registry, tc.arguments),
+        mutates=_tool_mutates(tc.name, tool_registry, tc.arguments, tool=_tool_for_call(tc, tool_registry)),
         status=final_status,
         source_url=truncated.source_url,
         extraction_status=truncated.extraction_status,
@@ -2303,7 +2315,8 @@ def store_result(
         stdout_preview=truncated.runtime_metadata.get("stdout_preview"),
         stderr_preview=truncated.runtime_metadata.get("stderr_preview"),
         exit_code=truncated.runtime_metadata.get("exit_code"),
-        recipient_id=truncated.runtime_metadata.get("recipient") if tc.name in {"send_message", "followup_task"} and truncated.runtime_metadata.get("recipient") not in {None, "*"} else None,
+        recipient_id=(truncated.runtime_metadata.get("recipient_id") if tc.name == "interrupt_agent" else
+            truncated.runtime_metadata.get("recipient") if tc.name in {"send_message", "followup_task"} and truncated.runtime_metadata.get("recipient") not in {None, "*"} else None),
         recipient_ids=truncated.runtime_metadata.get("recipient_ids") if tc.name in {"send_message", "followup_task"} else None,
     )
     if tool_ctx is not None and tool_ctx.run_context is not None and tool_ctx.run_context.tool_execution_gate is not None:

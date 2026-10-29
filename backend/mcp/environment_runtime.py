@@ -54,7 +54,8 @@ class MCPAppEnvironmentLease:
 
 
 class MCPEnvironmentRuntime:
-    def __init__(self, environment_manager, turn_environments: TurnEnvironmentSnapshot | None, *, local_cwd: str):
+    def __init__(self, environment_manager, turn_environments: TurnEnvironmentSnapshot | None, *, local_cwd: str,
+            connection_pool=None):
         self.environment_manager = environment_manager
         self.snapshot = turn_environments.clone() if turn_environments is not None else None
         self.local_cwd = local_cwd
@@ -65,6 +66,10 @@ class MCPEnvironmentRuntime:
         self._app_borrowers = 0
         self._app_close_requested = False
         self._close_lock = asyncio.Lock()
+        self.connection_pool = connection_pool
+
+    def for_connection(self):
+        return MCPEnvironmentRuntime(self.environment_manager, self.snapshot, local_cwd=self.local_cwd)
 
     def acquire_app_lease(self) -> MCPAppEnvironmentLease:
         self._app_borrowers += 1
@@ -262,7 +267,8 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
     environment_manager, local_cwd: str, is_subagent: bool = False,
     previous: PreparedEnvironmentCapabilities | None = None, disabled_plugin_ids: tuple[str, ...] = (),
     disabled_skill_paths=None, restriction_product: str | None = "codex",
-    selected_capability_roots: tuple[dict, ...] = ()) -> PreparedEnvironmentCapabilities:
+    selected_capability_roots: tuple[dict, ...] = (), connection_pool=None,
+    optional_startup_grace_ms: int = 1000) -> PreparedEnvironmentCapabilities:
     from backend.mcp.environment_discovery import discover_environment_http, selected_plugin_configs
     from backend.mcp.manager import MCPServerManager
     from backend.mcp.node_repl import SOURCE_PREFIX as NODE_COMPANION_SOURCE
@@ -274,7 +280,8 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
     skills = host_skill_manager.clone_host_catalog() if host_skill_manager is not None else SkillManager()
     if turn_environments is None:
         return PreparedEnvironmentCapabilities(host_mcp_manager, skills, (), (), None, False, thread_id, turn_id)
-    runtime = MCPEnvironmentRuntime(environment_manager, turn_environments, local_cwd=local_cwd)
+    runtime = MCPEnvironmentRuntime(environment_manager, turn_environments, local_cwd=local_cwd,
+        connection_pool=connection_pool)
     prepared = PreparedEnvironmentCapabilities(None, skills, (), (), runtime, False, thread_id, turn_id)
     try:
         ready = tuple(runtime.snapshot.turn_environments())
@@ -332,13 +339,18 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             requirements_path=source._requirements_path if source is not None else None,
             environment_runtime=runtime, runtime_configs=(),
             startup_policy="LazyWhenCached" if is_subagent else "Eager",
-            cached_catalog=tuple(entry for entry in source.catalog_snapshot()
-                if not entry[0].source.startswith((NODE_COMPANION_SOURCE, CUA_COMPANION_SOURCE))) if source is not None else ())
+            optional_startup_grace_ms=optional_startup_grace_ms, feature_flags=feature_flags)
         prepared.mcp_manager = manager
         prepared.owns_mcp_manager = True
         # Dynamic kernels are admitted only after this step captures its
         # model/network scope and receiving owner; they are not host config.
-        configs = {config.name: deepcopy(config) for config in source.load_config()
+        source_stack = None
+        if source is not None:
+            from backend.config import load_config_layer_stack
+
+            source_stack = load_config_layer_stack(cwd=source.workspace_root, requirements_path=source._requirements_path,
+                managed_settings_dir=source._managed_settings_dir)
+        configs = {config.name: deepcopy(config) for config in source.load_config(config_stack=source_stack)
             if not config.source.startswith((NODE_COMPANION_SOURCE, CUA_COMPANION_SOURCE))} if source is not None else {}
         warnings = [*resolution_warnings, *catalog.warnings]
         plugins, disabled_roots = selected_plugin_configs(manager, discoveries,
@@ -359,14 +371,15 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
                     registered.add(config.name)
                     configs[config.name] = config
         if source is not None:
-            from backend.config import load_config_layer_stack
             from backend.mcp.policy import load_mcp_policy
 
-            stack = load_config_layer_stack(cwd=source.workspace_root, requirements_path=source._requirements_path,
-                managed_settings_dir=source._managed_settings_dir)
-            policy = load_mcp_policy(managed_settings_dir=source._managed_settings_dir, config_stack=stack)
+            # Use the same captured policy layers for host config and the
+            # receiving catalog. The next step captures its own fresh stack.
+            policy = load_mcp_policy(managed_settings_dir=source._managed_settings_dir, config_stack=source_stack)
             configs = {config.name: config for config in manager._apply_mcp_policies(list(configs.values()), policy=policy)}
         manager._runtime_configs = tuple(configs.values())
+        if connection_pool is not None:
+            connection_pool.reconcile({config.name for config in configs.values() if config.enabled})
         cua_configs = [config for config in configs.values() if is_configured_cua(config)]
         if len(cua_configs) > 1:
             raise ValueError("A receiving thread must select exactly one CUA computer runtime")

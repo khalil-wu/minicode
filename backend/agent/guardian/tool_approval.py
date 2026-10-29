@@ -23,7 +23,7 @@ async def review_tool_request(request, context, registry):
         and settings.get("approvals_reviewer", "user") == "auto_review"
     ):
         return None
-    tool = registry.get_tool(request.tool_name)
+    tool = request.prepared_tool if request.prepared_tool is not None else registry.get_tool(request.tool_name)
     mcp_metadata = None
     if isinstance(tool, MCPToolProxy):
         mcp_metadata = {"server": tool.server_name, "tool_name": tool._tool_def.name,

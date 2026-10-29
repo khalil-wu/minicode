@@ -96,7 +96,7 @@
   "不受信任": "Untrusted",
   "允许网络访问": "Allow network access",
   "允许工作区写入沙箱访问网络。": "Allow network access when the sandbox is set to workspace write.",
-  "回复详细程度": "Response verbosity",
+  "回复详细程度": "Output detail",
   "选择 MiniCode 在回复中包含多少细节。": "Choose how much detail MiniCode includes in responses.",
   "选择 MiniCode 如何概述推理过程。": "Choose how MiniCode summarizes its reasoning.",
   "简洁": "Concise",

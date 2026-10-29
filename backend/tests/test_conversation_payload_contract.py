@@ -52,6 +52,29 @@ def test_conversation_create_handler_does_not_create_on_invalid_permission_mode(
     assert events[0].data["data"]["error_code"] == "invalid_permission_mode"
 
 
+def test_conversation_create_rejects_permission_mode_disallowed_by_managed_requirements() -> None:
+    from backend.config import AppConfig, LLMSettings
+    from backend.config_layers import ConfigLayerStack
+    from backend.config_requirements import RequirementSource, RequirementsLayerEntry, compose_requirements
+
+    requirements = compose_requirements([RequirementsLayerEntry(
+        RequirementSource("system_requirements_toml", location="requirements.toml"),
+        {"allowed_approval_policies": ["on-request"], "allowed_sandbox_modes": ["read-only", "workspace-write"]},
+    )])
+    events = []
+
+    async def send_event(event) -> None:
+        events.append(event)
+
+    session = SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key=""), config_layer_stack=ConfigLayerStack(layers=(), requirements=requirements)),
+                              send_event=send_event)
+    assert asyncio.run(handle_conversation_create(session, {"permission_mode": "bypass"})) is True
+    assert len(events) == 1
+    assert events[0].type == "command.result"
+    assert events[0].data["level"] == "error"
+    assert "Managed requirement" in events[0].data["message"]
+
+
 def test_isolated_worktree_failure_does_not_leave_a_shared_success_record(
     monkeypatch,
     tmp_path: Path,

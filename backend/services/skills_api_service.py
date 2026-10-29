@@ -50,12 +50,7 @@ async def update_skill_enabled(path: str, enabled: bool, *, skill_manager: Any, 
         skills["config"] = rules
 
     await to_thread_cancel_safe(_update_settings_json, apply)
-    result = await to_thread_cancel_safe(skills_settings_payload, skill_manager=skill_manager, workspace_root=workspace_root)
-    current = next(skill for skill in [*result["skills"], *result["plugin_skills"]]
-        if Path(skill["path"]).resolve() == requested)
-    if current["enabled"] != enabled:
-        raise ValueError("Another configuration layer overrides this skill setting.")
-    return result
+    return await to_thread_cancel_safe(skills_settings_payload, skill_manager=skill_manager, workspace_root=workspace_root)
 
 
 def installed_skill_names(skill_manager: Any | None) -> set[str]:

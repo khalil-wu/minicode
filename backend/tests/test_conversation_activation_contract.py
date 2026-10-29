@@ -39,8 +39,80 @@ def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
     session.permission_context_for_conversation = Mock(return_value=SimpleNamespace(mode="bypass"))
     session.refresh_llm_selection = Mock()
     session.session_lifecycle.schedule_runtime_capabilities = Mock()
-    session.conversation_runtime = SimpleNamespace(defer_repository_hydration=Mock())
+    runtime = SimpleNamespace(defer_repository_hydration=Mock(), hydration_error=None, _hydration_generation=1)
+    def prepare_snapshot(owner, _snapshot, *, on_hydration_complete, **_kwargs):
+        runtime.defer_repository_hydration(owner, on_hydration_complete=on_hydration_complete)
+        return True
+    runtime.load_active_conversation_snapshot = Mock(side_effect=prepare_snapshot)
+    session.conversation_runtime = runtime
     return session
+
+
+@pytest.mark.parametrize("count", [0, 25])
+def test_empty_transcript_switch_loads_its_actual_checkpoint_before_first_turn(tmp_path, count):
+    from backend.agent.context import ContextBuilder
+    from backend.ws.conversation_runtime import ConversationRuntime
+
+    repo = ConversationRepository(tmp_path / "conversations")
+    history = [{"role": "user", "content": f"saved-{index}"} for index in range(count)]
+    target = repo.create_conversation(context_snapshot={"history": history} if history else {})
+    session = _session(repo, "previous")
+    builder = ContextBuilder()
+    builder.append_user("previous conversation must not leak")
+    runtime = ConversationRuntime(conversation_repo=repo, context_builder=builder,
+        build_summary_from_transcript=lambda *_args, **_kwargs: "",
+        projection_lock_for=session._conversation_projection_lock)
+    runtime.active_conversation_id = target.id
+    session.conversation_runtime = runtime
+    session.start_active_conversation_hydration = runtime.start_hydration
+
+    async def scenario():
+        await conversation.handle_conversation_switch(session, {"conversation_id": target.id, "_reemit_pending": False})
+        initial = [call.args[0] for call in session.send_payload.await_args_list]
+        assert [payload["is_hydrating"] for payload in initial] == ([False] if count == 0 else [True])
+        await runtime.wait_for_hydration(target.id)
+        assert [message.content for message in builder._history] == [item["content"] for item in history]
+        final = [call.args[0] for call in session.send_payload.await_args_list]
+        assert final[-1]["is_hydrating"] is False
+
+    asyncio.run(scenario())
+
+
+def test_empty_transcript_switch_reloads_a_checkpoint_changed_during_read(tmp_path, monkeypatch):
+    from backend.agent.context import ContextBuilder
+    from backend.ws.conversation_runtime import ConversationRuntime
+
+    repo = ConversationRepository(tmp_path / "conversations")
+    target = repo.create_conversation()
+    session = _session(repo, "previous")
+    builder = ContextBuilder()
+    runtime = ConversationRuntime(conversation_repo=repo, context_builder=builder,
+        build_summary_from_transcript=lambda *_args, **_kwargs: "",
+        projection_lock_for=session._conversation_projection_lock)
+    runtime.active_conversation_id = target.id
+    session.conversation_runtime = runtime
+    session.start_active_conversation_hydration = runtime.start_hydration
+    read = repo.get_conversation_for_resume
+    changed = False
+
+    def update_after_read(owner):
+        nonlocal changed
+        record = read(owner)
+        if not changed:
+            changed = True
+            repo.save_context_snapshot(owner, {"history": [{"role": "user", "content": "newer durable input"}]})
+        return record
+
+    monkeypatch.setattr(repo, "get_conversation_for_resume", update_after_read)
+
+    async def scenario():
+        await conversation.handle_conversation_switch(session, {"conversation_id": target.id, "_reemit_pending": False})
+        assert session.send_payload.await_args_list[0].args[0]["is_hydrating"] is True
+        await runtime.wait_for_hydration(target.id)
+        assert [message.content for message in builder._history] == ["newer durable input"]
+        assert session.send_payload.await_args_list[-1].args[0]["is_hydrating"] is False
+
+    asyncio.run(scenario())
 
 
 def test_actual_switch_initial_and_hydrated_pages_restore_legacy_image_sources(tmp_path, monkeypatch):
@@ -84,6 +156,49 @@ def test_actual_switch_initial_and_hydrated_pages_restore_legacy_image_sources(t
     assert "source" not in repo.get_conversation(target.id).transcript[0]["artifacts"][1]
     assert reads and all(thread_id != loop_thread for thread_id in reads)
     store.shutdown()
+
+
+def test_switch_publishes_hydrated_owner_before_requesting_capability_catalog(tmp_path):
+    repo = ConversationRepository(tmp_path / "conversations")
+    target = repo.create_conversation()
+    session = _session(repo, "previous")
+    session.conversation_runtime.hydration_error = None
+    session.conversation_runtime._hydration_generation = 1
+    order = []
+
+    async def send(payload, **_kwargs):
+        if payload["type"] == "conversation.switched":
+            order.append("hydrating" if payload["is_hydrating"] else "hydrated")
+
+    session.send_payload.side_effect = send
+    session.session_lifecycle.schedule_runtime_capabilities.side_effect = lambda **_kwargs: order.append("capabilities")
+
+    async def scenario():
+        await conversation.handle_conversation_switch(session, {"conversation_id": target.id, "_reemit_pending": False})
+        assert order == ["hydrating"]
+        callback = session.conversation_runtime.defer_repository_hydration.call_args.kwargs["on_hydration_complete"]
+        await callback(target.id)
+
+    asyncio.run(scenario())
+    assert order == ["hydrating", "hydrated", "capabilities"]
+
+
+def test_first_message_switch_leaves_capability_refresh_to_its_owner(tmp_path):
+    repo = ConversationRepository(tmp_path / "conversations")
+    target = repo.create_conversation()
+    session = _session(repo, "previous")
+
+    async def scenario():
+        await conversation.handle_conversation_switch(session, {"conversation_id": target.id,
+            "defer_runtime_capabilities": True, "_reemit_pending": False})
+        callback = session.conversation_runtime.defer_repository_hydration.call_args.kwargs["on_hydration_complete"]
+        await callback(target.id)
+
+    asyncio.run(scenario())
+    payload = session.send_payload.await_args_list[-1].args[0]
+    assert payload["conversation_id"] == target.id
+    assert payload["is_hydrating"] is False and payload["capabilities_deferred"] is True
+    session.session_lifecycle.schedule_runtime_capabilities.assert_not_called()
 
 
 def test_short_switch_rejection_preserves_previous_conversation(tmp_path):

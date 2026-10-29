@@ -70,7 +70,7 @@ export function GitPreferencesSettings({ active = true }: { active?: boolean }) 
       <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("审查结果呈现方式")}</div>
         <div className="settings-row-description">{t("尽可能在当前聊天中启动 /review，或启动单独的审查聊天")}</div></div>
         <div role="group" aria-label={t("审查结果呈现方式")} className="settings-git-segments">
-          {([['inline', t("内嵌")], ['detached', t("单独")]] as const).map(([delivery, label]) => <button type="button" key={delivery}
+          {([['inline', t("内联")], ['detached', t("单独")]] as const).map(([delivery, label]) => <button type="button" key={delivery}
             aria-pressed={preferences?.review_delivery === delivery} disabled={!preferences || saving}
             onClick={() => void save({ review_delivery: delivery })}>{label}</button>)}
         </div></div>

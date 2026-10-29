@@ -3,6 +3,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import type { CommandResultEvent, UserMessageCommand, UserMessageQueueUpdatedEvent } from "../protocol/events";
 import { toBackendPermissionMode } from "../protocol/permissions";
 import { useAppStore } from "../stores";
+import { isComposerConversationDeleted } from "../stores/composer-drafts";
 import type { AgentMode, ChatMessage, ComposerQuote, MessageAttachmentRef, MessageContextRef } from "../stores/types";
 import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
 import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
@@ -10,10 +11,11 @@ import { normalizeAgentErrorMessage } from "./errorMessages";
 import { conversationWorkspacePath, uniqueMessageId, updateMessagesForConversation } from "../stores/shared-helpers";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { parseRuntimeSlashInput } from "../lib/runtime-commands";
-import { commandResultSucceeded, notifyClientCommandReceived, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { CommandNotSentError, CommandRejectedError, clientCommandIsAwaitingReceipt, commandResultSucceeded, notifyClientCommandReceived, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { adoptGeneratedConversation } from "./conversationAdoption";
 import { captureSteerTurnId } from "../lib/steer-command";
 import { submitQueuedMessageEdit } from "../composer/queued-message-edit";
+import { reconcileRetainedInputOutcome } from "../composer/retainedComposerInputs";
 
 export interface SendChatMessageOptions {
   queuedEdit?: import("../stores/composer-drafts").QueuedMessageEdit;
@@ -37,16 +39,28 @@ export interface SendChatMessageOptions {
   retryFromMessageId?: string;
   awaitAdmission?: boolean;
   onAdmission?: (event: CommandResultEvent) => void;
+  /** The captured input has been durably admitted or entered the turn queue. */
+  onModelAccepted?: () => void;
+  onSubmitted?: () => void;
   onReceived?: () => void;
-  onRejected?: () => void;
+  onRejected?: (reason?: string) => void;
+  onConversationCreated?: (conversationId: string) => void;
 }
 
 const pendingInputs = new Map<string, Parameters<typeof appendLocalUserTurn>[0] & {
   workspaceRoot: string;
   queueUpdate?: UserMessageQueueUpdatedEvent;
+  onAdmission?: SendChatMessageOptions["onAdmission"];
+  onRejected?: (reason: string) => void;
+  onModelAccepted?: () => void;
 }>();
 
 export const resetPendingUserMessagesForTests = () => pendingInputs.clear();
+export const discardPendingUserMessagesForConversation = (conversationId: string): void => {
+  for (const [id, input] of pendingInputs) if (input.conversationId === conversationId) pendingInputs.delete(id);
+};
+export const isConversationMessageAwaitingReceipt = (conversationId: string): boolean =>
+  [...pendingInputs].some(([id, input]) => input.conversationId === conversationId && clientCommandIsAwaitingReceipt(id));
 
 const addSystemNotice = (content: string, conversationId?: string) => {
   useAppStore.getState().upsertSystemMessage(
@@ -54,6 +68,27 @@ const addSystemNotice = (content: string, conversationId?: string) => {
     content,
     conversationId ? { conversationId } : undefined,
   );
+};
+
+const updateUserDeliveryStatus = (
+  conversationId: string | undefined,
+  userMessageId: string,
+  deliveryStatus: ChatMessage["deliveryStatus"],
+) => {
+  if (!userMessageId || !deliveryStatus) return;
+  useAppStore.setState((state) => updateMessagesForConversation(
+    state,
+    conversationId || undefined,
+    (messages) => {
+      let changed = false;
+      const next = messages.map((message) => {
+        if (message.id !== userMessageId || message.deliveryStatus === deliveryStatus) return message;
+        changed = true;
+        return { ...message, deliveryStatus };
+      });
+      return changed ? next : messages;
+    },
+  ));
 };
 
 const isAttachmentRef = (value: unknown): value is MessageAttachmentRef => {
@@ -123,6 +158,7 @@ const appendLocalUserTurn = ({
   retryFromMessageId,
   queued,
   includeAssistant = true,
+  deliveryStatus,
 }: {
   asyncRequestId?: string;
   content: string;
@@ -137,6 +173,7 @@ const appendLocalUserTurn = ({
   retryFromMessageId?: string;
   queued: boolean;
   includeAssistant?: boolean;
+  deliveryStatus?: ChatMessage["deliveryStatus"];
 }) => {
   useAppStore.setState((state) => {
     const targetId = conversationId || state.conversationId || undefined;
@@ -146,6 +183,7 @@ const appendLocalUserTurn = ({
     // is replayed. Stable input identity must never append it a second time.
     const retryIndex = retryFromMessageId ? currentMessages.findIndex(message => message.id === retryFromMessageId) : -1;
     const retainedMessages = retryIndex >= 0 ? currentMessages.slice(0, retryIndex) : currentMessages;
+    const retainedQueue = retryIndex >= 0 ? currentMessages.slice(retryIndex).filter(message => message.queueState === "queued") : [];
     const existingUser = retainedMessages.find(message => message.id === userMessageId);
     const existingAssistant = retainedMessages.find(message => message.id === assistantMessageId);
     if (existingUser && (!includeAssistant || (existingAssistant && (existingUser.queueState === "queued") === queued))) return state;
@@ -163,6 +201,7 @@ const appendLocalUserTurn = ({
       artifacts: [],
       timestamp,
       ...(queued ? { queueState: "queued" as const, queueMessageId: assistantMessageId } : {}),
+      ...(deliveryStatus ? { deliveryStatus } : {}),
     };
     const assistantMessage: ChatMessage = {
       id: assistantMessageId,
@@ -178,13 +217,14 @@ const appendLocalUserTurn = ({
       if (existingUser) {
         const updated = retainedMessages.map(message => message.id === userMessageId ? { ...message,
           queueState: queued ? "queued" as const : undefined, queueMessageId: queued ? assistantMessageId : undefined,
+          ...(deliveryStatus ? { deliveryStatus } : {}),
         } : message);
-        return existingAssistant ? updated : [...updated, assistantMessage];
+        return existingAssistant ? [...updated, ...retainedQueue] : [...updated, assistantMessage, ...retainedQueue];
       }
-      if (!includeAssistant) return [...retainedMessages, userMessage];
+      if (!includeAssistant) return [...retainedMessages, userMessage, ...retainedQueue];
       const assistantIndex = retainedMessages.findIndex(message => message.id === assistantMessageId);
-      return assistantIndex < 0 ? [...retainedMessages, userMessage, assistantMessage]
-        : [...retainedMessages.slice(0, assistantIndex), userMessage, ...retainedMessages.slice(assistantIndex)];
+      return assistantIndex < 0 ? [...retainedMessages, userMessage, assistantMessage, ...retainedQueue]
+        : [...retainedMessages.slice(0, assistantIndex), userMessage, ...retainedMessages.slice(assistantIndex), ...retainedQueue];
     };
 
     if (targetId && state.sideChats[targetId]) {
@@ -238,7 +278,7 @@ const appendLocalUserTurn = ({
 
 const conversationSwitchBlockReason = (conversationId?: string): string | null => {
   const state = useAppStore.getState();
-  return state.pendingConversationSwitchId && (!conversationId || conversationId === state.conversationId)
+  return state.pendingConversationSwitchId && !conversationId
     ? "正在切换会话，请等待加载完成后发送。"
     : null;
 };
@@ -248,7 +288,8 @@ export const getChatSendBlockReason = (conversationId?: string): string | null =
   if (switchReason) return switchReason;
   const state = useAppStore.getState();
   if (!state.composerDraftsReady) return "正在恢复输入草稿，请等待完成后发送。";
-  const targetConversationId = conversationId ?? state.conversationId ?? state.runtimeSession?.active_conversation_id ?? undefined;
+  const targetConversationId = conversationId ?? state.conversationId
+    ?? (state.activeConversationDraftId ? undefined : state.runtimeSession?.active_conversation_id ?? undefined);
   if (
     hasLocalPendingPromptForConversation(
       [
@@ -289,6 +330,7 @@ export const sendChatMessage = (options: SendChatMessageOptions): boolean | Prom
     return false;
   }
   const before = useAppStore.getState();
+  if (!(options.backendContent ?? options.displayContent ?? "").trim() && !(options.attachments?.length)) return false;
   // Preserve the user's original target through permission waits and durable
   // replay. Callers preparing async context supply the value captured earlier.
   const capturedOptions = Object.hasOwn(options, "expectedTurnId") ? options : {
@@ -299,6 +341,14 @@ export const sendChatMessage = (options: SendChatMessageOptions): boolean | Prom
   if (capturedOptions.expectedTurnId === null) {
     pushToast("当前任务尚未提供回合标识，无法引导；请稍后重试。", "warning");
     return false;
+  }
+  if (!options.conversationId && !before.conversationId) {
+    const draftId = before.activeConversationDraftId ?? before.startConversationDraft({ bindWorkspace: Boolean(before.workingDirectory), appMode: before.appMode });
+    return before.materializeConversationDraft(draftId).then(owner => {
+      if (!owner) return false;
+      options.onConversationCreated?.(owner);
+      return sendConfirmedChatMessage({ ...capturedOptions, conversationId: owner });
+    });
   }
   const conversationId = options.conversationId || before.conversationId || "";
   const change = before.pendingPermissionModeChanges[conversationId];
@@ -350,6 +400,8 @@ const sendConfirmedChatMessage = ({
   retryFromMessageId,
   awaitAdmission = false,
   onAdmission,
+  onModelAccepted,
+  onSubmitted,
   onReceived,
   onRejected,
 }: SendChatMessageOptions): boolean | Promise<boolean> => {
@@ -362,7 +414,6 @@ const sendConfirmedChatMessage = ({
   const submittedContent = backendContent ?? displayContent ?? "";
   const contentForBackend = contextRefs.some(ref => ref.kind === "diff_comment") ? submittedContent : submittedContent.trim();
   const contentForDisplay = (displayContent ?? backendContent ?? "").trim();
-  if (!contentForBackend && attachments.length === 0) return false;
 
   const state = useAppStore.getState();
   if (!state.composerDraftsReady) {
@@ -400,6 +451,7 @@ const sendConfirmedChatMessage = ({
   }
 
   const targetConversationId = conversationId || state.conversationId || "";
+  if (targetConversationId && isComposerConversationDeleted(targetConversationId)) return false;
   const targetConversation = targetConversationId
     ? state.conversations.find((item) => item.id === targetConversationId)
     : undefined;
@@ -462,7 +514,28 @@ const sendConfirmedChatMessage = ({
     ...(steering ? { expected_turn_id: expectedTurnId } : {}),
   };
 
-  if (!skipLocalAppend && !isRetry && !awaitAdmission) {
+  // The event reducer survives a UI wait timeout. Both paths can observe the
+  // same receipt, but the captured draft has exactly one definitive outcome.
+  let outcomeDelivered = false;
+  let modelAccepted = false;
+  const acceptModelInput = () => {
+    if (modelAccepted || outcomeDelivered) return;
+    modelAccepted = true;
+    onModelAccepted?.();
+  };
+  const acceptInput = (event: CommandResultEvent) => {
+    if (outcomeDelivered) return;
+    onAdmission?.(event);
+    if (event.data?.admitted === true || event.data?.queued === true) acceptModelInput();
+    outcomeDelivered = true;
+  };
+  const rejectInput = (reason: string) => {
+    if (outcomeDelivered || modelAccepted) return;
+    outcomeDelivered = true;
+    onRejected?.(reason);
+  };
+
+  if (!skipLocalAppend && !isRetry) {
     appendLocalUserTurn({
       asyncRequestId,
       content: contentForDisplay,
@@ -476,6 +549,8 @@ const sendConfirmedChatMessage = ({
       userMessageId,
       retryFromMessageId,
       queued,
+      includeAssistant: !awaitAdmission,
+      ...(awaitAdmission ? { deliveryStatus: "sending" as const } : {}),
     });
     if (!queued && targetConversationId && assistantMessageId) {
       useAppStore.getState().flushPendingProviderProgress(targetConversationId, assistantMessageId);
@@ -488,40 +563,42 @@ const sendConfirmedChatMessage = ({
       conversationId: targetConversationId, contextRefs, attachmentRefs: displayAttachmentRefs,
       assistantMessageId, userMessageId, retryFromMessageId, queued: isRetry ? false : queued,
       workspaceRoot: state.workingDirectory,
+      onAdmission: acceptInput, onRejected: rejectInput, onModelAccepted: acceptModelInput,
     });
     if (awaitAdmission) {
       let received = false;
-      const admission = sendClientCommandAwaitResult(command, "user_message", { silent: true, onReceived: () => {
+      let locallySubmitted = false;
+      const admission = sendClientCommandAwaitResult(command, "user_message", { silent: true, onSubmitted: () => {
+        locallySubmitted = true;
+        onSubmitted?.();
+      }, onReceived: () => {
         received = true;
-        const current = useAppStore.getState();
-        const visibleEmptyOwner = !targetConversationId && !current.conversationId && workspaceRootsEqual(current.workingDirectory, state.workingDirectory);
-        if (!skipLocalAppend && !isRetry && (targetConversationId || visibleEmptyOwner)) appendLocalUserTurn({
-          content: contentForDisplay, backendContent: contentForBackend, quotedMessage, asyncRequestId, conversationId: targetConversationId || undefined,
-          contextRefs, attachmentRefs: displayAttachmentRefs, assistantMessageId, userMessageId,
-          queued, includeAssistant: false,
-        });
+        updateUserDeliveryStatus(targetConversationId || undefined, userMessageId, "sent");
         onReceived?.();
       } });
       return admission.then(event => {
         handleUserMessageAdmission(event);
         if (commandResultSucceeded(event) && (event.data?.admitted === true || event.data?.queued === true
           || event.data?.native_completion === "completed")) {
-          onAdmission?.(event);
+          acceptInput(event);
           return true;
         }
         const cancelled = event.data?.cancelled === true;
         if (event.data?.native_completion === "unknown"
           || (!cancelled && commandResultSucceeded(event) && event.data?.admitted !== false)) {
+          if (modelAccepted) return true;
           pushToast(received ? "消息已保存，准入结果尚未确认；等待会话恢复原记录。"
-            : "消息接收尚未确认，输入已保留。请先核对会话再重试。", "warning", 6000);
+            : locallySubmitted && !skipLocalAppend ? "消息接收尚未确认，原消息已保留在会话中。请先核对会话再重试。"
+              : "消息接收尚未确认，输入已保留。请先核对会话再重试。", "warning", 6000);
           return false;
         }
-        onRejected?.();
+        const reason = event.message || (cancelled ? "用户已取消本次发送，输入已保留。" : "消息未被后端接收，输入已保留。");
+        rejectInput(reason);
         const current = useAppStore.getState();
         const owner = !targetConversationId && current.messages.some(message => message.id === assistantMessageId)
           ? current.conversationId || undefined
           : typeof event.data?.conversation_id === "string" ? event.data.conversation_id : targetConversationId;
-        const reason = event.message || (cancelled ? "用户已取消本次发送，输入已保留。" : "消息未被后端接收，输入已保留。");
+        updateUserDeliveryStatus(owner || targetConversationId || current.conversationId || undefined, userMessageId, "failed");
         if (current.getVisibleMessages(owner || undefined).some(message => message.id === assistantMessageId)) {
           current.finishStreaming(owner || undefined, undefined, cancelled ? "interrupted" : "failed", assistantMessageId,
             reason, true, undefined, cancelled ? String(event.data?.reason || "user_interrupted") : "admission_rejected");
@@ -533,21 +610,27 @@ const sendConfirmedChatMessage = ({
         }
         return false;
       }, error => {
-        if (!received) {
-          onRejected?.();
+        if (modelAccepted) return true;
+        if (!received && (error instanceof CommandNotSentError || error instanceof CommandRejectedError)) {
+          rejectInput(error.message);
           pendingInputs.delete(command.client_command_id);
+          updateUserDeliveryStatus(targetConversationId || undefined, userMessageId, "failed");
         }
+        const unconfirmed = locallySubmitted && !skipLocalAppend ? "消息接收尚未确认，原消息已保留在会话中。重连后请先核对会话再重试。"
+          : "消息接收尚未确认，输入已保留。重连后请先核对会话再重试。";
         pushToast(received ? "消息已保存，处理结果尚未确认；重连后恢复原记录。"
-          : `消息接收尚未确认，输入已保留。重连后请先核对会话再重试。${error instanceof Error ? ` ${error.message}` : ""}`, "warning", 6000);
+          : `${unconfirmed}${error instanceof Error ? ` ${error.message}` : ""}`, "warning", 6000);
         return false;
       });
     }
     if (!ws.send(command)) {
       throw new Error("Backend connection is not ready yet.");
     }
+    onSubmitted?.();
     return true;
   } catch (err) {
     pendingInputs.delete(command.client_command_id!);
+    updateUserDeliveryStatus(targetConversationId || undefined, userMessageId, "failed");
     if (!isRetry) useAppStore.getState().removeEmptyStreamingAssistant(conversationId, assistantMessageId);
     if (!queued && !isRetry) {
       useAppStore.getState().finishStreaming(conversationId, undefined, "failed");
@@ -568,18 +651,43 @@ const appendAdmittedInput = (input: Parameters<typeof appendLocalUserTurn>[0] & 
     if (owned) useAppStore.setState({ messages: owned });
   }
   const appendOwner = firstForeground ? undefined : owner || input.conversationId;
-  appendLocalUserTurn({ ...input, conversationId: appendOwner, queued, includeAssistant: queued || started });
+  updateUserDeliveryStatus(appendOwner, input.userMessageId, "sent");
+  appendLocalUserTurn({ ...input, conversationId: appendOwner, queued, includeAssistant: queued || started, deliveryStatus: "sent" });
   if (firstForeground) adoptGeneratedConversation(owner, input.assistantMessageId, input.userMessageId);
   if (owner && !queued) useAppStore.getState().flushPendingProviderProgress(owner, input.assistantMessageId);
 };
 
 export const capturePendingUserMessageStart = (conversationId: string, assistantMessageId: string): void => {
   for (const [commandId, input] of pendingInputs) {
-    if (input.assistantMessageId !== assistantMessageId) continue;
+    if (input.assistantMessageId !== assistantMessageId || (input.conversationId && input.conversationId !== conversationId)) continue;
     notifyClientCommandReceived(commandId);
     appendAdmittedInput(input, conversationId, false, true);
     return;
   }
+};
+
+export const captureCommittedUserMessage = (conversationId: string, userMessageId: string): void => {
+  for (const [commandId, input] of pendingInputs) {
+    if (input.userMessageId !== userMessageId || input.conversationId !== conversationId) continue;
+    notifyClientCommandReceived(commandId);
+    updateUserDeliveryStatus(conversationId, userMessageId, "sent");
+    input.onModelAccepted?.();
+    return;
+  }
+  reconcileRetainedInputOutcome({ ownerId: conversationId, inputId: userMessageId, accepted: true });
+};
+
+/** A transport receipt can arrive after the command-result wait has expired. */
+export const capturePendingUserMessageReceipt = (commandId: string, accepted: boolean, reason: string): void => {
+  const input = pendingInputs.get(commandId);
+  if (!input) return;
+  updateUserDeliveryStatus(input.conversationId, input.userMessageId, accepted ? "sent" : "failed");
+  if (accepted) return;
+  pendingInputs.delete(commandId);
+  if (input.queued) useAppStore.setState(state => updateMessagesForConversation(state, input.conversationId, messages => messages.map(message =>
+    (message.id === input.userMessageId || message.id === input.assistantMessageId) && message.queueState === "queued"
+      ? { ...message, queueState: undefined, queueMessageId: undefined, queuePosition: undefined, queuePaused: undefined } : message)));
+  input.onRejected?.(reason);
 };
 
 // Queue updates are already durable input facts. Publish the captured input
@@ -590,21 +698,41 @@ export const capturePendingUserMessageQueueUpdate = (event: UserMessageQueueUpda
     if (input.retryFromMessageId || (input.conversationId && input.conversationId !== event.conversation_id)) continue;
     if (input.assistantMessageId !== event.message_id && input.userMessageId !== event.user_message_id) continue;
     input.queueUpdate = event;
-    if (event.status !== "cancelled") appendAdmittedInput(input, event.conversation_id, true);
+    if (event.status !== "cancelled") {
+      appendAdmittedInput(input, event.conversation_id, true);
+      input.onModelAccepted?.();
+    }
     return;
   }
+  if (event.status !== "cancelled" && event.user_message_id) reconcileRetainedInputOutcome({
+    ownerId: event.conversation_id, inputId: event.user_message_id, accepted: true,
+  });
 };
 
 export const handleUserMessageAdmission = (event: CommandResultEvent & { client_command_id?: string }): void => {
   const id = event.client_command_id || (typeof event.data?.client_command_id === "string" ? event.data.client_command_id : "");
   if (event.command !== "user_message" || !id) return;
   const input = pendingInputs.get(id);
-  if (!input) return;
+  if (!input) {
+    const ownerId = event.data?.conversation_id, inputId = event.data?.user_message_id;
+    if (typeof ownerId === "string" && typeof inputId === "string" && event.data?.native_completion !== "unknown") {
+      const accepted = commandResultSucceeded(event) && (event.data?.admitted === true || event.data?.queued === true || event.data?.native_completion === "completed");
+      if (accepted || event.data?.admitted === false || event.data?.cancelled === true || !commandResultSucceeded(event)) {
+        reconcileRetainedInputOutcome({ ownerId, inputId, accepted, reason: event.message });
+      }
+    }
+    return;
+  }
   if (!commandResultSucceeded(event) || (event.data?.admitted !== true && event.data?.queued !== true)) {
     if (event.data?.native_completion !== "unknown" && (event.data?.cancelled === true
       || event.data?.native_completion === "completed" || event.data?.native_completion === "refused"
       || event.data?.admitted === false || !commandResultSucceeded(event))) {
       pendingInputs.delete(id);
+      updateUserDeliveryStatus(
+        typeof event.data?.conversation_id === "string" ? event.data.conversation_id : input.conversationId || undefined,
+        input.userMessageId,
+        event.data?.native_completion === "completed" ? "sent" : "failed",
+      );
       if (input.queued) {
         // ACK proved receipt, not queue admission. This reducer also receives
         // late outcomes after the awaiting UI operation has timed out.
@@ -614,6 +742,9 @@ export const handleUserMessageAdmission = (event: CommandResultEvent & { client_
             ? { ...message, queueState: undefined, queueMessageId: undefined, queuePosition: undefined, queuePaused: undefined }
             : message)));
       }
+      if (event.data?.native_completion === "completed") input.onAdmission?.(event);
+      else input.onRejected?.(event.message || (event.data?.cancelled === true
+        ? "用户已取消本次发送，输入已保留。" : "消息未被后端接收，输入已保留。"));
     }
     if (input.retryFromMessageId && event.data?.cancelled !== true && (event.level === "error" || event.level === "failed")) {
       pushToast(event.message || "重新生成未被后端接受，原记录已保留。", "error");
@@ -621,13 +752,17 @@ export const handleUserMessageAdmission = (event: CommandResultEvent & { client_
     return;
   }
   pendingInputs.delete(id);
-  if (input.queueUpdate) return;
   const owner = typeof event.data?.conversation_id === "string" ? event.data.conversation_id : input.conversationId || "";
+  updateUserDeliveryStatus(owner || input.conversationId || undefined, input.userMessageId, "sent");
+  input.onAdmission?.(event);
+  if (input.queueUpdate) return;
   const admittedReview = event.data?.input as { code_review: import("../protocol/code-review-types").CodeReviewScope; display_content: string; content: string } | undefined;
   if (admittedReview) {
     input.codeReview = admittedReview.code_review;
     input.content = admittedReview.display_content;
     input.backendContent = admittedReview.content;
+    useAppStore.setState(state => updateMessagesForConversation(state, owner || undefined, messages => messages.map(message =>
+      message.id === input.userMessageId ? { ...message, codeReview: input.codeReview, content: input.content, backendContent: input.backendContent } : message)));
   }
   appendAdmittedInput(input, owner, event.data?.queued === true);
 };

@@ -140,12 +140,19 @@ async def test_same_thread_retains_real_companion_and_retires_original_permissio
     again = await owner.admit(attachment, None, config)
     assert first.source == again.source
     original = owner.instances[owner.active_key]
-    original.client = SimpleNamespace(close_thread=AsyncMock())
+    class Client:
+        def __init__(self, config, attachment, network, **kwargs):
+            self.close_thread = AsyncMock()
+    owner.client_type = Client
+    client, view = owner.client_for(first, on_disconnect=AsyncMock(), on_tools_changed=AsyncMock())
+    # A real owner connection exists, with no current manager borrowing it.
+    await view.aclose()
+    assert original.connection is not None and original.views == 0
     changed = replace(config, env={**config.env, 'SOURCE_RUNTIME_SETTING': 'changed'})
     next_config = await owner.admit(attachment, None, changed)
     assert next_config.source != first.source
-    original.client.close_thread.assert_awaited_once()
-    assert original.closed
+    client.close_thread.assert_awaited_once()
+    assert original.closed and original.connection.closed
     await owner.retire(next_config)
     assert not owner.instances
     await owner.aclose()

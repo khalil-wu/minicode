@@ -27,6 +27,9 @@ async def sessions(tmp_path, monkeypatch, *, unload_delay=60.0):
     manager = WebSocketManager(thread_unload_delay_seconds=unload_delay)
     owner, _ = await manager.connect(**_connection(tmp_path / "owner", "execution-owner"))
     reader, _ = await manager.connect(**_connection(tmp_path / "reader", "execution-reader"))
+    # The scheduler is exercised with the connection's real registry; this
+    # isolated host does not start the application bootstrap service.
+    monkeypatch.setattr(owner, "_conversation_tool_registry", lambda *args, **kwargs: owner.tool_registry)
     controls = {}
 
     async def provider(content, *, conversation_id, metadata, run_context, **_kwargs):

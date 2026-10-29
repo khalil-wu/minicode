@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const { atomicWriteTextSync } = require("./utils");
-const { FILE_OPEN_TARGET_IDS, fileOpenTargets } = require("./open-targets");
+const { FILE_OPEN_TARGET_IDS, fileOpenTarget, fileOpenTargets } = require("./open-targets");
 const { isNotificationSound } = require("./notification-sounds");
 
 const DEFAULT_PREFERENCES = Object.freeze({
@@ -249,4 +249,4 @@ function needsCloseConfirmation(source) {
     || preferences.confirmBeforeClose === "keyboardOnly" && source === "keyboard";
 }
 
-module.exports = { init, getPreferences, setPreferences, migrateDictationPreferences, preferredFileOpenTarget, setPreferredFileOpenTarget, fileOpenTargets, terminalShellTargets, resolveTerminalShell, shouldNotify, needsCloseConfirmation, DEFAULT_PREFERENCES };
+module.exports = { init, getPreferences, setPreferences, migrateDictationPreferences, preferredFileOpenTarget, setPreferredFileOpenTarget, fileOpenTarget, fileOpenTargets, terminalShellTargets, resolveTerminalShell, shouldNotify, needsCloseConfirmation, DEFAULT_PREFERENCES };

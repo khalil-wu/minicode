@@ -12,6 +12,7 @@ export interface AppearanceCodeThemePickerProps {
   colors: AppearanceColorValues;
   value: CodeThemeId;
   onSelect: (id: CodeThemeId) => Promise<void>;
+  active?: boolean;
 }
 
 function CodeThemePreview({ id, label, variant, colors }: {
@@ -43,11 +44,12 @@ function CodeThemePreview({ id, label, variant, colors }: {
 }
 
 /** Source eo/to/io: mode-compatible directory themes, previews and selection. */
-export function AppearanceCodeThemePicker({ variant, colors, value, onSelect }: AppearanceCodeThemePickerProps) {
+export function AppearanceCodeThemePicker({ variant, colors, value, onSelect, active = true }: AppearanceCodeThemePickerProps) {
   const { t } = useI18n();
   const themes = codeThemesForVariant(variant);
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => { if (!active) setPosition(null); }, [active]);
   const variantLabel = t(variant === "light" ? "浅色" : "深色");
   const select = async (id: CodeThemeId) => {
     try {
@@ -79,7 +81,7 @@ export function AppearanceCodeThemePicker({ variant, colors, value, onSelect }: 
       </span>
       <SettingsSourceIcon icon="chevronDown" size={14} />
     </button>
-    {position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-code-theme-menu" onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
+    {active && position && <ContextMenu position={position} anchor={trigger.current!} className="appearance-code-theme-menu" onClose={() => setPosition(null)} returnFocusTo={trigger.current!}
       ariaLabel={t("{variant}代码主题", { variant: variantLabel })} items={[
         themeItem(themes.find(theme => theme.id === "codex")!),
         { label: t("Codex 主题"), iconWidth: 24, icon: <span className="appearance-code-theme-preview" aria-hidden="true" style={{

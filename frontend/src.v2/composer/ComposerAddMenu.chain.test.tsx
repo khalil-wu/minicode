@@ -22,7 +22,7 @@ vi.mock("../protocol/ws-outbox", () => ({
   commandResultSucceeded: () => true,
 }));
 vi.mock("../overlays/DialogService", () => ({ showPrompt: vi.fn() }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, pickDirectory: vi.fn(), remoteDirectoryEntries: remote.list }));
+vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, desktop: () => undefined, pickDirectory: vi.fn(), remoteDirectoryEntries: remote.list }));
 vi.mock("../overlays/RemoteFilePicker", () => ({ showRemoteFilePicker: remote.pick }));
 vi.mock("./uploads", () => ({ uploadComposerFiles: vi.fn(), uploadComposerRemoteFiles: remote.upload }));
 
@@ -129,7 +129,7 @@ it("selects conversational plan mode independently of the permission profile", a
 
 it("opens the real file picker directly without adding another file-and-folder submenu",()=>{
   const files = vi.fn(), close = vi.fn();
-  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} showGoal goalAvailable onFiles={files} onGoal={vi.fn()} onPlan={vi.fn()} onPlugin={vi.fn()} onClose={close} />);
+  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} planAvailable showGoal goalAvailable onFiles={files} onGoal={vi.fn()} onPlan={vi.fn()} onPlugin={vi.fn()} onClose={close} />);
   fireEvent.click(screen.getByRole("menuitem",{name:"文件和文件夹"}));
   expect(files).toHaveBeenCalledOnce();
   expect(screen.queryByRole("menuitem", { name: "引用文件夹" })).toBeNull();
@@ -193,7 +193,7 @@ it("keeps composer focus while suggestion arrows loop and Enter activates the hi
 
 it("skips disabled actions and leaves typing and Space to the composer rather than menu typeahead", async () => {
   const plan = vi.fn(), close = vi.fn();
-  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} showGoal goalAvailable={false}
+  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} planAvailable showGoal goalAvailable={false}
     onFiles={vi.fn()} onGoal={vi.fn()} onPlan={plan} onPlugin={vi.fn()} onClose={close} />);
   await screen.findByRole("menuitem", { name: /Notes/ });
   const first = screen.getByRole("menuitem", { name: "文件和文件夹" }), item = screen.getByRole("menuitem", { name: /^计划模式/ });
@@ -220,4 +220,34 @@ it("preserves outside focus and closes stale add controls while switching conver
   expect(screen.queryByRole("menu")).toBeNull();
   expect((trigger as HTMLButtonElement).disabled).toBe(true);
   expect(useAppStore.getState().draft).toBe("Keep this draft");
+});
+
+it.each(["client", "canonical", "submitting"] as const)("disables plan/goal mouse and keyboard actions for the existing %s lock and enables them when it clears", async phase => {
+  const context = { id: "mode-draft", workspaceRoot: "C:/menu-project", bindWorkspace: true, appMode: "cowork" as const,
+    permissionMode: "confirm" as const, permissionEdited: false, modelSelection: { mode: "default" as const },
+    selectionLoading: false, selectionError: null, materializing: phase !== "submitting",
+    ...(phase === "canonical" ? { conversationId: "menu-owner", adopted: true } : {}) };
+  useAppStore.setState({ conversationId: phase === "client" ? null : "menu-owner", activeConversationDraftId: phase === "client" ? context.id : null,
+    conversationDrafts: phase === "submitting" ? {} : { [context.id]: context }, agentMode: "build", goalMode: true,
+    runtimeCapabilities: { feature_flags: { goals: { enabled: true } } } });
+  const view = render(<FooterRow submitting={phase === "submitting"} sendState="idle" onSend={() => {}} />);
+  const clearGoal = screen.getByRole("button", { name: "清除目标" }) as HTMLButtonElement;
+  expect(clearGoal.disabled).toBe(true); fireEvent.click(clearGoal); expect(useAppStore.getState().goalMode).toBe(true);
+  act(() => useAppStore.setState({ goalMode: false, agentMode: "plan" }));
+  expect((screen.getByRole("button", { name: "关闭计划模式" }) as HTMLButtonElement).disabled).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+  const plan = screen.getByRole("menuitem", { name: /^计划模式/ }) as HTMLButtonElement;
+  const goal = screen.getByRole("menuitem", { name: /^目标/ }) as HTMLButtonElement;
+  expect(plan.disabled).toBe(true); expect(goal.disabled).toBe(true);
+  const plugin = await screen.findByRole("menuitem", { name: /Notes/ });
+  fireEvent.keyDown(window, { key: "ArrowDown" });
+  expect(plugin.getAttribute("data-highlighted")).toBe("true");
+  expect(plan.getAttribute("aria-current")).toBeNull(); expect(goal.getAttribute("aria-current")).toBeNull();
+  fireEvent.click(plan); fireEvent.click(goal);
+  expect(useAppStore.getState()).toMatchObject({ agentMode: "plan", goalMode: false, draft: "Keep this draft" });
+  expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  act(() => useAppStore.setState({ conversationDrafts: phase === "submitting" ? {} : { [context.id]: { ...context, materializing: false } } }));
+  view.rerender(<FooterRow submitting={false} sendState="idle" onSend={() => {}} />);
+  expect(plan.disabled).toBe(false); expect(goal.disabled).toBe(false);
+  expect((screen.getByRole("button", { name: "关闭计划模式" }) as HTMLButtonElement).disabled).toBe(false);
 });

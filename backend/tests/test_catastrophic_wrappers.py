@@ -142,8 +142,8 @@ def test_runtime_review_posix_clusters_bind_exact_payload(tmp_path):
             args = {"command": command}
             context.metadata.clear()
             call = ToolCallEvent(id="exact-wrapper", name=tool.name, arguments=args)
-            authorized = _authorize_final_tool_request(call, tool_registry=context.tool_registry,
-                permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+            authorized = (await _authorize_final_tool_request(call, tool_registry=context.tool_registry,
+                permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context))
             assert not authorized.error, authorized.error
             assert authorized.permission_decision.decision == "ask"
             assert authorized.request.exec_policy.kind == "needs_approval"

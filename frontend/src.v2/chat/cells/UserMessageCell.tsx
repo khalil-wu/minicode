@@ -20,6 +20,7 @@ import { contextReferenceLabel, openContextReference } from "../contextReference
 import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { DiffCommentAttachments } from "../../composer/DiffCommentAttachments";
+import { restoreRetainedComposerInput } from "../../composer/retainedComposerInputs";
 
 const COLLAPSE_CHAR_THRESHOLD = 900;
 const COLLAPSE_LINE_THRESHOLD = 14;
@@ -42,6 +43,9 @@ export function UserMessageCell({
   const recallMessage = useAppStore((s) => s.recallMessage);
   const ownerConversationId = String(conversationId || "").trim();
   const canRecall = useAppStore((s) => !ownerConversationId || s.conversationId === ownerConversationId);
+  const retainedFailure = useAppStore(s => isTranscriptMode ? undefined : s.retainedComposerInputs[cell.id]?.message.failureMessage);
+  const livePendingInput = useAppStore(s => Boolean(s.retainedComposerInputs[cell.id]?.unconfirmed && !s.retainedComposerInputs[cell.id]?.recovered));
+  const recoveredUnconfirmedInput = useAppStore(s => Boolean(s.retainedComposerInputs[cell.id]?.unconfirmed && s.retainedComposerInputs[cell.id]?.recovered));
 
   const cancelQueuedMessage = useCallback(async () => {
     if (!ownerConversationId || !cell.queueMessageId || cancelPending) return;
@@ -74,6 +78,7 @@ export function UserMessageCell({
 
   const recall = useCallback(async () => {
     const state = useAppStore.getState();
+    if (state.retainedComposerInputs[cell.id]) { restoreRetainedComposerInput(cell.id); return; }
     const requestConversationId = ownerConversationId || state.conversationId;
     if (!requestConversationId || state.conversationId !== requestConversationId) return;
     const index = state.messages.findIndex((item) => item.id === cell.id);
@@ -136,7 +141,7 @@ export function UserMessageCell({
   }, [cell.id, cell.content]);
 
   return (
-    <div className="user-cell-wrap" data-message-id={cell.id}>
+    <div className="user-cell-wrap" data-message-id={cell.id} title={recoveredUnconfirmedInput ? tr("未确认发送") : retainedFailure}>
       {cell.messageSource?.kind === "scheduled_task" ? (
         <div
           className="user-cell-source"
@@ -233,7 +238,7 @@ export function UserMessageCell({
             <X size={14} />
           </button>
         ) : canRecall ? (
-          <button type="button" onClick={recall} title={tr("撤回到输入框编辑")} aria-label={tr("撤回到输入框")} className="cell-action-btn user-cell-edit-action">
+          <button type="button" onClick={recall} disabled={livePendingInput} title={tr("撤回到输入框编辑")} aria-label={tr("撤回到输入框")} className="cell-action-btn user-cell-edit-action">
             <RotateCcw size={14} />
             <span>{tr("编辑")}</span>
           </button>

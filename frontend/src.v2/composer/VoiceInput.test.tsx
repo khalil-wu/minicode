@@ -9,7 +9,7 @@ import { useNativeDictation } from "../hooks/useNativeDictation";
 import type { NativeDictationEvent } from "../desktop/runtime";
 import { composerWindowOwnerId } from "../stores/composer-drafts";
 let nativeEvent: ((event: NativeDictationEvent) => void) | undefined;
-let nativeBridge: { get: ReturnType<typeof vi.fn>; complete: ReturnType<typeof vi.fn>; insert: ReturnType<typeof vi.fn>; onEvent: (listener: (event: NativeDictationEvent) => void) => () => void } | undefined;
+var nativeBridge: { get: ReturnType<typeof vi.fn>; complete: ReturnType<typeof vi.fn>; insert: ReturnType<typeof vi.fn>; onEvent: (listener: (event: NativeDictationEvent) => void) => () => void } | undefined;
 vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => nativeBridge ? {
   dictation: { ...nativeBridge, getLocalRuntime: async () => ({ apiBaseUrl: "http://127.0.0.1:8000", runtimeToken: "fixture-local", revision: 1 }),
     migratePreferences: async () => useAppStore.getState().workbenchPreferences, openProviderSettings: async () => true },

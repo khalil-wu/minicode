@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { TriangleAlert } from "../lib/icons";
 import { Button } from "../components/Button";
 import { useI18n } from "../i18n";
@@ -6,6 +6,7 @@ import { buildElicitationResponseCommand } from "../protocol/prompt-responses";
 import { commandResultSucceeded, sendPromptResponseCommand } from "../protocol/ws-outbox";
 import { useAppStore } from "../stores";
 import type { PendingAskUser } from "../stores/types";
+import { useApprovalShortcuts } from "./useApprovalShortcuts";
 
 type PersistMode = "session" | "always";
 interface ComputerUseMeta extends Record<string, unknown> {
@@ -39,7 +40,6 @@ export function ComputerUseApprovalCard({ request }: { request: ComputerUseReque
   const [responding, setResponding] = useState(false);
   const [error, setError] = useState("");
   const pending = useRef(false);
-  const actions = useRef<HTMLDivElement>(null);
   const respond = async (action: "accept" | "decline", persist?: PersistMode) => {
     if (pending.current) return;
     pending.current = true;
@@ -61,20 +61,7 @@ export function ComputerUseApprovalCard({ request }: { request: ComputerUseReque
     }
   };
   const allowConversation = () => void respond("accept", meta.persist.includes("session") ? "session" : undefined);
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (document.querySelector(".inline-approval-actions") !== actions.current || responding
-        || event.defaultPrevented || event.isComposing || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
-      if ((event.target as HTMLElement).closest('input, textarea, select, button, [contenteditable="true"], [role="menu"], [role="listbox"]')) return;
-      if (event.key === "Escape" || event.key === "Enter") {
-        event.preventDefault();
-        if (event.key === "Escape") void respond("decline");
-        else allowConversation();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  });
+  const actions = useApprovalShortcuts({ responding, onDeny: () => void respond("decline"), onAllow: allowConversation });
   const elevated = meta.riskLevel === "high";
   return <section className="inline-approval-bar inline-computer-use-approval" aria-label={title}
     aria-busy={responding} data-computer-use-app-id={meta.tool_params.app}>

@@ -265,6 +265,8 @@ export interface McpStatusEvent {
     disabled_reason?: string;
     error?: string;
     source?: string;
+    plugin_id?: string | null;
+    plugin_server_name?: string | null;
     approval_status?: "approved" | "rejected" | "pending" | "not_applicable";
     config_path?: string;
     project_workspace?: string;

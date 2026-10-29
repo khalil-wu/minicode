@@ -31,9 +31,10 @@ def tool_mutates(
     name: str,
     tool_registry: ToolRegistry | None = None,
     args: dict[str, object] | None = None,
+    *, tool=None,
 ) -> bool:
     """Whether a tool call mutates state according to tool-owned metadata."""
-    return tool_side_effect_kind(name, tool_registry, args) in {
+    return tool_side_effect_kind(name, tool_registry, args, tool=tool) in {
         "workspace", "external", "destructive"
     }
 
@@ -42,12 +43,13 @@ def tool_side_effect_kind(
     name: str,
     tool_registry: ToolRegistry | None = None,
     args: dict[str, object] | None = None,
+    *, tool=None,
 ) -> str:
     """Return a tool-owned side-effect class."""
-    if tool_registry is not None:
+    if tool is None and tool_registry is not None:
         tool = tool_registry.get_tool(name)
-        if tool is not None:
-            return tool.get_side_effect_kind(args)
+    if tool is not None:
+        return tool.get_side_effect_kind(args)
     return "none"
 
 
@@ -55,9 +57,10 @@ def tool_is_idempotent(
     name: str,
     tool_registry: ToolRegistry,
     args: dict[str, object] | None = None,
+    *, tool=None,
 ) -> bool:
     """Whether repeating the exact call is safe for loop guardrails/retries."""
-    tool = tool_registry.get_tool(name)
+    tool = tool if tool is not None else tool_registry.get_tool(name)
     if tool is None:
         return False
     return tool.is_idempotent(args)

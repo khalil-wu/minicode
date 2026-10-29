@@ -170,12 +170,14 @@ export function ExecCell({
               {copied === "output" ? <Check size={14} /> : <Copy size={14} />}
             </button>
           </div>
+          {!cell.guardianDeclined && cell.diagnostic && <pre className="exec-cell-output-pre">{cell.diagnostic}</pre>}
           {cell.outputArtifact && <button type="button" className="activity-cell-evidence-button" onClick={() => openArtifactPreview({
             artifactId: cell.outputArtifact!.artifactId, name: t("完整命令输出"), kind: cell.outputArtifact!.kind,
             mediaType: cell.outputArtifact!.mediaType, conversationId,
           })}>{t("查看完整输出")}</button>}
           {cell.artifacts?.map((artifact) => <ToolArtifactImage key={artifact.artifactId} artifact={artifact} conversationId={conversationId} />)}
           {!cell.guardianDeclined && !running && cell.status !== "pending" && cell.status !== "pending_approval"
+            && (!nativeCommand || cell.executionStartedAt != null || cell.exitCode != null)
             && <div className="exec-cell-output-status" data-status={status}>
             {cell.status === "success" && cell.exitCode === 0 && !cell.background && <Check size={13} aria-hidden="true" />}
             <span>{cell.background && cell.status === "success" ? t("已在后台启动")
@@ -193,6 +195,7 @@ export function ExecCell({
 
 function nativeCommandTitle(cell: ExecCellState, running: boolean, duration: string, expanded: boolean, t: Translate): string {
   if (running) return duration ? t("命令已运行 {duration}", { duration }) : t("正在运行命令");
+  if (cell.executionStartedAt == null && cell.status !== "success") return t("运行命令");
   if (cell.background && cell.status === "success") return t("已在后台启动");
   if (cell.status === "cancelled" && cell.executionStartedAt != null) return duration
     ? t(expanded ? "运行 {duration} 后停止命令" : "运行 {duration} 后停止", { duration })

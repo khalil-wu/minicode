@@ -480,6 +480,42 @@ describe("SidebarLeft session status", () => {
     expect(useAppStore.getState().appMode).toBe("cowork");
   });
 
+  it("keeps IME keys inside the mode picker and restores focus only on explicit Escape", () => {
+    render(<SidebarLeft />);
+    const trigger = screen.getByRole("button", { name: "切换工作模式" });
+    fireEvent.click(trigger);
+    const current = document.activeElement!;
+    fireEvent.keyDown(current, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(current, { key: "ArrowDown", keyCode: 229 });
+    expect(screen.getByRole("menu", { name: "工作模式" })).toBeTruthy();
+    expect(document.activeElement).toBe(current);
+    const outside = vi.fn();
+    document.addEventListener("keydown", outside);
+    try {
+      fireEvent.keyDown(current, { key: "Escape" });
+      expect(screen.queryByRole("menu", { name: "工作模式" })).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+      expect(outside).not.toHaveBeenCalled();
+    } finally { document.removeEventListener("keydown", outside); }
+    fireEvent.click(trigger);
+    const search = screen.getByRole("button", { name: "搜索", exact: true });
+    act(() => search.focus());
+    expect(screen.queryByRole("menu", { name: "工作模式" })).toBeNull();
+    expect(document.activeElement).toBe(search);
+  });
+
+  it.each(["mode", "profile"])("retires the %s portal when its sidebar closes without reopening it later", menu => {
+    useAppStore.setState({ leftSidebarWidth: LEFT_SIDEBAR_DEFAULT_WIDTH });
+    render(<SidebarLeft />);
+    fireEvent.click(screen.getByRole("button", { name: menu === "mode" ? "切换工作模式" : "打开个人资料菜单" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    act(() => useAppStore.getState().setLeftSidebarWidth(0));
+    expect(screen.queryByRole("menu")).toBeNull();
+    act(() => useAppStore.getState().setLeftSidebarWidth(LEFT_SIDEBAR_DEFAULT_WIDTH));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.getByRole("button", { name: menu === "mode" ? "切换工作模式" : "打开个人资料菜单" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("keeps settings in the persistent sidebar footer", () => {
     useAppStore.setState({ settingsOpen: false });
     render(<SidebarLeft />);
@@ -594,14 +630,12 @@ describe("SidebarLeft session status", () => {
     vi.mocked(sendClientCommand).mockClear();
     fireEvent.click(screen.getByRole("button", { name: "新聊天" }));
 
-    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalled());
     await waitFor(() => expect(useAppStore.getState().appMode).toBe("cowork"));
-    const command = vi.mocked(sendClientCommandAwaitResult).mock.calls[0]?.[0] as { type?: string; workspace_root?: string };
     const state = useAppStore.getState();
-    expect(command).toMatchObject({ type: "conversation.create", workspace_root: "C:\\Desktop\\MiniCode" });
+    expect(state.conversationDrafts[state.activeConversationDraftId!]).toMatchObject({ bindWorkspace: true, workspaceRoot: "C:\\Desktop\\MiniCode" });
     expect(state.appMode).toBe("cowork");
     expect(state.workingDirectory).toBe("C:\\Desktop\\MiniCode");
-    expect(state).toMatchObject({ conversationId: "conv-restored", draft: "unfinished prompt", activeTabPath: "README.md", activeEditorPath: "README.md" });
+    expect(state).toMatchObject({ activeTabPath: "README.md", activeEditorPath: "README.md" });
     expect(state.editorTabs).toBe(settledEditorTabs);
     expect(state.panelSlots).toBe(panelSlots);
     expect(state.conversations[0].workspaceRoot).toBeUndefined();
@@ -909,10 +943,10 @@ describe("SidebarLeft session status", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "在 MiniCode 中新建任务" }));
 
-    await waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({
-      type: "conversation.create",
-      workspace_root: "C:\\Desktop\\MiniCode",
-    }), "conversation.create"));
+    await waitFor(() => {
+      const state = useAppStore.getState();
+      expect(state.conversationDrafts[state.activeConversationDraftId!]).toMatchObject({ bindWorkspace: true, workspaceRoot: "C:\\Desktop\\MiniCode" });
+    });
     expect(useAppStore.getState().workingDirectory).toBe("C:\\Desktop\\MiniCode");
     expect(useAppStore.getState().appMode).toBe("cowork");
   });

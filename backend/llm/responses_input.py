@@ -1,15 +1,17 @@
 """Project host-admitted input identity into Responses messages."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from backend.llm.base import LLMMessage
 
 
 def agent_message_response_item(*, author: str, recipient: str, content: str = "",
-    encrypted_content: str | None = None, trigger_turn: bool) -> dict[str, Any]:
+    encrypted_content: str | None = None, trigger_turn: bool,
+    message_type: Literal["MESSAGE", "NEW_TASK", "FINAL_ANSWER"] | None = None) -> dict[str, Any]:
     """Render Source's attributed agent input, preserving opaque content."""
-    message_type = "NEW_TASK" if trigger_turn else "MESSAGE"
+    if message_type is None:
+        message_type = "NEW_TASK" if trigger_turn else "MESSAGE"
     header = f"Message Type: {message_type}\nTask name: {recipient}\nSender: {author}\nPayload:\n"
     parts = ([{"type": "input_text", "text": header},
         {"type": "encrypted_content", "encrypted_content": encrypted_content}]

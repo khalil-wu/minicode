@@ -117,6 +117,120 @@ function browserSettingsRenderer() {
     hostWindow: { webContents: { send: (channel, payload) => ipcRenderer.emit(channel, {}, structuredClone(payload)) } } };
 }
 
+test("materializing a draft transfers its real native pages only within their owning window", async () => {
+  const h = browserHarness();
+  const source = "client-draft:primary:local";
+  await h.manager.create({ id: "local-page", conversation_id: source, window_instance_id: "fixture-window", url: "about:blank" });
+  await h.manager.create({ id: "other-page", conversation_id: source, window_instance_id: "other-window", url: "about:blank" });
+  const original = h.views[0].webContents;
+  h.manager.activate("local-page", source, "fixture-window");
+  assert.equal(h.manager.transferOwner(source, "real-owner", "fixture-window"), 1);
+  assert.equal(h.manager.listTargets(source, "fixture-window").length, 0);
+  assert.equal(h.manager.listTargets(source, "other-window").length, 1);
+  const target = h.manager.listTargets("real-owner", "fixture-window")[0];
+  assert.equal(target.id, "local-page"); assert.equal(target.active, true);
+  assert.equal(h.views[0].webContents, original); assert.equal(h.views.length, 2);
+  assert.throws(() => h.manager.activate("local-page", source, "fixture-window"), /another conversation/);
+  assert.equal(h.manager.activate("local-page", "real-owner", "fixture-window"), true);
+  assert.throws(() => h.manager.transferOwner("real-owner", "another", "fixture-window"), /client draft/);
+  h.manager.disposeAll();
+});
+
+test("a navigation waiting for DNS publishes under the draft's materialized native owner", async () => {
+  const h = browserHarness();
+  const source = "client-draft:primary:pending";
+  const pending = h.manager.create({ id: "pending-page", conversation_id: source, window_instance_id: "fixture-window", url: "https://example.com/" });
+  h.manager.transferOwner(source, "real-owner", "fixture-window");
+  h.resolveDns();
+  const target = await pending;
+  assert.equal(target.conversationId, "real-owner");
+  assert.equal(h.manager.listTargets(source, "fixture-window").length, 0);
+  assert.equal(h.manager.listTargets("real-owner", "fixture-window")[0].id, "pending-page");
+  assert.equal(h.views.length, 1);
+  h.manager.disposeAll();
+});
+
+test("authenticated manual navigation and its native redirects, children and history do not add DNS approval", async () => {
+  let prompts = 0, lookups = 0;
+  const h = browserHarness({ async showMessageBox() { prompts++; return { response: 0 }; } });
+  h.manager.init({ lookupHostAddresses: async () => { lookups++; throw new Error("Node DNS unavailable"); } });
+  const owner = { id: "manual-page", conversation_id: "client-draft:primary:manual", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...owner, url: "https://example.com/" }, { manualNavigation: true });
+  const contents = h.views[0].webContents;
+  let cancelled;
+  h.beforeRequest({ id: 600, webContentsId: contents.id, resourceType: "mainFrame", url: "http://192.168.1.20/redirect" }, value => { cancelled = value.cancel; });
+  await new Promise(setImmediate);
+  assert.equal(cancelled, false);
+  let prevented = false;
+  contents.emit("will-redirect", { preventDefault() { prevented = true; } }, "http://192.168.1.20/redirect", false, true);
+  contents.url = "http://192.168.1.20/redirect";
+  contents.emit("did-navigate", {}, contents.url);
+  assert.equal(prevented, false); assert.equal(contents.stopCalls, 0);
+  h.responseStarted({ webContentsId: contents.id, resourceType: "mainFrame", url: contents.url, ip: "192.168.1.20" });
+  await new Promise(setImmediate);
+  assert.equal(contents.stopCalls, 0);
+  const nativeChild = h.createNativeContents();
+  const opened = contents.windowOpenHandler({ url: "http://localhost:3000/", disposition: "foreground-tab" });
+  assert.equal(opened.action, "allow");
+  assert.equal(opened.createWindow({ webContents: nativeChild, webPreferences: {} }), nativeChild);
+  h.beforeRequest({ id: 601, webContentsId: nativeChild.id, resourceType: "mainFrame", url: "http://localhost:3000/" }, value => { cancelled = value.cancel; });
+  await new Promise(setImmediate);
+  assert.equal(cancelled, false);
+  let wentBack = false;
+  contents.navigationHistory = { canGoBack: () => true, goBack() { wentBack = true; } };
+  assert.equal(h.manager.runNavigationAction({ ...owner, action: "back" }, { manualNavigation: true }), true);
+  assert.equal(wentBack, true);
+  assert.equal(lookups, 0); assert.equal(prompts, 0);
+  assert.deepEqual(contents.loadCalls, ["https://example.com/"]);
+  h.manager.disposeAll();
+});
+
+test("manual mode preserves URL, owner and window admission instead of trusting payload authority", async () => {
+  let prompts = 0;
+  const h = browserHarness({ async showMessageBox() { prompts++; return { response: 0 }; } });
+  h.manager.init({ lookupHostAddresses: async () => { throw new Error("DNS unavailable"); } });
+  const owner = { id: "manual-admission", conversation_id: "owner", window_instance_id: "fixture-window" };
+  for (const url of ["file:///C:/secret.txt", "javascript:alert(1)", "https://user:password@example.com/"]) {
+    await assert.rejects(h.manager.create({ ...owner, url }, { manualNavigation: true }), /HTTP|credentials/);
+  }
+  await assert.rejects(h.manager.create({ ...owner, url: "https://example.com/", manualNavigation: true, source: "manual" }), /cancelled/);
+  assert.equal(prompts, 1); assert.equal(h.views.length, 0);
+  await h.manager.create({ ...owner, url: "http://localhost:3000/" }, { manualNavigation: true });
+  await assert.rejects(h.manager.create({ ...owner, conversation_id: "another", url: "https://example.com/" }, { manualNavigation: true }), /another conversation/);
+  assert.throws(() => h.manager.runNavigationAction({ ...owner, window_instance_id: "other-window", action: "focus" }, { manualNavigation: true }), /No embedded browser tab/);
+  h.manager.disposeAll();
+});
+
+test("Agent control retains its network policy until the last original control is released", async () => {
+  let prompts = 0;
+  const h = browserHarness({ async showMessageBox() { prompts++; return { response: 0 }; } });
+  h.manager.init({ lookupHostAddresses: async () => [{ address: "198.18.0.2", family: 4 }] });
+  const owner = { id: "shared-page", conversation_id: "real-owner", window_instance_id: "fixture-window" };
+  await h.manager.create({ ...owner, url: "https://example.com/" }, { manualNavigation: true });
+  const original = { id: "actual-control", turnId: "actual-turn" }, parallel = { id: "parallel-control", turnId: "parallel-turn" };
+  for (const agentControl of [original, parallel]) {
+    await h.manager.executeControlCommand({ ...owner, target_id: owner.id, action: "get_url", manualNavigation: true, source: "manual" }, { agentControl });
+  }
+  const contents = h.views[0].webContents;
+  let cancelled;
+  const navigate = async id => {
+    h.beforeRequest({ id, webContentsId: contents.id, resourceType: "mainFrame", url: "https://example.com/private" }, value => { cancelled = value.cancel; });
+    await new Promise(setImmediate);
+  };
+  await navigate(610); assert.equal(cancelled, true); assert.equal(prompts, 1);
+  assert.equal(h.manager.releaseAgentControl({ ...owner, control: { ...original, turnId: "wrong-turn" } }), 0);
+  assert.equal(h.manager.releaseAgentControl({ ...owner, control: original }), 1);
+  await navigate(611); assert.equal(cancelled, true); assert.equal(prompts, 2);
+  await assert.rejects(h.manager.navigate({ ...owner, url: "http://192.168.1.20/", manualNavigation: true }, { manualNavigation: true }), /cancelled/);
+  assert.equal(prompts, 3);
+  assert.equal(h.manager.releaseAgentControl({ ...owner, control: parallel }), 1);
+  await navigate(612); assert.equal(cancelled, false); assert.equal(prompts, 3);
+  h.responseStarted({ webContentsId: contents.id, resourceType: "mainFrame", url: "https://example.com/", ip: "198.18.0.2" });
+  await new Promise(setImmediate);
+  assert.equal(contents.stopCalls, 0);
+  h.manager.disposeAll();
+});
+
 test("site management persists permission edits and reset changes the native permission callbacks", async () => {
   const { manager, views, session } = browserHarness();
   manager.init({ lookupHostAddresses: async () => [{ address: "93.184.216.34", family: 4 }] });

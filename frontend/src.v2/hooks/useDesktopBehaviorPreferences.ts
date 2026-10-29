@@ -7,9 +7,16 @@ import { mirrorDictationPreferences } from "../lib/dictation-preferences";
 export function useDesktopBehaviorPreferences() {
   const { preferences } = useDesktopPreferences();
   useEffect(() => {
-    if (preferences) useAppStore.setState({ defaultTerminalLocation: preferences.defaultTerminalLocation,
-      composerPlainTextMode: preferences.composerPlainTextMode,
-      primaryNumberShortcutTarget: preferences.primaryNumberShortcutTarget });
+    if (preferences) {
+      const state = useAppStore.getState();
+      if (state.defaultTerminalLocation !== preferences.defaultTerminalLocation
+        || state.composerPlainTextMode !== preferences.composerPlainTextMode
+        || state.primaryNumberShortcutTarget !== preferences.primaryNumberShortcutTarget) {
+        useAppStore.setState({ defaultTerminalLocation: preferences.defaultTerminalLocation,
+          composerPlainTextMode: preferences.composerPlainTextMode,
+          primaryNumberShortcutTarget: preferences.primaryNumberShortcutTarget });
+      }
+    }
     if (preferences) mirrorDictationPreferences(preferences);
   }, [preferences]);
   useEffect(() => {

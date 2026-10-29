@@ -178,14 +178,10 @@ describe("desktop chrome uses the existing workbench command and owner chain", (
     act(() => useAppStore.setState({ appMode: "code" }));
     fireEvent.click(screen.getByRole("button", { name: "文件", exact: true }));
     fireEvent.click(screen.getByRole("menuitem", { name: "新聊天" }));
-    await waitFor(() => expect(awaitResult).toHaveBeenCalledWith(expect.objectContaining({
-      type: "conversation.create", conversation_type: "main", title: "New chat",
-      workspace_root: "C:\\workspace",
-    }), "conversation.create"));
     await waitFor(() => expect(useAppStore.getState().appMode).toBe("cowork"));
-    expect(useAppStore.getState().conversationId).toBe("A");
-    expect(useAppStore.getState().messages[0].id).toBe("message-A");
-    expect(useAppStore.getState().draft).toBe("unfinished");
+    const state = useAppStore.getState();
+    expect(state.conversationDrafts[state.activeConversationDraftId!]).toMatchObject({ bindWorkspace: true, workspaceRoot: "C:\\workspace" });
+    expect(state.conversationId).toBeNull();
     expect(popup).not.toHaveBeenCalled();
   });
 

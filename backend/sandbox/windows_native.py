@@ -377,10 +377,12 @@ def prepare_command(
     deny_write_paths: Iterable[Path],
     argv: list[str] | None = None,
     tty: bool = False,
+    runtime: WindowsNativeRuntime | None = None,
 ) -> tuple[list[str], PrivateDesktop, Path]:
-    runtime, reason = discover_runtime()
     if runtime is None:
-        raise RuntimeError(reason)
+        runtime, reason = discover_runtime()
+        if runtime is None:
+            raise RuntimeError(reason)
     account = runtime.online_username if resolved.allow_network and not resolved.enforce_managed_network else runtime.offline_username
     with ExitStack() as preparation:
         desktop = PrivateDesktop.create(account)

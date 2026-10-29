@@ -5,7 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException, Response
+import httpx
+from fastapi import FastAPI, HTTPException, Response
 
 from backend.api import routes_skills
 from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
@@ -105,14 +106,51 @@ async def test_settings_cannot_modify_a_builtin_or_undiscovered_path(skills_sett
 
 
 @pytest.mark.asyncio
-async def test_effective_workspace_override_is_reported_instead_of_claiming_the_requested_state(skills_settings):
+@pytest.mark.parametrize("name,field", [("one", "skills"), ("plugin-owned", "plugin_skills")])
+async def test_effective_workspace_override_preserves_a_successful_user_write_and_reports_actual_state(skills_settings, name, field):
     fixture = skills_settings
-    fixture.extra.append(ConfigLayer(ConfigLayerSource("session_flags"), {"skills": {"config": [{"name": "one", "enabled": False}]}}))
-    with pytest.raises(HTTPException) as error:
-        await routes_skills.update_skill_settings_api(routes_skills.SkillEnabledRequest(path=str(fixture.paths["one"]), enabled=True), Response())
-    assert error.value.status_code == 400
-    assert "overrides" in error.value.detail
-    assert fixture.manager.snapshot().get_meta_by_path(fixture.paths["one"]) is None
+    fixture.extra.append(ConfigLayer(ConfigLayerSource("session_flags"), {"skills": {"config": [{"name": name, "enabled": False}]}}))
+    result = await routes_skills.update_skill_settings_api(
+        routes_skills.SkillEnabledRequest(path=str(fixture.paths[name]), enabled=True), Response())
+    assert len(fixture.writes) == 1
+    assert next(rule for rule in fixture.writes[0]["skills"]["config"] if rule["path"] == str(fixture.paths[name].resolve()))["enabled"] is True
+    assert next(skill for skill in result[field] if skill["name"] == name)["enabled"] is False
+    assert not any(skill["name"] == name for skill in result["available_skills"])
+    assert fixture.manager.snapshot().get_meta_by_path(fixture.paths[name]) is None
+    fixture.extra.clear()
+    inherited = await routes_skills.get_skill_settings_api(Response())
+    assert next(skill for skill in inherited[field] if skill["name"] == name)["enabled"] is True
+    assert any(skill["name"] == name for skill in inherited["available_skills"])
+
+
+@pytest.mark.asyncio
+async def test_http_commit_receipt_is_successful_while_each_workspace_keeps_its_effective_policy(skills_settings, tmp_path, monkeypatch):
+    fixture = skills_settings
+    root_a, root_b = tmp_path / "workspace-a", tmp_path / "workspace-b"
+    root_a.mkdir()
+    root_b.mkdir()
+    override = ConfigLayer(ConfigLayerSource("session_flags"), {"skills": {"config": [{"name": "one", "enabled": False}]}})
+
+    def stack(*, cwd=None, **_kwargs):
+        layers = [ConfigLayer(ConfigLayerSource("user", file=str(tmp_path / "settings.json")), deepcopy(fixture.settings))]
+        if cwd is not None and Path(cwd) == root_a:
+            layers.append(override)
+        return ConfigLayerStack(tuple(layers))
+
+    monkeypatch.setattr("backend.config.load_config_layer_stack", stack)
+    app = FastAPI()
+    app.include_router(routes_skills.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+        saved = await client.put("/api/skills/settings", json={"path": str(fixture.paths["one"]), "enabled": True, "workspace_root": str(root_a)})
+        assert saved.status_code == 200
+        assert saved.headers["Cache-Control"] == "no-store"
+        assert next(skill for skill in saved.json()["skills"] if skill["name"] == "one")["enabled"] is False
+        assert len(fixture.writes) == 1
+        assert next(rule for rule in fixture.writes[0]["skills"]["config"] if rule["path"] == str(fixture.paths["one"].resolve()))["enabled"] is True
+        current_b = await client.get("/api/skills/settings", params={"workspace_root": str(root_b)})
+        assert current_b.status_code == 200 and current_b.json()["workspace_root"] == str(root_b)
+        assert next(skill for skill in current_b.json()["skills"] if skill["name"] == "one")["enabled"] is True
+        assert any(skill["name"] == "one" for skill in current_b.json()["available_skills"])
 
 
 @pytest.mark.asyncio

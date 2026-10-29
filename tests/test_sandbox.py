@@ -227,7 +227,8 @@ def test_protected_write_path_blocks_gitconfig() -> None:
 # ── Command reads outside workspace fail ──
 
 
-def test_unfrozen_external_cwd_is_rejected_and_native_capture_retains_sandbox(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_unfrozen_external_cwd_is_rejected_and_native_capture_retains_sandbox(tmp_path: Path, monkeypatch) -> None:
     from backend.tools.command_tool import RunCommandTool
     from backend.artifact.store import ArtifactStore
     from backend.permissions.context import PermissionContext, ToolExecutionContext
@@ -250,12 +251,12 @@ def test_unfrozen_external_cwd_is_rejected_and_native_capture_retains_sandbox(tm
     monkeypatch.setattr(tool, "_execute_foreground", foreground)
     monkeypatch.setattr(tool, "_execute_background", background)
     args = {"command": "echo hi", "cwd": str(outside)}
-    result = asyncio.run(tool.execute(args, context=context))
+    result = await tool.execute(args, context=context)
     assert result.is_error
     assert "no frozen native execution-policy request" in result.content
     foreground.assert_not_awaited()
     background.assert_not_awaited()
-    authorization = authorize_command_call(ToolCallEvent(id="outside-cwd", name=tool.name, arguments=args), context)
+    authorization = await authorize_command_call(ToolCallEvent(id="outside-cwd", name=tool.name, arguments=args), context)
     assert not authorization.error, authorization.error
     native = authorization.request.exec_policy
     assert native.command.cwd == outside.resolve()

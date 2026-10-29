@@ -1,10 +1,12 @@
 /* @vitest-environment jsdom */
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { SkillsMarketplace } from "./SkillsMarketplace";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "./ToastContainer";
+import { useSkillSettings } from "./useSkillSettings";
+import { handleCommandCatalogEvent } from "../chat/commandCatalogEvents";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { writable: true, value: vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })) }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
@@ -14,8 +16,11 @@ vi.mock("../protocol/api", async original => ({
   LONG_HTTP_TIMEOUT_MS: 300_000, fetchWithTimeout: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
   errorMessageFromResponseText: (text: string, fallback: string) => text || fallback,
   pluginAssetResourceUrlWithToken: () => "",
+  fetchDraftModelSelection: vi.fn(async (workspaceRoot: string) => ({ current_model: "fixture-model", model: "fixture-model", provider: "custom",
+    available_models: ["fixture-model"], models_source: "configured", available_permission_modes: ["auto"],
+    config_version: "fixture", config_cwd: workspaceRoot, feature_flags: {}, composer_commands: [] })),
 }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, pickDirectory: vi.fn() }));
+vi.mock("../desktop/runtime", () => ({ desktop: () => undefined, isDesktop: () => false, pickDirectory: vi.fn() }));
 vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
 vi.mock("./DialogService", () => ({ showAlert: vi.fn(), showConfirm: vi.fn(async () => true), showPrompt: vi.fn(async () => "C:/skills/local") }));
 
@@ -32,9 +37,17 @@ const rawSkill = "---\nname: docs\ndescription: Actual document workflow\n---\n#
 describe("Plugins and skills workspace", () => {
   beforeEach(() => {
     useAppStore.setState({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "skills", skillsMarketplaceReturnTarget: "app", settingsOpen: false,
-      workingDirectory: "C:/marketplace", conversationId: "catalog-owner", draft: "Keep draft", availableSkills: [docs, internal],
+      workingDirectory: "C:/marketplace", conversationId: "catalog-owner", activeConversationDraftId: null, draft: "Keep draft", availableSkills: [docs, internal],
       marketplaceSkills: [], selectedSkills: [] });
     docsEnabled = true; docsInstalled = true;
+    vi.mocked(sendClientCommand).mockImplementation(command => {
+      if (command.type === "skills.list") {
+        const store = useAppStore.getState(), root = command.workspace_root ?? store.workingDirectory;
+        handleCommandCatalogEvent({ type: "skills.list", conversation_id: command.conversation_id ?? store.conversationId ?? "",
+          workspace_root: root, skills: settingsPayload(root).available_skills });
+      }
+      return true;
+    });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/api/skills/docs" && init?.method === "DELETE") { docsInstalled = false; return Promise.resolve(json({ removed: true })); }
@@ -225,5 +238,66 @@ describe("Plugins and skills workspace", () => {
     expect(useAppStore.getState().draft).toBe("Keep draft\nUse the document workflow");
     expect(vi.mocked(sendClientCommand).mock.calls.some(([command]) => command.type === "user_message")).toBe(false);
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it.each(["install", "import"] as const)("rebuilds both current consumers after a pending global %s and holds the button through its real read", async kind => {
+    let finishWrite!: (value: Response) => void;
+    let committed = false, writes = 0;
+    const finishReads: ((value: Response) => void)[] = [];
+    const reads: string[] = [];
+    const installed = { name: "remote-review", description: "Installed instructions", path: "C:/skills/remote-review/SKILL.md", source_level: "user", enabled: true, uninstall_name: "remote-review" };
+    const currentPayload = (root: string) => ({ ...settingsPayload(root),
+      skills: [...settingsPayload(root).skills, ...(committed ? [installed] : [])],
+      available_skills: [...settingsPayload(root).available_skills, ...(committed ? [installed] : []), { name: root + "-local", description: "Current project", path: root + "/local/SKILL.md" }] });
+    vi.mocked(sendClientCommand).mockImplementation(command => {
+      if (command.type === "skills.list") {
+        const store = useAppStore.getState(), root = command.workspace_root ?? store.workingDirectory;
+        handleCommandCatalogEvent({ type: "skills.list", conversation_id: command.conversation_id ?? store.conversationId ?? "",
+          workspace_root: root, skills: currentPayload(root).available_skills });
+      }
+      return true;
+    });
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (init?.method === "POST" && url.pathname === `/api/skills/${kind}`) { writes++; return new Promise<Response>(resolve => { finishWrite = resolve; }); }
+      if (url.pathname === "/api/skills/settings") {
+        const root = url.searchParams.get("workspace_root")!; reads.push(root);
+        return committed ? new Promise<Response>(resolve => finishReads.push(resolve)) : Promise.resolve(json(currentPayload(root)));
+      }
+      if (url.pathname === "/api/extensions/marketplace") return Promise.resolve(json({ ...catalog, skills: catalog.skills.map(skill => ({ ...skill, installed: committed })) }));
+      if (url.pathname === "/api/plugins/marketplaces") return Promise.resolve(json({ marketplaces: [] }));
+      if (url.pathname === "/api/plugins") return Promise.resolve(json({ plugins: [] }));
+      return Promise.resolve(json({}));
+    }));
+    render(<SkillsMarketplace />);
+    const sibling = renderHook(() => useSkillSettings(true));
+    await waitFor(() => expect(sibling.result.current.skills).toHaveLength(1));
+    let button: HTMLElement;
+    if (kind === "install") {
+      fireEvent.click(screen.getByRole("button", { name: "公开", exact: true }));
+      button = await screen.findByRole("button", { name: "安装技能 remote-review" });
+      fireEvent.click(button);
+    } else {
+      button = screen.getByRole("button", { name: "添加", exact: true });
+      fireEvent.click(button); fireEvent.click(screen.getByRole("menuitem", { name: "导入本地技能" }));
+    }
+    await waitFor(() => expect(writes).toBe(1));
+    act(() => useAppStore.setState({ workingDirectory: "C:/B", conversationId: "catalog-b" }));
+    await waitFor(() => expect(reads.filter(root => root === "C:/B")).toHaveLength(2));
+    const aReads = reads.filter(root => root === "C:/marketplace").length;
+    committed = true;
+    await act(async () => finishWrite(json({ installed: true })));
+    await waitFor(() => expect(finishReads).toHaveLength(2));
+    expect(button).toHaveProperty("disabled", true);
+    fireEvent.click(button); expect(writes).toBe(1);
+    await act(async () => { for (const finish of finishReads) finish(json(currentPayload("C:/B"))); });
+    await waitFor(() => expect(sibling.result.current.skills.some(skill => skill.path === installed.path)).toBe(true));
+    expect(await screen.findByRole("button", { name: "查看技能详情 remote-review" })).toBeTruthy();
+    expect(reads.filter(root => root === "C:/B")).toHaveLength(4);
+    expect(reads.filter(root => root === "C:/marketplace")).toHaveLength(aReads);
+    expect(useAppStore.getState().availableSkills.some(skill => skill.name === "C:/B-local")).toBe(true);
+    expect(useAppStore.getState().draft).toBe("Keep draft");
+    expect(vi.mocked(sendClientCommand).mock.calls.filter(([command]) => command.type === "skills.list" && command.workspace_root === "C:/B")).toHaveLength(1);
+    expect(writes).toBe(1);
   });
 });

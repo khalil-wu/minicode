@@ -16,6 +16,24 @@ export interface ActivityDetail {
 
 export type ActivityToolRecord = NonNullable<ActivityCellState["toolCallRecords"]>[number];
 
+// Tool records are immutable store snapshots. ActivityCell asks for the same
+// presented output from several evidence branches during one render; retain
+// both protocol variants per record instead of reparsing JSON and receipts on
+// every branch. A new streamed receipt has a new object identity and therefore
+// gets a fresh entry automatically.
+const recordOutputTextCache = new WeakMap<ActivityToolRecord, { nested?: string; flat?: string }>();
+const recordOutputPreviewCache = new WeakMap<ActivityToolRecord, string>();
+
+export const isAgentWaitRecord = (record: Pick<ActivityToolRecord, "name">): boolean => record.name === "wait_agent";
+export const isHiddenAgentWaitRecord = (record: ActivityToolRecord): boolean => {
+  if (!isAgentWaitRecord(record)) return false;
+  if (["failed", "blocked", "timeout"].includes(record.status)) return false;
+  if (!["partial", "cancelled"].includes(record.status)) return true;
+  const diagnostic = record.outputPreview || record.contentPreview || record.developerDetail || record.userSummary || "";
+  const receipt = safeJsonParse<{ timed_out?: unknown } | null>(diagnostic, null);
+  return !record.errorInfo && (!diagnostic.trim() || typeof receipt?.timed_out === "boolean");
+};
+
 /** The harness parses shell commands once; the transcript consumes its actions. */
 export function commandActionKind(actions: ActivityToolRecord["commandActions"]): "fileRead" | "workspaceSearch" | "workspaceList" | "commandExecution" {
   if (!actions?.length) return "commandExecution";
@@ -186,6 +204,8 @@ export function readableRecordLabel(record: ActivityToolRecord, t: Translate = k
  * Codex/pi render the call's input beside its operation name; use the typed
  * args as the fallback when a provider did not populate inputSummary. */
 export function recordInputTarget(record: ActivityToolRecord): string {
+  // Source wait has no receiver/target label; its receipt stays in raw history.
+  if (isAgentWaitRecord(record)) return "";
   const args = record.args && typeof record.args === "object"
     ? record.args as Record<string, unknown>
     : {};
@@ -385,6 +405,14 @@ export const codeModeOwnError = (record: ActivityToolRecord): string => {
  * Only these two known tools produce this envelope: code, DOM and stdout
  * that happen to mention cell/call ids must retain their actual bytes. */
 export function getRecordOutputText(record: ActivityToolRecord, includeNestedTools = true): string {
+  const cached = recordOutputTextCache.get(record) ?? {};
+  const key = includeNestedTools ? "nested" : "flat";
+  if (cached[key] === undefined) cached[key] = getRecordOutputTextUncached(record, includeNestedTools);
+  recordOutputTextCache.set(record, cached);
+  return cached[key]!;
+}
+
+function getRecordOutputTextUncached(record: ActivityToolRecord, includeNestedTools: boolean): string {
   if (record.stdoutPreview !== undefined || record.stderrPreview !== undefined) {
     return [record.stdoutPreview, record.stderrPreview].filter(value => value).join("\n");
   }
@@ -562,20 +590,28 @@ export function hasOutputPreview(records?: NonNullable<ActivityCellState["toolCa
 
 /** Return the bounded output belonging to exactly one tool record. */
 export function getRecordOutputPreview(record: ActivityToolRecord): string {
+  const cached = recordOutputPreviewCache.get(record);
+  if (cached !== undefined) return cached;
   const output = getRecordOutputText(record);
-  if (!output) return "";
+  if (!output) {
+    recordOutputPreviewCache.set(record, "");
+    return "";
+  }
   const isReadResult = record.name === "read_file"
     || String(record.activityKind || "").toLowerCase() === "fileread"
     || String(record.resultKind || "").toLowerCase() === "file";
   if (isReadResult) {
     // Line numbers and edit hashes belong to the model's read protocol. The
     // disclosure shows code; the header already carries the requested range.
-    return record.name === "read_file"
+    const preview = record.name === "read_file"
       ? output.replace(/^[ \t]*\d+→/gm, "")
       : output;
+    recordOutputPreviewCache.set(record, preview);
+    return preview;
   }
   // The backend has already bounded this evidence. An explicit disclosure
   // must not silently discard its first lines or a useful failure context.
+  recordOutputPreviewCache.set(record, output);
   return output;
 }
 

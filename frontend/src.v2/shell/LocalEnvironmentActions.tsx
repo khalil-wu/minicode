@@ -14,7 +14,7 @@ export function LocalEnvironmentActions() {
   const conversationId = useAppStore(state => state.conversationId);
   const pending = useAppStore(state => state.pendingConversationSwitchId);
   const root = useAppStore(state => state.workingDirectory);
-  const registration = useAppStore(state => state.runtimeSession);
+  const runtimeSessionId = useAppStore(state => state.runtimeSession?.session_id);
   const [revision, setRevision] = useState(0);
   const [loaded, setLoaded] = useState<{ owner: string; session: string; root: string; data: ActiveLocalEnvironment } | null>(null);
   const owner = workspaceRequestOwner();
@@ -29,7 +29,7 @@ export function LocalEnvironmentActions() {
     const controller = new AbortController();
     void activeLocalEnvironment(root, controller.signal).then(data => { if (!controller.signal.aborted) setLoaded({ owner: conversationId, session: owner.session_id, root, data }); }).catch(reason => { if (!controller.signal.aborted) pushToast(String(reason), "error"); });
     return () => controller.abort();
-  }, [connected, conversationId, pending, root, registration, revision, owner?.session_id]);
+  }, [connected, conversationId, pending, root, runtimeSessionId, revision, owner?.session_id]);
   if (!loaded || !owner || !connected || pending || owner.conversation_id !== conversationId || loaded.session !== owner.session_id || loaded.owner !== conversationId || loaded.root !== root || loaded.data.actions.length === 0) return null;
   return <>{loaded.data.actions.map(action => {
     const Icon = icons[action.icon || "tool"];

@@ -10,6 +10,7 @@ import math
 import os
 import re
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -34,6 +35,8 @@ from backend.mcp.transport import mcp_transport_from_mapping, normalize_mcp_remo
 from backend.mcp.value_utils import has_nonempty_value as _has_nonempty_config_value
 from backend.mcp.value_utils import resolve_env_placeholders as _resolve_env_placeholders
 from backend.plugins.layout import plugin_manifest_path
+from backend.feature_flags import FeatureFlags, feature_enabled
+from backend.mcp.connections import TOOL_CATALOG_CACHE
 from backend.workspace.state import get_explicit_active_workspace_root
 
 logger = logging.getLogger(__name__)
@@ -54,7 +57,7 @@ MCP_DEFAULT_TOOL_TIMEOUT_SECONDS = 300.0
 _MCP_SERVER_FIELDS = frozenset({
     "transport", "command", "args", "env", "env_vars", "cwd", "url",
     "headers", "headers_helper", "oauth", "auto_start", "startup_timeout_sec",
-    "tool_timeout_sec", "required", "supports_parallel_tool_calls",
+    "tool_timeout_sec", "required", "startup_readiness", "supports_parallel_tool_calls",
     "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools",
     "requires_user_action", "setup_hint", "docs_url",
     "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
@@ -172,6 +175,7 @@ class MCPServerConfig:
     startup_timeout_sec: float | None = None
     tool_timeout_sec: float | None = None
     required: bool = False
+    startup_readiness: str = "connection"
     supports_parallel_tool_calls: bool = False
     enabled_tools: list[str] | None = None
     disabled_tools: list[str] = field(default_factory=list)
@@ -243,6 +247,8 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
         setattr(config, field_name, float(value))
     if not isinstance(config.required, bool):
         raise ValueError("required must be a boolean")
+    if config.startup_readiness not in ("connection", "catalog"):
+        raise ValueError("startup_readiness must be connection or catalog")
     if not isinstance(config.supports_parallel_tool_calls, bool):
         raise ValueError("supports_parallel_tool_calls must be a boolean")
     for field_name, values in (
@@ -401,12 +407,15 @@ class MCPServerState:
             "cleanup": cleanup,
             "error": self.last_error if self.status == ServerStatus.ERROR else "",
             "source": self.config.source,
+            "plugin_id": self.config.plugin_id,
+            "plugin_server_name": self.config.plugin_server_name,
             "approval_status": self.config.approval_status,
             "config_path": self.config.config_path,
             "project_workspace": self.config.project_workspace,
             "priority": self.config.priority,
             "transport": self.config.transport,
             "required": self.config.required,
+            "startup_readiness": self.config.startup_readiness,
             "supports_parallel_tool_calls": self.config.supports_parallel_tool_calls,
             "enabled_tools": self.config.enabled_tools,
             "disabled_tools": list(self.config.disabled_tools),
@@ -502,15 +511,26 @@ class MCPServerManager:
         environment_runtime=None,
         runtime_configs: tuple[MCPServerConfig, ...] | None = None,
         startup_policy: str = "Eager",
-        cached_catalog: tuple[tuple[MCPServerConfig, list[MCPToolDef], list[MCPToolDef], str], ...] = (),
+        optional_startup_grace_ms: int = 1000,
+        feature_flags: FeatureFlags | None = None,
+        requires_read_only_tools: bool = False,
     ) -> None:
         self._config_path = config_path or MCP_CONFIG_FILE
         self.environment_runtime = environment_runtime
         self._runtime_configs = runtime_configs
         self._startup_policy = startup_policy
-        self._cached_catalog = {config.name: (config, deepcopy(tools), deepcopy(raw_tools), instructions)
-            for config, tools, raw_tools, instructions in cached_catalog}
+        if type(optional_startup_grace_ms) is not int or not 0 <= optional_startup_grace_ms <= (1 << 64) - 1:
+            raise ValueError("optional_startup_grace_ms must be a non-negative integer")
+        self._optional_startup_grace_ms = optional_startup_grace_ms
+        self._feature_flags = feature_flags if feature_flags is not None else FeatureFlags(flags={
+            name: feature_enabled(name) for name in ("mcp_roots", "mcp_elicitation",
+                "mcp_streamable_http_transport", "mcp_websocket_transport")})
+        self._requires_read_only_tools = requires_read_only_tools
+        self._catalog_keys: dict[str, Any] = {}
+        self._catalog_contexts: dict[str, Any] = {}
+        self._catalog_snapshots: dict[str, Any] = {}
         self._lazy_servers: set[str] = set()
+        self._dormant_servers: set[str] = set()
         self._servers: dict[str, MCPServerState] = {}
         self._on_status_change = on_status_change
         self._elicitation_handler = elicitation_handler
@@ -528,6 +548,12 @@ class MCPServerManager:
         self._cleanup_reaper_tasks: dict[str, asyncio.Task[Any]] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
         self._node_companion_views: dict[str, Any] = {}
+        self._shared_connection_views: dict[str, Any] = {}
+        self._startup_tasks: dict[str, asyncio.Task] = {}
+        self._local_startup_slots = asyncio.Semaphore(_mcp_connection_batch_size())
+        self._remote_startup_slots = asyncio.Semaphore(_mcp_remote_connection_batch_size())
+        self._optional_startup_deadline: tuple[int, float] | None = None
+        self._startup_admitted_at: dict[str, float] = {}
         self._reload_lock = asyncio.Lock()
         # OAuth tokens for HTTP MCP servers, persisted alongside the MCP config.
         from backend.mcp.oauth import TokenStore
@@ -545,6 +571,59 @@ class MCPServerManager:
     def registry_version(self) -> int:
         return self._registry_version
 
+    def _client_capability_identity(self, config: MCPServerConfig):
+        from backend.mcp.node_repl import SOURCE_PREFIX
+        elicitation = self._elicitation_handler is not None and not config.source.startswith(SOURCE_PREFIX)
+        return (MCPClient.PROTOCOL_VERSION, self._feature_flags.enabled("mcp_roots"),
+            self._feature_flags.enabled("mcp_elicitation") and elicitation, ())
+
+    def _credential_identity(self, config: MCPServerConfig):
+        if config.transport not in {"http", "sse"} or config.credential_policy == "ExecutorOnly":
+            return None, False
+        return self._token_store.for_server(config.url or "", config.oauth_client_id).startup_identity(config.oauth_credential_name())
+
+    def _catalog_identity(self, config: MCPServerConfig):
+        from backend.mcp.catalog_identity import catalog_identity
+        _credentials, has_credentials = self._credential_identity(config)
+        return catalog_identity(config, self.environment_runtime, self._client_capability_identity(config),
+            has_oauth_credentials=has_credentials, requires_read_only_tools=self._requires_read_only_tools)
+
+    def _borrow_connection(self, config: MCPServerConfig, *, interactive_oauth: bool):
+        from backend.mcp.catalog_identity import connection_identity
+        runtime = self.environment_runtime
+        credential_key, _has_credentials = self._credential_identity(config)
+        key = connection_identity(config, runtime, self._client_capability_identity(config), credential_key,
+            requires_read_only_tools=self._requires_read_only_tools)
+        catalog_key = self._catalog_identity(config)
+        captured = deepcopy(config)
+        def capture():
+            connection_runtime = runtime.for_connection()
+
+            async def factory(connection):
+                binding = await connection_runtime.bind_server(captured)
+                return self._create_client(captured, interactive_oauth=interactive_oauth,
+                    execution_binding=binding, connection_events=connection)
+
+            async def close(client):
+                if client is not None and not await client.close():
+                    if not await client.finish_pending_cleanup():
+                        raise ConnectionError("The captured MCP connection still owns pending cleanup")
+                await connection_runtime.aclose()
+            return factory, close
+
+        async def on_disconnect(name):
+            view = self._shared_connection_views.get(name)
+            if view is not None:
+                await self._handle_client_disconnect(name, view.client)
+
+        async def on_tools_changed(name):
+            view = self._shared_connection_views.get(name)
+            if view is not None:
+                self._schedule_tool_refresh(name, view.client)
+
+        return runtime.connection_pool.acquire(name=config.name, identity=key, catalog_identity=catalog_key,
+            capture=capture, on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
+
     @property
     def workspace_root(self) -> Path | None:
         """Workspace whose project MCP/config layers this manager owns."""
@@ -553,7 +632,7 @@ class MCPServerManager:
             return self._workspace_root
         return get_explicit_active_workspace_root()
 
-    def load_config(self) -> list[MCPServerConfig]:
+    def load_config(self, *, config_stack: Any | None = None) -> list[MCPServerConfig]:
         if self._runtime_configs is not None:
             if self.environment_runtime is None:
                 # A host configuration catalog has no receiving attachment.
@@ -564,11 +643,12 @@ class MCPServerManager:
         workspace_root = self.workspace_root
         from backend.config import load_config_layer_stack
 
-        config_stack = load_config_layer_stack(
-            cwd=workspace_root,
-            requirements_path=self._requirements_path,
-            managed_settings_dir=self._managed_settings_dir,
-        )
+        if config_stack is None:
+            config_stack = load_config_layer_stack(
+                cwd=workspace_root,
+                requirements_path=self._requirements_path,
+                managed_settings_dir=self._managed_settings_dir,
+            )
         policy = load_mcp_policy(
             managed_settings_dir=self._managed_settings_dir,
             config_stack=config_stack,
@@ -721,19 +801,35 @@ class MCPServerManager:
                 if not manifest_path.is_file():
                     continue
                 try:
-                    from backend.plugins.manifest import _read_plugin_manifest
+                    from backend.plugins.manifest import _load_plugin_manifest
 
-                    manifest = _read_plugin_manifest(manifest_path)
+                    loaded = _load_plugin_manifest(manifest_path)
                 except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
                     raise RuntimeError(
                         f"Failed to read plugin manifest {manifest_path}: {exc}"
                     ) from exc
-                if not isinstance(manifest, Mapping):
+                if loaded is None:
                     raise ValueError(f"Plugin manifest {manifest_path} must contain an object")
+                manifest = loaded.payload
+                agent_plugin = loaded.format == "agent_plugin"
 
                 declaration = manifest.get("mcp_servers")
                 server_maps: list[Mapping[str, Any]] = []
-                if isinstance(declaration, Mapping):
+                if agent_plugin:
+                    from backend.mcp.agent_plugin_config import load_agent_plugin_mcp_config
+                    from backend.plugins.layout import agent_plugin_data_root
+
+                    data_root = agent_plugin_data_root(plugin_id)
+                    servers = load_agent_plugin_mcp_config(plugin_root, data_root).servers
+                    if any(server["transport"] == "stdio" for server in servers.values()):
+                        try:
+                            data_root.mkdir(parents=True, exist_ok=True)
+                        except OSError as exc:
+                            logger.warning("Failed to create Agent Plugins data directory %s: %s", data_root, exc)
+                            servers = {name: server for name, server in servers.items() if server["transport"] != "stdio"}
+                    self._apply_agent_plugin_env_overlay(plugin_root, servers)
+                    server_maps.append(servers)
+                elif isinstance(declaration, Mapping):
                     server_maps.append(declaration)
                 else:
                     config_path = plugin_root / ".mcp.json"
@@ -775,8 +871,9 @@ class MCPServerManager:
                         plugin_settings = config_stack.effective_config().get("plugins", {}).get(plugin_id, {})
                         policy_override = plugin_settings.get("mcp_servers", {}).get(name, {})
                         raw_config = deepcopy(raw_config)
-                        if "default_tools_approval_mode" in policy_override:
-                            raw_config["default_tools_approval_mode"] = policy_override["default_tools_approval_mode"]
+                        for field_name in ("enabled", "enabled_tools", "disabled_tools", "default_tools_approval_mode"):
+                            if field_name in policy_override:
+                                raw_config[field_name] = policy_override[field_name]
                         for tool_name, tool_policy in policy_override.get("tools", {}).items():
                             raw_config.setdefault("tools", {}).setdefault(tool_name, {}).update(tool_policy)
                         config = self._config_from_mapping(
@@ -785,6 +882,10 @@ class MCPServerManager:
                             source=f"plugin:{plugin_id}",
                             priority=plugin_order * 1000 + server_index,
                             base_dir=plugin_root,
+                            config_path=plugin_root / "mcp.json" if agent_plugin else None,
+                            plugin_id=plugin_id,
+                            plugin_server_name=str(name),
+                            resolve_placeholders=not agent_plugin,
                         )
                         from backend.mcp.cua_repl import is_computer_cua_declaration
 
@@ -793,6 +894,27 @@ class MCPServerManager:
                                 plugin_server_name=str(name), config_path=str(manifest_path))
                         configs.append(config)
         return configs
+
+    def _apply_agent_plugin_env_overlay(self, plugin_root: Path, servers: dict[str, dict[str, Any]]) -> None:
+        if not servers:
+            return
+        from backend.mcp.agent_plugin_overlay import load_agent_plugin_env_overlay
+        from backend.mcp.agent_plugin_config import ascii_upper
+
+        overlay = load_agent_plugin_env_overlay(plugin_root, lambda name, server: self._config_from_mapping(
+            name, server, source="agent-plugin-overlay", priority=0, base_dir=plugin_root,
+            resolve_placeholders=False,
+        ).env_vars)
+        for name, variables in overlay.items():
+            server = servers.get(name)
+            if server is None or server["transport"] != "stdio":
+                continue
+            names_match = ascii_upper if os.name == "nt" else (lambda value: value)
+            selected = {names_match(variable) for variable in variables}
+            server["env"] = {key: value for key, value in server["env"].items()
+                if not (value.startswith("${") and value.endswith("}")
+                    and names_match(key) == names_match(value[2:-1]) and names_match(key) in selected)}
+            server["env_vars"] = variables
 
     def _load_local_configs(self) -> list[MCPServerConfig]:
         if not self._config_path.exists():
@@ -894,6 +1016,7 @@ class MCPServerManager:
         selected_root_id: str | None = None,
         plugin_id: str | None = None,
         plugin_server_name: str | None = None,
+        resolve_placeholders: bool = True,
     ) -> MCPServerConfig:
         if not isinstance(raw_config, Mapping):
             raise ValueError(f"MCP server '{name}' from {source} must be an object")
@@ -904,9 +1027,9 @@ class MCPServerManager:
             raise ValueError(f"MCP server '{name}' environment_id must be a string")
         environment = {} if executor_source else {**os.environ, **vault_subprocess_env(f"mcp:{name}")}
         configured_env = raw_config.get("env", {})
-        if isinstance(configured_env, Mapping):
+        if resolve_placeholders and isinstance(configured_env, Mapping):
             environment.update(_resolve_mapping_placeholders(dict(configured_env), environment))
-        conf = dict(raw_config) if executor_source else _resolve_mapping_placeholders(dict(raw_config), environment)
+        conf = dict(raw_config) if executor_source or not resolve_placeholders else _resolve_mapping_placeholders(dict(raw_config), environment)
         if "http_headers" in conf:
             conf["headers"] = conf.pop("http_headers")
         if "http_headers_helper" in conf:
@@ -1141,6 +1264,7 @@ class MCPServerManager:
             startup_timeout_sec=startup_timeout_sec,
             tool_timeout_sec=tool_timeout_sec,
             required=required,
+            startup_readiness=conf.get("startup_readiness", "connection"),
             supports_parallel_tool_calls=supports_parallel_tool_calls,
             enabled_tools=enabled_tools,
             disabled_tools=disabled_tools,
@@ -1162,15 +1286,14 @@ class MCPServerManager:
             await self._start_all_unlocked()
 
     async def _start_all_unlocked(self) -> None:
-        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE, is_configured_cua
-
         configs = self.load_config()
-        local = [config for config in configs if config.transport == "stdio"]
-        remote = [config for config in configs if config.transport != "stdio"]
-        await asyncio.gather(
-            self._start_config_batch(local, _mcp_connection_batch_size()),
-            self._start_config_batch(remote, _mcp_remote_connection_batch_size()),
-        )
+        await asyncio.gather(*(self.ensure_server_startup(config) for config in configs))
+        await self.capture_startup_readiness()
+        self.validate_required_startups()
+
+    def validate_required_startups(self, *, names=None) -> None:
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE, is_configured_cua
+        configs = [state.config for name, state in self._servers.items() if names is None or name in names]
         required_failures = [
             config.name
             for config in configs
@@ -1180,7 +1303,8 @@ class MCPServerManager:
             and _config_can_connect(config)
             and (
                 config.name not in self._servers
-                or self._servers[config.name].status != ServerStatus.CONNECTED and config.name not in self._lazy_servers
+                or self.get_client(config.name) is None and not (config.name in self._lazy_servers
+                    and self._cached_startup(config, fallback=self._catalog_snapshots.get(config.name)) is not None)
             )
         ]
         if required_failures:
@@ -1189,36 +1313,246 @@ class MCPServerManager:
                 + ", ".join(required_failures)
             )
 
-    async def _start_config_batch(
-        self,
-        configs: list[MCPServerConfig],
-        batch_size: int,
-    ) -> None:
-        for start in range(0, len(configs), batch_size):
-            batch = configs[start:start + batch_size]
-            results = await asyncio.gather(
-                *(self._start_or_register_config(config) for config in batch),
-                return_exceptions=True,
-            )
-            failures = [result for result in results if isinstance(result, BaseException)]
-            if failures:
-                raise RuntimeError(
-                    "Failed to initialize MCP server batch: "
-                    + "; ".join(f"{type(error).__name__}: {error}" for error in failures)
-                )
+    def _connection_view(self, name: str):
+        return self._shared_connection_views.get(name) or self._node_companion_views.get(name)
 
-    async def _start_or_register_config(self, config: MCPServerConfig) -> None:
-        cached = self._cached_catalog.get(config.name)
-        if self._startup_policy == "LazyWhenCached" and cached is not None and _same_runtime_config(config, cached[0]) and _config_can_connect(config):
-            await self.register_config(config)
-            state = self._servers[config.name]
-            state.tools, state.raw_tools = deepcopy(cached[1]), deepcopy(cached[2])
-            self._lazy_servers.add(config.name)
-            return
-        if config.auto_start and _config_can_connect(config):
-            await self.start_server(config)
+    def _startup_pending(self, name: str, task) -> bool:
+        view = self._connection_view(name)
+        return (view.connection.startup_pending() if view is not None else
+            self._servers[name].status == ServerStatus.STARTING and task is not None and not task.done())
+
+    async def _prepare_connection_view(self, state, *, interactive_oauth: bool = False):
+        from backend.mcp.node_repl import SOURCE_PREFIX as NODE_SOURCE
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE
+        config = state.config
+        view = self._connection_view(config.name)
+        if view is None:
+            if (self.environment_runtime is not None and self.environment_runtime.connection_pool is not None
+                    and not config.source.startswith((NODE_SOURCE, CUA_SOURCE))):
+                view = self._borrow_connection(config, interactive_oauth=interactive_oauth)
+                self._shared_connection_views[config.name] = view
+            elif state.client is None:
+                if self.environment_runtime is None and config.environment_id != "local":
+                    raise ValueError(f"MCP server `{config.name}` requires its configured execution environment `{config.environment_id}`")
+                binding = (await self.environment_runtime.bind_server(config)
+                    if self.environment_runtime is not None and not config.source.startswith((NODE_SOURCE, CUA_SOURCE)) else None)
+                state.client = self._create_client(config, interactive_oauth=interactive_oauth, execution_binding=binding)
+                view = self._connection_view(config.name)
+        self._capture_catalog_context(config, view=view)
+        return view
+
+    def _capture_catalog_context(self, config, *, view=None) -> None:
+        key = self._catalog_identity(config)
+        if view is not None and view.connection.catalog_cache is not None:
+            context = view.connection.catalog_cache
+        elif config.name in self._catalog_contexts and self._catalog_keys[config.name] == key:
+            context = self._catalog_contexts[config.name]
         else:
+            context = TOOL_CATALOG_CACHE.context(key)
+        if view is not None:
+            view.connection.attach_catalog(TOOL_CATALOG_CACHE, key, context=context)
+        self._catalog_keys[config.name] = key
+        self._catalog_contexts[config.name] = context
+
+    def _cached_startup(self, config, *, fallback=None):
+        context = self._catalog_contexts.get(config.name)
+        cached = context.get(fallback) if context is not None else None
+        if cached is None or not cached.tools:
+            return None
+        if config.startup_readiness == "catalog":
+            visible = _filter_mcp_tools(config, cached.tools)
+            if config.name in self._dormant_servers:
+                return cached if visible else None
+            if not any(not isinstance(tool.meta.get("ui"), dict)
+                    or not isinstance(tool.meta["ui"].get("visibility"), list)
+                    or "model" in tool.meta["ui"]["visibility"] for tool in visible):
+                return None
+        return cached
+
+    def _project_cached_startup(self, state, cached) -> None:
+        raw = cached.copy_tools()
+        state.raw_tools = raw
+        state.tools = _filter_mcp_tools(state.config, raw)
+        self._lazy_servers.add(state.config.name)
+        self._catalog_snapshots[state.config.name] = cached
+
+    async def ensure_server_startup(self, config: MCPServerConfig) -> None:
+        """Admit a real connection attempt without waiting for its SDK initialize."""
+        from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE, is_configured_cua
+        from backend.mcp.node_repl import SOURCE_PREFIX as NODE_SOURCE
+        current = self._servers.get(config.name)
+        if current is not None and _same_runtime_config(current.config, config):
+            if config.name in self._startup_tasks or config.name in self._dormant_servers or current.status == ServerStatus.CONNECTED:
+                return
+        if current is not None and not _same_runtime_config(current.config, config):
+            await self.stop_server(config.name)
+        if (not config.auto_start or not _config_can_connect(config)
+                or is_configured_cua(config) and not config.source.startswith(CUA_SOURCE)):
             await self.register_config(config)
+            return
+        lock = self._connection_locks.setdefault(config.name, asyncio.Lock())
+        async with lock:
+            # The first caller can publish the startup task while a second
+            # caller is waiting for this per-server lock. Re-check ownership
+            # after acquiring it so concurrent environment/turn preparation
+            # cannot launch a second initialize process for the same config.
+            current = self._servers.get(config.name)
+            if current is not None and _same_runtime_config(current.config, config) and (
+                config.name in self._startup_tasks
+                or current.status == ServerStatus.STARTING
+                or current.status == ServerStatus.CONNECTED
+            ):
+                return
+            try:
+                state = await self._prepare_state(config)
+                if state.status == ServerStatus.CONNECTED:
+                    return
+                if (self.environment_runtime is not None and self.environment_runtime.connection_pool is not None
+                        and not config.source.startswith((NODE_SOURCE, CUA_SOURCE))):
+                    # Capturing a shared producer/view is synchronous. Its
+                    # environment bind and SDK construction run in that owner.
+                    await self._prepare_connection_view(state)
+                else:
+                    # A standalone/builtin connection may fail construction or
+                    # wait for an environment. Keep that work inside the actual
+                    # attempt so optional grace and per-server errors apply.
+                    self._capture_catalog_context(config)
+            except MCPTokenStoreError as exc:
+                await self._report_credential_store_failure(config.name, exc)
+                return
+            if self._startup_policy == "LazyWhenCached":
+                self._dormant_servers.add(config.name)
+            cached = self._cached_startup(config)
+            if self._startup_policy == "LazyWhenCached" and cached is not None:
+                self._project_cached_startup(state, cached)
+                await self._notify_status(config.name, state.status)
+                return
+            state.status = ServerStatus.STARTING
+            await self._notify_status(config.name, ServerStatus.STARTING)
+            self._launch_server_startup(state)
+
+    def _launch_server_startup(self, state) -> asyncio.Task:
+        name, config = state.config.name, state.config
+        self._dormant_servers.discard(name)
+        self._startup_admitted_at[name] = asyncio.get_running_loop().time()
+        slots = self._local_startup_slots if config.transport == "stdio" else self._remote_startup_slots
+        view = self._connection_view(name)
+        if view is not None:
+            view.connection.start(startup_slot=slots)
+
+        async def project_startup():
+            async with self._connection_locks[name]:
+                if self._servers.get(name) is not state or not _same_runtime_config(state.config, config):
+                    return
+                await self._attempt_connection(name, state, startup_slot=slots)
+                if state.status == ServerStatus.CONNECTED:
+                    self._lazy_servers.discard(name)
+                elif state.status == ServerStatus.ERROR:
+                    cached = self._cached_startup(config, fallback=self._catalog_snapshots.get(name)) if config.startup_readiness == "catalog" else None
+                    if cached is not None:
+                        self._project_cached_startup(state, cached)
+                        await self._notify_status(name, state.status)
+                    else:
+                        self._lazy_servers.discard(name)
+
+        async def start():
+            try:
+                await project_startup()
+            except asyncio.CancelledError:
+                if self._servers.get(name) is state and state.status == ServerStatus.STARTING:
+                    state.status = ServerStatus.OFFLINE
+                    state.tools = []
+                    self._lazy_servers.discard(name)
+                    await self._notify_status(name, ServerStatus.OFFLINE)
+                raise
+
+        task = asyncio.create_task(start(), name=f"mcp-startup-view:{name}")
+        self._startup_tasks[name] = task
+        task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+        return task
+
+    async def capture_startup_readiness(self, *, names=None, required_servers=()) -> None:
+        selected = tuple(names) if names is not None else tuple(self._servers)
+        grace_ms = self._optional_startup_grace_ms
+        now = asyncio.get_running_loop().time()
+        if self._optional_startup_deadline is None or self._optional_startup_deadline[0] != grace_ms:
+            self._optional_startup_deadline = (grace_ms, now + grace_ms / 1000)
+        default_deadline = self._optional_startup_deadline[1]
+
+        async def wait_for_snapshot(name):
+            state = self._servers[name]
+            config = state.config
+            if not config.auto_start or not _config_can_connect(config) or state.status == ServerStatus.CONNECTED:
+                return None
+            cached = self._cached_startup(config)
+            dormant = name in self._dormant_servers
+            must_wait = name in required_servers or config.required and not (cached is not None and (
+                config.startup_readiness == "catalog" or dormant))
+            if dormant and (must_wait or cached is None):
+                task = self._launch_server_startup(state)
+            else:
+                task = self._startup_tasks.get(name)
+            if task is None:
+                return name, state, config, cached, task
+            from backend.mcp.node_repl import SOURCE_PREFIX as NODE_SOURCE
+            from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE
+            runtime = self.environment_runtime
+            companion = (runtime.node_repl_companions if config.source.startswith(NODE_SOURCE)
+                else runtime.cua_repl_companions if config.source.startswith(CUA_SOURCE) else None) if runtime is not None else None
+            if task.done():
+                await asyncio.shield(task)
+            elif not must_wait and cached is not None:
+                pass
+            elif must_wait or grace_ms == 0:
+                if grace_ms == 0:
+                    view = self._connection_view(name)
+                    if view is not None:
+                        view.connection.startup_deadline(grace_ms, now)
+                    context = self._catalog_contexts.get(name)
+                    if context is not None:
+                        context.deadline(grace_ms, now)
+                    if companion is not None:
+                        companion.startup_deadline(config, grace_ms, now)
+                await asyncio.shield(task)
+            else:
+                view = self._connection_view(name)
+                initial_deadline = max(default_deadline, self._startup_admitted_at.get(name, now) + grace_ms / 1000)
+                deadline = view.connection.startup_deadline(grace_ms, initial_deadline) if view is not None else initial_deadline
+                context = self._catalog_contexts.get(name)
+                if context is not None:
+                    deadline = context.deadline(grace_ms, deadline)
+                if companion is not None:
+                    deadline = companion.startup_deadline(config, grace_ms, deadline)
+                await asyncio.wait({task}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()))
+            return name, state, config, cached, task
+
+        async def project(snapshot):
+            if snapshot is None:
+                return
+            name, state, config, cached, task = snapshot
+            if self._servers.get(name) is not state or state.status == ServerStatus.CONNECTED:
+                return
+            if task is None:
+                current = self._cached_startup(config, fallback=cached)
+                if current is not None:
+                    self._project_cached_startup(state, current)
+                return
+            accepts_cache = self._startup_pending(name, task) or config.startup_readiness == "catalog"
+            current = self._cached_startup(config, fallback=cached) if accepts_cache else None
+            # A server can opt out of catalog caching after the first pass.
+            # Required catalog readiness must then use the actual connection.
+            if current is None and config.required and config.startup_readiness == "catalog" and not task.done():
+                await asyncio.shield(task)
+            if state.status != ServerStatus.CONNECTED:
+                accepts_cache = self._startup_pending(name, task) or config.startup_readiness == "catalog"
+                current = self._cached_startup(config, fallback=cached) if accepts_cache else None
+                if current is not None:
+                    self._project_cached_startup(state, current)
+                else:
+                    self._lazy_servers.discard(name)
+
+        snapshots = await asyncio.gather(*(wait_for_snapshot(name) for name in selected if name in self._servers))
+        await asyncio.gather(*(project(snapshot) for snapshot in snapshots))
 
     async def reload_config(self) -> None:
         """Reconcile running servers with the effective config catalog."""
@@ -1337,6 +1671,11 @@ class MCPServerManager:
         await self._notify_status(name, ServerStatus.ERROR)
 
     async def _close_client_owner(self, name: str, client: MCPClient) -> bool:
+        shared = self._shared_connection_views.get(name)
+        if shared is not None and shared.client is client:
+            closed = await shared.aclose()
+            self._shared_connection_views.pop(name)
+            return closed
         view = self._node_companion_views.get(name)
         if view is not None and view.client is client:
             closed = await view.aclose()
@@ -1350,6 +1689,10 @@ class MCPServerManager:
             return True
 
         await self._cancel_reconnect_task(name)
+        startup = self._startup_tasks.pop(name, None)
+        if startup is not None and startup is not asyncio.current_task() and not startup.done():
+            startup.cancel()
+            await asyncio.gather(startup, return_exceptions=True)
         await self._cancel_tool_refresh_task(name)
         lock = self._connection_locks.get(name)
         if lock is None:
@@ -1361,6 +1704,10 @@ class MCPServerManager:
             # remote disconnect and schedule a reconnect after the cancellation
             # above has already completed.
             client = state.client
+            if client is None:
+                borrowed = self._shared_connection_views.pop(name, None) or self._node_companion_views.pop(name, None)
+                if borrowed is not None:
+                    await borrowed.aclose()
             if client is not None:
                 try:
                     closed = await self._close_client_owner(name, client)
@@ -1395,6 +1742,8 @@ class MCPServerManager:
             state.last_error = ""
             state.last_exception = None
             state.operation_failures.clear()
+            self._lazy_servers.discard(name)
+            self._dormant_servers.discard(name)
             await self._notify_status(name, ServerStatus.OFFLINE)
             return True
 
@@ -1490,17 +1839,44 @@ class MCPServerManager:
             raise RuntimeError(
                 f"MCP server '{name}' is still shutting down and cannot restart"
             )
+        await self._restart_connection_owner(name, config)
         await self.start_server(config, force=True)
+
+    async def _restart_connection_owner(self, name: str, config: MCPServerConfig) -> None:
+        runtime = self.environment_runtime
+        if runtime is not None:
+            from backend.mcp.node_repl import SOURCE_PREFIX as NODE_SOURCE
+            from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE
+            if config.source.startswith(NODE_SOURCE):
+                await runtime.node_repl_companions.restart(config)
+            elif config.source.startswith(CUA_SOURCE):
+                await runtime.cua_repl_companions.restart(config)
+            elif runtime.connection_pool is not None:
+                await runtime.connection_pool.restart(name)
+
+    async def cancel_startup(self) -> None:
+        """An idle/owner interrupt cancels producers; view retirement only releases views."""
+        views = tuple(self._shared_connection_views.values()) + tuple(self._node_companion_views.values())
+        await asyncio.gather(*(view.connection.cancel_startup() for view in views))
+        pending = [task for task in self._startup_tasks.values() if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
     async def oauth_login(self, name: str) -> None:
         """Run the official MCP SDK OAuth flow after an explicit user action."""
         state = self._servers.get(name)
         if state is None:
             raise KeyError(f"MCP server '{name}' is not configured")
+        if not await self.stop_server(name):
+            raise RuntimeError(f"MCP server '{name}' is still shutting down and cannot log in")
+        await self._restart_connection_owner(name, state.config)
         state.retry_count = 0
         await self.start_server(
             state.config,
             interactive_oauth=True,
+            force=True,
         )
 
     async def oauth_logout(self, name: str) -> None:
@@ -1511,6 +1887,7 @@ class MCPServerManager:
             raise RuntimeError(
                 f"MCP server '{name}' is still shutting down and cannot log out"
             )
+        await self._restart_connection_owner(name, state.config)
         store = self._token_store.for_server(state.config.url or "", state.config.oauth_client_id)
         await to_thread_cancel_safe(store.clear, state.config.oauth_credential_name())
         self._resource_subscriptions.pop(name, None)
@@ -1524,29 +1901,35 @@ class MCPServerManager:
     def get_all_tools(self) -> dict[str, list[MCPToolDef]]:
         result: dict[str, list[MCPToolDef]] = {}
         for name, state in self._servers.items():
-            if (state.status == ServerStatus.CONNECTED or name in self._lazy_servers) and state.tools:
+            cached = (name in self._lazy_servers and self._cached_startup(state.config,
+                fallback=self._catalog_snapshots.get(name)) is not None)
+            if (self.get_client(name) is not None or cached) and state.tools:
                 result[name] = state.tools
         return result
 
     def has_enabled_servers(self) -> bool:
         return any(state.config.enabled for state in self._servers.values())
 
-    def catalog_snapshot(self) -> tuple[tuple[MCPServerConfig, list[MCPToolDef], list[MCPToolDef], str], ...]:
-        return tuple((deepcopy(state.config), deepcopy(state.tools), deepcopy(state.raw_tools),
-            state.client.instructions if state.client is not None else self._cached_catalog[name][3])
-            for name, state in self._servers.items()
-            if state.status == ServerStatus.CONNECTED or name in self._lazy_servers)
-
     async def prepare_server_call(self, server_name: str) -> None:
-        if server_name not in self._lazy_servers:
-            await self.wait_for_server_startup(server_name)
-            return
-        state = self._servers[server_name]
-        await self.start_server(state.config)
-        self._lazy_servers.discard(server_name)
+        if server_name in self._dormant_servers:
+            self._launch_server_startup(self._servers[server_name])
+        await self.wait_for_server_startup(server_name)
+        if self.get_client(server_name) is not None:
+            self._lazy_servers.discard(server_name)
+        else:
+            state = self._servers.get(server_name)
+            raise ConnectionError(state.last_error if state is not None and state.last_error
+                else f"MCP server '{server_name}' is not connected")
 
     async def wait_for_server_startup(self, server_name: str) -> None:
         """Wait for this server's admitted connection attempt to settle."""
+        reconnect = self._reconnect_tasks.get(server_name)
+        if reconnect is not None and reconnect is not asyncio.current_task() and not reconnect.done():
+            await asyncio.shield(reconnect)
+        task = self._startup_tasks.get(server_name)
+        if task is not None:
+            await asyncio.shield(task)
+            return
         lock = self._connection_locks.get(server_name)
         if lock is not None:
             async with lock:
@@ -1554,7 +1937,7 @@ class MCPServerManager:
 
     def get_client(self, server_name: str) -> MCPClient | None:
         state = self._servers.get(server_name)
-        if state and state.status == ServerStatus.CONNECTED:
+        if state and state.status == ServerStatus.CONNECTED and state.client is not None and state.client.connected:
             return state.client
         return None
 
@@ -1580,12 +1963,17 @@ class MCPServerManager:
         state = self._servers.get(server_name)
         return state.config if state is not None else None
 
+    def catalog_is_cached(self, server_name: str) -> bool:
+        return server_name in self._lazy_servers
+
     def get_server_contract(self, server_name: str) -> tuple[Any, ...] | None:
         state = self._servers.get(server_name)
         if state is None:
             return None
         if server_name in self._lazy_servers:
-            return (_mcp_server_identity(state.config), self._cached_catalog[server_name][3])
+            if self._cached_startup(state.config, fallback=self._catalog_snapshots.get(server_name)) is None:
+                return None
+            return (_mcp_server_identity(state.config), self._catalog_snapshots[server_name].instructions)
         if state.client is None:
             return None
         return (_mcp_server_identity(state.config), state.client.instructions)
@@ -1608,7 +1996,8 @@ class MCPServerManager:
         result: dict[str, str] = {}
         for name, state in self._servers.items():
             if name in self._lazy_servers:
-                text = self._cached_catalog[name][3].strip()
+                cached = self._cached_startup(state.config, fallback=self._catalog_snapshots.get(name))
+                text = cached.instructions.strip() if cached is not None else ""
                 if text:
                     result[name] = text
                 continue
@@ -1662,7 +2051,13 @@ class MCPServerManager:
                 await self._notify_status(name, ServerStatus.RECONNECTING)
 
                 stale_client = state.client
-                if stale_client is not None:
+                shared = self._shared_connection_views.get(name)
+                if shared is not None:
+                    await self.environment_runtime.connection_pool.reconnect(name, shared.connection)
+                    await shared.aclose()
+                    self._shared_connection_views.pop(name)
+                    state.client = None
+                elif stale_client is not None:
                     try:
                         closed = await self._close_client_owner(name, stale_client)
                     except Exception as exc:
@@ -1714,24 +2109,29 @@ class MCPServerManager:
         state: MCPServerState,
         *,
         interactive_oauth: bool = False,
+        startup_slot: asyncio.Semaphore | None = None,
     ) -> None:
         client = state.client
         try:
-            if client is None:
-                if self.environment_runtime is not None:
-                    binding = await self.environment_runtime.bind_server(state.config)
-                    client = self._create_client(state.config, interactive_oauth=interactive_oauth, execution_binding=binding)
-                elif state.config.environment_id != "local":
-                    raise ValueError(f"MCP server `{name}` requires its configured execution environment `{state.config.environment_id}`")
-                else:
-                    client = self._create_client(state.config, interactive_oauth=interactive_oauth)
+            view = await self._prepare_connection_view(state, interactive_oauth=interactive_oauth)
+            client = state.client
+            if view is not None:
+                view.connection.start(startup_slot=startup_slot)
+                result = await view.wait_for_startup()
+                client = result.client
                 state.client = client
-            connect_timeout = (
-                310.0
-                if interactive_oauth
-                else _mcp_connection_timeout_seconds(state.config) + 1.0
-            )
-            await asyncio.wait_for(client.connect(), timeout=connect_timeout)
+                raw_tools = list(result.tools)
+            else:
+                async with (startup_slot if startup_slot is not None else nullcontext()):
+                    context = self._catalog_contexts[name]
+                    ticket = context.begin_fetch() if context is not None else None
+                    connect_timeout = 310.0 if interactive_oauth else _mcp_connection_timeout_seconds(state.config) + 1.0
+                    await asyncio.wait_for(client.connect(), timeout=connect_timeout)
+                    if context is not None and not client.tool_catalog_cacheable:
+                        context.disable()
+                    raw_tools = await client.list_tools()
+                    if context is not None:
+                        context.publish(ticket, raw_tools, client.instructions)
             # Replay durable subscription intent after every new transport
             # session.  The old client-owned set cannot survive reconnect.
             restore_failures: list[tuple[str, BaseException]] = []
@@ -1744,7 +2144,7 @@ class MCPServerManager:
                         )
                 except Exception as exc:
                     restore_failures.append((uri, exc))
-            state.raw_tools = await client.list_tools()
+            state.raw_tools = raw_tools
             state.tools = _filter_mcp_tools(state.config, state.raw_tools)
             stored_auth_status = self._stored_auth_status(state.config)
             state.auth_status = (
@@ -1754,6 +2154,8 @@ class MCPServerManager:
                 else stored_auth_status
             )
             state.status = ServerStatus.CONNECTED
+            self._lazy_servers.discard(name)
+            self._dormant_servers.discard(name)
             state.retry_count = 0
             state.last_error = ""
             state.last_exception = None
@@ -1784,7 +2186,12 @@ class MCPServerManager:
             state.operation_failures.pop("tool_catalog", None)
             await self._notify_status(name, ServerStatus.CONNECTED)
         except asyncio.CancelledError:
-            closed = await self._close_client_owner(name, client) if client is not None else True
+            borrowed = self._shared_connection_views.pop(name, None)
+            if borrowed is not None:
+                await borrowed.aclose()
+                closed = True
+            else:
+                closed = await self._close_client_owner(name, client) if client is not None else True
             state.client = None if closed else client
             state.tools = []
             state.status = ServerStatus.OFFLINE if closed else ServerStatus.ERROR
@@ -1796,7 +2203,12 @@ class MCPServerManager:
         except Exception as exc:
             cleanup_error: BaseException | None = None
             cleanup_pending = False
-            if client is not None:
+            if self._connection_view(name) is not None:
+                # The connection producer closed its failed transport. Retain
+                # this view's exact settled attempt until view retirement or an
+                # explicit reconnect; its failure must not become "pending".
+                client = None
+            elif client is not None:
                 try:
                     cleanup_pending = not await self._close_client_owner(name, client)
                 except Exception as close_exc:
@@ -1912,6 +2324,7 @@ class MCPServerManager:
         *,
         interactive_oauth: bool = False,
         execution_binding=None,
+        connection_events=None,
     ) -> MCPClient:
         t = config.transport.lower()
         if t == "sse":
@@ -1926,11 +2339,18 @@ class MCPServerManager:
             raise ValueError(f"Unsupported MCP transport: {config.transport}")
         client: MCPClient
 
-        async def on_disconnect(_: str) -> None:
-            await self._handle_client_disconnect(config.name, client)
+        if connection_events is not None:
+            on_disconnect = connection_events.notify_disconnect
+            on_tools_changed = connection_events.notify_tools_changed
+        else:
+            async def on_disconnect(_: str) -> None:
+                await self._handle_client_disconnect(config.name, client)
 
-        async def on_tools_changed(_: str) -> None:
-            self._schedule_tool_refresh(config.name, client)
+            async def on_tools_changed(_: str) -> None:
+                context = self._catalog_contexts.get(config.name)
+                if context is not None:
+                    context.invalidate()
+                self._schedule_tool_refresh(config.name, client)
 
         from backend.mcp.node_repl import SOURCE_PREFIX
         from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE
@@ -1977,6 +2397,7 @@ class MCPServerManager:
             workspace_root=self.workspace_root if config.environment_id == "local" else None,
             execution_binding=execution_binding, bearer_token_env_var=config.bearer_token_env_var,
             oauth_credential_name=config.oauth_credential_name(),
+            feature_flags=self._feature_flags, requires_read_only_tools=self._requires_read_only_tools,
         )
         return client
 
@@ -2020,7 +2441,15 @@ class MCPServerManager:
                     ):
                         continue
                     try:
-                        tools = await client.list_tools()
+                        view = self._shared_connection_views.get(name) or self._node_companion_views.get(name)
+                        if view is not None:
+                            tools = list((await view.connection.refresh_catalog()).tools)
+                        else:
+                            context = self._catalog_contexts.get(name)
+                            ticket = context.begin_fetch() if context is not None else None
+                            tools = await client.list_tools()
+                            if context is not None:
+                                context.publish(ticket, tools, client.instructions)
                     except Exception as exc:
                         if state.client is client and client.connected:
                             state.status = ServerStatus.ERROR
@@ -2323,6 +2752,7 @@ def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
         and left.startup_timeout_sec == right.startup_timeout_sec
         and left.tool_timeout_sec == right.tool_timeout_sec
         and left.required == right.required
+        and left.startup_readiness == right.startup_readiness
         and left.supports_parallel_tool_calls == right.supports_parallel_tool_calls
         and left.enabled_tools == right.enabled_tools
         and left.disabled_tools == right.disabled_tools
@@ -2354,6 +2784,10 @@ def _same_connection_config(left: MCPServerConfig, right: MCPServerConfig) -> bo
         tool_approval_modes=right.tool_approval_modes,
         tool_output_token_limits=right.tool_output_token_limits,
         supports_parallel_tool_calls=right.supports_parallel_tool_calls,
+        required=right.required,
+        startup_readiness=right.startup_readiness,
+        startup_timeout_sec=right.startup_timeout_sec,
+        tool_timeout_sec=right.tool_timeout_sec,
     ), right)
 
 

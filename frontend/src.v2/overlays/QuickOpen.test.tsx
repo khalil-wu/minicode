@@ -12,6 +12,7 @@ vi.mock("../protocol/workspace", () => ({
   searchWorkspaceFiles: (...args: unknown[]) => mocks.searchWorkspaceFiles(...args),
 }));
 vi.mock("../desktop/runtime", () => ({
+  desktop: () => undefined,
   isDesktop: () => false,
   fsSearchFiles: (...args: unknown[]) => mocks.fsSearchFiles(...args),
 }));

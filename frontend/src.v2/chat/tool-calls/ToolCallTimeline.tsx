@@ -61,6 +61,41 @@ const PHASE_LABELS: Record<TimelinePhase, string> = {
 
 const PHASE_ORDER: TimelinePhase[] = ["context", "model", "tool", "approval", "subagent", "cache", "recovery", "final"];
 
+// Tool receipts are immutable snapshots. Streaming creates a new assistant
+// message identity for the live receipt, while every settled historical
+// message keeps its identity. Reuse the derived timeline rows for those
+// settled messages so opening the inspector or receiving a new tool event does
+// not rebuild labels, summaries, and status for the whole transcript.
+const toolTimelineItemsCache = new WeakMap<ChatMessage, TimelineItem[]>();
+const presentedTimelineMessageCache = new WeakMap<ChatMessage, ChatMessage>();
+
+const presentedTimelineMessage = (message: ChatMessage): ChatMessage => {
+  const cached = presentedTimelineMessageCache.get(message);
+  if (cached) return cached;
+  const presented = { ...message, blocks: getPresentedContentBlocks(message) };
+  presentedTimelineMessageCache.set(message, presented);
+  return presented;
+};
+
+const toolTimelineItemsForMessage = (message: ChatMessage): TimelineItem[] => {
+  const cached = toolTimelineItemsCache.get(message);
+  if (cached) return cached;
+  const items = getToolCallsFromMessage(message).map((tc) => ({
+    id: `tool:${message.id}:${tc.id}`,
+    phase: phaseForTool(tc.phase),
+    label: readableToolLabel(tc.status === "running" || tc.status === "pending"
+      ? tc.displayHint || tc.name || "工具"
+      : tc.displaySummary || tc.displayHint || tc.name || "工具"),
+    summary: tc.inputSummary || tc.userSummary || tc.sourceUrl || "",
+    status: normalizeToolStatus(tc),
+    startedAt: tc.startedAt || message.timestamp || Date.now(),
+    finishedAt: tc.finishedAt,
+    toolName: tc.name,
+  } satisfies TimelineItem));
+  toolTimelineItemsCache.set(message, items);
+  return items;
+};
+
 export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
   const messages = useAppStore((s) => s.messages);
   const agentProgress = useAppStore((s) => s.agentProgress);
@@ -68,7 +103,7 @@ export const ToolCallTimeline = ({ limit = 40 }: { limit?: number } = {}) => {
   // The inspector's live view follows ownership too. Replay/export helpers
   // continue to use the unchanged raw records and their original timestamps.
   const allItems = useMemo(() => buildRunTimelineItems(
-    messages.map(message => ({ ...message, blocks: getPresentedContentBlocks(message) })),
+    messages.map(presentedTimelineMessage),
     agentProgress.map(entry => !isStreaming && entry.status === "running"
       ? { ...entry, status: "partial" } : entry),
   ), [messages, agentProgress, isStreaming]);
@@ -191,20 +226,7 @@ export function buildRunTimelineItems(
   progress: AgentProgressEntry[],
   options: { includeDebugCache?: boolean } = {},
 ): TimelineItem[] {
-  const toolItems = messages.flatMap((message) =>
-    getToolCallsFromMessage(message).map((tc) => ({
-      id: `tool:${message.id}:${tc.id}`,
-      phase: phaseForTool(tc.phase),
-      label: readableToolLabel(tc.status === "running" || tc.status === "pending"
-        ? tc.displayHint || tc.name || "工具"
-        : tc.displaySummary || tc.displayHint || tc.name || "工具"),
-      summary: tc.inputSummary || tc.userSummary || tc.sourceUrl || "",
-      status: normalizeToolStatus(tc),
-      startedAt: tc.startedAt || message.timestamp || Date.now(),
-      finishedAt: tc.finishedAt,
-      toolName: tc.name,
-    } satisfies TimelineItem)),
-  );
+  const toolItems = messages.flatMap(toolTimelineItemsForMessage);
 
   const progressItems = progress
     .filter((entry) => !isProviderRequestProgress(entry))

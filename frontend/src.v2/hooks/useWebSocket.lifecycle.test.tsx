@@ -34,6 +34,7 @@ import { getToolCallsFromMessage } from "../lib/content-blocks";
 import { projectMessagesToTurns } from "../chat/chatSurfaceState";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { QueuedMessageList } from "../composer/QueuedMessageList";
+import { latestProjectionCommandIds } from "../protocol/command-projection";
 import {
   getWebSocket,
   resetPendingClientCommandAcksForTests,
@@ -127,6 +128,33 @@ const flushQueuedCommands = async () => act(async () => {
 const Harness = () => {
   useWebSocketConnection();
   return null;
+};
+
+const connectSkillOwner = async (owner = "skills-owner", root = "C:/skills-project") => {
+  useAppStore.setState({ conversationId: null, activeConversationDraftId: null, pendingConversationSwitchId: null,
+    workingDirectory: root, availableSkills: [], conversations: [{ id: owner, title: owner, updatedAt: "2026-10-26", workspaceRoot: root }] });
+  render(<Harness />);
+  act(() => vi.advanceTimersByTime(0));
+  const socket = MockWebSocket.instances[0];
+  act(() => {
+    socket.emit("open");
+    const sync = sentCommands(socket).find(command => command.type === "session.sync")!;
+    socket.emitMessage({ ...initialSessionSyncSnapshot(new URL(socket.url).searchParams.get("session_id")!, sync.client_command_id,
+      { active_conversation_id: owner, workspace_root: root, selected_model: "fixture-model" }), client_command_type: "session.sync" });
+  });
+  await flushQueuedCommands();
+  expect(useAppStore.getState()).toMatchObject({ conversationId: owner, workingDirectory: root, connectionPhase: "connected" });
+  return socket;
+};
+
+const skillCatalogReceipt = (commandId: string, owner: string, root: string, name: string, seq: number, previous: number) => ({
+  type: "skills.list", client_command_id: commandId, client_command_type: "skills.list", conversation_id: owner, workspace_root: root,
+  skills: [{ name, description: `Session-owned ${name}`, path: `${root}/.minicode/skills/${name}/SKILL.md`, source_level: "user" }],
+  seq, previous_replay_seq: previous, event_id: `skills:${commandId}:${seq}`,
+});
+
+const acknowledgeSkillReads = (socket: MockWebSocket, ...ids: string[]) => {
+  for (const id of ids) socket.emitMessage({ type: "client.command.ack", command_type: "skills.list", client_command_id: id, accepted: true });
 };
 
 describe("useWebSocketConnection socket ownership", () => {
@@ -953,6 +981,11 @@ describe("useWebSocketConnection socket ownership", () => {
     await flushQueuedCommands();
 
     expect(useAppStore.getState().conversationId).toBe("conv-followup");
+    expect(sentCommandCount(socket, "commands.list")).toBe(before);
+    // The canonical owner is applied first; catalog reads start on the next
+    // task so they do not delay the restored conversation's initial paint.
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await flushQueuedCommands();
     expect(sentCommandCount(socket, "commands.list")).toBe(before + 1);
   });
 
@@ -1363,6 +1396,150 @@ describe("useWebSocketConnection socket ownership", () => {
     expect(getLastReceivedServerSeqForTests()).toBe(2);
     expect(useAppStore.getState().connectionPhase).toBe("connected");
     expect(resumed.close).not.toHaveBeenCalled();
+  });
+
+  it("keeps the latest same-owner Skill projection after both transport ACKs and consumes the obsolete durable receipt", async () => {
+    const owner = "skills-owner", root = "C:/skills-project", socket = await connectSkillOwner(owner, root);
+    const observed: string[] = [];
+    const unsubscribe = getWebSocket()?.subscribe(value => {
+      const event = value as { type?: string; client_command_id?: string };
+      if (event.type === "skills.list") observed.push(event.client_command_id!);
+    });
+    act(() => {
+      expect(getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: root, client_command_id: "skills-old" })).toBe(true);
+      expect(getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: root, client_command_id: "skills-new" })).toBe(true);
+      acknowledgeSkillReads(socket, "skills-old", "skills-new");
+      socket.emitMessage(skillCatalogReceipt("skills-new", owner, root, "fresh", 1, 0));
+      socket.emitMessage(skillCatalogReceipt("skills-old", owner, root, "obsolete", 2, 1));
+      socket.emitMessage({ type: "command.result", command: "skills.list", level: "info", message: "", data: { count: 1 },
+        conversation_id: owner, workspace_root: root, seq: 3, previous_replay_seq: 2 });
+    });
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["fresh"]);
+    expect(observed).toEqual(["skills-new"]);
+    expect(getPendingClientCommandAckIdsForTests()).not.toContain("skills-old");
+    expect(getPendingClientCommandAckIdsForTests()).not.toContain("skills-new");
+    expect(getLastReceivedServerSeqForTests()).toBe(3);
+    expect(socket.close).not.toHaveBeenCalled();
+    unsubscribe?.();
+  });
+
+  it("uses the canonical Skill fallback owner while a different conversation is pending and preserves that navigation", async () => {
+    const owner = "skills-owner", root = "C:/skills-project", socket = await connectSkillOwner(owner, root);
+    act(() => {
+      getWebSocket()?.send({ type: "conversation.switch", conversation_id: "pending-owner", client_command_id: "pending-navigation" });
+      useAppStore.setState({ pendingConversationSwitchId: "pending-owner" });
+      getWebSocket()?.send({ type: "skills.list", client_command_id: "fallback-old" });
+      getWebSocket()?.send({ type: "skills.list", client_command_id: "fallback-new" });
+      socket.emitMessage(skillCatalogReceipt("fallback-new", owner, root, "fresh", 1, 0));
+      socket.emitMessage(skillCatalogReceipt("fallback-old", owner, root, "obsolete", 2, 1));
+    });
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["fresh"]);
+    expect(latestProjectionCommandIds.get("foreground-intent")).toBe("pending-navigation");
+    expect(useAppStore.getState()).toMatchObject({ conversationId: owner, pendingConversationSwitchId: "pending-owner" });
+    act(() => socket.emitMessage({ type: "conversation.switched", client_command_id: "pending-navigation", client_command_type: "conversation.switch",
+      conversation_id: "pending-owner", is_hydrating: false, conversation: { id: "pending-owner", title: "Pending", updated_at: "2026-10-26", workspace_root: "C:/pending-project", messages: [] } }));
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "pending-owner", pendingConversationSwitchId: null });
+  });
+
+  it("does not supersede another Skill owner or another root while ordering repeated reads of the original scope", async () => {
+    const socket = await connectSkillOwner("A", "C:/one");
+    act(() => {
+      getWebSocket()?.send({ type: "skills.list", conversation_id: "A", workspace_root: "C:/one", client_command_id: "a-old" });
+      useAppStore.setState({ conversationId: "B", workingDirectory: "C:/one" });
+      getWebSocket()?.send({ type: "skills.list", conversation_id: "B", workspace_root: "C:/one", client_command_id: "b-original" });
+      useAppStore.setState({ conversationId: "A", workingDirectory: "C:/two" });
+      getWebSocket()?.send({ type: "skills.list", conversation_id: "A", workspace_root: "C:/two", client_command_id: "a-other-root" });
+      useAppStore.setState({ conversationId: "A", workingDirectory: "C:/one" });
+      getWebSocket()?.send({ type: "skills.list", conversation_id: "A", workspace_root: "C:/one", client_command_id: "a-new" });
+      socket.emitMessage(skillCatalogReceipt("a-new", "A", "C:/one", "a-fresh", 1, 0));
+      socket.emitMessage(skillCatalogReceipt("a-old", "A", "C:/one", "obsolete", 2, 1));
+    });
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["a-fresh"]);
+    act(() => {
+      useAppStore.setState({ conversationId: "B", workingDirectory: "C:/one" });
+      socket.emitMessage(skillCatalogReceipt("b-original", "B", "C:/one", "b-fresh", 3, 2));
+    });
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["b-fresh"]);
+    act(() => {
+      useAppStore.setState({ conversationId: "A", workingDirectory: "C:/two" });
+      socket.emitMessage(skillCatalogReceipt("a-other-root", "A", "C:/two", "other-root-fresh", 4, 3));
+    });
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["other-root-fresh"]);
+    expect(getLastReceivedServerSeqForTests()).toBe(4);
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["C:/Owned/Repo", "C:\\Owned\\Repo\\.\\sub\\..", "c:/owned/repo/"],
+    ["//Server/Share/Repo", "\\\\Server\\Share\\Repo\\.", "//server/share/repo/"],
+  ])("orders Skill receipts across aliases of the same Windows workspace (%s)", async (root, first, latest) => {
+    const owner = "alias-owner", socket = await connectSkillOwner(owner, root);
+    act(() => {
+      getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: first, client_command_id: "alias-old" });
+      getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: latest, client_command_id: "alias-new" });
+      socket.emitMessage(skillCatalogReceipt("alias-new", owner, root, "fresh", 1, 0));
+      socket.emitMessage(skillCatalogReceipt("alias-old", owner, root, "obsolete", 2, 1));
+    });
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["fresh"]);
+    expect(getLastReceivedServerSeqForTests()).toBe(2);
+    expect(socket.close).not.toHaveBeenCalled();
+  });
+
+  it.each(["buffered", "replay"] as const)("consumes an obsolete durable Skill receipt during recovery without projecting or notifying it (%s)", async mode => {
+    const owner = "recovery-owner", root = "C:/recovery-project", first = await connectSkillOwner(owner, root);
+    const observed: string[] = [];
+    const unsubscribe = getWebSocket()?.subscribe(value => {
+      const event = value as { type?: string; client_command_id?: string };
+      if (event.type === "skills.list") observed.push(event.client_command_id!);
+    });
+    act(() => {
+      getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: root, client_command_id: "recovery-old" });
+      getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: root, client_command_id: "recovery-new" });
+      acknowledgeSkillReads(first, "recovery-old", "recovery-new");
+      first.emitMessage(skillCatalogReceipt("recovery-new", owner, root, "fresh-before-reconnect", 1, 0));
+      first.emit("close", 1006);
+    });
+    act(() => vi.advanceTimersByTime(2_000));
+    const resumed = MockWebSocket.instances[1];
+    act(() => resumed.emit("open"));
+    await flushQueuedCommands();
+    const restore = sentCommands(resumed).find(command => command.type === "session.restore")!;
+    if (mode === "buffered") {
+      act(() => resumed.emitMessage(skillCatalogReceipt("recovery-old", owner, root, "obsolete", 2, 1)));
+      expect(getLastReceivedServerSeqForTests()).toBe(1);
+    }
+    act(() => resumed.emitMessage({ type: "session.restored", client_command_id: restore.client_command_id, client_command_type: "session.restore",
+      active_conversation_id: owner, conversation_switched_follows: false, current_seq: mode === "replay" ? 3 : 1, last_seq: 1,
+      requested_last_seq: 1, replayed_events: mode === "replay" ? 2 : 0, session: { active_conversation_id: owner, workspace_root: root, selected_model: "fixture-model" } }));
+    if (mode === "replay") act(() => resumed.emitMessage({ type: "session.replay", last_seq: 1, current_seq: 3, replayed_events: 2, events: [
+      skillCatalogReceipt("recovery-old", owner, root, "obsolete", 2, 1),
+      { type: "command.result", command: "skills.list", level: "info", message: "", data: { count: 1 }, conversation_id: owner,
+        workspace_root: root, seq: 3, previous_replay_seq: 2, event_id: "recovery-old-result" },
+    ] }));
+    await flushQueuedCommands();
+    const cursor = mode === "replay" ? 3 : 2;
+    expect(getLastReceivedServerSeqForTests()).toBe(cursor);
+    expect(observed).not.toContain("recovery-old");
+    expect(useAppStore.getState().availableSkills.some(skill => skill.name === "obsolete")).toBe(false);
+    expect(useAppStore.getState().connectionPhase).toBe("connected");
+    expect(resumed.close).not.toHaveBeenCalled();
+    const refresh = sentCommands(resumed).filter(command => command.type === "skills.list").at(-1)!;
+    act(() => resumed.emitMessage(skillCatalogReceipt(refresh.client_command_id!, owner, root, "fresh-after-reconnect", cursor + 1, cursor)));
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["fresh-after-reconnect"]);
+    expect(getLastReceivedServerSeqForTests()).toBe(cursor + 1);
+    unsubscribe?.();
+  });
+
+  it("does not consume a superseded durable Skill receipt across a real replay hole", async () => {
+    const owner = "hole-owner", root = "C:/hole-project", socket = await connectSkillOwner(owner, root);
+    act(() => {
+      getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: root, client_command_id: "hole-old" });
+      getWebSocket()?.send({ type: "skills.list", conversation_id: owner, workspace_root: root, client_command_id: "hole-new" });
+      socket.emitMessage(skillCatalogReceipt("hole-old", owner, root, "obsolete", 2, 1));
+    });
+    expect(getLastReceivedServerSeqForTests()).toBe(0);
+    expect(useAppStore.getState().availableSkills).toEqual([]);
+    expect(socket.close).toHaveBeenCalledWith(4002, "event replay required");
   });
 
 });

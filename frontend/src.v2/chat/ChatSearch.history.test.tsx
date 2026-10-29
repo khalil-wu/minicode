@@ -24,7 +24,7 @@ const pair = (index: number): ChatMessage[] => [
     blocks: [{ type: "text", itemId: `answer-${index}`, source: "model_final", status: "completed", isStreaming: false, content: index === 0 ? "historic-exact-needle" : `answer ${index}` }] },
 ];
 beforeEach(() => {
-  useAppStore.setState({ ...initial, messages: Array.from({ length: 60 }, (_, index) => pair(index)).flat(),
+  useAppStore.setState({ ...initial, reducedMotion: true, messages: Array.from({ length: 60 }, (_, index) => pair(index)).flat(),
     conversationId: "A", conversations: [{ id: "A", title: "search owner", updatedAt: "2026-09-30" }],
     isStreaming: false, conversationHistoryPages: {}, turnDiffs: {}, workingDirectory: "" }, true);
   vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} });

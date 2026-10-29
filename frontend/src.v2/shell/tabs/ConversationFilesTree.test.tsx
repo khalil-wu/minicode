@@ -7,9 +7,12 @@ const mocks = vi.hoisted(() => {
   return { tree: vi.fn(), original: vi.fn(), preview: vi.fn(), branches: vi.fn(), search: vi.fn(), upload: vi.fn(), openPreferred: vi.fn(), toast: vi.fn(), copy: vi.fn(), target: "minicode",
     perPath: {} as Record<string, string>, targets: [] as Array<{ id: string; label: string; kind: string; icon: string }> };
 });
-vi.mock("../../protocol/file-workspace", () => ({ readFileWorkspaceTree: mocks.tree, readFileWorkspaceOriginal: mocks.original, readFileWorkspaceBranches: mocks.branches, searchFileWorkspace: mocks.search }));
+vi.mock("../../protocol/file-workspace", async importOriginal => ({ ...await importOriginal<typeof import("../../protocol/file-workspace")>(),
+  readFileWorkspaceTree: mocks.tree, readFileWorkspaceOriginal: mocks.original, readFileWorkspaceBranches: mocks.branches, searchFileWorkspace: mocks.search }));
 vi.mock("../../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: { fileOpenTarget: mocks.target,
-  fileOpenTargetPerPath: mocks.perPath, fileOpenTargets: [{ id: "minicode", label: "MiniCode", kind: "editor", hidden: true }, { id: "system", label: "默认应用", kind: "systemDefault", hidden: true }, ...mocks.targets] } }) }));
+  fileOpenTargetPerPath: mocks.perPath } }) }));
+vi.mock("../../hooks/useDesktopPreferenceTargets", () => ({ useDesktopPreferenceTargets: () => ({ targets: { fileOpenTargets: [
+  { id: "minicode", label: "MiniCode", kind: "editor", hidden: true }, { id: "system", label: "默认应用", kind: "systemDefault", hidden: true }, ...mocks.targets], terminalShellTargets: [] } }) }));
 vi.mock("../../desktop/runtime", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../desktop/runtime")>()), desktop: () => ({ openPreferredPath: mocks.openPreferred }) }));
 vi.mock("../../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "session-a" }) }));
 vi.mock("../../protocol/api", async (importOriginal) => ({ ...(await importOriginal<typeof import("../../protocol/api")>()), uploadAttachment: mocks.upload }));
@@ -19,6 +22,9 @@ vi.mock("../../lib/clipboard", () => ({ copyText: mocks.copy }));
 import { useAppStore } from "../../stores";
 import { ConversationFilesTree } from "./ConversationFilesTree";
 import type { ConversationBrowserEntry, ConversationBrowserTree } from "../../protocol/conversation-browser";
+import { sendClientCommand } from "../../protocol/ws-outbox";
+import { handleSessionEvent } from "../../chat/sessionEvents";
+import { emptyConversationWorkbenchState } from "../../stores/ui-slice";
 
 const browserRoot = "C:/Users/ago/Documents";
 const owner = { scopeId: "conversation:owner-a", conversationId: "owner-a", executionCwd: "C:/tasks/a", browserRoot };
@@ -41,13 +47,53 @@ beforeEach(() => {
   mocks.search.mockResolvedValue({ results: [] });
   mocks.original.mockResolvedValue(new Blob(["original bytes\r\n"], { type: "text/plain" }));
   mocks.upload.mockResolvedValue({ conversation_id: "owner-a", artifact_id: "uploaded-original", attachment: { artifact_id: "uploaded-original", file_name: "note.txt", kind: "document", media_type: "text/plain" } });
+  vi.mocked(sendClientCommand).mockReturnValue(true);
   useAppStore.setState({ conversationId: "owner-a", pendingConversationSwitchId: null, conversations: [{ id: "owner-a", title: "Owner A", updatedAt: "", executionCwd: owner.executionCwd, projectlessBrowserRoot: browserRoot }],
     workingDirectory: owner.executionCwd, draft: "authored draft", attachments: [{ id: "existing", name: "keep.txt", type: "text/plain", size: 1, status: "ready" }],
+    activeConversationDraftId: null, conversationDrafts: {}, homeConversationDraftIds: {}, isConnected: true,
     composerDraftsReady: true, conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, sideChats: {}, editorOpenRequests: [], appMode: "chat", openWorkspaceFileTab: mocks.preview });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("read-only conversation Files tree", () => {
+  it("keeps the task collection filesystem root separate from the actual task Git workspace", async () => {
+    const base = "C:/tasks", cwd = `${base}/2026-10-25/report`;
+    const taskOwner = { scopeId: "conversation:task", conversationId: "task", executionCwd: cwd, browserRoot: base };
+    const file = "2026-10-25/report/outputs/alignment-check.md";
+    useAppStore.setState({ conversationId: "task", workingDirectory: cwd,
+      conversations: [{ id: "task", title: "Task", updatedAt: "", executionCwd: cwd, projectlessBrowserRoot: base }] });
+    mocks.tree.mockImplementation(async (_owner, path) => path === "." ? page([entry("2026-10-25", true)], base)
+      : page([entry(file)], base));
+    const { rerender } = render(<ConversationFilesTree owner={taskOwner} browserRoot={base} connected version={1} />);
+    await screen.findByText("2026-10-25");
+    expect(mocks.branches).not.toHaveBeenCalled();
+    mocks.branches.mockRejectedValueOnce(new Error("Workspace folder is not trusted."));
+    rerender(<ConversationFilesTree owner={taskOwner} browserRoot={base} rootSelected connected version={1} />);
+    await screen.findByText("Workspace folder is not trusted.");
+    expect(mocks.branches).toHaveBeenCalledTimes(1);
+    rerender(<ConversationFilesTree owner={taskOwner} browserRoot={cwd} connected version={1} />);
+    const row = await screen.findByText("alignment-check.md");
+    expect(row.closest('[role="treeitem"]')?.getAttribute("title")).toBe(`${cwd}/outputs/alignment-check.md`);
+    fireEvent.click(row);
+    expect(mocks.preview).toHaveBeenCalledWith(taskOwner, file, "alignment-check.md");
+    await waitFor(() => expect(mocks.branches).toHaveBeenCalledWith(taskOwner, expect.any(AbortSignal), undefined, cwd));
+    mocks.search.mockResolvedValue({ results: [{ path: file }] });
+    fireEvent.change(screen.getByRole("textbox", { name: "筛选文件" }), { target: { value: "alignment" } });
+    const match = await screen.findByText(file);
+    expect(match.closest('[role="treeitem"]')?.getAttribute("title")).toBe(`${cwd}/outputs/alignment-check.md`);
+    fireEvent.click(match);
+    expect(mocks.preview).toHaveBeenLastCalledWith(taskOwner, file, "alignment-check.md");
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "task", workingDirectory: cwd, draft: "authored draft" });
+  });
+
+  it("does not infer task-collection capability limits from an ancestor path alone", async () => {
+    const cwd = "C:/tasks/regular-project";
+    const regular = { scopeId: "conversation:regular", conversationId: "regular", executionCwd: cwd, browserRoot: "C:/tasks" };
+    useAppStore.setState({ conversationId: "regular", conversations: [{ id: "regular", title: "Regular", updatedAt: "", executionCwd: cwd }] });
+    render(<ConversationFilesTree owner={regular} browserRoot="C:/tasks" connected version={1} />);
+    await waitFor(() => expect(mocks.branches).toHaveBeenCalledWith({ ...regular, conversationId: null, executionCwd: "C:/tasks" }, expect.any(AbortSignal), undefined, "C:/tasks"));
+  });
+
   it("passes the selected repository and comparison to All changes and filters unloaded paths", async () => {
     mocks.branches.mockResolvedValue({ is_git_repo: true, current_branch: "feature", default_base_branch: "origin/main", branches: ["origin/main"], commits: [] });
     mocks.search.mockResolvedValue({ results: [{ path: "unloaded/deep.ts" }] });
@@ -148,10 +194,24 @@ describe("read-only conversation Files tree", () => {
     expect(await fileText(mocks.upload.mock.calls[0][2])).toBe("original bytes\r\n");
     expect(useAppStore.getState().draft).toBe("authored draft");
     expect(useAppStore.getState().attachments.map(item => item.name)).toEqual(["keep.txt", "note.txt"]);
-    act(() => useAppStore.setState({ conversationId: "owner-b", workingDirectory: "C:/tasks/b", draft: "B draft", attachments: [{ id: "b", name: "b.txt", type: "text/plain", size: 1, status: "ready" }] }));
+    act(() => {
+      useAppStore.setState(state => ({ conversations: [...state.conversations, { id: "owner-b", title: "B", updatedAt: "", executionCwd: "C:/tasks/b", workspaceRoot: "C:/tasks/b" }],
+        conversationWorkbenchStates: { ...state.conversationWorkbenchStates, "owner-b": { ...emptyConversationWorkbenchState(), draft: "B draft",
+          attachments: [{ id: "b", name: "b.txt", type: "text/plain", size: 1, status: "ready" }] } } }));
+      useAppStore.getState().requestConversationSwitch("owner-b");
+      const command = vi.mocked(sendClientCommand).mock.calls.find(([request]) => request.type === "conversation.switch" && request.conversation_id === "owner-b")![0];
+      const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never;
+      for (const hydrating of [true, false]) handleSessionEvent({ type: "conversation.switched", conversation_id: "owner-b",
+        client_command_id: command.client_command_id, client_command_type: "conversation.switch", is_hydrating: hydrating, context_pending: hydrating,
+        conversation: { id: "owner-b", title: "B", workspace_root: "C:/tasks/b", execution_cwd: "C:/tasks/b", messages: [] } } as never, buffers);
+    });
     await act(async () => resolveUpload({ conversation_id: "owner-a", artifact_id: "uploaded-original", attachment: { artifact_id: "uploaded-original", file_name: "note.txt", kind: "document" } }));
     await waitFor(() => expect(useAppStore.getState().conversationWorkbenchStates["owner-a"].attachments.at(-1)?.status).toBe("ready"));
     expect(useAppStore.getState().conversationWorkbenchStates["owner-a"].draft).toBe("authored draft");
+    const uploaded = useAppStore.getState().conversationWorkbenchStates["owner-a"].attachments.at(-1)!;
+    expect(uploaded.localFile).toBe(mocks.upload.mock.calls[0][2]);
+    expect(await fileText(uploaded.localFile!)).toBe("original bytes\r\n");
+    expect(mocks.upload).toHaveBeenCalledTimes(1);
     expect(useAppStore.getState()).toMatchObject({ conversationId: "owner-b", workingDirectory: "C:/tasks/b", draft: "B draft", attachments: [{ id: "b", name: "b.txt" }] });
   });
 

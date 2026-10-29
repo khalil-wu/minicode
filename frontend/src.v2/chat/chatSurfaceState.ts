@@ -176,6 +176,10 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     stderrPreview: outputLines(stderr),
     stdoutFull: stdout,
     stderrFull: stderr,
+    diagnostic: nativeBeforeExecutionTerminal && record.status !== "success"
+      ? record.developerDetail || record.errorInfo?.developer_detail
+        || (record.errorKind !== "approval_rejected" && record.errorKind !== "approval_aborted" ? getRecordOutputText(record) : undefined)
+      : undefined,
     outputArtifact: record.artifactId && !recordHasImageArtifact(record) ? {
       artifactId: record.artifactId,
       kind: canonicalArtifactKind(record.artifactKind, record.artifactMediaType, record),
@@ -290,6 +294,9 @@ const activityCell = (item: TurnActivityItem, message: ChatMessage): ActivityCel
         providerState: item.progress.at(-1)?.providerState,
         errorMessage: item.progress.at(-1)?.errorMessage,
         detail: item.progress.at(-1)?.detail,
+        ...(item.progress.length > 1 && item.progress.every(isProviderStreamError) ? {
+          errorDetails: item.progress.map(progress => progress.detail || progress.errorMessage!),
+        } : {}),
       }
     : undefined,
   skill: item.kind === "skill"
@@ -396,7 +403,9 @@ const projectProcessItem = (
       segment: item.segment,
       segmentClosed: item.segmentClosed,
     }));
-    if (item.records?.some((record) => ["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status))) rows.push(activityCell(item, message));
+    if (item.records?.some((record) => ["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status)
+      || record.name === "task" && !record.delegations && Array.isArray(record.args.parallel_tasks)
+        && taskResultAgentIds(record).length < record.args.parallel_tasks.length)) rows.push(activityCell(item, message));
     return { cells: rows };
   }
   if (item.kind === "fileChange") {
@@ -536,6 +545,7 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
     if (["failed", "blocked", "timeout", "partial", "cancelled"].includes(record.status)
       && !(["task", "spawn_agent"].includes(name) && record.delegations?.some((delegation) => delegation.started_at > 0))) continue;
     if (name === "send_message" || name === "followup_task") {
+      if (record.status !== "success") continue;
       const requestedRecipient = stringArg(name === "followup_task" ? record.args?.target : record.args?.target ?? record.args?.recipient);
       const recipients = record.recipientIds ?? (record.recipientId ? [record.recipientId] : requestedRecipient ? [requestedRecipient] : []);
       const content = (record.args.message as string | undefined) ?? "";
@@ -549,7 +559,8 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       continue;
     }
     if (name === "task_stop" || name === "interrupt_agent") {
-      const target = stringArg(name === "interrupt_agent" ? record.args?.target : record.args?.subagent_id) || "子智能体";
+      if (record.status !== "success") continue;
+      const target = record.recipientId || stringArg(name === "interrupt_agent" ? record.args?.target : record.args?.subagent_id) || "子智能体";
       cells.push(collaborationCell(record, "closed", [{
         agentId: target,
         agentLabel: collaborationAgentLabel(target),
@@ -572,6 +583,7 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       if (entries.length) cells.push(collaborationCell(record, "delegated", entries));
       continue;
     }
+    if (record.status !== "success" || name === "spawn_agent") continue;
     // TaskTool's actual triad-aligned batch field is ``parallel_tasks``.
     // ``subtasks`` never exists on the production schema and made the live
     // renderer miss successful parallel delegations despite unit tests passing.
@@ -579,15 +591,16 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
     const rawEntries = Array.isArray(rawSubtasks) && rawSubtasks.length > 0
       ? rawSubtasks
       : [record.args];
+    const actualIds = taskResultAgentIds(record);
+    if (actualIds.length !== rawEntries.length) continue;
     const entries = rawEntries.flatMap((raw, index) => {
       if (!raw || typeof raw !== "object") return [];
       const args = raw as Record<string, unknown>;
       const content = (args.prompt as string | undefined) ?? "";
-      const explicitId = taskResultAgentIds(record)[index];
-      const fallback = stringArg(args.description) || stringArg(args.agent_type) || `任务 ${index + 1}`;
-      const agentId = explicitId || fallback;
+      const explicitId = actualIds[index];
+      if (!explicitId) return [];
       const labels = [...new Set([stringArg(args.name), stringArg(args.description)].filter(Boolean))];
-      return [{ agentId, agentLabel: labels.join(" · ") || stringArg(args.agent_type) || collaborationAgentLabel(agentId), content }];
+      return [{ agentId: explicitId, agentLabel: labels.join(" · ") || stringArg(args.agent_type) || collaborationAgentLabel(explicitId), content }];
     });
     if (entries.length > 0) cells.push(collaborationCell(record, "delegated", entries));
   }
@@ -777,6 +790,27 @@ function buildTurn(
     workspaceRoot,
     toolImages,
   );
+  const terminalFailure = assistantMessage.failureMessage?.trim();
+  if (terminalFailure && (assistantMessage.terminalStatus === "failed" || assistantMessage.terminalStatus === "partial")) {
+    // Public failed provider progress is emitted only after retries finish,
+    // immediately before this terminal result. Its localized message can differ
+    // from the provider's original diagnostic, including for partial replies.
+    const providerTerminal = ["api_error", "api", "auth", "billing", "blocked", "model",
+      "provider_capability", "provider_protocol", "incomplete_tool_stream", "partial_stream_error", "partial_api_error"]
+      .includes(assistantMessage.terminationReason ?? "");
+    const providerFailure = [...projection.activityItems].reverse().find((item) =>
+      item.progress?.some((progress) => progress.providerState === "failed"
+        && progress.errorMessage?.trim() && (providerTerminal || terminalFailure === progress.errorMessage.trim())));
+    const index = providerFailure ? committedCells.findIndex((cell) => cell.kind === "error" && cell.id === providerFailure.id) : -1;
+    const existing = committedCells[index];
+    if (existing?.kind === "error") {
+      const detail = existing.rawError || existing.message;
+      committedCells[index] = { ...existing, message: terminalFailure,
+        title: assistantMessage.terminalStatus === "partial" ? "响应未完整结束" : "请求失败",
+        recoverable: assistantMessage.failureRecoverable ?? false,
+        rawError: !terminalFailure.includes(detail.trim()) ? detail : undefined };
+    }
+  }
   if (
     (assistantMessage.terminalStatus === "failed"
       || (assistantMessage.terminalStatus === "partial" && Boolean(assistantMessage.failureMessage)))
@@ -991,7 +1025,7 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
       if (index !== undefined) replaceCell(index, { ...base.committedCells[index], content: block.content } as ThinkingCellState);
     } else if (kind === "progress" && block.type === "progress") {
       // Several retry facts can project into one stable stream-error row.
-      if (isProviderStreamError(block)) return null;
+      if (isProviderStreamError(block) || block.toolName === "wait_agent") return null;
       const index = positions.get(block.id);
       if (index === -1) return null;
       if (index === undefined && block.status === "failed" && block.errorMessage?.trim()) return null;
@@ -1001,7 +1035,7 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
         replaceCell(index, { ...activityCell(projectProgressBlock(block), message), segment: previous.segment, segmentClosed: previous.segmentClosed });
       }
     } else if ((kind === "tool_output" || kind === "tool") && block.type === "tool_call") {
-      if (["tool_exec", "tool_wait"].includes(block.record.name)) return null;
+      if (["tool_exec", "tool_wait", "wait_agent"].includes(block.record.name)) return null;
       // The single-index path cannot update one-to-many action cells.
       if ((block.record.commandActions?.length ?? 0) > 1) return null;
       const index = positions.get(block.record.id);

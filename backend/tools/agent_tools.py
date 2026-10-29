@@ -3646,7 +3646,8 @@ class TaskTool(BaseTool):
                             await event_queue.put((event, consumed))
                             await consumed.wait()
                         await event_queue.put(None)
-                    except asyncio.CancelledError:
+                    except asyncio.CancelledError as exc:
+                        await event_queue.put(exc)
                         raise
                     except Exception as exc:
                         await event_queue.put(exc)
@@ -3911,6 +3912,8 @@ class TaskTool(BaseTool):
                                 event.data.get("status") or "completed"
                             )
                             terminal_reason = str(event.data.get("reason") or "")
+                            if terminal_reason == "guardian_denials":
+                                last_error = event.data["error"]["message"]
                             if isinstance(event.data.get("usage"), dict):
                                 terminal_usage = dict(event.data["usage"])
                             provider_raw = provider_raw_from_event_data(event.data)
@@ -3950,6 +3953,12 @@ class TaskTool(BaseTool):
                                     await queued_item
                         with suppress(asyncio.CancelledError, Exception):
                             await pump_task
+                    abort_error = child_run_context.turn_abort_error
+                    if (turn_state.terminal_status == "cancelled" and abort_error is not None
+                            and abort_error["turn_id"] == turn_run_id):
+                        terminal_status = "cancelled"
+                        terminal_reason = "guardian_denials"
+                        last_error = abort_error["message"]
                     turn_usage = (
                         child_run_context.llm_turn_context.usage
                         if child_run_context.llm_turn_context is not None
@@ -4462,10 +4471,12 @@ class TaskTool(BaseTool):
                 else None
             )
             cancel_reason = str(
+                terminal_reason if terminal_reason == "guardian_denials" else
                 (task_runtime_metadata or {}).get("cancel_reason") or "cancelled"
             ).strip()[:128]
+            cancel_error = last_error if cancel_reason == "guardian_denials" else "cancelled"
             record = None
-            retained = "".join(summary_parts).strip()
+            retained = sub_state.reply.strip() or "".join(summary_parts).strip()
             try:
                 worktree_note = await _cleanup_worktree()
                 if worktree_note:
@@ -4479,7 +4490,7 @@ class TaskTool(BaseTool):
                     subagent_id,
                     status="cancelled",
                     content=retained,
-                    error="cancelled",
+                    error=cancel_error,
                     duration_ms=elapsed_ms,
                     iterations=cumulative_iterations,
                     tool_call_count=cumulative_tool_calls,
@@ -4494,7 +4505,7 @@ class TaskTool(BaseTool):
                 record = runtime.complete_subagent(
                     subagent_id,
                     "cancelled",
-                    summary="cancelled",
+                    summary=cancel_error,
                     tool_count=cumulative_tool_calls,
                     **subagent_fence,
                 )
@@ -4503,7 +4514,7 @@ class TaskTool(BaseTool):
             if emit_event is not None:
                 done_event = AgentEvent.subagent_done(
                     subagent_id=subagent_id,
-                    error="cancelled",
+                    error=cancel_error,
                     status="cancelled",
                     termination_reason=cancel_reason,
                     duration_ms=elapsed_ms,
@@ -4516,7 +4527,7 @@ class TaskTool(BaseTool):
                 done_event.data["result"] = _terminal_result_payload(
                     status="cancelled",
                     content=retained,
-                    error="cancelled",
+                    error=cancel_error,
                     reason=cancel_reason,
                 )
                 prompt_cache_fork = _current_prompt_cache_fork_diagnostic()

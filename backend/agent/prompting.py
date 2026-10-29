@@ -737,7 +737,6 @@ class PromptBuilderV2:
         skill_context: str = "",
         memory_context: str = "",
         persistent_context: str = "",
-        git_status_context: str | None = None,
         model_instructions: str = "",
         model_slug: str = "",
         personality: str | None = None,
@@ -792,13 +791,6 @@ class PromptBuilderV2:
                     ("persistent_context", persistent_context.strip() if persistent_context else ""),
                 )
             )
-        # Session-start git snapshot lives in the cacheable context layer (after
-        # the stable boundary) and is stripped for subagents, which operate on a
-        # scoped task rather than the repo working tree.
-        if not is_subagent:
-            git_status = git_status_context
-            if git_status:
-                context_candidates.append(("git_status", git_status))
         # Path-matched rules can change as tools touch files during a turn.
         # Keep them last in the user-level project instruction fragment.
         context_candidates.append(("conditional_rules", conditional_rules.strip()))

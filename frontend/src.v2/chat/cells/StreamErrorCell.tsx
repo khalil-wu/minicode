@@ -17,7 +17,7 @@ export function StreamErrorCell({ cell }: { cell: ActivityCellState }) {
   const numbered = (progress.retryAttempt ?? 0) > 0 && progress.maxRetries !== undefined;
   const busy = progress.statusCode === 429 || progress.providerErrorCode === "server_is_overloaded";
   const summary = busy ? t("服务器繁忙，正在重连") : numbered ? t("正在重连") : progress.text;
-  const detail = progress.detail || progress.errorMessage!;
+  const details = progress.errorDetails ?? [progress.detail || progress.errorMessage!];
   return <div className="stream-error-cell" data-retry-attempt={progress.retryAttempt}>
     <button type="button" className="stream-error-summary" aria-expanded={expanded}
       onClick={() => { userToggled.current = true; setExpanded(value => !value); }}>
@@ -32,7 +32,7 @@ export function StreamErrorCell({ cell }: { cell: ActivityCellState }) {
       </svg>
     </button>
     {disclosure.mounted && <div ref={disclosure.element} aria-hidden={!expanded} style={{ pointerEvents: expanded ? "auto" : "none" }}>
-      <div className="stream-error-details">{detail}</div>
+      {details.map((detail, index) => <div key={index} className="stream-error-details">{detail}</div>)}
     </div>}
   </div>;
 }

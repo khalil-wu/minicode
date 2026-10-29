@@ -53,6 +53,8 @@ import { BrandIcon } from "../components/BrandIcon";
 import { SelectMenu } from "../components/SelectMenu";
 import { useAppStore } from "../stores";
 import { useTurnChanges } from "../chat/useTurnChanges";
+import { openArtifactPreview, openWorkspaceFilePreview } from "../chat/openAttachmentPreview";
+import { NewTabRecents, type NewTabRecentArtifact } from "./NewTabRecents";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { captureSteerTurnId } from "../lib/steer-command";
 import {
@@ -66,6 +68,7 @@ import { captureBrowserAnnotationAttachments } from "./browser-annotation-captur
 import { liveConversationWorkbenchState } from "../stores/ui-slice";
 import { pushToast } from "../overlays/ToastContainer";
 import { formatShortcut, matchesShortcut } from "../lib/keyboard-shortcuts";
+import { browserOwnerId, browserWorkbenchLayout, currentBrowserOwnerId, readBrowserWorkbench, writeBrowserWorkbench } from "../stores/browser-workbench";
 
 export type BrowserTabSummary = { id: string; title: string; active: boolean };
 
@@ -192,7 +195,10 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
   const { t } = useI18n();
   const { preferences } = useDesktopPreferences();
   const [addressFocused, setAddressFocused] = useState(false);
-  const conversationId = useAppStore((state) => state.conversationId) || "";
+  const serverConversationId = useAppStore((state) => state.conversationId) || "";
+  const hasChangesContext = useAppStore((state) => Boolean(state.conversationId || state.workingDirectory));
+  const conversationId = useAppStore(browserOwnerId);
+  const pendingConversationSwitchId = useAppStore((state) => state.pendingConversationSwitchId);
   const shortcutBindings = useAppStore((state) => state.shortcutBindings);
   const [terminalMenuAnchor, setTerminalMenuAnchor] = useState<HTMLButtonElement | null>(null);
   const rightStackTab = useAppStore((state) => state.rightStackTab);
@@ -200,7 +206,10 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
   const floatingComposerVisible = useAppStore((state) => state.rightPanelExpanded && state.rightPanelOpen);
   const addBrowserAnnotation = useAppStore((state) => state.addBrowserAnnotation);
   const addSelectedMention = useAppStore((state) => state.addSelectedMention);
-  const isStreaming = useAppStore((state) => state.isStreaming);
+  // Feedback controls only need the live stream state while this panel is the
+  // visible browser surface. Hidden browser tabs must not rerender on every
+  // assistant delta.
+  const isStreaming = useAppStore((state) => state.rightPanelOpen && state.rightStackTab === "browser" ? state.isStreaming : false);
   const isConnected = useAppStore((state) => state.isConnected);
   const [tabs, setRenderedTabs] = useState<BrowserTab[]>(() => [blankTab()]);
   const [activeId, setActiveId] = useState(() => tabs[0].id);
@@ -266,6 +275,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     setRenderedTabs(nextTabs);
   }, []);
   const createdIdsRef = useRef(new Set<string>());
+  const savedPagesToRestoreRef = useRef(new Set<string>());
   const visibleIdsRef = useRef(new Set<string>());
   const ownerRef = useRef(conversationId);
   const ownerGenerationRef = useRef(0);
@@ -285,7 +295,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     return onEmbeddedBrowserSettingsChanged(settings => { alwaysShowDeviceToolbar.current = settings.deviceToolbarAlwaysOnNewTabs; });
   }, []);
   const { summary: turnChanges, openReview } = useTurnChanges({
-    conversationId, tab: "browser", url: activeTab.url, targetId: activeTab.id,
+    conversationId: serverConversationId, tab: "browser", url: activeTab.url, targetId: activeTab.id,
   });
   const pageKey = JSON.stringify([conversationId, activeId, activeTab.url]);
   const annotationDraft = annotationDrafts[pageKey] ?? EMPTY_ANNOTATION_DRAFT;
@@ -331,7 +341,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
       for (const id of createdIdsRef.current) {
         void embeddedBrowserSetBounds({
           id,
-          conversationId: previousOwner,
+          conversationId: currentBrowserOwnerId(previousOwner),
           x: 0,
           y: 0,
           width: 0,
@@ -341,13 +351,16 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     }
     ownerRef.current = conversationId;
     const generation = ++ownerGenerationRef.current;
-    const initialTab = blankTab();
+    const saved = conversationId ? readBrowserWorkbench(conversationId) : null;
+    const initialTabs = saved?.tabs.length ? saved.tabs.map(tab => ({ ...blankTab(tab.id), ...tab })) : [blankTab()];
+    savedPagesToRestoreRef.current = new Set(initialTabs.filter(tab => tab.url).map(tab => tab.id));
+    const initialTab = initialTabs.find(tab => tab.id === saved?.activeId) ?? initialTabs[0];
     placeholderTab.current = initialTab.id;
     createdIdsRef.current.clear();
     visibleIdsRef.current.clear();
     navigationRequestsRef.current.clear();
     activeIdRef.current = initialTab.id;
-    setTabs([initialTab]);
+    setTabs(initialTabs);
     setActiveId(initialTab.id);
     setHydratedConversationId(null);
     setInspectorPage(null);
@@ -370,25 +383,27 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
         || ownerGenerationRef.current !== generation
         || ownerRef.current !== conversationId
         || !Array.isArray(targets)
-        || targets.length === 0
       ) return;
+      const observedIds = new Set(createdIdsRef.current);
       const restoredTabs = targets.map((target) => {
         if (!createdIdsRef.current.has(target.id) && target.url && target.url !== "about:blank") {
           visibleIdsRef.current.add(target.id);
         }
         createdIdsRef.current.add(target.id);
-        return updateTabFromEvent(blankTab(target.id), target);
+        savedPagesToRestoreRef.current.delete(target.id);
+        return updateTabFromEvent(initialTabs.find(tab => tab.id === target.id) ?? blankTab(target.id), target);
       });
-      const restoredIds = new Set(restoredTabs.map((tab) => tab.id));
       setTabs((current) => {
         const liveTabs = new Map(current.map((tab) => [tab.id, tab]));
+        const nativeTabs = new Map(restoredTabs.map(tab => [tab.id, tab]));
         return [
-          ...restoredTabs.map((tab) => liveTabs.get(tab.id) ?? tab),
-          ...current.filter((tab) => !restoredIds.has(tab.id) && createdIdsRef.current.has(tab.id)),
+          ...current.filter(tab => saved || createdIdsRef.current.has(tab.id)).map(tab => observedIds.has(tab.id) ? tab : nativeTabs.get(tab.id) ?? tab),
+          ...restoredTabs.filter(tab => !liveTabs.has(tab.id)),
+          ...(targets.length === 0 && !saved && !current.some(tab => createdIdsRef.current.has(tab.id)) ? [initialTab] : []),
         ];
       });
       const activeTarget = targets.find((target) => target.active) ?? targets[0];
-      if (!createdIdsRef.current.has(activeIdRef.current) || activeIdRef.current === initialTab.id) {
+      if (activeTarget && !saved && (!createdIdsRef.current.has(activeIdRef.current) || activeIdRef.current === initialTab.id)) {
         activeIdRef.current = activeTarget.id;
         setActiveId(activeTarget.id);
       }
@@ -402,6 +417,13 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     });
     return () => { cancelled = true; };
   }, [conversationId]);
+
+  useEffect(() => {
+    if (!conversationId || !browserHydrated || ownerRef.current !== conversationId
+      || browserOwnerId(useAppStore.getState()) !== conversationId) return;
+    writeBrowserWorkbench(conversationId, { activeId, tabs: tabs.map(({ id, title, url, draftUrl, faviconUrl }) =>
+      ({ id, title, url, draftUrl, faviconUrl })), layout: browserWorkbenchLayout(useAppStore.getState()) });
+  }, [conversationId, browserHydrated, tabs, activeId]);
 
   const syncBounds = useCallback(() => {
     if (!isDesktop()) return;
@@ -501,6 +523,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     const generation = ownerGenerationRef.current;
     if (!owner) return false;
     const request = (navigationRequestsRef.current.get(tabId) ?? 0) + 1;
+    savedPagesToRestoreRef.current.delete(tabId);
     navigationRequestsRef.current.set(tabId, request);
     const isCurrent = () => ownerRef.current === owner
       && ownerGenerationRef.current === generation
@@ -592,15 +615,17 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
   useEffect(() => {
     if (!isDesktop() || !browserHydrated) return;
     if (activeId !== activeIdRef.current) return;
-    if (!createdIdsRef.current.has(activeId)) {
-      // Keep the initial blank tab as UI state only. Create the native view
-      // when a real URL is navigated, so opening a link cannot leave an extra
-      // about:blank WebContents behind.
-      return;
-    }
     const owner = ownerRef.current;
     const generation = ownerGenerationRef.current;
     if (!owner) return;
+    if (!createdIdsRef.current.has(activeId)) {
+      for (const id of createdIdsRef.current) {
+        void embeddedBrowserSetBounds({ id, conversationId: owner, x: 0, y: 0, width: 0, height: 0 });
+      }
+      const savedTab = tabsRef.current.find(tab => tab.id === activeId);
+      if (savedTab?.url && savedPagesToRestoreRef.current.has(activeId)) void performNativeNavigation(savedTab.id, savedTab.url);
+      return;
+    }
     const navigationRequest = navigationRequestsRef.current.get(activeId);
     const isCurrent = () => ownerRef.current === owner && ownerGenerationRef.current === generation
       && activeIdRef.current === activeId && navigationRequestsRef.current.get(activeId) === navigationRequest;
@@ -614,7 +639,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
         : tab));
     });
     if (visibleIdsRef.current.has(activeId)) window.requestAnimationFrame(syncBounds);
-  }, [activeId, browserHydrated, reconcileNativeTab, syncBounds]);
+  }, [activeId, browserHydrated, performNativeNavigation, reconcileNativeTab, syncBounds]);
 
   const openTab = useCallback((requestedUrl = "") => {
     const reusableBlank = requestedUrl
@@ -640,6 +665,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
   const removeClosedTab = useCallback((tabId: string) => {
     visibleIdsRef.current.delete(tabId);
     createdIdsRef.current.delete(tabId);
+    savedPagesToRestoreRef.current.delete(tabId);
     navigationRequestsRef.current.delete(tabId);
     const index = tabsRef.current.findIndex((tab) => tab.id === tabId);
     if (index < 0) return;
@@ -672,13 +698,13 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
       if (event.type === "find-result" || event.type === "find-request" || event.type === "print-request") return;
       if (event.type === "numbered-shortcut" || event.type === "external-link-request") {
         const state = useAppStore.getState();
-        if (state.conversationId !== event.conversationId || state.pendingConversationSwitchId
+        if (browserOwnerId(state) !== event.conversationId || state.pendingConversationSwitchId
           || event.id !== activeIdRef.current || !createdIdsRef.current.has(event.id)
           || !state.rightPanelOpen || state.rightStackTab !== "browser") return;
         if (event.type === "numbered-shortcut") {
           const { target, index } = event.numberedShortcut!;
           window.dispatchEvent(new CustomEvent(target === "tabs" ? "select-numbered-tab" : "select-numbered-chat", {
-            detail: { index, conversationId: event.conversationId, surface: "sidebar" },
+            detail: { index, conversationId: state.conversationId, surface: "sidebar" },
           }));
         } else {
           void openExternal(event.requestedUrl!);
@@ -728,7 +754,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     const owner = ownerRef.current;
     for (const id of createdIdsRef.current) {
       if (owner) {
-        void embeddedBrowserSetBounds({ id, conversationId: owner, x: 0, y: 0, width: 0, height: 0 });
+        void embeddedBrowserSetBounds({ id, conversationId: currentBrowserOwnerId(owner), x: 0, y: 0, width: 0, height: 0 });
       }
     }
     visibleIdsRef.current.clear();
@@ -884,6 +910,18 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     removeClosedTab(tabId);
   };
 
+  const openRecentArtifact = (item: NewTabRecentArtifact, replaceTabId: string, owner: string) => {
+    const state = useAppStore.getState();
+    if (state.conversationId !== owner || ownerRef.current !== owner || state.pendingConversationSwitchId
+      || !state.rightPanelOpen || state.rightStackTab !== "browser" || activeIdRef.current !== replaceTabId
+      || !tabsRef.current.some(tab => tab.id === replaceTabId && !tab.url)) return;
+    const opened = item.artifactId ? openArtifactPreview({ artifactId: item.artifactId, name: item.label,
+      mediaType: item.mediaType, kind: item.kind, conversationId: owner })
+      : item.path ? openWorkspaceFilePreview({ path: item.path, name: item.label, mediaType: item.mediaType,
+        kind: item.kind, workspaceRoot: item.workspaceRoot, conversationId: owner }) : false;
+    if (opened) void closeTab(replaceTabId);
+  };
+
   const annotationItems = () => {
     const note = annotationNote.trim();
     return (pickedElements.length ? pickedElements : [null]).map((selectedElement) => {
@@ -929,7 +967,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
 
   const saveAnnotation = async () => {
     if (!annotationNote.trim() || !activeTab?.url) return;
-    const owner = conversationId;
+    const owner = serverConversationId;
     const initialWorkbench = liveConversationWorkbenchState(useAppStore.getState());
     const workspaceRoot = useAppStore.getState().workingDirectory;
     const submittedPage = pageKey;
@@ -959,7 +997,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     window.dispatchEvent(new Event("composer:focus"));
     requestAnimationFrame(() => {
       const current = useAppStore.getState();
-      if (current.conversationId !== conversationId || current.workingDirectory !== workspaceRoot) return;
+      if (current.conversationId !== owner || current.workingDirectory !== workspaceRoot) return;
       document.querySelector<HTMLTextAreaElement>("[data-composer-input]")?.focus();
     });
   };
@@ -968,7 +1006,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
     if (!annotationNote.trim() || !activeTab.url || feedbackSubmittingPage === pageKey) return;
     const submittedPage = pageKey;
     const submittedDraft = annotationDraft;
-    const owner = conversationId;
+    const owner = serverConversationId;
     const expectedTurnId = feedbackBusyBehavior === "steer" ? captureSteerTurnId(useAppStore.getState(), owner) : undefined;
     const items = annotationItems();
     setFeedbackSubmittingPage(submittedPage);
@@ -1230,10 +1268,10 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
 
       {moreMenuPosition && <BrowserPageActions position={moreMenuPosition} onClose={() => setMoreMenuPosition(null)} conversationId={conversationId} tabId={activeTab.id} url={activeTab.url}
         viewportEnabled={Boolean(viewport)} onViewportChange={enabled => setViewport(enabled ? { ...DEFAULT_DEVICE_VIEWPORT } : null)} />}
-      <BrowserFindBar key={pageKey} conversationId={conversationId} tabId={activeTab.id} />
+      <BrowserFindBar key={`find:${pageKey}`} conversationId={conversationId} tabId={activeTab.id} />
       {downloadsOpen && <BrowserDownloads onClose={() => setDownloadsOpen(false)} />}
 
-      {settingsOpen && activeTab.url && <BrowserSiteInfo key={pageKey} conversationId={conversationId} tabId={activeTab.id} url={activeTab.url} onClose={() => setSettingsPage(null)} />}
+      {settingsOpen && activeTab.url && <BrowserSiteInfo key={`site:${pageKey}`} conversationId={conversationId} tabId={activeTab.id} url={activeTab.url} onClose={() => setSettingsPage(null)} />}
 
       {inspectorOpen && activeTab.url && (
         <section className="mc-browser-inspector" aria-label={t("页面诊断")}>
@@ -1301,7 +1339,7 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
         </section>
       )}
 
-      {viewport && activeTab.url && <BrowserDeviceToolbar key={pageKey} conversationId={conversationId} tabId={activeTab.id} viewport={viewport} onChange={setViewport} />}
+      {viewport && activeTab.url && <BrowserDeviceToolbar key={`device:${pageKey}`} conversationId={conversationId} tabId={activeTab.id} viewport={viewport} onChange={setViewport} />}
       {annotationOpen && activeTab.url && (
         <div className="mc-browser-annotation" role="region" aria-label={t("页面批注")}>
           <div className="mc-browser-annotation-heading">
@@ -1341,10 +1379,10 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
           </details>
           <div className="mc-browser-annotation-actions">
             <button type="button" onClick={() => updateAnnotationDraft({ open: false })}>{t("收起")}</button>
-            <button type="button" disabled={!isConnected || !annotationNote.trim() || feedbackSubmittingPage === pageKey} onClick={() => void saveAnnotation()}>{t("加入对话")}</button>
+            <button type="button" disabled={!serverConversationId || !isConnected || !annotationNote.trim() || feedbackSubmittingPage === pageKey} onClick={() => void saveAnnotation()}>{t("加入对话")}</button>
             {isStreaming && <SelectMenu ariaLabel={t("页面反馈发送方式")} value={feedbackBusyBehavior} onValueChange={(value) => setFeedbackBusyBehavior(value as "queue" | "steer")}><option value="queue">{t("排队发送")}</option><option value="steer">{t("立即引导")}</option></SelectMenu>}
             <button type="button" className="mc-browser-feedback-send" aria-label={feedbackSubmittingPage === pageKey ? "正在提交页面反馈" : "发送页面反馈"} title={isStreaming ? feedbackBusyBehavior === "queue" ? "排队发送反馈" : "引导当前任务" : "发送页面反馈"}
-              disabled={!isConnected || !annotationNote.trim() || feedbackSubmittingPage === pageKey} onClick={() => void sendAnnotation()}>
+              disabled={!serverConversationId || !isConnected || !annotationNote.trim() || feedbackSubmittingPage === pageKey} onClick={() => void sendAnnotation()}>
               {feedbackSubmittingPage === pageKey ? <LoaderCircle className="mc-browser-spin" size={15} /> : <ArrowUp size={15} />}
             </button>
           </div>
@@ -1373,21 +1411,21 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
             }
           }} />}
         {!activeTab.url && (
-          <div className="mc-browser-empty">
+          <div className="mc-browser-empty" data-new-tab-scroll-root>
             <div className="mc-browser-new-tools" aria-label={t("工具")}>
               <h3>{t("工具")}</h3>
               <div className="mc-browser-tool-grid">
               {([
                 ["变更", FileDiff, "sidePanel", () => useAppStore.getState().setRightStackTab("diff")],
                 ["终端", TerminalSquare, "terminal", () => useAppStore.getState().setRightStackTab("terminal")],
-                ...conversationId ? [["侧边聊天", MessageSquarePlus, "openSideChat", () => { const state = useAppStore.getState(); openNewSideChat({ conversationId, workspaceRoot: state.workingDirectory, permissionMode: state.permissionMode }); }] as const] : [],
+                ...serverConversationId ? [["侧边聊天", MessageSquarePlus, "openSideChat", () => { const state = useAppStore.getState(); openNewSideChat({ conversationId: serverConversationId, workspaceRoot: state.workingDirectory, permissionMode: state.permissionMode }); }] as const] : [],
                 ["文件", FolderOpen, "fileTree", () => useAppStore.getState().setRightStackTab("files")],
               ] as const).map(([label, Icon, shortcut, action]) => <div className="mc-browser-tool-card" key={label}>
-                <button type="button" aria-label={t(label)} onClick={() => { action(); void closeTab(activeTab.id); }}>
+                <button type="button" aria-label={t(label)} disabled={label === "变更" ? !hasChangesContext : label === "终端" && !serverConversationId} onClick={() => { action(); void closeTab(activeTab.id); }}>
                   <Icon size={16} strokeWidth={1.5} aria-hidden="true" /><span>{t(label)}</span>
                   {shortcutBindings[shortcut].length > 0 && <kbd>{formatShortcut(shortcutBindings[shortcut][0])}</kbd>}
                 </button>
-                {label === "终端" && <button type="button" className="mc-browser-terminal-options" aria-label={t("终端选项")}
+                {label === "终端" && <button type="button" disabled={!serverConversationId} className="mc-browser-terminal-options" aria-label={t("终端选项")}
                   aria-haspopup="menu" aria-expanded={Boolean(terminalMenuAnchor)} onClick={event => setTerminalMenuAnchor(event.currentTarget)}><MoreHorizontal size={16} /></button>}
               </div>)}
               </div>
@@ -1397,6 +1435,8 @@ export const BrowserPanel = ({ tabHosts, tabInteractions, onTabsChanged, onTabCl
                   onClick: () => { useAppStore.getState().openBottomTab("terminal"); void closeTab(activeTab.id); },
                 }]} />}
             </div>
+            {serverConversationId && browserVisible && !pendingConversationSwitchId && <NewTabRecents key={`${serverConversationId}:${activeTab.id}`}
+              conversationId={serverConversationId} replaceTabId={activeTab.id} onOpen={openRecentArtifact} />}
           </div>
         )}
       </div>

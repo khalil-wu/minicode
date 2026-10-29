@@ -6,7 +6,7 @@ const path = require("node:path");
 const { JSDOM } = require("jsdom");
 const animations = require("../frontend/public/pets/animations.json");
 
-async function renderer(t, tasks = [], overrides = {}, onAction) {
+async function renderer(t, tasks = [], overrides = {}, onAction, options = {}) {
   const dom = new JSDOM(fs.readFileSync(path.join(__dirname, "pet-window.html"), "utf8"), { runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const actions = [];
@@ -14,7 +14,13 @@ async function renderer(t, tasks = [], overrides = {}, onAction) {
   let changed;
   const state = { pets: [{ id: "codex", displayName: "Codex", spriteVersionNumber: 2, updatedAt: 0 }], selectedPetId: "codex", size: 112, petVisible: true, miniOpen: true,
     activity: { running: false, waiting: false, failed: false, review: false, tasks }, reducedMotion: true, locale: "en-US", animations, layout: { noticeHeight: tasks.length * 76 }, ...overrides };
-  dom.window.matchMedia = () => ({ matches: false, addEventListener() {} });
+  dom.window.matchMedia = () => ({ matches: Boolean(options.systemReducedMotion), addEventListener() {} });
+  const timers = new Map();
+  if (options.fakeTimers) {
+    let nextTimer = 0;
+    dom.window.setTimeout = callback => { const id = ++nextTimer; timers.set(id, callback); return id; };
+    dom.window.clearTimeout = id => timers.delete(id);
+  }
   dom.window.miniPet = { getState: async () => state, getSprite: async id => { spriteRequests.push(id); return "data:image/webp;base64,fixture"; }, act: async (action, payload) => { actions.push({ action, payload }); return onAction?.(action, payload); }, onState: callback => { changed = callback; }, onError() {} };
   dom.window.eval(fs.readFileSync(path.join(__dirname, "pet-window.js"), "utf8"));
   const flush = () => new Promise(resolve => setImmediate(resolve));
@@ -26,7 +32,7 @@ async function renderer(t, tasks = [], overrides = {}, onAction) {
     const event = new dom.window.MouseEvent(type, { button: 0, screenX: x, screenY: y, bubbles: true });
     Object.defineProperty(event, "pointerId", { value: 1 }); element.dispatchEvent(event);
   }
-  return { dom, pet, bar, actions, spriteRequests, state, pointer, changed: next => changed(next), flush };
+  return { dom, pet, bar, actions, spriteRequests, state, pointer, changed: next => changed(next), flush, timers };
 }
 
 test("None renders a live Mini bar and actual notices without requesting a sprite", async t => {
@@ -72,6 +78,20 @@ test("reduced motion and the true running or approval state use the correct atla
   assert.equal(h.pet.style.backgroundPosition, "0% 70%");
   h.changed({ ...h.state, activity: { running: false, waiting: true, failed: false, review: false, tasks: [] } }); await h.flush();
   assert.equal(h.pet.style.backgroundPosition, "0% 60%");
+});
+
+test("Mini follows the resolved app motion setting even when the system preference differs", async t => {
+  const h = await renderer(t, [], { reducedMotion: false }, undefined, { systemReducedMotion: true, fakeTimers: true });
+  assert.equal(h.pet.style.backgroundPosition, "0% 0%");
+  assert.equal(h.timers.size, 1);
+  const [id, nextFrame] = h.timers.entries().next().value;
+  h.timers.delete(id); nextFrame();
+  assert.ok(Math.abs(parseFloat(h.pet.style.backgroundPosition) - 100 / 7) < 0.001);
+  h.changed({ ...h.state, reducedMotion: true }); await h.flush();
+  assert.equal(h.pet.style.backgroundPosition, "0% 0%");
+  assert.equal(h.timers.size, 0);
+  h.changed({ ...h.state, reducedMotion: false }); await h.flush();
+  assert.equal(h.timers.size, 1);
 });
 
 test("real request labels are the only reply buttons and a rejected reply stays in the card", async t => {

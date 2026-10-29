@@ -5,7 +5,7 @@ import { fetchCodeReviewOptions } from "../protocol/code-review";
 import type { CodeReviewOptions } from "../protocol/code-review-types";
 import "./CodeReviewMenu.css";
 
-export interface CodeReviewOwner { conversationId?: string; cwd: string; input: string; selectedCommand: string | null; dismissed?: boolean; }
+export interface CodeReviewOwner { conversationId?: string; draftId?: string | null; cwd: string; input: string; selectedCommand: string | null; dismissed?: boolean; }
 
 export function CodeReviewMenu({ owner, pending, onClose, onSelect }: {
   owner: CodeReviewOwner; pending: boolean; onClose: () => void;

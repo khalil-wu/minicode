@@ -11,6 +11,7 @@ const searchWorkspaceFiles = vi.fn();
 const isDesktop = vi.fn(() => true);
 
 vi.mock("../desktop/runtime", () => ({
+  desktop: () => undefined,
   isDesktop: () => isDesktop(),
   fsListTree: (path: string) => fsListTree(path),
   fsSearchFiles: (...args: unknown[]) => fsSearchFiles(...args),

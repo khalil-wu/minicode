@@ -1,7 +1,7 @@
 {
   "审查结果呈现方式": "Review delivery",
   "尽可能在当前聊天中启动 /review，或启动单独的审查聊天": "Start /review in the current chat when possible or launch a separate review chat",
-  "内嵌": "Inline",
+  "内联": "Inline",
   "单独": "Detached",
   "压缩合并": "Squash",
   "Git 偏好": "Git preferences",

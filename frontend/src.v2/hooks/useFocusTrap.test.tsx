@@ -82,6 +82,16 @@ describe("useFocusTrap", () => {
     expect(document.body.style.overflow).toBe("");
   });
 
+  it("preserves a new navigation focus when its old dialog deactivates", () => {
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 0; });
+    const view = render(<><button>Next settings page</button><Harness active /></>);
+    const destination = within(view.container).getByText("Next settings page");
+    destination.focus();
+    view.rerender(<><button>Next settings page</button><Harness active={false} /></>);
+    expect(document.activeElement).toBe(destination);
+    expect(document.body.style.overflow).toBe("");
+  });
+
   it("restores the remaining dialog when a nested trigger was removed", () => {
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { callback(0); return 0; });
     const Trap = ({ children }: { children: ReactNode }) => {

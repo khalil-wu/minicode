@@ -20,7 +20,7 @@ const onRadioGroupKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
 };
 const THEMES = [{ id: "system", label: "系统" }, { id: "light", label: "浅色" }, { id: "dark", label: "深色" }] as const;
 
-function AppearanceSettings() {
+function AppearanceSettings({ active }: { active: boolean }) {
   const { t } = useI18n();
   const themeMode = useAppStore(state => state.themeMode), resolved = useAppStore(state => state.resolvedTheme);
   const themes = useAppStore(state => state.appearanceThemes);
@@ -53,7 +53,7 @@ function AppearanceSettings() {
           </button>)}
         </div>
       </div></div>
-      {variants.map(variant => <AppearanceColors key={variant} variant={variant} separateModes={separateModes} />)}
+      {variants.map(variant => <AppearanceColors key={variant} variant={variant} separateModes={separateModes} active={active} />)}
     </section>
     <EditorPreferencesSettings canReset={canReset} onReset={reset}>
       <section className="settings-group"><div className="settings-card">
@@ -73,7 +73,7 @@ function AppearanceSettings() {
           <button type="button" className="settings-toggle" role="switch" aria-label={t("分别设置浅色和深色模式")} aria-checked={separateModes} data-active={separateModes} onClick={() => setSeparateModes(!separateModes)}><span /></button>
         </div>
       </div></section>
-      {variants.map(variant => <AppearanceColors advanced key={variant} variant={variant} separateModes={separateModes} />)}
+      {variants.map(variant => <AppearanceColors advanced key={variant} variant={variant} separateModes={separateModes} active={active} />)}
       <section className="settings-group"><div className="settings-card">
         <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("差异标记")}</div><div className="settings-row-description">{t("使用颜色或 +/- 标记显示更改")}</div></div>
           <div className="appearance-segmented" role="radiogroup" aria-label={t("差异标记")} onKeyDown={onRadioGroupKeyDown}>
@@ -89,4 +89,4 @@ function AppearanceSettings() {
   </>;
 }
 
-export const AppearanceTab = () => <AppearanceFontCatalogProvider><AppearanceWindowCapabilitiesProvider><AppearanceSettings /></AppearanceWindowCapabilitiesProvider></AppearanceFontCatalogProvider>;
+export const AppearanceTab = ({ active = true }: { active?: boolean }) => <AppearanceFontCatalogProvider><AppearanceWindowCapabilitiesProvider><AppearanceSettings active={active} /></AppearanceWindowCapabilitiesProvider></AppearanceFontCatalogProvider>;

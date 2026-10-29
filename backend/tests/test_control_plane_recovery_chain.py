@@ -107,17 +107,18 @@ def test_handoff_samples_one_local_checkout_once(tmp_path, monkeypatch):
     commands = []
     def git(root, *args, **kwargs):
         commands.append(args)
-        if args[0] == "status": return True, ""
-        if args[0] == "rev-parse": return True, "HEAD-ID"
-        if args[0] == "branch": return True, "main"
+        if args[0] == "status": return True, "# branch.oid HEAD-ID\0# branch.head main\0"
         return False, "ref absent"
     monkeypatch.setattr("backend.services.conversation_worktree_handoff_service._git_snapshot", git)
     conversation = SimpleNamespace(id="owner", workspace_root=str(tmp_path), worktree_path="", git_isolated=False, git_branch="")
     result = build_handoff_preflight(conversation, target="worktree", conversation_repo=SimpleNamespace(list_conversations=lambda: []), main_worktree_root=lambda _path: tmp_path, has_running_turn=False)
     assert result["allowed"] is True
-    assert commands.count(("status", "--porcelain=v1", "--untracked-files=all")) == 1
-    assert commands.count(("rev-parse", "HEAD")) == 1
-    assert commands.count(("branch", "--show-current")) == 1
+    assert commands == [
+        ("status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all", "--ignored=traditional"),
+        ("show-ref", "--verify", "refs/heads/codex/owner"),
+    ]
+    assert result["source"]["head"] == "HEAD-ID"
+    assert result["source"]["branch"] == "main"
 
 
 @pytest.mark.asyncio

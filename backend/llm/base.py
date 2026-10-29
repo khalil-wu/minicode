@@ -755,6 +755,11 @@ class LLMMessage:
         Only the explicit provenance field can identify an app-owned prefix.
         Literal tags supplied by a user remain part of their original text.
         """
+        if self.input_origin == "agent" and self.provider_items:
+            parts = [part for item in self.provider_items if item["type"] == "agent_message" for part in item["content"]]
+            if any(part["type"] == "encrypted_content" for part in parts):
+                raise ValueError("Encrypted agent messages require the Responses API")
+            return [part["text"] for part in parts]
         text = self.content or ""
         if self.is_user_input and self.runtime_context:
             reminder = f"<system-reminder>\n{self.runtime_context}\n</system-reminder>"
@@ -788,7 +793,7 @@ class LLMMessage:
             if parts:
                 msg["content"] = parts
         else:
-            msg["content"] = self.content or ""
+            msg["content"] = "".join(text_parts) if self.role == "user" else self.content or ""
 
         if self.role == "tool" and self.mcp_output is not None:
             from backend.mcp.result_projection import mcp_text_output

@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useRef } from "react";
 import { useAppStore } from "../stores";
+import { adoptConversationDraftContent, newConversationDraftContext } from "../stores/conversation-drafts";
+import { emptyComposerDraft } from "../stores/composer-drafts";
 import { ComposerTextarea } from "./ComposerTextarea";
 import { Composer } from "./Composer";
 import { documentPosition, markdownOffset, parseComposerMarkdown, richComposerSchema as schema, richDocumentState, serializeComposerDocument } from "./rich-composer-document";
@@ -285,7 +287,7 @@ it("sends serialized Markdown through the existing Composer and restores the ric
   mocks.send.mockImplementationOnce(async options => {
     const id = options.userMessageId as string;
     useAppStore.setState(state => ({ messages: [...state.messages, { id, role: "user", content: options.displayContent as string, timestamp: 1, artifacts: [] }] }));
-    (options.onReceived as () => void)();
+    (options.onSubmitted as () => void)();
     (options.onRejected as () => void)();
     return false;
   });
@@ -300,4 +302,66 @@ it("sends serialized Markdown through the existing Composer and restores the ric
   expect(mocks.send.mock.calls[0][0]).toMatchObject({ displayContent: markdown, backendContent: markdown });
   expect(useAppStore.getState().richDraft?.document).toEqual(saved?.document);
   expect(screen.getByRole("textbox", { name: "消息输入" }).querySelector("pre")).toBeTruthy();
+});
+
+it("clears the actual rich editor on local acceptance and keeps identical new typing through late completion", async () => {
+  let finish!: (value: boolean) => void;
+  mocks.send.mockImplementationOnce(options => {
+    useAppStore.setState(state => ({ messages: [...state.messages, { id: options.userMessageId as string,
+      role: "user", content: options.displayContent as string, timestamp: 1, artifacts: [] }] }));
+    (options.onSubmitted as () => void)();
+    return new Promise<boolean>(resolve => { finish = resolve; });
+  });
+  render(<Composer />);
+  const input = screen.getByRole("textbox", { name: "消息输入" });
+  paste(input, "**同样的新内容**");
+  await waitFor(() => expect(useAppStore.getState().richDraft).toBeTruthy());
+  const submitted = useAppStore.getState().draft;
+  fireEvent.keyDown(input, { key: "Enter", code: "Enter", ctrlKey: true });
+  await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+  expect(useAppStore.getState().draft).toBe("");
+  expect(input.textContent).toBe("");
+  paste(input, "**同样的新内容**");
+  await waitFor(() => expect(useAppStore.getState().draft).toBe(submitted));
+  await act(async () => finish(true));
+  expect(useAppStore.getState().draft).toBe(submitted);
+  expect(input.querySelector("strong")?.textContent).toBe("同样的新内容");
+});
+
+it.each([false, true])("Enter clears the real rich editor while first-conversation creation is pending, newer input=%s", async newer => {
+  const materialize = useAppStore.getState().materializeConversationDraft;
+  const context = newConversationDraftContext(useAppStore.getState(), "C:/rich-owner", true);
+  let finishCreation!: () => void;
+  const creation = new Promise<void>(resolve => { finishCreation = resolve; });
+  const owner = "created-rich-owner";
+  useAppStore.setState({ conversationId: null, activeConversationDraftId: context.id, conversations: [], messages: [],
+    conversationDrafts: { [context.id]: context }, conversationWorkbenchStates: {},
+    workspaceComposerDrafts: { [context.id]: emptyComposerDraft() }, draft: "", richDraft: undefined,
+    materializeConversationDraft: async id => {
+      await creation;
+      adoptConversationDraftContent(id, owner);
+      useAppStore.setState({ conversations: [{ id: owner, title: "first rich prompt", workspaceRoot: "C:/rich-owner" }] });
+      useAppStore.getState().applyConversationSwitched({ conversationId: owner });
+      return owner;
+    } });
+  mocks.send.mockImplementationOnce(async options => { (options.onSubmitted as () => void)(); return true; });
+  try {
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "消息输入" });
+    paste(input, "**first rich prompt**");
+    fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
+    expect(useAppStore.getState().draft).toBe("");
+    expect(input.textContent).toBe("");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(useAppStore.getState().conversationDrafts[context.id].pendingUserMessage?.content).toBe("**first rich prompt**");
+    if (newer) paste(input, "**new unsent prompt**");
+    await act(async () => finishCreation());
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ displayContent: "**first rich prompt**", conversationId: owner }));
+    expect(useAppStore.getState().draft).toBe(newer ? "**new unsent prompt**" : "");
+    expect(input.textContent).toBe(newer ? "new unsent prompt" : "");
+    expect(useAppStore.getState().conversationWorkbenchStates[owner]?.draft).toBe(newer ? "**new unsent prompt**" : "");
+  } finally {
+    useAppStore.setState({ materializeConversationDraft: materialize });
+  }
 });

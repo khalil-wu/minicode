@@ -187,15 +187,18 @@ async def _release_host(host):
 
 
 class CuaReplMCPClient(NodeReplMCPClient):
-    def __init__(self, config, attachment, network, *, on_disconnect, on_tools_changed):
+    def __init__(self, config, attachment, network, *, on_disconnect, on_tools_changed, feature_flags=None,
+            requires_read_only_tools=False):
         from backend.mcp.native_cua_runtime import is_native_cua
         self.native = is_native_cua(config)
         self.runtime = None if self.native else CuaRuntime.selected(config)
         from backend.mcp.cua_approval_store import native_approval_home
         self.home = native_approval_home() if self.native else agent_runtime_root() / "computer-use"
         self.host = None
-        super().__init__(config, attachment, network, on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
-        self._startup_timeout = 120
+        super().__init__(config, attachment, network, on_disconnect=on_disconnect,
+            on_tools_changed=on_tools_changed, feature_flags=feature_flags,
+            requires_read_only_tools=requires_read_only_tools)
+        self._startup_timeout = config.startup_timeout_sec if config.startup_timeout_sec is not None else 120
 
     def _tool_request_timeout_seconds(self, params):
         return super()._tool_request_timeout_seconds(params) + 300
@@ -248,7 +251,8 @@ class CuaReplCompanions(NodeReplCompanions):
     source_prefix = SOURCE_PREFIX
     client_type = CuaReplMCPClient
 
-    async def admit(self, attachment, network, selected, *, app_access=None):
+    async def admit(self, attachment, network, selected, *, app_access=None, feature_flags=None,
+            requires_read_only_tools=False):
         from backend.mcp.native_cua_runtime import is_native_cua, native_cua_config
         native = is_native_cua(selected)
         if native:
@@ -258,7 +262,9 @@ class CuaReplCompanions(NodeReplCompanions):
         identity = json.dumps([id(attachment.environment), attachment.permission_scope.identity(), _env_policy(attachment),
             attachment.config.mcp_policy, network.identity() if network is not None else None,
             selected.command, selected.args, selected.env, selected.source, selected.config_path,
-            selected.plugin_id, selected.plugin_server_name], sort_keys=True)
+            selected.plugin_id, selected.plugin_server_name,
+            (feature_flags.enabled("mcp_roots"), feature_flags.enabled("mcp_elicitation"))
+                if feature_flags is not None else None, requires_read_only_tools], sort_keys=True)
         key = hashlib.sha256(identity.encode()).hexdigest()
         config = replace(selected, source=SOURCE_PREFIX + key, cwd=attachment.selection.cwd,
             environment_id=attachment.selection.environment_id if native else "local")
@@ -269,8 +275,16 @@ class CuaReplCompanions(NodeReplCompanions):
                 if old.views == 0:
                     await self._close(old)
             self.active_key = key
+            returning = self.instances.get(key)
+            if returning is not None and returning.connection is not None and returning.connection.closed:
+                returning.retired = True
+                if returning.views == 0:
+                    await self._close(returning)
+                if self.instances.get(key) is returning:
+                    self.instances.pop(key)
             if key not in self.instances:
-                self.instances[key] = _Companion(key, config, attachment, network)
+                self.instances[key] = _Companion(key, config, attachment, network, feature_flags=feature_flags,
+                    requires_read_only_tools=requires_read_only_tools)
             self.instances[key].retired = False
         return config
 
@@ -318,7 +332,8 @@ async def register_cua_companion(run_context, agent_session, *, execution):
         stack = execution.config.config_layer_stack
         app_access = stack.effective_config().get("computer_use", {}) if stack is not None else {}
     config = await owner.admit(attachment, run_context.network_step.policy_for(attachment), selected,
-        app_access=app_access)
+        app_access=app_access, feature_flags=execution.config.feature_flags,
+        requires_read_only_tools=manager._requires_read_only_tools)
     config = manager.environment_runtime.apply_authority(config)
     if execution.model_info is not None and execution.model_info.extra.get("node_repl_disabled", False):
         config = replace(config, enabled=False, disabled_reason="The selected model disables node_repl")
@@ -328,7 +343,7 @@ async def register_cua_companion(run_context, agent_session, *, execution):
         await owner.retire(config)
         await manager.register_config(config)
         return
-    await manager.start_server(config)
-    if config.required and manager.get_client(config.name) is None:
-        raise RuntimeError("Required CUA runtime failed to initialize: " + manager._servers[config.name].last_error)
+    await manager.ensure_server_startup(config)
+    await manager.capture_startup_readiness(names=(config.name,))
+    manager.validate_required_startups(names=(config.name,))
     run_context.cua_repl_turn = CuaTurn(owner.instances[config.source.removeprefix(SOURCE_PREFIX)], prepared.thread_id, prepared.turn_id)

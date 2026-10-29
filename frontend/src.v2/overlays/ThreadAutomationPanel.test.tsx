@@ -13,7 +13,7 @@ import { openAutomations, openThreadAutomationEditor, openThreadAutomationSettin
 const mocks = vi.hoisted(() => ({ send: vi.fn(), toast: vi.fn(), preferences: vi.fn() }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommandAwaitResult: mocks.send, commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed" }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
-vi.mock("../desktop/runtime", () => ({ getDesktopPreferences: mocks.preferences }));
+vi.mock("../desktop/runtime", () => ({ desktop: () => undefined, getDesktopPreferences: mocks.preferences }));
 
 const owner = { id: "pane-A", title: "Chat A", workspaceRoot: "C:/A", permissionMode: "auto" as const };
 const rule = "RRULE:FREQ=MINUTELY;INTERVAL=30";

@@ -7,6 +7,7 @@ import { isDesktop, ptyKillConversation, ptyList, embeddedBrowserCloseConversati
 import { sendPromptResponseCommand } from "../protocol/ws-outbox";
 
 vi.mock("../desktop/runtime", () => ({
+  desktop: () => undefined,
   isDesktop: vi.fn(() => false),
   ptyKillConversation: vi.fn(async () => 1),
   ptyList: vi.fn(async () => []),

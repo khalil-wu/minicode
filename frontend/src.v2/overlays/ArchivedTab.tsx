@@ -22,10 +22,11 @@ import { searchResultConversation } from "../protocol/conversation-search";
 import "./ArchivedTab.css";
 
 type ArchiveMenu = { anchor: HTMLButtonElement; kind: "filter" | "project"; project?: string };
+const EMPTY_CONVERSATIONS: never[] = [];
 
 export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTMLElement | null; active?: boolean }) => {
   const { t, locale } = useI18n();
-  const conversations = useAppStore(state => state.conversations);
+  const conversations = useAppStore(state => active ? state.conversations : EMPTY_CONVERSATIONS);
   const workspaces = useAppStore(state => state.recentWorkspaces);
   const runtimeCapabilities = useAppStore(state => state.runtimeCapabilities);
   const archived = conversations.filter(conversation => conversation.archived && conversation.conversationType !== "side_chat");

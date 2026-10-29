@@ -18,7 +18,7 @@ from typing import Any
 from backend.agent.instruction_discovery import _get_managed_minicode_dir
 from backend.agent.markdown_scopes import get_minicode_config_home_dir
 from backend.config import PROJECT_ROOT, STATE_ROOT
-from backend.feature_flags import feature_enabled
+from backend.feature_flags import load_feature_flags
 from backend.skills.frontmatter import parse_skill_frontmatter
 from backend.skills.config import SkillsConfiguration, skills_configuration_from_stack
 
@@ -108,8 +108,10 @@ class SkillLoader:
     def skills_configuration(self) -> SkillsConfiguration:
         return self._skills_configuration
 
-    def restrict_role(self, config: dict[str, Any], features: dict[str, bool]) -> None:
+    def restrict_role(self, config: dict[str, Any], features: dict[str, bool]) -> bool:
         """Layer Codex role restrictions onto this child-owned loader."""
+        previous = (len(self._role_disabled_paths), len(self._role_disabled_names),
+            self._role_bundled_enabled, self._role_plugins_enabled)
         for entry in config.get("config", []):
             if entry["enabled"] is not False:
                 continue
@@ -122,6 +124,29 @@ class SkillLoader:
                 logger.warning("Ignoring skills.config entry without exactly one non-empty path or name selector")
         self._role_bundled_enabled = self._role_bundled_enabled and config.get("bundled", {}).get("enabled", True)
         self._role_plugins_enabled = self._role_plugins_enabled and features.get("plugins", True)
+        return previous != (len(self._role_disabled_paths), len(self._role_disabled_names),
+            self._role_bundled_enabled, self._role_plugins_enabled)
+
+    def _role_allows(self, meta: SkillMeta, *, source_path_key: str | None = None) -> bool:
+        if self._role_disabled_paths and (
+            (source_path_key if source_path_key is not None else self._path_key(meta.source_path)) in self._role_disabled_paths
+            or self._path_key(meta.source_path.parent) in self._role_disabled_paths
+        ):
+            return False
+        return not (
+            meta.name in self._role_disabled_names
+            or (meta.source_level == "builtin" and not self._role_bundled_enabled)
+            or (meta.source_level == "plugin" and not self._role_plugins_enabled)
+        )
+
+    def restrict_discovered_catalog(self) -> None:
+        """Project receiving-role restrictions onto an admitted host snapshot."""
+        self._catalog = [meta for meta in self._catalog if self._role_allows(meta)]
+        self._settings_catalog = [(meta, enabled) for meta, enabled in self._settings_catalog
+            if self._role_allows(meta)]
+        self._path_cache = {self._path_key(meta.source_path): meta for meta in self._catalog}
+        self._full_cache = {key: full for key, full in self._full_cache.items()
+            if key in self._path_cache}
 
     def set_project_root(self, project_root: Path | str | None) -> None:
         """Rebind discovery to the active session workspace."""
@@ -182,8 +207,8 @@ class SkillLoader:
         try:
             from backend.config import load_config_layer_stack
 
-            requirements = load_config_layer_stack(cwd=self._project_root).requirements
-            return requirements.restricts_customization_to_plugins("skills")
+            stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
+            return stack.requirements.restricts_customization_to_plugins("skills")
         except Exception:
             # A managed policy read failure must never silently widen the
             # search surface to user/project Skills.  Fail closed and leave a
@@ -211,8 +236,6 @@ class SkillLoader:
         return ancestors
 
     def _plugin_search_dirs(self) -> list[tuple[str, Path]]:
-        if not feature_enabled("plugin_skills", True):
-            return []
         try:
             from backend.plugins.manager import PluginManager
         except Exception:
@@ -223,6 +246,12 @@ class SkillLoader:
             from backend.config import load_config_layer_stack
 
             stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
+            flags = load_feature_flags(
+                stack.effective_config(),
+                managed_requirements=stack.requirements.feature_requirements,
+            )
+            if not flags.enabled("plugin_skills"):
+                return []
             snapshot = PluginManager(config_stack=stack).snapshot()
         except Exception:
             logger.warning("Unified plugin snapshot unavailable for Skills", exc_info=True)
@@ -269,7 +298,7 @@ class SkillLoader:
         Returns:
             SkillMeta 列表（已去重，高优先级优先）
         """
-        catalog: list[SkillMeta] = []
+        catalog: list[tuple[SkillMeta, str]] = []
         seen_paths: set[str] = set()
         from backend.config import load_config_layer_stack
 
@@ -285,50 +314,49 @@ class SkillLoader:
             if not base_dir.exists():
                 continue
 
-            agent_plugin = self._path_key(base_dir) in self._direct_skill_roots
+            root_key = self._path_key(base_dir)
+            agent_plugin = root_key in self._direct_skill_roots
+            plugin_enabled = root_key not in self._disabled_plugin_roots
             skill_files = self.skill_files_for_root(base_dir, direct_children=agent_plugin)
             for skill_file in skill_files:
                 meta = self._parse_frontmatter(skill_file, level)
                 if meta:
                     meta.alias_root = base_dir
                     meta.agent_plugin = agent_plugin
-                    meta.plugin_enabled = self._path_key(base_dir) not in self._disabled_plugin_roots
+                    meta.plugin_enabled = plugin_enabled
                     if meta.products and "codex" not in meta.products:
                         continue
                     path_key = self._path_key(meta.source_path)
-                    if (path_key in self._role_disabled_paths
-                        or meta.name in self._role_disabled_names
-                        or self._path_key(meta.source_path.parent) in self._role_disabled_paths
-                        or (meta.source_level == "builtin" and not self._role_bundled_enabled)
-                        or (meta.source_level == "builtin" and not self._skills_configuration.bundled_enabled)
-                        or (meta.source_level == "plugin" and not self._role_plugins_enabled)):
+                    if not self._role_allows(meta, source_path_key=path_key) or (
+                        meta.source_level == "builtin" and not self._skills_configuration.bundled_enabled
+                    ):
                         continue
                     if path_key in seen_paths:
                         continue
                     seen_paths.add(path_key)
-                    catalog.append(meta)
+                    catalog.append((meta, path_key))
 
         disabled_paths: set[str] = set()
         for kind, value, enabled in self._skills_configuration.rules:
-            matched = [self._path_key(meta.source_path) for meta in catalog if
+            rule_path_key = self._path_key(Path(value)) if kind == "path" else None
+            matched = [path_key for meta, path_key in catalog if
                 (kind == "name" and (meta.original_name or meta.name) == value)
-                or (kind == "path" and self._path_key(meta.source_path) == self._path_key(Path(value)))]
+                or (kind == "path" and path_key == rule_path_key)]
             if kind == "path":
-                matched.append(self._path_key(Path(value)))
+                matched.append(rule_path_key)
             if enabled:
                 disabled_paths.difference_update(matched)
             else:
                 disabled_paths.update(matched)
-        self._settings_catalog = [(meta, self._path_key(meta.source_path) not in disabled_paths)
-            for meta in catalog]
-        catalog = [meta for meta in catalog if meta.plugin_enabled and self._path_key(meta.source_path) not in disabled_paths]
+        self._settings_catalog = [(meta, path_key not in disabled_paths) for meta, path_key in catalog]
+        catalog = [(meta, path_key) for meta, path_key in catalog if meta.plugin_enabled and path_key not in disabled_paths]
 
-        self._catalog = catalog
+        self._catalog = [meta for meta, _path_key in catalog]
         self._discovered = True
-        self._path_cache = {self._path_key(meta.source_path): meta for meta in catalog}
+        self._path_cache = {path_key: meta for meta, path_key in catalog}
         self._full_cache.clear()
-        logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in catalog))
-        return list(catalog)
+        logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in self._catalog))
+        return list(self._catalog)
 
     @staticmethod
     def skill_files_for_root(base_dir: Path, *, direct_children: bool) -> list[Path]:

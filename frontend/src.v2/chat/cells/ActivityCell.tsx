@@ -89,7 +89,27 @@ export const ActivityCell = memo(function ActivityCell({
   const ownerConversationId = String(conversationId || "").trim();
   const records = useMemo(() => cell.toolCallRecords ?? [], [cell.toolCallRecords]);
   const hasRecords = records.length > 0;
-  const browserRecords = records.filter(isBrowserRecord);
+  const recordCollections = useMemo(() => {
+    const browserRecords: ActivityToolRecord[] = [];
+    const planRecords: ActivityToolRecord[] = [];
+    const nonPlanRecords: ActivityToolRecord[] = [];
+    const questionRecords: ActivityToolRecord[] = [];
+    const fetchBodyRecords: ActivityToolRecord[] = [];
+    const fullOutputRecords: ActivityToolRecord[] = [];
+    const recordStatuses = records.map(recordPresentationStatus);
+    for (const record of records) {
+      const browser = isBrowserRecord(record);
+      const question = isUserQuestionRecord(record);
+      if (browser) browserRecords.push(record);
+      if (planUpdateSteps(record).length > 0) planRecords.push(record);
+      if (record.name !== "update_plan" && !browser && !question) nonPlanRecords.push(record);
+      if (question) questionRecords.push(record);
+      if (isWebFetchRecord(record) && record.artifactId) fetchBodyRecords.push(record);
+      if (record.artifactId && !recordHasImageArtifact(record) && !isWebFetchRecord(record)) fullOutputRecords.push(record);
+    }
+    return { browserRecords, planRecords, nonPlanRecords, questionRecords, fetchBodyRecords, fullOutputRecords, recordStatuses };
+  }, [records]);
+  const { browserRecords, planRecords, nonPlanRecords, questionRecords, fetchBodyRecords, fullOutputRecords, recordStatuses } = recordCollections;
   const isBrowserAction = browserRecords.length > 0;
   const isFileChange = cell.activityKind === "fileChange";
   const guardianReviewing = cell.automaticApprovalReviews?.some(review => review.status === "in_progress") === true;
@@ -99,7 +119,6 @@ export const ActivityCell = memo(function ActivityCell({
   const isWebAction = cell.activityKind === "webSearch";
   const isWebFetchAction = isWebFetchActivity(cell);
   const isInlineAction = isRead || isWorkspaceSearch || isWorkspaceList || isWebAction;
-  const recordStatuses = records.map(recordPresentationStatus);
   const presentationStatus = cell.status === "done" && recordStatuses.some((status, index) => status !== records[index].status)
     ? recordStatuses.every((status) => status === "failed") ? "failed" : "partial"
     : cell.status;
@@ -141,15 +160,6 @@ export const ActivityCell = memo(function ActivityCell({
       : [],
     [records, developerMode, hasRecords, cell.outputText],
   );
-  const planRecords = useMemo(
-    () => records.filter((record) => planUpdateSteps(record).length > 0),
-    [records],
-  );
-  const nonPlanRecords = useMemo(
-    () => records.filter((record) => record.name !== "update_plan" && !isBrowserRecord(record) && !isUserQuestionRecord(record)),
-    [records],
-  );
-  const questionRecords = records.filter(isUserQuestionRecord);
   const imageArtifacts = useMemo(() => {
     const images = new Map<string, ArtifactPreview>(records.filter(isImageArtifactRecord).map((record) => [record.artifactId!, {
       artifactId: record.artifactId!, kind: "image" as const,
@@ -197,8 +207,6 @@ export const ActivityCell = memo(function ActivityCell({
     () => isFileChange ? buildChangeDetails(records) : [],
     [isFileChange, records],
   );
-  const fetchBodyRecords = records.filter((record) => isWebFetchRecord(record) && record.artifactId);
-  const fullOutputRecords = records.filter((record) => record.artifactId && !recordHasImageArtifact(record) && !isWebFetchRecord(record));
   const browserDetails = browserRecords.flatMap((record) => {
     const output = getRecordOutputPreview(record);
     const rawError = purifyToolErrorText(record.stderrPreview || record.developerDetail || record.errorInfo?.developer_detail

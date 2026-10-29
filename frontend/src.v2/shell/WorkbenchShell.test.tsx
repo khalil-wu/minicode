@@ -22,6 +22,7 @@ vi.mock("../desktop/runtime", async original => ({
   getDesktopPreferences: async () => ({ showBottomPanel: true }),
   onDesktopPreferencesChanged: () => () => {},
 }));
+vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: { showBottomPanel: true }, error: "", update: vi.fn() }) }));
 
 const reconnect = vi.hoisted(() => vi.fn());
 const workspaceRenders = vi.hoisted(() => vi.fn());
@@ -59,8 +60,8 @@ const chooseMode = (name: "代码" | "协作") => {
   fireEvent.click(screen.getByRole("menuitem", { name, exact: true }));
 };
 
-let runtimeState: { runtimeToken: string } | null = { runtimeToken: "test-token" };
-let nativeDesktop: { windowControls: { minimize: () => void; maximize: () => void; close: () => void;
+var runtimeState: { runtimeToken: string } | null = { runtimeToken: "test-token" };
+var nativeDesktop: { windowControls: { minimize: () => void; maximize: () => void; close: () => void;
   getState: () => Promise<{ isMaximized: boolean }>; onStateChanged: () => () => void } } | null = null;
 
 describe("WorkbenchShell narrow navigation", () => {
@@ -79,6 +80,7 @@ describe("WorkbenchShell narrow navigation", () => {
       settingsOpen: false,
       settingsTab: "general",
       appMode: "code",
+      compactPanel: null,
       isConnected: true,
       connectionPhase: "connecting",
       reconnectAttempt: 0,
@@ -92,10 +94,6 @@ describe("WorkbenchShell narrow navigation", () => {
       previewArtifact: null,
       dockCollapsed: true,
       sideChatOpen: false,
-      connectionPhase: "connecting",
-      reconnectAttempt: 0,
-      reconnectMaxAttempts: null,
-      connectionError: null,
       conversationId: "conversation-1",
       pendingConversationSwitchId: null,
       conversations: [{ id: "conversation-1", title: "Test", updatedAt: "2026-07-11T00:00:00Z" }],
@@ -404,7 +402,7 @@ describe("WorkbenchShell narrow navigation", () => {
     expect(screen.getByTestId("right-sidebar").getAttribute("data-initial-tab")).toBe("preview");
   });
 
-  it("reopens the compact drawer for another attachment preview on the active tab", () => {
+  it("does not reopen a closed compact preview on async completion but opens a new request", () => {
     useAppStore.setState({ rightPanelOpen: true, rightStackTab: "preview" });
     render(<WorkbenchShell />);
 
@@ -414,17 +412,31 @@ describe("WorkbenchShell narrow navigation", () => {
 
     act(() => useAppStore.setState({
       previewArtifact: {
-        artifactId: "attachment-2",
+        artifactId: "attachment-1",
         content: "",
-        name: "second.pdf",
-        loading: true,
+        name: "first.pdf",
+        loading: false,
         source: "attachment",
         loadedAt: 2,
       },
     }));
+    expect(screen.queryByRole("dialog", { name: "右侧面板" })).toBeNull();
+
+    act(() => useAppStore.getState().setRightStackTab("preview"));
 
     expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
     expect(screen.getByTestId("right-sidebar").getAttribute("data-initial-tab")).toBe("preview");
+  });
+
+  it("moves an open wide preview into the drawer when the viewport becomes compact", () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1600 });
+    useAppStore.setState({ rightPanelOpen: true, rightStackTab: "preview", previewArtifact: {
+      artifactId: "attachment-1", content: "", name: "first.pdf", loading: true, source: "attachment", loadedAt: 1,
+    } });
+    render(<WorkbenchShell />);
+    expect(screen.queryByRole("dialog", { name: "右侧面板" })).toBeNull();
+    act(() => { Object.defineProperty(window, "innerWidth", { configurable: true, value: 1000 }); window.dispatchEvent(new Event("resize")); });
+    expect(screen.getByRole("dialog", { name: "右侧面板" })).toBeTruthy();
   });
 
   it("keeps the desktop sidebar mounted when switching between Cowork and Code", () => {

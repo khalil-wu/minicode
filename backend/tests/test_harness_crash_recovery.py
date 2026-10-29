@@ -24,7 +24,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
 from backend.agent.swarm_store import FileSwarmStore
 from backend.artifact.store import ArtifactStore
-from backend.config import AgentSettings, PermissionSettings, TokenBudget
+from backend.config import AgentSettings, AppConfig, LLMSettings, PermissionSettings, TokenBudget
 from backend.conversations.context_delta import context_snapshot_delta
 from backend.conversations.repository import ConversationRepository
 from backend.permissions.checker import PermissionChecker
@@ -103,7 +103,7 @@ async def _create_session(root: Path):
     queue = DurableUserMessageQueue(session_id="create-session", root_dir=root / "queue")
     session = SimpleNamespace(session_id="create-session", ws_manager=None, is_connected=False,
         active_conversation_id=None, _extension_shutdown_requested=False, _model_override_active=False,
-        config=SimpleNamespace(llm=SimpleNamespace(reasoning_effort="")), provider="fixture", selected_model="fixture",
+        config=AppConfig(llm=LLMSettings(api_key="")), provider="fixture", selected_model="fixture",
         artifact_store=None, conversation_repo=ConversationRepository(root / "conversations"),
         run_manager=SimpleNamespace(durable_client_commands=queue, durable_queue=None), connection_generation=1)
     lock = asyncio.Lock()

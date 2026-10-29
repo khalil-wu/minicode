@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -282,7 +282,7 @@ def _conversation_list_session(versioned_listing: Any) -> WebSocketSession:
         active_conversation_id=None,
         active_conversation=None,
     )
-    session.runtime_snapshot = lambda: {"session_id": "session-list"}
+    session.runtime_snapshot = Mock(return_value={"session_id": "session-list"})
     session.send_payload = AsyncMock(return_value=True)
     session.ws_manager = None
     session.session_lifecycle = SimpleNamespace(foreground_navigation_is_current=lambda: True)
@@ -306,6 +306,7 @@ def test_send_conversation_list_projects_production_epoch_and_legacy_double() ->
     versioned_payload = versioned.send_payload.await_args.args[0]
     assert versioned_payload["inventory_instance_id"] == "0123456789abcdef0123456789abcdef"
     assert versioned_payload["inventory_revision"] == 9
+    versioned.runtime_snapshot.assert_called_once_with(include_capabilities=False)
 
     legacy = _conversation_list_session((9, [summary]))
     asyncio.run(legacy.send_conversation_list())

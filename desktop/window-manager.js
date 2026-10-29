@@ -194,7 +194,7 @@ function attachRendererDiagnostics(window, label) {
 // ---------------------------------------------------------------------------
 
 function getFrontendDistFile() {
-  return path.join(getAppRoot(), "frontend", "dist", "index.html");
+  return process.env.MINICODE_FRONTEND_DIST_FILE || path.join(getAppRoot(), "frontend", "dist", "index.html");
 }
 
 function getFrontendTarget() {

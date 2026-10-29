@@ -6,6 +6,7 @@ import { ArrowLeft, Columns2, Folder, Maximize2, Minimize2, Search, SlidersHoriz
 import { useAppStore } from "../stores";
 import type { PanelSlot } from "../stores/types";
 import { ChatPane } from "../chat/ChatPane";
+import { threadSummaryDisplayMode, threadSummarySurface } from "../chat/thread-summary-layout";
 import { openNewBrowserTab, returnToBrowserPage } from "../chat/openWebInBrowser";
 import { PanelSkeleton } from "./PanelSkeleton";
 import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
@@ -43,6 +44,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   const resizePanel = useAppStore((s) => s.resizePanel);
   const setWorkbenchLayout = useAppStore((s) => s.setWorkbenchLayout);
   const hasOpenEditor = useAppStore((s) => s.editorTabs.length > 0);
+  const conversationId = useAppStore((s) => s.conversationId);
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
   const conversationTitle = useAppStore((s) => s.conversations.find((item) => item.id === (s.pendingConversationSwitchId || s.conversationId))?.title);
   const previewReturnTarget = useAppStore((s) => s.diffReview?.conversationId === s.conversationId
@@ -54,6 +56,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   const toggleContextCard = useAppStore((s) => s.toggleContextCard);
   const surfaceRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
+  const [summaryDisplayMode, setSummaryDisplayMode] = useState(() => threadSummaryDisplayMode(window.innerWidth));
 
   const chatSlot = panelSlots.find((slot) => slot.kind === "chat") ?? { id: "main-chat", kind: "chat" as const, label: tr("对话") };
   const focusedSlot = panelSlots.find((slot) => slot.focused) ?? chatSlot;
@@ -62,6 +65,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
   if (focusedSlot.kind === "file" || focusedSlot.kind === "editor") lastAuxiliarySlot.current = focusedSlot.id;
   const auxiliarySlot = panelSlots.find(slot => slot.id === lastAuxiliarySlot.current) ?? editorSlot ?? fileSlots[0];
   const showEditorLayout = Boolean(auxiliarySlot) && !forceChat;
+  const home = !conversationId && !pendingConversationSwitchId && !showEditorLayout && !floating;
   const maximizedSlot = panelSlots.find((slot) => slot.maximized) ?? null;
   const effectiveMaximizedSlot = forceChat ? null : maximizedSlot;
   const tabbed = mode === "tabs";
@@ -86,10 +90,15 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
 
   useLayoutEffect(() => {
     const surface = surfaceRef.current!;
-    const updateWidth = () => setCompact(surface.getBoundingClientRect().width < COMPACT_MAIN_WIDTH);
+    const chatFrame = surface.querySelector<HTMLElement>('.mc-main-slot-frame[data-panel-slot-kind="chat"]')!;
+    const updateWidth = () => {
+      setCompact(surface.getBoundingClientRect().width < COMPACT_MAIN_WIDTH);
+      setSummaryDisplayMode(threadSummaryDisplayMode(chatFrame.clientWidth));
+    };
     updateWidth();
     const observer = new ResizeObserver(updateWidth);
     observer.observe(surface);
+    observer.observe(chatFrame);
     return () => observer.disconnect();
   }, []);
 
@@ -101,6 +110,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
         flex: 1,
         minWidth: 0,
         minHeight: 0,
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         background: "var(--surface-base)",
@@ -109,7 +119,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
     >
       <main style={mainCanvasStyle}>
         {(conversationTitle || showEditorLayout || activeSlot.kind === "chat") && (
-          <div className="mc-workbench-toolbar">
+          <div className="mc-workbench-toolbar" data-home={home || undefined}>
             {conversationTitle && <span className="mc-workbench-title" title={conversationTitle}><Folder size={17} aria-hidden="true" />{conversationTitle}</span>}
             {appMode === "code" && conversationTitle && !pendingConversationSwitchId && activeSlot.kind === "chat" && (
               <button
@@ -155,10 +165,9 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
               </div>
             )}
             <div className="mc-workbench-task-actions">
-              <LocalEnvironmentActions />
-              <ChatActionsButton />
-              {visibleSlots.some((slot) => slot.kind === "chat") && <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("切换摘要")} title={tr("切换摘要")}
-                aria-pressed={!contextCardCollapsed || contextCardPinned} aria-controls="thread-summary-panel" onClick={() => {
+              {!home && <><LocalEnvironmentActions /><ChatActionsButton /></>}
+              {!home && visibleSlots.some((slot) => slot.kind === "chat") && <button type="button" className="btn-ghost mc-icon-button" aria-label={tr("切换摘要")} title={tr("切换摘要")}
+                aria-pressed={threadSummarySurface(summaryDisplayMode, contextCardPinned, !contextCardCollapsed) !== null} aria-controls="thread-summary-panel" onClick={() => {
                   const chatFrame = surfaceRef.current!.querySelector<HTMLElement>('.mc-main-slot-frame[data-panel-slot-kind="chat"]')!;
                   toggleContextCard(chatFrame.clientWidth);
                 }}><SlidersHorizontal size={17} /></button>}

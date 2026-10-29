@@ -276,6 +276,17 @@ def get_llm_settings_api(response: Response) -> dict[str, Any]:
     return get_llm_settings()
 
 
+@router.get("/api/llm/draft-selection")
+def get_draft_model_selection_api(response: Response, workspace_root: str = "", model: str = "", reasoning_effort: str = "", config_cwd: str = "") -> dict[str, Any]:
+    from backend.services.draft_model_selection_service import draft_model_selection
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return draft_model_selection(workspace_root, model, reasoning_effort, config_cwd)
+    except (ValueError, SettingsError) as error:
+        raise HTTPException(400, str(error)) from error
+
+
 @router.put("/api/llm/settings")
 async def update_llm_settings_api(request: LLMSettingsUpdateRequest) -> dict[str, Any]:
     try:

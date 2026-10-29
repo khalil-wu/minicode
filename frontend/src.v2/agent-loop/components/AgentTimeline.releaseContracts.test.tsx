@@ -10,7 +10,7 @@ afterEach(cleanup);
 
 it("shows a terminal tool failure without requiring another disclosure click", () => {
   const cell: ExecCellState = { kind: "exec", id: "failed-command", command: "build", status: "failed", stdoutPreview: [], stderrPreview: ["Build failed"], collapsed: false, createdAt: 1, segment: 1, segmentClosed: true };
-  render(<AgentTimeline cells={[cell]} isRunning={false} renderCell={() => <div>Build failed</div>} />);
+  render(<AgentTimeline cells={[cell]} isRunning={false} renderCell={({ key }) => <div key={key}>Build failed</div>} />);
   expect(screen.getByText("Build failed")).toBeTruthy();
 });
 

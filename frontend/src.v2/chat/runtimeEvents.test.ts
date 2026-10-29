@@ -10,6 +10,7 @@ import { normalizeInboundServerEvent } from "../protocol/server-event-validation
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { buildInterruptCommand } from "../lib/interrupt-command";
+import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
@@ -50,6 +51,54 @@ describe("runtime compaction events", () => {
     });
   });
 
+  it("does not recreate a confirmed deleted owner from late run, progress or busy events", async () => {
+    const owner = "deleted-runtime-owner";
+    await deleteConversationComposerDrafts(owner);
+    useAppStore.setState({ conversationId: "surviving-reader", messages: [], conversationMessages: {}, conversationStreaming: {},
+      sideChats: {}, conversationAgentStates: {}, isStreaming: false, draft: "keep current input", conversations: [] });
+    const before = useAppStore.getState();
+    for (const event of [
+      { type: "agent.run.started", role: "main", message_id: "late-answer", turn_id: "late-turn", run_id: "late-turn", status: "running" },
+      { type: "agent.progress", message_id: "late-answer", turn_id: "late-turn", id: "late-progress", stage: "status", status: "running", label: "working" },
+      { type: "session.state_changed", state: "working" },
+      { type: "agent.run.completed", role: "main", message_id: "late-answer", turn_id: "late-turn", status: "completed" },
+    ]) expect(handleRuntimeEvent({ ...event, conversation_id: owner } as ServerEvent, owner)).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "surviving-reader", isStreaming: false, draft: "keep current input" });
+    expect(useAppStore.getState().conversationMessages).toBe(before.conversationMessages);
+    expect(useAppStore.getState().conversationStreaming).toBe(before.conversationStreaming);
+    expect(useAppStore.getState().conversationAgentStates).toBe(before.conversationAgentStates);
+    // Inventory absence is not deletion: another window's real new run is admitted.
+    handleRuntimeEvent({ type: "agent.run.started", role: "main", conversation_id: "uncached-live-owner",
+      message_id: "live-answer", turn_id: "live-turn", run_id: "live-turn", status: "running" } as ServerEvent);
+    expect(useAppStore.getState().conversationMessages["uncached-live-owner"]?.[0]).toMatchObject({ id: "live-answer", isStreaming: true });
+  });
+
+  it("projects live entries from a session snapshot while excluding confirmed deleted run and queue owners", async () => {
+    const owner = "deleted-snapshot-owner";
+    await deleteConversationComposerDrafts(owner);
+    useAppStore.setState({ conversationId: "snapshot-reader", messages: [], isStreaming: false, conversationMessages: {},
+      conversationStreaming: {}, sideChats: {}, runtimeSession: null, draft: "untouched reader draft" });
+    handleRuntimeEvent({ type: "task.update", partial: true, session: {
+      active_conversation_id: "snapshot-reader", active_stream_conversation_ids: [owner, "uncached-snapshot-live"],
+      queued_user_messages: [owner, "uncached-snapshot-live"].map(conversation_id => ({ conversation_id,
+        message_id: `queue-${conversation_id}`, user_message_id: `user-${conversation_id}`, content: "real queued input", position: 1 })),
+      pending_turn_inputs: [owner, "uncached-snapshot-live"].map(conversation_id => ({ conversation_id, mode: "steer",
+        message_id: `steer-${conversation_id}`, user_message_id: `steer-user-${conversation_id}`, target_message_id: "live-target", content: "real steer" })),
+    } } as ServerEvent);
+    const state = useAppStore.getState();
+    expect(state.conversationMessages[owner]).toBeUndefined();
+    expect(state.conversationStreaming[owner]).toBeUndefined();
+    expect(state.conversationMessages["uncached-snapshot-live"]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "user-uncached-snapshot-live", queueState: "queued" }),
+      expect.objectContaining({ id: "steer-user-uncached-snapshot-live", steeredIntoMessageId: "live-target" }),
+    ]));
+    expect(state.conversationStreaming["uncached-snapshot-live"]).toBe(true);
+    expect(state.runtimeSession?.active_stream_conversation_ids).toEqual(["uncached-snapshot-live"]);
+    expect(state.runtimeSession?.queued_user_messages?.map(input => input.conversation_id)).toEqual(["uncached-snapshot-live"]);
+    expect(state.runtimeSession?.pending_turn_inputs?.map(input => input.conversation_id)).toEqual(["uncached-snapshot-live"]);
+    expect(state.draft).toBe("untouched reader draft");
+  });
+
   it("reconciles active, cached, and side-chat busy flags from a runtime task snapshot", () => {
     const assistant = (id: string) => ({
       id, role: "assistant" as const, content: "preserved partial result", timestamp: 1, isStreaming: true,
@@ -60,7 +109,7 @@ describe("runtime compaction events", () => {
       conversationMessages: { cached: [assistant("cached-assistant")], live: [assistant("live-assistant")] },
       conversationStreaming: { "conv-runtime": true, cached: true, live: false, side: true },
       sideChats: { side: { id: "side", draft: "keep this draft", messages: [assistant("side-assistant")], isStreaming: true } },
-      runtimeSession: { selected_model: "preserved-model", active_stream_conversation_ids: ["conv-runtime", "cached", "side"] },
+      runtimeSession: { active_conversation_id: "conv-runtime", selected_model: "preserved-model", active_stream_conversation_ids: ["conv-runtime", "cached", "side"] },
     });
 
     handleRuntimeEvent({ type: "task.update", partial: true,
@@ -77,13 +126,13 @@ describe("runtime compaction events", () => {
     expect(state.runtimeSession?.selected_model).toBe("preserved-model");
     expect(state.messages[0].terminalStatus).toBeUndefined();
 
-    handleRuntimeEvent({ type: "task.update", session: { active_stream_conversation_ids: [] } } as ServerEvent);
+    handleRuntimeEvent({ type: "task.update", session: { active_conversation_id: "conv-runtime", active_stream_conversation_ids: [] } } as ServerEvent);
     expect(Object.values(useAppStore.getState().conversationStreaming).some(Boolean)).toBe(false);
   });
 
   it("preserves live streams when a partial runtime update omits its ownership set", () => {
     useAppStore.setState({ isStreaming: true, conversationStreaming: { "conv-runtime": true },
-      runtimeSession: { active_stream_conversation_ids: [] },
+      runtimeSession: { active_conversation_id: "conv-runtime", active_stream_conversation_ids: [] },
     });
     handleRuntimeEvent({ type: "task.update", partial: true, session: { selected_model: "new-model" } } as ServerEvent);
     expect(useAppStore.getState().isStreaming).toBe(true);

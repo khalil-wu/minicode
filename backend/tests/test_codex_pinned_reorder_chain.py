@@ -142,7 +142,7 @@ def test_real_inventory_producer_projects_pinned_order_and_revision_after_cold_r
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
     session.session_lifecycle = SessionLifecycle(session)
     session.ws_manager = None
-    session.runtime_snapshot = lambda: {"session_id": "real-inventory"}
+    session.runtime_snapshot = lambda **_: {"session_id": "real-inventory"}
     session.send_payload = AsyncMock(return_value=True)
     session.conversation_repo = ConversationRepository(repository.storage_root)
     assert asyncio.run(session.send_conversation_list()) is True

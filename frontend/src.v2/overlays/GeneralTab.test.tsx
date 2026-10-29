@@ -3,25 +3,43 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GeneralTab } from "./GeneralTab";
 import { useAppStore } from "../stores";
+import type { DesktopPreferenceTargets } from "../desktop/runtime";
 
 const fixture = vi.hoisted(() => ({ update: vi.fn(), updates: vi.fn(), preferences: {
   defaultTaskDirectory: "C:/AuthoredTasks", taskDirectoryOverride: "C:/AuthoredTasks",
-  fileOpenTarget: "minicode", fileOpenTargets: [{ id: "minicode", label: "MiniCode" }], terminalShell: "system", terminalShellTargets: [],
+  fileOpenTarget: "minicode", terminalShell: "system",
   localeOverride: "zh-CN", confirmBeforeClose: "keyboardOnly", showFullAccess: true, showBottomPanel: true,
   autoArchiveAfterDays: 0, localHistoryCompression: false, notificationSound: "none", turnCompletionNotifications: "never",
   permissionNotifications: false, questionNotifications: false, showContextWindowUsage: false,
   defaultWorkspaceFullView: false, popoutWindowShortcut: null as string | null, popoutWindowProjectlessDefault: false, confettiEnabled: false,
-} }));
+}, targets: null as DesktopPreferenceTargets | null, targetsError: "" }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: fixture.preferences, error: "", update: fixture.update }) }));
+vi.mock("../hooks/useDesktopPreferenceTargets", () => ({ useDesktopPreferenceTargets: () => ({ targets: fixture.targets, error: fixture.targetsError }) }));
 vi.mock("../hooks/usePluginsFeature", () => ({ usePluginsFeature: () => ({ enabled: false, locked: false, error: "" }), setPluginsFeatureEnabled: vi.fn() }));
 vi.mock("../desktop/runtime", () => ({ isDesktop: () => true, desktop: () => ({ platformInfo: { platform: "linux" }, updates: { getStatus: fixture.updates } }) }));
 beforeEach(() => {
   vi.clearAllMocks(); fixture.update.mockResolvedValue(undefined);
+  fixture.targets = { fileOpenTargets: [{ id: "minicode", label: "MiniCode", kind: "editor" }], terminalShellTargets: [] };
+  fixture.targetsError = "";
   fixture.preferences.popoutWindowShortcut = null;
   fixture.preferences.defaultWorkspaceFullView = false; fixture.preferences.popoutWindowProjectlessDefault = false; fixture.preferences.confettiEnabled = false;
   useAppStore.setState({ draft: "Original unsent draft", attachments: [], composerPlainTextMode: false, sendShortcut: "enter", followUpBehavior: "queue" });
 });
 afterEach(cleanup);
+
+it("keeps unrelated settings usable while application discovery is loading or fails", () => {
+  fixture.targets = null;
+  const view = render(<GeneralTab />);
+  expect(screen.getByRole("button", { name: /^默认文件打开位置，当前：/ })).toHaveProperty("disabled", true);
+  fireEvent.click(screen.getByRole("switch", { name: "底部面板" }));
+  expect(fixture.update).toHaveBeenLastCalledWith({ showBottomPanel: false });
+  fixture.targetsError = "Actual application discovery error";
+  view.rerender(<GeneralTab />);
+  expect(screen.getByRole("alert").textContent).toBe("Actual application discovery error");
+  fireEvent.click(screen.getByRole("switch", { name: "默认使用完整视图" }));
+  expect(fixture.update).toHaveBeenLastCalledWith({ defaultWorkspaceFullView: true });
+  expect(useAppStore.getState().draft).toBe("Original unsent draft");
+});
 
 it("keeps Source's conditional directory Reset while removing the three Source-absent General entry types", () => {
   render(<GeneralTab />);

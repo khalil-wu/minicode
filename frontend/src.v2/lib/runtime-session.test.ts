@@ -4,7 +4,9 @@ import {
   hasRuntimePendingUserActionForConversation,
   runtimePendingUserActionLabel,
   runtimePendingUserActionLabelForConversation,
+  runtimePendingUserActionLabels,
 } from "./runtime-session";
+import type { RuntimeSessionSnapshot } from "../protocol/events";
 
 describe("hasRuntimePendingUserAction", () => {
   it("uses pending approval count when present", () => {
@@ -55,6 +57,25 @@ describe("runtimePendingUserActionLabel", () => {
 });
 
 describe("conversation-scoped runtime pending prompts", () => {
+  it.each<RuntimeSessionSnapshot>([
+    { pending_approval_count: 2 },
+    { active_conversation_id: "conv-active", pending_approval_count: 1 },
+    { active_conversation_id: "conv-active", pending_approval_count: 3, pending_approvals: [] },
+    { pending_approval_count: 3, pending_approvals: [{ request_id: "a", type: "other" }] },
+    { pending_approvals: [{ request_id: "a", type: "control_request", subtype: "elicitation" }] },
+    { pending_approval_count: 2, pending_approvals: [
+      { request_id: "a", type: "other", conversation_id: "conv-active" },
+      { request_id: "b", type: "control_request", conversation_id: "conv-active", tool_name: "read_file" },
+      { request_id: "c", type: "control_request", conversation_id: "conv-other", subtype: "elicitation" },
+      { request_id: "d", type: "control_request" },
+    ] },
+  ])("keeps the indexed sidebar labels equivalent to owner-scoped prompt semantics: %j", snapshot => {
+    const labels = runtimePendingUserActionLabels(snapshot);
+    expect(runtimePendingUserActionLabels(snapshot)).toBe(labels);
+    for (const owner of ["conv-active", "conv-other", "no-prompt"]) {
+      expect(labels.get(owner) ?? labels.get("") ?? null).toBe(runtimePendingUserActionLabelForConversation(snapshot, owner));
+    }
+  });
   it("matches pending prompts to the conversation that owns them", () => {
     const runtimeSession = {
       active_conversation_id: "conv-active",

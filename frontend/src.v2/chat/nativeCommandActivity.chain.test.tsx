@@ -43,7 +43,7 @@ const planned = (seq = 2) => emit({ type: "tool_call", id: callId, name: "run_co
 beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(10000);
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
-  useAppStore.setState({ ...initial, conversationId: owner, isStreaming: true,
+  useAppStore.setState({ ...initial, reducedMotion: true, conversationId: owner, isStreaming: true,
     conversationStreaming: { [owner]: true }, conversationMessages: {}, sideChats: {}, pendingApproval: null,
     messages: [{ id: messageId, turnId: "native-turn", role: "assistant", content: "", timestamp: 1000, artifacts: [], blocks: [], isStreaming: true }],
   });
@@ -132,16 +132,37 @@ it.each(["blocked", "cancelled"] as const)("keeps a native %s terminal without e
   expect(cells()).toHaveLength(1);
   expect(execution()).toMatchObject({ status: status === "blocked" ? "failed" : "cancelled", durationMs: undefined });
   const view = render(<ExecCell cell={execution()} />);
-  expect(screen.getByText("已运行")).toBeTruthy();
+  expect(screen.getByText("运行命令")).toBeTruthy();
   expect(view.container.querySelector('[data-source-icon="terminal-light-16"]')).toBeTruthy();
   expect(view.container.querySelector(".exec-cell-header-button")?.getAttribute("data-processing")).toBe("false");
   fireEvent.click(screen.getByRole("button", { name: /展开命令详情/ }));
   expect(screen.queryByText("The original command was not executed.")).toBeNull();
   expect(view.container.querySelector(".exec-cell-output-pre")?.textContent).toBe("");
   expect(view.container.querySelector(".exec-cell-no-output")).toBeNull();
-  expect(view.container.querySelector(".exec-cell-output-status")?.textContent).toBe("退出码 未知");
+  expect(view.container.querySelector(".exec-cell-output-status")).toBeNull();
   expect(view.container.textContent).not.toMatch(/等待批准|准备命令|已停止|失败/);
   expect(records()[0].summary).toBe("The original command was not executed.");
+});
+
+it("retains a real pre-execution approval timeout as diagnostic in live and restored detail", () => {
+  const diagnostic = "Operation rejected: The turn's time budget was exhausted before this approval was answered. The action was not performed.";
+  provider(); planned();
+  emit({ type: "tool_result", id: callId, status: "blocked", is_error: true, summary: diagnostic,
+    developer_detail: diagnostic, error_kind: "approval_rejected", result_kind: "command", seq: 3 });
+  const cold = hydrateMessages([{ id: messageId, role: "assistant", content: "", timestamp: 1000,
+    blocks: useAppStore.getState().messages[0].blocks, terminal_status: "completed" }]);
+  for (const cell of [execution(), projectMessagesToTurns(cold, false)[0].committedCells[0]]) {
+    expect(cell).toMatchObject({ kind: "exec", diagnostic });
+    if (cell.kind !== "exec") throw new Error("Expected command evidence");
+    const view = render(<ExecCell cell={cell} />);
+    expect(screen.getByText("运行命令")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /展开命令详情/ }));
+    expect(view.container.textContent).toContain(diagnostic);
+    expect(view.container.querySelector(".exec-cell-output-stdout")).toBeNull();
+    expect(view.container.querySelector(".exec-cell-output-status")).toBeNull();
+    expect(view.container.textContent).not.toContain("已运行");
+    view.unmount();
+  }
 });
 
 it("keeps actual typed stdout and stderr instead of a model receipt even when execution start metadata is absent", () => {

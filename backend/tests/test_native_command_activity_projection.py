@@ -37,7 +37,7 @@ def snapshot(events):
 @pytest.mark.asyncio
 async def test_frozen_native_planned_item_approval_execution_result_and_recovery_share_one_identity(tmp_path):
     host = setup(tmp_path)
-    call, auth = authorize(host, command=output_command("NATIVE_ACTIVITY_RESULT")[0])
+    call, auth = (await authorize(host, command=output_command("NATIVE_ACTIVITY_RESULT")[0]))
     state = AgentState(user_message="native activity lifecycle")
     state.ui_tool_started_at[call.id] = time.time() - 30
     events = [tool_call_pending_event(ToolCallStartEvent(id=call.id, name=call.name),
@@ -89,7 +89,7 @@ async def test_native_abort_commits_real_declined_item_without_execution_measure
     host.context.cancel_event = asyncio.Event()
     cancelled = []
     host.context.run_context.record_user_cancelled = cancelled.append
-    call, auth = authorize(host, command='Set-Content -LiteralPath native-projection-never-ran.txt -Value "not approved"')
+    call, auth = (await authorize(host, command='Set-Content -LiteralPath native-projection-never-ran.txt -Value "not approved"'))
     state = AgentState(user_message="native activity abort")
     state.ui_tool_started_at[call.id] = time.time() - 30
     events = []
@@ -123,7 +123,7 @@ async def test_native_guardian_rejection_retains_its_receipt_without_claiming_a_
     host.context.cancel_event = asyncio.Event()
     cancelled = []
     host.context.run_context.record_user_cancelled = cancelled.append
-    call, auth = authorize(host, command='Set-Content -LiteralPath guardian-projection-never-ran.txt -Value "not approved"')
+    call, auth = (await authorize(host, command='Set-Content -LiteralPath guardian-projection-never-ran.txt -Value "not approved"'))
     state = AgentState(user_message="native automatic refusal")
     events = []
     async def review(request, context, registry):
@@ -150,7 +150,7 @@ async def test_native_host_approval_rejections_do_not_become_user_abort(tmp_path
     host.context.cancel_event = asyncio.Event()
     cancelled = []
     host.context.run_context.record_user_cancelled = cancelled.append
-    call, auth = authorize(host, command='Set-Content -LiteralPath host-projection-never-ran.txt -Value "not approved"')
+    call, auth = (await authorize(host, command='Set-Content -LiteralPath host-projection-never-ran.txt -Value "not approved"'))
     state = AgentState(user_message="native host approval rejection")
     if reason in {"expired", "timeout"}:
         host.context.deadline_monotonic = time.monotonic() + (-1 if reason == "expired" else 0.01)

@@ -104,6 +104,7 @@ class ConversationThreadRuntime:
     environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     mcp_app_runtime: Any | None = None
     node_repl_companions: Any | None = None
+    mcp_connections: Any | None = None
     cua_repl_companions: Any | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
@@ -130,6 +131,8 @@ class ConversationThreadRuntime:
             await asyncio.wait(pending)
         if self.mcp_app_runtime is not None:
             await self.mcp_app_runtime.close_conversation(self.store_identity, self.conversation_id)
+        if self.mcp_connections is not None:
+            await self.mcp_connections.aclose()
         if self.node_repl_companions is not None:
             await self.node_repl_companions.aclose()
         if self.cua_repl_companions is not None:

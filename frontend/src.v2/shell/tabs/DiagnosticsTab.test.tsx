@@ -7,7 +7,7 @@ import { DiagnosticsTab } from "./DiagnosticsTab";
 const { diagnose } = vi.hoisted(() => ({ diagnose: vi.fn() }));
 vi.mock("../../protocol/api", () => ({ apiBase: () => "http://diagnosis.test", authHeaders: () => ({}), errorMessageFromResponseText: (text: string) => text, fetchWithTimeout: diagnose }));
 vi.mock("../../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn() }));
-vi.mock("../../desktop/runtime", () => ({ isDesktop: () => false, runtime: () => null }));
+vi.mock("../../desktop/runtime", () => ({ desktop: () => undefined, isDesktop: () => false, runtime: () => null }));
 beforeEach(() => { vi.clearAllMocks(); useAppStore.setState({ isConnected: true, connectionPhase: "connected", connectionError: null, mcpServers: [], runtimeCapabilities: null, settingsOpen: false, currentModel: "model", terminalSessions: [] }); });
 afterEach(cleanup);
 const payload = (mcp: unknown[] = [], withSandbox = true) => ({ backend: { status: "ok" }, llm: { active_model: "model" }, mcp,

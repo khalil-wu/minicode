@@ -1,10 +1,10 @@
 import { useI18n } from "../../i18n";
-import { useMemo } from "react";
+import { useContext, useId, useMemo } from "react";
 import { ChevronRight } from "../../lib/icons";
 import { guessLanguageFromPath, useColorizedLines } from "../../lib/monaco-colorize";
 import { extractFilePathFromDiff, parseUnifiedDiffLines, type UnifiedDiffLine } from "../../lib/unified-diff";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
-import { useTranscriptReadingPreference } from "../transcriptReadingState";
+import { TranscriptReadingContext, useTranscriptReadingPreference } from "../transcriptReadingState";
 import { useDiffPalette } from "../../lib/use-diff-palette";
 import { diffPaletteStyle } from "../../lib/diff-palette";
 import { buildDiffWordDecorations } from "./diff-word-spans";
@@ -150,14 +150,34 @@ function FileDiff({ file, contextLines, readingKey }: { file: DiffFile; contextL
   </div>;
 }
 
+function CollapsibleFileDiff({ file, contextLines, readingKey }: { file: DiffFile; contextLines?: number; readingKey: string }) {
+  const { t: tr } = useI18n();
+  const bodyId = useId();
+  const [preference, setExpanded, userToggled] = useTranscriptReadingPreference(`${readingKey}:expanded`, true);
+  const expanded = useTranscriptSearch() || preference;
+  return <div className="inline-diff-file-section">
+    <button type="button" className="inline-diff-file-title" aria-expanded={expanded} aria-controls={bodyId}
+      onClick={() => { userToggled.current = true; setExpanded(value => !value); }}>
+      <ChevronRight size={14} className="mc-process-disclosure" data-expanded={expanded} aria-hidden="true" />
+      <span>{tr("文件：")}{file.path}</span>
+    </button>
+    {expanded && <div id={bodyId}><FileDiff file={file} contextLines={contextLines} readingKey={readingKey} /></div>}
+  </div>;
+}
+
 export function InlineDiff({ patch, contextLines, filePath, readingKey = "inline-diff" }: { patch: string; contextLines?: number; filePath?: string; readingKey?: string }) {
   const { t: tr } = useI18n();
+  const transcriptReading = useContext(TranscriptReadingContext);
+  const localReading = useMemo(() => new Map<string, unknown>(), [readingKey]);
   const { palette, variant } = useDiffPalette();
   const files = useMemo(() => parseFiles(patch, filePath), [patch, filePath]);
-  return <div className="inline-diff" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)} role="region" aria-label={tr("文件修改差异")}>
-    {files.map((file, index) => <div key={`${index}:${file.path}`}>
-      {files.length > 1 && file.path && <div className="inline-diff-file-title">{tr("文件：")}{file.path}</div>}
-      <FileDiff file={file} contextLines={contextLines} readingKey={`${readingKey}:file:${index}:${file.path}`} />
-    </div>)}
-  </div>;
+  return <TranscriptReadingContext.Provider value={transcriptReading ?? localReading}>
+  <div className="inline-diff" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)} role="region" aria-label={tr("文件修改差异")}>
+    {files.map((file, index) => {
+      const fileReadingKey = `${readingKey}:file:${index}:${file.path}`;
+      return files.length > 1 && file.path
+        ? <CollapsibleFileDiff key={fileReadingKey} file={file} contextLines={contextLines} readingKey={fileReadingKey} />
+        : <FileDiff key={fileReadingKey} file={file} contextLines={contextLines} readingKey={fileReadingKey} />;
+    })}
+  </div></TranscriptReadingContext.Provider>;
 }

@@ -20,6 +20,7 @@ it("uses the Source frame cadence and all sixteen clockwise look cells", () => {
 
 it("animates the real atlas and freezes the first state frame for reduced motion", () => {
   vi.useFakeTimers();
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
   const view = render(<PetSprite pet={codex} />);
   const pet = screen.getByRole("img", { name: "Codex" });
   expect(pet.getAttribute("data-pet-column")).toBe("0");

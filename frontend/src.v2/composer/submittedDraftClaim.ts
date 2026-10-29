@@ -1,11 +1,12 @@
 import { useAppStore } from "../stores";
-import { composerWorkspaceKey, emptyComposerDraft, type ComposerDraft } from "../stores/composer-drafts";
+import { composerWorkspaceKey, emptyComposerDraft, isComposerConversationDeleted, type ComposerDraft } from "../stores/composer-drafts";
 import { getDiffCommentScope, readDiffCommentState, subscribeDiffComments } from "../lib/diff-comment-storage";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 
 /** One optimistically cleared draft, until its delivery result owns the input. */
-export function claimSubmittedDraft({ conversationId, workspaceRoot, userMessageId, selectedCommand }: {
+export function claimSubmittedDraft({ conversationId, draftId, workspaceRoot, userMessageId, selectedCommand }: {
   conversationId: string;
+  draftId?: string | null;
   workspaceRoot: string;
   userMessageId: string;
   selectedCommand: () => string | null;
@@ -14,12 +15,16 @@ export function claimSubmittedDraft({ conversationId, workspaceRoot, userMessage
   const empty = emptyComposerDraft();
   const location = () => {
     const state = useAppStore.getState();
+    const context = draftId ? state.conversationDrafts[draftId] : undefined;
+    if (context?.conversationId) owner = context.conversationId;
     if (!owner && state.conversationId && state.messages.some(message => message.id === userMessageId)) owner = state.conversationId;
-    const active = String(state.conversationId || "") === owner && workspaceRootsEqual(state.workingDirectory, workspaceRoot);
-    const draft: ComposerDraft = active ? state : owner
+    const active = draftId ? state.activeConversationDraftId === draftId || Boolean(owner && state.conversationId === owner)
+      : String(state.conversationId || "") === owner && workspaceRootsEqual(state.workingDirectory, workspaceRoot);
+    const draft: ComposerDraft = active ? state : context && !context.adopted
+      ? state.workspaceComposerDrafts[context.id] ?? empty : owner
       ? state.conversationWorkbenchStates[owner] ?? empty
-      : state.workspaceComposerDrafts[composerWorkspaceKey(workspaceRoot)] ?? empty;
-    const scope = getDiffCommentScope(owner, workspaceRoot);
+      : state.workspaceComposerDrafts[draftId || composerWorkspaceKey(workspaceRoot)] ?? empty;
+    const scope = getDiffCommentScope(context && !context.adopted ? context.id : owner || draftId, workspaceRoot);
     return { owner, active, draft, scope };
   };
   const signature = () => {
@@ -29,15 +34,19 @@ export function claimSubmittedDraft({ conversationId, workspaceRoot, userMessage
   };
   const baseline = signature();
   let untouched = true;
-  const observe = () => { if (signature() !== baseline) untouched = false; };
+  // A subsequent edit permanently owns the composer. Once that happens, do
+  // not serialize its rich document/attachments again for unrelated updates.
+  const observe = () => { if (untouched && signature() !== baseline) untouched = false; };
   const stopDraft = useAppStore.subscribe(observe);
   const stopComments = subscribeDiffComments(observe);
   return {
     observe,
     canRestore: () => {
       observe();
+      if (!untouched) return false;
       const { active, draft, scope } = location();
-      return untouched && !draft.draft && !draft.attachments.length && !draft.selectedMentions.length
+      if (owner && isComposerConversationDeleted(owner)) return false;
+      return !draft.draft && !draft.attachments.length && !draft.selectedMentions.length
         && !draft.selectedSkills.length && !draft.quotedMessage && !readDiffCommentState(scope).comments.length
         && (!active || !selectedCommand());
     },

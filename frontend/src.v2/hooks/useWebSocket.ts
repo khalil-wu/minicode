@@ -11,6 +11,7 @@ import {
 } from "../protocol/events";
 import { isUnknownServerEventType, normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import {
+  CommandRejectedError,
   commandWithClientCommandId,
   rejectAllPendingCommandResults,
   rejectClientCommandResult,
@@ -31,6 +32,7 @@ import { handleArtifactEvent } from "../chat/artifactEvents";
 import { handleCommandCatalogEvent } from "../chat/commandCatalogEvents";
 import { handlePeripheralEvent } from "../chat/peripheralEvents";
 import { handleCommandResultEvent } from "../chat/commandResultEvents";
+import { capturePendingUserMessageReceipt } from "../chat/sendChatMessage";
 import { handlePreviewEvent } from "../chat/previewEvents";
 import { handleDiffEvent } from "../chat/diffEvents";
 import { createHeartbeatRendererObserver } from "../chat/heartbeatRendererState";
@@ -45,7 +47,8 @@ import { safeJsonParse } from "../lib/safe-parse";
 import { LS, readLS } from "../stores/shared-helpers";
 import { hasInterruptFence } from "../lib/interrupt-command";
 import { isTransientProviderReasoning } from "../lib/provider-reasoning";
-import { latestProjectionCommandIds, rememberSentCommandProjection, isSupersededPendingProjectionCommand, isSupersededCommandProjection } from "../protocol/command-projection";
+import { carriesConversationSnapshot, latestProjectionCommandIds, rememberSentCommandProjection, isSupersededPendingProjectionCommand, isSupersededCommandProjection } from "../protocol/command-projection";
+import { savedActiveConversationDraftId } from "../stores/conversation-drafts";
 export { isSupersededCommandProjection } from "../protocol/command-projection";
 
 // Transport policy follows MiniCode's WebSocket transport: reconnects are
@@ -174,8 +177,10 @@ export const workspaceRootForConversationRestore = (state: {
 
 export const conversationIdForSessionRestore = (state: {
   conversationId?: string | null;
+  activeConversationDraftId?: string | null;
   conversations?: Array<{ id?: string; archived?: boolean; conversationType?: "main" | "side_chat" }>;
 }): string => {
+  if (state.activeConversationDraftId || (state.activeConversationDraftId === undefined && savedActiveConversationDraftId())) return "";
   const activeId = typeof state.conversationId === "string" ? state.conversationId.trim() : "";
   if (activeId) return activeId;
   const persistedId = (readLS(LS.conversation.activeId) || "").trim();
@@ -572,10 +577,12 @@ export const acknowledgeClientCommand = (event: ServerEvent): boolean => {
   if (typeof clientCommandId !== "string" || !clientCommandId) return true;
   const command = pendingClientCommands.get(clientCommandId);
   clearPendingClientCommandAck(clientCommandId);
+  capturePendingUserMessageReceipt(clientCommandId, ack.accepted !== false,
+    String(ack.reason || "Command was rejected by the server"));
   if (ack.accepted !== false) notifyClientCommandReceived(clientCommandId);
   if (ack.accepted === false) {
     const reason = String(ack.reason || "Command was rejected by the server");
-    rejectClientCommandResult(clientCommandId, reason);
+    rejectClientCommandResult(clientCommandId, reason, new CommandRejectedError(reason));
     if (command?.type === "conversation.switch"
       && command.conversation_id === useAppStore.getState().pendingConversationSwitchId) {
       useAppStore.setState({ pendingConversationSwitchId: null });
@@ -727,7 +734,9 @@ export const useWebSocketConnection = () => {
       }
       if (clientCommandId) {
         const view = useAppStore.getState();
-        rememberSentCommandProjection(command, clientCommandId, view.pendingConversationSwitchId || view.conversationId);
+        rememberSentCommandProjection(command, clientCommandId,
+          command.type === "skills.list" ? view.conversationId : view.pendingConversationSwitchId || view.conversationId,
+          view.workingDirectory);
       }
       trackPendingClientCommandAck(command);
       return true;
@@ -1004,7 +1013,7 @@ export const useWebSocketConnection = () => {
           closeWebSocketForResync(ws, "event replay required");
           return false;
         }
-        if (handled) {
+        if (handled && (!isSupersededCommandProjection(parsed) || carriesConversationSnapshot(parsed))) {
           if (parsed.type === "conversation.switched" && parsed.conversation_id) {
             // The reducer may reject a superseded switch. Observe only the
             // canonical owner actually accepted by the store.
@@ -1031,6 +1040,11 @@ export const useWebSocketConnection = () => {
         replayPendingClientCommands();
         flushOfflineQueue();
         sendOrCoalesceCommand({ type: "conversation.list" });
+        const draftId = useAppStore.getState().activeConversationDraftId;
+        if (draftId) {
+          void useAppStore.getState().refreshConversationDraftSelection(draftId);
+          return;
+        }
         if (!switchWillRefreshCatalog) {
           sendOrCoalesceCommand({ type: "commands.list" });
         }
@@ -1048,7 +1062,8 @@ export const useWebSocketConnection = () => {
         const buffered = bufferedRecoveryEvents;
         bufferedRecoveryEvents = [];
         for (const bufferedEvent of buffered) {
-          if (isSupersededCommandProjection(bufferedEvent)) continue;
+          if (isSupersededCommandProjection(bufferedEvent) && !carriesConversationSnapshot(bufferedEvent)
+            && !shouldAdvanceReplayCursor(bufferedEvent)) continue;
           if (!deliverInboundEvent(bufferedEvent)) return;
         }
 
@@ -1092,7 +1107,8 @@ export const useWebSocketConnection = () => {
           return;
         }
         if (!parsed) return;
-        if (isSupersededCommandProjection(parsed)) return;
+        if (isSupersededCommandProjection(parsed) && !carriesConversationSnapshot(parsed)
+          && !shouldAdvanceReplayCursor(parsed)) return;
         if (parsed.type === "scheduler.heartbeat.renderer_state.request") {
           if (!isReplayedEvent(parsed) && deliverInboundEvent(parsed)) {
             rendererObserver.request(parsed.conversation_id);
@@ -1455,7 +1471,9 @@ const handleServerEvent = (e: ServerEvent): boolean => {
       }
       if (!shouldProcessInboundEvent(replayed)) continue;
       if (!processInboundEvent(replayed)) return false;
-      for (const sub of subscribers) sub(replayed);
+      if (!isSupersededCommandProjection(replayed) || carriesConversationSnapshot(replayed)) {
+        for (const sub of subscribers) sub(replayed);
+      }
     }
     return true;
   }
@@ -1476,7 +1494,10 @@ const handleServerEvent = (e: ServerEvent): boolean => {
 const processInboundEvent = (event: ServerEvent): boolean => {
   try {
     assertInboundReplayCursorContinuity(event);
-    const handled = handleServerEvent(event);
+    // A superseded durable catalog still owns its place in the replay chain.
+    // Consume that receipt without projecting its obsolete contents.
+    const handled = isSupersededCommandProjection(event) && !carriesConversationSnapshot(event)
+      ? true : handleServerEvent(event);
     if (!handled) {
       console.warn("[ws] Known server event was not routed; leaving it replayable", event);
       return false;

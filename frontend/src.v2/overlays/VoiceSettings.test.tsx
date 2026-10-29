@@ -13,7 +13,7 @@ function nativeBridge() {
   return { getLocalRuntime: vi.fn(async () => ({ apiBaseUrl: "http://127.0.0.1:8000", runtimeToken: "local", revision: 1 })), get: vi.fn(async () => state), onState: vi.fn(() => () => {}), suspend: vi.fn(async () => {}),
     configure: vi.fn(async (patch: Partial<DictationHotkeyState>) => { state = { ...state, ...patch }; return state; }) };
 }
-let bridge: ReturnType<typeof nativeBridge> | undefined;
+var bridge: ReturnType<typeof nativeBridge> | undefined;
 vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => bridge ? { dictation: bridge } : undefined }));
 vi.mock("./ToastContainer", () => ({ pushToast: vi.fn() }));
 let mediaDevices: EventTarget & { enumerateDevices: ReturnType<typeof vi.fn>; getUserMedia: ReturnType<typeof vi.fn> };

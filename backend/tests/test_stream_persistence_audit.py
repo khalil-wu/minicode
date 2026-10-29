@@ -220,7 +220,8 @@ async def test_extension_reload_keeps_project_configuration(tmp_path, monkeypatc
     def build(owner, **kwargs):
         captured.update(kwargs)
         raise StopProbe()
-    host = SimpleNamespace(conversation_repo=SimpleNamespace(get_conversation=lambda owner: SimpleNamespace(id=owner)),
+    host = SimpleNamespace(conversation_repo=SimpleNamespace(get_conversation=lambda owner: SimpleNamespace(id=owner),
+        get_conversation_summary=lambda owner: SimpleNamespace(id=owner)),
         _extension_runtime_state=lambda owner: state, _extension_workspace_key=lambda path: "project",
         _conversation_tool_registries={"conv_probe": (1, "project", registry)}, _on_model_runtime_changed=lambda *args: None,
         _build_conversation_tool_registry=build, _mcp_manager_for_workspace=lambda path: mcp, session_id="fixture")
@@ -400,14 +401,22 @@ async def test_priority_control_can_release_saturated_normal_command_slots():
 
 @pytest.mark.asyncio
 async def test_start_boundary_assigns_identity_for_non_transport_prompts():
+    from unittest.mock import Mock
+
     captured = []
+    captured_contexts = []
+    request_snapshot = object()
+    capture_request = Mock(return_value=request_snapshot)
     async def run(content, *, metadata, **kwargs):
         captured.append(metadata)
+        captured_contexts.append(kwargs["run_context"])
         metadata["_turn_admission_future"].set_result(None)
     def create(name, coroutine):
         return SimpleNamespace(id="task1", task=asyncio.create_task(coroutine))
     host = SimpleNamespace(session_id="non-transport-fixture", ws_manager=None,
-        run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True),
+        run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True,
+            release_query_claim=conversation_query_guards().end),
+        capture_agent_run_request=capture_request,
         _window_binding_token="", window_instance_id="", window_owner_id="",
         _conversation_streams={}, execution_cleanup_tasks=set(),
         event_outbox=SimpleNamespace(bind_connection_generation=lambda value: nullcontext()), task_manager=SimpleNamespace(create=create),
@@ -415,6 +424,9 @@ async def test_start_boundary_assigns_identity_for_non_transport_prompts():
     await WebSocketSession.start_agent_run(host, "authorized PR follow-up", conversation_id="conv_probe")
     await asyncio.gather(*host.execution_cleanup_tasks)
     assert captured[0]["user_message_id"].startswith("user_")
+    capture_request.assert_called_once_with("conv_probe")
+    assert captured_contexts[0].start_request is request_snapshot
+    assert captured_contexts[0].reserved_query_claim is None
 
 
 @pytest.mark.asyncio

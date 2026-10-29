@@ -23,7 +23,7 @@
    ════════════════════════════════════════════════════════ */
 
 :root {
-  --desktop-rail-width: 56px;
+  --desktop-rail-width: 52px;
   --height-toolbar: 46px;
   --height-toolbar-sm: 36px;
   --height-toolbar-pane: 40px;
@@ -136,6 +136,28 @@ html[data-theme="dark"] ::selection {
   background: var(--surface-base);
 }
 
+.mc-workbench-toolbar[data-home="true"] {
+  position: absolute;
+  inset: 0 0 auto auto;
+  z-index: 2;
+  border: 0;
+  background: transparent;
+}
+
+.mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .workbench-empty-state {
+  transform: translateY(-11px);
+}
+.mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .workbench-empty-brand {
+  gap: 28px;
+}
+.mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .chat-pane {
+  --mc-chat-width: 748px;
+  --chat-composer-axis-width: min(748px, calc(100% - 32px));
+}
+#root .mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .chat-pane .composer-container {
+  margin-bottom: 24px !important;
+}
+
 .mc-workbench-title {
   display: flex;
   align-items: center;
@@ -159,7 +181,7 @@ html[data-theme="dark"] ::selection {
 .mc-navigation-rail-main { display: flex; flex-direction: column; align-items: center; gap: 8px; flex: 1; }
 .mc-navigation-rail button { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 12.5px; color: var(--text-muted); }
 .mc-navigation-rail button:hover { background: var(--workbench-hover); color: var(--text-primary); }
-.mc-navigation-rail button[aria-current="page"] { background: var(--workbench-active); color: var(--text-primary); }
+.mc-navigation-rail button[aria-current="page"] { background: var(--surface-selected); color: var(--text-primary); }
 .mc-navigation-rail-main > button:first-child[aria-current="page"] > svg { fill: currentColor; stroke: currentColor; }
 .mc-navigation-rail button > svg { width: 20px; height: 20px; stroke-width: var(--mc-icon-stroke); }
 .mc-rail-divider { width: 22px; height: 1px; background: var(--border-subtle); margin: 2px 0; }
@@ -830,7 +852,7 @@ html[data-theme="light"] .workbench-home {
   border-radius: var(--mc-control-radius);
 }
 
-.mc-workspace-group-header[data-active="true"] { background: var(--workbench-active); }
+.mc-workspace-group-header[data-active="true"] { background: var(--surface-selected); }
 .mc-workspace-group-header:hover { background: var(--workbench-hover); }
 
 .mc-workspace-group-toggle {
@@ -1078,6 +1100,17 @@ html[data-theme="dark"] .mc-sidebar-right {
   padding: 0;
   min-height: 0;
   touch-action: none;
+  -webkit-app-region: no-drag;
+}
+
+/* Keep the separator outside the native browser view; clip only panel content. */
+.mc-sidebar-right-content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .mc-sidebar-right-resize-handle::after {
@@ -1085,7 +1118,7 @@ html[data-theme="dark"] .mc-sidebar-right {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 4px;
+  right: 0;
   width: 1px;
   background: transparent;
   transition: background var(--transition-fast), width var(--transition-fast);
@@ -1094,7 +1127,7 @@ html[data-theme="dark"] .mc-sidebar-right {
 .mc-sidebar-right-resize-handle:hover::after,
 .layout-dragging .mc-sidebar-right-resize-handle::after {
   width: 2px;
-  background: var(--accent-primary);
+  background: var(--border-strong);
 }
 
 .mc-sidebar-right-resize-handle:focus-visible,
@@ -1249,7 +1282,7 @@ html[data-theme="dark"] [aria-label="Agent is waiting for input"] section {
 
 /* Reveal the existing panel through the sidebar clip instead of rewrapping
    its files, diffs and browser toolbar at every intermediate animation width. */
-.mc-sidebar-right[data-embedded="false"][data-expanded="false"] > :is(.mc-sidebar-right-header, .mc-sidebar-panel-view) {
+.mc-sidebar-right[data-embedded="false"][data-expanded="false"] > .mc-sidebar-right-content > :is(.mc-sidebar-right-header, .mc-sidebar-panel-view) {
   width: var(--right-sidebar-width);
 }
 

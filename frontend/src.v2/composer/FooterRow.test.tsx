@@ -548,11 +548,11 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
     expect((screen.getByTitle("更改权限") as HTMLElement).style.color).toBe("var(--text-secondary)");
-    // `max` is not among the provider's declared levels. Previously the pill
-    // silently rendered the nearest extreme level (极高) as if it were the
-    // configured value; it now names the real level and says it is unsupported.
-    expect(screen.getByRole("button", { name: "模型与推理强度：5，最大（不支持）" }).getAttribute("title")).toBe("选择模型");
-    expect(screen.getByRole("button", { name: "模型与推理强度：5，最大（不支持）" })).toBeTruthy();
+    // `max` is not among the provider's declared levels. Keep the retained
+    // value out of the trigger instead of presenting an unsupported control.
+    const trigger = screen.getByTitle("gpt-5");
+    expect(trigger.querySelector(".composer-model-trigger-effort")).toBeNull();
+    expect(screen.queryByText("最大（不支持）")).toBeNull();
   });
 
   it("does not show fake thinking controls for unsupported chat models", () => {
@@ -571,6 +571,19 @@ describe("FooterRow permission picker", () => {
     render(<FooterRow sendState="disabled" onSend={() => {}} />);
 
     expect(screen.queryByTitle(/推理强度：/)).toBeNull();
+  });
+
+  it.each([{ levels: [] }, { levels: ["off"] }, { levels: ["high"] }])("keeps a model with fixed levels $levels on the model picker", ({ levels }) => {
+    useAppStore.setState({ currentProvider: "custom", currentModel: "fixed-model", availableModels: ["fixed-model"],
+      effortLevel: levels[0] || "medium", availableModelOptions: [{ model: "fixed-model", reasoningEffortLevels: levels, defaultReasoningEffort: levels[0] || "off" }],
+      runtimeCapabilities: { provider_capabilities: { model: "fixed-model", reasoning_effort_supported: true,
+        reasoning_effort_levels: ["low", "medium", "high"] } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    const trigger = screen.getByTitle("fixed-model");
+    expect(trigger.querySelector(".composer-model-trigger-effort")).toBeNull();
+    fireEvent.click(trigger);
+    expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
+    expect(screen.queryByRole("slider")).toBeNull();
   });
 
   it("hides reasoning effort until the runtime confirms model support", () => {
@@ -893,6 +906,45 @@ describe("FooterRow permission picker", () => {
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
+  it("reveals the selected model in a long list while leaving IME navigation to composition", async () => {
+    const scroll = vi.spyOn(Element.prototype, "scrollIntoView");
+    useAppStore.setState({ currentModel: "model-59", availableModels: Array.from({ length: 60 }, (_, index) => `model-${index}`),
+      runtimeCapabilities: { provider_capabilities: { reasoning_effort: false, reasoning_effort_levels: [] } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByTitle("model-59"));
+    const selected = screen.getByRole("option", { name: "model-59", exact: true });
+    await waitFor(() => expect(document.activeElement).toBe(selected));
+    expect(scroll).toHaveBeenCalledWith({ block: "nearest" });
+    expect(scroll.mock.contexts.at(-1)).toBe(selected);
+    fireEvent.keyDown(selected, { key: "Home", isComposing: true });
+    fireEvent.keyDown(selected, { key: "Escape", keyCode: 229 });
+    expect(document.activeElement).toBe(selected);
+    expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
+    fireEvent.keyDown(selected, { key: "Home" });
+    expect(document.activeElement).toBe(screen.getByRole("option", { name: "model-0", exact: true }));
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
+
+  it("does not close or commit the reasoning control during IME Enter or navigation", async () => {
+    useAppStore.setState({ effortLevel: "medium", runtimeCapabilities: { provider_capabilities: {
+      reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
+    } } });
+    render(<FooterRow sendState="idle" onSend={() => {}} />);
+    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度/ }));
+    const slider = screen.getByRole("slider");
+    await waitFor(() => expect(document.activeElement).toBe(slider));
+    fireEvent.change(slider, { target: { value: "2" } });
+    fireEvent.keyUp(slider, { key: "ArrowRight", isComposing: true });
+    fireEvent.keyUp(slider, { key: "Home", keyCode: 229 });
+    fireEvent.keyDown(slider, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(slider, { key: "Escape", keyCode: 229 });
+    expect(screen.getByRole("slider")).toBe(slider);
+    expect(document.activeElement).toBe(slider);
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.pointerCancel(slider);
+    expect(slider.getAttribute("aria-valuetext")).toBe("中");
+  });
+
   it("keeps model-menu Tab navigation inside its controls and confirms the current effort with Enter", async () => {
     useAppStore.setState({ runtimeCapabilities: { provider_capabilities: { reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"] } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
@@ -956,15 +1008,16 @@ describe("FooterRow permission picker", () => {
     expect(sendClientCommandAwaitResult).toHaveBeenCalledTimes(1);
   });
 
-  it("offers declared choices when the current effort is unsupported", () => {
+  it("hides the retained effort when the current model does not declare it", () => {
     useAppStore.setState({ effortLevel: "max", runtimeCapabilities: { provider_capabilities: {
       reasoning_effort: true, reasoning_effort_levels: ["low", "medium", "high"],
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
-    fireEvent.click(screen.getByRole("button", { name: /模型与推理强度：.*，最大/ }));
+    const trigger = screen.getByTitle("gpt-5");
+    fireEvent.click(trigger);
     expect(screen.queryByRole("slider")).toBeNull();
-    fireEvent.click(screen.getByRole("option", { name: "中" }));
-    expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("中");
+    expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
+    expect(screen.queryByText("最大（不支持）")).toBeNull();
   });
 
   it("keeps the picker and latest selection stable while earlier effort replies arrive", async () => {

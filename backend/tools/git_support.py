@@ -13,6 +13,7 @@ import subprocess
 from dataclasses import replace
 
 from backend.subprocesses import communicate_bounded
+from backend.runtime_env import is_git_tool_env as _is_git_repository_env
 from backend.permissions.context import ToolExecutionContext
 from backend.sandbox import SandboxPolicy, SandboxRunner
 from backend.sandbox.policy import (
@@ -33,17 +34,6 @@ logger = logging.getLogger(__name__)
 
 
 _GIT_TRANSPORT_LIMIT_BYTES = 20 * 1024 * 1024
-_GIT_REPOSITORY_ENV = frozenset({
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES",
-    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
-})
-
-
-def _is_git_repository_env(name: str) -> bool:
-    key = name.upper() if os.name == "nt" else name
-    return key in _GIT_REPOSITORY_ENV or key == "GIT_CONFIG" or key.startswith("GIT_CONFIG_")
 
 
 async def _run_git(

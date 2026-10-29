@@ -21,6 +21,8 @@ import { getWebSocket } from "../hooks/useWebSocket";
 import { searchResultConversation } from "../protocol/conversation-search";
 import { revealConversationMessage } from "../chat/revealConversationMessage";
 
+const EMPTY_CONVERSATIONS: never[] = [];
+
 interface PaletteAction {
   id: string;
   label: string;
@@ -91,7 +93,9 @@ export const CommandPalette = () => {
   const openBottomTab = useAppStore((s) => s.openBottomTab);
   const openTerminal = useAppStore(s => s.openTerminal);
   const setRightStackTab = useAppStore((s) => s.setRightStackTab);
-  const conversations = useAppStore((s) => s.conversations);
+  // The palette is mounted while closed. Avoid subscribing to live
+  // conversation projections until it is actually open.
+  const conversations = useAppStore((s) => s.commandPaletteOpen ? s.conversations : EMPTY_CONVERSATIONS);
   const conversationId = useAppStore((s) => s.conversationId);
   const runtimeCapabilities = useAppStore((s) => s.runtimeCapabilities);
   const globalSearchEnabled = capabilityFeatureEnabled(runtimeCapabilities, "global_search", true);
@@ -194,7 +198,7 @@ export const CommandPalette = () => {
       group: "导航",
       run: () => {
         const state = useAppStore.getState();
-        state.createConversation({ appMode: state.appMode, bindWorkspace: Boolean(state.workingDirectory) });
+        state.startConversationDraft({ appMode: state.appMode, bindWorkspace: Boolean(state.workingDirectory) });
       },
     },
     {

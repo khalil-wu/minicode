@@ -309,6 +309,8 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           enabled?: boolean;
           disabled_reason?: string;
           source?: string;
+          plugin_id?: string | null;
+          plugin_server_name?: string | null;
           approval_status?: "approved" | "rejected" | "pending" | "not_applicable";
           config_path?: string;
           project_workspace?: string;
@@ -363,6 +365,8 @@ export const handlePeripheralEvent = (e: ServerEvent): boolean => {
           enabled: srv.enabled,
           disabledReason: srv.disabled_reason,
           source: srv.source,
+          pluginId: srv.plugin_id,
+          pluginServerName: srv.plugin_server_name,
           approvalStatus: srv.approval_status,
           configPath: srv.config_path,
           projectWorkspace: srv.project_workspace,

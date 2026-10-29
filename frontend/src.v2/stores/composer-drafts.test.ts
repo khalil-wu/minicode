@@ -17,7 +17,8 @@ const renderer = async (owner: string) => {
 const state = (patch: Partial<AppStore> = {}): AppStore => ({
   draft: "", attachments: [], quotedMessage: null, selectedMentions: [], selectedSkills: [], allowedRemoteImageDomains: [],
   conversationId: null, workingDirectory: "C:/draft-project", conversations: [], workspaceComposerDrafts: {},
-  conversationWorkbenchStates: {}, sideChats: {}, ...patch,
+  activeConversationDraftId: null, conversationDrafts: {}, homeConversationDraftIds: {},
+  conversationWorkbenchStates: {}, sideChats: {}, retainedComposerInputs: {}, ...patch,
 } as AppStore);
 const attachment = (id: string, file: File, status: ComposerAttachment["status"] = "uploading"): ComposerAttachment => ({
   id, name: file.name, type: file.type, size: file.size, status, localFile: file,
@@ -39,6 +40,34 @@ afterEach(async () => {
 });
 
 describe("durable owned composer drafts", () => {
+  it("writes only the edited owner while retaining dormant rich drafts and original attachment bytes on cold reopen", async () => {
+    const storage = await renderer("incremental-window");
+    const hiddenFile = new File([new Uint8Array([0, 127, 255])], "hidden.bin", { lastModified: 42 });
+    const workbenches = Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`hidden-${index}`, {
+      ...state(), draft: `Unsent ${index}: ` + "保持未发送内容 ".repeat(500),
+      ...(index === 0 ? { attachments: [attachment("hidden-file", hiddenFile)],
+        richDraft: { markdown: "**hidden**", plainTextMode: false, document: { type: "doc", content: [] } } } : {}),
+    }]));
+    const initial = state({ conversationId: "active", draft: "a", conversationWorkbenchStates: workbenches as never });
+    await save(storage, initial);
+    const writes = vi.spyOn(IDBObjectStore.prototype, "put");
+    await save(storage, { ...initial, draft: "ab" }, 2);
+    const writtenDrafts = writes.mock.calls.filter((_, index) => writes.mock.contexts[index].name === "drafts");
+    expect(writtenDrafts.map(([record]) => record.owner.id)).toEqual(["active"]);
+    expect(writes.mock.contexts.filter(store => store.name === "files")).toHaveLength(0);
+    await storage.resetComposerDraftStorageForTests(true);
+    const cold = await renderer("incremental-window");
+    const recovered = await cold.loadComposerDrafts();
+    expect(recovered).toHaveLength(101);
+    expect(recovered.find(record => record.owner.id === "active")!.draft.draft).toBe("ab");
+    for (let index = 0; index < 100; index++) {
+      expect(recovered.find(record => record.owner.id === `hidden-${index}`)!.draft.draft).toBe(workbenches[`hidden-${index}`].draft);
+    }
+    const hidden = recovered.find(record => record.owner.id === "hidden-0")!.draft;
+    expect(hidden.richDraft).toEqual(workbenches["hidden-0"].richDraft);
+    expect(new Uint8Array(await hidden.attachments[0].localFile!.arrayBuffer())).toEqual(new Uint8Array([0, 127, 255]));
+  });
+
   it("cold reopens an interrupted remote import without copying bytes or losing its original source", async () => {
     const first = await renderer("remote-window");
     await save(first, state({ conversationId: "remote-owner", workingDirectory: "/srv/project", draft: "keep remote draft",

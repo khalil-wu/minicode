@@ -1,6 +1,7 @@
 import { useAppStore } from "../stores";
 import { parseHttpUrl } from "../lib/network-target";
 import type { EmbeddedBrowserState } from "../desktop/runtime";
+import { browserOwnerId } from "../stores/browser-workbench";
 
 interface BrowserRequestBase {
   id: number;
@@ -21,7 +22,7 @@ type BrowserRequestListener = (request: BrowserRequest) => void;
 
 const listeners = new Set<BrowserRequestListener>();
 let requestSequence = 0;
-const pendingRequests = new Map<string, BrowserRequest>();
+const pendingRequests = new Map<number, BrowserRequest>();
 
 export function isPreviewableHttpUrl(value: string): boolean {
   return parseHttpUrl(value) !== null;
@@ -31,13 +32,13 @@ export function openWebInBrowser(url: string): boolean {
   const parsedUrl = parseHttpUrl(url);
   if (!parsedUrl) return false;
   const normalizedUrl = parsedUrl.toString();
-  const conversationId = String(useAppStore.getState().conversationId || "").trim();
+  const conversationId = browserOwnerId(useAppStore.getState());
   if (!conversationId) return false;
 
   useAppStore.getState().setRightStackTab("browser");
 
   const request: BrowserRequest = { kind: "open", id: ++requestSequence, url: normalizedUrl, conversationId };
-  pendingRequests.set("open", request);
+  pendingRequests.set(request.id, request);
   listeners.forEach((listener) => listener(request));
   return true;
 }
@@ -45,16 +46,16 @@ export function openWebInBrowser(url: string): boolean {
 export function openNewBrowserTab(): void {
   const state = useAppStore.getState();
   state.setRightStackTab("browser");
-  const request: BrowserRequest = { kind: "new", id: ++requestSequence, url: "", conversationId: state.conversationId || "" };
-  pendingRequests.set("new", request);
+  const request: BrowserRequest = { kind: "new", id: ++requestSequence, url: "", conversationId: browserOwnerId(state) };
+  pendingRequests.set(request.id, request);
   listeners.forEach(listener => listener(request));
 }
 
 export function focusBrowserAddressBar(): void {
   const state = useAppStore.getState();
   state.setRightStackTab("browser");
-  const request: BrowserRequest = { kind: "focus-address", id: ++requestSequence, url: "", conversationId: state.conversationId || "" };
-  pendingRequests.set("focus-address", request);
+  const request: BrowserRequest = { kind: "focus-address", id: ++requestSequence, url: "", conversationId: browserOwnerId(state) };
+  pendingRequests.set(request.id, request);
   listeners.forEach(listener => listener(request));
 }
 
@@ -64,16 +65,20 @@ export function refreshWebInBrowser(url: string, conversationId: string, workspa
   const request: BrowserRequest = {
     kind: "refresh", id: ++requestSequence, url: parsedUrl.toString(), conversationId, workspaceRoot,
   };
-  pendingRequests.set(JSON.stringify([conversationId, workspaceRoot, parsedUrl.origin]), request);
+  for (const [id, pending] of pendingRequests) {
+    if (pending.kind === "refresh" && pending.conversationId === conversationId && pending.workspaceRoot === workspaceRoot
+      && new URL(pending.url).origin === parsedUrl.origin) pendingRequests.delete(id);
+  }
+  pendingRequests.set(request.id, request);
   listeners.forEach((listener) => listener(request));
   return true;
 }
 
 export function returnToBrowserPage(target: { conversationId: string; targetId: string; url: string }): void {
-  if (target.conversationId !== useAppStore.getState().conversationId) return;
+  if (target.conversationId !== browserOwnerId(useAppStore.getState())) return;
   useAppStore.getState().setRightStackTab("browser");
   const request: BrowserRequest = { ...target, kind: "resume", id: ++requestSequence };
-  pendingRequests.set("resume", request);
+  pendingRequests.set(request.id, request);
   listeners.forEach((listener) => listener(request));
 }
 
@@ -84,23 +89,30 @@ export function presentExistingBrowserPage(target: EmbeddedBrowserState): void {
     || (state.rightStackTabLocked && (!state.rightPanelOpen || state.rightStackTab !== "browser"))) return;
   const request: BrowserRequest = { kind: "present", id: ++requestSequence,
     conversationId: target.conversationId, url: target.url, target };
-  pendingRequests.set("present", request);
+  pendingRequests.set(request.id, request);
   state.setRightStackTab("browser", { automatic: true });
   listeners.forEach((listener) => listener(request));
 }
 
 export function discardInactiveBrowserPresentation(): void {
-  const request = pendingRequests.get("present");
-  if (!request) return;
   const state = useAppStore.getState();
-  if (request.conversationId !== state.conversationId || state.pendingConversationSwitchId
-    || !state.rightPanelOpen || state.rightStackTab !== "browser") pendingRequests.delete("present");
+  for (const [id, request] of pendingRequests) {
+    if (request.kind === "present" && (request.conversationId !== state.conversationId || state.pendingConversationSwitchId
+      || !state.rightPanelOpen || state.rightStackTab !== "browser")) pendingRequests.delete(id);
+  }
 }
 
 export function discardClosedBrowserPresentation(target: EmbeddedBrowserState): void {
-  const request = pendingRequests.get("present");
-  if (request?.kind === "present" && request.target.id === target.id
-    && request.conversationId === target.conversationId) pendingRequests.delete("present");
+  for (const [id, request] of pendingRequests) {
+    if (request.kind === "present" && request.target.id === target.id
+      && request.conversationId === target.conversationId) pendingRequests.delete(id);
+  }
+}
+
+export function transferDraftBrowserRequests(fromOwner: string, toOwner: string): void {
+  for (const [id, request] of pendingRequests) {
+    if (request.conversationId === fromOwner) pendingRequests.set(id, { ...request, conversationId: toOwner });
+  }
 }
 
 export function subscribeBrowserRequests(listener: BrowserRequestListener): () => void {
@@ -110,12 +122,7 @@ export function subscribeBrowserRequests(listener: BrowserRequestListener): () =
 }
 
 export function acknowledgeBrowserRequest(id: number): void {
-  for (const [key, request] of pendingRequests) {
-    if (request.id === id) {
-      pendingRequests.delete(key);
-      return;
-    }
-  }
+  pendingRequests.delete(id);
 }
 
 export function __resetOpenWebInBrowserForTests(): void {

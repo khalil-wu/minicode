@@ -173,7 +173,8 @@ def test_literal_external_commands_are_classified_external() -> None:
     assert _command_side_effect_kind({"command": "git -C sub fetch"}) == "external"
 
 
-def test_bypass_and_remembered_allows_preserve_frozen_source_compound_rules(tmp_path) -> None:
+@pytest.mark.asyncio
+async def test_bypass_and_remembered_allows_preserve_frozen_source_compound_rules(tmp_path) -> None:
     import json
     from backend.config import permission_settings_from_config
     from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
@@ -201,12 +202,12 @@ def test_bypass_and_remembered_allows_preserve_frozen_source_compound_rules(tmp_
             context = configure_command_context(tool, ToolExecutionContext(permission, workspace_root=tmp_path),
                 sandbox_policy=SandboxPolicy.bypass())
             context.run_context.exec_policy_owner = ExecPolicyOwner(home=home, stack=stack)
-            result = authorize_command_call(ToolCallEvent(id="compound", name="run_command", arguments={"command": text}), context)
+            result = (await authorize_command_call(ToolCallEvent(id="compound", name="run_command", arguments={"command": text}), context))
             assert result.request.exec_policy.kind == "forbidden", result.request.exec_policy.evidence_json
             assert result.permission_decision.permission_level == PermissionLevel.ALWAYS_DENY
     context = configure_command_context(tool,
         ToolExecutionContext(checker.build_context(mode="bypass"), workspace_root=tmp_path),
         sandbox_policy=SandboxPolicy.bypass())
-    safe = authorize_command_call(ToolCallEvent(id="safe-command", name="run_command", arguments={"command": "echo observed"}), context)
+    safe = (await authorize_command_call(ToolCallEvent(id="safe-command", name="run_command", arguments={"command": "echo observed"}), context))
     assert safe.request.exec_policy.kind == "skip"
     assert safe.permission_decision.decision == "allow"

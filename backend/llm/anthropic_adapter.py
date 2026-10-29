@@ -47,7 +47,6 @@ from backend.llm.errors import (
 from backend.llm.openai_usage import _get_usage_cost_usd, _get_usage_field
 from backend.llm.proxy_policy import (
     normalize_provider_proxy_mode,
-    provider_httpx_proxy_kwargs,
 )
 from backend.llm.sse import SSEMalformedBudget, iter_sse_data
 from backend.tools.catalog import canonicalize_tool_schemas
@@ -595,21 +594,11 @@ class AnthropicAdapter(LLMAdapter):
 
     def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None:
-            if self._application_network.managed:
-                from backend.application_network import application_http_client
-                self._http_client = application_http_client(self._messages_url(), policy=self._application_network,
-                    proxy_mode=self._proxy_mode, timeout=None, follow_redirects=False)
-                return self._http_client
+            from backend.application_network import application_http_client
             # Provider request liveness is owned by the turn/stream policy;
             # this transport must not introduce a second idle timeout.
-            self._http_client = httpx.AsyncClient(
-                timeout=None,
-                follow_redirects=False,
-                **provider_httpx_proxy_kwargs(
-                    self._messages_url(),
-                    proxy_mode=self._proxy_mode,
-                ),
-            )
+            self._http_client = application_http_client(self._messages_url(), policy=self._application_network,
+                proxy_mode=self._proxy_mode, timeout=None, follow_redirects=False)
         return self._http_client
 
     async def _prepare_message_request(
@@ -1941,7 +1930,7 @@ class AnthropicAdapter(LLMAdapter):
                         {"role": "user", "content": parts or msg.content}
                     )
                 else:
-                    raw_messages.append({"role": "user", "content": msg.content})
+                    raw_messages.append({"role": "user", "content": "".join(text_parts)})
 
             elif msg.role == "assistant":
                 native_content = _anthropic_replay_content(msg.provider_items)

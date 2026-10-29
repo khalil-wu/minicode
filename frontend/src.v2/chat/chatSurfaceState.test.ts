@@ -440,7 +440,7 @@ describe("chat surface explicit projection", () => {
     ]);
   });
 
-  it("groups parallel task prompts into one multi-agent collaboration row", () => {
+  it("retains parallel task records when their results do not identify started agents", () => {
     const turns = projectMessagesToTurns([
       message("assistant-1", "assistant", [{
         type: "tool_call",
@@ -463,17 +463,37 @@ describe("chat surface explicit projection", () => {
 
     const [cell] = turns[0]?.committedCells ?? [];
     expect(cell).toMatchObject({
-      kind: "collaboration",
-      action: "delegated",
-      status: "success",
-      entries: [
-        { agentId: "审计前端", content: "检查前端。" },
-        { agentId: "审计后端", content: "检查后端。" },
-      ],
+      kind: "activity",
+      status: "done",
+      toolCallRecords: [expect.objectContaining({ id: "task-parallel" })],
     });
   });
 
-  it("projects delegation immediately while the task tool is still running", () => {
+  it("retains mixed parallel failure evidence alongside only the child that actually started", () => {
+    const record = { id: "task-mixed", name: "task", args: { parallel_tasks: [
+      { description: "Started", prompt: "First" }, { description: "Rejected", prompt: "Second" },
+    ] }, status: "failed" as const, resultKind: "subagent" as const, activityKind: "genericTool" as const,
+      startedAt: 1, outputPreview: "Second task was rejected", delegations: [
+        { agent_id: "subagent-actual", name: "Started", status: "running", started_at: 2 },
+      ] };
+    const turn = projectMessagesToTurns([message("assistant-mixed", "assistant", [{ type: "tool_call", record }])], false)[0];
+    expect(turn.committedCells).toEqual([
+      expect.objectContaining({ kind: "collaboration", entries: [expect.objectContaining({ agentId: "subagent-actual" })] }),
+      expect.objectContaining({ kind: "activity", toolCallRecords: [expect.objectContaining({ outputPreview: "Second task was rejected" })] }),
+    ]);
+  });
+
+  it("does not assign an incomplete parallel receipt to an arbitrary task", () => {
+    const turn = projectMessagesToTurns([message("assistant-incomplete", "assistant", [{ type: "tool_call", record: {
+      id: "task-incomplete", name: "task", args: { parallel_tasks: [
+        { description: "First", prompt: "One" }, { description: "Second", prompt: "Two" },
+      ] }, status: "success", startedAt: 1, outputPreview: "subagent-actual",
+    } }])], false)[0];
+    expect(turn.committedCells).toEqual([expect.objectContaining({ kind: "activity",
+      toolCallRecords: [expect.objectContaining({ outputPreview: "subagent-actual" })] })]);
+  });
+
+  it("keeps an unstarted task as a real tool action while the request is running", () => {
     const turns = projectMessagesToTurns([
       message("assistant-1", "assistant", [{
         type: "tool_call",
@@ -496,12 +516,9 @@ describe("chat surface explicit projection", () => {
 
     expect(turns[0]?.committedCells).toEqual([
       expect.objectContaining({
-        kind: "collaboration",
+        kind: "activity",
         status: "running",
-        entries: [
-          { agentId: "子任务一", agentLabel: "子任务一", content: "读取 fact-1.txt" },
-          { agentId: "子任务二", agentLabel: "子任务二", content: "读取 fact-2.txt" },
-        ],
+        toolCallRecords: [expect.objectContaining({ id: "task-live" })],
       }),
     ]);
   });

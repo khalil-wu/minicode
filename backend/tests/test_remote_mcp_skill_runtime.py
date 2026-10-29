@@ -117,8 +117,9 @@ def test_captured_model_resource_messages_reach_registry_and_change_cache_withou
         assert invalid["description"] == "Valid independent description" and invalid["parameters"] == tool.get_schema().parameters
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("remote_full,main_full,has_scope", [(False, True, True), (True, False, True), (False, True, False)])
-def test_final_mcp_approval_uses_captured_server_scope_even_when_primary_has_other_permissions(tmp_path, remote_full, main_full, has_scope):
+async def test_final_mcp_approval_uses_captured_server_scope_even_when_primary_has_other_permissions(tmp_path, remote_full, main_full, has_scope):
     from backend.mcp.registry import MCPToolProxy
     from backend.permissions.context import PermissionContext
     from backend.permissions.environment_scope import EnvironmentPermissionScope
@@ -134,7 +135,7 @@ def test_final_mcp_approval_uses_captured_server_scope_even_when_primary_has_oth
     manager.environment_runtime = SimpleNamespace(permission_scope=lambda environment_id: scope)
     tool = MCPToolProxy("source-server", _tool._tool_def, client, manager=manager)
     permission = PermissionContext(mode="bypass", approval_policy="never", workspace_root=tmp_path)
-    result, _, _ = authorize(tool, tmp_path, policy(tmp_path, "disabled" if main_full else "managed-workspace"), permission)
+    result, _, _ = (await authorize(tool, tmp_path, policy(tmp_path, "disabled" if main_full else "managed-workspace"), permission))
     assert (result.permission_decision.decision == "allow") is (remote_full and has_scope)
     manager.environment_runtime.permission_scope = lambda environment_id: None
     assert tool.permission_scope is scope and tool.environment_id == "remote-server"

@@ -8,7 +8,7 @@ import {
 import { isTerminalToolCallStatus, isToolCallExecuting, type ToolCallRecord } from "./tool-call-reducer";
 import { isBrowserScreenshotRecord } from "./artifact-projection";
 import { isProviderRequestProgress, isProviderStreamError, providerProgressLabel, providerRetryCounter } from "./provider-progress";
-import { codeModeOwnError, commandActionKind, getRecordOutputText, taskResultAgentIds } from "../chat/cells/activityCellHelpers";
+import { codeModeOwnError, commandActionKind, getRecordOutputText, isAgentWaitRecord, isHiddenAgentWaitRecord, taskResultAgentIds } from "../chat/cells/activityCellHelpers";
 import {
   isProviderReasoning,
   isProviderReasoningSummary,
@@ -155,6 +155,7 @@ export const activityKindFromToolRecord = (record: ToolCallRecord): TurnActivity
   if (record.commandPresentation && record.executionStartedAt == null && isTerminalToolCallStatus(record.status)) return "commandExecution";
   const declared = String(record.activityKind || "").trim();
   const name = String(record.name || "").trim().toLowerCase();
+  if (isAgentWaitRecord(record)) return "genericTool";
   // A screenshot is a first-class browser result.  Persisted records from
   // before the browser lane was introduced can retain an unrelated activity
   // declaration (for example `fileRead`) even though the result carries
@@ -268,6 +269,7 @@ const thinkingKind = (
 
 const isVisibleActivity = (block: ContentBlock, includeHidden: boolean): boolean => {
   if (includeHidden) return true;
+  if (block.type === "tool_call" && isAgentWaitRecord(block.record)) return !isHiddenAgentWaitRecord(block.record);
   if (block.type === "tool_call" && block.record.streamingAnnouncement && !isTerminalToolCallStatus(block.record.status)) return false;
   const visibility = block.type === "tool_call"
     ? block.record.visibility
@@ -504,6 +506,12 @@ export function projectTurn(
       // Older persisted turns can contain an agent.progress mirror for a
       // typed tool call. The tool lifecycle is authoritative.
       if (block.toolCallId && typedToolIds.has(block.toolCallId)) return;
+      if (!options.includeHiddenActivity && block.toolName === "wait_agent") {
+        if (block.status === "failed" || block.status === "partial" && (block.errorMessage?.trim() || block.detail?.trim())) {
+          activityItems.push(progressItem(block, segment));
+        }
+        return;
+      }
       if (isProviderStreamError(block)) {
         const item = { ...progressItem(block, segment), status: "info" as const, hasFailure: false };
         const previous = activityItems.at(-1);
@@ -511,8 +519,10 @@ export function projectTurn(
         // Source stream-error coalesces adjacent numbered retries, preserving
         // the first row's identity and the latest attempt's original details.
         if (previous?.segment === segment && isProviderStreamError(previousProgress)
+          && previousProgress?.operationId === block.operationId
           && providerRetryCounter(previousProgress) && providerRetryCounter(block)) {
-          activityItems[activityItems.length - 1] = { ...item, id: previous.id };
+          activityItems[activityItems.length - 1] = { ...item, id: previous.id,
+            blocks: [...previous.blocks, ...item.blocks], progress: [...(previous.progress ?? []), block] };
         } else activityItems.push(item);
         return;
       }

@@ -120,7 +120,7 @@ def test_turn_and_recovery_use_owned_durable_mode_while_explicit_child_modes_do_
         yield AgentEvent.done()
 
     session.query_engine = QueryEngine(runner=runner)
-    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(api_key="test-key")))
+    monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda cwd=None, **_kwargs: AppConfig(llm=LLMSettings(provider="openai", model="gpt-test", api_key="test-key")))
     monkeypatch.setattr("backend.ws.agent_runner.get_llm_provider", lambda: "openai")
     monkeypatch.setattr("backend.ws.agent_runner.get_available_models", lambda provider="openai": ["gpt-test"])
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
@@ -129,7 +129,7 @@ def test_turn_and_recovery_use_owned_durable_mode_while_explicit_child_modes_do_
         metadata["agent_mode"] = explicit
         metadata["_agent_mode_selection_revision"] = session.conversation_repo.get_conversation("conv_runnerdone").agent_mode_revision
     _run_session_scenario(session, session._run_agent_locked("Continue owned work", conversation_id="conv_runnerdone", metadata=metadata))
-    assert captured == [explicit or selected]
+    assert captured == [explicit or selected], events
     assert session.conversation_repo.get_conversation("conv_runnerdone").agent_mode == expected_durable
     assert session.conversation_repo.get_conversation(foreign.id).agent_mode == "build"
     reopened = ConversationRepository(session.conversation_repo.storage_root)

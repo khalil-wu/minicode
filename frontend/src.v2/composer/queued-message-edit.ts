@@ -10,7 +10,8 @@ import { pushToast } from "../overlays/ToastContainer";
 import { getDiffCommentScope, readDiffCommentState, setDiffComments, subscribeDiffComments } from "../lib/diff-comment-storage";
 import { recordQueuedMessageUndo } from "./queued-message-undo";
 
-const editUndoActions = new WeakMap<QueuedMessageEdit, ReturnType<typeof recordQueuedMessageUndo>>();
+// The captured original stays stable while uploads replace the mutable backup.
+const editUndoActions = new WeakMap<ChatMessage, ReturnType<typeof recordQueuedMessageUndo>>();
 
 const ownerDraft = (ownerId: string): ComposerDraft => {
   const state = useAppStore.getState();
@@ -19,10 +20,10 @@ const ownerDraft = (ownerId: string): ComposerDraft => {
 };
 
 const writeOwnerDraft = (ownerId: string, draft: ComposerDraft) => useAppStore.setState(state => ({
-  ...(state.conversationId === ownerId ? { ...draft, richDraft: draft.richDraft, queuedEdit: draft.queuedEdit } : {}),
+  ...(state.conversationId === ownerId ? { ...draft, richDraft: draft.richDraft, queuedEdit: draft.queuedEdit, retainedInputEdit: draft.retainedInputEdit } : {}),
   conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
     [ownerId]: { ...emptyConversationWorkbenchState(), ...state.conversationWorkbenchStates[ownerId],
-      ...draft, richDraft: draft.richDraft, queuedEdit: draft.queuedEdit } },
+      ...draft, richDraft: draft.richDraft, queuedEdit: draft.queuedEdit, retainedInputEdit: draft.retainedInputEdit } },
 }));
 
 const commentScope = (edit: QueuedMessageEdit) => getDiffCommentScope(edit.ownerId, edit.workspaceRoot);
@@ -101,15 +102,17 @@ export const beginQueuedMessageEdit = async (ownerId: string, message: ChatMessa
   const ordered = state.messages.filter(item => item.role === "user" && item.queueState === "queued")
     .sort((left, right) => (left.queuePosition ?? 0) - (right.queuePosition ?? 0));
   const index = ordered.findIndex(item => item.id === message.id);
-  const edit: QueuedMessageEdit = { ownerId, workspaceRoot: state.workingDirectory, original: message, backup,
+  const edit: QueuedMessageEdit = { ownerId, workspaceRoot: state.workingDirectory, original: { ...message }, backup,
     previousMessageId: ordered[index - 1]?.queueMessageId, nextMessageId: ordered[index + 1]?.queueMessageId,
     backupDiffComments: readDiffCommentState(getDiffCommentScope(ownerId, state.workingDirectory)).comments };
   let changed = false;
   const unsubscribe = useAppStore.subscribe((current, previous) => {
     if (current.conversationId !== previous.conversationId || current.pendingConversationSwitchId !== previous.pendingConversationSwitchId
-      || current.draft !== previous.draft || current.attachments !== previous.attachments
+      || current.draft !== previous.draft || current.richDraft !== previous.richDraft || current.attachments !== previous.attachments
       || current.selectedMentions !== previous.selectedMentions || current.selectedSkills !== previous.selectedSkills
-      || current.quotedMessage !== previous.quotedMessage || current.goalMode !== previous.goalMode) changed = true;
+      || current.quotedMessage !== previous.quotedMessage || current.goalMode !== previous.goalMode
+      || current.retainedInputEdit !== previous.retainedInputEdit || current.queuedEdit !== previous.queuedEdit
+      || current.agentMode !== previous.agentMode || current.allowedRemoteImageDomains !== previous.allowedRemoteImageDomains) changed = true;
   });
   const unsubscribeComments = subscribeDiffComments(() => { changed = true; });
   try {
@@ -135,20 +138,26 @@ export const beginQueuedMessageEdit = async (ownerId: string, message: ChatMessa
     };
     let unsubscribeEdit: (() => void) | undefined;
     let unsubscribeUndoComments: (() => void) | undefined;
-    if (backup.queuedEdit) editUndoActions.get(backup.queuedEdit)?.invalidate();
+    if (backup.queuedEdit) editUndoActions.get(backup.queuedEdit.original)?.invalidate();
     const action = recordQueuedMessageUndo({ ownerId, expiresAfterMs: 30 * 60_000,
       undo: async () => {
         editedDraft = ownerDraft(ownerId);
         editedComments = readDiffCommentState(commentScope(edit)).comments;
         await restoreQueuedMessage(edit);
-        if (ownerDraft(ownerId).queuedEdit === edit) restoreBackup(edit);
+        const current = ownerDraft(ownerId);
+        if (current.queuedEdit?.original === edit.original) {
+          editedDraft = current;
+          editedComments = readDiffCommentState(commentScope(edit)).comments;
+          restoreBackup(current.queuedEdit);
+        }
         undoneFingerprint = fingerprint();
         phase = "undone";
       },
       redo: async () => {
         await removeQueuedMessage(ownerId, message);
         phase = "editing";
-        writeOwnerDraft(ownerId, { ...editedDraft, queuedEdit: edit });
+        writeOwnerDraft(ownerId, { ...editedDraft, queuedEdit: { ...editedDraft.queuedEdit!,
+          backup: ownerDraft(ownerId), backupDiffComments: readDiffCommentState(commentScope(edit)).comments } });
         setDiffComments(commentScope(edit), editedComments);
       },
       onFinalize: () => { unsubscribeEdit?.(); unsubscribeUndoComments?.(); },
@@ -156,7 +165,7 @@ export const beginQueuedMessageEdit = async (ownerId: string, message: ChatMessa
     const invalidateBranch = () => { if (phase === "undone" && fingerprint() !== undoneFingerprint) action.invalidate(); };
     unsubscribeEdit = useAppStore.subscribe(invalidateBranch);
     unsubscribeUndoComments = subscribeDiffComments(invalidateBranch);
-    editUndoActions.set(edit, action);
+    editUndoActions.set(edit.original, action);
     window.dispatchEvent(new Event("composer:focus"));
   } catch (error) {
     pushToast(error instanceof Error ? error.message : String(error), "error");
@@ -171,8 +180,9 @@ export const cancelQueuedMessageEdit = async () => {
     if (!edit.completed) {
       await restoreQueuedMessage(edit);
     }
-    editUndoActions.get(edit)?.invalidate();
-    if (ownerDraft(edit.ownerId).queuedEdit === edit) restoreBackup(edit);
+    editUndoActions.get(edit.original)?.invalidate();
+    const current = ownerDraft(edit.ownerId).queuedEdit;
+    if (current?.original === edit.original) restoreBackup(current);
     return true;
   } catch (error) {
     pushToast(error instanceof Error ? error.message : String(error), "error");
@@ -192,17 +202,18 @@ export const submitQueuedMessageEdit = async (options: SendChatMessageOptions): 
       ...((options.codeReview ?? edit.original.codeReview) ? { code_review: options.codeReview ?? edit.original.codeReview } : {}) },
     "user_message.queue.add", { silent: true });
     if (!commandResultSucceeded(result) || result.data?.queued !== true) throw new Error(result.message);
-    editUndoActions.get(edit)?.invalidate();
+    editUndoActions.get(edit.original)?.invalidate();
     options.onAdmission?.(result);
+    options.onModelAccepted?.();
     options.onReceived?.();
     const current = ownerDraft(edit.ownerId);
-    if (current.queuedEdit === edit) {
+    if (current.queuedEdit?.original === edit.original) {
       // A newer draft typed during acceptance stays visible. Its predecessor
       // remains durable and returns when that newer draft has been consumed.
-      const empty = !current.draft && !current.attachments.length && !current.quotedMessage
+      const empty = !current.goalMode && !current.draft && !current.attachments.length && !current.quotedMessage
         && !current.selectedMentions.length && !current.selectedSkills.length && !readDiffCommentState(commentScope(edit)).comments.length;
-      if (empty) restoreBackup(edit);
-      else writeOwnerDraft(edit.ownerId, { ...current, queuedEdit: { ...edit, completed: true } });
+      if (empty) restoreBackup(current.queuedEdit);
+      else writeOwnerDraft(edit.ownerId, { ...current, queuedEdit: { ...current.queuedEdit, completed: true } });
     }
     try { await restorePosition(edit, messageId); }
     catch (error) { pushToast(error instanceof Error ? error.message : String(error), "error"); }
@@ -217,12 +228,17 @@ export const installQueuedEditRecovery = () => {
   const restore = () => {
     const state = useAppStore.getState();
     const edit = state.queuedEdit;
-    if (edit?.completed && !state.draft && !state.attachments.length && !state.quotedMessage
+    if (edit?.completed && !state.goalMode && !state.draft && !state.attachments.length && !state.quotedMessage
       && !state.selectedMentions.length && !state.selectedSkills.length && !readDiffCommentState(commentScope(edit)).comments.length) restoreBackup(edit);
   };
   restore();
   const observe = () => queueMicrotask(restore);
-  const unsubscribe = useAppStore.subscribe(observe);
-  const unsubscribeComments = subscribeDiffComments(observe);
+  const unsubscribe = useAppStore.subscribe((state, previous) => {
+    if (state.queuedEdit?.completed && (state.queuedEdit !== previous.queuedEdit || state.draft !== previous.draft
+      || state.attachments !== previous.attachments || state.quotedMessage !== previous.quotedMessage
+      || state.selectedMentions !== previous.selectedMentions || state.selectedSkills !== previous.selectedSkills
+      || state.goalMode !== previous.goalMode)) observe();
+  });
+  const unsubscribeComments = subscribeDiffComments(() => { if (useAppStore.getState().queuedEdit?.completed) observe(); });
   return () => { unsubscribe(); unsubscribeComments(); };
 };

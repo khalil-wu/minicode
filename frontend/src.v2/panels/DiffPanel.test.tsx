@@ -9,7 +9,7 @@ import { showConfirm } from "../overlays/DialogService";
 import { DiffPanel } from "./DiffPanel";
 import { __resetOpenWebInBrowserForTests, subscribeBrowserRequests } from "../chat/openWebInBrowser";
 import * as deferredTurnDiff from "../chat/loadMessageTurnDiff";
-import type { GitChangeFile, GitChangesState, GitComparisonState, GitDiffSource, GitReviewSelection, TurnDiffState } from "../stores/types";
+import type { ChatMessage, GitChangeFile, GitChangesState, GitComparisonState, GitDiffSource, GitReviewSelection, TurnDiffState } from "../stores/types";
 import { clearDiffCommentScope, clearDiffReaderDrafts, readDiffCommentState } from "../lib/diff-comment-storage";
 import { setWordDiffsEnabled } from "../chat/diff/word-diff-preference";
 import { clearGitReviewSelection } from "../chat/diff/git-review-selection";
@@ -17,6 +17,9 @@ import { readGitReviewOptions, type GitReviewOptions } from "../chat/diff/git-re
 import { clearReviewExpansion } from "../chat/diff/review-expansion-state";
 import { readFileWorkspaceApplyPatch, readFileWorkspaceBranches, readFileWorkspaceChanges } from "../protocol/file-workspace";
 import * as clipboard from "../lib/clipboard";
+import { toggleChangesPanel } from "../lib/changes-panel";
+import * as reviewHistory from "../lib/review-history";
+import * as codeReview from "../chat/codeReview";
 
 const commandIds = vi.hoisted(() => ({ next: 0 }));
 
@@ -140,6 +143,7 @@ beforeEach(() => {
   __resetOpenWebInBrowserForTests();
   useAppStore.setState({
     conversationId: "conv-diff",
+    activeConversationDraftId: null,
     pendingConversationSwitchId: null,
     pendingConversationCreateId: null,
     workingDirectory: "C:\\workspace",
@@ -170,6 +174,218 @@ afterEach(() => {
   vi.mocked(sendClientCommandAwaitResult).mockReset();
   vi.mocked(sendPromptResponseCommand).mockReset();
   vi.mocked(showConfirm).mockReset();
+});
+
+describe("conversation review streaming work", () => {
+  const patch = (path: string, value: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+${value}`;
+  const answer = (id: string): ChatMessage => ({ id, role: "assistant", turnId: `turn-${id}`, content: "Done", timestamp: 2, artifacts: [],
+    blocks: [{ type: "tool_call", record: { id: `edit-${id}`, name: "apply_patch", status: "success", startedAt: 1,
+      args: { patch: patch(`${id}.ts`, `change_${id}`) } } }] });
+
+  it("avoids history and comment recomputation for actual text/stdout events, then projects changed receipts and empty aggregates", async () => {
+    const history = vi.spyOn(reviewHistory, "buildReviewHistory");
+    const comments = vi.spyOn(codeReview, "codeReviewComments");
+    const past = Array.from({ length: 80 }, (_, index) => answer(`past-${index}`));
+    useAppStore.setState({ messages: [...past, { ...answer("live"), isStreaming: true, content: "" }] });
+    render(<DiffPanel />);
+    await act(async () => {});
+    history.mockClear(); comments.mockClear();
+    for (let index = 0; index < 50; index += 1) {
+      act(() => {
+        useAppStore.getState().appendAgentMessageDelta("reply", `word ${index} `, "conv-diff", "live", "reply");
+        useAppStore.getState().updateToolCall("edit-live", { stdoutPreview: `output ${index}`, seq: index }, "conv-diff", undefined, "live");
+      });
+    }
+    expect(history).not.toHaveBeenCalled();
+    expect(comments).not.toHaveBeenCalled();
+    expect(useAppStore.getState().messages.at(-1)?.blocks?.some(block => block.type === "text" && block.content.includes("word 49"))).toBe(true);
+    act(() => useAppStore.getState().updateToolCall("edit-live", { args: { patch: patch("live.ts", "corrected_receipt") }, seq: 51 }, "conv-diff", undefined, "live"));
+    expect(history).toHaveBeenCalledOnce();
+    expect(comments).not.toHaveBeenCalled();
+    chooseDiffSource("上一轮");
+    expect(screen.getByText("corrected_receipt", { exact: true })).toBeTruthy();
+    const aggregate = { threadId: "conv-diff", turnId: "turn-live", messageId: "live", updatedAt: 1, diff: patch("final.ts", "aggregate_final") };
+    act(() => useAppStore.setState({ turnDiffs: { "conv-diff": aggregate } }));
+    expect(screen.queryByText("corrected_receipt", { exact: true })).toBeNull();
+    expect(screen.getByText("aggregate_final", { exact: true })).toBeTruthy();
+    act(() => useAppStore.setState({ turnDiffs: { "conv-diff": { ...aggregate, diff: "" } } }));
+    expect(screen.queryByText("aggregate_final", { exact: true })).toBeNull();
+    expect(history.mock.results.at(-1)?.value).toHaveLength(81);
+    expect(history.mock.results.at(-1)?.value[1].files[0].path).toBe("past-79.ts");
+  });
+
+  it("publishes completed review findings without replaying history, and removes findings after transcript replacement", async () => {
+    const history = vi.spyOn(reviewHistory, "buildReviewHistory");
+    const comments = vi.spyOn(codeReview, "codeReviewComments");
+    const scope = { mode: "uncommitted" as const, cwd: "C:/workspace", gitRoot: "C:/workspace" };
+    const source = patch("live.ts", "review_change");
+    useAppStore.setState({ messages: [{ ...answer("live"), isStreaming: true, content: "" }], diffReview: {
+      requestId: "code-review:input", conversationId: "conv-diff", workspaceRoot: "C:/workspace", codeReview: scope,
+      mode: "view", status: "viewing", diff: source, files: [{ path: "live.ts", patch: source }], fileDecisions: {},
+    } });
+    render(<DiffPanel />);
+    await act(async () => {});
+    history.mockClear(); comments.mockClear();
+    const finding = '::code-comment{title="Actual finding" body="Retain the changed value." file="C:/workspace/live.ts" start=1 end=1}';
+    act(() => useAppStore.getState().appendAgentMessageDelta("reply", finding, "conv-diff", "live", "reply"));
+    expect(comments).not.toHaveBeenCalled();
+    expect(screen.queryByText("Actual finding", { exact: true })).toBeNull();
+    act(() => {
+      useAppStore.getState().completeAgentMessage({ id: "reply", text: finding, source: "reply" }, "conv-diff", undefined, "live");
+      useAppStore.getState().finishStreaming("conv-diff", undefined, "completed", "live");
+    });
+    expect(comments).toHaveBeenCalledOnce();
+    expect(history).not.toHaveBeenCalled();
+    expect(screen.getByText("Actual finding", { exact: true })).toBeTruthy();
+    act(() => useAppStore.setState({ messages: [answer("other")] }));
+    expect(screen.queryByText("Actual finding", { exact: true })).toBeNull();
+    expect(history).toHaveBeenCalledOnce();
+    expect(comments).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("project drafts use the standalone Changes producer", () => {
+  const projectA = "C:/changes-draft-project-a";
+  const projectB = "C:/changes-draft-project-b";
+  const comparison = (selection: GitReviewSelection, text = "draft change") => {
+    const files = ["a.ts", "b.ts"].map(path => ({ path, patch: `@@ -1 +1 @@\n-old\n+${text} ${path}`, additions: 1, deletions: 1 }));
+    return { ...selection, loading: false, isGitRepo: true, status: "success" as const, files, diff: files.map(file => file.patch).join("\n") };
+  };
+  const selectDraft = (id: string, root: string) => useAppStore.setState(state => ({
+    conversationId: null, activeConversationDraftId: id, workingDirectory: root, gitReviewRequest: null,
+    conversationDrafts: { ...state.conversationDrafts, [id]: { id, workspaceRoot: root, bindWorkspace: true,
+      appMode: "cowork", permissionMode: "confirm", permissionEdited: false, modelSelection: { mode: "default" },
+      selectionLoading: false, selectionError: null, preferencesLoading: false } },
+    isConnected: true, draft: `unsent ${id}`, workspaceFileTabs: [], rightPanelOpen: false, rightStackTab: "tasks",
+  }));
+
+  beforeEach(() => {
+    vi.mocked(readFileWorkspaceBranches).mockReset().mockResolvedValue({ ...defaultOptions, branches: ["main", "feature", "origin/release"] });
+    vi.mocked(readFileWorkspaceChanges).mockReset().mockImplementation(async (_owner, selection) => comparison(selection));
+    vi.mocked(readFileWorkspaceApplyPatch).mockReset().mockResolvedValue("draft patch");
+  });
+
+  it("opens a selected project through the common shortcut and panel route without creating or querying a conversation", async () => {
+    selectDraft("changes-direct", projectA);
+    const before = useAppStore.getState();
+    act(() => toggleChangesPanel());
+    render(<DiffPanel />);
+    await screen.findByText("draft change a.ts");
+    const owner = { scopeId: `home:${projectA}`, conversationId: null, executionCwd: projectA, browserRoot: projectA };
+    expect(readFileWorkspaceBranches).toHaveBeenCalledWith(owner, expect.any(AbortSignal), undefined, projectA);
+    expect(readFileWorkspaceChanges).toHaveBeenCalledWith(owner, { source: "unstaged" }, false, expect.any(AbortSignal), projectA);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: null, activeConversationDraftId: "changes-direct", draft: "unsent changes-direct", rightStackTab: "diff" });
+    expect(useAppStore.getState().gitChanges).toBe(before.gitChanges);
+    expect(before.requestGitChanges).not.toHaveBeenCalled();
+    expect(before.requestGitComparison).not.toHaveBeenCalled();
+    expect(readGitReviewOptions).not.toHaveBeenCalled();
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("region", { name: "审阅未暂存 a.ts" })).getByRole("button", { name: "打开位置" }));
+    expect(useAppStore.getState().workspaceFileTabs).toMatchObject([{ owner, path: "a.ts" }]);
+    expect(useAppStore.getState().conversationId).toBeNull();
+  });
+
+  it("retains each draft's branch, source, file expansion and file jump across same-project switching and remount", async () => {
+    selectDraft("changes-remember-a", projectA);
+    const view = render(<DiffPanel />);
+    await screen.findByText("draft change a.ts");
+    chooseDiffSource("此分支");
+    await screen.findByRole("button", { name: "main", exact: true });
+    fireEvent.click(screen.getByRole("button", { name: "main", exact: true }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "origin/release", exact: true }));
+    await waitFor(() => expect(readFileWorkspaceChanges).toHaveBeenLastCalledWith(expect.anything(),
+      { source: "branch", baseBranch: "origin/release", commitSha: undefined }, false, expect.any(AbortSignal), projectA));
+    await screen.findByRole("button", { name: "审阅此分支 a.ts" });
+    fireEvent.click(gitFileTrigger("a.ts", "branch"));
+    fireEvent.click(screen.getByRole("button", { name: "跳转到文件", exact: true }));
+    fireEvent.click(screen.getByRole("option", { name: "b.ts", exact: true }));
+    expect(gitFileTrigger("a.ts", "branch").getAttribute("aria-expanded")).toBe("false");
+    expect(gitFileTrigger("b.ts", "branch").getAttribute("aria-expanded")).toBe("true");
+
+    act(() => selectDraft("changes-remember-b", projectA));
+    await screen.findByText("draft change a.ts");
+    chooseDiffSource("已暂存");
+    await screen.findByRole("button", { name: "审阅已暂存 a.ts" });
+    act(() => selectDraft("changes-remember-a", projectA));
+    await screen.findByRole("button", { name: "origin/release", exact: true });
+    await screen.findByRole("button", { name: "审阅此分支 a.ts" });
+    expect(gitFileTrigger("a.ts", "branch").getAttribute("aria-expanded")).toBe("false");
+    expect(gitFileTrigger("b.ts", "branch").getAttribute("aria-expanded")).toBe("true");
+    if (screen.queryByRole("button", { name: "显示文件", exact: true })) fireEvent.click(screen.getByRole("button", { name: "显示文件", exact: true }));
+    expect(screen.getByRole("treeitem", { name: "b.ts", exact: true }).getAttribute("aria-selected")).toBe("true");
+    view.unmount();
+    vi.mocked(HTMLElement.prototype.scrollIntoView).mockClear();
+    render(<DiffPanel />);
+    await screen.findByRole("button", { name: "origin/release", exact: true });
+    await screen.findByRole("button", { name: "审阅此分支 a.ts" });
+    expect(gitFileTrigger("a.ts", "branch").getAttribute("aria-expanded")).toBe("false");
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "start" });
+    expect(useAppStore.getState().draft).toBe("unsent changes-remember-a");
+    expect(sendClientCommand).not.toHaveBeenCalled();
+  });
+
+  it("aborts the previous project producer and ignores its late options and comparison", async () => {
+    let finishOldComparison!: (value: ReturnType<typeof comparison>) => void;
+    let finishOldOptions!: (value: GitReviewOptions) => void;
+    let oldComparisonSignal: AbortSignal | undefined;
+    let oldOptionsSignal: AbortSignal | undefined;
+    vi.mocked(readFileWorkspaceChanges).mockImplementation((owner, selection, _whitespace, signal) => {
+      if (owner.executionCwd === projectA) { oldComparisonSignal = signal; return new Promise(resolve => { finishOldComparison = resolve; }); }
+      return Promise.resolve(comparison(selection, "current project"));
+    });
+    vi.mocked(readFileWorkspaceBranches).mockImplementation((owner, signal) => {
+      if (owner.executionCwd === projectA) { oldOptionsSignal = signal; return new Promise(resolve => { finishOldOptions = resolve; }); }
+      return Promise.resolve(defaultOptions);
+    });
+    selectDraft("changes-race-a", projectA);
+    render(<DiffPanel />);
+    expect(oldComparisonSignal?.aborted).toBe(false);
+    act(() => selectDraft("changes-race-b", projectB));
+    await screen.findByText("current project a.ts");
+    expect(oldComparisonSignal?.aborted).toBe(true);
+    expect(oldOptionsSignal?.aborted).toBe(true);
+    await act(async () => { finishOldComparison(comparison({ source: "unstaged" }, "obsolete project"));
+      finishOldOptions({ ...defaultOptions, current_branch: "obsolete-branch" }); });
+    expect(screen.queryByText("obsolete project a.ts")).toBeNull();
+    expect(screen.queryByText("obsolete-branch")).toBeNull();
+    expect(useAppStore.getState()).toMatchObject({ conversationId: null, activeConversationDraftId: "changes-race-b", workingDirectory: projectB });
+  });
+
+  it("consumes a Files request once and does not replay its source or expansion when the draft panel remounts", async () => {
+    selectDraft("changes-explicit", projectA);
+    useAppStore.setState({ gitReviewRequest: { id: "changes-explicit-open-file", conversationId: null, workspaceRoot: projectA,
+      path: "a.ts", section: "working", source: "branch", baseBranch: "origin/release",
+      fileOwner: { scopeId: `home:${projectA}`, conversationId: null, executionCwd: projectA, browserRoot: projectA } } });
+    const view = render(<DiffPanel />);
+    await screen.findByText("draft change a.ts");
+    chooseDiffSource("已暂存");
+    await screen.findByRole("button", { name: "审阅已暂存 a.ts" });
+    fireEvent.click(gitFileTrigger("a.ts", "staged"));
+    expect(gitFileTrigger("a.ts", "staged").getAttribute("aria-expanded")).toBe("false");
+    view.unmount();
+    render(<DiffPanel />);
+    await screen.findByRole("button", { name: "审阅已暂存 a.ts" });
+    expect(gitFileTrigger("a.ts", "staged").getAttribute("aria-expanded")).toBe("false");
+    expect(readFileWorkspaceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ conversationId: null }),
+      { source: "staged", baseBranch: "origin/release", commitSha: undefined }, false, expect.any(AbortSignal), projectA);
+    expect(sendClientCommand).not.toHaveBeenCalled();
+  });
+
+  it("honors the Git file list's staged source and file request without requiring a fileOwner or materializing the draft", async () => {
+    selectDraft("changes-git-file-list", projectA);
+    useAppStore.setState({ gitReviewRequest: { id: "changes-git-staged-b", conversationId: null, workspaceRoot: projectA,
+      path: "b.ts", section: "staged" } });
+    render(<DiffPanel />);
+    await screen.findByRole("button", { name: "审阅已暂存 b.ts" });
+    expect(readFileWorkspaceChanges).toHaveBeenLastCalledWith(expect.objectContaining({ conversationId: null, executionCwd: projectA }),
+      { source: "staged", baseBranch: undefined }, false, expect.any(AbortSignal), projectA);
+    if (screen.queryByRole("button", { name: "显示文件", exact: true })) fireEvent.click(screen.getByRole("button", { name: "显示文件", exact: true }));
+    expect(screen.getByRole("treeitem", { name: "b.ts", exact: true }).getAttribute("aria-selected")).toBe("true");
+    expect(useAppStore.getState()).toMatchObject({ conversationId: null, activeConversationDraftId: "changes-git-file-list", draft: "unsent changes-git-file-list" });
+    expect(sendClientCommand).not.toHaveBeenCalled();
+    expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  });
 });
 
 describe("Files All changes repository ownership", () => {

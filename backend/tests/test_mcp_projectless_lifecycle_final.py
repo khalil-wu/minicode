@@ -55,7 +55,7 @@ def _manager(scope, label):
         workspace_root=scope, registry_version=1,
         get_all_tools=lambda: {label: [MCPToolDef("read", label, annotations={"readOnlyHint": True})]},
         get_client=lambda name: client,
-        get_server_contract=lambda name: (label,),
+        get_server_contract=lambda name: (label,), catalog_is_cached=lambda name: False,
         get_server_config=lambda name: None,
     )
 

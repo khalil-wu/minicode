@@ -362,8 +362,12 @@ async def handle_model_command(session: "WebSocketSession", data: dict[str, Any]
     # A rejected selection must still restore the client from the session's
     # authoritative model state. This is an explicit command response, not a
     # duplicate background runtime projection.
-    await session.send_llm_state(force=True)
-    await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set", include_catalogs=False)
+    # A draft's new conversation is configured before it is selected. These
+    # snapshots describe the currently visible conversation, not that draft;
+    # its authoritative model state is published by the ensuing switch.
+    if not conversation_id or conversation_id == session.active_conversation_id or owner is not session:
+        await session.send_llm_state(force=True)
+        await session.session_lifecycle.send_runtime_capabilities(source="llm.model.set", include_catalogs=False)
     if changed:
         await session.emit_command_result("model.set", "", level="success", data={
             "conversation_id": conversation_id, "selection_mode": request.selection_mode,
@@ -579,6 +583,8 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
     # after reconnect must become a no-op once that turn has completed or a new
     # turn has taken its place; otherwise an old Stop click can kill new work.
     if not (expected_turn_id or expected_message_id or expected_task_id):
+        if target_conversation_id and session.running_agent_task_for(target_conversation_id) is None:
+            await session.run_manager.cancel_mcp_startup(target_conversation_id)
         return True
     if (
         (expected_turn_id and expected_turn_id != current_turn_id)
@@ -1167,7 +1173,7 @@ async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]
         None,
     )
     if callable(ensure_extension_commands) and conversation_id:
-        await ensure_extension_commands(conversation_id)
+        await ensure_extension_commands(conversation_id, bind_command_context=False)
     commands = [
         *session.command_registry.list_extension_slash_commands(
             scope_id=conversation_id or None

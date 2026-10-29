@@ -1,7 +1,11 @@
 .settings-browser-settings { display: grid; gap: 38px; }
 .settings-browser-settings .settings-browser-group { display: grid; gap: 14px; }
+@media (min-width: 761px) {
+  .settings-center-content:has(.settings-tab-pane:not([hidden]) .settings-browser-settings) > .settings-page-heading { margin-bottom: 28px; }
+  .settings-browser-settings > .settings-browser-group:first-of-type { gap: 6px; }
+}
 .settings-browser-control-card .settings-row-copy { display: flex; align-items: center; gap: 16px; }
-.settings-browser-control-card .settings-row-copy > svg { flex-shrink: 0; color: var(--text-secondary); }
+.settings-browser-control-card .settings-row-copy > svg { flex-shrink: 0; color: var(--text-primary); }
 .settings-browser-group-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-browser-import-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: color-mix(in oklch, black 20%, transparent); font-family: var(--font-ui); }
 .settings-browser-import-dialog { display: grid; gap: 20px; width: min(560px, calc(100vw - 48px)); box-sizing: border-box; max-height: calc(100dvh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--border-subtle); border-radius: 20px; background: var(--surface-raised); color: var(--text-primary); font-size: var(--mc-font-secondary); box-shadow: var(--shadow-strong-overlay); }

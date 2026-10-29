@@ -446,7 +446,8 @@ def test_approval_response_digest_mismatch_rejects_execution(
     assert "did not match" in _event(events, "tool_result").data["summary"]
 
 
-def test_arguments_changed_while_waiting_for_approval_are_rejected(
+@pytest.mark.asyncio
+async def test_arguments_changed_while_waiting_for_approval_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tool = _ModeTool()
@@ -456,13 +457,13 @@ def test_arguments_changed_while_waiting_for_approval_are_rejected(
     tool_ctx = ToolExecutionContext(permission=permission, workspace_root=tmp_path)
     checker = PermissionChecker(PermissionSettings(), tmp_path)
     tc = ToolCallEvent(id="drift", name=tool.name, arguments={"mode": "write"})
-    authorization = _authorize_final_tool_request(
+    authorization = (await _authorize_final_tool_request(
         tc,
         tool_registry=registry,
         permission_checker=checker,
         permission_context=permission,
         tool_ctx=tool_ctx,
-    )
+    ))
     assert authorization.request is not None
     assert authorization.permission_decision is not None
     _bind_final_tool_request(tc, authorization.request)
@@ -493,7 +494,7 @@ def test_arguments_changed_while_waiting_for_approval_are_rejected(
             )
         ]
 
-    events = asyncio.run(collect())
+    events = (await collect())
     assert tool.executed == []
     assert (
         "changed while approval was pending"

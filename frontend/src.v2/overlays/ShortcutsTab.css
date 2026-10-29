@@ -1,0 +1,33 @@
+.settings-center-content:has(.settings-shortcuts) {
+  width: min(49rem, 100%);
+  padding-top: 26px;
+}
+.settings-center-content:has(.settings-shortcuts) > .settings-page-heading { margin-bottom: 34px; }
+@media (min-width: 1000px) {
+  .settings-center-content:has(.settings-shortcuts) { position: relative; left: 4px; }
+}
+@media (max-width: 760px) {
+  .settings-center-content:has(.settings-shortcuts) { padding-top: 20px; }
+  .settings-center-content:has(.settings-shortcuts) > .settings-page-heading { margin-bottom: 26px; }
+}
+.settings-shortcuts > .settings-section-heading { margin-bottom: 28px; }
+.settings-shortcuts > .settings-shortcut-preference + .settings-shortcut-preference { margin-top: 8px; }
+.settings-shortcuts:has(> .settings-shortcut-preference) > .settings-shortcuts-card { margin-top: 40px; }
+.settings-shortcuts .settings-shortcut-search { border-radius: 999px; }
+.settings-center-main .settings-shortcut-slot kbd { font-family: var(--font-ui) !important; }
+.settings-shortcuts .settings-shortcut-row {
+  position: relative;
+  grid-template-columns: minmax(0, .875fr) minmax(220px, 1.125fr);
+  border-bottom: 0;
+}
+.settings-shortcuts .settings-shortcut-row:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  inset: auto 16px 0;
+  height: 1px;
+  background: var(--border-subtle);
+  pointer-events: none;
+}
+@media (max-width: 600px) {
+  .settings-shortcuts .settings-shortcut-row { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+}

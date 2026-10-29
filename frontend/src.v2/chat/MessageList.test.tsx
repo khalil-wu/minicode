@@ -468,6 +468,7 @@ describe("MessageList cell UI", () => {
   });
 
   it("uses a larger visible hit target for scrolling back to the bottom", async () => {
+    useAppStore.setState({ reducedMotion: false });
     const { container } = render(<MessageList />);
     const scroll = screen.getByTestId("message-list-scroll");
     const scrollTo = vi.fn();
@@ -491,6 +492,24 @@ describe("MessageList cell UI", () => {
       expect(scrollTo).toHaveBeenCalledWith({ top: 1200, behavior: "smooth" });
       expect(container.querySelector('[aria-label="回到底部"]')).toBeNull();
     });
+  });
+
+  it("returns to the latest reply without smooth motion when reduced motion is enabled", async () => {
+    const previous = useAppStore.getState().reducedMotion;
+    useAppStore.setState({ reducedMotion: true });
+    const view = render(<MessageList />);
+    const scroll = screen.getByTestId("message-list-scroll");
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 1200 });
+    Object.defineProperty(scroll, "clientHeight", { configurable: true, value: 400 });
+    Object.defineProperty(scroll, "scrollTop", { configurable: true, writable: true, value: 0 });
+    Object.defineProperty(scroll, "scrollTo", { configurable: true, value: scrollTo });
+    fireEvent.scroll(scroll);
+    fireEvent.click(await screen.findByRole("button", { name: "回到底部" }));
+    await waitFor(() => expect(scroll.scrollTop).toBe(1200));
+    expect(scrollTo).not.toHaveBeenCalled();
+    view.unmount();
+    useAppStore.setState({ reducedMotion: previous });
   });
 
   it("follows streaming content when the user is already at the bottom", async () => {

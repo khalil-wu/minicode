@@ -110,9 +110,9 @@ def test_managed_login_disable_rejects_explicit_true_before_launch(tmp_path, mon
         from backend.permissions.exec_policy import ExecPolicyOwner
         context.run_context.exec_policy_owner = ExecPolicyOwner(home=tmp_path / ".managed-command-policy", stack=stack)
         try:
-            result = _authorize_final_tool_request(ToolCallEvent(id="managed-login", name="run_command",
+            result = (await _authorize_final_tool_request(ToolCallEvent(id="managed-login", name="run_command",
                 arguments={"command": "echo untouched", "login": True}), tool_registry=registry,
-                permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context)
+                permission_checker=context.permission_checker, permission_context=context.permission, tool_ctx=context))
             assert "login shell is disabled" in result.error
             assert manager.list_commands(include_completed=True, conversation_id=context.command_scope_id) == []
             omitted = command_shell_argv("echo source", shell="pwsh" if sys.platform == "win32" else "bash", allow_login_shell=False)

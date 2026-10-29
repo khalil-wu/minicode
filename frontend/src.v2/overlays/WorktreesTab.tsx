@@ -9,9 +9,10 @@ import "./WorktreesTab.css";
 
 type Preferences = { worktree_root: string; default_worktree_root: string; auto_cleanup_enabled: boolean; keep_count: number; upstream_refresh_mode: "best-effort" | "never" };
 type ManagedWorktree = { path: string; repo_root: string; branch: string; pinned: boolean; conversation_ids: string[]; can_remove: boolean; protection_reason: string };
+const EMPTY_CONVERSATIONS: never[] = [];
 export function WorktreesTab({ active = true }: { active?: boolean }) {
   const { t } = useI18n();
-  const conversations = useAppStore(state => state.conversations);
+  const conversations = useAppStore(state => active ? state.conversations : EMPTY_CONVERSATIONS);
   const [preferences, setPreferences] = useState<Preferences | null>(null);
   const [trees, setTrees] = useState<ManagedWorktree[]>([]);
   const [root, setRoot] = useState<string | null>(null);
@@ -73,7 +74,7 @@ export function WorktreesTab({ active = true }: { active?: boolean }) {
         {!preferences && !error && <p role="status">{t("正在获取工作树详情…")}</p>}
         <div className={isEmpty ? "settings-card settings-worktrees-empty-card" : "settings-card"}>
           {isEmpty && <p className="settings-worktrees-empty settings-section-description">{t("MiniCode 创建的工作树将显示在这里。")}</p>}
-          {trees.map(tree => <details key={tree.path} className="settings-detail-block"><summary className="settings-row"><span className="settings-row-copy"><span className="settings-row-title">{tree.repo_root.split(/[\\/]/).pop()} · {tree.branch}</span><span className="settings-row-description">{tree.path}</span></span></summary><div className="settings-page-note"><div className="settings-row"><button type="button" className="settings-action-button" onClick={() => { const state = useAppStore.getState(); void state.createConversation({ bindWorkspace: true, workspaceRoot: tree.path, appMode: "cowork" }).then(created => { if (created) useAppStore.getState().toggleSettings(); }); }}><SquarePen size={15} />{t("在此工作树中新建聊天")}</button><button type="button" className="settings-action-button" disabled={busy || !tree.can_remove} title={tree.protection_reason} onClick={() => { void remove(tree); }}><Trash2 size={15} />{t("删除")}</button></div><h4>{t("已知聊天")}</h4>{tree.conversation_ids.map(id => <button type="button" className="settings-action-button" key={id} onClick={() => { const state = useAppStore.getState(); state.switchConversation(id); state.toggleSettings(); }}>{conversations.find(chat => chat.id === id)?.title || id}</button>)}</div></details>)}</div>
+          {trees.map(tree => <details key={tree.path} className="settings-detail-block"><summary className="settings-row"><span className="settings-row-copy"><span className="settings-row-title">{tree.repo_root.split(/[\\/]/).pop()} · {tree.branch}</span><span className="settings-row-description">{tree.path}</span></span></summary><div className="settings-page-note"><div className="settings-row"><button type="button" className="settings-action-button" onClick={() => { const state = useAppStore.getState(); state.startConversationDraft({ bindWorkspace: true, workspaceRoot: tree.path, appMode: "cowork" }); }}><SquarePen size={15} />{t("在此工作树中新建聊天")}</button><button type="button" className="settings-action-button" disabled={busy || !tree.can_remove} title={tree.protection_reason} onClick={() => { void remove(tree); }}><Trash2 size={15} />{t("删除")}</button></div><h4>{t("已知聊天")}</h4>{tree.conversation_ids.map(id => <button type="button" className="settings-action-button" key={id} onClick={() => { const state = useAppStore.getState(); state.switchConversation(id); state.toggleSettings(); }}>{conversations.find(chat => chat.id === id)?.title || id}</button>)}</div></details>)}</div>
       </section>
     </div>
   </>;

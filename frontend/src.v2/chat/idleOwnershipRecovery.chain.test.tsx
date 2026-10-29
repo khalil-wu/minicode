@@ -71,7 +71,7 @@ beforeEach(() => {
     workingDirectory: "C:/a", draft: "keep A draft", richDraft: undefined, attachments: [], quotedMessage: null,
     selectedMentions: [], selectedSkills: [], conversationWorkbenchStates: {}, workspaceComposerDrafts: {},
     conversationAgentStates: {}, conversationHistoryPages: {}, conversationHydration: {}, pendingProviderProgress: {},
-    pendingConversationSwitchId: null, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
+    pendingConversationSwitchId: null, pendingConversationCreateId: null,
     inspectorEntries: [], plan: null, todos: [], subagents: [], agentProgress: [], backgroundTasks: [],
     pendingApproval: null, approvalQueue: [], pendingAskUser: null, askUserQueue: [], pendingDiffReview: null, diffReviewQueue: [],
   });

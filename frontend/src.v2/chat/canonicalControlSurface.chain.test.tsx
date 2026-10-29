@@ -243,11 +243,11 @@ describe("source request-input wizard through wire, owner store and semantic res
     expect(screen.queryByText("Which details?")).toBeNull();
     act(() => vi.advanceTimersByTime(179)); expect(screen.queryByText("Which details?")).toBeNull();
     act(() => vi.advanceTimersByTime(1)); expect(screen.getByText("Which details?")).toBeTruthy(); vi.useRealTimers();
-    fireEvent.change(screen.getByRole("textbox", { name: "回答当前问题" }), { target: { value: "Exact 原始内容" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "回答当前问题" }), { target: { value: "  Exact 原始内容\n    缩进\n" } });
     fireEvent.keyDown(screen.getByRole("textbox", { name: "回答当前问题" }), { key: "Enter" });
     await waitFor(() => expect(mocks.response).toHaveBeenCalledWith({ type: "control_response", request_id: "same-model-call",
       conversation_id: "owner", turn_id: "turn-one", message_id: "message-turn-one", task_id: "task-turn-one",
-      response: { subtype: "success", response: { answers: { area: { answers: ["Runner"] }, details: { answers: ["Exact 原始内容"] } } } },
+      response: { subtype: "success", response: { answers: { area: { answers: ["Runner"] }, details: { answers: ["  Exact 原始内容\n    缩进\n"] } } } },
     }));
     await waitFor(() => expect(useAppStore.getState().pendingAskUser).toBeNull());
     expect(useAppStore.getState().draft).toBe("unsent main draft"); expect(loadPromptDrafts()).toEqual({});

@@ -26,7 +26,7 @@ from backend.plugins.identity import (
     plugin_id as canonical_plugin_id,
     version_satisfies,
 )
-from backend.plugins.layout import plugin_install_root
+from backend.plugins.layout import plugin_data_root, plugin_install_root
 from backend.plugins.manifest import (
     _count_plugin_skills,
     _declared_component_payload,
@@ -34,6 +34,7 @@ from backend.plugins.manifest import (
     _filesystem_path_key,
     _iter_hook_maps,
     _looks_like_versioned_store,
+    _load_plugin_manifest,
     _manifest_component_counts,
     _manifest_mcp_server_names,
     _manifest_source_descriptor,
@@ -54,7 +55,6 @@ from backend.plugins.package import (
     _looks_like_remote_plugin_source,
     _normalized_extracted_plugin_dir,
     _remove_within_root,
-    _safe_plugin_data_segment,
     _safe_plugin_folder_name,
     _same_path,
     validate_plugin_directory,
@@ -303,10 +303,11 @@ def get_plugin_settings(
         effective_config,
         settings_data,
     )
-    plugins_enabled = load_feature_flags(
+    feature_flags = load_feature_flags(
         {**settings_data, **effective_config},
         managed_requirements=resolved_stack.requirements.feature_requirements if resolved_stack is not None else {},
-    ).enabled("plugins")
+    )
+    plugins_enabled = feature_flags.enabled("plugins")
     inventory: dict[str, dict[str, Any]] = {}
 
     for manifest_path in _iter_plugin_manifests(roots):
@@ -399,11 +400,13 @@ def get_plugin_settings(
             entry["source_descriptor"] = _manifest_source_descriptor(
                 plugin_dir, marketplace, raw_manifest,
             )
-        counts = _manifest_component_counts(manifest_path)
+        if entry.get("manifest_format") == "agent_plugin":
+            entry["runtime_support"].update(hooks=False, extensions=False)
+        counts = _manifest_component_counts(manifest_path, plugin_id=plugin_id)
         entry["mcp_server_count"] += counts["mcp_server_count"]
         entry["mcp_server_names"] = sorted({
             *entry.get("mcp_server_names", []),
-            *_manifest_mcp_server_names(manifest_path),
+            *_manifest_mcp_server_names(manifest_path, plugin_id=plugin_id),
         }, key=str.casefold)
         entry["app_count"] += counts["app_count"]
         entry["hook_count"] += counts["hook_count"]
@@ -527,7 +530,7 @@ def get_plugin_settings(
             str(key): value for key, value in sorted(configured_states.items(), key=lambda item: item[0].casefold())
         },
         "configured_explicit": configured_explicit,
-        "feature_enabled": feature_enabled("plugin_lifecycle_api", True),
+        "feature_enabled": feature_flags.enabled("plugin_lifecycle_api"),
         "plugins_enabled": plugins_enabled,
         "policy": {
             "configured": bool(
@@ -1073,19 +1076,17 @@ def load_enabled_plugin_hook_sources(
             continue
         plugin_root = Path(str(plugin.get("path") or "")).resolve()
         plugin_id = str(plugin.get("id") or plugin.get("name") or plugin_root.name).strip()
-        plugin_data_root = plugin_install_root().parent / "data" / _safe_plugin_data_segment(plugin_id)
+        data_root = plugin_data_root(plugin_id)
         for raw_manifest in plugin.get("manifest_paths", []):
             manifest_path = Path(str(raw_manifest))
             key = _filesystem_path_key(manifest_path)
             if key in seen_manifests:
                 continue
             seen_manifests.add(key)
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            loaded = _load_plugin_manifest(manifest_path)
+            if loaded is None or loaded.format == "agent_plugin":
                 continue
-            if not isinstance(manifest, Mapping):
-                continue
+            manifest = loaded.payload
             payload = _declared_component_payload(
                 plugin_root,
                 manifest.get("hooks"),
@@ -1120,7 +1121,7 @@ def load_enabled_plugin_hook_sources(
                             "source_path": str(manifest_path.resolve()),
                             "plugin_id": plugin_id,
                             "plugin_root": str(plugin_root),
-                            "plugin_data_root": str(plugin_data_root),
+                            "plugin_data_root": str(data_root),
                             "managed": bool(plugin.get("policy_managed")),
                         }
                     )
@@ -1206,8 +1207,8 @@ def load_enabled_plugin_extension_sources(
                 )
                 continue
             try:
-                manifest = json.loads(manifest_resolved.read_text(encoding="utf-8"))
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                loaded = _load_plugin_manifest(manifest_resolved)
+            except ValueError as exc:
                 sources.append(
                     {
                         **base,
@@ -1216,7 +1217,7 @@ def load_enabled_plugin_extension_sources(
                     }
                 )
                 continue
-            if not isinstance(manifest, Mapping):
+            if loaded is None:
                 sources.append(
                     {
                         **base,
@@ -1225,6 +1226,7 @@ def load_enabled_plugin_extension_sources(
                     }
                 )
                 continue
+            manifest = loaded.payload
             declared = manifest.get("extensions")
             raw_paths = [declared] if isinstance(declared, str) else declared
             if declared is None:

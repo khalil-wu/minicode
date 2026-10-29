@@ -511,3 +511,33 @@
 .plugin-marketplace-removal-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; max-height: 40dvh; overflow-y: auto; }
 .plugin-marketplace-removal-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .plugin-marketplace-removal-list li > span:last-child:not(:first-child) { display: inline-flex; align-items: center; gap: 4px; color: var(--text-secondary); font-size: var(--mc-font-secondary); }
+
+.plugins-catalog { container-type: inline-size; }
+.plugin-catalog-page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin: 0 8px 24px; }
+.plugin-catalog-page-header .skills-page-heading { margin: 0; }
+.plugin-catalog-toolbar { display: flex; align-items: center; gap: 8px; padding-top: 1px; }
+.plugin-catalog-toolbar .skills-search { width: 288px; margin: 0 8px 0 0; box-shadow: none; }
+.plugin-directory-tabs { display: flex; align-items: center; gap: 4px; margin: 0 8px 32px; }
+.plugin-directory-tabs button { border-radius: var(--radius-full); padding-inline: 18px; }
+.plugin-directory-tabs button[aria-selected="true"] { background: var(--surface-hover); color: var(--text-primary); }
+.plugins-catalog .plugin-source-catalog { margin-bottom: 40px; }
+.plugins-catalog .plugin-catalog-heading { margin: 0 8px 24px; }
+.plugins-catalog .plugin-discover-grid { gap: 8px 40px; }
+.plugins-catalog .plugin-discover-row { gap: 16px; padding: 10px 8px; }
+.plugin-catalog-open { display: flex; align-items: center; gap: 14px; min-width: 0; flex: 1; border-radius: var(--mc-control-radius); }
+.plugin-catalog-open.plugin-detail-link:hover { color: var(--text-primary); }
+.plugin-catalog-open .plugin-local-copy { display: grid; gap: 4px; text-align: left; }
+.plugin-catalog-open .plugin-local-title { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; min-width: 0; }
+.plugin-catalog-open .plugin-local-title > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-catalog-open .plugin-local-title > svg { flex-shrink: 0; color: var(--text-muted); }
+.plugin-catalog-open .plugin-section-description { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugins-catalog .plugin-discover-row .plugin-local-icon { width: 44px; height: 44px; flex: 0 0 44px; border: 1px solid var(--border-subtle); background: var(--surface-base); border-radius: 12px; }
+.plugin-catalog-install { flex-shrink: 0; }
+.plugin-catalog-open:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 4px; }
+.plugin-catalog-install:focus-visible, .plugin-directory-tabs button:focus-visible { outline: 2px solid var(--border-strong); outline-offset: 2px; }
+.plugin-detail-try { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+@container (max-width: 880px) {
+  .plugin-catalog-page-header { flex-wrap: wrap; gap: 16px; }
+  .plugin-catalog-toolbar { width: 100%; }
+  .plugin-catalog-toolbar .skills-search { flex: 1; width: auto; }
+}

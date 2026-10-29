@@ -1,5 +1,6 @@
 import { useI18n } from "../i18n";
-import { cloneElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { cloneElement, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import {
   Folder,
   FolderOpen,
@@ -15,7 +16,7 @@ import { showConfirm, showPrompt } from "../overlays/DialogService";
 import { copyText } from "../lib/clipboard";
 import * as wsOutbox from "../protocol/ws-outbox";
 import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-display";
-import { runtimePendingUserActionLabelForConversation } from "../lib/runtime-session";
+import { runtimePendingUserActionLabels } from "../lib/runtime-session";
 import { SessionRow } from "./SessionRow";
 import { useThreadPullRequestStatuses } from "./ThreadPullRequestBadge";
 import { PinnedConversationList } from "./PinnedConversationList";
@@ -36,7 +37,6 @@ import { projectExecutionRoot, projectOwnsWorkspace } from "../lib/project-regis
 import { ProjectMarkerIcon } from "../components/ProjectMarker";
 import { fromMarkdown, markdownNodeText } from "../lib/markdown";
 import { setConversationArchived } from "../chat/archiveConversation";
-import { loadConversationMarkdown } from "../chat/conversationMarkdown";
 import { getWebSocket } from "../hooks/useWebSocket";
 import { useSidebarSections, type SidebarSection } from "../protocol/thread-metadata";
 import { SidebarSections } from "./SidebarSections";
@@ -70,6 +70,12 @@ const activitySummaryText = (summary?: string): string => {
   const content = assistant ? assistant.slice("Assistant:".length) : summary.replace(/^User:\s*/, "");
   return markdownNodeText(fromMarkdown(content)).replace(/\s+/g, " ").trim();
 };
+
+const ActivitySummary = memo(({ summary }: { summary?: string }) => {
+  const text = activitySummaryText(summary);
+  return text ? <p className="mc-sidebar-activity-summary">{text}</p> : null;
+});
+ActivitySummary.displayName = "ActivitySummary";
 
 type ConversationUiState = {
   collapsedGroups: Set<string>;
@@ -171,29 +177,33 @@ export function groupByWorkspace(conversations: (ConversationMeta & { sessionSta
     addWorkspace(conversationWorkspacePath(c)).items.push(c as EnrichedConversation);
   }
 
-  const labelCounts = new Map<string, number>();
-  for (const group of groups.values()) {
-    labelCounts.set(group.baseLabel, (labelCounts.get(group.baseLabel) ?? 0) + 1);
+  const groupsByLabel = new Map<string, Array<[string, WorkspaceConversationGroup]>>();
+  for (const entry of groups) {
+    const sameLabel = groupsByLabel.get(entry[1].baseLabel);
+    if (sameLabel) sameLabel.push(entry);
+    else groupsByLabel.set(entry[1].baseLabel, [entry]);
   }
-  for (const [key, group] of groups) {
-    if ((labelCounts.get(group.baseLabel) ?? 0) < 2) continue;
-    const duplicateGroups = Array.from(groups.entries()).filter(([, candidate]) => candidate.baseLabel === group.baseLabel);
-    const parts = workspacePathParts(group.path);
-    let qualifier = key;
-    for (let depth = 1; depth < parts.length; depth += 1) {
-      const candidateQualifier = parts.slice(Math.max(0, parts.length - 1 - depth), -1).join("/");
-      const isUnique = duplicateGroups.every(([candidateKey, candidate]) => {
-        if (candidateKey === key) return true;
-        const candidateParts = workspacePathParts(candidate.path);
-        const otherQualifier = candidateParts.slice(Math.max(0, candidateParts.length - 1 - depth), -1).join("/");
-        return otherQualifier !== candidateQualifier;
+  for (const duplicates of groupsByLabel.values()) {
+    if (duplicates.length < 2) continue;
+    const candidates = duplicates.map(([key, group]) => ({ key, group, parents: workspacePathParts(group.path).slice(0, -1) }));
+    const unresolved = new Set(candidates.map(({ key, group }) => {
+      group.label = `${group.baseLabel} — ${key}`;
+      return key;
+    }));
+    const maxDepth = Math.max(...candidates.map(candidate => candidate.parents.length));
+    // Resolve shortest unique parent suffixes together instead of comparing
+    // and reparsing every pair of same-named projects on each sidebar update.
+    for (let depth = 1; depth <= maxDepth && unresolved.size; depth += 1) {
+      const qualifiers = candidates.map(candidate => candidate.parents.slice(-depth).join("/"));
+      const counts = new Map<string, number>();
+      for (const qualifier of qualifiers) counts.set(qualifier, (counts.get(qualifier) ?? 0) + 1);
+      candidates.forEach(({ key, group, parents }, index) => {
+        if (unresolved.has(key) && depth <= parents.length && counts.get(qualifiers[index]) === 1) {
+          group.label = `${group.baseLabel} — ${qualifiers[index]}`;
+          unresolved.delete(key);
+        }
       });
-      if (isUnique) {
-        qualifier = candidateQualifier;
-        break;
-      }
     }
-    group.label = `${group.baseLabel} — ${qualifier}`;
   }
   return groups;
 }
@@ -232,8 +242,8 @@ export const ConversationsTab = ({
   const diffReviewQueue = useAppStore((s) => s.diffReviewQueue);
   const pendingAskUser = useAppStore((s) => s.pendingAskUser);
   const askUserQueue = useAppStore((s) => s.askUserQueue);
-  const runtimeSession = useAppStore((s) => s.runtimeSession);
-  const createConversation = useAppStore((s) => s.createConversation);
+  const runtimeWaitingLabels = useAppStore(useShallow((s) => runtimePendingUserActionLabels(s.runtimeSession)));
+  const startConversationDraft = useAppStore((s) => s.startConversationDraft);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renamingRow, setRenamingRow] = useState<string | null>(null);
   const [recentLimit, setRecentLimit] = useState(20);
@@ -338,7 +348,7 @@ export const ConversationsTab = ({
   const enrichedConversations = useMemo(() => {
     return conversations.map((conversation) => {
       const waitingLabel = waitingLabelsByConversation.get(conversation.id)
-        ?? runtimePendingUserActionLabelForConversation(runtimeSession, conversation.id);
+        ?? runtimeWaitingLabels.get(conversation.id) ?? runtimeWaitingLabels.get("") ?? null;
       let sessionStatus: EnrichedConversation["sessionStatus"] = "idle";
       if (waitingLabel) {
         sessionStatus = "waiting";
@@ -356,7 +366,7 @@ export const ConversationsTab = ({
         sessionStatus,
       };
     });
-  }, [conversations, conversationId, isStreaming, conversationStreaming, waitingLabelsByConversation, runtimeSession]);
+  }, [conversations, conversationId, isStreaming, conversationStreaming, waitingLabelsByConversation, runtimeWaitingLabels]);
 
   const filtered = useMemo(() => enrichedConversations.filter((conversation) => !conversation.archived), [enrichedConversations]);
   const sidebarProjects = useMemo(() => recentWorkspaces.filter(project => project.pinned !== false
@@ -621,6 +631,7 @@ export const ConversationsTab = ({
       messages: state.getVisibleMessages(owner.id), historyPage: state.conversationHistoryPages[owner.id],
       sessionId: getWebSocket()?.sessionId ?? "", messageCount: owner.messageCount };
     try {
+      const { loadConversationMarkdown } = await import("../chat/conversationMarkdown");
       const markdown = await loadConversationMarkdown(captured);
       if (markdown !== null) await copyText(markdown, tr("复制为 Markdown"));
     } catch (error) {
@@ -639,7 +650,7 @@ export const ConversationsTab = ({
       setCollapsedGroups(next);
       scheduleConversationUiStatePersist(next, listRef.current?.scrollTop ?? 0);
     }
-    createConversation({ bindWorkspace: true, workspaceRoot, appMode: "cowork" });
+    startConversationDraft({ bindWorkspace: true, workspaceRoot, appMode: "cowork" });
     onNavigate?.();
   };
 
@@ -792,7 +803,7 @@ export const ConversationsTab = ({
             }
           })().catch(error => pushToast(String(error), "error")); }}
           onNewChat={section => {
-            void createConversation({ bindWorkspace: false, appMode: "cowork", sidebarSectionId: section.id });
+            startConversationDraft({ bindWorkspace: false, appMode: "cowork", sidebarSectionId: section.id });
           }}
           visibleItemKeys={section => section.item_keys.filter(key => key.startsWith("thread:")
             ? filtered.some(item => item.id === key.slice(7))
@@ -812,7 +823,7 @@ export const ConversationsTab = ({
           title={activityView ? tr("暂无任务活动") : tr("开始你的第一个任务")}
           action={<button type="button" onClick={() => {
             const state = useAppStore.getState();
-            createConversation({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) });
+            startConversationDraft({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) });
             onNavigate?.();
           }}>{tr("新建任务")}</button>}
         />}
@@ -843,10 +854,9 @@ export const ConversationsTab = ({
         {activityView && activityGroups.map((group) => <section key={group.key} aria-label={group.label} className="mc-sidebar-activity-group">
           <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{group.label}</span></div>
           {group.items.map((conversation) => {
-            const summary = activitySummaryText(conversation.summary);
             return <div key={conversation.id} className="mc-sidebar-activity-task">
               {renderSessionRow(conversation, `activity-${group.key}`)}
-              {summary && <p className="mc-sidebar-activity-summary">{summary}</p>}
+              <ActivitySummary summary={conversation.summary} />
             </div>;
           })}
         </section>)}

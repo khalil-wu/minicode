@@ -117,10 +117,11 @@ export function useFocusTrap(isActive: boolean, fallbackFocusRef?: RefObject<HTM
     return () => {
       cancelAnimationFrame(focusFrame);
       const wasTop = activeFocusTraps.at(-1) === container;
+      const ownedFocus = container.contains(document.activeElement) || document.activeElement === document.body;
       activeFocusTraps.splice(activeFocusTraps.indexOf(container), 1);
       if (activeFocusTraps.length === 0) document.body.style.overflow = bodyOverflowBeforeTraps;
       document.removeEventListener('keydown', handleKeyDown);
-      if (!wasTop) return;
+      if (!wasTop || !ownedFocus) return;
 
       // Restore focus to the original trigger when it still exists. A nested
       // drawer may have unmounted that trigger, so fall back to explicit shell

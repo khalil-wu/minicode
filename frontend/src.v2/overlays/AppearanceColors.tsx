@@ -12,6 +12,7 @@ import { AppearanceThemeSharing } from "./AppearanceThemeSharing";
 import { AppearanceCodeThemePicker } from "./AppearanceCodeThemePicker";
 import { AppearanceFonts } from "./AppearanceFonts";
 import { AppearanceAccentPicker } from "./AppearanceAccentPicker";
+import { isSettingsNavigationTarget } from "./settingsControlOwner";
 import "./AppearanceColors.css";
 
 const WindowCapabilities = createContext(false);
@@ -30,7 +31,7 @@ export function AppearanceWindowCapabilitiesProvider({ children }: { children: R
   return <WindowCapabilities.Provider value={supportsTranslucency}>{children}</WindowCapabilities.Provider>;
 }
 
-function ColorControl({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
+function ColorControl({ label, value, onChange, active }: { label: string; value: string; onChange: (value: string) => void; active: boolean }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
@@ -39,20 +40,23 @@ function ColorControl({ label, value, onChange }: { label: string; value: string
   const trigger = useRef<HTMLButtonElement>(null);
   const popover = useRef<HTMLDivElement>(null);
   const id = useId();
-  const close = () => { setOpen(false); setDraft(null); };
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const close = (discardDraft = true) => { setOpen(false); if (discardDraft) setDraft(null); };
+  useEffect(() => { if (!active) close(false); }, [active]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !active) return;
     const outside = (event: PointerEvent) => {
       const path = event.composedPath();
-      if (!path.includes(root.current!) && !path.includes(popover.current!)) close();
+      if (!path.includes(root.current!) && !path.includes(popover.current!)) close(!isSettingsNavigationTarget(event.target));
     };
     document.addEventListener("pointerdown", outside, true);
     return () => document.removeEventListener("pointerdown", outside, true);
-  }, [open]);
+  }, [open, active]);
 
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!open || !active) return;
     const place = () => {
       const anchor = trigger.current!.getBoundingClientRect();
       const panel = popover.current!.getBoundingClientRect();
@@ -64,7 +68,7 @@ function ColorControl({ label, value, onChange }: { label: string; value: string
     window.addEventListener("resize", place);
     window.addEventListener("scroll", place, true);
     return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
-  }, [open]);
+  }, [open, active]);
 
   const onKeyDown = (event: KeyboardEvent) => {
     if (open && event.key === "Tab" && !event.shiftKey && document.activeElement === trigger.current) {
@@ -86,20 +90,22 @@ function ColorControl({ label, value, onChange }: { label: string; value: string
   };
 
   return <div ref={root} className="appearance-color-control" onKeyDown={onKeyDown} onBlur={event => {
-    if (open && !root.current!.contains(event.relatedTarget) && !popover.current!.contains(event.relatedTarget)) close();
+    if (open && active && !root.current!.contains(event.relatedTarget) && !popover.current!.contains(event.relatedTarget)) close(!isSettingsNavigationTarget(event.relatedTarget));
   }}>
     <button ref={trigger} type="button" className="appearance-color-swatch" style={{ backgroundColor: value }}
       aria-label={t("选择{color}", { color: label })} aria-expanded={open} aria-controls={open ? id : undefined}
       aria-haspopup="dialog" onClick={() => { setDraft(null); setOpen(!open); }} />
     <input aria-label={label} type="text" value={(draft ?? value).toUpperCase()} spellCheck={false}
-      onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onBlur={() => setDraft(null)}
+      onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onBlur={event => {
+        if (activeRef.current && !isSettingsNavigationTarget(event.relatedTarget)) setDraft(null);
+      }}
       onChange={event => {
         const next = colorInputDraft(event.target.value);
         const complete = completeColorInput(next);
         if (complete === null) { setDraft(next); return; }
         setDraft(null); onChange(complete);
       }} />
-    {open && createPortal(<div ref={popover} id={id} role="dialog" aria-label={label}
+    {active && open && createPortal(<div ref={popover} id={id} role="dialog" aria-label={label}
       className="appearance-color-popover" style={position} onKeyDown={onKeyDown}>
       <HexColorPicker color={value} onChange={color => { setDraft(null); onChange(color); }} />
     </div>, document.body)}
@@ -112,7 +118,7 @@ const roles = [
   { role: "ink", label: "前景", input: "{variant}前景颜色" },
 ] as const satisfies readonly { role: AppearanceColorRole; label: string; input: string }[];
 
-export function AppearanceColors({ advanced = false, variant: requestedVariant, separateModes = false }: { advanced?: boolean; variant?: AppearanceVariant; separateModes?: boolean } = {}) {
+export function AppearanceColors({ advanced = false, variant: requestedVariant, separateModes = false, active = true }: { advanced?: boolean; variant?: AppearanceVariant; separateModes?: boolean; active?: boolean } = {}) {
   const { t } = useI18n();
   const resolved = useAppStore(state => state.resolvedTheme);
   const variant = requestedVariant || resolved;
@@ -135,7 +141,7 @@ export function AppearanceColors({ advanced = false, variant: requestedVariant, 
     });
   };
   if (advanced) return <section className="settings-group">{separateModes && <h3 className="settings-group-title">{t("{variant}主题", { variant: variantLabel })}</h3>}<div className="settings-card">
-      <AppearanceFonts advanced variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} />
+      <AppearanceFonts advanced variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} active={active} />
       {supportsTranslucency && <div className="settings-row">
         <div className="settings-row-copy"><div className="settings-row-title">{t("半透明侧栏")}</div></div>
         <div className="settings-row-control"><button type="button" className="settings-toggle" role="switch"
@@ -151,18 +157,18 @@ export function AppearanceColors({ advanced = false, variant: requestedVariant, 
   </div></section>;
   return <section className="settings-card settings-appearance-colors" aria-label={t("主题")}>
     <div className="settings-row appearance-theme-heading"><h4 className="settings-row-title">{separateModes ? t("{variant}主题", { variant: variantLabel }) : t("主题")}</h4><div className="appearance-theme-heading-controls">
-      <AppearanceThemeSharing key={variant} variant={variant} snapshot={snapshot} onImport={importTheme} />
-      <AppearanceCodeThemePicker variant={variant} colors={effective} value={codeThemeId} onSelect={id => setCodeThemeId(variant, id)} />
+      <AppearanceThemeSharing key={variant} variant={variant} snapshot={snapshot} onImport={importTheme} active={active} />
+      <AppearanceCodeThemePicker variant={variant} colors={effective} value={codeThemeId} onSelect={id => setCodeThemeId(variant, id)} active={active} />
     </div></div>
     {roles.map(({ role, label, input }) => <div className="settings-row" key={role}>
       <div className="settings-row-copy"><div className="settings-row-title">{t(label)}</div></div>
       <div className="settings-row-control">
-        {role === "accent" && <AppearanceAccentPicker variant={variant} onCustomSelect={() => setColor(variant, "accent", effective.accent)} />}
+        {role === "accent" && <AppearanceAccentPicker variant={variant} onCustomSelect={() => setColor(variant, "accent", effective.accent)} active={active} />}
         <ColorControl key={`${variant}:${role}`} label={t(input, { variant: variantLabel })}
-          value={effective[role]} onChange={value => setColor(variant, role, value)} />
+          value={effective[role]} onChange={value => setColor(variant, role, value)} active={active} />
       </div>
     </div>)}
-    <AppearanceFonts variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} />
+    <AppearanceFonts variant={variant} fonts={fonts} onChange={next => patchPreferences(variant, { fonts: next })} active={active} />
 
   </section>;
 }

@@ -1,10 +1,13 @@
 /* @vitest-environment jsdom */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getChatSendBlockReason, handleUserMessageAdmission, resetPendingUserMessagesForTests, sendChatMessage } from "./sendChatMessage";
-import { useAppStore } from "../stores";
+import { useAppStore, waitComposerDraftRecovery } from "../stores";
 import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
-import type { CommandResultEvent } from "../protocol/events";
+import type { ClientCommand, CommandResultEvent, ServerEvent } from "../protocol/events";
 import { handleRuntimeEvent } from "./runtimeEvents";
+import { handleSessionEvent } from "./sessionEvents";
+import { latestProjectionCommandIds } from "../protocol/command-projection";
+import { composerWorkspaceKey } from "../stores/composer-drafts";
 import { captureSteerTurnId } from "../lib/steer-command";
 import { pushToast } from "../overlays/ToastContainer";
 
@@ -13,6 +16,7 @@ const wsMock = vi.hoisted(() => ({
   clientCommands: [] as unknown[],
   throwOnSend: false,
   acceptSend: true,
+  listeners: new Set<(event: unknown) => void>(),
 }));
 const sent = wsMock.sent;
 const clientCommands = wsMock.clientCommands;
@@ -28,14 +32,30 @@ vi.mock("../hooks/useWebSocket", () => ({
       return true;
     },
     sessionId: "session-test",
+    subscribe: (listener: (event: unknown) => void) => {
+      wsMock.listeners.add(listener);
+      return () => { wsMock.listeners.delete(listener); };
+    },
   }),
+}));
+
+vi.mock("../protocol/api", async load => ({
+  ...await load<typeof import("../protocol/api")>(),
+  fetchDraftModelSelection: vi.fn(async (workspaceRoot: string, model: string, effort: string, _signal?: AbortSignal, configCwd = workspaceRoot) => ({
+    provider: "custom", current_model: model || "fixture", model: model || "fixture", models_source: "configured",
+    available_models: ["fixture"], available_model_options: [{ model: "fixture", reasoning_effort_levels: ["low", "medium", "high"], default_reasoning_effort: "medium" }],
+    effective_reasoning_effort: effort || "medium", model_selection_mode: model ? "model" : "default",
+    default_model_selection: { provider: "custom", model: "fixture", reasoning_effort: "medium", conversation_id: "", working_directory: workspaceRoot },
+    available_permission_modes: ["confirm", "auto", "bypass"], feature_flags: {}, composer_commands: [], config_version: "fixture-config", config_cwd: configCwd,
+  })),
 }));
 
 vi.mock("../overlays/ToastContainer", () => ({
   pushToast: vi.fn(),
 }));
 
-vi.mock("../protocol/ws-outbox", () => ({
+vi.mock("../protocol/ws-outbox", async load => ({
+  ...await load<typeof import("../protocol/ws-outbox")>(),
   sendClientCommand: (command: unknown) => {
     clientCommands.push(command);
     return true;
@@ -46,6 +66,27 @@ vi.mock("../protocol/ws-outbox", () => ({
   }),
   commandResultSucceeded: (event: { level?: string }) => !["error", "failed"].includes(String(event.level || "")),
 }));
+
+const canonicalBuffers = { textStreamBuffer: { destroy: vi.fn(), flush: vi.fn(), push: vi.fn() },
+  thinkingStreamBuffer: { destroy: vi.fn(), flush: vi.fn(), push: vi.fn() } } as never;
+const generatedCwd = "C:/fixture-created-task";
+const receiveCanonicalSwitch = (command: ClientCommand, hydrating: boolean) => {
+  if (command.type !== "conversation.switch") throw new Error("Expected the actual switch command");
+  const event = { type: "conversation.switched", client_command_id: command.client_command_id,
+    client_command_type: command.type, conversation_id: command.conversation_id, is_hydrating: hydrating, context_pending: hydrating,
+    conversation: { id: command.conversation_id, title: "Created fixture", workspace_root: "", execution_cwd: generatedCwd,
+      revision: 2, messages: [], app_mode: "cowork", agent_mode: "build" },
+    session: { active_conversation_id: command.conversation_id, workspace_root: generatedCwd, active_stream_conversation_ids: [] },
+  } as ServerEvent;
+  handleSessionEvent(event, canonicalBuffers);
+  for (const listener of [...wsMock.listeners]) listener(event);
+};
+const defaultCommandResult = async (command: ClientCommand, expectedCommand: string): Promise<CommandResultEvent> => {
+  clientCommands.push(command);
+  if (command.type === "conversation.switch") throw new Error("A successful switch is canonical events, not command.result");
+  return { type: "command.result", command: expectedCommand, level: "success", message: "",
+    data: command.type === "conversation.create" ? { conversation_id: command.conversation_id, execution_cwd: generatedCwd, created: true, activated: false } : {} };
+};
 
 describe("sendChatMessage attachment feedback", () => {
   it("queues an owner-scoped selection with durable range metadata while the main draft stays intact", () => {
@@ -59,14 +100,20 @@ describe("sendChatMessage attachment feedback", () => {
     expect(useAppStore.getState().sideChats.side.messages.find((message) => message.role === "user")).toMatchObject({ contextRefs, queueState: "queued" });
     expect(useAppStore.getState().draft).toBe("main stays");
   });
-  beforeEach(() => {
+  beforeEach(async () => {
+    await waitComposerDraftRecovery();
     resetPendingUserMessagesForTests();
+    latestProjectionCommandIds.clear();
+    wsMock.listeners.clear();
+    vi.mocked(sendClientCommandAwaitResult).mockReset().mockImplementation(defaultCommandResult);
     sent.length = 0;
     clientCommands.length = 0;
     wsMock.throwOnSend = false;
     wsMock.acceptSend = true;
     useAppStore.setState({
       conversationId: "conv-test",
+      activeConversationDraftId: null,
+      conversationDrafts: {}, homeConversationDraftIds: {}, workspaceComposerDrafts: {}, composerDraftsReady: true,
       pendingConversationSwitchId: null,
       messages: [],
       conversationMessages: {},
@@ -89,23 +136,39 @@ describe("sendChatMessage attachment feedback", () => {
     vi.useRealTimers();
   });
 
-  it.each([
-    [undefined, false], ["conv-test", false], [undefined, true], ["conv-test", true],
-  ] as const)("blocks current composer %s queue=%s during navigation without touching its draft", (conversationId, allowWhileStreaming) => {
+  it.each([false, true])("blocks the unowned current composer queue=%s during navigation without touching its draft", (allowWhileStreaming) => {
     const attachment = { id: "keep", name: "note.txt", type: "text/plain", size: 4, status: "ready" as const };
     const messages = allowWhileStreaming
       ? [{ id: "running", role: "assistant" as const, content: "working", timestamp: 1, isStreaming: true }]
       : [];
     useAppStore.setState({ pendingConversationSwitchId: "new-owner", draft: "old owner draft", attachments: [attachment],
       isStreaming: allowWhileStreaming, messages });
-    expect(getChatSendBlockReason(conversationId)).toBe("正在切换会话，请等待加载完成后发送。");
-    expect(sendChatMessage({ conversationId, displayContent: "old owner draft", allowWhileStreaming })).toBe(false);
+    expect(getChatSendBlockReason()).toBe("正在切换会话，请等待加载完成后发送。");
+    expect(sendChatMessage({ displayContent: "old owner draft", allowWhileStreaming })).toBe(false);
     expect(sent).toHaveLength(0);
     expect(useAppStore.getState()).toMatchObject({ draft: "old owner draft", attachments: [attachment], messages, isStreaming: allowWhileStreaming });
 
     useAppStore.setState({ conversationId: "new-owner", pendingConversationSwitchId: null, draft: "new owner draft", messages: [], isStreaming: false });
     expect(sendChatMessage({ displayContent: "new owner draft" })).toBe(true);
     expect(sent[0]).toMatchObject({ conversation_id: "new-owner", content: "new owner draft" });
+  });
+
+  it.each([false, true])("continues an explicit background owner queue=%s while the main composer navigates", (allowWhileStreaming) => {
+    const attachment = { id: "keep", name: "note.txt", type: "text/plain", size: 4, status: "ready" as const };
+    const backgroundMessages = allowWhileStreaming
+      ? [{ id: "running", role: "assistant" as const, content: "working", artifacts: [], timestamp: 1, isStreaming: true }]
+      : [];
+    useAppStore.setState({ conversationId: "new-owner", pendingConversationSwitchId: "new-owner", draft: "new owner draft", attachments: [attachment],
+      conversations: [{ id: "conv-test", title: "Original owner", workspaceRoot: "C:/owner" }, { id: "new-owner", title: "New owner", workspaceRoot: "C:/new-owner" }],
+      workingDirectory: "C:/new-owner", messages: [], isStreaming: false, sideChats: {},
+      conversationMessages: { "conv-test": backgroundMessages }, conversationStreaming: { "conv-test": allowWhileStreaming } });
+    expect(getChatSendBlockReason()).toBe("正在切换会话，请等待加载完成后发送。");
+    expect(getChatSendBlockReason("conv-test")).toBe(allowWhileStreaming ? "当前对话仍在运行，请等待完成或先停止；你也可以在新对话中继续。" : null);
+    expect(sendChatMessage({ conversationId: "conv-test", displayContent: "original owner follow up", allowWhileStreaming })).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ conversation_id: "conv-test", workspace_root: "C:/owner", content: "original owner follow up" });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "new-owner", pendingConversationSwitchId: "new-owner", draft: "new owner draft", attachments: [attachment], messages: [], isStreaming: false });
+    expect(useAppStore.getState().conversationMessages["conv-test"].some(message => message.role === "user" && message.content === "original owner follow up")).toBe(true);
   });
 
   it("allows an explicitly owned side chat while the main conversation switches", () => {
@@ -117,7 +180,7 @@ describe("sendChatMessage attachment feedback", () => {
     expect(useAppStore.getState().draft).toBe("main draft");
   });
 
-  it("keeps a pending-ACK submission unsent when navigation starts before confirmation", async () => {
+  it("continues the captured owner after its permission ACK while later navigation stays pending", async () => {
     let confirm!: (result: CommandResultEvent) => void;
     vi.mocked(sendClientCommandAwaitResult).mockReturnValueOnce(new Promise((resolve) => { confirm = resolve; }));
     useAppStore.setState({ workingDirectory: "C:/owner", draft: "keep draft",
@@ -127,9 +190,12 @@ describe("sendChatMessage attachment feedback", () => {
     useAppStore.setState({ pendingConversationSwitchId: "new-owner" });
     confirm({ type: "command.result", command: "conversation.permission_mode.set", level: "info", message: "", data: {} });
     expect(await modeChange).toBe(true);
-    expect(await submission).toBe(false);
-    expect(sent).toHaveLength(0);
+    expect(await submission).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ conversation_id: "conv-test", workspace_root: "C:/owner", content: "keep draft" });
+    expect(sent[0]).not.toHaveProperty("permission_mode");
     expect(useAppStore.getState().draft).toBe("keep draft");
+    expect(useAppStore.getState().pendingConversationSwitchId).toBe("new-owner");
   });
 
   it("waits for the owner permission ACK before sending without overriding the stored mode", async () => {
@@ -1465,7 +1531,7 @@ describe("sendChatMessage attachment feedback", () => {
     });
   });
 
-  it("does not bind the first global message to a stale working directory", () => {
+  it("materializes a real projectless owner and waits for its final canonical frame before the first global message", async () => {
     useAppStore.setState({
       conversationId: null,
       conversations: [],
@@ -1475,23 +1541,56 @@ describe("sendChatMessage attachment feedback", () => {
       isStreaming: false,
       isConnected: true,
       permissionMode: "bypass",
+      appMode: "cowork", draft: "old workspace draft", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null,
       workingDirectory: "C:\\Desktop\\MiniCode",
       activeTabPath: "README.md",
     });
+    const draftId = useAppStore.getState().startConversationDraft({ bindWorkspace: false, appMode: "cowork" });
+    const oldWorkspaceKey = composerWorkspaceKey("C:\\Desktop\\MiniCode");
+    expect(useAppStore.getState().workspaceComposerDrafts[oldWorkspaceKey].draft).toBe("old workspace draft");
+    expect(useAppStore.getState().draft).toBe("");
+    useAppStore.getState().setDraft("hello");
+    expect(useAppStore.getState()).toMatchObject({ activeConversationDraftId: draftId, draft: "hello" });
 
-    const ok = sendChatMessage({
+    const submission = sendChatMessage({
       displayContent: "hello",
       backendContent: "hello",
     });
 
-    expect(ok).toBe(true);
+    expect(sent).toHaveLength(0);
+    await vi.waitFor(() => expect(clientCommands.some(command => (command as ClientCommand).type === "conversation.switch")).toBe(true));
+    const create = clientCommands.find(command => (command as ClientCommand).type === "conversation.create") as Extract<ClientCommand, { type: "conversation.create" }>;
+    const switched = clientCommands.find(command => (command as ClientCommand).type === "conversation.switch") as Extract<ClientCommand, { type: "conversation.switch" }>;
+    const owner = switched.conversation_id;
+    expect(create).toMatchObject({ activate: false, conversation_id: owner, permission_mode: "bypass" });
+    expect(create.workspace_root).toBeUndefined();
+    expect(clientCommands.filter(command => ["conversation.create", "llm.model.set", "llm.config.set", "conversation.permission_mode.set", "conversation.switch"].includes((command as ClientCommand).type))
+      .map(command => (command as ClientCommand).type)).toEqual(["conversation.create", "llm.model.set", "conversation.switch"]);
+    expect(sent).toHaveLength(0);
+    expect(wsMock.listeners.size).toBe(1);
+    receiveCanonicalSwitch(switched, true);
+    await Promise.resolve();
+    expect(useAppStore.getState().conversationId).toBe(owner);
+    expect(useAppStore.getState().conversationDrafts[draftId].materializing).toBe(true);
+    expect(sent).toHaveLength(0);
+    receiveCanonicalSwitch(switched, false);
+    expect(await submission).toBe(true);
+    expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       type: "user_message",
       content: "hello",
-      permission_mode: "bypass",
+      conversation_id: owner, workspace_root: generatedCwd,
     });
-    expect(sent[0]).not.toHaveProperty("workspace_root");
+    expect(sent[0]).not.toHaveProperty("permission_mode");
     expect(sent[0]).not.toHaveProperty("primary_file");
+    expect(useAppStore.getState().workingDirectory).toBe(generatedCwd);
+    expect(useAppStore.getState().draft).toBe("hello");
+    expect(useAppStore.getState().conversationWorkbenchStates[owner].draft).toBe("hello");
+    expect(useAppStore.getState().workspaceComposerDrafts[oldWorkspaceKey].draft).toBe("old workspace draft");
+    expect(vi.mocked(sendClientCommandAwaitResult).mock.calls.some(([command]) => command.type === "conversation.switch")).toBe(false);
+    expect(wsMock.listeners.size).toBe(0);
+    receiveCanonicalSwitch(switched, false);
+    expect(sent).toHaveLength(1);
   });
 
   it("marks the local streaming turn failed when websocket send throws", () => {
@@ -1869,6 +1968,33 @@ describe("sendChatMessage attachment feedback", () => {
       data: { admitted: true, conversation_id: "conv-test" } });
     expect(useAppStore.getState().messages.map((message) => message.content)).toEqual(["try again"]);
     expect(useAppStore.getState().isStreaming).toBe(false);
+  });
+
+  it("keeps paused queued messages and attachment identities when a retry is admitted without another queue event", () => {
+    const attachmentRefs = [{ id: "image-1", name: "queue.png", kind: "image" as const,
+      mediaType: "image/png", artifactId: "uploaded-image" }];
+    const queued = [
+      { id: "q1-user", role: "user" as const, content: "queued one", artifacts: [], timestamp: 3,
+        attachmentRefs, queueState: "queued" as const, queueMessageId: "q1-answer", queuePosition: 1, queuePaused: true },
+      { id: "q1-answer", role: "assistant" as const, content: "", artifacts: [], timestamp: 3,
+        queueState: "queued" as const, queueMessageId: "q1-answer", queuePosition: 1, queuePaused: true },
+      { id: "q2-user", role: "user" as const, content: "queued two", artifacts: [], timestamp: 4,
+        queueState: "queued" as const, queueMessageId: "q2-answer", queuePosition: 2, queuePaused: true },
+      { id: "q2-answer", role: "assistant" as const, content: "", artifacts: [], timestamp: 4,
+        queueState: "queued" as const, queueMessageId: "q2-answer", queuePosition: 2, queuePaused: true },
+    ];
+    useAppStore.setState({ conversationId: "conv-test", draft: "unsent draft", messages: [
+      { id: "user-retry", role: "user", content: "try again", artifacts: [], timestamp: 1 },
+      { id: "assistant-old", role: "assistant", content: "old", artifacts: [], timestamp: 2 },
+      ...queued,
+    ], conversationMessages: {}, conversationStreaming: {}, isStreaming: false, isConnected: true });
+    expect(sendChatMessage({ displayContent: "try again", retryFromMessageId: "user-retry" })).toBe(true);
+    handleUserMessageAdmission({ type: "command.result", command: "user_message", level: "success", message: "admitted",
+      client_command_id: (sent[0] as { client_command_id: string }).client_command_id,
+      data: { admitted: true, conversation_id: "conv-test" } });
+    expect(useAppStore.getState().messages.filter(message => message.queueState === "queued")).toEqual(queued);
+    expect(useAppStore.getState().draft).toBe("unsent draft");
+    expect(useAppStore.getState().conversationMessages["conv-test"].filter(message => message.queueState === "queued")).toEqual(queued);
   });
 
   it("does not rewind the local transcript when an atomic retry cannot be sent", () => {

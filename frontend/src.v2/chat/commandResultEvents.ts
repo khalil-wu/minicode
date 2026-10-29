@@ -9,11 +9,13 @@ import { openAutomations } from "../lib/automations-navigation";
 import { openSettings } from "../lib/settings-navigation";
 import type { PanelKind, RightStackTab, WorkspaceSlice } from "../stores/types";
 import { workspaceRootsEqual } from "../lib/workspace-path";
-import { handleUserMessageAdmission } from "./sendChatMessage";
+import { discardPendingUserMessagesForConversation, handleUserMessageAdmission } from "./sendChatMessage";
 import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
 import { clearDiffCommentScope } from "../lib/diff-comment-storage";
 import { cancelConversationComposerUploads } from "../composer/uploads";
 import { latestProjectionCommandIds } from "../protocol/command-projection";
+import { discardConversationDraftsForOwner } from "../stores/conversation-drafts";
+import { releaseRetainedInputPreviews } from "../composer/retainedComposerInputs";
 import { saveBlobFile } from "../lib/save-blob";
 
 export const downloadConversationExport = async (
@@ -259,15 +261,22 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
   }
   if (ev.command === "conversation.delete" && ev.data?.deleted === true && typeof ev.data.conversation_id === "string") {
     const id = ev.data.conversation_id;
+    discardPendingUserMessagesForConversation(id);
     clearGitReviewSelection(id);
     clearReviewExpansion(id);
     clearDiffCommentScope(id);
     cancelConversationComposerUploads(id);
+    discardConversationDraftsForOwner(id);
+    for (const input of Object.values(useAppStore.getState().retainedComposerInputs)) {
+      if (input.owner.kind === "conversation" && input.owner.id === id) releaseRetainedInputPreviews(input);
+    }
     useAppStore.setState(state => {
       const workbenches = { ...state.conversationWorkbenchStates };
       const sideChats = { ...state.sideChats };
       delete workbenches[id]; delete sideChats[id];
-      return { conversationWorkbenchStates: workbenches, sideChats };
+      return { conversationWorkbenchStates: workbenches, sideChats,
+        retainedComposerInputs: Object.fromEntries(Object.entries(state.retainedComposerInputs)
+          .filter(([, input]) => input.owner.kind !== "conversation" || input.owner.id !== id)) };
     });
     void deleteConversationComposerDrafts(id).catch(error => {
       useAppStore.setState({ composerDraftStorageError: error instanceof Error ? error.message : String(error) });

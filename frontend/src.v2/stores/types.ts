@@ -189,6 +189,8 @@ export interface McpServerStatus {
   enabled?: boolean;
   disabledReason?: string;
   source?: string;
+  pluginId?: string | null;
+  pluginServerName?: string | null;
   approvalStatus?: "approved" | "rejected" | "pending" | "not_applicable";
   configPath?: string;
   projectWorkspace?: string;
@@ -284,6 +286,7 @@ export interface DiffLineComment {
 }
 
 export interface ConversationWorkbenchState {
+  retainedInputEdit?: import("./composer-drafts").RetainedInputEdit;
   queuedEdit?: import("./composer-drafts").QueuedMessageEdit;
   agentMode?: AgentMode;
   goalMode?: boolean;
@@ -451,6 +454,8 @@ export type SettingsTab =
 export interface UISlice {
   projectsOpen: boolean;
   projectEditTarget: string | null;
+  compactPanel: "left" | "right" | null;
+  setCompactPanel: (panel: "left" | "right" | null) => void;
   contextCardCollapsed: boolean;
   setContextCardCollapsed: (collapsed: boolean) => void;
   contextCardPinned: boolean;
@@ -829,6 +834,18 @@ export interface WorkspaceFileTab {
   pinned: boolean;
   pane: "left" | "right";
   line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  isPreview?: boolean;
+  locationRequestId?: string;
+}
+
+export interface WorkspaceFileOpenOptions {
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  isPreview?: boolean;
 }
 
 export interface WorkspaceSlice {
@@ -836,7 +853,8 @@ export interface WorkspaceSlice {
   workspaceFileTabs: WorkspaceFileTab[];
   fileBrowserRoots: Record<string, string>;
   pendingWorkspaceFileTabId: string | null;
-  openWorkspaceFileTab: (owner: WorkspaceFileOwner, path: string, title?: string, line?: number) => string;
+  reconcileWorkspaceFileTabs: () => void;
+  openWorkspaceFileTab: (owner: WorkspaceFileOwner, path: string, title?: string, line?: number, options?: WorkspaceFileOpenOptions) => string;
   activateWorkspaceFileTab: (id: string) => void;
   closeWorkspaceFileTab: (id: string) => void;
   pinWorkspaceFileTab: (id: string, pinned: boolean) => void;
@@ -1382,6 +1400,8 @@ export interface ChatMessage {
   isStreaming?: boolean;
   isThinkingStreaming?: boolean;
   terminalStatus?: "completed" | "partial" | "failed" | "interrupted";
+  /** Local delivery lifecycle for a user row awaiting durable admission. */
+  deliveryStatus?: "sending" | "sent" | "failed";
   terminationReason?: string;
   failureMessage?: string;
   failureRecoverable?: boolean;
@@ -1520,7 +1540,46 @@ export interface ConversationHistoryPage {
   loading: boolean;
 }
 
+export interface ConversationDraftContext {
+  id: string;
+  pendingUserMessage?: ChatMessage;
+  workspaceRoot: string;
+  bindWorkspace: boolean;
+  projectlessBase?: string;
+  executionCwd?: string;
+  appMode: AppMode;
+  sidebarSectionId?: string;
+  permissionMode: PermissionMode;
+  permissionEdited: boolean;
+  modelSelection: { mode: "default" | "model"; model?: string; effort?: EffortLevel };
+  modelProjection?: import("../protocol/api").DraftModelSelection;
+  selectionLoading: boolean;
+  selectionError: string | null;
+  preferencesLoading?: boolean;
+  materializing?: boolean;
+  requestedConversationId?: string;
+  creationCommandId?: string;
+  conversationId?: string;
+  adopted?: boolean;
+}
+
+export interface ConversationDraftOptions {
+  bindWorkspace?: boolean;
+  workspaceRoot?: string;
+  appMode?: AppMode;
+  sidebarSectionId?: string;
+}
+
 export interface ChatSlice {
+  activeConversationDraftId: string | null;
+  conversationDrafts: Record<string, ConversationDraftContext>;
+  preparingComposerMessages: Record<string, ChatMessage>;
+  retainedComposerInputs: Record<string, import("./composer-drafts").RetainedComposerInput>;
+  homeConversationDraftIds: Record<string, string>;
+  startConversationDraft: (options?: ConversationDraftOptions) => string;
+  selectConversationDraft: (id: string) => void;
+  refreshConversationDraftSelection: (id?: string) => Promise<boolean>;
+  materializeConversationDraft: (id: string) => Promise<string | null>;
   messageRevealTarget: { conversationId: string; messageId: string; requestId: string } | null;
   conversationId: string | null;
   pendingConversationSwitchId: string | null;
@@ -1558,13 +1617,12 @@ export interface ChatSlice {
   requestConversationSwitch: (id: string) => void;
   applyConversationSwitched: (payload: { conversationId: string }) => void;
   switchConversation: (id: string) => void;
-  pendingComposerConversationAdoption: { conversationId: string; workspaceRoot: string } | null;
   ensureComposerConversation: () => Promise<string | null>;
-  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode; adoptDraft?: boolean; sidebarSectionId?: string }) => Promise<boolean>;
+  createConversation: (options?: { bindWorkspace?: boolean; workspaceRoot?: string; appMode?: AppMode; sidebarSectionId?: string; activate?: boolean; conversationId?: string; clientCommandId?: string; permissionMode?: PermissionMode; agentMode?: AgentMode; initialPrompt?: string; projectlessBase?: string; preferences?: import("../desktop/runtime").DesktopPreferences | null; onCreated?: (result: import("../protocol/events").CommandResultEvent) => void }) => Promise<boolean>;
   removeConversation: (id: string) => Promise<boolean>;
   getVisibleMessages: (conversationId?: string | null) => ChatMessage[];
   setActiveGoal: (goal: ConversationGoal | null, conversationId?: string, revision?: number) => void;
-  hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean; historyPage?: ConversationHistoryPage }) => void;
+  hydrateConversationMessages: (id: string, messages: ChatMessage[], options?: { activate?: boolean; isStreaming?: boolean; historyPage?: ConversationHistoryPage; confirmedUserMessageIds?: string[] }) => void;
   recordTurnUserInput: (message: ChatMessage, conversationId: string, assistantMessageId: string) => void;
   bindStreamingTurn: (conversationId: string | undefined, messageId: string | undefined, turnId: string | undefined, startedAt?: number) => void;
   startAgentMessage: (
@@ -1707,6 +1765,7 @@ export type AgentMode = "build" | "plan" | "review" | "explore";
 
 export interface ComposerAttachment {
   id: string;
+  draftId?: string;
   name: string;
   type: string;
   size: number;
@@ -1736,6 +1795,7 @@ export interface ComposerQuote {
 
 export interface ComposerSlice {
   queuedEdit?: import("./composer-drafts").QueuedMessageEdit;
+  retainedInputEdit?: import("./composer-drafts").RetainedInputEdit;
   goalMode: boolean;
   workspaceComposerDrafts: Record<string, import("./composer-drafts").ComposerDraft>;
   composerDraftsReady: boolean;

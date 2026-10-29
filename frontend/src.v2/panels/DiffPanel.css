@@ -98,6 +98,11 @@
 .mc-diff-code-row { display: flex; align-items: stretch; min-width: 0; min-height: var(--editor-line-height); }
 .mc-diff-code-body .mc-diff-code-content { flex: 1; min-width: 0; padding-inline: 8px; padding-block: 0; }
 .mc-diff-code-sign { display: inline-block; width: 1.5ch; font: inherit; }
+.mc-diff-code-content { border-left: 2px solid transparent; }
+.mc-diff-code-row[data-diff-kind="add"] .mc-diff-code-content { border-left-color: var(--diff-added-foreground); }
+.mc-diff-code-row[data-diff-kind="del"] .mc-diff-code-content { border-left-color: var(--diff-removed-foreground); }
+html[data-diff-marker-style="color"] .mc-diff-code-sign { visibility: hidden; }
+html[data-diff-marker-style="symbols"] .mc-diff-code-row .mc-diff-code-content { border-left-color: transparent; }
 
 .mc-diff-reading-surface {
   background: var(--diff-view-background);

@@ -10,6 +10,7 @@ from fastapi import Response
 
 from backend.api import routes_skills
 from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+from backend.config_requirements import ConfigRequirements
 from backend.plugins.manager import PluginManager
 from backend.plugins.source_agent_manifest import AGENT_PLUGIN_SCHEMA
 from backend.services import plugin_settings_service, skills_api_service
@@ -36,7 +37,6 @@ def plugin_catalog(tmp_path, monkeypatch):
     monkeypatch.setattr(plugin_settings_service, "_load_settings_json", lambda: deepcopy(settings))
     monkeypatch.setattr(commands, "default_plugin_roots", lambda: [installed])
     monkeypatch.setenv("MINICODE_PLUGINS_DIR", str(installed))
-    monkeypatch.setattr("backend.skills.loader.feature_enabled", lambda *_args: True)
     monkeypatch.setattr(SkillLoader, "_search_dirs", lambda self: self._plugin_search_dirs())
     monkeypatch.setattr(skills_api_service, "SETTINGS_FILE", settings_file)
     monkeypatch.setattr(skills_api_service, "_update_settings_json", lambda change: change(settings))
@@ -97,9 +97,11 @@ def test_count_and_runtime_share_format_validation_and_exact_path_inventory(plug
     malformed.parent.mkdir()
     malformed.write_text("No Skill frontmatter", encoding="utf8")
     if agent_plugin:
-        fixture.manifest.write_text(json.dumps({"$schema": AGENT_PLUGIN_SCHEMA, "name": "docs", "version": "1.2.3"}), encoding="utf8")
+        (fixture.root / "plugin.json").write_text(json.dumps({"$schema": AGENT_PLUGIN_SCHEMA, "name": "docs", "version": "1.2.3"}), encoding="utf8")
     plugin = PluginManager(config_stack=fixture.stack()).snapshot().plugins[0]
     inventory = fixture.manager.snapshot().list_settings(source_level="plugin")
+    if agent_plugin:
+        assert plugin["manifest_paths"] == [str(fixture.root / "plugin.json")]
     assert plugin["skill_count"] == expected == len(inventory)
     assert len({skill["path"] for skill in inventory}) == expected
     assert not any("broken" in skill["path"] or "chatgpt-only" in skill["path"] for skill in inventory)
@@ -113,3 +115,57 @@ def test_local_information_urls_and_fields_survive_plugin_payload(plugin_catalog
     assert plugin["websiteUrl"] == "https://docs.example/"
     assert plugin["privacyPolicyUrl"] == "https://docs.example/privacy"
     assert plugin["termsOfServiceUrl"] == "https://docs.example/terms"
+
+
+@pytest.mark.parametrize("configured,required,expected", [
+    (True, None, True), (False, None, False), (True, False, False), (False, True, True),
+])
+def test_captured_skill_and_plugin_flags_do_not_reload_global_config(plugin_catalog, monkeypatch, configured, required, expected):
+    from backend import config
+
+    fixture = plugin_catalog
+    fixture.skill("skills/review")
+    values = deepcopy(fixture.settings)
+    values["features"] = {"plugin_skills": configured, "plugin_lifecycle_api": configured}
+    requirements = {"strict_plugin_only_customization": ["skills"]}
+    if required is not None:
+        requirements["features"] = {"plugin_skills": required, "plugin_lifecycle_api": required}
+    stack = ConfigLayerStack(
+        (ConfigLayer(ConfigLayerSource("session_flags"), values),),
+        requirements=ConfigRequirements(raw=requirements),
+    )
+    fixture.manager._loader._config_stack = stack
+    for name in ("PLUGIN_SKILLS", "PLUGIN_LIFECYCLE_API", "PLUGINS"):
+        monkeypatch.delenv(f"MINICODE_FEATURE_{name}", raising=False)
+    reads = []
+
+    def unexpected_global_read(*_args, **_kwargs):
+        reads.append(True)
+        raise AssertionError("A captured skill snapshot must use its captured configuration")
+
+    monkeypatch.setattr(config, "load_config_layer_stack", unexpected_global_read)
+    monkeypatch.setattr(config, "_load_effective_settings_json", unexpected_global_read)
+    monkeypatch.setattr(config, "get_config_requirements", unexpected_global_read)
+    assert fixture.manager._loader._plugin_only_customization() is True
+    snapshot = fixture.manager.snapshot(config_stack=stack)
+    assert bool(snapshot.list_metas()) is expected
+    assert PluginManager(config_stack=stack).snapshot().get("feature_enabled") is expected
+    assert reads == []
+
+
+def test_next_turn_skill_snapshot_sees_edits_removals_installs_and_new_config(plugin_catalog):
+    fixture = plugin_catalog
+    path = fixture.skill("skills/review")
+    captured = fixture.manager.snapshot(config_stack=fixture.stack())
+    path.write_text(path.read_text(encoding="utf8").replace("Actual workflow", "Updated workflow"), encoding="utf8")
+    updated = fixture.manager.snapshot(config_stack=fixture.stack())
+    assert captured.list_metas()[0].description == "Actual workflow"
+    assert updated.list_metas()[0].description == "Updated workflow"
+    path.unlink()
+    assert fixture.manager.snapshot(config_stack=fixture.stack()).list_metas() == []
+    fixture.skill("skills/new", "installed")
+    installed = fixture.manager.snapshot(config_stack=fixture.stack())
+    assert [meta.name for meta in installed.list_metas()] == ["docs@local:installed"]
+    fixture.settings["features"] = {"plugin_skills": False}
+    assert fixture.manager.snapshot(config_stack=fixture.stack()).list_metas() == []
+    assert [meta.name for meta in installed.list_metas()] == ["docs@local:installed"]

@@ -1,21 +1,28 @@
 /* @vitest-environment jsdom */
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore, waitComposerDraftRecovery } from "./index";
 import { composerWorkspaceKey, emptyComposerDraft, flushComposerDrafts, loadComposerDrafts, resetComposerDraftStorageForTests } from "./composer-drafts";
 import { emptyConversationWorkbenchState } from "./ui-slice";
 import { handleSessionEvent } from "../chat/sessionEvents";
 import { sendChatMessage, resetPendingUserMessagesForTests } from "../chat/sendChatMessage";
-import { sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { latestProjectionCommandIds } from "../protocol/command-projection";
-import type { CommandResultEvent } from "../protocol/events";
+import type { ClientCommand, CommandResultEvent } from "../protocol/events";
 
-const wire = vi.hoisted(() => ({ messages: [] as Record<string, unknown>[] }));
+const wire = vi.hoisted(() => ({ messages: [] as Record<string, unknown>[], modes: new Map<string, "build" | "plan">(), listeners: new Set<(data: unknown) => void>() }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({
   send: (message: Record<string, unknown>) => { wire.messages.push(message); return true; }, sessionId: "mode-chain",
+  subscribe: (listener: (data: unknown) => void) => { wire.listeners.add(listener); return () => wire.listeners.delete(listener); },
 }) }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), sendClientCommandAwaitResult: vi.fn(),
   commandResultSucceeded: (result: { level: string }) => !["error", "failed"].includes(result.level), sendConversationDeleteCommand: vi.fn() }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
+vi.mock("../protocol/api", async load => ({ ...await load<typeof import("../protocol/api")>(),
+  fetchDraftModelSelection: vi.fn(async (root: string) => ({ provider: "custom", current_model: "fixture", model: "fixture",
+    available_models: ["fixture"], models_source: "configured", effective_reasoning_effort: "off", available_permission_modes: ["confirm", "auto", "bypass"],
+    config_version: "fixture", config_cwd: root, feature_flags: {}, composer_commands: [],
+    default_model_selection: { provider: "custom", model: "fixture", reasoning_effort: "off", conversation_id: "", working_directory: root } })),
+}));
 const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as never;
 const meta = (id: string, agentMode: "build" | "plan", revision = 1) => ({ id, title: id, updatedAt: "2026-10-12", agentMode, revision, workspaceRoot: "C:/project" });
 const complete = (command: string, revision?: number, level = "success"): CommandResultEvent => ({
@@ -26,21 +33,38 @@ const delayed = () => {
   vi.mocked(sendClientCommandAwaitResult).mockImplementationOnce(() => new Promise(done => { resolve = done; }));
   return (result: CommandResultEvent) => resolve(result);
 };
-const switchTo = (id: string, agentMode: "build" | "plan", revision = 1) => handleSessionEvent({
+const switchTo = (id: string, agentMode: "build" | "plan", revision = 1, command?: ClientCommand, hydrating = false) => {
+  const event = {
   type: "conversation.switched", conversation_id: id,
+  is_hydrating: hydrating, context_pending: hydrating,
+  client_command_id: command?.client_command_id, client_command_type: command?.type,
   conversation: { id, title: id, agent_mode: agentMode, revision, workspace_root: "C:/project", messages: [] },
-} as never, buffers);
+  } as never;
+  handleSessionEvent(event, buffers); for (const listener of [...wire.listeners]) listener(event);
+};
 
 beforeEach(async () => {
   await waitComposerDraftRecovery();
   await resetComposerDraftStorageForTests();
   vi.clearAllMocks();
+  vi.mocked(sendClientCommandAwaitResult).mockReset();
+  vi.mocked(sendClientCommandAwaitResult).mockImplementation(async (command, expected) => {
+    if (command.type === "conversation.create") wire.modes.set(command.conversation_id!, command.agent_mode === "plan" ? "plan" : "build");
+    if (command.type === "conversation.switch") throw new Error("Switch success is a canonical notification, not command.result");
+    return { ...complete(expected), data: { conversation_id: "conversation_id" in command ? command.conversation_id : undefined, execution_cwd: "C:/project" } };
+  });
+  vi.mocked(sendClientCommand).mockImplementation(command => { if (command.type === "conversation.switch") {
+    switchTo(command.conversation_id, wire.modes.get(command.conversation_id)!, 1, command, true);
+    switchTo(command.conversation_id, wire.modes.get(command.conversation_id)!, 1, command, false);
+  } return true; });
   wire.messages.length = 0;
+  wire.modes.clear();
+  wire.listeners.clear();
   latestProjectionCommandIds.clear();
   resetPendingUserMessagesForTests();
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: "owner", conversations: [meta("owner", "build"), meta("other", "build")],
     conversationInventoryInstanceId: null, conversationInventoryRevision: 0, workingDirectory: "C:/project", appMode: "cowork",
-    pendingConversationSwitchId: null, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
+    pendingConversationSwitchId: null, pendingConversationCreateId: null,
     workspaceComposerDrafts: {}, conversationWorkbenchStates: {}, pendingAgentModeChanges: {}, latestAgentModeCommandIds: {},
     pendingPermissionModeChanges: {}, permissionMode: "confirm", composerDraftsReady: true, runtimeSession: null,
     messages: [], conversationMessages: {}, conversationStreaming: {}, conversationAgentStates: {}, sideChats: {},
@@ -50,6 +74,7 @@ beforeEach(async () => {
     attachments: [{ id: "attachment", name: "note.txt", type: "text/plain", size: 4, status: "ready" }],
   });
 });
+afterEach(() => { useAppStore.setState({ isConnected: false }); });
 
 it("reopens each conversation's durable mode while preserving its composer and independent permissions", () => {
   switchTo("owner", "plan", 2);
@@ -60,21 +85,29 @@ it("reopens each conversation's durable mode while preserving its composer and i
   expect(useAppStore.getState()).toMatchObject({ agentMode: "plan", draft: "Retained text", quotedMessage: { id: "quote" } });
 });
 
-it("persists a homepage mode-only draft and adopts it through real conversation creation", async () => {
+it("persists a client homepage mode-only draft and binds it after explicit creation/configuration/canonical switch", async () => {
   useAppStore.setState({ ...emptyComposerDraft(), conversationId: null, conversations: [] });
+  const draftId = useAppStore.getState().startConversationDraft({ bindWorkspace: true, workspaceRoot: "C:/project" });
   expect(await useAppStore.getState().setAgentMode("plan")).toBe(true);
   expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   await flushComposerDrafts();
   await resetComposerDraftStorageForTests(true);
-  expect((await loadComposerDrafts()).find(record => record.owner.kind === "workspace")?.draft).toMatchObject({ agentMode: "plan", draft: "" });
+  expect((await loadComposerDrafts()).find(record => record.owner.kind === "draft" && record.owner.id === draftId)?.draft).toMatchObject({ agentMode: "plan", draft: "" });
   const finish = delayed();
   const creation = useAppStore.getState().ensureComposerConversation();
-  const id = useAppStore.getState().pendingConversationCreateId!;
-  expect(sendClientCommandAwaitResult).toHaveBeenLastCalledWith(expect.objectContaining({ type: "conversation.create", conversation_id: id, agent_mode: "plan" }), "conversation.create");
-  switchTo(id, "plan");
-  finish(complete("conversation.create"));
+  await vi.waitFor(() => expect(sendClientCommandAwaitResult).toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.create", agent_mode: "plan", activate: false }), "conversation.create"));
+  const create = vi.mocked(sendClientCommandAwaitResult).mock.calls.find(([command]) => command.type === "conversation.create")![0];
+  const id = create.conversation_id!;
+  expect(useAppStore.getState()).toMatchObject({ activeConversationDraftId: draftId, conversationId: null, pendingConversationCreateId: null });
+  wire.modes.set(id, "plan");
+  finish({ ...complete("conversation.create"), data: { conversation_id: id, execution_cwd: "C:/project", created: true, activated: false } });
   expect(await creation).toBe(id);
   expect(useAppStore.getState().agentMode).toBe("plan");
+  expect(useAppStore.getState().conversationId).toBe(id);
+  expect(useAppStore.getState().conversationWorkbenchStates[id]).toMatchObject({ agentMode: "plan", draft: "" });
+  expect(useAppStore.getState().workspaceComposerDrafts[draftId]).toBeUndefined();
+  expect(vi.mocked(sendClientCommandAwaitResult).mock.calls.map(([command]) => command.type)).toEqual(["conversation.create", "llm.model.set"]);
+  expect(sendClientCommand).toHaveBeenCalledWith(expect.objectContaining({ type: "conversation.switch", conversation_id: id }));
   expect(useAppStore.getState().workspaceComposerDrafts[composerWorkspaceKey("C:/project")]).toBeUndefined();
 });
 

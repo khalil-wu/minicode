@@ -21,11 +21,14 @@ import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { Target } from "../lib/icons";
 import { enterComposerGoalMode, updateThreadGoal } from "./goal-state";
+import { isConversationDraftMaterializing } from "../stores/conversation-drafts";
+import { isConversationMessageAwaitingReceipt } from "../chat/sendChatMessage";
 import "./goal.css";
 
 interface Props {
   sendState: SendButtonState;
   isStopping?: boolean;
+  submitting?: boolean;
   onSend: () => void | Promise<void>;
   onStop?: () => void;
   compact?: boolean;
@@ -61,7 +64,7 @@ const KNOWN_EFFORT_OPTIONS: Record<string, { label: TranslationKey | "Ultra"; de
   ultra: { label: "Ultra", description: "Ultra 推理强度" },
 };
 
-export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, compact = false, minimal = false }: Props) => {
+export const FooterRow = memo(({ sendState, isStopping = false, submitting = false, onSend, onStop, compact = false, minimal = false }: Props) => {
   const { t: tr } = useI18n();
   const { preferences } = useDesktopPreferences();
   const permissionMode = useAppStore((s) => s.permissionMode);
@@ -70,7 +73,15 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   const setAgentMode = useAppStore((s) => s.setAgentMode);
   const effortLevel = useAppStore((s) => s.effortLevel);
   const conversationId = useAppStore((s) => s.conversationId);
+  const activeDraftId = useAppStore(s => s.activeConversationDraftId);
+  const composerDraftsReady = useAppStore(s => s.composerDraftsReady);
+  const draftContext = useAppStore(s => s.activeConversationDraftId ? s.conversationDrafts[s.activeConversationDraftId] : undefined);
+  const materializing = useAppStore(isConversationDraftMaterializing);
+  const draftControlsBusy = !composerDraftsReady || Boolean(activeDraftId && !draftContext
+    || draftContext?.selectionLoading || draftContext?.preferencesLoading || draftContext?.materializing);
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
+  const awaitingInputReceipt = useAppStore(s => Boolean(s.conversationId && isConversationMessageAwaitingReceipt(s.conversationId)));
+  const modeControlsBusy = draftControlsBusy || materializing || submitting || awaitingInputReceipt || Boolean(pendingConversationSwitchId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const currentModel = useAppStore((s) => s.currentModel);
   const projectedDefaultModel = useAppStore((s) => s.defaultModelSelection);
@@ -92,7 +103,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   const fileRef = useRef<HTMLInputElement>(null);
   const filePickerActive = useRef(false);
   useEffect(() => useAppStore.subscribe((state, previous) => {
-    if (state.conversationId !== previous.conversationId || state.workingDirectory !== previous.workingDirectory
+    if (state.conversationId !== previous.conversationId || state.activeConversationDraftId !== previous.activeConversationDraftId || state.workingDirectory !== previous.workingDirectory
       || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
       || state.pendingConversationCreateId !== previous.pendingConversationCreateId) {
       filePickerActive.current = false;
@@ -107,7 +118,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   const [effortOpen, setEffortOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const footerRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setAddOpen(false); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }, [conversationId, workingDirectory, pendingConversationSwitchId]);
+  useEffect(() => { setAddOpen(false); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); }, [conversationId, activeDraftId, workingDirectory, pendingConversationSwitchId]);
   useEffect(() => {
     const openAddMenu = () => { window.dispatchEvent(new Event("composer:focus")); setAddOpen(true); setModelOpen(false); setEffortOpen(false); setPermissionOpen(false); };
     window.addEventListener("composer:open-add-menu", openAddMenu);
@@ -115,12 +126,13 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   }, []);
   const [effortDraft, setEffortDraft] = useState<{ level: EffortLevel; model: string; owner: string | null | undefined; accepted: boolean } | null>(null);
   const effortRequest = useRef(0);
-  const displayedEffort = effortDraft?.model === currentModel && effortDraft.owner === conversationId
+  const composerOwnerId = conversationId || activeDraftId;
+  const displayedEffort = effortDraft?.model === currentModel && effortDraft.owner === composerOwnerId
     ? effortDraft.level : effortLevel;
   useEffect(() => {
-    if (effortDraft && (effortDraft.model !== currentModel || effortDraft.owner !== conversationId
+    if (effortDraft && (effortDraft.model !== currentModel || effortDraft.owner !== composerOwnerId
       || (effortDraft.accepted && effortDraft.level === effortLevel))) setEffortDraft(null);
-  }, [currentModel, conversationId, effortLevel, effortDraft]);
+  }, [currentModel, composerOwnerId, effortLevel, effortDraft]);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const permissionRef = useRef<HTMLDivElement>(null);
 
@@ -148,10 +160,13 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
     const options = () => Array.from(root.querySelectorAll<HTMLElement>('[role="option"]:not(:disabled), .composer-effort-model-toggle:not(:disabled), .composer-effort-reset:not(:disabled), input[type="range"]'));
     queueMicrotask(() => {
       const items = options();
-      (root.querySelector<HTMLInputElement>('input[type="range"]')
-        ?? items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0])?.focus({ preventScroll: true });
+      const selected = root.querySelector<HTMLInputElement>('input[type="range"]')
+        ?? items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0];
+      selected?.focus({ preventScroll: true });
+      if (modelOpen) selected?.scrollIntoView({ block: "nearest" });
     });
     const handleMenuKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === "Escape") {
         event.preventDefault();
         event.stopPropagation();
@@ -259,6 +274,8 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
 
   const togglePlanMode = () => {
     const owner = useAppStore.getState();
+    if (modeControlsBusy || isConversationDraftMaterializing(owner)
+      || (owner.conversationId && isConversationMessageAwaitingReceipt(owner.conversationId))) return;
     if (owner.agentMode === "plan") { void owner.setAgentMode("build"); return; }
     useAppStore.setState({ goalMode: false });
     if (owner.activeGoal && owner.conversationId && capabilityFeatureEnabled(owner.runtimeCapabilities, "goals")) {
@@ -271,6 +288,8 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
 
   const clearGoalMode = () => {
     const owner = useAppStore.getState();
+    if (modeControlsBusy || isConversationDraftMaterializing(owner)
+      || (owner.conversationId && isConversationMessageAwaitingReceipt(owner.conversationId))) return;
     useAppStore.setState({ goalMode: false });
     if (owner.activeGoal && owner.conversationId) void updateThreadGoal(owner.conversationId, "clear")
       .catch(error => pushToast(error instanceof Error ? error.message : tr("目标操作失败"), "error"));
@@ -286,10 +305,10 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
         : tr("开启 Ultra 和完全访问后，MiniCode 可在未经询问的前提下运行命令、联网检索、编辑电脑内任意路径文件，同时启用深度推理。目前没有可用的更严格权限模式。"),
       confirmLabel: tr("使用完全访问"), cancelLabel: tr("继续"), cancelDisabled: !fallback, danger: true });
     const current = useAppStore.getState();
-    if (choice === null || current.conversationId !== owner.conversationId || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) return false;
+    if (choice === null || current.conversationId !== owner.conversationId || current.activeConversationDraftId !== owner.activeConversationDraftId || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) return false;
     if (choice === false && (!fallback || !await setPermissionMode(fallback))) return false;
     const after = useAppStore.getState();
-    return after.conversationId === owner.conversationId && workspaceRootsEqual(after.workingDirectory, owner.workingDirectory);
+    return after.conversationId === owner.conversationId && after.activeConversationDraftId === owner.activeConversationDraftId && workspaceRootsEqual(after.workingDirectory, owner.workingDirectory);
   };
 
   const switchModel = async (selection: { mode: "model"; model: string } | { mode: "default" }) => {
@@ -299,14 +318,21 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
       : option?.reasoningEffortLevels.includes(owner.effortLevel) ? owner.effortLevel : option?.defaultReasoningEffort;
     if (!await confirmUltraWithFullAccess(nextEffort, owner)) return;
     const admitted = useAppStore.getState();
-    if (admitted.conversationId !== owner.conversationId || !workspaceRootsEqual(admitted.workingDirectory, owner.workingDirectory)) return;
+    if (admitted.conversationId !== owner.conversationId || admitted.activeConversationDraftId !== owner.activeConversationDraftId || !workspaceRootsEqual(admitted.workingDirectory, owner.workingDirectory)) return;
     if (!await setModelSelection(selection)) return;
     const current = useAppStore.getState();
-    if (current.conversationId !== owner.conversationId || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) return;
+    if (current.conversationId !== owner.conversationId || current.activeConversationDraftId !== owner.activeConversationDraftId || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) return;
     setModelOpen(false);
     const capabilities = current.runtimeCapabilities?.provider_capabilities;
-    const hasEffort = capabilityBool(capabilities?.reasoning_effort_supported ?? capabilities?.reasoning_effort)
-      && normalizeCapabilityEffortLevels(capabilities?.reasoning_effort_levels).length > 0;
+    const selectedOption = current.availableModelOptions.find(option => option.model === current.currentModel);
+    const selectedLevels = selectedOption
+      ? normalizeCapabilityEffortLevels(selectedOption.reasoningEffortLevels)
+      : normalizeCapabilityEffortLevels(capabilities?.reasoning_effort_levels);
+    const visibleLevels = selectedLevels.filter(level => level !== "max" && level !== "ultra"
+      || preferences?.enabledReasoningEfforts === undefined || preferences.enabledReasoningEfforts.includes(level));
+    const hasEffort = (capabilities?.model === undefined || capabilities.model === current.currentModel)
+      && capabilityBool(capabilities?.reasoning_effort_supported ?? capabilities?.reasoning_effort)
+      && visibleLevels.length > 1 && selectedLevels.includes(current.effortLevel);
     setEffortOpen(hasEffort);
     if (!hasEffort) queueMicrotask(() => dropdownRef.current?.querySelector<HTMLButtonElement>(':scope > button')?.focus());
   };
@@ -315,14 +341,14 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
     if (level === displayedEffort) return;
     const owner = useAppStore.getState();
     const request = ++effortRequest.current;
-    const draft = { level, model: currentModel, owner: conversationId, accepted: false };
+    const draft = { level, model: currentModel, owner: composerOwnerId, accepted: false };
     setEffortDraft(draft);
     if (!await confirmUltraWithFullAccess(level, owner)) {
       if (request === effortRequest.current) setEffortDraft(null);
       return;
     }
     const admitted = useAppStore.getState();
-    if (admitted.conversationId !== owner.conversationId || !workspaceRootsEqual(admitted.workingDirectory, owner.workingDirectory)) {
+    if (admitted.conversationId !== owner.conversationId || admitted.activeConversationDraftId !== owner.activeConversationDraftId || !workspaceRootsEqual(admitted.workingDirectory, owner.workingDirectory)) {
       if (request === effortRequest.current) setEffortDraft(null);
       return;
     }
@@ -347,6 +373,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
     }
     const current = useAppStore.getState();
     if (current.conversationId !== owner.conversationId
+      || current.activeConversationDraftId !== owner.activeConversationDraftId
       || !workspaceRootsEqual(current.workingDirectory, owner.workingDirectory)) {
       pushToast(tr("会话或工作区已切换，未应用原完全访问确认；请重新选择权限。"), "warning");
       return;
@@ -407,12 +434,20 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   const capabilityEffortLevels = normalizeCapabilityEffortLevels(
     providerCapabilities?.reasoning_effort_levels,
   );
+  const selectedModelOption = availableModelOptions.find(option => option.model === currentModel);
+  // The provider capability ladder can describe the adapter in general. The
+  // model catalog is the authoritative per-model contract; when it declares
+  // no effort levels, keep the composer focused on model selection instead of
+  // presenting a retained level that this model cannot use.
+  const modelEffortLevels = selectedModelOption
+    ? normalizeCapabilityEffortLevels(selectedModelOption.reasoningEffortLevels)
+    : capabilityEffortLevels;
   const supportsReasoningEffort = (providerCapabilities?.model === undefined || providerCapabilities.model === currentModel)
     && capabilityBool(
     providerCapabilities?.reasoning_effort_supported ?? providerCapabilities?.reasoning_effort,
-  ) && capabilityEffortLevels.length > 0;
+  ) && modelEffortLevels.length > 0;
   const visibleReasoningEfforts = preferences?.enabledReasoningEfforts;
-  const composerEffortLevels = capabilityEffortLevels.filter(level => level !== "max" && level !== "ultra"
+  const composerEffortLevels = modelEffortLevels.filter(level => level !== "max" && level !== "ultra"
     || visibleReasoningEfforts === undefined || visibleReasoningEfforts.includes(level));
   const effortOptions = supportsReasoningEffort
     ? composerEffortLevels.map((level) => {
@@ -427,17 +462,17 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
   // declared default (the old `?? medium` fallback) reported 中 for a session
   // configured at `minimal`, put the checkmark on the wrong row, and left the
   // real level unreachable from the menu.
-  const effortIsDeclared = capabilityEffortLevels.includes(displayedEffort);
+  const effortIsDeclared = modelEffortLevels.includes(displayedEffort);
+  const showReasoningEffort = supportsReasoningEffort && effortIsDeclared && composerEffortLevels.length > 1;
   const selectedEffort = effortOptions.find((option) => option.id === displayedEffort)
     ?? effortOption(displayedEffort, tr);
   const effortTitle = tr("选择模型");
-  const effortLabel = supportsReasoningEffort && !effortIsDeclared
-    ? tr("{label}（不支持）", { label: selectedEffort.label })
-    : selectedEffort.label;
+  const effortLabel = selectedEffort.label;
 
   return (
     <div ref={footerRef} className="flex flex-col gap-0">
-      {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} showGoal={capabilityFeatureEnabled(runtimeCapabilities, "goals")} goalAvailable={!pendingConversationSwitchId}
+      {addOpen && <ComposerAddMenu workspaceRoot={workingDirectory} planMode={agentMode === "plan"} planAvailable={!modeControlsBusy}
+        showGoal={capabilityFeatureEnabled(runtimeCapabilities, "goals")} goalAvailable={!modeControlsBusy}
         onFiles={openFilePicker}
         onRemoteFiles={remoteHost ? () => void openRemoteFilePicker() : undefined}
         onGoal={() => void editGoal()} onPlan={togglePlanMode}
@@ -530,7 +565,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
             label={permLabel}
             title={tr("更改权限")}
             icon={<PermissionIcon size={15} />}
-            disabled={availablePermissionModes === undefined || Boolean(pendingConversationSwitchId)}
+            disabled={availablePermissionModes === undefined || Boolean(pendingConversationSwitchId) || draftControlsBusy}
             warning={permissionMode === "bypass"}
           >
             <div className="composer-permission-heading"><span>{tr("应如何批准操作？")}</span><button type="button" onClick={openPermissionsHelp}>{tr("了解更多")}</button></div>
@@ -550,8 +585,8 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
             ))}
           </Picker>
 
-          {agentMode === "plan" && <button type="button" className="composer-plan-chip" aria-label={tr("关闭计划模式")} title={tr("计划模式")} onClick={() => setAgentMode("build")}><ListChecks size={15} /><span>{tr("计划")}</span><X size={13} /></button>}
-          {goalMode && <button type="button" className="composer-goal-mode" aria-label={tr("清除目标")} title={tr("清除目标")}
+          {agentMode === "plan" && <button type="button" className="composer-plan-chip" disabled={modeControlsBusy} aria-label={tr("关闭计划模式")} title={tr("计划模式")} onClick={() => setAgentMode("build")}><ListChecks size={15} /><span>{tr("计划")}</span><X size={13} /></button>}
+          {goalMode && <button type="button" className="composer-goal-mode" disabled={modeControlsBusy} aria-label={tr("清除目标")} title={tr("清除目标")}
             onClick={clearGoalMode}><Target className="goal-mode-target" size={14} /><X className="goal-mode-clear" size={14} />{tr("目标")}</button>}
 
         </div>
@@ -569,20 +604,20 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
             onClick={() => {
               setPermissionOpen(false);
               const open = modelOpen || effortOpen;
-              setModelOpen(!open && !supportsReasoningEffort);
-              setEffortOpen(!open && supportsReasoningEffort);
+              setModelOpen(!open && !showReasoningEffort);
+              setEffortOpen(!open && showReasoningEffort);
             }}
             className="composer-model-select"
-            data-reasoning-supported={supportsReasoningEffort}
-            aria-label={supportsReasoningEffort ? tr("模型与推理强度：{model}，{effort}", { model: modelLabel, effort: effortLabel }) : undefined}
+            data-reasoning-supported={showReasoningEffort}
+            aria-label={showReasoningEffort ? tr("模型与推理强度：{model}，{effort}", { model: modelLabel, effort: effortLabel }) : undefined}
             aria-expanded={modelOpen || effortOpen}
-            disabled={Boolean(pendingConversationSwitchId)}
-            aria-haspopup={supportsReasoningEffort ? "dialog" : "listbox"}
+            disabled={Boolean(pendingConversationSwitchId) || draftControlsBusy}
+            aria-haspopup={showReasoningEffort ? "dialog" : "listbox"}
             style={pill}
-            title={supportsReasoningEffort ? effortTitle : currentModel || tr("选择模型")}
+            title={showReasoningEffort ? effortTitle : currentModel || tr("选择模型")}
           >
             <span className="composer-model-trigger-label">{modelLabel}</span>
-            {supportsReasoningEffort && <span className="composer-model-trigger-effort" data-effort={displayedEffort}>{effortLabel}</span>}
+            {showReasoningEffort && <span className="composer-model-trigger-effort" data-effort={displayedEffort}>{effortLabel}</span>}
             <PromptSourceIcon icon="model-chevron-down" />
           </button>
           {modelOpen && (
@@ -615,10 +650,10 @@ export const FooterRow = memo(({ sendState, isStopping = false, onSend, onStop, 
               </div>}
             </div>
           )}
-        {supportsReasoningEffort && effortOpen && (
+        {showReasoningEffort && effortOpen && (
           <div className="mc-dropdown-menu composer-picker-menu composer-reasoning-menu" role="dialog" aria-label={tr("模型与推理强度")} style={dropdownStyle("right")}>
             <EffortControl
-              key={`${currentModel}:${conversationId}:${composerEffortLevels.join(",")}`}
+              key={`${currentModel}:${composerOwnerId}:${composerEffortLevels.join(",")}`}
               options={effortOptions}
               selected={selectedEffort}
               modelLabel={modelLabel}
@@ -740,6 +775,7 @@ function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel,
     {canSlide && <div
       className="composer-effort-slider"
       data-dragging={dragging}
+      data-effort={current.id}
       style={{ "--effort-progress": `${index / (options.length - 1) * 100}%` } as React.CSSProperties}
     >
       <div className="composer-effort-track" aria-hidden="true">
@@ -759,7 +795,10 @@ function EffortControl({ options, selected, modelLabel, onSelect, onChooseModel,
         onPointerUp={commit}
         onPointerCancel={() => { setDragIndex(null); setDragging(false); }}
         onBlur={commit}
-        onKeyUp={(event) => { if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit(); }}
+        onKeyUp={(event) => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+          if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) commit();
+        }}
       />
     </div>}
     {!canSlide && <div role="listbox" aria-label={tr("推理档位")} className="composer-effort-options">

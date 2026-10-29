@@ -14,6 +14,12 @@ if TYPE_CHECKING:
     from backend.llm.provider_contracts import ModelDefinition
 
 
+def capture_model_config(config: AppConfig) -> AppConfig:
+    return replace(config, permissions=deepcopy(config.permissions),
+        feature_flags=deepcopy(config.feature_flags), config_layer_stack=deepcopy(config.config_layer_stack),
+        model_request_policy=deepcopy(config.model_request_policy))
+
+
 @dataclass(frozen=True, slots=True)
 class ModelExecutionSnapshot:
     config: AppConfig
@@ -29,12 +35,7 @@ class ModelExecutionSnapshot:
     def __post_init__(self) -> None:
         # Capture the mutable host configuration once. Frozen model/budget
         # values and process-local adapters/strategies keep their identity.
-        object.__setattr__(self, "config", replace(
-            self.config, permissions=deepcopy(self.config.permissions),
-            feature_flags=deepcopy(self.config.feature_flags),
-            config_layer_stack=deepcopy(self.config.config_layer_stack),
-            model_request_policy=deepcopy(self.config.model_request_policy),
-        ))
+        object.__setattr__(self, "config", capture_model_config(self.config))
 
     @classmethod
     def capture(cls, config: AppConfig, llm: LLMAdapter) -> ModelExecutionSnapshot:

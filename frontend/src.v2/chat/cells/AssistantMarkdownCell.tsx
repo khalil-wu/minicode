@@ -278,6 +278,7 @@ export function AssistantMarkdownCell({
           knownFilePaths={knownFilePaths}
           workspaceRoot={workspaceRoot}
           conversationId={conversationId}
+          openFileLinksInSidePanel
           />
         )}
         {(visibleImageProgress.length > 0 || imageArtifacts.length > 0 || otherArtifacts.length > 0) && (
@@ -314,6 +315,7 @@ export function AssistantMarkdownCell({
           knownFilePaths={knownFilePaths}
           workspaceRoot={workspaceRoot}
           conversationId={conversationId}
+          openFileLinksInSidePanel
           />
         )}
         {visibleGeneratedFiles.length > 0 && (

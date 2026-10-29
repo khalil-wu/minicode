@@ -54,6 +54,7 @@ export async function loadMessageTurnDiff(owner: DeferredTurnDiffOwner, signal?:
     unsubscribe();
     current.hydrateConversationMessages(owner.conversationId, messages, {
       activate: true, isStreaming: current.isStreaming, historyPage: current.conversationHistoryPages[owner.conversationId],
+      confirmedUserMessageIds: [],
     });
     return loaded;
   } catch (error) {

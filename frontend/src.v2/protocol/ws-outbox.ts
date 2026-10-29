@@ -7,11 +7,17 @@ type SendClientCommandOptions = { silent?: boolean };
 export type AwaitCommandResultOptions = {
   timeoutMs?: number;
   silent?: boolean;
+  /** The local transport accepted this captured command; no server receipt is implied. */
+  onSubmitted?: () => void;
   onReceived?: () => void;
 };
 
 export const DEFAULT_COMMAND_RESULT_TIMEOUT_MS = 60_000;
 export const LONG_COMMAND_RESULT_TIMEOUT_MS = 10 * 60_000;
+
+export class CommandNotSentError extends Error {}
+/** The server explicitly rejected the command at the transport receipt boundary. */
+export class CommandRejectedError extends Error {}
 
 let sender: Sender | null = null;
 let senderFailureReason: (() => string) | null = null;
@@ -29,6 +35,9 @@ export const notifyClientCommandReceived = (id: string): void => {
   if (pending) pending.onReceived = undefined;
   received?.();
 };
+
+export const clientCommandIsAwaitingReceipt = (id: string): boolean =>
+  pendingCommandResults.get(id)?.onReceived !== undefined;
 
 export const createClientCommandId = (): string => {
   const randomPart = typeof globalThis.crypto?.randomUUID === "function"
@@ -127,11 +136,21 @@ export const sendClientCommandAwaitResult = (
       timer,
       onReceived: options.onReceived,
     });
-    if (sendClientCommand(commandWithId, { silent: options.silent })) return;
+    try {
+      if (sendClientCommand(commandWithId, { silent: options.silent })) {
+        options.onSubmitted?.();
+        return;
+      }
+    } catch (error) {
+      clearTimeout(timer);
+      if (pendingCommandResults.get(clientCommandId)?.timer === timer) pendingCommandResults.delete(clientCommandId);
+      reject(error);
+      return;
+    }
     const pending = pendingCommandResults.get(clientCommandId);
     if (pending) clearTimeout(pending.timer);
     pendingCommandResults.delete(clientCommandId);
-    reject(new Error(sendFailureMessage()));
+    reject(new CommandNotSentError(sendFailureMessage()));
   });
 };
 
@@ -185,12 +204,13 @@ export const resolveClientCommandResult = (event: CommandResultEvent & { client_
 export const rejectClientCommandResult = (
   clientCommandId: string,
   reason: string,
+  error: Error = new Error(reason || "Command was rejected by the server"),
 ): boolean => {
   const pending = pendingCommandResults.get(clientCommandId);
   if (!pending) return false;
   pendingCommandResults.delete(clientCommandId);
   clearTimeout(pending.timer);
-  pending.reject(new Error(reason || "Command was rejected by the server"));
+  pending.reject(error);
   return true;
 };
 

@@ -17,6 +17,7 @@ from backend.llm.base import ToolCallEvent
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.services.subagent_service import build_subagent_transcript_messages, project_subagent_transcript_events
 from backend.tools.swarm_tools import SourceSendMessageTool
+from backend.tools.collaboration_tools import InterruptAgentTool
 
 
 @pytest.mark.asyncio
@@ -64,5 +65,36 @@ async def test_source_destination_receipt_reaches_event_api_and_child_replay(tmp
         messages = runtime.list_swarm_messages(conversation_id="owner")
         assert len(messages) == 1
         assert messages[0].recipient_id == recipient
+    finally:
+        await runtime.aclose(release_lease=True)
+
+
+@pytest.mark.asyncio
+async def test_interrupt_resolved_recipient_survives_event_and_history(tmp_path):
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
+    runtime.start_run(run_id="root", conversation_id="owner")
+    runtime.start_subagent(subagent_id="child-id", parent_run_id="root", agent_type="default", agent_path_segment="review")
+    context = ToolExecutionContext(permission=PermissionContext(mode="bypass"), conversation_id="owner",
+        metadata={"run_id": "root"}, run_context=RunContext(agent_runtime=runtime, multi_agent_version="v2"))
+    call = ToolCallEvent("interrupt-call", "interrupt_agent", {"target": "/root/review"})
+    builder, state = ContextBuilder(), AgentState(user_message="Stop the review")
+    builder.append_user("Stop the review")
+    builder.append_assistant_tool_calls([call])
+    journal = ExecutionJournal("root", base_dir=tmp_path / "journals")
+    try:
+        result = await InterruptAgentTool().execute(call.arguments, context)
+        assert not result.is_error
+        event = store_result(call, result, builder, state, iteration_id="iter:1", turn_id="turn", tool_ctx=context)
+        assert event.data["recipient_id"] == "child-id"
+        api = ApiToolCallRecord.from_internal(state.tool_calls[-1]).model_dump()
+        assert project_public_tool_call(api)["recipientId"] == "child-id"
+        journal.append_tool_use(tool_call_start_event(call, started_epoch=time.time(), iteration_id="iter:1", turn_id="turn").data)
+        journal.append_tool_result(event.data, tool_name=call.name)
+        journal.append_terminal(status="completed", summary="Interrupted")
+        raw = [asdict(row) for row in ExecutionJournal("root", base_dir=tmp_path / "journals").read_events()]
+        assert next(row["payload"]["record"] for row in project_subagent_transcript_events(raw) if row["event_type"] == "tool_result")["recipientId"] == "child-id"
+        restored = build_subagent_transcript_messages({"events": raw})
+        record = next(block["record"] for message in restored for block in message["blocks"] if block["type"] == "tool_call")
+        assert record["recipientId"] == "child-id" and record["args"]["target"] == "/root/review"
     finally:
         await runtime.aclose(release_lease=True)

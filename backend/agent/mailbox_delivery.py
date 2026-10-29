@@ -9,8 +9,9 @@ from typing import Any, Callable
 from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
 from backend.agent.runtime import AgentRuntime
+from backend.agent.runtime_records import source_agent_status_value
 from backend.agent.state import AgentState
-from backend.agent.agent_identity import coordination_agent_id
+from backend.agent.agent_identity import AgentPath, coordination_agent_id
 from backend.llm.responses_input import agent_message_response_item
 from backend.tools.base import truncate_tool_result
 from backend.permissions.checker import normalize_permission_mode_token
@@ -702,6 +703,48 @@ def format_parent_notification_message(item: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _parent_notification_model_input(item: dict[str, Any], runtime: AgentRuntime) -> dict[str, Any] | None:
+    payload = item["payload"]
+    if item["kind"] != "subagent_completed":
+        return {"content": format_parent_notification_message(item), "provider_items": []}
+    if payload.get("source_spawn_version") == "v2":
+        author, recipient = payload["author_agent_path"], payload["recipient_agent_path"]
+    else:
+        # Existing completion outboxes lack origin fields. Their durable child
+        # record retains the actual version and path across a cold restart.
+        child = runtime.get_subagent(item["subagent_id"]) or runtime.load_persisted_subagent(item["subagent_id"])
+        if child is None or child.resume_config.get("source_spawn_version") != "v2":
+            return {"content": format_parent_notification_message(item), "provider_items": []}
+        path = AgentPath.parse(child.agent_path)
+        author, recipient = path.logical_name, AgentPath(path.segments[:-1]).logical_name
+    terminal_reason = payload.get("terminal_reason", "")
+    if payload["status"] == "partial" and "terminal_reason" not in payload:
+        terminal_reason = runtime.get_subagent_snapshot(item["subagent_id"])["result"]["terminal_reason"]
+    guardian_denials = payload.get("codex_error_info") == "too_many_denials"
+    status = ({"errored": payload["error"]} if guardian_denials else
+        source_agent_status_value(payload["status"], content=payload["content"],
+            error=payload["error"], terminal_reason=terminal_reason))
+    if status in ("pending_init", "running", "interrupted"):
+        return None
+    if isinstance(status, dict) and "completed" in status:
+        content = status["completed"] or ""
+    elif isinstance(status, dict):
+        from backend.mcp.result_projection import _truncate_text
+
+        error = _truncate_text(status["errored"], "tokens", 900)
+        if guardian_denials:
+            content = (f"Agent interrupted by Guardian: {error}\n\nTell the user this agent stopped after repeated Guardian denials. "
+                "Do not resume this agent or retry its blocked work until the user explicitly confirms that it should continue.")
+        else:
+            content = (f"Agent errored: {error}\n\nThis agent's turn failed. If you still need this agent, "
+                "use the available collaboration tools to give it another task.")
+    else:
+        content = {"shutdown": "Agent shut down.", "not_found": "Agent was not found."}[status]
+    native = agent_message_response_item(author=author, recipient=recipient, content=content,
+        trigger_turn=False, message_type="FINAL_ANSWER")
+    return {"content": "", "provider_items": [native]}
+
+
 async def inject_parent_notifications(
     *,
     ctx: ContextBuilder,
@@ -803,9 +846,16 @@ async def inject_parent_notifications(
                 )
                 continue
         try:
+            model_input = _parent_notification_model_input(item, runtime)
+            if model_input is None:
+                ack_notification(notification_id, parent_run_id=parent_run_id, conversation_id=conversation_id)
+                continue
             if before_inject is not None:
                 before_inject()
-            ctx.append_user(format_parent_notification_message(item))
+            if model_input["provider_items"]:
+                ctx.append_agent_input_messages([model_input])
+            else:
+                ctx.append_user(model_input["content"])
             if subagent_id:
                 raw_collected = prompt_context.get("collected_subagent_ids", [])
                 collected = {

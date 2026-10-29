@@ -57,7 +57,8 @@ async def _verified_window_binding(websocket: WebSocket, window_instance_id: str
     if not endpoint or not (window_instance_id and window_owner_id and binding_token):
         await websocket.close(code=1008, reason="invalid window binding")
         raise WebSocketDisconnect(code=1008)
-    async with httpx.AsyncClient(timeout=5, follow_redirects=False, trust_env=False) as client:
+    from backend.application_network import application_http_ssl_context
+    async with httpx.AsyncClient(timeout=5, follow_redirects=False, trust_env=False, verify=application_http_ssl_context()) as client:
         response = await client.post(endpoint.rstrip("/") + "/v1/window-binding",
             headers={"Authorization": "Bearer " + os.environ.get("MINICODE_EMBEDDED_BROWSER_TOKEN", "")},
             json={"window_instance_id": window_instance_id, "window_owner_id": window_owner_id, "window_binding_token": binding_token})
@@ -544,6 +545,13 @@ class WebSocketManager:
     @asynccontextmanager
     async def conversation_lifecycle_scope(self, conversation_ids: tuple[str, ...], *, exclusive: bool = False):
         """Serialize task resources; only global maintenance excludes all tasks."""
+        async with self.conversation_maintenance_scope(exclusive=exclusive):
+            async with self.conversation_resource_scope(conversation_ids):
+                yield
+
+    @asynccontextmanager
+    async def conversation_maintenance_scope(self, *, exclusive: bool = False):
+        """Retain global maintenance participation without holding a window or task prefix."""
         # Reuse the manager's loop lifetime, including test-loop replacement.
         loop = asyncio.get_running_loop()
         if self._conversation_lifecycle_loop is not loop:
@@ -566,14 +574,7 @@ class WebSocketManager:
                 await condition.wait_for(lambda: not self._lifecycle_writer and self._lifecycle_waiting_writers == 0)
                 self._lifecycle_readers += 1
         try:
-            async with AsyncExitStack() as stack:
-                for conversation_id in sorted(set(conversation_ids)):
-                    lock = self._lifecycle_resource_locks.get(conversation_id)
-                    if lock is None:
-                        lock = asyncio.Lock()
-                        self._lifecycle_resource_locks[conversation_id] = lock
-                    await stack.enter_async_context(lock)
-                yield
+            yield
         finally:
             async with condition:
                 if exclusive:
@@ -581,6 +582,17 @@ class WebSocketManager:
                 else:
                     self._lifecycle_readers -= 1
                 condition.notify_all()
+
+    @asynccontextmanager
+    async def conversation_resource_scope(self, conversation_ids: tuple[str, ...]):
+        async with AsyncExitStack() as stack:
+            for conversation_id in sorted(set(conversation_ids)):
+                lock = self._lifecycle_resource_locks.get(conversation_id)
+                if lock is None:
+                    lock = asyncio.Lock()
+                    self._lifecycle_resource_locks[conversation_id] = lock
+                await stack.enter_async_context(lock)
+            yield
 
     def conversation_projection_lock(self, conversation_id: str) -> asyncio.Lock:
         owner = str(conversation_id or "").strip()
@@ -747,6 +759,7 @@ class WebSocketManager:
         memory_manager: Any | None = None,
         mcp_manager: Any = _SESSION_MCP_MANAGER_UNSET,
         environment_manager: Any | None = None,
+        websocket_accepted: bool = False,
     ) -> tuple[WebSocketSession, int]:
         from backend.ws.handler import (
             CONVERSATION_DATA_DIR,
@@ -758,7 +771,8 @@ class WebSocketManager:
         session_id = ""
         try:
             try:
-                await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
+                if not websocket_accepted:
+                    await websocket.accept(subprotocol=_websocket_accept_subprotocol(websocket))
                 requested_session_id = (websocket.query_params.get("session_id") or "").strip()
                 window_instance_id = str(websocket.query_params.get("window_instance_id") or "")
                 window_owner_id = str(websocket.query_params.get("window_owner_id") or "")

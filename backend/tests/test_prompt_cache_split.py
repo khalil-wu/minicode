@@ -259,14 +259,12 @@ def test_conditional_rules_follow_project_guidelines_in_user_context(tmp_path: P
         skill_context="SKILL CATALOG",
         memory_context="MEMORY",
         persistent_context="PERSISTENT FACT",
-        git_status_context="GIT SNAPSHOT",
     )
     first = builder.build_sections(**common, conditional_rules="RULE A")
     second = builder.build_sections(**common, conditional_rules="RULE B")
     assert first[-1].name == "conditional_rules"
     assert second[-1].name == "conditional_rules"
     assert [section.content for section in first[:-1]] == [section.content for section in second[:-1]]
-    assert "GIT SNAPSHOT" in first[-2].content
     assert first[-1].content == "RULE A"
     assert second[-1].content == "RULE B"
     first_system = PromptParts.from_sections(first).render_system()

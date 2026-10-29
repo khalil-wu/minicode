@@ -11,7 +11,7 @@ vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable:
   value: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
 }));
 vi.mock("../desktop/runtime", async load => ({ ...await load<typeof import("../desktop/runtime")>(),
-  isDesktop: () => true, getDesktopPreferences: mocks.preferences, desktop: () => ({ openPreferredPath: mocks.open }),
+  isDesktop: () => true, getDesktopPreferenceTargets: mocks.preferences, desktop: () => ({ openPreferredPath: mocks.open }),
 }));
 
 const targets = [

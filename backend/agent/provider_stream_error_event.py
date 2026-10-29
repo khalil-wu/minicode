@@ -15,7 +15,7 @@ from backend.agent.loop_runtime_helpers import (
 )
 from backend.agent.policies.stream_retry import plan_connection_retry
 from backend.agent.message import AgentEvent
-from backend.agent.progress import provider_stream_error_progress
+from backend.agent.progress import provider_failure_detail_progress, provider_stream_error_progress
 from backend.agent.first_byte_waiter import ProviderStreamFailure
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.provider_attempt import provider_progress_id
@@ -62,13 +62,17 @@ async def committed_provider_error(failure, *, state, turn_kernel, provider_atte
         }, project_progress=classification.fatal)
     if classification.fatal:
         _set_terminal_reason(state, terminal_reason_from_error_type(classification.error_type), status="failed")
-        return AgentEvent.error(message, recoverable=False, error_type=classification.error_type,
+        if failure_data.get("provider_error_message"):
+            yield provider_failure_detail_progress(str(failure_data["provider_error_message"]), attempt=provider_attempt, progress_id=progress_id)
+        yield AgentEvent.error(message, recoverable=False, error_type=classification.error_type,
             provider_error_type=classification.provider_error_type)
+        return
     state.mark_transition("provider_stream_after_tools", error_type=classification.error_type,
         provider_error_type=classification.provider_error_type, error_message=message)
-    return provider_stream_error_progress(
+    yield provider_stream_error_progress(
         "模型连接中断，保留已完成的工具结果后继续。", attempt=provider_attempt, progress_id=progress_id,
-        detail=message, error_message=message,
+        detail=redact_secrets(str(failure_data.get("provider_error_message") or message)),
+        error_message=redact_secrets(str(failure_data.get("provider_error_message") or message)),
         status_code=failure_data.get("status_code"),
         provider_error_code=failure_data.get("provider_error_code", ""),
     )
@@ -328,17 +332,19 @@ async def handle_provider_error_event(
                     data=span_data,
                 )
             if connection_retry:
+                diagnostic = redact_secrets(str(provider_failure_data.get("provider_error_message") or classification_input))
                 yield provider_stream_error_progress(
                     "正在重连，等待网络恢复",
                     attempt=provider_attempt,
                     progress_id=progress_id or provider_progress_id(iteration_id_value),
-                    detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
+                    detail=f"{diagnostic} · {retry_delay:.1f} 秒后重试",
                     retry_after_ms=max(0, int(round(retry_delay * 1000))),
-                    error_message=classification_input[:320],
+                    error_message=diagnostic,
                     status_code=provider_failure_data.get("status_code"),
                     provider_error_code=provider_failure_data.get("provider_error_code", ""),
                 )
             elif not switched_transport:
+                diagnostic = redact_secrets(str(provider_failure_data.get("provider_error_message") or classification_input))
                 attempt_label = (
                     f"第 {new_attempt}/{effective_max_retries} 次"
                     if effective_max_retries > 0
@@ -348,11 +354,11 @@ async def handle_provider_error_event(
                     f"连接失败，正在重连（{attempt_label}）",
                     attempt=provider_attempt,
                     progress_id=progress_id or provider_progress_id(iteration_id_value),
-                    detail=f"{classification_input[:320]} · {retry_delay:.1f} 秒后重试",
+                    detail=f"{diagnostic} · {retry_delay:.1f} 秒后重试",
                     retry_attempt=new_attempt,
                     max_retries=effective_max_retries,
                     retry_after_ms=max(0, int(round(retry_delay * 1000))),
-                    error_message=classification_input[:320],
+                    error_message=diagnostic,
                     status_code=provider_failure_data.get("status_code"),
                     provider_error_code=provider_failure_data.get("provider_error_code", ""),
                 )
@@ -448,6 +454,9 @@ async def handle_provider_error_event(
         summary="Provider stream returned an error",
         data=provider_failure_data,
     )
+    if provider_failure_data.get("provider_error_message"):
+        yield provider_failure_detail_progress(str(provider_failure_data["provider_error_message"]),
+            attempt=provider_attempt, progress_id=progress_id or provider_progress_id(iteration_id_value))
     async for recovery_event in degrade_and_finish(
         state=state,
         ctx=context_builder,

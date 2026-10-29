@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from backend.mcp.client import MCPClient, MCPTransport
 from backend.mcp.executor_stdio import executor_stdio_client
+from backend.mcp.connections import MCPConnection, MCPConnectionView
 
 SOURCE_PREFIX = "builtin:node_repl:"
 _SERVER = Path(__file__).with_name("node_repl_server.mjs").read_text(encoding="utf-8")
@@ -34,7 +35,8 @@ def _env_policy(attachment):
 class NodeReplMCPClient(MCPClient):
     notify_request_cancellation = True
 
-    def __init__(self, config, attachment, network, *, on_disconnect, on_tools_changed):
+    def __init__(self, config, attachment, network, *, on_disconnect, on_tools_changed, feature_flags=None,
+            requires_read_only_tools=False):
         self.attachment = attachment
         self.thread_lease = attachment.lease.clone()
         self.scope = attachment.permission_scope
@@ -43,11 +45,13 @@ class NodeReplMCPClient(MCPClient):
         self.process_handle = None
         super().__init__(config.name, command=config.command, args=config.args,
             transport=MCPTransport.STDIO, env=config.env,
-            on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
+            on_disconnect=on_disconnect, on_tools_changed=on_tools_changed,
+            startup_timeout=config.startup_timeout_sec, tool_timeout=config.tool_timeout_sec,
+            feature_flags=feature_flags, requires_read_only_tools=requires_read_only_tools)
 
     def _tool_request_timeout_seconds(self, params):
         timeout = params.get("arguments", {}).get("timeout_ms", 30000) if params["name"] == "js" else 30000
-        return max(self._tool_timeout, timeout / 1000 + self._request_timeout)
+        return max(super()._tool_request_timeout_seconds(params), timeout / 1000 + self._request_timeout)
 
     async def _sdk_transport_context(self):
         return self._executor_transport()
@@ -101,26 +105,44 @@ class _Companion:
     attachment: object
     network: object
     client: NodeReplMCPClient | None = None
+    connection: MCPConnection | None = None
     views: int = 0
     retired: bool = False
     closed: bool = False
+    feature_flags: object | None = None
+    requires_read_only_tools: bool = False
+    startup_window: tuple[int, float] | None = None
+
+    def startup_deadline(self, grace_ms: int, deadline: float) -> float:
+        if self.startup_window is None or self.startup_window[0] != grace_ms:
+            self.startup_window = (grace_ms, deadline)
+        return self.startup_window[1]
 
 
 @dataclass
 class NodeCompanionView:
     owner: object
     companion: _Companion
+    connection_view: MCPConnectionView
     released: bool = False
 
     @property
     def client(self):
         return self.companion.client
 
+    async def wait_for_startup(self):
+        return await self.connection_view.wait_for_startup()
+
+    @property
+    def connection(self):
+        return self.connection_view.connection
+
     async def aclose(self) -> bool:
         async with self.owner.lock:
             if not self.released:
                 self.companion.views -= 1
                 self.released = True
+                await self.connection_view.aclose()
             if self.companion.retired and self.companion.views == 0:
                 await self.owner._close(self.companion)
         return True
@@ -135,14 +157,19 @@ class NodeReplCompanions:
         self.active_key = None
         self.lock = asyncio.Lock()
 
-    async def admit(self, attachment, network):
+    def startup_deadline(self, config, grace_ms: int, deadline: float) -> float:
+        companion = self.instances[config.source.removeprefix(self.source_prefix)]
+        return companion.startup_deadline(grace_ms, deadline)
+
+    async def admit(self, attachment, network, *, feature_flags=None, requires_read_only_tools=False):
         from backend.mcp.manager import MCPServerConfig
 
         command = (os.environ.get("MINICODE_EDITOR_NODE") or shutil.which("node")) if not attachment.is_remote else "node"
         if command is None:
             return None
         identity = json.dumps([id(attachment.environment), attachment.permission_scope.identity(),
-            _env_policy(attachment), attachment.config.mcp_policy, network.identity() if network is not None else None],
+            _env_policy(attachment), attachment.config.mcp_policy, network.identity() if network is not None else None,
+            feature_flags.enabled("mcp_roots") if feature_flags is not None else None, requires_read_only_tools],
             sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
         # CreateProcess limits the complete Windows command line to 32,767
@@ -167,10 +194,17 @@ class NodeReplCompanions:
                         await self._close(previous)
             self.active_key = key
             returning = self.instances.get(key)
+            if returning is not None and returning.connection is not None and returning.connection.closed:
+                returning.retired = True
+                if returning.views == 0:
+                    await self._close(returning)
+                if self.instances.get(key) is returning:
+                    self.instances.pop(key)
             if returning is not None and returning.retired and returning.views == 0:
                 await self._close(returning)
             if key not in self.instances:
-                self.instances[key] = _Companion(key, config, attachment, network)
+                self.instances[key] = _Companion(key, config, attachment, network, feature_flags=feature_flags,
+                    requires_read_only_tools=requires_read_only_tools)
             self.instances[key].retired = False
         return config
 
@@ -189,20 +223,31 @@ class NodeReplCompanions:
         companion = self.instances[config.source.removeprefix(self.source_prefix)]
         if companion.client is None:
             companion.client = self.client_type(config, companion.attachment, companion.network,
-                on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
-        else:
-            companion.client._on_disconnect = on_disconnect
-            companion.client._on_tools_changed = on_tools_changed
+                on_disconnect=None, on_tools_changed=None, feature_flags=companion.feature_flags,
+                requires_read_only_tools=companion.requires_read_only_tools)
+
+            async def create(connection):
+                companion.client._on_disconnect = connection.notify_disconnect
+                companion.client._on_tools_changed = connection.notify_tools_changed
+                return companion.client
+
+            async def close(client):
+                await client.close_thread()
+
+            companion.connection = MCPConnection(factory=create, close=close, identity=companion.key)
+            companion.connection.client = companion.client
+        view = companion.connection.acquire(on_disconnect=on_disconnect, on_tools_changed=on_tools_changed)
         companion.views += 1
-        return companion.client, NodeCompanionView(self, companion)
+        return companion.client, NodeCompanionView(self, companion, view)
 
     async def _close(self, companion):
         if companion.closed:
             return
-        if companion.client is not None:
-            await companion.client.close_thread()
+        if companion.connection is not None:
+            await companion.connection.aclose()
         companion.closed = True
-        self.instances.pop(companion.key)
+        if self.instances.get(companion.key) is companion:
+            self.instances.pop(companion.key)
 
     async def aclose(self) -> None:
         async with self.lock:
@@ -210,6 +255,19 @@ class NodeReplCompanions:
                 companion.retired = True
                 await self._close(companion)
             self.active_key = None
+
+    async def cancel_startup(self) -> None:
+        await asyncio.gather(*(companion.connection.cancel_startup()
+            for companion in tuple(self.instances.values()) if companion.connection is not None))
+
+    async def restart(self, config) -> None:
+        async with self.lock:
+            key = config.source.removeprefix(self.source_prefix)
+            original = self.instances[key]
+            await self._close(original)
+            self.instances[key] = _Companion(key, config, original.attachment, original.network,
+                feature_flags=original.feature_flags, requires_read_only_tools=original.requires_read_only_tools)
+            self.active_key = key
 
 
 async def register_node_companion(run_context, registry, agent_session, *, execution) -> None:
@@ -234,7 +292,8 @@ async def register_node_companion(run_context, registry, agent_session, *, execu
     if owner_host.node_repl_companions is None:
         owner_host.node_repl_companions = NodeReplCompanions()
     owner = owner_host.node_repl_companions
-    config = await owner.admit(attachment, run_context.network_step.policy_for(attachment))
+    config = await owner.admit(attachment, run_context.network_step.policy_for(attachment),
+        feature_flags=execution.config.feature_flags, requires_read_only_tools=manager._requires_read_only_tools)
     if config is None:
         return
     from backend.mcp.policy import load_mcp_policy
@@ -250,5 +309,7 @@ async def register_node_companion(run_context, registry, agent_session, *, execu
         await owner.retire(config)
     manager.environment_runtime.node_repl_companions = owner
     manager._runtime_configs = tuple(item for item in manager._runtime_configs if item.name != "node_repl") + (config,)
-    await manager.start_server(config)
+    await manager.ensure_server_startup(config)
+    await manager.capture_startup_readiness(names=(config.name,))
+    manager.validate_required_startups(names=(config.name,))
     registry.mcp_tool_registry.sync()

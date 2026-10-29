@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from backend.agent import parent_notification_outbox
 from backend.agent.run_context import RunContext
@@ -58,6 +61,34 @@ def test_parent_queue_marker_is_deliverable_but_does_not_start_idle_turn(tmp_pat
     parent_notification_outbox.enqueue_parent_notification(parent_run_id="parent", conversation_id="conv", session_id="session",
         subagent_id="worker", payload={"message_id": "followup-message", "delivery_mode": "trigger_turn"}, kind="mailbox_wake", idempotency_key="mailbox_wake:followup-message")
     assert manager._has_replayable_parent_notification("conv") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+async def test_child_result_stays_queued_across_idle_parent_replay(tmp_path, monkeypatch, status):
+    monkeypatch.setattr(parent_notification_outbox, "OUTBOX_ROOT", tmp_path / "outbox")
+    lock = asyncio.Lock()
+    start = AsyncMock(return_value="unexpected-new-turn")
+    session = SimpleNamespace(session_id="session", ws_manager=None,
+        conversation_repo=SimpleNamespace(_base_dir=tmp_path / "conversations"),
+        conversation_lifecycle_lock=lambda: lock, start_agent_run=start)
+    manager = SessionRunManager(session)
+    try:
+        manager.watch_conversation_notifications("conv")
+        await asyncio.gather(*manager.notification_tasks_for("conv"))
+        notification = parent_notification_outbox.enqueue_parent_notification(
+            parent_run_id="finished-parent", conversation_id="conv", session_id="session",
+            subagent_id="worker", kind="subagent_completed", payload={"status": status})
+        assert not manager.notification_tasks_for("conv")
+        manager.recheck_watched_parent_notifications()
+        await asyncio.gather(*manager.notification_tasks_for("conv"))
+        start.assert_not_awaited()
+        pending, = parent_notification_outbox.load_parent_outbox(conversation_id="conv").replayable()
+        assert pending.notification_id == notification.notification_id
+        assert pending.status == "pending" and pending.attempts == 0
+    finally:
+        await manager.shutdown_notification_wakes()
+        manager.close_durable_queue()
 
 
 def test_old_messages_keep_their_recorded_wake_behavior():

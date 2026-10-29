@@ -228,7 +228,12 @@ def clear_workspace_recent(*, limit: int | None = None) -> tuple[int, dict[str, 
 
 
 def readonly_git_policy(root: Path) -> SandboxPolicy:
-    """Capture readonly authority, including registered MiniCode worktree metadata.
+    """Capture the selected cwd's readonly policy and required Git read roots."""
+    return _capture_readonly_git_policy(root)[0]
+
+
+def _capture_readonly_git_policy(root: Path) -> tuple[SandboxPolicy, Path | None]:
+    """Capture readonly authority for selected and trusted ancestor Git metadata.
 
     The selected checkout's .git file is NOT a source of grants. Only the
     trusted original repository's worktree registry can admit shared metadata.
@@ -241,7 +246,7 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
         FileSystemSandboxPolicy, NetworkSandboxPolicy, PermissionProfile,
         sandbox_policy_for_permission_context,
     )
-    from backend.workspace.trust import is_workspace_trusted
+    from backend.workspace.trust import is_workspace_trusted, trusted_workspace_roots
 
     root = root.resolve()
     stack = load_config_layer_stack(cwd=root)
@@ -258,6 +263,31 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
         return authority.resolve_access(path).can_read and not any(path.is_relative_to(denied) for denied in denied_roots)
 
     readable = [root]
+    metadata_owner = None
+    trusted_parents = [path for path in trusted_workspace_roots() if root.is_relative_to(path)]
+    if trusted_parents:
+        boundary = min(trusted_parents, key=lambda path: len(path.parts))
+        home = Path.home().resolve()
+        candidate = root
+        while candidate.is_relative_to(boundary):
+            # Match Git's existing home ceiling without reading a parent
+            # configuration stack or following a gitfile into another repo.
+            if candidate == home and candidate != root:
+                break
+            metadata = candidate / ".git"
+            if not may_read(candidate) or not may_read(metadata) or not may_read(metadata.resolve()):
+                break
+            if os.path.lexists(metadata):
+                if candidate != root and metadata.is_dir() and metadata.resolve().is_relative_to(candidate):
+                    # Git discovers its metadata and then chdirs to the
+                    # working tree for status/pathspecs. Both paths already
+                    # have captured READ authority; native ACLs need both.
+                    readable.extend((metadata, candidate))
+                    metadata_owner = candidate
+                break
+            if candidate == boundary:
+                break
+            candidate = candidate.parent
     from backend.services.worktree_settings_service import managed_worktree_record
     managed = managed_worktree_record(root)
     legacy = root.parent.name == "worktrees" and root.parent.parent.name == ".minicode"
@@ -278,6 +308,7 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
                     registered = backlink.parent / registered
                 if registered.resolve() == root / ".git":
                     readable.append(metadata)
+                    metadata_owner = original
                     break
     # Intersect the legacy snapshot grants with the captured canonical profile.
     # An ancestor managed DENY must not be reopened by a more precise READ.
@@ -294,12 +325,13 @@ def readonly_git_policy(root: Path) -> SandboxPolicy:
     profile = PermissionProfile.managed(FileSystemSandboxPolicy.restricted(
         entries, glob_scan_max_depth=captured.permission_profile.file_system.glob_scan_max_depth,
     ), network=NetworkSandboxPolicy.RESTRICTED)
-    return replace(
+    policy = replace(
         captured, permission_profile=profile,
         readable_roots=tuple(path for path in readable if may_read(path)),
         allow_unsandboxed_commands=False, auto_allow_commands_if_sandboxed=False,
         fail_if_unavailable=True,
     )
+    return policy, metadata_owner
 
 
 def run_readonly_git(
@@ -362,12 +394,12 @@ def git_branch_for(path: Path) -> str:
 def main_worktree_root(path: Path) -> Path:
     root = path.resolve()
     try:
-        policy = readonly_git_policy(root)
-        if len(policy.readable_roots) == 2:
-            # The original owner was admitted by its trusted worktree registry,
-            # not inferred from an untrusted checkout's .git pointer or a
-            # container alias for the metadata directory's parent.
-            return policy.readable_roots[1].parent
+        policy, metadata_owner = _capture_readonly_git_policy(root)
+        if metadata_owner is not None:
+            # A normal ancestor was admitted under the selected cwd's captured
+            # read authority, or shared metadata by the trusted worktree
+            # registry. A checkout gitfile never provides this authority.
+            return metadata_owner
         result = run_readonly_git(root, "worktree", "list", "--porcelain", sandbox_policy=policy)
         result.check_returncode()
     except Exception:

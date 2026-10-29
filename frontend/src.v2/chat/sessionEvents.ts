@@ -1,6 +1,7 @@
 import { useAppStore } from "../stores";
-import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft } from "../stores/composer-drafts";
-import { capturePendingUserMessageQueueUpdate } from "./sendChatMessage";
+import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft, isComposerConversationDeleted } from "../stores/composer-drafts";
+import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
+import { captureCommittedUserMessage, capturePendingUserMessageQueueUpdate } from "./sendChatMessage";
 import { subagentModelPatch } from "../lib/subagent-model";
 import type {
   ConversationListEvent,
@@ -21,7 +22,7 @@ import type {
   SessionSyncedEvent,
 } from "../protocol/events";
 import { isReplayedEvent } from "../protocol/events";
-import { isSupersededCommandProjection } from "../protocol/command-projection";
+import { isRequestedForegroundNavigation, isSupersededCommandProjection } from "../protocol/command-projection";
 import type { StreamBuffer } from "../lib/stream-buffer";
 import { pushToast } from "../overlays/ToastContainer";
 import {
@@ -76,6 +77,8 @@ type ConversationPayload = ConversationRecordPayload;
 const UI_AGENT_STATE_KEY = "ui_agent_state";
 const RUNTIME_PROTOCOL_VERSION = "1.0.0";
 const pendingAuthoritativeConversationResets = new Set<string>();
+const deferredSwitchCatalogs = new Map<string, { cancel: () => void }>();
+
 
 type ProviderOAuthEvent =
   | ProviderOAuthAuthEvent
@@ -133,8 +136,9 @@ const setAvailableModelsForCurrentProvider = (
 };
 
 export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent) => {
-  capturePendingUserMessageQueueUpdate(event);
   const conversationId = event.conversation_id;
+  if (isComposerConversationDeleted(conversationId)) return;
+  capturePendingUserMessageQueueUpdate(event);
   const steeredCurrentTurn = event.status === "dequeued" && (
     event.turn_mode === "steer" || event.reason === "steered_current_turn"
   );
@@ -666,6 +670,7 @@ export const applyQueuedUserMessageSnapshot = (
       const conversationId = String(entry?.conversation_id || "").trim();
       const messageId = String(entry?.message_id || "").trim();
       if (!conversationId || !messageId) continue;
+      if (isComposerConversationDeleted(conversationId)) continue;
       const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
       const position = typeof entry.position === "number" ? entry.position : undefined;
       const queuePaused = entry.paused ?? false;
@@ -737,6 +742,8 @@ export const applyQueuedUserMessageSnapshot = (
     }
     return { conversationMessages, messages: activeMessages };
   });
+  for (const entry of entries) if (entry.conversation_id && entry.message_id && entry.user_message_id
+    && !isComposerConversationDeleted(entry.conversation_id)) captureCommittedUserMessage(entry.conversation_id, entry.user_message_id);
 };
 
 export const applyPendingTurnInputSnapshot = (
@@ -753,6 +760,7 @@ export const applyPendingTurnInputSnapshot = (
       const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
       const targetMessageId = String(entry.target_message_id || "").trim();
       if (!conversationId || !messageId || !userMessageId) continue;
+      if (isComposerConversationDeleted(conversationId)) continue;
       const current = conversationMessages[conversationId]
         ? [...conversationMessages[conversationId]]
         : state.conversationId === conversationId
@@ -802,6 +810,8 @@ export const applyPendingTurnInputSnapshot = (
     }
     return { conversationMessages, messages: activeMessages };
   });
+  for (const entry of entries) if (entry.mode === "steer" && entry.conversation_id && entry.message_id && entry.user_message_id
+    && !isComposerConversationDeleted(entry.conversation_id)) captureCommittedUserMessage(entry.conversation_id, entry.user_message_id);
 };
 
 export const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
@@ -812,13 +822,14 @@ export const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
   if (!Array.isArray(session.active_stream_conversation_ids)) return;
   const activeStreamIds = session.active_stream_conversation_ids
     .map((id) => String(id || "").trim())
-    .filter(Boolean);
+    .filter(id => id && !isComposerConversationDeleted(id));
   const activeStreamSet = new Set(activeStreamIds);
   const legacyActiveConversationId = String(session.active_conversation_id || "").trim();
   if (
     activeStreamSet.size === 0
     && String(session.active_task_id || "").trim()
     && legacyActiveConversationId
+    && !isComposerConversationDeleted(legacyActiveConversationId)
   ) {
     // Compatibility with snapshots produced before per-conversation run ids
     // were added.  A concrete active task still proves that owner is live.
@@ -890,6 +901,7 @@ export const applyActiveStreamSnapshot = (session: RuntimeSessionSnapshot) => {
     ]);
     let activeMessages = state.messages;
     for (const conversationId of knownConversationIds) {
+      if (isComposerConversationDeleted(conversationId)) continue;
       const isStreaming = activeStreamSet.has(conversationId);
       conversationStreaming[conversationId] = isStreaming;
       if (sideChats[conversationId]) {
@@ -928,6 +940,7 @@ const hydrateActiveConversation = (
     upsertMeta?: boolean;
     preserveStreamingAssistant?: boolean;
     forceAuthoritative?: boolean;
+    activate?: boolean;
   } = {},
 ) => {
   const conversationId = maybeString(activeConversationId) || conversation?.id || "";
@@ -945,17 +958,22 @@ const hydrateActiveConversation = (
     });
   }
   const selection = useAppStore.getState();
+  const activate = options.activate !== false;
+  const selectedDraft = selection.activeConversationDraftId ? selection.conversationDrafts[selection.activeConversationDraftId] : undefined;
+  const adoptingDraft = selectedDraft?.conversationId === conversationId
+    && workspaceRootsEqual(selectedDraft.executionCwd || selectedDraft.workspaceRoot, conversationWorkspacePath(selection.conversations.find(item => item.id === conversationId)));
   const nextConversation = selection.conversations.find(item => item.id === conversationId);
   // Hydration completion refreshes the current snapshot; it is not another
   // navigation and must not reset and restore every conversation-owned slice.
-  if (selection.conversationId !== conversationId || selection.pendingConversationSwitchId === conversationId
-    || !workspaceRootsEqual(selection.workingDirectory, conversationWorkspacePath(nextConversation))) {
+  if (activate && (selection.conversationId !== conversationId || selection.pendingConversationSwitchId === conversationId
+    || !workspaceRootsEqual(selection.workingDirectory, conversationWorkspacePath(nextConversation)))) {
     selection.applyConversationSwitched({ conversationId });
   }
   const modeMeta = useAppStore.getState().conversations.find(item => item.id === conversationId);
   if (modeMeta?.agentMode !== undefined) useAppStore.getState().syncConversationAgentMode(modeMeta.agentMode, conversationId, undefined, modeMeta.revision);
-  if (!workspaceRootsEqual(previousWorkspace, useAppStore.getState().workingDirectory)) {
-    useAppStore.setState({ availableSkills: [], slashCommands: [], runtimeCapabilities: null, scheduledTasks: [], scheduledTaskRuns: [] });
+  if (activate && !workspaceRootsEqual(previousWorkspace, useAppStore.getState().workingDirectory)) {
+    useAppStore.setState({ ...(!adoptingDraft ? { availableSkills: [], slashCommands: [], runtimeCapabilities: null } : {}),
+      scheduledTasks: [], scheduledTaskRuns: [] });
   }
   if (conversation && !staleSnapshot) {
     useAppStore.getState().setActiveGoal(
@@ -987,7 +1005,7 @@ const hydrateActiveConversation = (
       useAppStore.getState().hydrateConversationMessages(
         conversationId,
         cachedMessages,
-        { activate: true, isStreaming: cachedMessages.some((message) => Boolean(message.isStreaming)) },
+        { activate, isStreaming: cachedMessages.some((message) => Boolean(message.isStreaming)), confirmedUserMessageIds: [] },
       );
     } else {
       const hydrated = hydrateMessages(transcript);
@@ -997,13 +1015,14 @@ const hydrateActiveConversation = (
       useAppStore.getState().hydrateConversationMessages(
         conversationId,
         messages,
-        { activate: true, isStreaming: messages.some((message) => Boolean(message.isStreaming)) },
+        { activate, isStreaming: messages.some((message) => Boolean(message.isStreaming)),
+          confirmedUserMessageIds: hydrated.filter(message => message.role === "user").map(message => message.id) },
       );
     }
   }
   restoreProviderInspectorFromTranscript(
     conversationId,
-    useAppStore.getState().messages,
+    useAppStore.getState().conversationMessages[conversationId] ?? [],
   );
   // Agent state and transcript describe one durable snapshot.  Apply the
   // transcript first so a stale local streaming placeholder cannot suppress a
@@ -1012,7 +1031,7 @@ const hydrateActiveConversation = (
   if (!staleSnapshot) hydrateConversationAgentState(conversationId, conversation);
 
   const workspaceRoot = maybeString(conversation?.execution_cwd) || maybeString(conversation?.worktree_path) || maybeString(conversation?.workspace_root);
-  if (conversation && !staleSnapshot) {
+  if (activate && conversation && !staleSnapshot) {
     // Project membership stays in workspace_root. File operations, attachments
     // and terminals follow the conversation's persisted execution directory.
     useAppStore.getState().setWorkingDirectory(workspaceRoot || "");
@@ -1146,28 +1165,43 @@ const clearActiveConversationView = (options: { preserveMode?: boolean } = {}) =
   });
 };
 
-const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null, eventOwner: string | null, event?: ServerEvent) => {
+export const applyRuntimeSessionSnapshot = (session: RuntimeSessionSnapshot | undefined | null, eventOwner: string | null,
+  event?: ServerEvent, partial = false) => {
   if (!session) return;
   const state = useAppStore.getState();
-  state.setRuntimeSession(session);
-  if (session.active_conversation_id === state.conversationId && session.workspace_root !== undefined) {
+  const permissionOwner = session.active_conversation_id === undefined
+    ? (partial ? state.runtimeSession?.active_conversation_id : eventOwner) : session.active_conversation_id;
+  if (permissionOwner && isComposerConversationDeleted(permissionOwner)) return;
+  // A delayed navigation snapshot still hydrates its conversation above; it
+  // cannot replace a different reader's current session or global run set.
+  const restoresPendingOwner = event?.type === "session.restored" && Boolean(state.pendingConversationSwitchId)
+    && state.pendingConversationSwitchId === permissionOwner
+    && !isSupersededCommandProjection(event);
+  if (state.conversationId && permissionOwner !== state.conversationId && !restoresPendingOwner) return;
+  const runtimeSession = partial ? { ...state.runtimeSession, ...session } : session;
+  state.setRuntimeSession({ ...runtimeSession,
+    ...(runtimeSession.active_stream_conversation_ids ? { active_stream_conversation_ids: runtimeSession.active_stream_conversation_ids.filter(id => !isComposerConversationDeleted(id)) } : {}),
+    ...(runtimeSession.queued_user_messages ? { queued_user_messages: runtimeSession.queued_user_messages.filter(input => !isComposerConversationDeleted(input.conversation_id)) } : {}),
+    ...(runtimeSession.pending_turn_inputs ? { pending_turn_inputs: runtimeSession.pending_turn_inputs.filter(input => !isComposerConversationDeleted(input.conversation_id)) } : {}),
+  });
+  const projectsCurrentOwner = !state.activeConversationDraftId;
+  if (projectsCurrentOwner && session.active_conversation_id === state.conversationId && session.workspace_root !== undefined) {
     state.setWorkingDirectory(session.workspace_root ?? "");
   }
-  useAppStore.setState(runtimeModelSelectionPatch(session, useAppStore.getState()));
+  if (projectsCurrentOwner) useAppStore.setState(runtimeModelSelectionPatch(session, useAppStore.getState()));
   applyQueuedUserMessageSnapshot(session.queued_user_messages);
   applyPendingTurnInputSnapshot(session.pending_turn_inputs);
   applyActiveStreamSnapshot(session);
-  const permissionOwner = session.active_conversation_id === undefined ? eventOwner : session.active_conversation_id;
   if (session.agent_mode && permissionOwner && permissionOwner === state.conversationId) {
     state.syncConversationAgentMode(session.agent_mode, permissionOwner,
       event?.client_command_type === "conversation.agent_mode.set" ? event.client_command_id : undefined,
       session.agent_mode_revision);
   }
-  if (session.permission_mode && (permissionOwner || null) === (state.conversationId || null)
+  if (projectsCurrentOwner && session.permission_mode && (permissionOwner || null) === (state.conversationId || null)
     && (session.workspace_root === undefined || workspaceRootsEqual(session.workspace_root ?? "", useAppStore.getState().workingDirectory))) {
     useAppStore.setState({ permissionMode: fromBackendPermissionMode(session.permission_mode) });
   }
-  if (session.capabilities && session.active_conversation_id === state.conversationId
+  if (projectsCurrentOwner && session.capabilities && session.active_conversation_id === state.conversationId
     && workspaceRootsEqual(session.workspace_root ?? "", useAppStore.getState().workingDirectory)) {
     const current = useAppStore.getState().runtimeCapabilities;
     const capabilities = mergeCapabilities(session.capabilities, current ?? undefined) ?? null;
@@ -1199,6 +1233,7 @@ export const handleSessionEvent = (
         useAppStore.setState((state) => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], model } } }));
         return true;
       }
+      if (s.activeConversationDraftId) return true;
       if (ev.conversation_id !== undefined && (ev.conversation_id || null) !== (s.conversationId || null)) return true;
       const model = stringValue(ev.current_model) || stringValue(ev.model);
       useAppStore.setState(modelSelectionPatch(ev));
@@ -1303,13 +1338,15 @@ export const handleSessionEvent = (
         || "";
       const pendingNavigation = useAppStore.getState();
       const pendingConversationId = pendingNavigation.pendingConversationSwitchId ?? pendingNavigation.pendingConversationCreateId;
-      if (pendingConversationId && activeConversationId !== pendingConversationId) return true;
+      const activate = !pendingNavigation.activeConversationDraftId
+        && !isSupersededCommandProjection(e)
+        && (!pendingConversationId || activeConversationId === pendingConversationId);
       const activeConversationIsHidden = Boolean(
         activeConversation?.archived || activeConversation?.conversation_type === "side_chat",
       );
       const switchEventWillHydrate = ev.type === "session.restored" && ev.conversation_switched_follows === true;
       if (ev.type === "session.restored") {
-        if (switchEventWillHydrate && activeConversationId) {
+        if (activate && switchEventWillHydrate && activeConversationId) {
           useAppStore.setState({ pendingConversationSwitchId: activeConversationId });
         }
         pendingAuthoritativeConversationResets.clear();
@@ -1341,17 +1378,18 @@ export const handleSessionEvent = (
       buffers.textStreamBuffer.destroy();
       buffers.thinkingStreamBuffer.destroy();
 
-      if (model) s.setCurrentModel(model);
-      const provider = maybeString(ev.provider);
-      if (provider) s.setCurrentProvider(provider);
-      s.setCurrentProviderMeta({
-        providerId: stringValue(ev.provider_id),
-        baseUrl: stringValue(ev.base_url),
-        wireApi: stringValue(ev.wire_api),
-      });
-      if (workspaceRoot && !switchEventWillHydrate) s.setWorkingDirectory(workspaceRoot);
-            setAvailableModelsForCurrentProvider(ev.available_models, model, provider, maybeString(ev.models_source));
-      if (activeConversationIsHidden) {
+      if (activate) {
+        if (model) s.setCurrentModel(model);
+        const provider = maybeString(ev.provider);
+        if (provider) s.setCurrentProvider(provider);
+        s.setCurrentProviderMeta({ providerId: stringValue(ev.provider_id), baseUrl: stringValue(ev.base_url), wireApi: stringValue(ev.wire_api) });
+        if (workspaceRoot && !switchEventWillHydrate) s.setWorkingDirectory(workspaceRoot);
+        setAvailableModelsForCurrentProvider(ev.available_models, model, provider, maybeString(ev.models_source));
+      }
+      if (!activate) {
+        if (activeConversationId) hydrateActiveConversation(activeConversation, activeConversationId, fallbackMessages,
+          { activate: false, forceAuthoritative: authoritativeEpochReset, preserveStreamingAssistant: hasActiveStream });
+      } else if (activeConversationIsHidden) {
         clearActiveConversationView();
       } else if (switchEventWillHydrate) {
         // The backend will immediately emit the canonical conversation.switched
@@ -1376,7 +1414,7 @@ export const handleSessionEvent = (
         // Replay has a bounded server window. Re-fetch the durable transcript
         // before accepting more deltas so timeline/tool cards cannot remain
         // silently absent after a long disconnect.
-        if (activeConversationId) {
+        if (activate && activeConversationId) {
           sendClientCommand({ type: "conversation.switch", conversation_id: activeConversationId });
         }
       }
@@ -1463,7 +1501,7 @@ export const handleSessionEvent = (
           && !((ev as unknown as { archive_navigation?: string }).archive_navigation === "home" && ev.active_conversation_id === null),
         );
         const effectiveActiveConversationId = currentEffectiveActiveConversationId
-          ?? requestedEffectiveActiveConversationId;
+          ?? (storeState.activeConversationDraftId ? undefined : requestedEffectiveActiveConversationId);
         const nextConversationMetas = conversationMetas;
         const knownConversationIds = new Set(nextConversationMetas.map((conversation) => conversation.id));
         const removedConversationIds = storeState.conversations
@@ -1552,7 +1590,12 @@ export const handleSessionEvent = (
         // A create/switch request already owns navigation. An inventory reply
         // received during that request may refresh the sidebar, but must not
         // restore an older owner or send a competing fallback switch.
-        if (storeState.pendingConversationSwitchId || storeState.pendingConversationCreateId) return true;
+        if (storeState.activeConversationDraftId || storeState.pendingConversationSwitchId || storeState.pendingConversationCreateId) {
+          if (ev.active_conversation) hydrateActiveConversation(ev.active_conversation, ev.active_conversation.id, undefined,
+            { upsertMeta: false, activate: false, preserveStreamingAssistant: true });
+          applyRuntimeSessionSnapshot(ev.session, requestedActiveConversationId ?? null, e);
+          return true;
+        }
         const eventActiveConversation = ev.active_conversation ?? null;
         const activeConversation = eventActiveConversation
           && eventActiveConversation.id === effectiveActiveConversationId
@@ -1624,24 +1667,32 @@ export const handleSessionEvent = (
       return true;
     }
     case "conversation.switched": {
-      if (isSupersededCommandProjection(e)) return true;
       const ev = e as ConversationSwitchedEvent;
       const switchedConversationId = maybeString(ev.conversation_id) ?? ev.conversation?.id;
       const pendingNavigation = useAppStore.getState();
       const pendingConversationId = pendingNavigation.pendingConversationSwitchId ?? pendingNavigation.pendingConversationCreateId;
-      if (pendingConversationId && switchedConversationId !== pendingConversationId) return true;
+      const matchingDraftOwner = pendingNavigation.activeConversationDraftId
+        ? (pendingNavigation.conversationDrafts[pendingNavigation.activeConversationDraftId]?.conversationId === switchedConversationId
+          && pendingNavigation.pendingConversationSwitchId === switchedConversationId) || isRequestedForegroundNavigation(e)
+        : true;
+      const superseded = isSupersededCommandProjection(e);
+      const activate = !superseded && matchingDraftOwner
+        && (!pendingConversationId || switchedConversationId === pendingConversationId);
       const forceAuthoritative = Boolean(
         switchedConversationId
         && pendingAuthoritativeConversationResets.delete(switchedConversationId),
       );
-      if (switchedConversationId) {
+      if (switchedConversationId && !superseded) {
         useAppStore.getState().setConversationHydration(
           switchedConversationId,
           ev.is_hydrating === true,
           Date.now(),
         );
       }
-      if (ev.conversation_id === null && ev.conversation === null) {
+      if (!activate) {
+        if (ev.conversation) hydrateActiveConversation(ev.conversation, switchedConversationId, undefined,
+          { activate: false, preserveStreamingAssistant: true, forceAuthoritative });
+      } else if (ev.conversation_id === null && ev.conversation === null) {
         clearActiveConversationView({ preserveMode: (ev as unknown as { archive_navigation?: string }).archive_navigation === "home" });
       } else if (ev.conversation?.archived || ev.conversation?.conversation_type === "side_chat") {
         clearActiveConversationView();
@@ -1658,20 +1709,53 @@ export const handleSessionEvent = (
         });
       }
       applyRuntimeSessionSnapshot(ev.session, switchedConversationId ?? null, e);
-      if (!isReplayedEvent(e) && !ev.context_pending) {
-        // Extension/project commands are conversation-scoped. A switch must
-        // replace the palette even when the transport itself did not reconnect.
-        sendClientCommand({ type: "commands.list" });
+      if (activate && !isReplayedEvent(e) && !ev.context_pending) {
         const active = useAppStore.getState();
-        if (active.conversationId) {
-          if (!Array.isArray(ev.session?.capabilities?.skills)) {
-            sendClientCommand({ type: "skills.list", conversation_id: active.conversationId,
-              workspace_root: active.workingDirectory }, { silent: true });
+        const owner = active.conversationId;
+        const root = active.workingDirectory;
+        const hasSkills = Array.isArray(ev.session?.capabilities?.skills);
+        const ownsSwitch = (current: ReturnType<typeof useAppStore.getState>) =>
+          current.conversationId === owner && !current.activeConversationDraftId
+          && !current.pendingConversationSwitchId && workspaceRootsEqual(current.workingDirectory, root);
+        const publish = () => {
+          if (!ownsSwitch(useAppStore.getState())) return;
+          sendClientCommand({ type: "commands.list" });
+          if (owner) {
+            if (ev.capabilities_deferred) sendClientCommand({ type: "runtime.capabilities.inspect",
+              source: "workspace.activate.conversation.switch" }, { silent: true });
+            if (!hasSkills) sendClientCommand({ type: "skills.list", conversation_id: owner,
+              workspace_root: root }, { silent: true });
+            sendClientCommand({ type: "mcp.list", conversation_id: owner,
+              workspace_root: root || undefined }, { silent: true });
           }
-          // A fast MCP startup can finish before the switch reaches the UI.
-          // Read its catalog again after the new owner is committed locally.
-          sendClientCommand({ type: "mcp.list", conversation_id: active.conversationId,
-            workspace_root: active.workingDirectory || undefined }, { silent: true });
+        };
+        if (owner) deferredSwitchCatalogs.get(owner)?.cancel();
+        if (owner && ev.capabilities_deferred && selectPendingDraftUserMessage(active)) {
+          // Keep background catalog work off the active stream. A request
+          // for composer commands, mentions or attachments refreshes it now.
+          const interact = (event: Event) => {
+            if (!(event.target instanceof Element)) return;
+            if (event.type === "pointerdown" && event.target.closest(".composer-attach-btn")) release();
+            if (event instanceof KeyboardEvent && ["/", "@", "$"].includes(event.key)
+              && event.target.closest(".composer-container")) release();
+          };
+          const cancel = () => {
+            stop();
+            document.removeEventListener("pointerdown", interact, true);
+            document.removeEventListener("keydown", interact, true);
+            deferredSwitchCatalogs.delete(owner);
+          };
+          const release = () => { cancel(); publish(); };
+          const stop = useAppStore.subscribe(next => {
+            if (!ownsSwitch(next) || !next.isConnected) { cancel(); return; }
+            if (next.slashPanelOpen || next.mentionPanelOpen
+              || (!selectPendingDraftUserMessage(next) && !next.isStreaming)) release();
+          });
+          document.addEventListener("pointerdown", interact, true);
+          document.addEventListener("keydown", interact, true);
+          deferredSwitchCatalogs.set(owner, { cancel });
+        } else {
+          window.setTimeout(publish, 0);
         }
       }
       return true;

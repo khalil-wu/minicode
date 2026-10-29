@@ -8,6 +8,8 @@ import { composerWorkspaceKey } from "../stores/composer-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import type { Translate } from "../i18n";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
+import { isConversationDraftMaterializing } from "../stores/conversation-drafts";
+import { isConversationMessageAwaitingReceipt } from "../chat/sendChatMessage";
 
 export interface GoalEditorState {
   draft: string;
@@ -30,6 +32,8 @@ export const useGoalEditor = (owner: string) => useSyncExternalStore(subscribe, 
 
 export function enterComposerGoalMode() {
   const owner = useAppStore.getState();
+  if (owner.pendingConversationSwitchId || isConversationDraftMaterializing(owner)
+    || (owner.conversationId && isConversationMessageAwaitingReceipt(owner.conversationId))) return false;
   if (!capabilityFeatureEnabled(owner.runtimeCapabilities, "goals")) return false;
   useAppStore.setState({ goalMode: true });
   if (owner.agentMode === "plan") void owner.setAgentMode("build");
@@ -80,14 +84,15 @@ export async function submitComposerGoal(tr: Translate) {
   }
   await updateThreadGoal(owner, "set", text);
   useAppStore.setState(state => {
-    if (state.conversationId === owner && workspaceRootsEqual(state.workingDirectory, captured.workingDirectory)) {
+    if (state.conversationId === owner && (captured.activeConversationDraftId
+      || workspaceRootsEqual(state.workingDirectory, captured.workingDirectory))) {
       return state.draft === captured.draft && state.goalMode ? { draft: "", goalMode: false } : {};
     }
     const workbench = state.conversationWorkbenchStates[owner];
     if (workbench?.draft === captured.draft && workbench.goalMode) return { conversationWorkbenchStates: {
       ...state.conversationWorkbenchStates, [owner]: { ...workbench, draft: "", goalMode: false },
     } };
-    const key = composerWorkspaceKey(captured.workingDirectory);
+    const key = captured.activeConversationDraftId || composerWorkspaceKey(captured.workingDirectory);
     const workspace = state.workspaceComposerDrafts[key];
     if (!captured.conversationId && workspace?.draft === captured.draft && workspace.goalMode) return { workspaceComposerDrafts: {
       ...state.workspaceComposerDrafts, [key]: { ...workspace, draft: "", goalMode: false },

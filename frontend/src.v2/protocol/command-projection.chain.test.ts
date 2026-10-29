@@ -15,7 +15,7 @@ beforeEach(()=>{
   latestProjectionCommandIds.clear();vi.clearAllMocks();
   useAppStore.setState({conversationId:"original",conversations:[{id:"original",title:"original",updatedAt:"2026-10-12",workspaceRoot:"C:/project"}],workingDirectory:"C:/project",
     messages:[],conversationMessages:{},conversationStreaming:{},conversationAgentStates:{},conversationWorkbenchStates:{},workspaceComposerDrafts:{},
-    pendingConversationSwitchId:null,pendingConversationCreateId:null,pendingComposerConversationAdoption:null,draft:"Keep original draft",attachments:[],selectedSkills:[],selectedMentions:[]});
+    pendingConversationSwitchId:null,pendingConversationCreateId:null,draft:"Keep original draft",attachments:[],selectedSkills:[],selectedMentions:[]});
 });
 
 it("uses the latest switch receipt even after its spinner and transport ACK have completed",()=>{
@@ -140,4 +140,44 @@ it("leaves legacy sidebar archive navigation intact and a background home archiv
   send({type:"conversation.archive",conversation_id:"unselected",archive_navigation:"home",client_command_id:"background-home-archive"});
   expect(latestProjectionCommandIds.get("active-conversation")).toBe("chosen-command");
   expect(latestProjectionCommandIds.get("conversation-list")).toBe("background-home-archive");
+});
+
+const skillsReceipt = (commandId: string, conversationId: string, workspaceRoot: string): ServerEvent => ({
+  type: "skills.list", client_command_id: commandId, client_command_type: "skills.list", conversation_id: conversationId,
+  workspace_root: workspaceRoot, skills: [],
+} as ServerEvent);
+
+it.each([
+  ["C:\\Projects\\Repo\\.\\sub\\..", "c:/projects/repo/", "C:/Projects/Repo"],
+  ["\\\\Server\\Share\\Repo\\.", "//server/share/repo/", "//SERVER/SHARE/Repo"],
+])("orders same-owner Skill receipts using the workspace's path identity (%s)", (first, latest, returned) => {
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "owner", workspace_root: first }, "skills-old", "owner", first);
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "owner", workspace_root: latest }, "skills-new", "owner", latest);
+  expect(isSupersededCommandProjection(skillsReceipt("skills-old", "owner", returned))).toBe(true);
+  expect(isSupersededCommandProjection(skillsReceipt("skills-new", "owner", returned))).toBe(false);
+});
+
+it("keeps Skill command ordering isolated by both conversation and workspace", () => {
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "A", workspace_root: "C:/one" }, "a-old", "A", "C:/one");
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "B", workspace_root: "C:/one" }, "b-original", "B", "C:/one");
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "A", workspace_root: "C:/two" }, "a-other-root", "A", "C:/two");
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "A", workspace_root: "c:/ONE/" }, "a-new", "A", "C:/one");
+  expect(isSupersededCommandProjection(skillsReceipt("a-old", "A", "C:/one"))).toBe(true);
+  expect(isSupersededCommandProjection(skillsReceipt("b-original", "B", "C:/one"))).toBe(false);
+  expect(isSupersededCommandProjection(skillsReceipt("a-other-root", "A", "C:/two"))).toBe(false);
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "A", workspace_root: "/Work/Repo" }, "posix-uppercase", "A", "/Work/Repo");
+  rememberSentCommandProjection({ type: "skills.list", conversation_id: "A", workspace_root: "/work/repo" }, "posix-lowercase", "A", "/work/repo");
+  expect(isSupersededCommandProjection(skillsReceipt("posix-uppercase", "A", "/Work/Repo"))).toBe(false);
+});
+
+it("records the actual fallback Skill owner without competing with foreground navigation", () => {
+  send({ type: "conversation.switch", conversation_id: "pending", client_command_id: "navigation" });
+  rememberSentCommandProjection({ type: "skills.list" }, "fallback-old", "original", "C:/project");
+  rememberSentCommandProjection({ type: "skills.list" }, "fallback-new", "original", "C:/project");
+  expect(isSupersededCommandProjection(skillsReceipt("fallback-old", "original", "c:/PROJECT/"))).toBe(true);
+  expect(isSupersededCommandProjection(skillsReceipt("fallback-new", "original", "C:/project"))).toBe(false);
+  expect(latestProjectionCommandIds.get("active-conversation")).toBe("navigation");
+  expect(latestProjectionCommandIds.get("foreground-intent")).toBe("navigation");
+  handleSessionEvent(receipt("navigation", "conversation.switch", "pending"), buffers);
+  expect(useAppStore.getState().conversationId).toBe("pending");
 });

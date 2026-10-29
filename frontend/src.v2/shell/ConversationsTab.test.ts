@@ -12,6 +12,14 @@ const conversation = (id: string, workspaceRoot: string): ConversationMeta & { s
 });
 
 describe("groupByWorkspace", () => {
+  it("qualifies broad same-named project groups without changing saved order or shortest unique suffixes", () => {
+    const paths = Array.from({ length: 1000 }, (_, index) => `C:/owners/owner-${index}/app`);
+    const groups = [...groupByWorkspace([], paths).values()];
+    expect(groups.map(group => group.path)).toEqual(paths);
+    expect(groups.map(group => group.label)).toEqual(paths.map((_, index) => `app — owner-${index}`));
+    const nested = [...groupByWorkspace([], ["C:/app", "D:/team/app", "C:/team/app", "/app"]).values()];
+    expect(nested.map(group => group.label)).toEqual(["app — C:", "app — D:/team", "app — C:/team", "app — /app"]);
+  });
   it("keeps saved empty projects in stable order and distinguishes equal folder names", () => {
     const paths = ["C:/client/app", "D:/internal/app"];
     const before = groupByWorkspace([conversation("task", paths[1])], paths);

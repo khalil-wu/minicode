@@ -37,9 +37,9 @@ export const modelSelectionPatch = (selection?: SelectionProjection): Partial<Se
 
 export const runtimeModelSelectionPatch = (
   session: RuntimeSessionSnapshot,
-  state: Pick<AppStore, "conversationId" | "workingDirectory" | "runtimeCapabilities">,
+  state: Pick<AppStore, "conversationId" | "workingDirectory" | "runtimeCapabilities"> & Partial<Pick<AppStore, "activeConversationDraftId">>,
 ): Partial<SelectionState> & Partial<Pick<AppStore, "runtimeCapabilities">> => {
-  if (session.active_conversation_id === undefined
+  if (state.activeConversationDraftId || session.active_conversation_id === undefined
     || (session.active_conversation_id ?? null) !== (state.conversationId ?? null)
     || session.workspace_root === undefined
     || !workspaceRootsEqual(session.workspace_root ?? "", state.workingDirectory)) return {};

@@ -8,8 +8,9 @@ vi.mock("./hooks/useWebSocket", () => ({ useWebSocketConnection: () => {} }));
 vi.mock("./hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: () => {} }));
 vi.mock("./hooks/useDesktopEvents", () => ({ useDesktopEvents: () => {} }));
 vi.mock("./hooks/useWorkspaceGit", () => ({ useWorkspaceGit: () => {} }));
+vi.mock("./desktop/DeferredDesktopEffects", () => ({ DeferredDesktopEffects: () => null }));
 vi.mock("./overlays/QuickOpen", () => ({ QuickOpen: () => null }));
-vi.mock("./overlays/ToastContainer", () => ({ ToastContainer: () => null }));
+vi.mock("./overlays/ToastContainer", () => ({ ToastContainer: () => null, pushToast: vi.fn() }));
 vi.mock("./overlays/SettingsCenter", () => ({ SettingsCenter: () => {
   const [draft, setDraft] = useState("");
   if (lifecycle.failSettings) throw new Error("fixture settings error");

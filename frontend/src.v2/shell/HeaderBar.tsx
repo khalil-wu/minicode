@@ -36,6 +36,9 @@ interface HeaderBarProps {
   onToggleRightPanel: () => void;
 }
 
+type HistoryTarget = { kind: "conversation" | "draft"; id: string };
+const historyTargetKey = (target: HistoryTarget) => `${target.kind}:${target.id}`;
+
 export const HeaderBar = ({
   leftPanelControls,
   leftPanelAvailable,
@@ -80,28 +83,41 @@ export const HeaderBar = ({
   }, tr);
   const projectName = workingDirectory.split(/[\\/]/).filter(Boolean).pop() || "MiniCode";
   const conversationId = useAppStore((state) => state.conversationId);
+  const activeDraftId = useAppStore((state) => state.activeConversationDraftId && state.conversationDrafts[state.activeConversationDraftId]
+    ? state.activeConversationDraftId : null);
   const pendingSwitch = useAppStore((state) => state.pendingConversationSwitchId);
-  const [history, setHistory] = useState<{ ids: string[]; index: number }>({ ids: [], index: -1 });
-  const requestedHistory = useRef<{ id: string; index: number } | null>(null);
+  const [history, setHistory] = useState<{ targets: HistoryTarget[]; index: number }>({ targets: [], index: -1 });
+  const requestedHistory = useRef<{ key: string; index: number } | null>(null);
   useEffect(() => {
-    if (!conversationId) return;
+    const target: HistoryTarget | null = activeDraftId ? { kind: "draft", id: activeDraftId }
+      : conversationId ? { kind: "conversation", id: conversationId } : null;
+    if (!target) return;
     const requested = requestedHistory.current;
     requestedHistory.current = null;
     setHistory((previous) => {
-      if (requested?.id === conversationId) return { ...previous, index: requested.index };
-      if (previous.ids[previous.index] === conversationId) return previous;
-      const ids = [...previous.ids.slice(0, previous.index + 1), conversationId];
-      return { ids, index: ids.length - 1 };
+      if (requested?.key === historyTargetKey(target)) return { ...previous, index: requested.index };
+      const current = previous.targets[previous.index];
+      if (current && historyTargetKey(current) === historyTargetKey(target)) return previous;
+      if (current?.kind === "draft" && target.kind === "conversation"
+        && useAppStore.getState().conversationDrafts[current.id]?.conversationId === target.id) {
+        const targets = [...previous.targets]; targets[previous.index] = target;
+        return { ...previous, targets };
+      }
+      const targets = [...previous.targets.slice(0, previous.index + 1), target];
+      return { targets, index: targets.length - 1 };
     });
-  }, [conversationId]);
+  }, [conversationId, activeDraftId]);
   const navigateHistory = (index: number) => {
-    const id = history.ids[index];
-    requestedHistory.current = { id, index };
-    useAppStore.getState().requestConversationSwitch(id);
+    const target = history.targets[index];
+    const state = useAppStore.getState();
+    const owner = target.kind === "draft" ? state.conversationDrafts[target.id]?.conversationId : target.id;
+    requestedHistory.current = { key: historyTargetKey(owner ? { kind: "conversation", id: owner } : target), index };
+    if (owner) state.requestConversationSwitch(owner);
+    else state.selectConversationDraft(target.id);
   };
   useEffect(() => {
     const back = () => { if (!pendingSwitch && history.index > 0) navigateHistory(history.index - 1); };
-    const forward = () => { if (!pendingSwitch && history.index + 1 < history.ids.length) navigateHistory(history.index + 1); };
+    const forward = () => { if (!pendingSwitch && history.index + 1 < history.targets.length) navigateHistory(history.index + 1); };
     window.addEventListener("navigate-back", back);
     window.addEventListener("navigate-forward", forward);
     return () => { window.removeEventListener("navigate-back", back); window.removeEventListener("navigate-forward", forward); };
@@ -123,7 +139,7 @@ export const HeaderBar = ({
   const browserMenuItems = (key: DesktopMenuKey): ContextMenuItem[] => {
     const state = useAppStore.getState();
     if (key === "file") return [
-      { label: tr("新聊天"), onClick: () => state.createConversation({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) }) },
+      { label: tr("新聊天"), onClick: () => state.startConversationDraft({ appMode: "cowork", bindWorkspace: state.appMode === "code" && Boolean(state.workingDirectory) }) },
       { label: tr("打开文件夹…"), onClick: () => { void openWorkspaceFolder(); } },
       { label: tr("设置…"), onClick: () => { if (!state.settingsOpen) state.toggleSettings(); } },
     ];
@@ -145,7 +161,7 @@ export const HeaderBar = ({
     <header className="header-bar mc-header">
       <div className="mc-header-start">
         <button type="button" className="mc-titlebar-navigation" aria-label={tr("上一条访问的对话")} title={tr("后退")} disabled={Boolean(pendingSwitch) || history.index <= 0} onClick={() => navigateHistory(history.index - 1)}><ArrowLeft size={16} /></button>
-        <button type="button" className="mc-titlebar-navigation" aria-label={tr("下一条访问的对话")} title={tr("前进")} disabled={Boolean(pendingSwitch) || history.index >= history.ids.length - 1} onClick={() => navigateHistory(history.index + 1)}><ArrowRight size={16} /></button>
+        <button type="button" className="mc-titlebar-navigation" aria-label={tr("下一条访问的对话")} title={tr("前进")} disabled={Boolean(pendingSwitch) || history.index >= history.targets.length - 1} onClick={() => navigateHistory(history.index + 1)}><ArrowRight size={16} /></button>
         {leftPanelAvailable && (
           <IconButton
             label={leftPanelOpen ? tr("收起左侧栏") : tr("打开左侧栏")}

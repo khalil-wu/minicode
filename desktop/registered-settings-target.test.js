@@ -91,7 +91,7 @@ async function settingsFixture(t) {
     getRemoteDesktop: () => ({ invokes: RemoteDesktop.prototype.invokes }),
     desktopPreferences: {
       preferredFileOpenTarget: owner => { preferredOwners.push(owner); return state.fileTarget; },
-      fileOpenTargets: () => [{ id: "cursor", kind: "editor" }, { id: "system", kind: "systemDefault" }],
+      fileOpenTarget: async id => [{ id: "cursor", kind: "editor" }, { id: "system", kind: "systemDefault" }].find(target => target.id === id),
     },
     getRuntimeConfig: owner => {
       runtimeOwners.push(owner);

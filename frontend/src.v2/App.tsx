@@ -7,10 +7,6 @@ import { useWebSocketConnection } from "./hooks/useWebSocket";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useDesktopEvents } from "./hooks/useDesktopEvents";
 import { useNativeWindowAppearance } from "./hooks/useNativeWindowAppearance";
-import { useDesktopPets } from "./hooks/useDesktopPets";
-import { useDesktopBehaviorPreferences } from "./hooks/useDesktopBehaviorPreferences";
-import { useNativeDictation } from "./hooks/useNativeDictation";
-import { useWorkspaceGit } from "./hooks/useWorkspaceGit";
 import { useAppStore } from "./stores";
 import { ChunkErrorBoundary, SafeBoundary } from "./shell/ChunkErrorBoundary";
 import { capabilityFeatureEnabled } from "./protocol/capabilities";
@@ -23,6 +19,25 @@ const KeyboardShortcutsHelp = lazy(() => import("./overlays/KeyboardShortcutsHel
 const LiveArtifacts = lazy(() => import("./overlays/LiveArtifacts").then((m) => ({ default: m.LiveArtifacts })));
 const AgentEditor = lazy(() => import("./overlays/AgentEditor").then((m) => ({ default: m.AgentEditor })));
 const ProjectDialogHost = lazy(() => import("./overlays/ProjectDialog").then(m => ({ default: m.ProjectDialogHost })));
+const DeferredDesktopEffects = lazy(() => import("./desktop/DeferredDesktopEffects").then(m => ({ default: m.DeferredDesktopEffects })));
+
+const DeferredDesktopEffectsHost = () => {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let idleCallback = false;
+    const release = () => { if (active) setReady(true); };
+    const idle = typeof window.requestIdleCallback === "function"
+      ? (idleCallback = true, window.requestIdleCallback(release, { timeout: 1200 }))
+      : window.setTimeout(release, 0);
+    return () => {
+      active = false;
+      if (idleCallback && typeof window.cancelIdleCallback === "function") window.cancelIdleCallback(idle);
+      else window.clearTimeout(idle);
+    };
+  }, []);
+  return ready ? <Suspense fallback={null}><DeferredDesktopEffects /></Suspense> : null;
+};
 
 const RouteLoading = ({ settings = false }: { settings?: boolean }) => {
   const { t } = useI18n();
@@ -39,10 +54,6 @@ const AppContent = () => {
   useKeyboardShortcuts();
   useDesktopEvents();
   useNativeWindowAppearance();
-  useDesktopPets();
-  useDesktopBehaviorPreferences();
-  useNativeDictation();
-  useWorkspaceGit();
 
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
   const quickOpenVisible = useAppStore((s) => s.quickOpenVisible);
@@ -68,6 +79,7 @@ const AppContent = () => {
         <WorkbenchShell />
         <McpAppSurfaces />
       </SafeBoundary>
+      <DeferredDesktopEffectsHost />
       <ChunkErrorBoundary key={overlayRoute}>
         <Suspense fallback={<RouteLoading />}>
           {commandPaletteOpen && <CommandPalette />}

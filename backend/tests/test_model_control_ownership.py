@@ -79,6 +79,29 @@ def controls(fixture, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_hidden_owner_model_selection_resolves_one_scoped_config_per_command(tmp_path, monkeypatch):
+    fixture = setup(tmp_path, monkeypatch, None)
+    host, repo = controls(fixture, tmp_path, monkeypatch)
+    load = Mock(return_value=fixture.config)
+    monkeypatch.setattr("backend.config.load_config", load)
+    try:
+        assert await host.set_selected_model("model-b", manual_override=True,
+            conversation_id="conv_other_control", reasoning_effort="high")
+        load.assert_called_once_with(cwd=tmp_path, resolve_credentials=False)
+        assert repo.get_conversation_summary("conv_other_control").model_selection == {
+            "provider": "custom", "model": "model-b", "reasoning_effort": "high", "selection_mode": "model"}
+        assert host.selected_model == "model-a"
+        assert fixture.owner.model_execution.model == "model-a"
+        assert await host.set_selected_model("model-a", manual_override=True,
+            conversation_id="conv_other_control", reasoning_effort="low")
+        assert load.call_count == 2
+        assert host.catalog.refresh.call_count == 2
+    finally:
+        await host.run_manager.shutdown_notification_wakes()
+        fixture.runtime.close(release_lease=True)
+
+
+@pytest.mark.asyncio
 async def test_footer_saves_next_turn_model_and_effort_without_changing_the_running_turn(tmp_path, monkeypatch):
     fixture, host, repo = None, None, None
     requests = 0
@@ -247,6 +270,25 @@ async def test_rejected_model_selection_does_not_acknowledge_effort_as_applied()
         set_selected_model=AsyncMock(return_value=False), emit_command_result=AsyncMock())
     await handle_llm_config_set(session, {"source": "frontend.footer", "reasoning_effort": "high"})
     session.emit_command_result.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_setting_hidden_draft_model_does_not_publish_foreground_capabilities():
+    lifecycle = SimpleNamespace(send_runtime_capabilities=AsyncMock())
+    session = SimpleNamespace(ws_manager=None, active_conversation_id="foreground", session_lifecycle=lifecycle,
+        restore_default_model_selection=AsyncMock(return_value=True), send_llm_state=AsyncMock(),
+        emit_command_result=AsyncMock())
+    await handle_model_command(session, {"selection_mode": "default", "conversation_id": "new-draft"})
+    session.restore_default_model_selection.assert_awaited_once_with("new-draft")
+    session.send_llm_state.assert_not_awaited()
+    lifecycle.send_runtime_capabilities.assert_not_awaited()
+    session.emit_command_result.assert_awaited_once_with("model.set", "", level="success",
+        data={"conversation_id": "new-draft", "selection_mode": "default"})
+
+    session.active_conversation_id = "new-draft"
+    await handle_model_command(session, {"selection_mode": "default", "conversation_id": "new-draft"})
+    session.send_llm_state.assert_awaited_once_with(force=True)
+    lifecycle.send_runtime_capabilities.assert_awaited_once_with(source="llm.model.set", include_catalogs=False)
 
 
 @pytest.mark.asyncio

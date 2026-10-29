@@ -33,16 +33,16 @@ vi.mock("../protocol/api", async (load) => ({
   ...await load<typeof import("../protocol/api")>(),
   fetchWithTimeout: vi.fn(async () => new Response(JSON.stringify({ plugins: [] }), { status: 200 })),
 }));
-vi.mock("../desktop/runtime", async (load) => ({
-  ...await load<typeof import("../desktop/runtime")>(),
-  isDesktop: () => true,
-  getDesktopPreferences: vi.fn(async () => ({ showFullAccess: true })),
-  onDesktopPreferencesChanged: vi.fn(() => () => {}),
-  fsListTree: vi.fn(async () => []),
-  fsSearchFiles: vi.fn(async () => []),
-}));
+vi.mock("../desktop/runtime", async (load) => {
+  const get = vi.fn(async () => ({ showFullAccess: true })), onChanged = vi.fn(() => () => {});
+  const api = { preferences: { get, onChanged } };
+  return { ...await load<typeof import("../desktop/runtime")>(), isDesktop: () => true, desktop: () => api,
+    getDesktopPreferences: get, onDesktopPreferencesChanged: onChanged,
+    fsListTree: vi.fn(async () => []), fsSearchFiles: vi.fn(async () => []) };
+});
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "session-A" }) }));
-vi.mock("../chat/sendChatMessage", () => ({ sendChatMessage: vi.fn(async () => true) }));
+vi.mock("../chat/sendChatMessage", async load => ({ ...await load<typeof import("../chat/sendChatMessage")>(),
+  sendChatMessage: vi.fn(async () => true) }));
 vi.mock("./contextPayload", () => ({
   buildContextPayload: vi.fn(async () => "Directory reference: C:/A/docs"),
   buildContextNativeAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], notes: "" })),
@@ -59,6 +59,10 @@ vi.mock("../chat/components/TurnPlanProgress", () => ({ TurnPlanProgress: () => 
 vi.mock("../shell/UsageRing", () => ({ UsageRing: () => null }));
 
 const initial = useAppStore.getState();
+const materialize = vi.fn(async () => {
+  useAppStore.setState({ conversationId: "created-A", activeConversationDraftId: null });
+  return "created-A";
+});
 const pr = (number: number) => ({ prUrl: `https://github.com/project/pull/${number}`, prNumber: number, ciStatus: "passed" as const, autoFix: false, autoMerge: false, lastCheckedAt: 0 });
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -70,6 +74,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   mentionTreeCache.clear(); mentionSearchCache.clear();
   useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A", permissionMode: "confirm", runtimeCapabilities: { permission: { available_modes: ["confirm", "bypass"] } }, currentModel: "model", currentProvider: "openai", availableModels: ["model"], isConnected: true, isStreaming: false, draft: "", attachments: [], selectedMentions: [], selectedSkills: [], availableSkills: [], slashCommands: [], pendingApproval: null, pendingAskUser: null, pendingDiffReview: null, prMonitor: null, fileTreeVersion: 0 });
+  useAppStore.setState({ activeConversationDraftId: null, pendingConversationSwitchId: null, pendingConversationCreateId: null,
+    materializeConversationDraft: materialize });
   vi.mocked(showConfirm).mockResolvedValue(true);
   vi.mocked(fsListTree).mockResolvedValue([]);
   vi.mocked(fsSearchFiles).mockResolvedValue([]);
@@ -79,7 +85,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("composer user-boundary regressions", () => {
-  it.each(["conversation", "workspace"])("cancels an unowned async send after a %s switch without clearing the new draft", async (kind) => {
+  it.each(["conversation", "workspace"])("keeps a materialized send with its original owner after a %s switch without clearing the new draft", async (kind) => {
     const pending = deferred<Awaited<ReturnType<typeof buildContextNativeAttachments>>>();
     vi.mocked(buildContextNativeAttachments).mockReturnValueOnce(pending.promise);
     useAppStore.setState({ conversationId: null, draft: "original task", selectedMentions: [{ kind: "folder", path: "C:/A/docs", name: "docs" }] });
@@ -88,9 +94,10 @@ describe("composer user-boundary regressions", () => {
     await waitFor(() => expect(buildContextNativeAttachments).toHaveBeenCalledTimes(1));
     act(() => useAppStore.setState({ conversationId: kind === "conversation" ? "B" : null, workingDirectory: "C:/B", draft: "new draft" }));
     await act(async () => pending.resolve({ attachments: [], attachmentRefs: [], notes: "" }));
-    expect(sendChatMessage).not.toHaveBeenCalled();
+    expect(materialize).toHaveBeenCalledTimes(1);
+    expect(sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "created-A" }));
     expect(useAppStore.getState().draft).toBe("new draft");
-    expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("本次发送已取消"), "warning", 4500);
+    expect(pushToast).not.toHaveBeenCalledWith(expect.stringContaining("本次发送已取消"), "warning", 4500);
   });
 
   it("still sends an unchanged blank intent", async () => {
@@ -98,7 +105,8 @@ describe("composer user-boundary regressions", () => {
     render(<Composer />);
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await waitFor(() => expect(sendChatMessage).toHaveBeenCalledTimes(1));
-    expect(vi.mocked(sendChatMessage).mock.calls[0][0].conversationId).toBeUndefined();
+    expect(materialize).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(sendChatMessage).mock.calls[0][0].conversationId).toBe("created-A");
   });
 
   it("keeps Unicode mention filtering open but does not treat an email as a mention", () => {

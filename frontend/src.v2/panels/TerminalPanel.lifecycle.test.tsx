@@ -483,6 +483,126 @@ describe("terminal lifecycle", () => {
     expect(useAppStore.getState().activeTerminalSessionId).toBe("term-a");
   });
 
+  it.each([true, false])("keeps an unconfirmed removal retryable when the refreshed record reports alive=%s", async (reportedAfterFailure) => {
+    let reportedAlive = true;
+    mocks.list.mockImplementation(async () => [pty("conv-a", "term-a", reportedAlive)]);
+    mocks.snapshot.mockImplementation(async () => pty("conv-a", "term-a", reportedAlive));
+    mocks.kill.mockResolvedValueOnce(false).mockResolvedValue(true);
+    mocks.ackExit.mockResolvedValue(true);
+    render(<TerminalPanel />);
+    const remove = await screen.findByRole("button", { name: "删除终端 pwsh" });
+    await waitFor(() => expect(mocks.instances.some(item => item.host?.dataset.terminalSession === "term-a")).toBe(true));
+    const instance = mocks.instances.find(item => item.host?.dataset.terminalSession === "term-a")!;
+    reportedAlive = reportedAfterFailure;
+    fireEvent.click(remove);
+    expect(await screen.findByText("未能确认终端已删除，请重试。")).toBeTruthy();
+    await waitFor(() => expect(remove).toHaveProperty("disabled", false));
+    expect(screen.queryByText(/不属于当前对话/)).toBeNull();
+    expect(instance.disposed).toBe(false);
+    expect(useAppStore.getState().terminalSessions.map(item => item.id)).toContain("term-a");
+    expect(mocks.send.mock.calls.some(([command]) => command.type === "terminal.kill")).toBe(false);
+    fireEvent.click(remove);
+    await waitFor(() => expect(useAppStore.getState().terminalSessions.some(item => item.id === "term-a")).toBe(false));
+    expect(mocks.kill).toHaveBeenNthCalledWith(1, "term-a", "conv-a");
+    if (reportedAfterFailure) expect(mocks.kill).toHaveBeenNthCalledWith(2, "term-a", "conv-a");
+    else expect(mocks.ackExit).toHaveBeenCalledExactlyOnceWith("term-a", "conv-a");
+    expect(instance.disposed).toBe(true);
+    expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ type: "terminal.kill", session_id: "term-a", conversation_id: "conv-a" }), expect.anything());
+  });
+
+  it("does not call a stale exited-row acknowledgement an owner mismatch and retries against refreshed state", async () => {
+    let reportedAlive = false;
+    mocks.list.mockImplementation(async () => [pty("conv-a", "term-a", reportedAlive)]);
+    mocks.snapshot.mockImplementation(async () => pty("conv-a", "term-a", reportedAlive));
+    mocks.ackExit.mockResolvedValue(false);
+    mocks.kill.mockResolvedValue(true);
+    render(<TerminalPanel />);
+    const remove = await screen.findByRole("button", { name: "删除终端 pwsh" });
+    reportedAlive = true;
+    fireEvent.click(remove);
+    expect(await screen.findByText("未能确认终端已删除，请重试。")).toBeTruthy();
+    await waitFor(() => expect(remove).toHaveProperty("disabled", false));
+    expect(mocks.ackExit).toHaveBeenCalledExactlyOnceWith("term-a", "conv-a");
+    expect(mocks.kill).not.toHaveBeenCalled();
+    expect(screen.queryByText(/不属于当前对话/)).toBeNull();
+    fireEvent.click(remove);
+    await waitFor(() => expect(mocks.kill).toHaveBeenCalledExactlyOnceWith("term-a", "conv-a"));
+    await waitFor(() => expect(useAppStore.getState().terminalSessions.some(item => item.id === "term-a")).toBe(false));
+  });
+
+  it("preserves the actual stop exception and releases busy for a successful owned retry", async () => {
+    mocks.list.mockResolvedValue([pty()]);
+    mocks.kill.mockRejectedValueOnce(new Error("PTY transport detached")).mockResolvedValue(true);
+    render(<TerminalPanel />);
+    const remove = await screen.findByRole("button", { name: "删除终端 pwsh" });
+    fireEvent.click(remove);
+    expect(await screen.findByText(/停止终端失败：.*PTY transport detached/)).toBeTruthy();
+    await waitFor(() => expect(remove).toHaveProperty("disabled", false));
+    expect(useAppStore.getState().terminalSessions.map(item => item.id)).toContain("term-a");
+    expect(mocks.send.mock.calls.some(([command]) => command.type === "terminal.kill")).toBe(false);
+    fireEvent.click(remove);
+    await waitFor(() => expect(useAppStore.getState().terminalSessions.some(item => item.id === "term-a")).toBe(false));
+  });
+
+  it("does not let a late unconfirmed removal in A change B's terminal feedback or cleanup", async () => {
+    const result = pending<boolean>();
+    mocks.list.mockImplementation(async (owner: string) => [pty(owner, owner === "conv-a" ? "term-a" : "term-b")]);
+    mocks.kill.mockReturnValueOnce(result.promise);
+    render(<TerminalPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "删除终端 pwsh" }));
+    await switchOwner("conv-b");
+    await waitFor(() => expect(useAppStore.getState().activeTerminalSessionId).toBe("term-b"));
+    const reads = mocks.list.mock.calls.length;
+    await act(async () => result.resolve(false));
+    expect(screen.queryByText("未能确认终端已删除，请重试。")).toBeNull();
+    expect(mocks.list.mock.calls).toHaveLength(reads);
+    expect(useAppStore.getState().terminalSessions.map(item => item.id)).toEqual(["term-b"]);
+    expect(mocks.send.mock.calls.some(([command]) => command.type === "terminal.kill")).toBe(false);
+  });
+
+  it("preserves the unconfirmed removal alongside a failed internal inventory refresh", async () => {
+    mocks.list.mockResolvedValueOnce([pty()]).mockRejectedValueOnce(new Error("Recheck unavailable")).mockResolvedValue([pty()]);
+    mocks.kill.mockResolvedValue(false);
+    render(<TerminalPanel />);
+    const remove = await screen.findByRole("button", { name: "删除终端 pwsh" });
+    fireEvent.click(remove);
+    expect(await screen.findByText("未能确认终端已删除，请重试。")).toBeTruthy();
+    expect(await screen.findByText(/刷新终端失败：.*Recheck unavailable/)).toBeTruthy();
+    await waitFor(() => expect(remove).toHaveProperty("disabled", false));
+    expect(useAppStore.getState().terminalSessions.map(item => item.id)).toContain("term-a");
+    expect(mocks.send.mock.calls.some(([command]) => command.type === "terminal.kill")).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: "刷新终端列表" }));
+    await waitFor(() => expect(mocks.list).toHaveBeenCalledTimes(3));
+    expect(screen.queryByText("未能确认终端已删除，请重试。")).toBeNull();
+    expect(screen.queryByText(/Recheck unavailable/)).toBeNull();
+  });
+
+  it("keeps B's own stop failure when A's already-started internal refresh finishes late", async () => {
+    const oldRefresh = pending<ReturnType<typeof pty>[]>();
+    let aReads = 0;
+    mocks.list.mockImplementation(async (owner: string) => {
+      if (owner === "conv-a" && ++aReads === 2) return oldRefresh.promise;
+      return [pty(owner, owner === "conv-a" ? "term-a" : "term-b")];
+    });
+    mocks.kill.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error("B stop failure"));
+    render(<TerminalPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "删除终端 pwsh" }));
+    expect(await screen.findByText("未能确认终端已删除，请重试。")).toBeTruthy();
+    await waitFor(() => expect(aReads).toBe(2));
+    await switchOwner("conv-b");
+    await waitFor(() => expect(useAppStore.getState().activeTerminalSessionId).toBe("term-b"));
+    expect(screen.queryByText("未能确认终端已删除，请重试。")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "删除终端 pwsh" }));
+    expect(await screen.findByText(/停止终端失败：.*B stop failure/)).toBeTruthy();
+    const reads = mocks.list.mock.calls.length;
+    await act(async () => oldRefresh.resolve([pty("conv-a", "term-a", false)]));
+    expect(screen.getByText(/停止终端失败：.*B stop failure/)).toBeTruthy();
+    expect(screen.queryByText("未能确认终端已删除，请重试。")).toBeNull();
+    expect(mocks.list.mock.calls).toHaveLength(reads);
+    expect(useAppStore.getState().terminalSessions.map(item => item.id)).toEqual(["term-b"]);
+    expect(mocks.send.mock.calls.some(([command]) => command.type === "terminal.kill")).toBe(false);
+  });
+
   it("does not publish a background conversation's server URL into the selected conversation", async () => {
     mocks.list.mockResolvedValue([pty("conv-b", "term-b")]);
     await switchOwner("conv-b");

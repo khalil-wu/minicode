@@ -20,6 +20,7 @@ const {
 
 vi.mock('../../desktop/runtime', () => ({
   isDesktop: () => false,
+  desktop: () => undefined,
   revealPath: vi.fn(),
 }))
 

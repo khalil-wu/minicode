@@ -720,13 +720,17 @@ class CapabilityRegistry:
         *,
         context: ToolExecutionContext | None = None,
         expected_policy_identity: str = "",
+        prepared_tool: BaseTool | None = None,
     ) -> ToolResult:
-        tool = self._tools.get(name)
+        tool = prepared_tool if prepared_tool is not None else self._tools.get(name)
         if tool is None:
             return ToolResult(
                 content=f"Tool '{name}' does not exist. Available: {', '.join(self._tools.keys())}",
                 is_error=True,
             )
+        if prepared_tool is not None and prepared_tool.name != name:
+            return ToolResult(content="The prepared tool does not belong to this invocation.", is_error=True,
+                status="blocked", error_kind="approval_stale")
         if expected_policy_identity and tool.policy_identity != expected_policy_identity:
             return ToolResult(content="The tool identity changed while this request was pending; submit the action again.",
                 is_error=True, status="blocked", error_kind="approval_stale")

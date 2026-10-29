@@ -7,15 +7,17 @@ const bridge = vi.hoisted(() => ({
   preferences: { localeOverride: "zh-CN", systemLocale: "en-US" } as unknown as DesktopPreferences,
   changed: null as ((preferences: DesktopPreferences) => void) | null,
 }));
-vi.mock("../desktop/runtime", () => ({
-  isDesktop: () => true,
-  getDesktopPreferences: () => Promise.resolve(bridge.preferences),
-  onDesktopPreferencesChanged: (callback: (preferences: DesktopPreferences) => void) => {
-    bridge.changed = callback;
-    return () => { bridge.changed = null; };
-  },
-  setDesktopPreferences: vi.fn(),
-}));
+vi.mock("../desktop/runtime", () => {
+  const api = { preferences: {
+    get: () => Promise.resolve(bridge.preferences),
+    onChanged: (callback: (preferences: DesktopPreferences) => void) => {
+      bridge.changed = callback;
+      return () => { bridge.changed = null; };
+    },
+    set: vi.fn(),
+  } };
+  return { isDesktop: () => true, desktop: () => api };
+});
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 
 import { DesktopLanguageProvider, LanguageProvider, resolveLocale, translate, useI18n } from "./index";
@@ -100,6 +102,9 @@ describe("UI language boundary", () => {
     expect(resolveLocale("en-US", "zh-CN")).toBe("en-US");
     expect(resolveLocale("zh-CN", "en-US")).toBe("zh-CN");
     expect(translate("en-US", "打开 {name}", { name: "设置与日志.txt" })).toBe("Open 设置与日志.txt");
+    expect(translate("en-US", "高")).toBe("High");
+    expect(translate("en-US", "视口高度")).toBe("Viewport height");
+    expect(translate("en-US", "回复详细程度")).toBe("Output detail");
   });
 
   it("has matching explicit keys in both language catalogs", () => {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from backend.environments.errors import ExecutorError
+from backend.runtime_env import GIT_EXECUTOR_ENV_PATTERNS, is_git_repository_env
 from backend.sandbox.policy import (AdditionalPermissionProfile, FileSystemAccessMode, FileSystemPath,
     FileSystemPermissions, FileSystemSandboxEntry, FileSystemSandboxPolicy, FileSystemSandboxKind,
     FileSystemSpecialPath, PermissionProfile, SandboxEnforcement)
@@ -11,17 +12,15 @@ from backend.workspace.executor_paths import ExecutorPath
 
 
 def executor_git_environment(service, *, index_file=None):
-    from backend.tools.git_support import _GIT_REPOSITORY_ENV
-
     policy = service.config.shell_environment_policy
     environment = {key: value for key, value in policy.set_values.items()
-                   if key.upper() not in _GIT_REPOSITORY_ENV and not key.upper().startswith("GIT_CONFIG")}
+                   if not is_git_repository_env(key.upper()) and not key.upper().startswith("GIT_CONFIG")}
     overrides = {}
     if service.scope.user_home_uri:
         overrides["GIT_CEILING_DIRECTORIES"] = service.resolve(service.scope.user_home_uri).native
     if index_file is not None:
         overrides["GIT_INDEX_FILE"] = service.resolve(str(index_file)).native
-    return replace(policy, exclude=tuple([*policy.exclude, *_GIT_REPOSITORY_ENV, "GIT_CONFIG*"]),
+    return replace(policy, exclude=(*policy.exclude, *GIT_EXECUTOR_ENV_PATTERNS),
         set_values=environment), overrides
 
 

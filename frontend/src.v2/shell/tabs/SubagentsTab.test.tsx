@@ -8,6 +8,8 @@ import { SubagentsTab } from "./SubagentsTab";
 import { CollaborationCell } from "../../chat/cells/CollaborationCell";
 import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
 import type { CollaborationCellState } from "../../chat/cells/cellTypes";
+import * as agentViews from "../../lib/agent-view-model";
+import * as markdown from "../../lib/markdown";
 
 const { sendClientCommandMock, sendClientCommandAwaitResultMock } = vi.hoisted(() => ({
   sendClientCommandMock: vi.fn(() => true),
@@ -69,7 +71,7 @@ describe("SubagentsTab", () => {
     expect(sendClientCommandAwaitResultMock).toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.transcript",
       subagent_id: "historical-child", conversation_id: "conversation-1", workspace_root: "C:\\workspace" }), "subagent.transcript", { silent: true });
     expect(screen.getByRole("region", { name: "子智能体任务详情：Historical review" })).toBeTruthy();
-    expect(screen.getByText("6.1 Sol · high")).toBeTruthy();
+    expect(screen.getByText("6.1 Sol · 高")).toBeTruthy();
     expect(screen.queryByText("parent-only-model")).toBeNull();
     expect(useAppStore.getState().subagents[0]).toMatchObject({ id: "historical-child", status: "done",
       displayName: "Historical review", agentPath: "/root/historical_review", model: "gpt-6.1-sol", provider: "child-provider" });
@@ -88,6 +90,16 @@ describe("SubagentsTab", () => {
     expect(screen.getByText("6.1 Sol · off")).toBeTruthy();
     expect(screen.getByTitle("custom · gpt-6.1-sol · off")).toBeTruthy();
     expect(useAppStore.getState().subagents[0]).toMatchObject({ model: "gpt-6.1-sol", provider: "custom", reasoningEffort: "off" });
+  });
+
+  it("localizes a known child reasoning effort without changing the original metadata", async () => {
+    useAppStore.setState({ focusedSubagentId: "known-effort", subagents: [{ id: "known-effort", role: "reviewer", status: "done",
+      objective: "核对强度标签", model: "gpt-6.1-sol", provider: "custom", reasoningEffort: "xhigh" }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandAwaitResultMock).toHaveBeenCalled());
+    expect(screen.getByText("6.1 Sol · 极高")).toBeTruthy();
+    expect(screen.getByTitle("custom · gpt-6.1-sol · xhigh")).toBeTruthy();
+    expect(useAppStore.getState().subagents[0].reasoningEffort).toBe("xhigh");
   });
   it("does not borrow the parent picker model for an unknown child", async () => {
     useAppStore.setState({ focusedSubagentId: "unknown-model", currentModel: "parent-only-model",
@@ -316,6 +328,63 @@ describe("SubagentsTab", () => {
     expect(screen.queryByRole("button", { name: "获取结果" })).toBeNull();
   });
 
+  it.each(["process", "partial"] as const)("does not use a previous answer or latest %s content to suppress a retained-result read", async (latest) => {
+    const messages = [
+      { id: "earlier-final", role: "assistant", content: "上一轮完整答案", timestamp: 1, terminal_status: "completed" },
+      latest === "process"
+        ? { id: "latest-process", role: "assistant", content: "", timestamp: 2, terminal_status: "completed", blocks: [
+          { type: "process", id: "latest-note", item_kind: "process_text", source: "model_preamble", status: "completed", visibility: "timeline", content: "本轮检查过程", timestamp: 2 },
+        ] }
+        : { id: "latest-partial", role: "assistant", content: "本轮尚未完整结束的正文", timestamp: 2, terminal_status: "partial" },
+    ];
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type: string }).type, level: "success", message: "",
+        data: (command as { type: string }).type === "subagent.transcript" ? { seq: 2, messages } : {} };
+    });
+    useAppStore.setState({ focusedSubagentId: "latest-result", subagents: [{ id: "latest-result", role: "reviewer", status: "done",
+      objective: "继续检查", resultAvailable: true }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(sendClientCommandMock).toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.status",
+      subagent_id: "latest-result", include_result: true })));
+    expect(screen.getByText("上一轮完整答案")).toBeTruthy();
+    expect(screen.getByText(latest === "process" ? "本轮检查过程" : "本轮尚未完整结束的正文")).toBeTruthy();
+  });
+
+  it.each([
+    { terminal: "completed", answer: "本轮完整结果", retained: "本轮完整结果", duplicate: true },
+    { terminal: "completed", answer: "较早的完整结果", retained: "更新后的真实结果", duplicate: false },
+    { terminal: "partial", answer: "未完整结束的内容", retained: "未完整结束的内容", duplicate: false },
+  ])("deduplicates only the actual complete final answer: $terminal / $duplicate", async ({ terminal, answer, retained, duplicate }) => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type: string }).type, level: "success", message: "", data: {
+        seq: 1, messages: [{ id: "answer", role: "assistant", content: answer, timestamp: 1, terminal_status: terminal }],
+      } };
+    });
+    useAppStore.setState({ focusedSubagentId: "known-result", subagents: [{ id: "known-result", role: "reviewer", status: "done",
+      objective: "检查最新结果", resultContent: retained }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(within(screen.getByLabelText("子智能体工作记录")).getByText(answer)).toBeTruthy());
+    if (duplicate) expect(screen.queryByLabelText("保留结果")).toBeNull();
+    else expect(within(screen.getByLabelText("保留结果")).getByText(retained)).toBeTruthy();
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.status" }));
+  });
+
+  it("uses the latest complete final answer without another retained-result request", async () => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: (command as { type: string }).type, level: "success", message: "", data: {
+        seq: 1, messages: [{ id: "complete-answer", role: "assistant", content: "当前轮完整答案", timestamp: 1, terminal_status: "completed" }],
+      } };
+    });
+    useAppStore.setState({ focusedSubagentId: "complete-result", subagents: [{ id: "complete-result", role: "reviewer", status: "done",
+      objective: "检查结果读取", resultAvailable: true }] });
+    render(<SubagentsTab />);
+    await waitFor(() => expect(screen.getByText("当前轮完整答案")).toBeTruthy());
+    expect(sendClientCommandMock).not.toHaveBeenCalledWith(expect.objectContaining({ type: "subagent.status" }));
+  });
+
   it("keeps runtime counters and result envelopes out of the transcript", async () => {
     useAppStore.setState({
       subagents: [{
@@ -458,6 +527,27 @@ describe("SubagentsTab", () => {
     expect(screen.queryByRole("button", { name: "停止子智能体" })).toBeNull();
   });
 
+  it.each([
+    { result: "RuntimeError: 模型请求被拒绝", alerts: 1 },
+    { result: "RuntimeError: 独立的启动清理错误", alerts: 2 },
+  ])("deduplicates only the child result error already present in its transcript: $result", async ({ result, alerts }) => {
+    sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
+      sendClientCommandMock(command);
+      return { type: "command.result", command: "subagent.transcript", level: "success", message: "", data: {
+        messages: [{ id: "child-turn", role: "assistant", content: "", timestamp: 2, completed_at: 4,
+          terminal_status: "failed", termination_reason: "api_error", failure_message: "模型请求被拒绝" }],
+      } };
+    });
+    useAppStore.setState({ conversationId: "conv-failed", focusedSubagentId: "failed-child", subagents: [{
+      id: "failed-child", role: "reviewer", status: "error", objective: "失败任务", resultError: result,
+    }] });
+    const view = render(<SubagentsTab />);
+    await waitFor(() => expect(view.container.querySelector(".subagents-transcript .error-cell-notice")).toBeTruthy());
+    expect(screen.getAllByRole("alert")).toHaveLength(alerts);
+    expect(screen.getByText("模型请求被拒绝")).toBeTruthy();
+    if (alerts === 2) expect(screen.getByText(result)).toBeTruthy();
+  });
+
   it("renders the child through the ordinary ChatTurn transcript without a details gate", async () => {
     sendClientCommandAwaitResultMock.mockImplementation(async (command: unknown) => {
       sendClientCommandMock(command);
@@ -507,7 +597,7 @@ describe("SubagentsTab", () => {
     expect(screen.getByText("实现已核对")).toBeTruthy();
     expect(screen.getAllByText("实现已核对")).toHaveLength(1);
     expect(screen.queryByText("保留结果")).toBeNull();
-    expect(screen.getByText("child-review-model · high")).toBeTruthy();
+    expect(screen.getByText("child-review-model · 高")).toBeTruthy();
     expect(screen.getByTitle("actual-child-provider · child-review-model · high")).toBeTruthy();
     expect(container.querySelector("details")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "给检查实现补充说明" })).toBeNull();
@@ -960,6 +1050,27 @@ describe("SubagentsTab", () => {
       act(() => vi.advanceTimersByTime(2_000));
       expect(within(running).getByText("3秒")).toBeTruthy();
     } finally { cleanup(); vi.useRealTimers(); }
+  });
+
+  it("ticks visible clocks without rebuilding agent projections or reparsing objectives, including completed recency", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(100_000);
+    const projection = vi.spyOn(agentViews, "projectAgentViews");
+    const parse = vi.spyOn(markdown, "fromMarkdown");
+    useAppStore.setState({ subagents: [
+      { id: "clock-active", role: "reviewer", status: "running", displayName: "Running audit", objective: "**Active** objective", startedAt: 98_100 },
+      { id: "clock-done", role: "reviewer", status: "done", displayName: "Finished audit", objective: "Finished objective", completedAt: 41_000 },
+    ] });
+    try {
+      render(<SubagentsTab />);
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Finished audit" })).getByText("刚刚")).toBeTruthy();
+      projection.mockClear(); parse.mockClear();
+      act(() => vi.advanceTimersByTime(2_000));
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Running audit" })).getByText("3秒")).toBeTruthy();
+      expect(within(screen.getByRole("button", { name: "打开子智能体任务：Finished audit" })).getByText("1分钟前")).toBeTruthy();
+      expect(projection).not.toHaveBeenCalled();
+      expect(parse).not.toHaveBeenCalled();
+    } finally { cleanup(); projection.mockRestore(); parse.mockRestore(); vi.useRealTimers(); }
   });
 
   it("reveals all active agents and keeps each conversation's disclosure choice", () => {

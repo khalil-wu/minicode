@@ -245,6 +245,19 @@ class TokenStore:
         SDKTokenStorage._parse_tokens(raw)
         return True
 
+    def startup_identity(self, server: str) -> tuple[str, bool]:
+        """Fingerprint protected discovery credentials without publishing their values."""
+        legacy = self.get(server)
+        try:
+            tokens = keyring.get_password(self._service, f"{server}:tokens")
+            client = keyring.get_password(self._service, f"{server}:client")
+        except _CREDENTIAL_ERRORS as exc:
+            raise MCPTokenStoreError("MCP credential store cannot read startup credentials") from exc
+        if tokens is not None:
+            SDKTokenStorage._parse_tokens(tokens)
+        value = [vars(legacy) if legacy is not None else None, tokens, client]
+        return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest(), any(item is not None for item in value)
+
 
 class SDKTokenStorage:
     """Adapter for the official MCP SDK TokenStorage protocol."""

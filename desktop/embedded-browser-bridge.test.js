@@ -46,6 +46,26 @@ test("authenticated health reports the actual browser control preference without
   } finally { await bridge.stop(); }
 });
 
+test("an Agent payload cannot claim the trusted manual navigation control option", async () => {
+  const controls = [];
+  bridge.init({ token: "manual-spoof-test", manager: {
+    async executeControlCommand(_payload, control) { controls.push(control); return { ok: true }; },
+  } });
+  const endpoint = await bridge.start();
+  try {
+    const response = await fetch(`${endpoint}/v1/command`, {
+      method: "POST", headers: { authorization: "Bearer manual-spoof-test" },
+      body: JSON.stringify({ action: "navigate", url: "https://example.com/", conversation_id: "actual-owner",
+        window_instance_id: "fixture-window", window_binding_token: "fixture-binding", operation_id: "spoof-manual",
+        agent_control_id: "original-agent", agent_turn_id: "original-turn", manualNavigation: true,
+        control: { manualNavigation: true }, source: "manual" }),
+    });
+    assert.equal(response.status, 200); assert.equal(controls.length, 1);
+    assert.equal(controls[0].manualNavigation, undefined);
+    assert.deepEqual(controls[0].agentControl, { id: "original-agent", turnId: "original-turn" });
+  } finally { await bridge.stop(); }
+});
+
 test("only the original token and window binding can release the captured agent browser control", async () => {
   const controls = [], releases = [];
   bridge.init({ token: "browser-owner-token", manager: {

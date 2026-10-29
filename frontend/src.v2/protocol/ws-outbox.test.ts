@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   LONG_COMMAND_RESULT_TIMEOUT_MS,
+  CommandNotSentError,
+  CommandRejectedError,
+  clientCommandIsAwaitingReceipt,
+  notifyClientCommandReceived,
   rejectClientCommandResult,
   rejectPendingPromptResponseResults,
   registerWebSocketSender,
@@ -76,6 +80,56 @@ describe("ws-outbox", () => {
       "error",
       3000,
     );
+  });
+
+  it("distinguishes a rejected local send from an unknown outcome after dispatch", async () => {
+    registerWebSocketSender(() => false);
+    await expect(sendClientCommandAwaitResult({ type: "conversation.list" }, "conversation.list", { silent: true }))
+      .rejects.toBeInstanceOf(CommandNotSentError);
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "sent-unconfirmed" }, "conversation.list");
+    rejectClientCommandResult("sent-unconfirmed", "receipt lost");
+    await expect(pending).rejects.not.toBeInstanceOf(CommandNotSentError);
+  });
+
+  it("keeps an explicit server receipt rejection distinguishable from an unknown outcome", async () => {
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "receipt-rejected" }, "conversation.list");
+    expect(rejectClientCommandResult("receipt-rejected", "transport admission rejected", new CommandRejectedError("transport admission rejected"))).toBe(true);
+    await expect(pending).rejects.toBeInstanceOf(CommandRejectedError);
+  });
+
+  it("reports local acceptance before receipt and keeps the two boundaries distinct", async () => {
+    const submitted = vi.fn();
+    const received = vi.fn();
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "local-accepted" }, "conversation.list",
+      { onSubmitted: submitted, onReceived: received });
+    expect(submitted).toHaveBeenCalledOnce();
+    expect(received).not.toHaveBeenCalled();
+    expect(clientCommandIsAwaitingReceipt("local-accepted")).toBe(true);
+    notifyClientCommandReceived("local-accepted");
+    expect(received).toHaveBeenCalledOnce();
+    expect(submitted).toHaveBeenCalledOnce();
+    resolveClientCommandResult({ type: "command.result", command: "conversation.list", client_command_id: "local-accepted", level: "success", message: "" });
+    await pending;
+  });
+
+  it("does not report local acceptance when the sender refuses the captured command", async () => {
+    const submitted = vi.fn();
+    registerWebSocketSender(() => false);
+    await expect(sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "local-refused" }, "conversation.list",
+      { onSubmitted: submitted, silent: true })).rejects.toBeInstanceOf(CommandNotSentError);
+    expect(submitted).not.toHaveBeenCalled();
+  });
+
+  it("releases the result registry if a local acceptance callback throws", async () => {
+    registerWebSocketSender(() => true);
+    await expect(sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "local-callback-error" }, "conversation.list",
+      { onSubmitted: () => { throw new Error("actual acceptance callback error"); }, onReceived: vi.fn() }))
+      .rejects.toThrow("actual acceptance callback error");
+    expect(clientCommandIsAwaitingReceipt("local-callback-error")).toBe(false);
+    expect(resolveClientCommandResult({ type: "command.result", command: "conversation.list", client_command_id: "local-callback-error", level: "success", message: "" })).toBe(false);
   });
 
   it("returns false when the registered sender rejects the command", () => {

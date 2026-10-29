@@ -3,6 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ImportSettingsTab } from "./ImportSettingsTab";
+import { subscribeExtensionSettingsChanges } from "../lib/extension-settings-events";
 
 const send = vi.hoisted(() => vi.fn());
 const openTarget = vi.hoisted(() => vi.fn(async () => true as const));
@@ -73,6 +74,36 @@ it("opens the General row's real two-step import and keeps no-data and hidden st
   expect(await screen.findByRole("button", { name: "未检测到数据" })).toHaveProperty("disabled", true);
 });
 
+it.each([
+  ["skills", "success", 1, 0],
+  ["plugins", "success", 1, 1],
+  ["skills", "skipped", 0, 0],
+  ["plugins", "error", 0, 0],
+  ["instructions", "success", 0, 0],
+])("invalidates only committed extension kinds from the actual import receipt (%s/%s)", async (kind, status, skillEvents, pluginEvents) => {
+  const selected = item("selected-source", String(kind));
+  detectedItems = [selected];
+  useAppStore.setState({ activeConversationDraftId: null });
+  const originalFetch = fetch;
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+    new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST"
+      ? Promise.resolve(Response.json(receipt([{ ...selected, status: String(status), message: "Actual import outcome" }], "C:/project")))
+      : originalFetch(input, init)));
+  const skillsChanged = vi.fn(), pluginsChanged = vi.fn();
+  const stopSkills = subscribeExtensionSettingsChanges("skills", {}, skillsChanged);
+  const stopPlugins = subscribeExtensionSettingsChanges("plugins", {}, pluginsChanged);
+  try {
+    render(<ImportSettingsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    fireEvent.click(within(screen.getByRole("dialog", { name: "选择要导入的内容" })).getByRole("button", { name: "导入", exact: true }));
+    await screen.findByText("Actual import outcome");
+    expect(skillsChanged).toHaveBeenCalledTimes(Number(skillEvents));
+    expect(pluginsChanged).toHaveBeenCalledTimes(Number(pluginEvents));
+    expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
+  } finally { stopSkills(); stopPlugins(); }
+});
+
 it("shows actual completed result files and opens only a successful known file through the existing file action", async () => {
   imported = true; selection = ["CLAUDE.md"];
   useAppStore.setState({ settingsOpen: true });
@@ -114,7 +145,7 @@ it("keeps skipped and failed history visible without labelling it as an imported
 
 it("detects compatible local sources and sends only selected detected identities to the real import route", async () => {
   render(<ImportSettingsTab />);
-  fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入" }));
   expect(screen.getByRole("dialog", { name: "从其他 AI 应用导入" })).toBeTruthy();
   expect(screen.getByRole("switch", { name: "Claude Code" }).getAttribute("aria-checked")).toBe("true");
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
@@ -146,9 +177,26 @@ it("detects compatible local sources and sends only selected detected identities
   for (const [, init] of vi.mocked(fetch).mock.calls) expect(new Headers(init?.headers).get("X-MiniCode-Token")).toBe(runtime.runtimeToken);
 });
 
+it("projects detected provider identity below automatic sync and keeps its real import action", async () => {
+  render(<ImportSettingsTab />);
+  const importAction = await screen.findByRole("button", { name: "从 Claude Code 导入" });
+  const syncHeading = screen.getByRole("heading", { name: "自动同步" });
+  const importHeading = screen.getByRole("heading", { name: "从其他 AI 应用导入" });
+  expect(syncHeading.compareDocumentPosition(importHeading) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getByText("同步已暂停，内容选择会保留")).toBeTruthy();
+  const row = importAction.closest(".settings-row")!;
+  expect(row.querySelector('[data-provider="claude"] svg')?.getAttribute("width")).toBe("40");
+  expect(within(row as HTMLElement).getByText("Claude Code")).toBeTruthy();
+  fireEvent.click(importAction);
+  expect(screen.getByRole("dialog", { name: "从其他 AI 应用导入" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "取消" }));
+  expect(selection).toEqual([]);
+  expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
+});
+
 it("keeps sync unavailable before a successful import and persists its actual consumer preferences afterwards", async () => {
   const view = render(<ImportSettingsTab />);
-  await screen.findByRole("button", { name: "导入 Claude Code" });
+  await screen.findByRole("button", { name: "从 Claude Code 导入" });
   expect(screen.getByRole("switch", { name: "保持导入内容同步" })).toHaveProperty("disabled", true);
   connected = true;
   view.rerender(<ImportSettingsTab active={false} />);
@@ -169,7 +217,7 @@ it("does not claim a failed scan succeeded and retries the actual detection requ
   render(<ImportSettingsTab />);
   expect((await screen.findByRole("alert")).textContent).toContain("fixture scan error");
   fireEvent.click(screen.getByRole("button", { name: "重试" }));
-  await screen.findByRole("button", { name: "导入 Claude Code" });
+  await screen.findByRole("button", { name: "从 Claude Code 导入" });
   expect(vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/detect"))).toHaveLength(2);
 });
 
@@ -183,9 +231,9 @@ it("performs no hidden-page scan and ignores a retired workspace response", asyn
   view.rerender(<ImportSettingsTab />);
   await waitFor(() => expect(resolve).toBeDefined());
   act(() => useAppStore.setState({ workingDirectory: "C:/next-project" }));
-  await screen.findByRole("button", { name: "导入 Claude Code" });
+  await screen.findByRole("button", { name: "从 Claude Code 导入" });
   await act(async () => resolve(Response.json({ detection_id: "retired", items: [item("old-workspace-only", "skills")], issues: [] })));
-  fireEvent.click(screen.getByRole("button", { name: "导入 Claude Code" }));
+  fireEvent.click(screen.getByRole("button", { name: "从 Claude Code 导入" }));
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
   fireEvent.click(screen.getByRole("button", { name: "展开工具与配置详情" }));
   expect(screen.queryByText("old-workspace-only")).toBeNull();
@@ -198,7 +246,7 @@ it("opens provider selection from the active Import page and keeps each app conn
   const view = render(<ImportSettingsTab active={false} />);
   expect(fetch).not.toHaveBeenCalled();
   view.rerender(<ImportSettingsTab />);
-  fireEvent.click(await screen.findByRole("button", { name: "导入 Cursor" }));
+  fireEvent.click(await screen.findByRole("button", { name: "从 Cursor 导入" }));
   fireEvent.click(screen.getByRole("switch", { name: "Claude Code" }));
   fireEvent.click(await screen.findByRole("switch", { name: "Cursor" }));
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
@@ -217,7 +265,7 @@ it("opens provider selection from the active Import page and keeps each app conn
 
 it("cancels provider selection without importing or replacing the existing draft", async () => {
   render(<ImportSettingsTab />);
-  fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入" }));
   fireEvent.click(screen.getByRole("switch", { name: "Claude Code" }));
   expect(screen.getByRole("button", { name: "继续" })).toHaveProperty("disabled", true);
   fireEvent.click(screen.getByRole("button", { name: "取消" }));
@@ -231,7 +279,7 @@ it("retains returned skipped and failed records in the dialog instead of reporti
   vi.mocked(fetch).mockImplementation((input, init) => new URL(String(input)).pathname === "/api/settings/import" && init?.method === "POST"
     ? Promise.resolve(Response.json(receipt([{ ...item("source-skill", "skills"), status: "skipped", message: "Destination has local edits" }, { ...item("CLAUDE.md", "instructions"), status: "error", message: "Actual write failure" }], "C:/project"))) : fetcher(input, init));
   render(<ImportSettingsTab />);
-  fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入" }));
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
   fireEvent.click(screen.getByRole("button", { name: "导入", exact: true }));
   const completed = await screen.findByRole("dialog", { name: "导入失败" });
@@ -285,7 +333,7 @@ it("replaces selection with the Source progress dialog for the actual request an
 it("opens a fast import using the actual POST history identity without waiting for a progress poll", async () => {
   useAppStore.setState({ settingsOpen: true });
   render(<ImportSettingsTab />);
-  fireEvent.click(await screen.findByRole("button", { name: "导入 Claude Code" }));
+  fireEvent.click(await screen.findByRole("button", { name: "从 Claude Code 导入" }));
   fireEvent.click(screen.getByRole("button", { name: "继续" }));
   fireEvent.click(within(screen.getByRole("dialog", { name: "选择要导入的内容" })).getByRole("button", { name: "导入", exact: true }));
   const completed = await screen.findByRole("dialog", { name: "已导入外部智能体配置" });

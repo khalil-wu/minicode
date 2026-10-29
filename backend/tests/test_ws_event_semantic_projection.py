@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from starlette.websockets import WebSocketDisconnect
@@ -601,8 +601,9 @@ def test_commands_list_keeps_captured_owner_and_workspace_across_await(
     session.event_outbox = SimpleNamespace(client_command_id="request-old")
     sent: list[tuple[dict[str, Any], str]] = []
 
-    async def ensure_extension_commands(conversation_id: str) -> None:
+    async def ensure_extension_commands(conversation_id: str, *, bind_command_context: bool = True) -> None:
         assert conversation_id == "conversation-old"
+        assert bind_command_context is False
         session.active_conversation_id = "conversation-new"
         await asyncio.sleep(0)
 
@@ -837,6 +838,36 @@ def _minimal_event_session() -> WebSocketSession:
     session._run_notification_hook_for_event = AsyncMock()
     session.send_payload = AsyncMock(return_value=True)
     return session
+
+
+@pytest.mark.parametrize("active_run", [True, False])
+def test_stream_events_use_the_captured_thread_owner_without_reopening_the_store(active_run):
+    session = _minimal_event_session()
+    realtime = SimpleNamespace(observe_backend_event=AsyncMock())
+    thread_runtime = SimpleNamespace(realtime_runtime=realtime)
+    lookup = Mock(return_value=thread_runtime)
+    store_id = Mock(return_value="actual-store")
+    session.ws_manager = SimpleNamespace(execution_contexts=SimpleNamespace(thread_runtime_for=lookup))
+    session.run_manager = SimpleNamespace(context_for=Mock(return_value=(
+        SimpleNamespace(environment_thread_runtime=thread_runtime) if active_run else None)))
+    session.conversation_repo = SimpleNamespace(store_instance_id=store_id)
+    session._publish_stream_projection = AsyncMock()
+
+    async def scenario():
+        for index in range(120):
+            await session.send_event(AgentEvent(type="agent_message.delta", data={
+                "conversation_id": "owner", "message_id": "answer", "item_id": "item",
+                "delta": str(index), "source": "commentary",
+            }))
+    asyncio.run(scenario())
+
+    assert session._publish_stream_projection.await_count == realtime.observe_backend_event.await_count == 120
+    if active_run:
+        store_id.assert_not_called()
+        lookup.assert_not_called()
+    else:
+        assert store_id.call_count == lookup.call_count == 120
+        lookup.assert_called_with("actual-store", "owner")
 
 
 def test_handle_rejects_non_object_json_and_continues_to_ping(

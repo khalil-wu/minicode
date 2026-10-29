@@ -20,6 +20,30 @@ const tool = (index: number) => ({ type: "tool_call", transcriptIndex: index,
   record: { id: `t${index}`, name: "read_file", args: { file_path: `f${index}.py` }, status: "success", startedAt: index } });
 const answer = { type: "text", itemId: "final", source: "model_final", status: "completed", content: "Final answer", transcriptIndex: 5 };
 
+it("shares concurrent views of the same history cursor and admits a replacement cursor independently", async () => {
+  const message = hydrateMessages([{ id: "old", role: "assistant", terminal_status: "completed", blocks: [tool(4), answer],
+    tool_page: { before: 4, remaining: 4, total: 5, revision: "old" } }])[0];
+  useAppStore.setState({ conversationId: "conv", messages: [message], conversationMessages: {}, conversationStreaming: {}, conversationHistoryPages: {} });
+  const replies: Array<(response: Response) => void> = [];
+  const fetch = vi.fn(() => new Promise<Response>(resolve => { replies.push(resolve); }));
+  vi.stubGlobal("fetch", fetch);
+  const first = loadEarlierToolItems("conv", "old");
+  expect(loadEarlierToolItems("conv", "old")).toBe(first);
+  expect(fetch).toHaveBeenCalledOnce();
+  const freshPage = { ...message.toolPage!, revision: "fresh" };
+  useAppStore.setState({ messages: [{ ...message, toolPage: freshPage }] });
+  const fresh = loadEarlierToolItems("conv", "old");
+  expect(fetch).toHaveBeenCalledTimes(2);
+  replies[0](new Response(JSON.stringify({ message_id: "old", blocks: [tool(1)], tool_page: { before: 1, remaining: 1, total: 5 } })));
+  await first;
+  expect(useAppStore.getState().messages[0].toolPage).toBe(freshPage);
+  expect(loadEarlierToolItems("conv", "old")).toBe(fresh);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  replies[1](new Response(JSON.stringify({ message_id: "old", blocks: [tool(2), tool(3)], tool_page: { before: 2, remaining: 2, total: 5, revision: "fresh" } })));
+  await fresh;
+  expect(useAppStore.getState().messages[0].blocks!.map(block => block.transcriptIndex)).toEqual([2, 3, 4, 5]);
+});
+
 it("keeps a history disclosure when all currently loaded steps are hidden", () => {
   const message = hydrateMessages([{ id: "old", role: "assistant", terminal_status: "completed", blocks: [answer],
     tool_page: { before: 4, remaining: 4, total: 5 } }])[0];

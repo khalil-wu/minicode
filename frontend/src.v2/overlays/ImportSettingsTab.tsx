@@ -5,6 +5,7 @@ import { useI18n } from "../i18n";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { Tip } from "../components/Tooltip";
 import { useAppStore } from "../stores";
+import { invalidateConversationDraftSelection } from "../stores/conversation-drafts";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout, LONG_HTTP_TIMEOUT_MS } from "../protocol/api";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import "./ProjectDialog.css";
@@ -13,6 +14,7 @@ import { projectOwnsWorkspace, projectWorkspaceRoots } from "../lib/project-regi
 import { openManagedSettingsTarget } from "../desktop/runtime";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import { ImportProviderIcon } from "./ImportProviderIcon";
+import { captureExtensionSettingsOwner, extensionSettingsOwnerMatches, publishExtensionSettingsChange } from "../lib/extension-settings-events";
 
 type ItemType = "sessions" | "projects" | "instructions" | "settings" | "skills" | "plugins" | "mcp" | "agents" | "hooks" | "commands" | "memory";
 type Item = { id: string; provider_id: string; item_type: ItemType; title: string; source_path: string; target_path: string; workspace_root: string; supported: boolean; reason: string };
@@ -29,7 +31,7 @@ const EN = {
   generalTitle: "Import work from other AI apps", generalDescription: "Bring over your setup, projects, and recent chats", importedSetup: "Imported agent setup", lastImported: "Last imported {relativeTime}", generalChecking: "Checking", noData: "No data detected", importAgain: "Import again", viewImported: "View imported files", tryAgain: "Try again",
   resultTitle: "Imported external agent config", resultSubtitle: "Selected config was copied into MiniCode", resultErrorTitle: "Import failed", resultErrorSubtitle: "Some config could not be imported. Check the selected items and try again", resultUnchangedTitle: "No content imported", resultUnchangedSubtitle: "Review the results for the selected items", resultRunningTitle: "Importing external agent config", resultRunningSubtitle: "Hang tight, this may take a few moments", scrollToBottom: "Scroll to bottom", userConfig: "User config", currentProject: "Current project", ok: "OK",
   checking: "Checking for imports", checkingDetail: "Looking for compatible setup, projects, and recent chats", empty: "Import from other AI apps", emptyDetail: "No importable setup found", noNew: "No new items found",
-  import: "Import", importTo: "Import", importing: "Importing", importProgress: "Import in progress", checkAgain: "Check again", retry: "Retry", review: "Select items to import", reviewDetail: "Choose what to bring over. Your existing setup won’t be affected.", cancel: "Cancel", close: "Close",
+  import: "Import", importTo: "Import", importFrom: "Import from {provider}", importing: "Importing", importProgress: "Import in progress", checkAgain: "Check again", retry: "Retry", review: "Select items to import", reviewDetail: "Choose what to bring over. Your existing setup won’t be affected.", cancel: "Cancel", close: "Close",
   dialogTitle: "Import from other AI apps", appsFound: "Apps found", continue: "Continue", tools: "Tools & setup", toolsDetail: "Settings, instructions, plugins, skills", projectsDetail: "Use your existing project folders", chatsDetail: "Recent chats", showTools: "Show Tools & setup details", hideTools: "Hide Tools & setup details", info: "What will be imported for", imported: "Import results",
   syncTitle: "Automatic sync", sync: "Keep imports in sync", syncDetail: "Automatically sync new and updated content from connected sources", paused: "Sync paused. Your content selections are saved", content: "Content", customize: "Customize", afterImport: "Available after your first import", save: "Save",
   history: "Import history", automatic: "Automatic sync", viewMore: "View more", noneSelected: "No content selected", categories: { sessions: "Chat sessions", projects: "Projects", instructions: "Instructions", settings: "Settings", skills: "Skills", plugins: "Plugins", mcp: "MCP servers", agents: "Agents", hooks: "Hooks", commands: "Commands", memory: "Memory" },
@@ -40,7 +42,7 @@ const ZH: typeof EN = {
   generalTitle: "从其他 AI 应用导入", generalDescription: "导入配置、项目和近期聊天", importedSetup: "已导入智能体配置", lastImported: "上次导入：{relativeTime}", generalChecking: "正在检查", noData: "未检测到数据", importAgain: "再次导入", viewImported: "查看导入的文件", tryAgain: "重试",
   resultTitle: "已导入外部智能体配置", resultSubtitle: "所选配置已复制到 MiniCode", resultErrorTitle: "导入失败", resultErrorSubtitle: "部分配置未能导入，请检查所选内容后重试", resultUnchangedTitle: "未导入内容", resultUnchangedSubtitle: "查看所选内容的处理结果", resultRunningTitle: "正在导入外部智能体配置", resultRunningSubtitle: "请稍候，这可能需要一些时间", scrollToBottom: "滚动到底部", userConfig: "用户配置", currentProject: "当前项目", ok: "确定",
   checking: "正在检查可导入的内容", checkingDetail: "查找兼容的配置、项目和近期聊天", empty: "从其他 AI 应用导入", emptyDetail: "未找到可导入的配置", noNew: "未发现新内容",
-  import: "导入", importTo: "导入", importing: "正在导入", importProgress: "正在导入", checkAgain: "再次检查", retry: "重试", review: "选择要导入的内容", reviewDetail: "选择要导入的内容。现有配置不会受到影响。", cancel: "取消", close: "关闭",
+  import: "导入", importTo: "导入", importFrom: "从 {provider} 导入", importing: "正在导入", importProgress: "正在导入", checkAgain: "再次检查", retry: "重试", review: "选择要导入的内容", reviewDetail: "选择要导入的内容。现有配置不会受到影响。", cancel: "取消", close: "关闭",
   dialogTitle: "从其他 AI 应用导入", appsFound: "找到的应用", continue: "继续", tools: "工具与配置", toolsDetail: "设置、指令、插件、技能", projectsDetail: "使用现有项目文件夹", chatsDetail: "最近的聊天", showTools: "展开工具与配置详情", hideTools: "收起工具与配置详情", info: "将导入的内容", imported: "导入结果",
   syncTitle: "自动同步", sync: "保持导入内容同步", syncDetail: "自动同步已连接来源中新增和更新的内容", paused: "同步已暂停，内容选择会保留", content: "内容", customize: "自定义", afterImport: "首次导入后可用", save: "保存",
   history: "导入历史", automatic: "自动同步", viewMore: "查看更多", noneSelected: "未选择内容", categories: { sessions: "聊天会话", projects: "项目", instructions: "指令", settings: "设置", skills: "技能", plugins: "插件", mcp: "MCP 服务", agents: "Agent", hooks: "Hook", commands: "命令", memory: "记忆" },
@@ -127,6 +129,7 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
   const apply = async (itemIds: string[]) => {
     const plan = detection!;
     const owner = workspace;
+    const backendOwner = captureExtensionSettingsOwner();
     setImporting(true); setError("");
     setSelection(null);
     setProgress({ id: null, detection_id: plan.detection_id, workspace_root: owner, status: "running", items: plan.items.filter(item => itemIds.includes(item.id)), results: [] });
@@ -134,6 +137,15 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
     try {
       imported = await request<ImportReceipt>("", { detection_id: plan.detection_id, item_ids: itemIds, workspace_root: owner });
       const outcome = imported;
+      const pluginsChanged = outcome.results.some(result => result.item_type === "plugins" && result.status === "success");
+      if (pluginsChanged) publishExtensionSettingsChange("plugins", backendOwner, sequence);
+      if (pluginsChanged || outcome.results.some(result => result.item_type === "skills" && result.status === "success")) {
+        publishExtensionSettingsChange("skills", backendOwner, sequence);
+        const state = useAppStore.getState();
+        if (extensionSettingsOwnerMatches(backendOwner) && state.activeConversationDraftId) {
+          void invalidateConversationDraftSelection(state.activeConversationDraftId);
+        }
+      }
       setProgress(current => current?.detection_id === plan.detection_id
         ? completedImport({ ...outcome, workspace_root: outcome.history.workspace_root }, outcome.history.id) : current);
       sendClientCommand({ type: "conversation.list" }, { silent: true });
@@ -190,16 +202,16 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
   }
   return <div className="settings-external-import">
     <p className="settings-page-description">{text.subtitle}</p>
+    {state && <section className="settings-group"><h3 className="settings-group-title">{text.syncTitle}</h3><div className="settings-card">
+      <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{text.sync}</div><div className="settings-row-description">{state.sync.enabled ? text.syncDetail : text.paused}</div></div><button type="button" role="switch" className="settings-toggle" aria-label={text.sync} aria-checked={state.sync.enabled} data-active={state.sync.enabled} disabled={!connected || syncSaving} onClick={() => void saveSync(!state.sync.enabled, state.sync.item_types)}><span /></button></div>
+      <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{text.content}</div><div className="settings-row-description">{connected ? state.sync.item_types.map(type => text.categories[type]).join("、") || text.noneSelected : text.afterImport}</div></div><button type="button" className="settings-action-button" disabled={!connected || syncSaving} onClick={() => setCustomize(true)}>{text.customize}</button></div>
+    </div>{state.sync.last_error && <p role="alert">{state.sync.last_error}</p>}</section>}
     <section className="settings-group"><h3 className="settings-group-title">{text.title}</h3>{detectedProviders.length > 0 && <p>{text.detected}</p>}
       <div className="settings-card">
-        {importing || state?.running_import ? <div className="settings-row" role="status"><div className="settings-row-copy"><div className="settings-row-title">{text.importProgress}</div>{state?.running_import && <div className="settings-row-description">{state.running_import.item_types.map(type => text.categories[type]).join("、")}</div>}</div><LoaderCircle className="animate-spin" size={17} /></div> : loading ? <div className="settings-row" role="status"><div className="settings-row-copy"><div className="settings-row-title">{text.checking}</div><div className="settings-row-description">{text.checkingDetail}</div></div><LoaderCircle className="animate-spin" size={17} /></div> : error && !detection ? <div className="settings-row"><p role="alert">{error}</p><button type="button" className="settings-action-button" onClick={() => void load()}>{text.retry}</button></div> : detectedProviders.length === 0 ? <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{state?.history.length ? text.noNew : text.empty}</div><div className="settings-row-description">{text.emptyDetail}</div></div><button type="button" className="settings-action-button" disabled={loading || !state?.history.length} onClick={() => void load()}>{state?.history.length ? text.checkAgain : text.import}</button></div> : detectedProviders.map(source => <div className="settings-row" key={source.id}><div className="settings-row-copy"><div className="settings-row-title">{source.name}</div></div><button type="button" className="settings-action-button" disabled={!detection!.items.some(item => item.provider_id === source.id && item.supported)} aria-label={`${text.import} ${source.name}`} onClick={() => setSelection({ provider: source.id })}>{text.import}</button></div>)}
+        {importing || state?.running_import ? <div className="settings-row" role="status"><div className="settings-row-copy"><div className="settings-row-title">{text.importProgress}</div>{state?.running_import && <div className="settings-row-description">{state.running_import.item_types.map(type => text.categories[type]).join("、")}</div>}</div><LoaderCircle className="animate-spin" size={17} /></div> : loading ? <div className="settings-row" role="status"><div className="settings-row-copy"><div className="settings-row-title">{text.checking}</div><div className="settings-row-description">{text.checkingDetail}</div></div><LoaderCircle className="animate-spin" size={17} /></div> : error && !detection ? <div className="settings-row"><p role="alert">{error}</p><button type="button" className="settings-action-button" onClick={() => void load()}>{text.retry}</button></div> : detectedProviders.length === 0 ? <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{state?.history.length ? text.noNew : text.empty}</div><div className="settings-row-description">{text.emptyDetail}</div></div><button type="button" className="settings-action-button" disabled={loading || !state?.history.length} onClick={() => void load()}>{state?.history.length ? text.checkAgain : text.import}</button></div> : detectedProviders.map(source => <div className="settings-row" key={source.id}><span className="settings-import-source-icon" data-provider={source.id}><ImportProviderIcon provider={source.id as "claude" | "cursor"} size={40} /></span><div className="settings-row-copy"><div className="settings-row-title">{source.name}</div></div><button type="button" className="settings-action-button" disabled={!detection!.items.some(item => item.provider_id === source.id && item.supported)} aria-label={text.importFrom.replace("{provider}", source.name)} onClick={() => setSelection({ provider: source.id })}>{text.import}</button></div>)}
       </div>
       {detection?.issues.map((issue, index) => <p className="settings-import-issue" key={`${issue.source_path}:${index}`}><strong>{issue.status === "unsupported" ? text.status.unsupported : text.status.error}</strong> · {issue.source_path}<br />{issue.message}</p>)}
     </section>
-    {state && <section className="settings-group"><h3 className="settings-group-title">{text.syncTitle}</h3><div className="settings-card">
-      <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{text.sync}</div><div className="settings-row-description">{!connected ? text.afterImport : state.sync.enabled ? text.syncDetail : text.paused}</div></div><button type="button" role="switch" className="settings-toggle" aria-label={text.sync} aria-checked={state.sync.enabled} data-active={state.sync.enabled} disabled={!connected || syncSaving} onClick={() => void saveSync(!state.sync.enabled, state.sync.item_types)}><span /></button></div>
-      <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{text.content}</div><div className="settings-row-description">{connected ? state.sync.item_types.map(type => text.categories[type]).join("、") || text.noneSelected : text.afterImport}</div></div><button type="button" className="settings-action-button" disabled={!connected || syncSaving} onClick={() => setCustomize(true)}>{text.customize}</button></div>
-    </div>{state.sync.last_error && <p role="alert">{state.sync.last_error}</p>}</section>}
     {error && detection && <p role="alert">{error}</p>}
     {Boolean(state?.history.length) && <section className="settings-group"><h3 className="settings-group-title">{text.history}</h3><div className="settings-card">{(showAllHistory ? state!.history : state!.history.slice(0, 3)).map(history => <details key={history.id} className="settings-import-history"><summary><span>{new Date(history.completed_at).toLocaleString(locale)}{history.automatic ? ` · ${text.automatic}` : ""}</span><span>{Object.entries(text.status).map(([status, label]) => { const count = history.results.filter(result => result.status === status).length; return count ? `${label} ${count}` : ""; }).filter(Boolean).join(" · ")}</span></summary><div>{history.results.map((result, index) => <p key={`${result.id}:${index}`}><strong>{text.status[result.status]} · {result.title}</strong><br /><span>{result.message || result.target_path}</span></p>)}{history.setup_errors?.map((message, index) => <p key={`setup-${index}`} role="alert">{message}</p>)}</div></details>)}</div>{!showAllHistory && state!.history.length > 3 && <button type="button" className="settings-action-button" onClick={() => setShowAllHistory(true)}>{text.viewMore}</button>}</section>}
     {active && selection && selectionDialog}

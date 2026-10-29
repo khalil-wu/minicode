@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
+import { subscribeExtensionSettingsChanges } from "../lib/extension-settings-events";
 
 export interface ComposerPlugin {
   id: string;
@@ -18,9 +19,18 @@ export function useComposerPlugins(open: boolean, workspaceRoot: string) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
+  const request = useRef<AbortController>();
+  useEffect(() => {
+    if (!open) return;
+    return subscribeExtensionSettingsChanges("plugins", request, () => {
+      request.current?.abort();
+      setRevision(value => value + 1);
+    });
+  }, [open]);
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
+    request.current = controller;
     setPlugins([]);
     setLoading(true);
     setError("");

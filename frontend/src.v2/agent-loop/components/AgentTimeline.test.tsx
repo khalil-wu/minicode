@@ -7,9 +7,18 @@ import type { AgentLoopProcessCell } from "../projection/project-turn";
 import { AgentTimeline } from "./AgentTimeline";
 import { StatusNoticeCell } from "../../chat/cells/StatusNoticeCell";
 import { LanguageProvider } from "../../i18n";
+import { useAppStore } from "../../stores";
+import { projectMessagesToTurns } from "../../chat/chatSurfaceState";
+import { TranscriptSearchContext } from "../../chat/TranscriptSearchContext";
+import * as renderKeys from "./renderKeys";
+import type { ChatMessage, ContentBlock } from "../../stores/types";
 
-afterEach(() => { cleanup(); vi.useRealTimers(); });
-beforeEach(() => vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("prefers-reduced-motion"), addEventListener() {}, removeEventListener() {} })));
+const previousReducedMotion = useAppStore.getState().reducedMotion;
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); useAppStore.setState({ reducedMotion: previousReducedMotion }); });
+beforeEach(() => {
+  useAppStore.setState({ reducedMotion: true });
+  vi.stubGlobal("matchMedia", (query: string) => ({ matches: query.includes("prefers-reduced-motion"), addEventListener() {}, removeEventListener() {} }));
+});
 
 const renderCell = ({ cell, key, className }: { cell: AgentLoopProcessCell; key?: React.Key; className?: string }) => (
   <div key={key} className={className}>
@@ -64,6 +73,98 @@ const openExec = (id: string, command: string): AgentLoopProcessCell => ({
 });
 
 describe("AgentTimeline", () => {
+  it("does not recompute closed work groups or their hidden row keys while the visible narration streams", () => {
+    const history = Array.from({ length: 12 }, (_, group) => [
+      { ...exec(`read-${group}`, `read-${group}`), segment: group },
+      { ...exec(`check-${group}`, `check-${group}`), segment: group },
+    ]);
+    const tail = (index: number): AgentLoopProcessCell => ({ kind: "thinking", id: "stream-tail", content: `visible tail ${index}`,
+      source: "commentary", collapsible: false, isStreaming: true, createdAt: 1, segment: 20 });
+    const draw = vi.fn(renderCell);
+    const view = render(<AgentTimeline cells={[...history.flat(), tail(0)]} renderCell={draw} isRunning />);
+    const formatter = Intl.ListFormat;
+    const formats = vi.spyOn(Intl, "ListFormat").mockImplementation(function(locales, options) { return new formatter(locales, options); });
+    const keys = vi.spyOn(renderKeys, "withStableRenderKeys");
+    try {
+      draw.mockClear();
+      for (let index = 1; index <= 50; index += 1) view.rerender(<AgentTimeline cells={[...history.flat(), tail(index)]} renderCell={draw} isRunning />);
+      expect(formats).not.toHaveBeenCalled();
+      expect(keys.mock.calls.some(([cells]) => cells.some(cell => cell.kind === "exec"))).toBe(false);
+      expect(draw).toHaveBeenCalledTimes(50);
+      expect(screen.getByText("visible tail 50")).toBeTruthy();
+      const firstGroup = view.container.querySelector<HTMLElement>(".agent-loop-timeline-group-work")!;
+      fireEvent.click(firstGroup.querySelector("button")!);
+      expect(screen.getByText("read-0")).toBeTruthy();
+      expect(screen.getByText("check-0")).toBeTruthy();
+      const openBody = firstGroup.querySelector(".agent-loop-timeline-group-items");
+      draw.mockClear(); formats.mockClear();
+      view.rerender(<AgentTimeline cells={[...history.flat(), tail(51)]} renderCell={draw} isRunning />);
+      expect(draw).toHaveBeenCalledOnce();
+      expect(formats).not.toHaveBeenCalled();
+      expect(firstGroup.querySelector(".agent-loop-timeline-group-items")).toBe(openBody);
+      expect(firstGroup.querySelector("button")?.getAttribute("aria-expanded")).toBe("true");
+    } finally { formats.mockRestore(); keys.mockRestore(); }
+  });
+
+  it("updates actual stdout, renderer callbacks, search context and language without discarding group reading state", () => {
+    const first = exec("history-one", "first command");
+    const second = { ...exec("history-two", "second command"), stdoutPreview: ["old stdout"] };
+    const renderOutput = ({ cell, key }: { cell: AgentLoopProcessCell; key?: React.Key }) => <div key={key}>
+      {cell.kind === "exec" ? `${cell.command}: ${cell.stdoutPreview.join("")}` : cell.id}
+    </div>;
+    const before = vi.fn(), after = vi.fn();
+    const view = render(<LanguageProvider locale="zh-CN"><TranscriptSearchContext.Provider value={false}>
+      <AgentTimeline cells={[first, second]} renderCell={renderOutput} onHistoryStartReached={before} />
+    </TranscriptSearchContext.Provider></LanguageProvider>);
+    fireEvent.click(screen.getByRole("button", { name: "运行了命令" }));
+    const changed = { ...second, stdoutPreview: ["actual new stdout"] };
+    view.rerender(<LanguageProvider locale="zh-CN"><TranscriptSearchContext.Provider value={false}>
+      <AgentTimeline cells={[first, changed]} renderCell={renderOutput} onHistoryStartReached={after} />
+    </TranscriptSearchContext.Provider></LanguageProvider>);
+    expect(screen.getByText("second command: actual new stdout")).toBeTruthy();
+    fireEvent.wheel(view.container.querySelector(".agent-loop-timeline-group-items")!, { deltaY: -1 });
+    expect(after).toHaveBeenCalledOnce();
+    expect(before).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "运行了命令" }));
+    expect(screen.queryByText("second command: actual new stdout")).toBeNull();
+    view.rerender(<LanguageProvider locale="en-US"><TranscriptSearchContext.Provider value={true}>
+      <AgentTimeline cells={[first, changed]} renderCell={renderOutput} onHistoryStartReached={after} />
+    </TranscriptSearchContext.Provider></LanguageProvider>);
+    expect(screen.getByRole("button", { name: "Ran commands" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("second command: actual new stdout")).toBeTruthy();
+    view.rerender(<LanguageProvider locale="en-US"><TranscriptSearchContext.Provider value={true}>
+      <AgentTimeline cells={[first, changed]} renderCell={({ cell, key }) => <div key={key}>new renderer {cell.id}</div>} onHistoryStartReached={after} />
+    </TranscriptSearchContext.Provider></LanguageProvider>);
+    expect(screen.getByText("new renderer history-two")).toBeTruthy();
+  });
+
+  it("retains historical group projections through the real store text-delta path", () => {
+    const blocks: ContentBlock[] = Array.from({ length: 8 }, (_, segment): ContentBlock[] => [
+      { type: "text", itemId: `step-${segment}`, content: `Step ${segment}`, source: "commentary", status: "completed", isStreaming: false },
+      { type: "tool_call", record: { id: `file-${segment}`, name: "read_file", args: { path: `file-${segment}.ts` }, status: "success", startedAt: 1, finishedAt: 2 } },
+      { type: "tool_call", record: { id: `run-${segment}`, name: "run_command", args: { command: `inspect-${segment}` }, status: "success", startedAt: 2, finishedAt: 3 } },
+    ]).flat();
+    blocks.push({ type: "text", itemId: "live-text", content: "Current", source: "commentary", status: "in_progress", isStreaming: true });
+    const assistant: ChatMessage = { id: "timeline-assistant", role: "assistant", content: "", artifacts: [], timestamp: 1, isStreaming: true, blocks };
+    useAppStore.setState({ conversationId: "timeline-owner", isStreaming: true, conversationMessages: {}, conversationStreaming: { "timeline-owner": true },
+      sideChats: {}, messages: [assistant] });
+    const Timeline = () => {
+      const messages = useAppStore(state => state.messages);
+      const turn = projectMessagesToTurns(messages, true)[0];
+      return <AgentTimeline cells={turn.committedCells} renderCell={renderCell} isRunning />;
+    };
+    const view = render(<Timeline />);
+    expect(view.container.querySelectorAll(".agent-loop-timeline-group-work").length).toBeGreaterThan(1);
+    const formatter = Intl.ListFormat;
+    const formats = vi.spyOn(Intl, "ListFormat").mockImplementation(function(locales, options) { return new formatter(locales, options); });
+    try {
+      for (let index = 0; index < 25; index += 1) act(() => useAppStore.getState().appendAgentMessageDelta("live-text", " word", "timeline-owner", "timeline-assistant", "commentary"));
+      expect(formats).not.toHaveBeenCalled();
+      expect(screen.getByText(`Current${" word".repeat(25)}`)).toBeTruthy();
+      expect(useAppStore.getState().messages[0].blocks).toHaveLength(blocks.length);
+    } finally { formats.mockRestore(); }
+  });
+
   it("keeps a completed screenshot group collapsed when narration moves to the next step", () => {
     const screenshot: AgentLoopProcessCell = { kind: "activity", id: "closed-capture", activityKind: "browser", title: "截图",
       status: "done", collapsed: true, startedAt: 1, segment: 2, segmentClosed: true,
@@ -382,7 +483,7 @@ describe("AgentTimeline", () => {
     expect(container.querySelectorAll(".agent-loop-process-cell")).toHaveLength(2);
   });
 
-  it("keeps completed reasoning summaries while hiding completed raw reasoning", () => {
+  it("hides completed reasoning summaries from the ordinary process stack", () => {
     const raw: AgentLoopProcessCell = {
       kind: "thinking",
       id: "raw-reasoning",
@@ -405,6 +506,20 @@ describe("AgentTimeline", () => {
     render(<AgentTimeline cells={[raw, summary]} renderCell={renderCell} />);
 
     expect(screen.queryByText("Temporary detailed reasoning")).toBeNull();
+    expect(screen.queryByText("已核对提交链路并定位重复请求。")).toBeNull();
+  });
+
+  it("shows completed reasoning summaries when the transcript is explicitly expanded", () => {
+    const summary: AgentLoopProcessCell = {
+      kind: "thinking",
+      id: "reasoning-summary-expanded",
+      content: "已核对提交链路并定位重复请求。",
+      source: "provider",
+      providerReasoningType: "reasoning_summary_text",
+      isStreaming: false,
+      createdAt: 2,
+    };
+    render(<AgentTimeline cells={[summary]} renderCell={renderCell} showAllOpenWork />);
     expect(screen.getByText("已核对提交链路并定位重复请求。")).toBeTruthy();
   });
 

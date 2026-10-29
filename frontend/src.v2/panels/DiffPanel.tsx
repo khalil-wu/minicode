@@ -11,7 +11,7 @@ import { useAppStore } from "../stores";
 import { fileIcon } from "../lib/file-icons";
 import { buildApprovalResponseCommand } from "../protocol/prompt-responses";
 import { useColorizedLines, extractFilePathFromDiff, guessLanguageFromPath } from "../lib/monaco-colorize";
-import { buildReviewHistory, type HistoryDiffTurn } from "../lib/review-history";
+import { buildReviewHistory, createReviewTranscriptSelector, type HistoryDiffTurn } from "../lib/review-history";
 import { EmptyState } from "../components/EmptyState";
 import { diffFileDecisionForPath, diffFilePathsEqual } from "../chat/diffReviewState";
 import { returnToBrowserPage } from "../chat/openWebInBrowser";
@@ -38,8 +38,9 @@ import { ChangesFileActions } from "../chat/diff/ChangesFileActions";
 import { ChangesBranchComparison } from "../chat/diff/ChangesBranchComparison";
 import { DiffFileContextMenu, useDiffRequestChanges } from "../chat/diff/DiffFileContextMenu";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { useDesktopPreferenceTargets } from "../hooks/useDesktopPreferenceTargets";
 import { openPreferredFile, preferredFileTargetForWorkspace } from "../lib/open-preferred-target";
-import { runtime, type DesktopPreferences } from "../desktop/runtime";
+import { runtime, type DesktopPreferences, type DesktopPreferenceTargets } from "../desktop/runtime";
 import { buildFullDiffContext, type FullDiffContext } from "../chat/diff/full-content-metadata";
 import { useGitDiffContents } from "../chat/diff/use-git-diff-contents";
 import { diffPreviewKind, GitDiffMediaPreview } from "../chat/diff/GitDiffMediaPreview";
@@ -59,6 +60,7 @@ import "./CodeReviewComments.css";
 import type { CodeReviewComment } from "../lib/code-comment";
 import { useDiffPalette } from "../lib/use-diff-palette";
 import { diffPaletteStyle } from "../lib/diff-palette";
+import { changesWorkbenchOwner, consumeStandaloneChangesRequest, draftChangesReviewRequest, standaloneChangesRequestPending, standaloneChangesRoute } from "../lib/changes-panel";
 
 type DiffViewMode = "unified" | "split" | "auto";
 type ChangeScope = "review" | "history" | "git";
@@ -126,7 +128,7 @@ interface ChangesNavigationState {
   visiblePath?: string;
 }
 const ChangesNavigationContext = createContext<ChangesNavigationState | null>(null);
-const DiffOpenPreferencesContext = createContext<DesktopPreferences | null>(null);
+const DiffOpenPreferencesContext = createContext<{ preferences: DesktopPreferences | null; targets: DesktopPreferenceTargets | null }>({ preferences: null, targets: null });
 const FileWorkspaceReviewContext = createContext<{ owner: WorkspaceFileOwner; root: string } | null>(null);
 const NO_CHANGE_FILES: GitChangeFile[] = [];
 const sourceLabels = {
@@ -138,13 +140,25 @@ export const DiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {}) =>
   const request = useAppStore(state => state.gitReviewRequest);
   const conversationId = useAppStore(state => state.conversationId);
   const workspaceRoot = useAppStore(state => state.workingDirectory);
+  const draftId = useAppStore(state => state.activeConversationDraftId);
+  const workbenchOwner = changesWorkbenchOwner(conversationId, draftId, workspaceRoot);
+  const draftRequest = useMemo(() => {
+    const project = conversationId ? null : draftChangesReviewRequest(draftId, workspaceRoot);
+    // The Git file list also opens a real source/path request, without a fileOwner.
+    return project && request?.conversationId === null && !request.fileOwner && workspaceRootsEqual(request.workspaceRoot, workspaceRoot)
+      ? { ...project, ...request, fileOwner: project.fileOwner,
+          source: request.source ?? (request.section === "staged" ? "staged" as const : "unstaged" as const) }
+      : project;
+  }, [conversationId, draftId, workspaceRoot, request]);
   if (request?.fileOwner && request.conversationId === conversationId) {
     const owner = request.fileOwner;
     if (!owner.conversationId || owner.conversationId !== conversationId || !workspaceRootsEqual(request.workspaceRoot, workspaceRoot)) {
-      return <FileWorkspaceChanges key={JSON.stringify([owner.scopeId, owner.conversationId, owner.executionCwd, request.workspaceRoot])}
-        owner={owner} request={request} readerOwnerId={readerOwnerId} />;
+      return <FileWorkspaceChanges key={standaloneChangesRoute(workbenchOwner, owner, request.workspaceRoot)}
+        owner={owner} request={request} workbenchOwner={workbenchOwner} readerOwnerId={readerOwnerId} />;
     }
   }
+  if (draftRequest) return <FileWorkspaceChanges key={standaloneChangesRoute(workbenchOwner, draftRequest.fileOwner, workspaceRoot)}
+    owner={draftRequest.fileOwner} request={draftRequest} workbenchOwner={workbenchOwner} readerOwnerId={readerOwnerId} />;
   return <ConversationDiffPanel readerOwnerId={readerOwnerId} />;
 };
 
@@ -155,7 +169,9 @@ const ConversationDiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {
   const { t: tr, locale } = useI18n();
   const { palette, variant } = useDiffPalette();
   const { preferences } = useDesktopPreferences();
-  const messages = useAppStore(s => s.messages);
+  const { targets } = useDesktopPreferenceTargets();
+  const selectReviewTranscript = useMemo(() => createReviewTranscriptSelector(), []);
+  const { historyMessages, commentMessages, latestReviewInput } = useAppStore(s => selectReviewTranscript(s.messages));
   const diffReview = useAppStore(s => s.diffReview);
   const gitChanges = useAppStore(s => s.gitChanges);
   const conversationId = useAppStore(s => s.conversationId);
@@ -165,9 +181,8 @@ const ConversationDiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {
   const turnDiff = useAppStore(s => s.conversationId ? s.turnDiffs[s.conversationId] : undefined);
   const gitReviewRequest = useAppStore(s => s.gitReviewRequest);
   const requestGitComparison = useAppStore(s => s.requestGitComparison);
-  const latestReviewInput = [...messages].reverse().find(message => message.role === "user" && message.codeReview);
-  const modelComments = useMemo(() => codeReviewComments(messages, diffReview?.workspaceRoot ?? ""), [messages, diffReview?.workspaceRoot]);
-  const displayedReview = diffReview?.codeReview ? { ...diffReview, modelComments } : diffReview;
+  const modelComments = useMemo(() => codeReviewComments(commentMessages, diffReview?.workspaceRoot ?? ""), [commentMessages, diffReview?.workspaceRoot]);
+  const displayedReview = useMemo(() => diffReview?.codeReview ? { ...diffReview, modelComments } : diffReview, [diffReview, modelComments]);
   const [reviewSelection, setReviewSelection] = useGitReviewSelection(conversationId ?? "", workspaceRoot);
   const selection: GitReviewSelection = { ...reviewSelection, source: reviewSelection.source === "last-turn" ? "branch" : reviewSelection.source };
   const setSelection = (value: GitReviewSelection | ((current: GitReviewSelection) => GitReviewSelection)) =>
@@ -236,7 +251,7 @@ const ConversationDiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {
       }); });
     return () => { active = false; };
   }, [conversationId, latestReviewInput?.id, diffReview?.requestId]);
-  const historySources = useMemo(() => buildReviewHistory(messages, turnDiff, conversationId ?? undefined), [messages, turnDiff, conversationId]);
+  const historySources = useMemo(() => buildReviewHistory(historyMessages, turnDiff, conversationId ?? undefined), [historyMessages, turnDiff, conversationId]);
   const historyTurn = historySources[0];
   const visibleScope = activeScope === "review" && !diffReview ? "git" : activeScope;
   const comparison = gitChanges.comparison?.source === selection.source
@@ -314,7 +329,7 @@ const ConversationDiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {
   const selectedCommit = visibleScope === "git" && selection.source === "commit" ? options?.commits.find(commit => commit.sha === selection.commitSha) : undefined;
   const allExpanded = expansion.state.expanded;
   return <DiffReaderOwnerContext.Provider value={readerId}>
-    <DiffOpenPreferencesContext.Provider value={preferences}>
+    <DiffOpenPreferencesContext.Provider value={{ preferences, targets }}>
     <ChangesNavigationContext.Provider value={{ openPaths, setFileOpen: expansion.setFileOpen, jump, onActivate: setActivePath, visiblePath: singleFile ? activeFilePath ?? undefined : undefined }}>
     <div ref={root} className="mc-diff-panel h-full flex flex-col min-h-0" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)}>
       <div className="mc-diff-toolbar flex items-center gap-2 px-2 shrink-0" style={diffToolbarStyle}>
@@ -390,20 +405,27 @@ const ConversationDiffPanel = ({ readerOwnerId }: { readerOwnerId?: string } = {
   </DiffReaderOwnerContext.Provider>;
 };
 
-const FileWorkspaceChanges = ({ owner, request, readerOwnerId }: { owner: WorkspaceFileOwner; request: GitReviewRequest; readerOwnerId?: string }) => {
+const FileWorkspaceChanges = ({ owner, request, workbenchOwner, readerOwnerId }: { owner: WorkspaceFileOwner; request: GitReviewRequest; workbenchOwner: string; readerOwnerId?: string }) => {
   const comparisonRoot = request.workspaceRoot;
   const { t: tr, locale } = useI18n();
   const { palette, variant } = useDiffPalette();
   const { preferences } = useDesktopPreferences();
-  const connected = useAppStore(state => state.isConnected);
+  const { targets } = useDesktopPreferenceTargets();
+  const connected = useAppStore(state => state.isConnected && !state.pendingConversationSwitchId && !state.pendingConversationCreateId);
   const version = useAppStore(state => state.fileTreeVersion);
   const localReaderId = useId();
   const readerId = readerOwnerId ?? localReaderId;
   useEffect(() => () => { if (readerOwnerId === undefined) clearDiffReaderDrafts(readerId); }, [readerOwnerId, readerId]);
-  const [selection, setSelection] = useState<GitReviewSelection>(() => ({ source: request.source ?? "uncommitted", baseBranch: request.baseBranch }));
+  const route = standaloneChangesRoute(workbenchOwner, owner, comparisonRoot);
+  const [savedSelection, updateSelection] = useGitReviewSelection(route, comparisonRoot);
+  const requestedSelection = standaloneChangesRequestPending(route, request.id) && (request.source !== undefined || request.baseBranch !== undefined);
+  const selection: GitReviewSelection = requestedSelection ? { source: request.source ?? "uncommitted", baseBranch: request.baseBranch }
+    : { ...savedSelection, source: savedSelection.source === "last-turn" ? "branch" : savedSelection.source };
+  const setSelection = (next: GitReviewSelection | ((current: GitReviewSelection) => GitReviewSelection), explicitSource = false) =>
+    updateSelection(typeof next === "function" ? next(selection) : next, explicitSource);
   const [refresh, setRefresh] = useState(0);
   const [optionsState, setOptionsState] = useState<{ key: string; data?: GitReviewOptions; error?: string }>();
-  const optionsKey = JSON.stringify([selection.baseBranch, refresh, version]);
+  const optionsKey = JSON.stringify([route, selection.baseBranch, refresh, version]);
   const options = optionsState?.key === optionsKey ? optionsState.data : undefined;
   useEffect(() => {
     if (!connected) return;
@@ -415,7 +437,7 @@ const FileWorkspaceChanges = ({ owner, request, readerOwnerId }: { owner: Worksp
   }, [owner, connected, optionsKey]);
   const [hideWhitespace] = useDiffViewPreference("hideWhitespace");
   const [comparisonState, setComparisonState] = useState<{ key: string; data?: FileWorkspaceComparison; error?: string }>();
-  const comparisonKey = JSON.stringify([selection, refresh, version, hideWhitespace]);
+  const comparisonKey = JSON.stringify([route, selection, refresh, version, hideWhitespace]);
   const comparison = comparisonState?.key === comparisonKey ? comparisonState.data : undefined;
   const comparisonError = comparisonState?.key === comparisonKey ? comparisonState.error : undefined;
   const loading = connected && !comparison && !comparisonError && !(selection.source === "commit" && !selection.commitSha);
@@ -427,16 +449,18 @@ const FileWorkspaceChanges = ({ owner, request, readerOwnerId }: { owner: Worksp
     }, error => { if (!operation.signal.aborted) setComparisonState({ key: comparisonKey, error: error.message }); });
     return () => operation.abort();
   }, [owner, connected, comparisonKey]);
-  const expansion = useReviewExpansion(`files:${JSON.stringify([owner.scopeId, owner.conversationId, owner.executionCwd, comparisonRoot])}`);
-  const [jump, setJump] = useState<{ path: string; nonce: number } | null>(null);
+  const expansion = useReviewExpansion(route);
+  const [jump, setJump] = useState<{ path: string; nonce: number } | null>(() =>
+    expansion.state.activePath ? { path: expansion.state.activePath, nonce: 0 } : null);
   const jumpToFile = (path: string) => {
     expansion.setFileOpen(path, true); expansion.setActivePath(path);
     setJump(value => ({ path, nonce: (value?.nonce ?? 0) + 1 }));
   };
   useEffect(() => {
-    setSelection({ source: request.source ?? "uncommitted", baseBranch: request.baseBranch });
+    if (!consumeStandaloneChangesRequest(route, request.id)) return;
+    setSelection(selection);
     if (request.path) jumpToFile(request.path);
-  }, [request.id]);
+  }, [route, request.id]);
   const files = comparison?.files ?? NO_CHANGE_FILES;
   const totals = files.reduce((total, file) => ({ plus: total.plus + file.additions, minus: total.minus + file.deletions }), { plus: 0, minus: 0 });
   const openPaths = new Set(files.filter(file => expansion.state.overrides.get(file.path)
@@ -463,9 +487,9 @@ const FileWorkspaceChanges = ({ owner, request, readerOwnerId }: { owner: Worksp
     const observer = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width));
     observer.observe(root.current!); return () => observer.disconnect();
   }, []);
-  const chooseSource = (source: GitDiffSource, commitSha?: string) => setSelection(current => ({ ...current, source, commitSha }));
+  const chooseSource = (source: GitDiffSource, commitSha?: string) => setSelection(current => ({ ...current, source, commitSha }), true);
   const selectedCommit = selection.source === "commit" ? options?.commits.find(commit => commit.sha === selection.commitSha) : undefined;
-  return <DiffReaderOwnerContext.Provider value={readerId}><DiffOpenPreferencesContext.Provider value={preferences}>
+  return <DiffReaderOwnerContext.Provider value={readerId}><DiffOpenPreferencesContext.Provider value={{ preferences, targets }}>
     <FileWorkspaceReviewContext.Provider value={{ owner, root: comparisonRoot }}>
     <ChangesNavigationContext.Provider value={{ openPaths, setFileOpen: expansion.setFileOpen, jump, onActivate: expansion.setActivePath, visiblePath: singleFile ? activePath : undefined }}>
     <div ref={root} className="mc-diff-panel h-full flex flex-col min-h-0" data-diff-palette={palette ? "textmate" : "native"} style={diffPaletteStyle(palette, variant)}>
@@ -705,12 +729,6 @@ const UnifiedDiffBody = ({ lines, comments, filePath, workspaceRoot, annotations
           <div
             className="mc-diff-code-content px-2.5 whitespace-pre-wrap break-words relative"
             style={{
-              borderLeft:
-                line.kind === "add"
-                  ? "2px solid var(--diff-added-foreground)"
-                  : line.kind === "del"
-                    ? "2px solid var(--diff-removed-foreground)"
-                    : "2px solid transparent",
               color: !colorized?.[colorIndex] ? colorForKind(line.kind) : undefined,
             }}
           >
@@ -1018,9 +1036,9 @@ const firstChangedLine = (lines: DiffLine[], deleted = false): number =>
   lines.find(line => deleted ? line.kind === "del" : line.kind === "add")?.[deleted ? "oldLine" : "newLine"] ?? 1;
 
 const useExternalEditor = (path: string, workspaceRoot: string | undefined) => {
-  const preferences = useContext(DiffOpenPreferencesContext);
+  const { preferences, targets } = useContext(DiffOpenPreferencesContext);
   const preferred = preferences && preferredFileTargetForWorkspace(preferences, workspaceRoot ?? useAppStore.getState().workingDirectory);
-  const editor = preferences?.fileOpenTargets.find(target => target.id === preferred && target.id !== "minicode" && target.kind === "editor");
+  const editor = targets?.fileOpenTargets.find(target => target.id === preferred && target.id !== "minicode" && target.kind === "editor");
   return editor && !runtime()?.remoteHost && workspaceRoot !== ""
     ? (line: number) => void openPreferredFile(path, workspaceRoot, line, undefined, { targetId: editor.id }) : undefined;
 };
@@ -1045,7 +1063,7 @@ const DiffFileSection = ({ path, oldPath, additions, deletions, open, onToggle, 
   const contentId = useId();
   const currentWorkspace = useAppStore(state => state.workingDirectory);
   const fileReview = useContext(FileWorkspaceReviewContext);
-  const preferences = useContext(DiffOpenPreferencesContext);
+  const { preferences } = useContext(DiffOpenPreferencesContext);
   const sectionRef = useRef<HTMLElement>(null);
   const navigation = useContext(ChangesNavigationContext);
   const contentRef = useRef<HTMLDivElement>(null);

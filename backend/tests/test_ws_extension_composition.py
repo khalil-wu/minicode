@@ -203,6 +203,8 @@ def test_ws_run_injects_the_conversation_owned_lifecycle_runtime(
         conversation_id: str,
         workspace_root: Path | None,
         tool_registry: Any,
+        config: Any = None,
+        skill_manager: Any = None,
     ):
         captured["conversation_id"] = conversation_id
         captured["workspace_root"] = workspace_root
@@ -323,5 +325,51 @@ def test_extension_candidate_cannot_publish_after_session_shutdown(
         assert registry.get_tool("project_echo") is None
         assert getattr(host, "_extension_runtime_states", {}) == {}
 
+    asyncio.run(scenario())
+    clear_extension_cache()
+
+
+def test_unchanged_extension_generation_does_not_reload_history_but_replacement_binds_full_snapshot(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    clear_extension_cache()
+    _isolate_user_extension_roots(monkeypatch, tmp_path)
+    monkeypatch.setattr("backend.ws.agent_runner.is_workspace_trusted", lambda root: True)
+    host = _Session(tmp_path, [])
+    registry = ToolRegistry()
+    replacement_registry = ToolRegistry()
+    create_registry = Mock(return_value=replacement_registry)
+    monkeypatch.setattr("backend.api._state.bootstrap", SimpleNamespace(create_tool_registry=create_registry))
+    # This host fixes its selected model; production owns its projection through
+    # SessionCommandHandlersMixin, outside the generation/history boundary.
+    host.refresh_llm_selection = Mock()
+    full_read = host.conversation_repo.get_conversation
+    bind = host._bind_lifecycle_runtime_command_snapshot
+    bindings = []
+
+    def capture_bind(runner, **kwargs):
+        assert host._extension_runtime_state("conv_runnerdone")["lock"].locked()
+        bindings.append(kwargs["conversation"].context_snapshot)
+        return bind(runner, **kwargs)
+
+    monkeypatch.setattr(host, "_bind_lifecycle_runtime_command_snapshot", capture_bind)
+
+    async def scenario():
+        try:
+            first = await host._ensure_lifecycle_runtime(conversation_id="conv_runnerdone", workspace_root=tmp_path, tool_registry=registry)
+            assert first is not None
+            blocked_read = Mock(side_effect=AssertionError("Unchanged generation must not read the transcript"))
+            monkeypatch.setattr(host.conversation_repo, "get_conversation", blocked_read)
+            assert await host._ensure_lifecycle_runtime(conversation_id="conv_runnerdone", workspace_root=tmp_path, tool_registry=registry) is first
+            blocked_read.assert_not_called()
+            monkeypatch.setattr(host.conversation_repo, "get_conversation", full_read)
+            host.conversation_repo.save_context_snapshot("conv_runnerdone", {"history": [], "latest_owner_marker": "replacement"})
+            replacement = await host._ensure_lifecycle_runtime(conversation_id="conv_runnerdone", workspace_root=tmp_path, tool_registry=registry, force_reload=True)
+            assert replacement is not None and replacement is not first
+            assert bindings[-1]["latest_owner_marker"] == "replacement"
+            create_registry.assert_called_once()
+            assert replacement._tool_registry is replacement_registry
+        finally:
+            await host._shutdown_lifecycle_runtimes("snapshot_reuse_test")
     asyncio.run(scenario())
     clear_extension_cache()

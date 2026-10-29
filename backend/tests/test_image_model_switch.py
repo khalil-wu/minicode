@@ -26,6 +26,7 @@ def test_model_selection_finishes_before_following_image_message(command_type):
         models = []
         session = SimpleNamespace(
             selected_model="text-only", connection_generation=1, ws_manager=None,
+            session_id="image-order", active_conversation_id="image-owner",
             conversation_lifecycle_lock=lambda: lock,
             event_outbox=SimpleNamespace(bind_connection_generation=lambda _: nullcontext()),
             send_event=AsyncMock(),

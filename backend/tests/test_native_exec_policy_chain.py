@@ -69,13 +69,13 @@ def setup(tmp_path, *, approval_policy="untrusted", rules="", ignored=False, mod
         registry=registry, tool=tool, context=context, checker=checker, events=events)
 
 
-def authorize(host, *, ident="exec-call", command='Write-Output "SOURCE_NATIVE_COMMAND"', prefix=None, **args):
+async def authorize(host, *, ident="exec-call", command='Write-Output "SOURCE_NATIVE_COMMAND"', prefix=None, **args):
     arguments = {"command": command, "login": False, **args}
     if prefix is not None:
         arguments["prefix_rule"] = prefix
     call = ToolCallEvent(id=ident, name="run_command", arguments=arguments)
-    result = _authorize_final_tool_request(call, tool_registry=host.registry, permission_checker=host.checker,
-        permission_context=host.context.permission, tool_ctx=host.context)
+    result = (await _authorize_final_tool_request(call, tool_registry=host.registry, permission_checker=host.checker,
+        permission_context=host.context.permission, tool_ctx=host.context))
     assert not result.error, result.error
     _bind_final_tool_request(call, result.request)
     return call, result
@@ -135,9 +135,10 @@ def test_requirements_use_original_native_producer_and_higher_layer_replaces_com
             {"pattern": [{"token": "git"}], "decision": "forbidden"}]}}), RequirementsLayerEntry(source, {"rules": {}})])
 
 
-def test_final_digest_binds_both_source_policy_and_actual_execution_argv(tmp_path):
+@pytest.mark.asyncio
+async def test_final_digest_binds_both_source_policy_and_actual_execution_argv(tmp_path):
     host = setup(tmp_path)
-    _, auth = authorize(host, prefix=["Write-Output"])
+    _, auth = (await authorize(host, prefix=["Write-Output"]))
     request = auth.request
     native = request.exec_policy
     assert request.digest == native.command.execution_digest
@@ -147,28 +148,30 @@ def test_final_digest_binds_both_source_policy_and_actual_execution_argv(tmp_pat
     assert native.command.argv[0] == native.command.policy_argv[0]
     assert "SOURCE_NATIVE_COMMAND" in native.command.argv[-1]
     assert native.parsed_commands == (("Write-Output", "SOURCE_NATIVE_COMMAND"),)
-    _, other = authorize(host, ident="second", command='Write-Output "DIFFERENT"', prefix=["Write-Output"])
+    _, other = (await authorize(host, ident="second", command='Write-Output "DIFFERENT"', prefix=["Write-Output"]))
     assert other.request.digest != request.digest
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("ignored,specialty", [(True, None), (False, "cyber")])
-def test_admitted_model_filter_controls_actual_requirement_and_same_permission_prompt(tmp_path, ignored, specialty):
+async def test_admitted_model_filter_controls_actual_requirement_and_same_permission_prompt(tmp_path, ignored, specialty):
     host = setup(tmp_path, rules='prefix_rule(pattern=["Write-Output"], decision="allow")', ignored=ignored, model_specialty=specialty)
-    _, auth = authorize(host, prefix=["Write-Output"])
+    _, auth = (await authorize(host, prefix=["Write-Output"]))
     assert auth.request.exec_policy.kind == "needs_approval"
     assert auth.request.exec_policy.proposed_amendment is None
     assert "Approved command prefixes" not in permission_instructions(host.context)
 
 
-def test_safe_skip_is_not_promoted_by_required_on_models_but_strict_review_is(tmp_path):
+@pytest.mark.asyncio
+async def test_safe_skip_is_not_promoted_by_required_on_models_but_strict_review_is(tmp_path):
     host = setup(tmp_path, approval_policy="on-request")
     host.snapshot.config.config_layer_stack.requirements.raw["auto_review"] = {"required_on_models": [host.snapshot.model]}
-    _, auth = authorize(host)
+    _, auth = (await authorize(host))
     assert auth.permission_decision.permission_level == PermissionLevel.AUTO
     granted = normalize_permission_profile({"network": {"enabled": True}}, cwd=host.workspace)
     host.context.permission_grants.record(PermissionGrantResponse(granted, "turn", True),
         host.context.environment_id, host.context.turn_id)
-    _, strict = authorize(host, ident="strict")
+    _, strict = (await authorize(host, ident="strict"))
     assert strict.permission_decision.permission_level == PermissionLevel.CONFIRM
     assert strict.permission_decision.matched_rule == "strict_auto_review"
 
@@ -179,7 +182,7 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
     from backend.ws.turn_wait_state import TurnWaitState
     host = setup(tmp_path)
     command, prefix = output_command("SOURCE_NATIVE_COMMAND")
-    call, auth = authorize(host, command=command, prefix=prefix, justification="SOURCE_NATIVE_PUBLIC_REASON")
+    call, auth = (await authorize(host, command=command, prefix=prefix, justification="SOURCE_NATIVE_PUBLIC_REASON"))
     builder = ContextBuilder()
     builder.bind_tool_context(host.context)
     runtime = SessionApprovalRuntimeMixin()
@@ -222,7 +225,7 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
     assert host.owner.inspect_for_model(host.snapshot)["allowed_prefixes"] == [prefix]
     host.context.permission = replace(host.context.permission, approval_policy="on-request")
     assert json.dumps(prefix, ensure_ascii=False) in permission_instructions(host.context)
-    _, second = authorize(host, ident="next", command=command)
+    _, second = (await authorize(host, ident="next", command=command))
     assert second.permission_decision.permission_level == PermissionLevel.AUTO
     assert second.request.exec_policy.bypass_sandbox is True
     cold = ExecPolicyOwner(home=host.home, stack=host.stack)
@@ -233,7 +236,7 @@ async def test_real_serial_approval_persists_original_array_then_executes_and_ne
 async def test_failed_real_amendment_write_warns_without_reuse_and_still_allows_approved_call(tmp_path):
     host = setup(tmp_path)
     command, prefix = output_command("SOURCE_NATIVE_COMMAND")
-    call, auth = authorize(host, command=command, prefix=prefix)
+    call, auth = (await authorize(host, command=command, prefix=prefix))
     (host.home / "rules").write_text("preserved blocking file", encoding="utf-8")
     builder = ContextBuilder()
     builder.bind_tool_context(host.context)
@@ -256,7 +259,7 @@ async def test_failed_real_amendment_write_warns_without_reuse_and_still_allows_
 @pytest.mark.asyncio
 async def test_an_approval_cannot_replace_the_source_proposed_prefix_or_execute_the_changed_grant(tmp_path):
     host = setup(tmp_path)
-    call, auth = authorize(host, command='Set-Content -LiteralPath denied-native-marker.txt -Value "not approved"', prefix=["Set-Content"])
+    call, auth = (await authorize(host, command='Set-Content -LiteralPath denied-native-marker.txt -Value "not approved"', prefix=["Set-Content"]))
     builder = ContextBuilder()
     builder.bind_tool_context(host.context)
     async def forged(call_id):
@@ -275,7 +278,7 @@ async def test_an_approval_cannot_replace_the_source_proposed_prefix_or_execute_
 async def test_changed_discovery_after_approval_cannot_replace_frozen_shell_or_argv(tmp_path, monkeypatch):
     host = setup(tmp_path, approval_policy="on-request")
     command, _ = output_command("SOURCE_NATIVE_COMMAND")
-    call, auth = authorize(host, command=command)
+    call, auth = (await authorize(host, command=command))
     def changed(*args, **kwargs):
         raise AssertionError("Shell must not be discovered again after final request capture")
     monkeypatch.setattr("backend.tools.command_tool.command_shell_argv", changed)
@@ -284,9 +287,10 @@ async def test_changed_discovery_after_approval_cannot_replace_frozen_shell_or_a
     assert "SOURCE_NATIVE_COMMAND" in result.content
 
 
-def test_allow_prefix_does_not_remove_denied_read_restrictions(tmp_path):
+@pytest.mark.asyncio
+async def test_allow_prefix_does_not_remove_denied_read_restrictions(tmp_path):
     host = setup(tmp_path, rules='prefix_rule(pattern=["Write-Output"], decision="allow")')
-    _, auth = authorize(host)
+    _, auth = (await authorize(host))
     native = auth.request.exec_policy
     restricted = replace(native, command=replace(native.command, denied_reads=True))
     assert restricted.first_attempt_override(already_approved=True) == "no_override"
@@ -306,33 +310,36 @@ def test_catalog_permission_text_preserves_literal_empty_and_does_not_append_bun
     assert "untrusted" not in text
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ["turn", "session"])
-def test_real_sticky_grant_allows_preapproved_additional_under_never_without_new_approval(tmp_path, scope):
+async def test_real_sticky_grant_allows_preapproved_additional_under_never_without_new_approval(tmp_path, scope):
     host = setup(tmp_path, approval_policy="never")
     granted = normalize_permission_profile({"network": {"enabled": True}}, cwd=host.workspace)
     host.context.permission_grants.record(PermissionGrantResponse(granted, scope), host.context.environment_id, host.context.turn_id)
-    _, auth = authorize(host, sandbox_permissions="with_additional_permissions", additional_permissions={"network": {"enabled": True}})
+    _, auth = (await authorize(host, sandbox_permissions="with_additional_permissions", additional_permissions={"network": {"enabled": True}}))
     native = auth.request.exec_policy
     assert native.kind == "skip"
     assert native.command.sandbox_permissions == "use_default"
     assert native.available_decisions() == ["approved", "abort"]
 
 
-def test_unapproved_additional_and_explicit_escalation_cannot_bypass_never(tmp_path):
+@pytest.mark.asyncio
+async def test_unapproved_additional_and_explicit_escalation_cannot_bypass_never(tmp_path):
     host = setup(tmp_path, approval_policy="never")
     for args in ({"sandbox_permissions": "require_escalated"},
         {"sandbox_permissions": "with_additional_permissions", "additional_permissions": {"network": {"enabled": True}}}):
         call = ToolCallEvent(id="unapproved", name="run_command", arguments={"command": "Write-Output rejected", **args})
-        auth = _authorize_final_tool_request(call, tool_registry=host.registry, permission_checker=host.checker,
-            permission_context=host.context.permission, tool_ctx=host.context)
+        auth = (await _authorize_final_tool_request(call, tool_registry=host.registry, permission_checker=host.checker,
+            permission_context=host.context.permission, tool_ctx=host.context))
         assert "cannot ask for escalated permissions" in auth.error
 
 
-def test_implicit_existing_grant_keeps_additional_only_available_decisions(tmp_path):
+@pytest.mark.asyncio
+async def test_implicit_existing_grant_keeps_additional_only_available_decisions(tmp_path):
     host = setup(tmp_path)
     grant = normalize_permission_profile({"network": {"enabled": True}}, cwd=host.workspace)
     host.context.permission_grants.record(PermissionGrantResponse(grant, "turn"), host.context.environment_id, host.context.turn_id)
-    _, auth = authorize(host, prefix=["Write-Output"])
+    _, auth = (await authorize(host, prefix=["Write-Output"]))
     assert auth.request.exec_policy.proposed_amendment == ("Write-Output",)
     assert auth.request.exec_policy.available_decisions() == ["approved", "abort"]
 
@@ -342,7 +349,7 @@ async def test_original_ws_waiter_accepts_only_frozen_available_native_decisions
     from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
     from backend.ws.turn_wait_state import TurnWaitState
     host = setup(tmp_path)
-    _, auth = authorize(host, prefix=["Write-Output"])
+    _, auth = (await authorize(host, prefix=["Write-Output"]))
     runtime = SessionApprovalRuntimeMixin()
     runtime.turn_wait_state = TurnWaitState()
     runtime.approval_diff_cache = {}
@@ -372,7 +379,7 @@ async def test_native_abort_interrupts_original_turn_before_command_execution(tm
     host.context.cancel_event = asyncio.Event()
     cancelled = []
     host.context.run_context.record_user_cancelled = cancelled.append
-    call, auth = authorize(host, command='Set-Content -LiteralPath aborted-native-marker.txt -Value "not approved"')
+    call, auth = (await authorize(host, command='Set-Content -LiteralPath aborted-native-marker.txt -Value "not approved"'))
     builder = ContextBuilder()
     builder.bind_tool_context(host.context)
     async def abort(call_id):

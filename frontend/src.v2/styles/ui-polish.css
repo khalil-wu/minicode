@@ -232,9 +232,9 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .mc-sidebar-action[data-active="true"] {
-  background: var(--surface-active) !important;
+  background: var(--surface-selected) !important;
   color: var(--text-primary) !important;
-  font-weight: var(--fw-semibold) !important;
+  font-weight: var(--fw-regular) !important;
   box-shadow: none !important;
 }
 
@@ -307,7 +307,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 /* Active session stays neutral so the task list reads as one flat surface. */
 :is(.mc-sidebar-left, .mc-pinned-drag-overlay, .mc-sidebar-sort-overlay) .session-row-hover[data-active] {
   border-color: transparent !important;
-  background: var(--workbench-active) !important;
+  background: var(--surface-selected) !important;
   box-shadow: none !important;
 }
 
@@ -471,7 +471,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   padding: 10px 16px !important;
   border: 0 !important;
   border-radius: 22px !important;
-  background: var(--workbench-tool) !important;
+  background: var(--surface-selected) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
 }
@@ -897,7 +897,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .settings-center-tab[aria-current="page"] {
   border-color: transparent !important;
-  background: var(--workbench-active) !important;
+  background: var(--surface-selected) !important;
   box-shadow: none !important;
   animation: none;
 }

@@ -37,6 +37,8 @@ from backend.ws.handlers import conversation as conversation_handlers
 
 
 class MCPPeer:
+    tool_catalog_cacheable = True
+
     def __init__(self, endpoint: str, tools: list[MCPToolDef] | None = None):
         self.endpoint = endpoint
         self.instructions = f"instructions for {endpoint}"

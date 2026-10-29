@@ -17,24 +17,27 @@ class WindowsProcessJob:
         self.closed = False
 
     def attach_suspended(self, process) -> None:
-        import psutil
+        import ctypes
+        from ctypes import wintypes
         import win32api
         import win32con
         import win32job
-        import win32process
 
-        handle = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, process.pid)
+        handle = win32api.OpenProcess(
+            win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE | win32con.PROCESS_SUSPEND_RESUME,
+            False, process.pid)
         try:
             win32job.AssignProcessToJobObject(self.job, handle)
             self.pid = process.pid
-            # CREATE_SUSPENDED gives the original process one primary thread;
-            # no workload code or descendant can run before this assignment.
-            primary = psutil.Process(process.pid).threads()[0].id
-            thread = win32api.OpenThread(win32con.THREAD_SUSPEND_RESUME, False, primary)
-            try:
-                win32process.ResumeThread(thread)
-            finally:
-                thread.Close()
+            # Resume the captured process after containment, without a system-wide thread scan.
+            ntdll = ctypes.WinDLL("ntdll")
+            resume = ntdll.NtResumeProcess
+            resume.argtypes, resume.restype = [wintypes.HANDLE], wintypes.LONG
+            status = resume(int(handle))
+            if status < 0:
+                convert = ntdll.RtlNtStatusToDosError
+                convert.argtypes, convert.restype = [wintypes.LONG], wintypes.ULONG
+                raise ctypes.WinError(convert(status))
         finally:
             handle.Close()
 

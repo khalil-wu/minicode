@@ -11,7 +11,7 @@ vi.mock("../protocol/ws-outbox", () => ({ sendClientCommandAwaitResult: mocks.se
   commandResultSucceeded: (event: { level?: string }) => event.level !== "error" && event.level !== "failed" }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
 vi.mock("./DialogService", () => ({ showConfirm: mocks.confirm }));
-vi.mock("../desktop/runtime", () => ({ getDesktopPreferences: mocks.preferences }));
+vi.mock("../desktop/runtime", () => ({ desktop: () => undefined, getDesktopPreferences: mocks.preferences }));
 
 const task = (id: string, root: string, conversationId: string, enabled = true): ScheduledTaskEntry => ({ id, name: `${id} task`, prompt: `Inspect ${id}`,
   schedule: "RRULE:FREQ=MINUTELY;INTERVAL=2", kind: "heartbeat", conversation_id: conversationId, workspace_root: root,

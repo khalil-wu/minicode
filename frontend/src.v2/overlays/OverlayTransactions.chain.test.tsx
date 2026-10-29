@@ -12,15 +12,19 @@ import { closeAutomations, getAutomationsPageState, openAutomations } from "../l
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 
 const mocks = vi.hoisted(() => ({ command: vi.fn(), deleteConversation: vi.fn(), confirm: vi.fn(), toast: vi.fn(), detect: vi.fn(),
-  getStatus: vi.fn(), onStatus: vi.fn(), status: vi.fn(), worktree: vi.fn(), diff: vi.fn() }));
+  getStatus: vi.fn(), onStatus: vi.fn(), getTargets: vi.fn(), status: vi.fn(), worktree: vi.fn(), diff: vi.fn() }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(), sendClientCommandAwaitResult: mocks.command,
   sendConversationDeleteCommand: mocks.deleteConversation,
   commandResultSucceeded: (event: { level: string }) => event.level !== "error" && event.level !== "failed" }));
 vi.mock("./DialogService", () => ({ showConfirm: mocks.confirm, showAlert: vi.fn() }));
 vi.mock("./ToastContainer", () => ({ pushToast: mocks.toast }));
 vi.mock("./GithubConnection", () => ({ GithubConnection: () => null }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => true, envDetect: mocks.detect, exportDiagnostics: vi.fn(),
-  desktop: () => ({ platformInfo: { isDesktop: true, platform: "linux", arch: "x64" }, updates: { getStatus: mocks.getStatus, onStatus: mocks.onStatus } }) }));
+vi.mock("../desktop/runtime", () => {
+  const api = { platformInfo: { isDesktop: true, platform: "linux", arch: "x64" },
+    preferences: { getTargets: mocks.getTargets, get: async () => ({ defaultTaskDirectory: "", defaultPermissionMode: "auto" }) },
+    updates: { getStatus: mocks.getStatus, onStatus: mocks.onStatus } };
+  return { isDesktop: () => true, envDetect: mocks.detect, exportDiagnostics: vi.fn(), desktop: () => api };
+});
 vi.mock("../protocol/workspace", () => ({ fetchWorkspaceGitStatus: mocks.status, fetchWorkspaceGitWorktree: mocks.worktree,
   fetchWorkspaceGitDiff: mocks.diff, removeWorkspaceGitWorktree: vi.fn() }));
 const deferred = <T,>() => {
@@ -50,10 +54,11 @@ beforeEach(() => {
   mocks.detect.mockResolvedValue({ git: true, python: true, node: true });
   mocks.getStatus.mockResolvedValue({ status: "idle", sequence: 0 });
   mocks.onStatus.mockReturnValue(vi.fn());
+  mocks.getTargets.mockResolvedValue({ fileOpenTargets: [], terminalShellTargets: [] });
   mocks.status.mockResolvedValue({ branch: "main", modified: ["main.ts"], staged: [], untracked: [] });
   mocks.worktree.mockResolvedValue({ current_path: "C:/A", worktrees: [] });
   mocks.diff.mockResolvedValue({ diff: "PATCH" });
-  useAppStore.setState({ ...initial, conversationId: "A", workingDirectory: "C:/A", isConnected: true,
+  useAppStore.setState({ ...initial, activeConversationDraftId: null, conversationId: "A", workingDirectory: "C:/A", isConnected: true,
     scheduledTasks: [], scheduledTaskRuns: [], envVars: [], conversations: [], workspaceGit: null,
     editorTabs: [], settingsOpen: true, settingsTab: "general" }, true);
 });
@@ -231,11 +236,12 @@ describe("overlay transaction chains", () => {
     expect((screen.getByRole("button", { name: "恢复 归档" }) as HTMLButtonElement).disabled).toBe(false);
     expect(screen.getByText("归档")).toBeTruthy();
   });
-  it("does not mount desktop update operations from the Source General page", () => {
-    render(<GeneralTab />);
+  it("does not mount desktop update operations from the Source General page", async () => {
+    await act(async () => { render(<GeneralTab />); });
     expect(screen.queryByRole("button", { name: "重启并安装" })).toBeNull();
     expect(mocks.getStatus).not.toHaveBeenCalled();
     expect(mocks.onStatus).not.toHaveBeenCalled();
+    expect(mocks.getTargets).toHaveBeenCalledTimes(1);
   });
   it("keeps Git preferences in settings without an extra workspace launcher", () => {
     const before = useAppStore.getState().activeBottomTab;

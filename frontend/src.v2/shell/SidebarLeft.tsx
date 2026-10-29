@@ -33,7 +33,7 @@ export const SidebarLeft = ({
   const leftSidebarExpandedWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
   const setLeftSidebarWidth = useAppStore((s) => s.setLeftSidebarWidth);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
-  const createConversation = useAppStore((s) => s.createConversation);
+  const startConversationDraft = useAppStore((s) => s.startConversationDraft);
   const toggleCommandPalette = useAppStore((s) => s.toggleCommandPalette);
   const toggleSkillsMarketplace = useAppStore((s) => s.toggleSkillsMarketplace);
   const skillsMarketplaceOpen = useAppStore((s) => s.skillsMarketplaceOpen);
@@ -47,6 +47,10 @@ export const SidebarLeft = ({
   const [modeMenu, setModeMenu] = useState<{ x: number; y: number } | null>(null);
   const modeTrigger = useRef<HTMLButtonElement>(null);
   const isOpen = embedded || leftSidebarWidth > 0;
+  useEffect(() => {
+    if (!isOpen || skillsMarketplaceOpen) setModeMenu(null);
+    if (!isOpen || withGlobalRail) setProfileMenu(null);
+  }, [isOpen, skillsMarketplaceOpen, withGlobalRail]);
   const sidebarRef = useRef<HTMLElement>(null);
   const [shellWidth, setShellWidth] = useState(window.innerWidth);
   const visibleSidebarWidth = visibleLeftSidebarWidth(leftSidebarWidth, shellWidth);
@@ -107,7 +111,7 @@ export const SidebarLeft = ({
 
   const startSession = () => {
     leaveMarketplace();
-    createConversation({ appMode: "cowork", bindWorkspace: appMode === "code" && Boolean(workingDirectory) });
+    startConversationDraft({ appMode: "cowork", bindWorkspace: appMode === "code" && Boolean(workingDirectory) });
     onNavigate?.();
   };
   const navigate = (action: () => void) => {
@@ -191,7 +195,7 @@ export const SidebarLeft = ({
           setProfileMenu(profileMenu ? null : { x: bounds.left, y: bounds.top });
         }}><MenuSourceIcon kind="settings" /><span>MiniCode</span></button>
       </div>}
-      {profileMenu && <ContextMenu position={profileMenu} anchor={profileTrigger.current!} returnFocusTo={profileTrigger.current!}
+      {isOpen && !withGlobalRail && profileMenu && <ContextMenu position={profileMenu} anchor={profileTrigger.current!} returnFocusTo={profileTrigger.current!}
         side="top" align="start" style={{ width: sidebarRef.current!.getBoundingClientRect().width - 16 }} onClose={() => setProfileMenu(null)} items={[
         { label: tr("设置"), icon: <MenuSourceIcon kind="settings" />, shortcut: formatShortcut(settingsShortcut), onClick: () => navigate(() => { useAppStore.getState().setSettingsTab("general"); toggleSettings(); }) },
         { label: "", separator: true },
@@ -203,7 +207,7 @@ export const SidebarLeft = ({
         ] },
       ]} />}
       </div>
-      {modeMenu && <SidebarModeMenu position={modeMenu} mode={appMode === "code" ? "code" : "cowork"} onClose={() => setModeMenu(null)} onRestoreFocus={() => modeTrigger.current!.focus()} onSelect={mode => navigate(() => {
+      {isOpen && !skillsMarketplaceOpen && modeMenu && <SidebarModeMenu position={modeMenu} mode={appMode === "code" ? "code" : "cowork"} onClose={() => setModeMenu(null)} onRestoreFocus={() => modeTrigger.current!.focus()} onSelect={mode => navigate(() => {
         leaveMarketplace(); const state = useAppStore.getState(); state.setAppMode(mode);
         if (mode === "code") state.focusPanel(useAppStore.getState().panelSlots.find(slot => slot.kind === "editor")!.id);
       })} />}
@@ -246,11 +250,13 @@ function SidebarModeMenu({ position, mode, onClose, onRestoreFocus, onSelect }: 
     document.addEventListener("mousedown", outside);
     return () => document.removeEventListener("mousedown", outside);
   }, [onClose]);
-  return createPortal(<div ref={menu} className="mc-dropdown-menu mc-sidebar-mode-menu" role="menu" aria-label={tr("工作模式")} style={{ left: position.x, top: position.y }} onKeyDown={event => {
-    if (event.key === "Escape") { event.preventDefault(); onClose(); onRestoreFocus(); return; }
+  return createPortal(<div ref={menu} className="mc-dropdown-menu mc-sidebar-mode-menu" role="menu" aria-label={tr("工作模式")} style={{ left: position.x, top: position.y }}
+    onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) onClose(); }} onKeyDown={event => {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); onRestoreFocus(); return; }
     if (event.key === "Tab") { onClose(); return; }
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
+    event.preventDefault(); event.stopPropagation();
     const buttons = Array.from(menu.current!.querySelectorAll<HTMLButtonElement>('button'));
     const index = buttons.indexOf(document.activeElement as HTMLButtonElement);
     const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1

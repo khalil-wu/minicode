@@ -147,6 +147,79 @@ async def test_actual_start_rejection_is_not_a_successful_running_command(execut
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("executor_host", ["local"], indirect=True)
+@pytest.mark.parametrize("finish_before_release", [False, True])
+async def test_slow_command_consumer_recovers_retained_output_without_stopping_process(executor_host, finish_before_release):
+    from backend.terminal.executor_runner import ExecutorCommandRunner
+
+    attachment = executor_host.environments.primary()
+    policy = EnvironmentCommandPolicy(attachment.permission_scope, attachment, attachment.config.shell_environment_policy, {}, 15, True)
+    runner = ExecutorCommandRunner(policy)
+    blocked, release = asyncio.Event(), asyncio.Event()
+    delivered = []
+
+    async def consume(text, stream):
+        delivered.append((text, stream))
+        if not blocked.is_set():
+            blocked.set()
+            await release.wait()
+
+    code = "import os,time; [(os.write(1,b'x'),time.sleep(.003)) for _ in range(300)]"
+    task = asyncio.create_task(runner.run("controlled slow consumer", cwd=attachment.selection.cwd,
+        argv=[sys.executable, "-I", "-S", "-u", "-c", code], stream_callback=consume))
+    try:
+        async with asyncio.timeout(10):
+            await blocked.wait()
+            while not (runner.handle.closed if finish_before_release else runner.handle.next_seq >= 270):
+                await asyncio.sleep(.01)
+        if not finish_before_release:
+            assert not runner.handle.closed
+        release.set()
+        result = await task
+        assert result.exit_code == 0 and result.stdout == "x" * 300
+        assert "".join(text for text, stream in delivered if stream == "stdout") == "x" * 300
+        assert runner.handle.closed and not result.cleanup_pending
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executor_host", ["local"], indirect=True)
+async def test_slow_command_consumer_reports_output_evicted_from_process_history(executor_host):
+    from backend.environments.errors import ExecutorProtocolError
+    from backend.terminal.executor_runner import ExecutorCommandRunner
+
+    attachment = executor_host.environments.primary()
+    policy = EnvironmentCommandPolicy(attachment.permission_scope, attachment, attachment.config.shell_environment_policy, {}, 15, True)
+    runner = ExecutorCommandRunner(policy)
+    blocked, release = asyncio.Event(), asyncio.Event()
+
+    async def consume(_text, _stream):
+        if not blocked.is_set():
+            blocked.set()
+            await release.wait()
+
+    code = "import os,time; [(os.write(1,b'x'*4096),time.sleep(.003)) for _ in range(300)]"
+    task = asyncio.create_task(runner.run("controlled evicted output", cwd=attachment.selection.cwd,
+        argv=[sys.executable, "-I", "-S", "-u", "-c", code], stream_callback=consume))
+    try:
+        async with asyncio.timeout(10):
+            await blocked.wait()
+            while not runner.handle.closed:
+                await asyncio.sleep(.01)
+        release.set()
+        with pytest.raises(ExecutorProtocolError, match="sequence gap"):
+            await task
+        assert runner.handle.closed and runner.closed
+    finally:
+        release.set()
+        if not task.done():
+            await task
+
+
+@pytest.mark.asyncio
 async def test_read_edit_checkpoint_share_actual_executor_uri_and_hash(executor_host):
     host = executor_host
     target = host.workspace / "owned-edit.txt"

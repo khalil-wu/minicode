@@ -8,6 +8,8 @@ import { ChatContextCard, collectAttachments } from "./ChatContextCard";
 import { hydrateMessages } from "./transcriptHydration";
 import * as desktopRuntime from "../desktop/runtime";
 import type { EmbeddedBrowserState } from "../desktop/runtime";
+import * as protocolApi from "../protocol/api";
+import { readFileWorkspacePreview } from "../protocol/file-workspace";
 
 vi.mock("../hooks/useWebSocket", () => ({
   getWebSocket: () => ({ sessionId: "session-context-image" }),
@@ -66,6 +68,7 @@ describe("ChatContextCard", () => {
       appMode: "cowork",
       contextCardCollapsed: false,
       contextCardPinned: false,
+      compactPanel: null,
       defaultTerminalLocation: "bottom",
       conversationId: "conv-active",
       messages: [{
@@ -482,6 +485,32 @@ describe("ChatContextCard", () => {
     expect(screen.queryByRole("button", { name: /^查看执行结果：代码执行输出/ })).toBeNull();
   });
 
+  it.each(["absolute", "cwd-relative"] as const)("opens a projectless Recents %s file in the declared browser namespace", async pathKind => {
+    const cwd = "C:/tasks/2026-10-25/markdown-alignment-check-md", base = "C:/tasks";
+    const path = pathKind === "absolute" ? `${cwd}/outputs/alignment-check.md` : "outputs/alignment-check.md";
+    const messages = hydrateMessages([{ id: "generated-projectless", role: "assistant", content: "已生成文件。", timestamp: 1,
+      reply_attachments: [{ path }], blocks: [{ type: "tool_call", record: { id: "report", name: "tool_exec", args: {}, status: "success",
+        outputFiles: [{ path, name: "alignment-check.md", size: 43 }], startedAt: 1 } }] }]);
+    useAppStore.setState({ conversationId: "projectless", workingDirectory: cwd, conversations: [{ id: "projectless", title: "Task", updatedAt: "",
+      workspaceRoot: "", executionCwd: cwd, projectlessBrowserRoot: base }], workspaceFileTabs: [], pendingConversationSwitchId: null,
+      messages, subagents: [], backgroundTasks: [], terminalSessions: [], draft: "keep this draft" });
+    const dirty = useAppStore.getState().editorTabs;
+    const fetch = vi.spyOn(protocolApi, "fetchWithTimeout").mockResolvedValue(Response.json({ content: "# 对齐验收\n右侧栏最近产物验收" }));
+    render(<ChatContextCard />);
+    fireEvent.click(screen.getByRole("button", { name: "查看生成文件：alignment-check.md" }));
+    const tab = useAppStore.getState().workspaceFileTabs[0];
+    expect(tab.owner).toEqual({ scopeId: "conversation:projectless", conversationId: "projectless", executionCwd: cwd, browserRoot: base });
+    expect(tab.path).toBe("2026-10-25/markdown-alignment-check-md/outputs/alignment-check.md");
+    await readFileWorkspacePreview(tab.owner, tab.path);
+    const url = new URL(String(fetch.mock.calls.at(-1)![0]));
+    expect(url.pathname).toBe("/api/workspace/browser-preview");
+    expect(url.searchParams.get("execution_cwd")).toBe(cwd);
+    expect(url.searchParams.get("path")).toBe(tab.path);
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "projectless", workingDirectory: cwd,
+      rightStackTab: `file:${tab.id}`, draft: "keep this draft" });
+    expect(useAppStore.getState().editorTabs).toBe(dirty);
+  });
+
   it("preserves explicit image metadata when its execution record is sparse", () => {
     const attachments = collectAttachments([{
       id: "assistant-exec-image", role: "assistant", content: "图片已生成。", timestamp: 1,
@@ -515,6 +544,7 @@ describe("ChatContextCard", () => {
 
     act(() => {
       useAppStore.setState({ rightPanelOpen: false });
+      useAppStore.getState().toggleContextCard(700);
     });
     fireEvent.click(screen.getByRole("button", { name: "打开来源：Layout guide" }));
     expect(useAppStore.getState()).toMatchObject({
@@ -581,9 +611,11 @@ describe("ChatContextCard", () => {
     expect(screen.getByText("1 个等待输入")).toBeTruthy();
   });
 
-  it("keeps the summary and its real project actions beside another right pane", () => {
+  it("opens the summary and its real project actions beside another right pane after the user reopens it", () => {
     useAppStore.setState({ rightPanelOpen: true, rightStackTab: "subagents" });
     render(<ChatContextCard />);
+    expect(screen.queryByRole("dialog", { name: "工作区上下文摘要" })).toBeNull();
+    act(() => useAppStore.getState().toggleContextCard(700));
     expect(screen.getByRole("dialog", { name: "工作区上下文摘要" })).toBeTruthy();
     expect(screen.getByText("layout-reference.png")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "摘要操作" }));
@@ -601,6 +633,8 @@ describe("ChatContextCard", () => {
     act(() => useAppStore.getState().setContextCardPinned(true));
     useAppStore.setState({ rightPanelOpen: true, rightStackTab: "files" });
     const view = render(<ChatContextCard displayMode="shift" />);
+    expect(screen.queryByRole("complementary", { name: "工作区上下文摘要" })).toBeNull();
+    act(() => useAppStore.getState().toggleContextCard(1200));
     expect(screen.getByRole("complementary", { name: "工作区上下文摘要" }).getAttribute("data-surface")).toBe("inline");
     view.rerender(<ChatContextCard displayMode="overlay" />);
     expect(screen.getByRole("dialog", { name: "工作区上下文摘要" })).toBeTruthy();
@@ -608,6 +642,8 @@ describe("ChatContextCard", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(useAppStore.getState()).toMatchObject({ contextCardPinned: true, rightPanelOpen: true, rightStackTab: "files" });
     view.rerender(<ChatContextCard displayMode="shift" />);
+    expect(screen.queryByRole("complementary", { name: "工作区上下文摘要" })).toBeNull();
+    act(() => useAppStore.getState().toggleContextCard(1200));
     expect(screen.getByRole("complementary", { name: "工作区上下文摘要" })).toBeTruthy();
     expect(localStorage.getItem("minicode.summary-pinned")).toBe("1");
   });

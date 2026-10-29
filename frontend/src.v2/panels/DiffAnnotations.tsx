@@ -28,10 +28,11 @@ export function useDiffAnnotations({ lines, rawPatch, filePath, workspaceRoot, c
   onApprovalRemove?: (position: DiffCommentPosition) => void;
 }) {
   const currentConversation = useAppStore(state => state.conversationId);
+  const draftId = useAppStore(state => state.activeConversationDraftId);
   const workingDirectory = useAppStore(state => state.workingDirectory);
   const sourceWorkspaceRoot = workspaceRoot ?? workingDirectory;
   const workspaceKey = commentWorkspaceKey(sourceWorkspaceRoot);
-  const scope = getDiffCommentScope(conversationId === undefined ? currentConversation : conversationId, sourceWorkspaceRoot);
+  const scope = getDiffCommentScope(conversationId === undefined ? currentConversation || draftId : conversationId, sourceWorkspaceRoot);
   const snapshot = useSyncExternalStore(subscribeDiffComments, () => readDiffCommentState(scope));
   const ownerId = `${useContext(DiffReaderOwnerContext)}::${sourceKey}`;
   const [selection, setSelection] = useState<DiffLineSelection | null>(null);

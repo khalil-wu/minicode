@@ -9,9 +9,21 @@ import type { EmbeddedBrowserState, EmbeddedBrowserSettingsSnapshot } from "../d
 import { BrowserPanel, normalizeBrowserInput } from "./BrowserPanel";
 import { useDesktopEvents } from "../hooks/useDesktopEvents";
 import { ContextMenu } from "../components/ContextMenu";
+import { hydrateMessages } from "../chat/transcriptHydration";
 import { __resetOpenWebInBrowserForTests, focusBrowserAddressBar, openWebInBrowser, refreshWebInBrowser, returnToBrowserPage } from "../chat/openWebInBrowser";
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 vi.mock("./browser-annotation-capture", () => ({ captureBrowserAnnotationAttachments: vi.fn(async () => ({ attachments: [], attachmentRefs: [], composerAttachments: [] })) }));
+const recentOpen = vi.hoisted(() => ({ artifact: vi.fn(), workspace: vi.fn(), resources: vi.fn() }));
+vi.mock("../chat/openAttachmentPreview", async load => {
+  const actual = await load<typeof import("../chat/openAttachmentPreview")>();
+  return { ...actual, openArtifactPreview: recentOpen.artifact,
+    openWorkspaceFilePreview: (target: import("../chat/openAttachmentPreview").WorkspaceFilePreviewTarget) => {
+      recentOpen.workspace(target); return actual.openWorkspaceFilePreview(target);
+    } };
+});
+vi.mock("../protocol/conversation-resources", async load => ({
+  ...await load<typeof import("../protocol/conversation-resources")>(), fetchConversationResources: recentOpen.resources,
+}));
 
 vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
@@ -69,7 +81,9 @@ vi.mock("../desktop/runtime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../desktop/runtime")>();
   return {
     ...actual,
-    desktop: () => ({ embeddedBrowser: { pageCommand: runtimeMocks.pageCommand } }),
+    desktop: () => ({ embeddedBrowser: { pageCommand: runtimeMocks.pageCommand }, preferences: { get: async () => ({
+      defaultTaskDirectory: "C:/browser-tasks", defaultPermissionMode: "bypass", defaultWorkspaceFullView: false,
+    }) } }),
     isDesktop: () => true,
     embeddedBrowserCreate: runtimeMocks.create,
     embeddedBrowserCapture: runtimeMocks.capture,
@@ -120,6 +134,22 @@ const openBrowserAction = (name: string) => {
 };
 
 describe("BrowserPanel", () => {
+  it("hides the previous native page while a new local blank tab is selected", async () => {
+    runtimeMocks.list.mockResolvedValueOnce([page("visible-page", "Visible native page", "https://example.com/", true)]);
+    render(<BrowserPanel />);
+    await screen.findByRole("tab", { name: "Visible native page" });
+    runtimeMocks.setBounds.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
+    await waitFor(() => expect(runtimeMocks.setBounds).toHaveBeenCalledWith({
+      id: "visible-page", conversationId: "conv-browser", x: 0, y: 0, width: 0, height: 0,
+    }));
+    expect((screen.getByRole("textbox", { name: "搜索或输入网址" }) as HTMLInputElement).value).toBe("");
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("tab", { name: "Visible native page" }));
+    await waitFor(() => expect(runtimeMocks.activate).toHaveBeenCalledWith("conv-browser", "visible-page"));
+    expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+  });
+
   it("adopts a native child page without replaying its POST navigation and applies the saved new-tab device preference", async () => {
     useAppStore.setState({ rightPanelOpen: true, rightStackTab: "browser", draft: "Keep source draft" });
     runtimeMocks.list.mockResolvedValueOnce([page("original-opener", "Original opener", "https://source.example/", true)]);
@@ -261,7 +291,9 @@ describe("BrowserPanel", () => {
     await waitFor(() => expect(runtimeMocks.navigate).toHaveBeenCalledWith("conv-browser", "address-draft", "https://unsent.example/new"));
   });
   beforeEach(() => {
+    for (const key of Object.keys(localStorage)) if (key.startsWith("minicode.browserWorkbench:")) localStorage.removeItem(key);
     vi.clearAllMocks();
+    recentOpen.artifact.mockImplementation(() => { useAppStore.getState().setRightStackTab("preview"); return true; });
     feedbackMocks.send.mockReset().mockResolvedValue(true);
     nativeListeners.clear();
     runtimeMocks.onEvent.mockImplementation(callback => { nativeListeners.add(callback); return () => { nativeListeners.delete(callback); }; });
@@ -290,6 +322,129 @@ describe("BrowserPanel", () => {
       turnDiffs: {},
       diffReview: null,
     });
+  });
+
+  it("projects existing output recents with real type/time while excluding uploads and execution transport", async () => {
+    runtimeMocks.list.mockReset().mockResolvedValue([]);
+    const timestamp = Date.now() - 60_000;
+    useAppStore.setState({ activeConversationDraftId: null, rightPanelOpen: true, rightStackTab: "browser", previewArtifact: null,
+      messages: hydrateMessages([
+        { id: "input", role: "user", content: "Use this input", timestamp,
+          attachmentRefs: [{ id: "input-file", artifactId: "input-file", name: "private-input.txt", kind: "file", mediaType: "text/plain" }] },
+        { id: "output", role: "assistant", content: "Produced output", timestamp,
+          artifacts: [{ artifactId: "report", kind: "file", summary: "report.pdf", mediaType: "application/pdf" },
+            { artifactId: "transport", kind: "text", summary: "Script completed" }],
+          tool_calls: [{ id: "exec", name: "tool_exec", args: {}, status: "success", artifact_id: "transport", artifact_kind: "text", display_summary: "Script completed", started_at: timestamp }],
+          reply_attachments: [{ path: "reports/output.csv", size: 12 }] },
+      ]) });
+    render(<BrowserPanel />);
+    const recents = await screen.findByRole("region", { name: "最近工作" });
+    expect(within(recents).getByRole("button", { name: "report.pdf" })).toBeTruthy();
+    expect(within(recents).getByText("PDF")).toBeTruthy();
+    expect(within(recents).getByText("电子表格")).toBeTruthy();
+    expect(recents.querySelector("time")?.getAttribute("datetime")).toBe(new Date(timestamp).toISOString());
+    expect(within(recents).queryByRole("button", { name: "private-input.txt" })).toBeNull();
+    expect(within(recents).queryByRole("button", { name: "Script completed" })).toBeNull();
+    expect(recentOpen.resources).not.toHaveBeenCalled();
+  });
+
+  it("reuses output state across repeated new tabs and owner switches without history reads or server creates", async ({ onTestFinished }) => {
+    runtimeMocks.list.mockReset().mockResolvedValue([]);
+    const originalCreate = useAppStore.getState().createConversation;
+    const create = vi.fn(originalCreate);
+    onTestFinished(() => useAppStore.setState({ createConversation: originalCreate }));
+    const output = (owner: string) => hydrateMessages([{ id: `${owner}-output`, role: "assistant", content: "", timestamp: 1000,
+      artifacts: [{ artifactId: `${owner}-file`, kind: "file", summary: `${owner}.pdf`, mediaType: "application/pdf" }] }]);
+    useAppStore.setState({ createConversation: create, activeConversationDraftId: null, rightPanelOpen: true, rightStackTab: "browser",
+      messages: output("A"), previewArtifact: null });
+    render(<BrowserPanel />);
+    await screen.findByRole("button", { name: "A.pdf" });
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
+    fireEvent.click(screen.getByRole("button", { name: "新建标签页" }));
+    act(() => useAppStore.setState({ conversationId: "owner-b", messages: output("B") }));
+    await screen.findByRole("button", { name: "B.pdf" });
+    act(() => useAppStore.setState({ conversationMessages: { "conv-browser": output("Background A") } }));
+    expect(screen.queryByRole("button", { name: "Background A.pdf" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "A.pdf" })).toBeNull();
+    act(() => useAppStore.setState({ conversationId: "conv-browser", messages: output("A") }));
+    await screen.findByRole("button", { name: "A.pdf" });
+    expect(recentOpen.resources).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
+    expect(runtimeMocks.create).not.toHaveBeenCalled(); expect(runtimeMocks.navigate).not.toHaveBeenCalled();
+    expect(runtimeMocks.list.mock.calls.map(([owner]) => owner)).toEqual(["conv-browser", "owner-b", "conv-browser"]);
+  });
+
+  it("opens an owned recent once and replaces exactly its blank tab without dropping the draft", async () => {
+    runtimeMocks.list.mockReset().mockResolvedValue([]);
+    const closed = vi.fn();
+    useAppStore.setState({ activeConversationDraftId: null, rightPanelOpen: true, rightStackTab: "browser", draft: "Keep unsent input",
+      messages: hydrateMessages([{ id: "produced", role: "assistant", content: "", timestamp: 1234,
+        artifacts: [{ artifactId: "owned-report", kind: "file", summary: "owned.pdf", mediaType: "application/pdf" }] }]), previewArtifact: null });
+    render(<BrowserPanel onLastTabClosed={closed} />);
+    const row = await screen.findByRole("button", { name: "owned.pdf" });
+    fireEvent.click(row); fireEvent.click(row);
+    expect(recentOpen.artifact).toHaveBeenCalledExactlyOnceWith({ artifactId: "owned-report", name: "owned.pdf", mediaType: "application/pdf", kind: "file", conversationId: "conv-browser" });
+    expect(closed).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState()).toMatchObject({ rightStackTab: "preview", draft: "Keep unsent input" });
+    expect(runtimeMocks.close).not.toHaveBeenCalled();
+  });
+
+  it("keeps a declined recent open request retryable and does not replace its blank tab", async () => {
+    runtimeMocks.list.mockReset().mockResolvedValue([]);
+    recentOpen.artifact.mockReturnValueOnce(false);
+    const closed = vi.fn();
+    useAppStore.setState({ activeConversationDraftId: null, rightPanelOpen: true, rightStackTab: "browser", previewArtifact: null,
+      messages: hydrateMessages([{ id: "produced", role: "assistant", content: "", timestamp: 1,
+        artifacts: [{ artifactId: "retry", kind: "file", summary: "retry.pdf", mediaType: "application/pdf" }] }]) });
+    render(<BrowserPanel onLastTabClosed={closed} />);
+    fireEvent.click(await screen.findByRole("button", { name: "retry.pdf" }));
+    expect(closed).not.toHaveBeenCalled();
+    expect(useAppStore.getState().rightStackTab).toBe("browser");
+    fireEvent.click(screen.getByRole("button", { name: "retry.pdf" }));
+    expect(recentOpen.artifact).toHaveBeenCalledTimes(2); expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a produced workspace file through its real file-tab owner and keeps existing Tools available", async () => {
+    runtimeMocks.list.mockReset().mockResolvedValue([]);
+    const closed = vi.fn();
+    useAppStore.setState({ activeConversationDraftId: null, rightPanelOpen: true, rightStackTab: "browser", previewArtifact: null,
+      conversations: [{ id: "conv-browser", title: "Owner", executionCwd: "C:/actual-executor", workspaceRoot: "C:/project" }],
+      workspaceFileTabs: [], messages: hydrateMessages([{ id: "produced", role: "assistant", content: "", timestamp: 1,
+        reply_attachments: [{ path: "reports/output.md", size: 10 }] }]) });
+    render(<BrowserPanel onLastTabClosed={closed} />);
+    expect(await screen.findByRole("button", { name: "文件", exact: true })).toBeTruthy();
+    fireEvent.click(await screen.findByRole("button", { name: "output.md" }));
+    expect(recentOpen.workspace).toHaveBeenCalledWith(expect.objectContaining({ path: "reports/output.md", conversationId: "conv-browser" }));
+    expect(useAppStore.getState().workspaceFileTabs.find(tab => tab.path === "reports/output.md")?.owner).toMatchObject({ conversationId: "conv-browser", executionCwd: "C:/actual-executor" });
+    expect(closed).toHaveBeenCalledTimes(1);
+  });
+
+  it("measures Recents after an initially hidden browser panel becomes visible", async () => {
+    runtimeMocks.list.mockReset().mockResolvedValue([]);
+    const observers: { callback: ResizeObserverCallback; targets: Element[] }[] = [];
+    vi.stubGlobal("ResizeObserver", class {
+      record: typeof observers[number];
+      constructor(callback: ResizeObserverCallback) { this.record = { callback, targets: [] }; observers.push(this.record); }
+      observe(target: Element) { this.record.targets.push(target); }
+      unobserve() {} disconnect() {}
+    });
+    useAppStore.setState({ activeConversationDraftId: null, rightPanelOpen: false, rightStackTab: "browser", previewArtifact: null,
+      messages: hydrateMessages([{ id: "produced", role: "assistant", content: "", timestamp: 1,
+        artifacts: [{ artifactId: "measure", kind: "file", summary: "measure.pdf", mediaType: "application/pdf" }] }]) });
+    render(<BrowserPanel />);
+    expect(screen.queryByRole("region", { name: "最近工作" })).toBeNull();
+    act(() => useAppStore.setState({ rightPanelOpen: true }));
+    const list = await screen.findByRole("list", { name: "最近工作" });
+    const root = list.closest<HTMLElement>("[data-new-tab-scroll-root]")!;
+    const row = list.firstElementChild as HTMLElement;
+    root.style.paddingBottom = "32px";
+    Object.defineProperty(root, "clientHeight", { configurable: true, value: 600 });
+    Object.defineProperty(root, "offsetHeight", { configurable: true, value: 600 });
+    Object.defineProperty(row, "offsetHeight", { configurable: true, value: 56 });
+    vi.spyOn(root, "getBoundingClientRect").mockReturnValue({ top: 0, height: 600 } as DOMRect);
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue({ top: 240, height: 308 } as DOMRect);
+    const observer = observers.find(item => item.targets.includes(list))!;
+    act(() => observer.callback([], {} as ResizeObserver));
+    expect(list.style.maxHeight).toBe("308px");
   });
 
   it("presents an authorized tool's exact native target and reports the real pane bounds", async () => {

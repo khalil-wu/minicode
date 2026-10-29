@@ -49,6 +49,39 @@ it("leaves default colors and typography alone, commits complete hex and restore
   expect(localStorage.getItem(LS.textScale)).toBe(authoredPreferences);
 });
 
+it("hides color portals on navigation while preserving incomplete authored hex without committing it", () => {
+  const page = (active: boolean) => <><nav className="settings-center-tabs"><button>另一个设置页</button></nav><AppearanceColors active={active} /></>;
+  const view = render(page(true));
+  const input = screen.getByRole("textbox", { name: "浅色背景颜色" });
+  fireEvent.click(screen.getByRole("button", { name: "选择浅色背景颜色" }));
+  fireEvent.change(input, { target: { value: "#AB" } });
+  const navigation = screen.getByRole("button", { name: "另一个设置页" });
+  fireEvent.pointerDown(navigation);
+  fireEvent.blur(input, { relatedTarget: navigation });
+  view.rerender(page(false));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(localStorage.getItem(LS.appearanceLight)).toBeNull();
+  view.rerender(page(true));
+  expect(screen.getByRole("textbox", { name: "浅色背景颜色" })).toBe(input);
+  expect(input).toHaveProperty("value", "#AB");
+  fireEvent.blur(input);
+  expect(input).toHaveProperty("value", "#FFFFFF");
+});
+
+it("retires theme and accent menus when the retained appearance page becomes inactive", () => {
+  const view = render(<AppearanceColors />);
+  fireEvent.click(screen.getByRole("button", { name: "浅色代码主题" }));
+  expect(screen.getByRole("menu", { name: "浅色代码主题" })).toBeTruthy();
+  view.rerender(<AppearanceColors active={false} />);
+  expect(screen.queryByRole("menu")).toBeNull();
+  view.rerender(<AppearanceColors />);
+  fireEvent.click(screen.getByRole("button", { name: "浅色强调色" }));
+  expect(screen.getByRole("menu", { name: "浅色强调色" })).toBeTruthy();
+  view.rerender(<AppearanceColors active={false} />);
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(localStorage.getItem(LS.appearanceLight)).toBeNull();
+});
+
 it("uses a real accessible react-colorful popover with immediate keyboard edits and Escape focus restoration", () => {
   render(<AppearanceColors />);
   fireEvent.change(screen.getByRole("textbox", { name: "浅色强调色" }), { target: { value: "#2468AC" } });

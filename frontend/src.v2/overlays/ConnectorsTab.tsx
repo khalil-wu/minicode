@@ -25,7 +25,6 @@ import { McpToolsEditor } from "./McpToolsEditor";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import {
   secondaryActionStyle,
-  mcpServerRowStyle,
   mcpNameStyle,
   mcpErrorStyle,
   statusChipStyle,
@@ -153,7 +152,10 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
   const mcpServers = useAppStore((s) => s.mcpServers);
   const [localSearch, setSearch] = useState("");
   const search = externalSearch ?? localSearch;
-  const visibleServers = mcpServers.filter(server => server.name.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  const visibleServers = mcpServers.filter(server =>
+    (server.pluginServerName || server.name).toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  const standaloneServers = visibleServers.filter(server => !server.pluginId);
+  const pluginServers = visibleServers.filter(server => server.pluginId);
   const conversationId = useAppStore((s) => s.conversationId);
   const workingDirectory = useAppStore((s) => s.workingDirectory);
   const inventoryScope = JSON.stringify([conversationId, normalizeWorkspaceRoot(workingDirectory)]);
@@ -562,11 +564,12 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
   const renderServerRuntime = (server: typeof mcpServers[number]) => {
     const inventoryView = inventoryViews[inventoryKey(server.name)];
     const inventory = inventoryView?.data;
+    const displayName = server.pluginServerName || server.name;
     return (
               <div className="settings-mcp-runtime">
                 <div className="flex-1 min-w-0">
                   <div className="settings-mcp-server-meta">
-                    <span style={mcpNameStyle}>{server.name}</span>
+                    <span style={mcpNameStyle}>{displayName}</span>
                     {server.approvalStatus === "pending" && (
                       <span style={{ ...miniMetaStyle, color: "var(--state-warning)" }}>{tr("等待批准")}</span>
                     )}
@@ -612,7 +615,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
                   )}
                   {inventoryView?.expanded && (
                     <div
-                      aria-label={tr("MCP 目录 {v0}", { v0: server.name })}
+                      aria-label={tr("MCP 目录 {v0}", { v0: displayName })}
                       style={{
                         marginTop: 8,
                         padding: 9,
@@ -687,7 +690,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
                     onClick={() => toggleServerInventory(server)}
                     style={mcpActionBtnStyle}
                     title={inventoryView?.expanded ? tr("收起 MCP 目录") : tr("按需查看 MCP 资源、资源模板和提示词")}
-                    aria-label={tr("{v0} MCP 内容 {v1}", { v0: inventoryView?.expanded ? tr("收起") : tr("查看"), v1: server.name })}
+                    aria-label={tr("{v0} MCP 内容 {v1}", { v0: inventoryView?.expanded ? tr("收起") : tr("查看"), v1: displayName })}
                   >
                     {inventoryView?.expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                   </button>
@@ -725,12 +728,12 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
                       onClick={() => void runServerAction(
                         server.name,
                         "mcp.oauth.login",
-                        tr("已登录 MCP 服务：{v0}", { v0: server.name }),
+                        tr("已登录 MCP 服务：{v0}", { v0: displayName }),
                       )}
                       disabled={Boolean(pendingServerActions[server.name])}
                       style={mcpActionBtnStyle}
                       title={tr("登录")}
-                      aria-label={tr("登录 {v0}", { v0: server.name })}
+                      aria-label={tr("登录 {v0}", { v0: displayName })}
                     >{pendingServerActions[server.name] === "mcp.oauth.login" ? <RefreshCw size={14} className="animate-spin" /> : <LogIn size={14} />}</button>
                   ) : server.authStatus === "oauth" ? (
                     <>
@@ -739,24 +742,24 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
                         onClick={() => void runServerAction(
                           server.name,
                           "mcp.restart",
-                          tr("已重启 MCP 服务：{v0}", { v0: server.name }),
+                          tr("已重启 MCP 服务：{v0}", { v0: displayName }),
                         )}
                         disabled={Boolean(pendingServerActions[server.name]) || server.phase === "connecting" || server.phase === "reconnecting"}
                         style={mcpActionBtnStyle}
                         title={tr("重启")}
-                        aria-label={tr("重启 {v0}", { v0: server.name })}
+                        aria-label={tr("重启 {v0}", { v0: displayName })}
                       ><RefreshCw size={14} className={pendingServerActions[server.name] === "mcp.restart" ? "animate-spin" : undefined} /></button>
                       <button
                         type="button"
                         onClick={() => void runServerAction(
                           server.name,
                           "mcp.oauth.logout",
-                          tr("已清除 MCP 登录：{v0}", { v0: server.name }),
+                          tr("已清除 MCP 登录：{v0}", { v0: displayName }),
                         )}
                         disabled={Boolean(pendingServerActions[server.name])}
                         style={mcpActionBtnStyle}
                         title={tr("清除登录")}
-                        aria-label={tr("清除 {v0} 登录", { v0: server.name })}
+                        aria-label={tr("清除 {v0} 登录", { v0: displayName })}
                       >{pendingServerActions[server.name] === "mcp.oauth.logout" ? <RefreshCw size={14} className="animate-spin" /> : <LogOut size={14} />}</button>
                     </>
                   ) : (
@@ -764,12 +767,12 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
                       onClick={() => void runServerAction(
                         server.name,
                         "mcp.restart",
-                        tr("已重启 MCP 服务：{v0}", { v0: server.name }),
+                        tr("已重启 MCP 服务：{v0}", { v0: displayName }),
                       )}
                       disabled={Boolean(pendingServerActions[server.name]) || server.phase === "connecting" || server.phase === "reconnecting"}
                       style={mcpActionBtnStyle}
                       title={tr("重启")}
-                      aria-label={tr("重启 {v0}", { v0: server.name })}
+                      aria-label={tr("重启 {v0}", { v0: displayName })}
                     ><RefreshCw size={14} className={pendingServerActions[server.name] === "mcp.restart" ? "animate-spin" : undefined} /></button>
                   ))}
 
@@ -778,19 +781,31 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
     );
   };
   const editingServer = mcpServers.find(server => server.name === editingServerName);
+  const renderServerRow = (server: typeof mcpServers[number]) => <div key={server.name} className="settings-mcp-server-row">
+    <span className="settings-mcp-list-name">{server.pluginServerName || server.name}</span>
+    <div className="settings-mcp-server-actions">
+      <button type="button" className="settings-icon-button" onClick={() => editServer(server)} title={tr("设置")} aria-label={tr("编辑 {v0}", { v0: server.pluginServerName || server.name })}><Settings size={16} /></button>
+      {server.editable && <button type="button" className="settings-toggle settings-mcp-toggle" role="switch"
+        aria-checked={server.autoStart !== false} aria-label={`${server.autoStart === false ? tr("启用") : tr("停用")} ${server.name}`}
+        data-active={server.autoStart !== false ? "true" : "false"}
+        disabled={server.enabled === false || togglingServer === server.name || Boolean(pendingServerActions[server.name])}
+        onClick={() => void toggleServer(server.name, server.autoStart === false)}
+        title={server.enabled === false ? server.disabledReason || tr("已被管理策略禁用") : server.autoStart === false ? tr("启用") : tr("停用")}><span /></button>}
+    </div>
+  </div>;
 
   if (editorOpen) return (
     <section className="mcp-detail" id="mcp-server-editor" aria-label={tr("MCP 服务编辑器")}>
       <button type="button" className="mcp-detail-back" onClick={() => setEditorOpen(false)}><ArrowLeft size={15} />{tr("返回")}</button>
       <header className="mcp-detail-heading">
-        <h3>{editingServerName ? tr("更新 {v0} MCP", { v0: editingServerName }) : tr("连接到自定义 MCP")}</h3>
+        <h3>{editingServerName ? editingServer?.editable ? tr("更新 {v0} MCP", { v0: editingServerName }) : editingServer?.pluginServerName || editingServerName : tr("连接到自定义 MCP")}</h3>
         {!editingServerName && <a href="https://developers.openai.com/codex/mcp" target="_blank" rel="noreferrer" aria-label={tr("打开 MCP 文档")}
           onClick={event => { event.preventDefault(); void openExternal("https://developers.openai.com/codex/mcp"); }}>{tr("文档")}<ExternalLink size={12} /></a>
         }
         {editingServer?.editable && <button type="button" className="mcp-detail-uninstall" disabled={Boolean(pendingServerActions[editingServer.name])}
           onClick={() => void removeServer(editingServer.name)}><Trash2 size={14} />{tr("卸载")}</button>}
       </header>
-      {editingServerName ? <p className="mcp-detail-notice">{tr("如需切换 MCP 服务器类型，请先卸载。")}</p> : <div className="mcp-detail-card">
+      {editingServerName ? editingServer?.editable && <p className="mcp-detail-notice">{tr("如需切换 MCP 服务器类型，请先卸载。")}</p> : <div className="mcp-detail-card">
         <label className="mcp-detail-field"><span className="mcp-detail-label">{tr("名称")}</span>
           <input aria-label={tr("服务名称")} value={newServerName} placeholder={tr("MCP 服务器名称")} onChange={event => setNewServerName(event.target.value)} />
         </label>
@@ -802,7 +817,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
           </div>
         </div>
       </div>}
-      <fieldset className="mcp-detail-card" disabled={Boolean(editingServer && !editingServer.editable)}>
+      {(!editingServerName || editingServer?.editable) && <fieldset className="mcp-detail-card">
         {newServerTransport === "stdio" ? <>
           <label className="mcp-detail-field"><span className="mcp-detail-label">{tr("启动命令")}</span>
             <input aria-label={tr("启动命令")} value={newServerCommand} placeholder="openai-dev-mcp serve-sqlite" onChange={event => setNewServerCommand(event.target.value)} />
@@ -846,7 +861,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
           {newServerTransport !== "ws" && <McpPairFields title={tr("来自环境变量的请求头")} nameLabel={tr("环境变量请求头名称")} valueLabel={tr("请求头环境变量名称")} rows={newServerEnvHeaders} onChange={setNewServerEnvHeaders}
             addLabel={tr("添加变量")} removeLabel={tr("删除请求头变量")} tr={tr} />}
         </>}
-      </fieldset>
+      </fieldset>}
       {editingServer && renderServerRuntime(editingServer)}
       {(!editingServer || editingServer.editable) && <div className="mcp-detail-footer"><button type="button" className="mcp-detail-save" disabled={!canAddServer || !editorChanged || addingServer} onClick={() => void saveServer()}>
         {addingServer ? tr("正在保存…") : tr("保存")}
@@ -866,22 +881,17 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
           </div>}
         </div>
             <div className="settings-card settings-mcp-list">
-            {mcpServers.length === 0 && <div className="settings-mcp-empty">{tr("尚未配置 MCP 服务。")}</div>}
-            {mcpServers.length > 0 && visibleServers.length === 0 && <div className="settings-mcp-empty">{tr("没有匹配的 MCP 服务器。")}</div>}
-            {visibleServers.map(server => <div key={server.name} className="settings-mcp-server-row" style={mcpServerRowStyle}>
-              <span className="settings-mcp-list-name">{server.name}</span>
-              <div className="settings-mcp-server-actions">
-                <button type="button" className="settings-icon-button" onClick={() => editServer(server)} title={tr("设置")} aria-label={tr("编辑 {v0}", { v0: server.name })}><Settings size={16} /></button>
-                {server.editable && <button type="button" className="settings-toggle settings-mcp-toggle" role="switch"
-                  aria-checked={server.autoStart !== false} aria-label={`${server.autoStart === false ? tr("启用") : tr("停用")} ${server.name}`}
-                  data-active={server.autoStart !== false ? "true" : "false"}
-                  disabled={server.enabled === false || togglingServer === server.name || Boolean(pendingServerActions[server.name])}
-                  onClick={() => void toggleServer(server.name, server.autoStart === false)}
-                  title={server.enabled === false ? server.disabledReason || tr("已被管理策略禁用") : server.autoStart === false ? tr("启用") : tr("停用")}><span /></button>}
-              </div>
-            </div>)}
+            {mcpServers.every(server => server.pluginId) && <div className="settings-mcp-empty">{tr("尚未配置 MCP 服务。")}</div>}
+            {mcpServers.some(server => !server.pluginId) && standaloneServers.length === 0 && <div className="settings-mcp-empty">{tr("没有匹配的 MCP 服务器。")}</div>}
+            {standaloneServers.map(renderServerRow)}
             </div>
           </section>
+          {pluginServers.length > 0 && <section className="settings-group" aria-label={tr("来自插件")}>
+            <h3 className="settings-group-title">{tr("来自插件")}</h3>
+            <div className="settings-card settings-mcp-list">
+              {pluginServers.map(renderServerRow)}
+            </div>
+          </section>}
           <McpAppDataSettings />
     </>
   );

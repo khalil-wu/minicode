@@ -10,7 +10,7 @@ import { pushToast } from "../overlays/ToastContainer";
 const mocks = vi.hoisted(() => ({ send: vi.fn(), switch: vi.fn(async () => true) }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), sendClientCommandAwaitResult: mocks.send,
   commandResultSucceeded: (event: { level: string }) => !["error", "failed"].includes(event.level) }));
-vi.mock("../desktop/runtime", () => ({ isDesktop: () => false, revealPath: vi.fn() }));
+vi.mock("../desktop/runtime", () => ({ desktop: () => undefined, isDesktop: () => false, revealPath: vi.fn() }));
 vi.mock("../workspace/openWorkspaceFolder", () => ({ openWorkspaceFolder: vi.fn() }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 

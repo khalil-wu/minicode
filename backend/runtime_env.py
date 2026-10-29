@@ -12,6 +12,30 @@ from pathlib import Path
 from typing import Any
 
 
+# App-owned Git capabilities select their repository from cwd, not launch
+# context. Keep this rule shared with the sandbox and executor Git boundaries.
+GIT_REPOSITORY_ENV = frozenset({
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE",
+    "GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+})
+# The executor Git capability already has a stricter config-prefix boundary.
+GIT_EXECUTOR_ENV_PATTERNS = (*sorted(GIT_REPOSITORY_ENV), "GIT_CONFIG*")
+
+
+def is_git_repository_env(name: str) -> bool:
+    key = name.upper() if os.name == "nt" else name
+    return key in GIT_REPOSITORY_ENV
+
+
+def is_git_tool_env(name: str) -> bool:
+    """Keep the model Git tool's existing stricter config-prefix policy."""
+    key = name.upper() if os.name == "nt" else name
+    return is_git_repository_env(key) or key.startswith("GIT_CONFIG_")
+
+
 def default_user_shell() -> dict[str, str]:
     """Capture Source's host session shell independently of model metadata."""
     if os.name == "nt":
@@ -490,16 +514,18 @@ def sanitize_env_overrides(extra: Mapping[str, str] | None) -> dict[str, str]:
 
 
 def sanitized_git_env(cwd: str | Path | None = None) -> dict[str, str]:
-    """Return a sanitized environment for git subprocesses.
+    """Return the inherited environment for app-owned Git subprocesses.
 
-    Drops inherited GIT_DIR/GIT_WORK_TREE so git resolves the repo from cwd.
+    Drop repository and command-config selectors so Git resolves the repo from
+    cwd. User global/system config paths retain their inherited meaning.
+    App-constructed overrides such as a snapshot index are added by the caller
+    after this boundary. User shell commands keep their normal environment.
     Repo discovery may ascend (a workspace that is a subdirectory of a repo
     must find its enclosing repository) but stops at the user's home directory
     so a stray ~/.git never masquerades as the workspace repo.
     """
-    env = sanitized_subprocess_env()
-    env.pop("GIT_DIR", None)
-    env.pop("GIT_WORK_TREE", None)
+    env = {key: value for key, value in sanitized_subprocess_env().items()
+           if not is_git_repository_env(key)}
     try:
         env["GIT_CEILING_DIRECTORIES"] = str(Path.home())
     except OSError:

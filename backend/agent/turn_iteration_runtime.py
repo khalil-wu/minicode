@@ -123,7 +123,7 @@ class TurnIterationRuntime:
     async def prepare(
         self,
         *,
-        previous_tool_schema_state: TurnToolSchemaDerivation,
+        previous_tool_schema_state: TurnToolSchemaDerivation | None,
         initial_turn_pending: bool,
         pending_turn_context: list[str],
     ) -> TurnIterationPreparation:
@@ -147,7 +147,8 @@ class TurnIterationRuntime:
                 config_stack=snapshot.config.config_layer_stack,
                 feature_flags=snapshot.config.feature_flags, registry=self.base_tool_registry,
                 artifact_store=self.tool_context.artifact_store, workspace_root=self.workspace_root,
-                conversation_id=self.tool_context.conversation_id, turn_id=self.tool_context.turn_id)
+                conversation_id=self.tool_context.conversation_id, turn_id=self.tool_context.turn_id,
+                mcp_optional_startup_grace_ms=snapshot.config.mcp_optional_startup_grace_ms)
             self.context.bind_skill_manager(prepared.skill_manager, self.workspace_root)
             self.skill_manager = prepared.skill_manager
             primary = run_context.turn_environments.primary()
@@ -271,6 +272,9 @@ class TurnIterationRuntime:
             active_policy.cache_key(),
             id(self.permission_checker),
         )
+        # Both projections describe one synchronous preparation boundary.
+        # Reuse its permission decisions without retaining them across steps.
+        permission_decisions: dict[str, Any] = {}
         if (schema_key != self._base_schema_key
                 or self.tool_context.permission is not self._base_schema_permission):
             self._base_schemas = self.tool_registry.get_schemas(
@@ -278,6 +282,7 @@ class TurnIterationRuntime:
                 permission_context=self.tool_context.permission,
                 toolset_policy=active_policy,
                 mcp_registry_version=mcp_version,
+                permission_decisions=permission_decisions,
             )
             self._base_schema_key = schema_key
             self._base_schema_permission = self.tool_context.permission
@@ -291,6 +296,7 @@ class TurnIterationRuntime:
             toolset_policy=active_policy,
             mcp_registry_version=mcp_version,
             previous=previous_tool_schema_state,
+            permission_decisions=permission_decisions,
         )
         active_capabilities = capabilities_for_adapter(self.llm)
         dedicated_image_model = is_gpt_image_model(active_capabilities.model) or (
@@ -342,7 +348,7 @@ class TurnIterationRuntime:
             initial_turn_pending=initial_turn_pending,
         )
 
-        if boundary_input.should_start_turn:
+        if boundary_input.has_new_input:
             history_start = self.context.history_length
             admission_snapshot = self.context.export_snapshot()
             try:

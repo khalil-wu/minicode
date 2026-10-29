@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from collections.abc import Iterable, Mapping
@@ -16,7 +17,7 @@ from backend.plugins.identity import (
     parse_plugin_id_strict,
 )
 from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_install_root, plugin_manifest_path
-from backend.plugins.source_agent_manifest import is_agent_plugin_schema, resolve_agent_manifest
+from backend.plugins.source_agent_manifest import resolve_agent_manifest
 
 def plugin_name_from_directory(plugin_dir: Path) -> str:
     plugin_dir = Path(plugin_dir)
@@ -40,18 +41,38 @@ def plugin_name_from_manifest(manifest_path: Path) -> str:
 
 def plugin_directory_for_manifest(manifest_path: Path) -> Path:
     manifest_path = Path(manifest_path)
-    if manifest_path.parent.name == PLUGIN_MANIFEST_DIRECTORY:
+    if manifest_path.parent.name in {PLUGIN_MANIFEST_DIRECTORY, ".codex-plugin"}:
         return manifest_path.parent.parent
     return manifest_path.parent
 
-def _read_plugin_manifest(manifest_path: Path) -> Mapping[str, Any] | None:
+@dataclass(frozen=True)
+class LoadedPluginManifest:
+    payload: Mapping[str, Any]
+    format: str
+
+
+def _resolve_plugin_manifest(payload: Mapping[str, Any], manifest_path: Path) -> LoadedPluginManifest:
+    manifest_path = Path(manifest_path)
+    plugin_root = plugin_directory_for_manifest(manifest_path)
+    if manifest_path == plugin_root / "plugin.json":
+        return LoadedPluginManifest(
+            resolve_agent_manifest(payload, plugin_root),
+            "agent_plugin",
+        )
+    return LoadedPluginManifest(payload, "legacy")
+
+
+def _load_plugin_manifest(manifest_path: Path) -> LoadedPluginManifest | None:
     try:
         payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if isinstance(payload, Mapping) and is_agent_plugin_schema(payload):
-        return resolve_agent_manifest(payload, plugin_directory_for_manifest(manifest_path))
-    return payload if isinstance(payload, Mapping) else None
+    return _resolve_plugin_manifest(payload, manifest_path) if isinstance(payload, Mapping) else None
+
+
+def _read_plugin_manifest(manifest_path: Path) -> Mapping[str, Any] | None:
+    loaded = _load_plugin_manifest(manifest_path)
+    return loaded.payload if loaded is not None else None
 
 def _primary_plugin_manifest(plugin_dir: Path) -> Path | None:
     """Return the canonical MiniCode plugin manifest."""
@@ -212,16 +233,12 @@ def _iter_hook_maps(payload: Any) -> Iterable[Mapping[str, Any]]:
     yield hooks if isinstance(hooks, Mapping) else payload
 
 def _merge_manifest_metadata(entry: dict[str, Any], manifest_path: Path) -> None:
-    try:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+    loaded = _load_plugin_manifest(manifest_path)
+    if loaded is None:
         return
-    if not isinstance(raw, Mapping):
-        return
-    agent_plugin = is_agent_plugin_schema(raw)
-    if agent_plugin:
-        raw = resolve_agent_manifest(raw, plugin_directory_for_manifest(manifest_path))
-    entry["manifest_format"] = "agent_plugin" if agent_plugin else "legacy"
+    raw = loaded.payload
+    agent_plugin = loaded.format == "agent_plugin"
+    entry["manifest_format"] = loaded.format
     entry["skill_discovery_mode"] = "direct_children" if agent_plugin else "recursive"
     if not entry.get("description"):
         entry["description"] = str(raw.get("description") or "").strip()
@@ -286,18 +303,15 @@ def plugin_skill_sources(plugin_dir: Path, manifest_paths: Iterable[Path] | None
     direct_children = False
     valid_manifest = False
     for manifest_path in manifest_paths if manifest_paths is not None else _plugin_manifest_paths(plugin_dir):
+        manifest_path = Path(manifest_path)
+        direct_children = direct_children or manifest_path == plugin_dir / "plugin.json"
         try:
-            raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            loaded = _load_plugin_manifest(manifest_path)
+        except ValueError:
+            return [], direct_children
+        if loaded is None:
             continue
-        if isinstance(raw, Mapping) and is_agent_plugin_schema(raw):
-            direct_children = True
-            try:
-                raw = resolve_agent_manifest(raw, plugin_dir)
-            except ValueError:
-                return [], direct_children
-        if not isinstance(raw, Mapping):
-            continue
+        raw = loaded.payload
         valid_manifest = True
         configured = raw.get("skills") if isinstance(raw, Mapping) else None
         configured_paths = [configured] if isinstance(configured, str) else configured if isinstance(configured, list) else []
@@ -384,11 +398,10 @@ def _validate_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
             "warnings": warnings,
             "errors": [f"{rel_manifest}: manifest must be a JSON object."],
         }
-    if is_agent_plugin_schema(raw):
-        try:
-            raw = resolve_agent_manifest(raw, plugin_directory_for_manifest(manifest_path))
-        except ValueError as exc:
-            return {"manifest": {"path": rel_manifest}, "warnings": warnings, "errors": [str(exc)]}
+    try:
+        raw = _resolve_plugin_manifest(raw, manifest_path).payload
+    except ValueError as exc:
+        return {"manifest": {"path": rel_manifest}, "warnings": warnings, "errors": [str(exc)]}
     plugin_name = str(raw.get("name") or "").strip()
     if not plugin_name:
         errors.append(f"{rel_manifest}: manifest name is required.")
@@ -481,22 +494,15 @@ def _validate_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
         "errors": errors,
     }
 
-def _manifest_component_counts(manifest_path: Path) -> dict[str, int]:
-    try:
-        raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        raw = {}
-    if not isinstance(raw, Mapping):
-        raw = {}
+def _manifest_component_counts(manifest_path: Path, *, plugin_id: str | None = None) -> dict[str, int]:
+    loaded = _load_plugin_manifest(manifest_path)
+    raw = loaded.payload if loaded is not None else {}
     plugin_dir = plugin_directory_for_manifest(Path(manifest_path))
-    mcp_servers = _declared_component_payload(
-        plugin_dir,
-        raw.get("mcp_servers"),
-        ".mcp.json",
-        "servers",
-    )
+    mcp_servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id)
     apps = _declared_component_payload(plugin_dir, raw.get("apps"), ".app.json", "apps")
-    hooks = _declared_component_payload(plugin_dir, raw.get("hooks"), "hooks/hooks.json", "hooks")
+    hooks = [] if loaded is not None and loaded.format == "agent_plugin" else _declared_component_payload(
+        plugin_dir, raw.get("hooks"), "hooks/hooks.json", "hooks",
+    )
     extensions = raw.get("extensions")
     extension_paths = (
         [extensions]
@@ -516,26 +522,32 @@ def _manifest_component_counts(manifest_path: Path) -> dict[str, int]:
         "extension_count": len(extension_paths),
     }
 
-def _manifest_mcp_server_names(manifest_path: Path) -> list[str]:
-    try:
-        raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return []
-    if not isinstance(raw, Mapping):
-        return []
-    plugin_dir = plugin_directory_for_manifest(Path(manifest_path))
-    servers = _declared_component_payload(
-        plugin_dir,
-        raw.get("mcp_servers"),
-        ".mcp.json",
-        "servers",
-    )
+def _manifest_mcp_server_names(manifest_path: Path, *, plugin_id: str | None = None) -> list[str]:
+    loaded = _load_plugin_manifest(manifest_path)
+    servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id)
     if not isinstance(servers, Mapping):
         return []
+    if loaded is not None and loaded.format == "agent_plugin":
+        return sorted(servers)
     return sorted(
         {str(name).strip() for name in servers if str(name).strip()},
         key=str.casefold,
     )
+
+
+def _manifest_mcp_servers(
+    manifest_path: Path, loaded: LoadedPluginManifest | None, *, plugin_id: str | None,
+) -> Any:
+    if loaded is None:
+        return {}
+    plugin_dir = plugin_directory_for_manifest(manifest_path)
+    if loaded.format == "agent_plugin":
+        from backend.mcp.agent_plugin_config import load_agent_plugin_mcp_config
+        from backend.plugins.layout import agent_plugin_data_root
+
+        data_root = agent_plugin_data_root(plugin_id) if plugin_id is not None else plugin_dir / ".plugin-data"
+        return load_agent_plugin_mcp_config(plugin_dir, data_root).servers
+    return _declared_component_payload(plugin_dir, loaded.payload.get("mcp_servers"), ".mcp.json", "servers")
 
 def _declared_component_payload(
     plugin_dir: Path,

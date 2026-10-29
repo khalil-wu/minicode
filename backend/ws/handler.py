@@ -71,6 +71,8 @@ from backend.ws.fork_registry import ForkRegistry
 from backend.ws.manager import _SESSION_MCP_MANAGER_UNSET
 from backend.ws.permission_runtime import SessionPermissionRuntimeMixin
 from backend.ws.run_manager import SessionRunManager
+from backend.ws.lifecycle_scope import handoff_command_lifecycle_prefix
+from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.ws.stream_state import apply_stream_event, create_stream_state
 from backend.ws.turn_wait_state import TurnWaitState
 from backend.ws.ui_agent_state_store import UiAgentStateStore
@@ -379,14 +381,17 @@ class WebSocketSession(
         self._model_override_active = False
         self._provider_override_active = False
 
-        if skill_manager is not None:
+        if skill_manager is not None and hasattr(skill_manager, "clone_host_catalog"):
+            # Bootstrap already owns the host catalog. Copy its discovered
+            # metadata into this receiving thread instead of rescanning every
+            # Skill root during the WebSocket handshake; later workspace or
+            # turn scope changes still create their own snapshots.
+            self.skill_manager = skill_manager.clone_host_catalog()
+        elif skill_manager is not None:
             from backend.skills.loader import SkillLoader
             from backend.skills.manager import SkillManager
 
-            self.skill_manager = SkillManager(
-                loader=SkillLoader(project_root=None),
-                runtime_roots=runtime_skill_roots,
-            )
+            self.skill_manager = SkillManager(loader=SkillLoader(project_root=None), runtime_roots=runtime_skill_roots)
             self.skill_manager.discover()
         else:
             self.skill_manager = None
@@ -1065,6 +1070,7 @@ class WebSocketSession(
         run_context = RunContext(
             turn_input_queue=self.run_manager.turn_input_queue(target_conversation_id),
             window_binding_token=self._window_binding_token,
+            start_request=self.capture_agent_run_request(target_conversation_id),
         )
         run_cancel_event = asyncio.Event()
         run_metadata = dict(metadata or {})
@@ -1123,8 +1129,20 @@ class WebSocketSession(
             # does not yield control, so the runner observes this id before its
             # first coroutine step.
             run_metadata["_run_task_id"] = str(managed_run.id)
+        run_context.prepare_turn_owner(managed_run.task)
+        run_context.turn_kind = "review" if run_metadata.get("code_review") is not None else "regular"
 
         try:
+            query_guards = conversation_query_guards()
+            owner_id = f"ws:{self.session_id}:{managed_run.id}"
+            transition = run_metadata.pop("_conversation_transition", None)
+            claim = (query_guards.handoff(transition, owner_id=owner_id) if transition is not None
+                else query_guards.try_start(target_conversation_id, owner_id=owner_id, owner=run_context))
+            if claim is None:
+                raise RuntimeError("This conversation already owns a turn or is closing")
+            run_context.reserved_query_claim = claim
+            if transition is not None:
+                query_guards.bind_owner(claim, run_context)
             self._register_agent_run(
                 conversation_id=target_conversation_id,
                 task=managed_run.task,
@@ -1153,6 +1171,9 @@ class WebSocketSession(
                 label=f"rejected duplicate run for {target_conversation_id}",
                 owner=self._cleanup_tasks,
             )
+            if run_context.reserved_query_claim is not None:
+                self.run_manager.release_query_claim(run_context.reserved_query_claim)
+                run_context.reserved_query_claim = None
             busy_error = AgentEvent.error(
                 str(exc),
                 recoverable=True,
@@ -1341,6 +1362,10 @@ class WebSocketSession(
                             "Fallback terminal delivery remained incomplete for conversation %s",
                             target_conversation_id,
                         )
+                if run_context.reserved_query_claim is not None:
+                    self.run_manager.release_query_claim(run_context.reserved_query_claim)
+                    run_context.reserved_query_claim = None
+                    run_context.publish_turn_terminal({"status": terminal_status, "reason": terminal_reason})
                 self._cleanup_agent_run(
                     conversation_id=target_conversation_id,
                     task=managed_run.task,
@@ -1354,6 +1379,10 @@ class WebSocketSession(
             cleanup_task.add_done_callback(self.execution_cleanup_tasks.discard)
             if self.ws_manager is not None:
                 self.ws_manager.track_execution_cleanup(target_conversation_id, self, cleanup_task)
+        # The concrete run, frozen request and cleanup owner now exist. Its slow
+        # admission continues in this command's suffix, outside the window/task
+        # mutation prefix. The maintenance participation and durable ACK stay owned.
+        await handoff_command_lifecycle_prefix(self.session_id)
         if admission_future is not None:
             done, _pending = await asyncio.wait(
                 {admission_future, managed_run.task},
@@ -1719,7 +1748,9 @@ class WebSocketSession(
                 ):
                     active = None
                     self.active_conversation_id = owner = None
-                runtime_snapshot = self.runtime_snapshot()
+                # Inventory updates change sidebar metadata, not the tool
+                # catalog. Capability events own that more expensive projection.
+                runtime_snapshot = self.runtime_snapshot(include_capabilities=False)
                 if owner != self.active_conversation_id:
                     continue
                 payload = {
@@ -1908,8 +1939,11 @@ class WebSocketSession(
         # ``control_request``.
         await self._publish_stream_projection(event, payload, target_conversation_id)
         if self.ws_manager is not None and target_conversation_id:
-            runtime = self.ws_manager.execution_contexts.thread_runtime_for(
-                self.conversation_repo.store_instance_id(), target_conversation_id)
+            run_context = self.run_manager.context_for(target_conversation_id)
+            runtime = run_context.environment_thread_runtime if run_context is not None else None
+            if runtime is None:
+                runtime = self.ws_manager.execution_contexts.thread_runtime_for(
+                    self.conversation_repo.store_instance_id(), target_conversation_id)
             if runtime is not None and runtime.realtime_runtime is not None:
                 from websockets.exceptions import ConnectionClosed
                 try:

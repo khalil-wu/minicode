@@ -69,6 +69,11 @@ class RunContext:
     environment_host_mcp_manager: Any | None = None
     environment_host_skill_manager: Any | None = None
     environment_host_captured: bool = False
+    start_request: Any | None = None
+    skill_snapshot_task: asyncio.Task | None = None
+    reserved_query_claim: Any | None = None
+    mcp_connections: Any | None = None
+    owns_mcp_connections: bool = False
     network_step: Any | None = None
     network_approval_service: Any | None = None
     session_source: str = "sdk"
@@ -155,6 +160,7 @@ class RunContext:
     turn_diff_tracker: TurnDiffTracker | None = None
     window_binding_token: str = field(default="", repr=False)
     cancel_reason: str = ""
+    turn_abort_error: dict[str, str] | None = None
     record_user_cancelled: Callable[[str], None] | None = None
     user_cancel_persistence: asyncio.Task[None] | None = None
     user_input_command: Callable[[], Any | None] | None = None
@@ -203,6 +209,17 @@ class RunContext:
             self.browser_execution = None
             consumers = tuple(self.environment_retirement_tasks | self.lifecycle_cleanup_tasks)
             self.environment_retirement_tasks.add(asyncio.create_task(original.finish_after(consumers), name="browser-turn-ended"))
+        if self.owns_mcp_connections:
+            connections = self.mcp_connections
+            self.mcp_connections, self.owns_mcp_connections = None, False
+            consumers = tuple(self.environment_retirement_tasks)
+
+            async def close_connections():
+                if consumers:
+                    await asyncio.gather(*(asyncio.shield(task) for task in consumers))
+                await connections.aclose()
+
+            self.environment_retirement_tasks.add(asyncio.create_task(close_connections(), name="turn-mcp-connections-close"))
         if self.environment_retirement_tasks:
             tasks = tuple(self.environment_retirement_tasks)
             pending_tools = any(not task.done() for task in self.lifecycle_cleanup_tasks)
@@ -219,8 +236,8 @@ class RunContext:
                 raise ExceptionGroup("retired environment capabilities did not close", errors)
             self.environment_retirement_tasks.difference_update(tasks)
 
-    def prepare_turn_owner(self) -> None:
-        self.turn_owner_task = asyncio.current_task()
+    def prepare_turn_owner(self, task: asyncio.Task | None = None) -> None:
+        self.turn_owner_task = task if task is not None else asyncio.current_task()
         self.turn_terminal_receipt = asyncio.get_running_loop().create_future()
         self.turn_started_receipt = asyncio.get_running_loop().create_future()
 

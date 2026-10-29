@@ -450,6 +450,8 @@ def create_isolated_worktree_binding(
     current_workspace_root: Path | None,
     main_worktree_root: Any,
     worktree_manager_factory: Any | None = None,
+    branch: str | None = None,
+    new_branch: bool = True,
 ) -> IsolatedWorktreeCreationResult:
     from backend.workspace.worktree import WorktreeManager, isolated_worktree_root
 
@@ -484,10 +486,10 @@ def create_isolated_worktree_binding(
 
     worktree_root = isolated_worktree_root(base_root)
     worktree_path = worktree_root / conversation_id
-    branch = generated_branch_name(conversation_id)
+    branch = branch if branch is not None else generated_branch_name(conversation_id)
     try:
         worktree_root.mkdir(parents=True, exist_ok=True)
-        created = manager.create_worktree(worktree_path, branch=branch, new_branch=True, run_environment=False)
+        created = manager.create_worktree(worktree_path, branch=branch, new_branch=new_branch, run_environment=False)
     except Exception as exc:
         return IsolatedWorktreeCreationResult(
             created=False,

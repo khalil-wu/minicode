@@ -323,11 +323,13 @@ class GuardianAsyncService:
             store.enable_image_capture()
 
     async def on_tool_start(self, tc, context, registry):
+        from backend.agent.final_tool_request import executable_tool_for_call
+
         execution = context.model_execution
         if self.closed or execution is None or not execution.config.feature_flags.enabled("guardian_approval", True):
             return
         self._enable_repl_image_capture(context)
-        tool = registry.get_tool(tc.name)
+        tool = executable_tool_for_call(tc, registry)
         if isinstance(tool, ToolWaitTool):
             return
         key = context.turn_id, tc.id

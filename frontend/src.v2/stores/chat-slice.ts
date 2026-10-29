@@ -1,4 +1,5 @@
 import type { StateCreator } from "zustand";
+import { mergeRetainedComposerMessages, reconcileRetainedInputOutcome } from "../composer/retainedComposerInputs";
 import { inheritMessageTopology, recordStreamingTextUpdate, recordStreamingThinkingUpdate, recordStreamingProgressUpdate, recordStreamingToolUpdate } from "../lib/message-changes";
 import type {
   AppStore,
@@ -62,10 +63,10 @@ import {
 } from "../lib/tool-call-reducer";
 import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
 import { isTransientProviderReasoning } from "../lib/provider-reasoning";
-import { composerWorkspaceKey } from "./composer-drafts";
-import { emptyConversationWorkbenchState } from "./ui-slice";
+import { activeDraftStorageKey, materializeConversationDraft, refreshConversationDraftSelection,
+  savedActiveConversationDraftId, selectConversationDraft, startConversationDraft } from "./conversation-drafts";
 import { rememberSentCommandProjection } from "../protocol/command-projection";
-import { getDiffCommentScope, readDiffCommentState, restoreSubmittedDiffComments, transferDiffComments } from "../lib/diff-comment-storage";
+import { getDiffCommentScope, readDiffCommentState, restoreSubmittedDiffComments } from "../lib/diff-comment-storage";
 
 function findAgentMessageBlockIndex(blocks: ContentBlock[], itemId: string): number {
   for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -304,7 +305,15 @@ function findOpenAssistantIndexForMessage(messages: AppStore["messages"], messag
 }
 
 export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, get) => ({
-  pendingComposerConversationAdoption: null,
+  activeConversationDraftId: savedActiveConversationDraftId(),
+  conversationDrafts: {},
+  preparingComposerMessages: {},
+  retainedComposerInputs: {},
+  homeConversationDraftIds: {},
+  startConversationDraft,
+  selectConversationDraft,
+  refreshConversationDraftSelection,
+  materializeConversationDraft,
   conversationId: null,
   pendingConversationSwitchId: null,
   pendingConversationCreateId: null,
@@ -625,8 +634,17 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
   requestConversationSwitch: (id) => {
     const targetId = id.trim();
     if (!targetId) return;
+    const unfinishedDraft = Object.values(get().conversationDrafts).find(draft => draft.conversationId === targetId && !draft.adopted);
+    if (unfinishedDraft) {
+      get().selectConversationDraft(unfinishedDraft.id);
+      void get().materializeConversationDraft(unfinishedDraft.id);
+      return;
+    }
     get().setAppMode("cowork");
     if (targetId === get().conversationId && !get().pendingConversationSwitchId) return;
+    if (get().activeConversationDraftId) {
+      get().snapshotWorkbenchState();
+    }
     // `conversation.switched` is the causal event and the only authority on
     // which conversation is active — the backend refuses a stale or archived
     // target rather than switching to it. Applying the switch locally first
@@ -634,7 +652,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     // every later command then carried a conversation_id its scope check
     // rejects. Keep the authority unchanged while presenting the requested
     // conversation as an empty view until its public page arrives.
-    set((state) => ({ pendingConversationSwitchId: targetId, pendingConversationCreateId: null, pendingComposerConversationAdoption: null,
+    set((state) => ({ pendingConversationSwitchId: targetId, pendingConversationCreateId: null,
       gitChanges: { ...state.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined, comparison: undefined },
       messageRevealTarget: state.messageRevealTarget?.conversationId === targetId ? state.messageRevealTarget : null,
     }));
@@ -659,23 +677,6 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     if (!currentConversationId || currentConversationKnown || currentConversationId === id) {
       get().snapshotWorkbenchState(currentConversationId ?? undefined);
     }
-    const adoption = get().pendingComposerConversationAdoption;
-    if (adoption?.conversationId === id && !currentConversationId
-      && workspaceRootsEqual(adoption.workspaceRoot, get().workingDirectory)) {
-      transferDiffComments(getDiffCommentScope(null, adoption.workspaceRoot), getDiffCommentScope(id, adoption.workspaceRoot));
-      set((state) => {
-        const workspaceKey = composerWorkspaceKey(adoption.workspaceRoot);
-        const draft = state.workspaceComposerDrafts[workspaceKey];
-        const remainingWorkspaceDrafts = { ...state.workspaceComposerDrafts };
-        delete remainingWorkspaceDrafts[workspaceKey];
-        return {
-          conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
-            [id]: { ...emptyConversationWorkbenchState(), ...state.conversationWorkbenchStates[id], ...draft } },
-          workspaceComposerDrafts: remainingWorkspaceDrafts,
-          pendingComposerConversationAdoption: null,
-        };
-      });
-    }
     const targetConversation = get().conversations.find((c) => c.id === id);
     const targetWorkspace = conversationWorkspacePath(targetConversation);
     const workspaceChanged = Boolean(targetConversation) && !workspaceRootsEqual(targetWorkspace, get().workingDirectory);
@@ -690,6 +691,9 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     }
     set((s) => {
       const sameConversation = s.conversationId === id;
+      const draft = s.activeConversationDraftId ? s.conversationDrafts[s.activeConversationDraftId] : undefined;
+      const adoptingDraft = draft?.conversationId === id
+        && workspaceRootsEqual(draft.executionCwd || draft.workspaceRoot, targetWorkspace);
       const currentStillKnown = Boolean(
         s.conversationId &&
         s.conversations.some((conversation) => conversation.id === s.conversationId),
@@ -720,6 +724,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         // reads still belong to that owner and must keep their request IDs.
         ...(sameConversation && !workspaceChanged ? { gitChanges: s.gitChanges } : {}),
         conversationId: id,
+        activeConversationDraftId: null,
         messageRevealTarget: s.messageRevealTarget?.conversationId === id ? s.messageRevealTarget : null,
         activeGoal: targetConversation?.goal ?? null,
         messages: cachedCurrent.conversationMessages[id] ?? [],
@@ -728,11 +733,12 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         conversationMessages: cachedCurrent.conversationMessages,
         conversationStreaming: cachedCurrent.conversationStreaming,
         runtimeSession: null,
-        ...(!sameConversation || workspaceChanged
+        ...((!sameConversation || workspaceChanged) && !adoptingDraft
           ? { runtimeCapabilities: null, availableSkills: [], slashCommands: [] }
           : {}),
         draft: "",
         queuedEdit: undefined,
+        retainedInputEdit: undefined,
         richDraft: undefined,
         attachments: [],
         quotedMessage: null,
@@ -759,6 +765,7 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       };
     });
     persistActiveConversationId(id);
+    writeLS(activeDraftStorageKey(), "");
     get().restoreAgentState(id);
     get().restoreWorkbenchState(id);
     set((s) => ({
@@ -779,17 +786,17 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     const owner = get();
     if (owner.pendingConversationSwitchId) return null;
     if (owner.conversationId) return owner.conversationId;
-    const creation = get().createConversation({ bindWorkspace: Boolean(owner.workingDirectory), appMode: owner.appMode, adoptDraft: true });
-    const requestedId = get().pendingConversationCreateId;
-    if (!await creation || get().conversationId !== requestedId) return null;
-    return requestedId;
+    const draftId = owner.activeConversationDraftId ?? owner.startConversationDraft({ bindWorkspace: Boolean(owner.workingDirectory), appMode: owner.appMode });
+    const created = await get().materializeConversationDraft(draftId);
+    return created && (get().conversationId === created || get().activeConversationDraftId === draftId) ? created : null;
   },
   createConversation: async (options) => {
     const state = get();
-    const id = newConversationId();
+    const id = options?.conversationId ?? newConversationId();
+    const activate = options?.activate !== false;
     const nextAppMode = options?.appMode ?? "cowork";
     const workspaceAtRequest = options?.workspaceRoot ?? state.workingDirectory;
-    const requestedWorkspace = options?.adoptDraft ? workspaceAtRequest.trim() : canonicalWorkspacePath(workspaceAtRequest);
+    const requestedWorkspace = canonicalWorkspacePath(workspaceAtRequest);
     const currentIsProjectless = state.conversations.some((conversation) =>
       conversation.id === state.conversationId && conversation.executionCwd && !conversation.workspaceRoot && !conversation.worktreePath);
     const shouldBindWorkspace = Boolean(options?.workspaceRoot)
@@ -807,31 +814,31 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     let workspaceRoot = shouldBindWorkspace
       ? requestedWorkspace
       : "";
-    set((current) => ({ pendingConversationSwitchId: id, pendingConversationCreateId: id,
-      pendingComposerConversationAdoption: options?.adoptDraft ? { conversationId: id, workspaceRoot: current.workingDirectory } : null,
+    if (activate) set((current) => ({ pendingConversationSwitchId: id, pendingConversationCreateId: id,
       gitChanges: { ...current.gitChanges, loading: false, workingTreeRequestId: undefined, stagedRequestId: undefined, comparison: undefined },
     }));
     let created = false;
     try {
-      const preferences = desktop() ? await desktop()!.preferences.get() : null;
-      if (get().pendingConversationCreateId !== id) return false;
+      const preferences = options?.preferences !== undefined ? options.preferences : desktop() ? await desktop()!.preferences.get() : null;
+      if (activate && get().pendingConversationCreateId !== id) return false;
       if (preferences) {
         get().initializeWorkspaceView(id, Boolean(preferences.defaultWorkspaceFullView));
-        if (window.__MINICODE_RUNTIME__?.initialNavigation?.popout && preferences.popoutWindowProjectlessDefault && !options?.workspaceRoot) workspaceRoot = "";
+        if (activate && window.__MINICODE_RUNTIME__?.initialNavigation?.popout && preferences.popoutWindowProjectlessDefault && !options?.workspaceRoot) workspaceRoot = "";
       }
       const createCommand = {
         type: "conversation.create",
+        activate,
         conversation_id: id,
         title: "New chat",
         conversation_type: "main",
         ...(options?.sidebarSectionId ? { sidebar_section_id: options.sidebarSectionId } : {}),
         workspace_root: workspaceRoot || undefined,
-        ...(!workspaceRoot && preferences ? { projectless_base: preferences.defaultTaskDirectory,
-          initial_prompt: options?.adoptDraft ? state.draft : "" } : {}),
-        permission_mode: options?.adoptDraft || !preferences
-          ? toBackendPermissionMode(state.permissionMode) : preferences.defaultPermissionMode,
-        agent_mode: options?.adoptDraft ? state.agentMode : "build",
-        client_command_id: uniqueMessageId("cmd"),
+        ...(!workspaceRoot && (options?.projectlessBase || preferences) ? { projectless_base: options?.projectlessBase ?? preferences!.defaultTaskDirectory,
+          initial_prompt: options?.initialPrompt ?? "" } : {}),
+        permission_mode: options?.permissionMode ?? (!preferences
+          ? toBackendPermissionMode(state.permissionMode) : preferences.defaultPermissionMode),
+        agent_mode: options?.agentMode ?? "build",
+        client_command_id: options?.clientCommandId ?? uniqueMessageId("cmd"),
       } as const;
       rememberSentCommandProjection(createCommand, createCommand.client_command_id, state.conversationId);
       const result = await sendClientCommandAwaitResult(createCommand, "conversation.create");
@@ -840,9 +847,10 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         pushToast(result.message || "Unable to create the conversation.", "error", 4000);
         return false;
       }
+      options?.onCreated?.(result);
       const current = get();
-      if (current.pendingConversationSwitchId === id
-        || (current.pendingConversationSwitchId === null && current.conversationId === id)) {
+      if (activate && (current.pendingConversationSwitchId === id
+        || (current.pendingConversationSwitchId === null && current.conversationId === id))) {
         current.setAppMode(nextAppMode);
       }
       created = true;
@@ -855,9 +863,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       pushToast(message, "error", 4000);
       return false;
     } finally {
-      if (get().pendingConversationCreateId === id) set({ pendingConversationCreateId: null });
-      if (get().pendingComposerConversationAdoption?.conversationId === id) set({ pendingComposerConversationAdoption: null });
-      if (!created) get().requestGitChanges();
+      if (activate && get().pendingConversationCreateId === id) set({ pendingConversationCreateId: null });
+      if (activate && !created) get().requestGitChanges();
     }
   },
   removeConversation: async (id) => sendConversationDeleteCommand({
@@ -893,9 +900,12 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
       };
     }),
   hydrateConversationMessages: (id, messages, options) => {
+    const confirmedIds = options?.confirmedUserMessageIds ?? messages.filter(message => message.role === "user"
+      && (message.deliveryStatus === "sent" || message.deliveryStatus === undefined)).map(message => message.id);
+    for (const inputId of confirmedIds) reconcileRetainedInputOutcome({ ownerId: id, inputId, accepted: true });
     set((s) => {
       const activate = options?.activate ?? id === s.conversationId;
-      const guardedMessages = applyRecallTruncation(id, messages, s);
+      const guardedMessages = applyRecallTruncation(id, mergeRetainedComposerMessages(s, id, messages), s);
       const restoredDiff = guardedMessages.slice().reverse().find((message) => message.role === "assistant")?.turnDiff;
       const nextStreaming = options?.isStreaming ?? guardedMessages.some((message) => message.isStreaming);
       const cachedCurrent = activate

@@ -6,7 +6,6 @@ const miniBar = document.getElementById("mini-bar");
 const miniOpen = document.getElementById("mini-open");
 const miniMenu = document.getElementById("mini-menu");
 const miniCount = document.getElementById("mini-count");
-const media = window.matchMedia("(prefers-reduced-motion: reduce)");
 let state;
 let spriteKey = "";
 let timer;
@@ -113,7 +112,7 @@ function animate() {
   clearTimeout(timer);
   if (!state || state.selectedPetId === null || !state.petVisible || !state.miniOpen) return;
   const animation = drag ? drag.direction : hover ? "jumping" : state.activity.waiting ? "waiting" : state.activity.running ? "running" : state.activity.failed ? "failed" : state.activity.review ? "review" : "idle";
-  const reduced = state.reducedMotion || media.matches;
+  const reduced = state.reducedMotion;
   if (currentAnimation !== animation) { currentAnimation = animation; frame = 0; }
   const idle = state.animations.idleDurations.map((duration, column) => ({ row: 0, column, duration: duration * state.animations.idleHoldMultiplier }));
   const row = state.animations.states[animation];
@@ -200,7 +199,6 @@ miniBar.addEventListener("contextmenu", event => { event.preventDefault(); act("
 sprite.addEventListener("contextmenu", event => { event.preventDefault(); act("context-menu"); });
 document.addEventListener("mousemove", event => pointerInteraction(Boolean(drag || event.target.closest("#pet, #mini-bar, .notice, #error:not([hidden])"))));
 document.addEventListener("mouseleave", () => { if (!drag) pointerInteraction(false); });
-media.addEventListener("change", animate);
 window.miniPet.onState(next => { void apply(next).catch(showError); });
 window.miniPet.onError(showError);
 void window.miniPet.getState().then(apply).catch(showError);

@@ -1486,12 +1486,12 @@ class FileSwarmStore:
                 return
 
     def has_pending_messages(self, *, participant_id: str, mailbox_epoch: int,
-        conversation_id: str, excluded_message_kinds: tuple[str, ...] = ()) -> bool:
+        conversation_id: str, excluded_message_kinds: tuple[str, ...] = (), trigger_turn_only: bool = False) -> bool:
         """Read pending input without consuming a claim or waking another turn."""
         with closing(self._connect()) as connection:
             return next(self._claimable_message_rows(connection, participant_id=participant_id,
                 mailbox_epoch=mailbox_epoch, conversation_id=conversation_id, since_seq=0, now_ms=epoch_ms(),
-                excluded_message_kinds=excluded_message_kinds), None) is not None
+                excluded_message_kinds=excluded_message_kinds, trigger_turn_only=trigger_turn_only), None) is not None
 
     def claim_messages(
         self,

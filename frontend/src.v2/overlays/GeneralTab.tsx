@@ -8,6 +8,7 @@ import { pushToast } from "./ToastContainer";
 import { SelectMenu } from "../components/SelectMenu";
 import { FileOpenTargetIcon } from "../components/FileOpenTargetIcon";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
+import { useDesktopPreferenceTargets } from "../hooks/useDesktopPreferenceTargets";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { Pencil, ShieldAlert, X } from "lucide-react";
 import { formatShortcut, shortcutFromEvent, toElectronAccelerator } from "../lib/keyboard-shortcuts";
@@ -41,7 +42,7 @@ export const GeneralTab = ({
   const modifierSymbol = navigator.platform.startsWith("Mac") ? "⌘" : "^";
   return (
     <div className="settings-general-groups">
-      {isDesktop() && <DesktopGeneralPreferences onOpenLicenses={onOpenLicenses} />}
+      {isDesktop() && <DesktopGeneralPreferences active={active} onOpenLicenses={onOpenLicenses} />}
       <SettingsGroup title={t("输入框")}>
         <PlainTextComposerPreference />
         {isDesktop() && <ComposerContextUsagePreference />}
@@ -118,27 +119,27 @@ const SettingsRow = ({ title, description, children }: { title: string; descript
   </div>
 );
 
-const DesktopGeneralPreferences = ({ onOpenLicenses }: { onOpenLicenses?: () => void }) => {
+const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean; onOpenLicenses?: () => void }) => {
   const { t } = useI18n();
   const { preferences, error, update } = useDesktopPreferences();
+  const { targets, error: targetsError } = useDesktopPreferenceTargets(active, preferences?.terminalShell);
   const [fullAccessConfirmation, setFullAccessConfirmation] = useState(false);
   const [changingTaskDirectory, setChangingTaskDirectory] = useState(false);
   if (error) return <p role="alert">{error}</p>;
   if (!preferences) return <p role="status">{t("正在读取桌面设置…")}</p>;
   return <>
     <SettingsGroup title={t("权限")}>
-      <SettingsRow title={t("默认权限")} description={t("默认权限允许读取和编辑任务文件；需要时，可以请求额外访问权限。") }>
+      <SettingsRow title={t("默认权限")} description={t("默认情况下，MiniCode 可以读取和编辑其工作空间中的文件。需要时，它可以请求额外访问权限。") }>
         <button type="button" className="settings-toggle" role="switch" aria-label={t("始终显示默认权限")} aria-checked="true" data-active="true" disabled><span /></button>
       </SettingsRow>
-      <SettingsRow title={t("完整访问权限")} description={<>{t("当 MiniCode 以完整访问权限运行时，它无需你的批准即可编辑电脑上的任何文件，并运行可访问网络的命令。这会显著增加数据丢失、泄露或意外行为的风险。")}{" "}<a href={PERMISSIONS_LEARN_MORE_URL} className="settings-full-access-learn-more" onClick={event => {
+      <SettingsRow title={t("完整访问权限")} description={<>{t("当 MiniCode 以完整访问权限运行时，它无需你的批准即可编辑你电脑上的任何文件，并运行可访问网络的命令。这会显著增加数据丢失、泄露或意外行为的风险。")}{" "}<a href={PERMISSIONS_LEARN_MORE_URL} className="settings-full-access-learn-more" onClick={event => {
         event.preventDefault(); void import("../lib/open-preferred-target").then(({ openPreferredWebLink }) => openPreferredWebLink(PERMISSIONS_LEARN_MORE_URL));
-      }}>{t("了解更多")}</a></>}>
+      }}>{t("了解更多")}</a>{t("关于风险升高的信息。")}</>}>
         <button type="button" className="settings-toggle" role="switch" aria-label={t("完整访问权限")} aria-checked={preferences.showFullAccess} data-active={preferences.showFullAccess}
           onClick={() => preferences.showFullAccess ? void update({ showFullAccess: false }) : setFullAccessConfirmation(true)}><span /></button>
       </SettingsRow>
     </SettingsGroup>
     <SettingsGroup title={t("常规")}>
-      {desktop()!.platformInfo.platform === "win32" && <StartupAppsPreference />}
       <SettingsRow title={t("无项目任务文件夹")} description={t("在项目外启动的任务默认存储数据的位置。")}>
         <code className="settings-general-task-path" title={preferences.defaultTaskDirectory}>{preferences.defaultTaskDirectory}</code>
         <div className="settings-general-task-actions">
@@ -153,14 +154,17 @@ const DesktopGeneralPreferences = ({ onOpenLicenses }: { onOpenLicenses?: () => 
       </SettingsRow>
       <SettingsRow title={t("默认文件打开位置")} description={t("默认打开文件和文件夹的位置。")}>
         <SelectMenu ariaLabel={t("默认文件打开位置")} className="settings-select settings-select-regular" align="end" menuMaxHeight={320}
-          renderOptionIcon={(value) => <FileOpenTargetIcon target={preferences.fileOpenTargets.find(target => target.id === value)!} />}
+          disabled={!targets} selectedLabel={!targets ? t("正在读取桌面设置…") : undefined}
+          renderOptionIcon={targets ? (value) => <FileOpenTargetIcon target={targets.fileOpenTargets.find(target => target.id === value)!} /> : undefined}
           value={preferences.fileOpenTarget} onValueChange={(value) => void update({ fileOpenTarget: value as typeof preferences.fileOpenTarget })}>
-          {preferences.fileOpenTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
+          {targets?.fileOpenTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
         </SelectMenu>
+        {targetsError && <p role="alert">{targetsError}</p>}
       </SettingsRow>
       <SettingsRow title={t("集成终端 Shell")} description={t("选择要在集成终端中打开的 Shell。")}>
-        <SelectMenu ariaLabel={t("集成终端 Shell")} className="settings-select settings-select-regular" align="end" value={preferences.terminalShell} onValueChange={(value) => void update({ terminalShell: value as typeof preferences.terminalShell })}>
-          {preferences.terminalShellTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
+        <SelectMenu ariaLabel={t("集成终端 Shell")} className="settings-select settings-select-regular" align="end" disabled={!targets} selectedLabel={!targets ? t("正在读取桌面设置…") : undefined}
+          value={preferences.terminalShell} onValueChange={(value) => void update({ terminalShell: value as typeof preferences.terminalShell })}>
+          {targets?.terminalShellTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
         </SelectMenu>
       </SettingsRow>
       <SettingsRow title={t("语言")} description={t("应用界面语言。")}>
@@ -178,6 +182,7 @@ const DesktopGeneralPreferences = ({ onOpenLicenses }: { onOpenLicenses?: () => 
           aria-checked={preferences.defaultWorkspaceFullView} data-active={preferences.defaultWorkspaceFullView}
           onClick={() => void update({ defaultWorkspaceFullView: !preferences.defaultWorkspaceFullView })}><span /></button>
       </SettingsRow>
+      {desktop()!.platformInfo.platform === "win32" && <StartupAppsPreference />}
       <SettingsRow title={t("底部面板")} description={t("在应用顶部显示底部面板入口。") }>
         <button type="button" className="settings-toggle" role="switch" aria-label={t("底部面板")}
           aria-checked={preferences.showBottomPanel} data-active={preferences.showBottomPanel}
