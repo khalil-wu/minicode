@@ -84,9 +84,11 @@ export const LS = {
 export const DEFAULT_WORKSPACE_KEY = "__default__";
 export const LEFT_SIDEBAR_DEFAULT_WIDTH = 340;
 export const LEFT_SIDEBAR_MIN_WIDTH = 240;
+export const LEFT_SIDEBAR_RAIL_MIN_WIDTH = 290;
 export const LEFT_SIDEBAR_MAX_WIDTH = 520;
-export const visibleLeftSidebarWidth = (width: number, shellWidth: number) => width === 0 ? 0
-  : Math.max(LEFT_SIDEBAR_MIN_WIDTH, Math.min(width, LEFT_SIDEBAR_MAX_WIDTH, shellWidth - 240));
+// Widths stored in layout state include the navigation rail when it is present.
+export const visibleLeftSidebarWidth = (width: number, shellWidth: number, minimumWidth = LEFT_SIDEBAR_MIN_WIDTH) => width === 0 ? 0
+  : Math.max(minimumWidth, Math.min(width, LEFT_SIDEBAR_MAX_WIDTH, shellWidth - 240));
 export const RIGHT_SIDEBAR_DEFAULT_WIDTH = 600;
 export const COMPACT_WORKBENCH_MAX_WIDTH = 1199;
 

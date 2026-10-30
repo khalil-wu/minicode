@@ -505,11 +505,13 @@ describe("WorkbenchShell narrow navigation", () => {
     render(<WorkbenchShell />);
 
     const sidebar = leftSidebar()!;
+    expect(sidebar.style.width).toBe("0px");
     expect(screen.getByRole("button", { name: "打开左侧栏" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "打开左侧栏" }));
     expect(leftSidebar()!).toBe(sidebar);
     expect(useAppStore.getState().leftSidebarWidth).toBe(336);
+    expect(sidebar.style.width).toBe("calc(336px - var(--desktop-rail-width))");
   });
 
   it("closes a narrow drawer after its content completes navigation", () => {

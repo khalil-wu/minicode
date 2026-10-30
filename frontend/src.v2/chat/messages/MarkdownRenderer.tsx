@@ -1669,7 +1669,7 @@ const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openF
 }) => {
   const headingId = useMemo(() => createMarkdownHeadingIdAssigner(`${scopeId}-p${part.start}`), [scopeId, part.start]);
   const components = useMemo(() => mdComponents(resolved, scopeId, headingId), [resolved, scopeId, headingId]);
-  const content = useMemo(() => normalizeMarkdownSource(part.content), [part.content]);
+  const content = useMemo(() => openFence === 0 ? part.content : normalizeMarkdownSource(part.content), [part.content, openFence]);
   headingId.reset();
   if (openFence === 0) {
     const newline = part.content.indexOf("\n");

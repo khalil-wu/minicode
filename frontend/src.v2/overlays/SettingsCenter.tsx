@@ -9,7 +9,7 @@ import {
   X,
 } from "../lib/icons";
 import { useAppStore } from "../stores";
-import { visibleLeftSidebarWidth } from "../stores/shared-helpers";
+import { LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_RAIL_MIN_WIDTH, visibleLeftSidebarWidth } from "../stores/shared-helpers";
 import { fetchLLMSettings } from "../protocol/api";
 import { runtime } from "../desktop/runtime";
 import { openDictationProviderSettings } from "../lib/dictation-preferences";
@@ -58,11 +58,12 @@ const WorktreesTab = lazy(() => import("./WorktreesTab").then(m => ({ default: m
 const SourcePetsTab = lazy(() => import("./SourcePetsTab").then(m => ({ default: m.SourcePetsTab })));
 const ComputerUseSettings = lazy(() => import("./ComputerUseSettings").then(m => ({ default: m.ComputerUseSettings })));
 
-export const SettingsCenter = memo(function SettingsCenter() {
+export const SettingsCenter = memo(function SettingsCenter({ withGlobalRail = false }: { withGlobalRail?: boolean }) {
   const { t: tr } = useI18n();
   const settingsOpen = useAppStore((s) => s.settingsOpen);
   const sidebarWidth = useAppStore((s) => s.leftSidebarExpandedWidth);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+  const sidebarTotalWidth = visibleLeftSidebarWidth(sidebarWidth, windowWidth, withGlobalRail ? LEFT_SIDEBAR_RAIL_MIN_WIDTH : LEFT_SIDEBAR_MIN_WIDTH);
   useEffect(() => {
     const resize = () => setWindowWidth(window.innerWidth);
     window.addEventListener("resize", resize);
@@ -345,7 +346,7 @@ export const SettingsCenter = memo(function SettingsCenter() {
     <main
       ref={pageRef}
       className="settings-workspace settings-center"
-      style={{ "--settings-sidebar-width": `${visibleLeftSidebarWidth(sidebarWidth, windowWidth)}px` } as import("react").CSSProperties}
+      style={{ "--settings-sidebar-width": withGlobalRail ? `calc(${sidebarTotalWidth}px - var(--desktop-rail-width))` : `${sidebarTotalWidth}px` } as import("react").CSSProperties}
       hidden={!settingsOpen}
       aria-label={tr("设置")}
       tabIndex={-1}

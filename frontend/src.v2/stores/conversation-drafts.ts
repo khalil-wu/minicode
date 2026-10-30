@@ -350,10 +350,15 @@ export const materializeConversationDraft = (id: string): Promise<string | null>
       return retiredDrafts.has(id) ? null : initial.conversationId!;
     }
     const body = atStart.activeConversationDraftId === id ? composerDraftOf(atStart) : atStart.workspaceComposerDrafts[id];
+    const readyDefault = initial.modelSelection.mode === "default" && initial.modelProjection
+      && !initial.selectionLoading && !initial.selectionError;
     const [preferences, selectionReady] = await Promise.all([
-      loadConversationDraftPreferences(id), refreshConversationDraftSelection(id),
+      loadConversationDraftPreferences(id), readyDefault ? true : refreshConversationDraftSelection(id),
     ]);
     if (!selectionReady) return null;
+    // Settings can invalidate a ready footer while preferences are loading.
+    const pendingSelection = selectionRequests.get(id);
+    if (pendingSelection && !await pendingSelection.promise) return null;
     if (retiredDrafts.has(id)) return null;
     let context = useAppStore.getState().conversationDrafts[id];
     const owner = context.conversationId ?? context.requestedConversationId ?? newConversationId();

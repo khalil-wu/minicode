@@ -4,7 +4,7 @@ import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BookOpenText, Check, ChevronDown, Clock3, Puzzle, Search, SquarePen } from "../lib/icons";
 import { useAppStore } from "../stores";
-import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, visibleLeftSidebarWidth } from "../stores/shared-helpers";
+import { LEFT_SIDEBAR_DEFAULT_WIDTH, LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_RAIL_MIN_WIDTH, LEFT_SIDEBAR_MAX_WIDTH, visibleLeftSidebarWidth } from "../stores/shared-helpers";
 import { ConfirmDialog, type ConfirmDialogState } from "./sidebarComponents";
 import { ConversationsTab } from "./ConversationsTab";
 import { ContextMenu } from "../components/ContextMenu";
@@ -53,7 +53,8 @@ export const SidebarLeft = ({
   }, [isOpen, skillsMarketplaceOpen, withGlobalRail]);
   const sidebarRef = useRef<HTMLElement>(null);
   const [shellWidth, setShellWidth] = useState(window.innerWidth);
-  const visibleSidebarWidth = visibleLeftSidebarWidth(leftSidebarWidth, shellWidth);
+  const minimumWidth = withGlobalRail && !embedded ? LEFT_SIDEBAR_RAIL_MIN_WIDTH : LEFT_SIDEBAR_MIN_WIDTH;
+  const visibleTotalWidth = visibleLeftSidebarWidth(leftSidebarWidth, shellWidth, minimumWidth);
   const resizeRef = useRef<{ x: number; width: number; nextWidth: number; didMove: boolean; frame: number | null } | null>(null);
   useEffect(() => { sidebarRef.current!.inert = !isOpen; }, [isOpen]);
   useEffect(() => {
@@ -63,12 +64,12 @@ export const SidebarLeft = ({
   }, []);
   useLayoutEffect(() => {
     if (embedded) return;
-    const workspace = sidebarRef.current!.closest(".mc-desktop-workspace");
+    const workspace = sidebarRef.current!.closest(withGlobalRail ? ".mc-desktop-body" : ".mc-desktop-workspace");
     if (!workspace) return;
     const observer = new ResizeObserver(([entry]) => setShellWidth(entry.contentRect.width));
     observer.observe(workspace);
     return () => observer.disconnect();
-  }, [embedded]);
+  }, [embedded, withGlobalRail]);
   useEffect(() => () => finishResize(), []);
 
   const finishResize = () => {
@@ -82,7 +83,7 @@ export const SidebarLeft = ({
   const startResize = (event: PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
-    resizeRef.current = { x: event.clientX, width: visibleSidebarWidth, nextWidth: visibleSidebarWidth, didMove: false, frame: null };
+    resizeRef.current = { x: event.clientX, width: visibleTotalWidth, nextWidth: visibleTotalWidth, didMove: false, frame: null };
     event.currentTarget.setPointerCapture(event.pointerId);
     document.body.classList.add("layout-dragging");
   };
@@ -91,7 +92,7 @@ export const SidebarLeft = ({
     if (!drag) return;
     drag.didMove ||= event.clientX !== drag.x;
     const width = drag.width + event.clientX - drag.x;
-    drag.nextWidth = width < LEFT_SIDEBAR_MIN_WIDTH / 2 ? 0 : width;
+    drag.nextWidth = width < minimumWidth / 2 ? 0 : visibleLeftSidebarWidth(width, Infinity, minimumWidth);
     if (drag.frame === null) drag.frame = requestAnimationFrame(() => {
       drag.frame = null;
       setLeftSidebarWidth(drag.nextWidth, { persist: false });
@@ -99,14 +100,14 @@ export const SidebarLeft = ({
   };
   const resizeWithKeyboard = (event: KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 40 : 10;
-    const next = event.key === "ArrowLeft" ? visibleSidebarWidth - step
-      : event.key === "ArrowRight" ? visibleSidebarWidth + step
-      : event.key === "Home" ? LEFT_SIDEBAR_MIN_WIDTH
+    const next = event.key === "ArrowLeft" ? visibleTotalWidth - step
+      : event.key === "ArrowRight" ? visibleTotalWidth + step
+      : event.key === "Home" ? minimumWidth
       : event.key === "End" ? LEFT_SIDEBAR_MAX_WIDTH
       : event.key === "Enter" ? LEFT_SIDEBAR_DEFAULT_WIDTH : null;
     if (next === null) return;
     event.preventDefault();
-    setLeftSidebarWidth(next);
+    setLeftSidebarWidth(visibleLeftSidebarWidth(next, Infinity, minimumWidth));
   };
 
   const startSession = () => {
@@ -129,7 +130,9 @@ export const SidebarLeft = ({
 
   const openAutomationsPanel = () => navigate(openAutomations);
 
-  const sidebarWidth = embedded ? "100%" : `${visibleSidebarWidth}px`;
+  const contentTotalWidth = visibleTotalWidth || visibleLeftSidebarWidth(leftSidebarExpandedWidth, shellWidth, minimumWidth);
+  const navigationWidth = withGlobalRail ? `calc(${contentTotalWidth}px - var(--desktop-rail-width))` : `${contentTotalWidth}px`;
+  const sidebarWidth = embedded ? "100%" : isOpen ? navigationWidth : "0px";
 
   return (
     <aside
@@ -153,7 +156,7 @@ export const SidebarLeft = ({
         pointerEvents: isOpen ? "auto" : "none",
       }}
     >
-      <div className="mc-sidebar-left-inner" style={{ width: embedded ? "100%" : `${visibleSidebarWidth || leftSidebarExpandedWidth}px` }}>
+      <div className="mc-sidebar-left-inner" style={{ width: embedded ? "100%" : navigationWidth }}>
       <div className="mc-sidebar-heading">
       <span className="mc-sidebar-brand">{skillsMarketplaceOpen ? tr("自定义") : <button ref={modeTrigger} type="button" className="mc-sidebar-mode-toggle" aria-label={tr("切换工作模式")} aria-haspopup="menu" aria-expanded={Boolean(modeMenu)} onClick={event => {
         const bounds = event.currentTarget.getBoundingClientRect();
@@ -212,8 +215,8 @@ export const SidebarLeft = ({
         if (mode === "code") state.focusPanel(useAppStore.getState().panelSlots.find(slot => slot.kind === "editor")!.id);
       })} />}
       {!embedded && <div className="mc-sidebar-left-resize-handle" role="separator" aria-orientation="vertical"
-        aria-label={tr("调整左侧栏宽度")} aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH} aria-valuemax={LEFT_SIDEBAR_MAX_WIDTH}
-        aria-valuenow={visibleSidebarWidth} tabIndex={isOpen ? 0 : -1} title={tr("拖动调整侧栏宽度，双击恢复默认")}
+        aria-label={tr("调整左侧栏宽度")} aria-valuemin={minimumWidth} aria-valuemax={LEFT_SIDEBAR_MAX_WIDTH}
+        aria-valuenow={visibleTotalWidth} tabIndex={isOpen ? 0 : -1} title={tr("拖动调整侧栏宽度，双击恢复默认")}
         onPointerDown={startResize}
         onPointerMove={resize}
         onPointerUp={(event) => { if (resizeRef.current?.didMove) resize(event); finishResize(); }}

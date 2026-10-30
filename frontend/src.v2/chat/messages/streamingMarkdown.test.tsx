@@ -1,10 +1,16 @@
 /* @vitest-environment jsdom */
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { StreamingMarkdownPartition } from "./streamingMarkdown";
 import { MarkdownRenderer } from "./MarkdownRenderer";
+import { fromMarkdown } from "mdast-util-from-markdown";
 
-afterEach(cleanup);
+vi.mock("mdast-util-from-markdown", async load => {
+  const actual = await load<typeof import("mdast-util-from-markdown")>();
+  return { ...actual, fromMarkdown: vi.fn(actual.fromMarkdown) };
+});
+
+afterEach(() => { cleanup(); vi.mocked(fromMarkdown).mockClear(); });
 
 it("scans completed lines once and preserves list/fence/math blocks", () => {
   const value = "# Title\n\n- first\n\n- second\n\nNext\n\n```ts\nconst x = 1;\n\nconst y = 2;\n```\n\n$$\na+b\n\nc+d\n$$\n\nEnd";
@@ -45,4 +51,23 @@ it("preserves a multi-paragraph list as one list during streaming", () => {
   const { container } = render(<MarkdownRenderer content={"- first\n\n- second\n\nOutside list\n\n"} isStreaming />);
   expect(container.querySelectorAll("ul")).toHaveLength(1);
   expect(container.querySelectorAll("li")).toHaveLength(2);
+});
+
+it.each(["closed", "settled"] as const)("keeps an open code fence literal without parsing it until %s", outcome => {
+  const code = [String.raw`const path = "C:\work\file.ts";`,
+    String.raw`const literal = "$$price$$ [1] \(raw\)";`, "```"].join("\n");
+  const source = "````typescript\n" + code;
+  const view = render(<MarkdownRenderer content={source} isStreaming />);
+  expect(fromMarkdown).not.toHaveBeenCalled();
+  expect(view.container.querySelector("pre")?.getAttribute("data-markdown-copy-text")).toBe(code);
+  const continued = code + "\nconst tail = '$literal';";
+  view.rerender(<MarkdownRenderer content={"````typescript\n" + continued} isStreaming />);
+  expect(fromMarkdown).not.toHaveBeenCalled();
+  expect(view.container.querySelector("pre")?.getAttribute("data-markdown-copy-text")).toBe(continued);
+
+  view.rerender(<MarkdownRenderer content={"````typescript\n" + continued + (outcome === "closed" ? "\n````\n\nOutside \\(x+y\\)" : "")}
+    isStreaming={outcome === "closed"} />);
+  expect(fromMarkdown).toHaveBeenCalled();
+  expect(view.container.querySelector("[data-markdown-copy-text]")?.getAttribute("data-markdown-copy-text")).toBe(continued);
+  if (outcome === "closed") expect(view.container.querySelector(".katex")).not.toBeNull();
 });

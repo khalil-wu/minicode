@@ -7,6 +7,7 @@ import { useDesktopPreferences } from "./useDesktopPreferences";
 import { useDesktopPreferenceTargets } from "./useDesktopPreferenceTargets";
 import { useDesktopBehaviorPreferences } from "./useDesktopBehaviorPreferences";
 import { useAppStore } from "../stores";
+import { flushComposerDrafts } from "../stores/composer-drafts";
 import { defaultWorkbenchPreferences, useDesktopDictationPreferences } from "../lib/workbench-preferences";
 import { pushToast } from "../overlays/ToastContainer";
 
@@ -99,15 +100,54 @@ it("discovers targets only while visible, refreshes on focus, and ignores a hidd
 });
 
 it("does not rewrite workbench state or drafts when an unrelated preference changes", async () => {
-  const native = bindNative();
+  const native = bindNative(), initial = deferred<DesktopPreferences>();
+  const preferences: DesktopPreferences = { ...native.initial, defaultTerminalLocation: "right", speechEnabled: true };
+  native.get.mockReturnValueOnce(initial.promise);
   useDesktopDictationPreferences();
   useAppStore.setState({ workbenchPreferences: { ...defaultWorkbenchPreferences }, defaultTerminalLocation: "bottom", composerPlainTextMode: false,
     primaryNumberShortcutTarget: "tabs", draft: "Keep this unsent draft", workspaceComposerDrafts: {} });
-  renderHook(useDesktopBehaviorPreferences);
-  await waitFor(() => expect(native.listeners.size).toBe(1));
+  const view = renderHook(() => { useDesktopBehaviorPreferences(); return useDesktopPreferences(); });
+  expect(native.listeners.size).toBe(1);
+  await act(async () => { initial.resolve(preferences); await initial.promise; });
+  expect(view.result.current.preferences).toBe(preferences);
+  expect(useAppStore.getState().defaultTerminalLocation).toBe("right");
+  expect(useAppStore.getState().workbenchPreferences.speechEnabled).toBe(true);
+  // Setting the authored draft started a real IndexedDB write. Its completion
+  // is separate from the preference change measured below.
+  await act(async () => { await flushComposerDrafts(); });
+  expect(useAppStore.getState().composerDraftStoragePending).toBe(false);
   const unchanged = useAppStore.getState(), changed = vi.fn(), stop = useAppStore.subscribe(changed);
-  await act(async () => native.emit({ ...native.initial, showBottomPanel: false }));
-  expect(changed).not.toHaveBeenCalled();
-  expect(useAppStore.getState()).toBe(unchanged);
-  stop();
+  try {
+    await act(async () => native.emit({ ...preferences, showBottomPanel: false }));
+    expect(changed).not.toHaveBeenCalled();
+    expect(useAppStore.getState()).toBe(unchanged);
+  } finally { stop(); view.unmount(); }
+  expect(native.get).toHaveBeenCalledTimes(1);
+  expect(native.listeners.size).toBe(0);
+  expect(native.stop).toHaveBeenCalledTimes(1);
+});
+
+it("retires a pending behavior read before teardown and reads fresh preferences on remount", async () => {
+  const native = bindNative(), initial = deferred<DesktopPreferences>(), fresh = deferred<DesktopPreferences>();
+  native.get.mockReturnValueOnce(initial.promise).mockReturnValueOnce(fresh.promise);
+  const view = renderHook(useDesktopBehaviorPreferences);
+  expect(native.listeners.size).toBe(1);
+  view.unmount();
+  expect(native.listeners.size).toBe(0);
+  await act(async () => { await flushComposerDrafts(); });
+  const unchanged = useAppStore.getState(), changed = vi.fn(), stop = useAppStore.subscribe(changed);
+  try {
+    await act(async () => { initial.resolve({ ...native.initial, defaultTerminalLocation: "right", speechEnabled: true }); await initial.promise; });
+    const next = renderHook(useDesktopPreferences);
+    try {
+      expect(next.result.current.preferences).toBeNull();
+      expect(native.get).toHaveBeenCalledTimes(2);
+      await act(async () => { fresh.resolve(native.initial); await fresh.promise; });
+      expect(next.result.current.preferences).toBe(native.initial);
+      expect(changed).not.toHaveBeenCalled();
+      expect(useAppStore.getState()).toBe(unchanged);
+    } finally { next.unmount(); }
+  } finally { stop(); }
+  expect(native.listeners.size).toBe(0);
+  expect(native.stop).toHaveBeenCalledTimes(2);
 });

@@ -212,7 +212,7 @@ it.each(["default", "model"] as const)("applies %s model selection atomically wi
   }
   const catalogReads = vi.mocked(fetchDraftModelSelection).mock.calls.length;
   expect(await useAppStore.getState().materializeConversationDraft(id)).toBeTruthy();
-  expect(vi.mocked(fetchDraftModelSelection).mock.calls.length - catalogReads).toBe(mode === "model" ? 2 : 1);
+  expect(vi.mocked(fetchDraftModelSelection).mock.calls.length - catalogReads).toBe(mode === "model" ? 2 : 0);
   const command = commandOfType("llm.model.set");
   expect(command).toMatchObject({ selection_mode: mode });
   if (mode === "model") expect(command).toMatchObject({ model: "other", reasoning_effort: "high" });
@@ -221,6 +221,51 @@ it.each(["default", "model"] as const)("applies %s model selection atomically wi
     expect(command).not.toHaveProperty("reasoning_effort");
   }
   expect(wire.order).not.toContain("llm.config.set");
+});
+
+it("joins a real invalidation while a ready default draft waits for its creation preferences", async () => {
+  const id = currentDraft();
+  await useAppStore.getState().refreshConversationDraftSelection(id);
+  useAppStore.getState().setDraft("submitted body");
+  const preferences = deferred<{ defaultTaskDirectory: string; defaultPermissionMode: string; defaultWorkspaceFullView: boolean }>();
+  window.__MINICODE_RUNTIME__ = { windowOwnerId: "primary", desktop: {
+    preferences: { get: () => preferences.promise },
+  } } as never;
+  const fresh = deferred<DraftModelSelection>();
+  vi.mocked(fetchDraftModelSelection).mockImplementationOnce(() => fresh.promise);
+  const reads = vi.mocked(fetchDraftModelSelection).mock.calls.length;
+  const materialized = useAppStore.getState().materializeConversationDraft(id);
+  handleCommandCatalogEvent({ type: "skills/changed" } as ServerEvent);
+  useAppStore.getState().setDraft("new input while preparation waits");
+  preferences.resolve({ defaultTaskDirectory: "C:/tasks", defaultPermissionMode: "confirm", defaultWorkspaceFullView: false });
+  await preferences.promise;
+  await flushComposerDrafts();
+  expect(useAppStore.getState().conversationDrafts[id].requestedConversationId).toBeUndefined();
+  expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
+  fresh.resolve({ ...selection(root), config_version: "latest-settings" });
+  const owner = await materialized;
+  expect(owner).toBeTruthy();
+  expect(vi.mocked(fetchDraftModelSelection).mock.calls.length - reads).toBe(1);
+  expect(useAppStore.getState().conversationDrafts[id].modelProjection?.config_version).toBe("latest-settings");
+  expect(commandOfType("llm.model.set")).toMatchObject({ conversation_id: owner, selection_mode: "default" });
+  expect(wire.order).toEqual(["conversation.create", "llm.model.set", "conversation.switch"]);
+  expect(useAppStore.getState()).toMatchObject({ conversationId: owner, draft: "new input while preparation waits" });
+});
+
+it("refreshes a failed footer projection before materializing instead of reusing its older success", async () => {
+  const id = currentDraft();
+  await useAppStore.getState().refreshConversationDraftSelection(id);
+  const original = useAppStore.getState().conversationDrafts[id].modelProjection;
+  vi.mocked(fetchDraftModelSelection).mockRejectedValueOnce(new Error("actual catalog refusal"));
+  expect(await useAppStore.getState().refreshConversationDraftSelection(id)).toBe(false);
+  expect(useAppStore.getState().conversationDrafts[id]).toMatchObject({
+    modelProjection: original, selectionLoading: false, selectionError: "actual catalog refusal",
+  });
+  const reads = vi.mocked(fetchDraftModelSelection).mock.calls.length;
+  expect(await useAppStore.getState().materializeConversationDraft(id)).toBeTruthy();
+  expect(vi.mocked(fetchDraftModelSelection).mock.calls.length - reads).toBe(1);
+  expect(commandOfType("llm.model.set")).toMatchObject({ selection_mode: "default" });
+  expect(useAppStore.getState().conversationDrafts[id].selectionError).toBeNull();
 });
 
 it("moves browser ownership after real creation/configuration and before switching or sending the first message", async () => {

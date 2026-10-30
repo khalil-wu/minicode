@@ -91,7 +91,7 @@ const AppContent = () => {
       <div hidden={!settingsOpen} style={{ display: settingsOpen ? "contents" : "none" }}>
         <ChunkErrorBoundary resetKey={settingsOpen}>
           <Suspense fallback={<RouteLoading settings />}>
-            {(settingsVisited || settingsOpen) && <SettingsCenter />}
+            {(settingsVisited || settingsOpen) && <SettingsCenter withGlobalRail />}
           </Suspense>
         </ChunkErrorBoundary>
       </div>

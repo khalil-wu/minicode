@@ -30,7 +30,7 @@ import { useAppStore, waitEditorDraftRecovery } from "../stores";
 import { sendClientCommand, sendClientCommandAwaitResult, sendConversationDeleteCommand } from "../protocol/ws-outbox";
 import { openWorkspaceFolder } from "../workspace/openWorkspaceFolder";
 import type { ChatMessage } from "../stores/types";
-import { LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
+import { LEFT_SIDEBAR_MIN_WIDTH, LEFT_SIDEBAR_RAIL_MIN_WIDTH, LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { closeAutomations, getAutomationsPageState } from "../lib/automations-navigation";
 
 const renderSidebarShell = (props: { embedded?: boolean; onNavigate?: () => void } = {}) => render(<>
@@ -181,6 +181,69 @@ describe("SidebarLeft session status", () => {
     expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(358);
   });
 
+  it("keeps keyboard sizes and persistence in total panel units with an external rail", () => {
+    useAppStore.getState().setLeftSidebarWidth(340);
+    const { container } = render(<SidebarLeft withGlobalRail />);
+    const aside = container.querySelector<HTMLElement>(".mc-sidebar-left")!;
+    const handle = screen.getByRole("separator", { name: "调整左侧栏宽度" });
+    expect(aside.style.width).toBe("calc(340px - var(--desktop-rail-width))");
+    expect(handle.getAttribute("aria-valuenow")).toBe("340");
+    expect(handle.getAttribute("aria-valuemin")).toBe(String(LEFT_SIDEBAR_RAIL_MIN_WIDTH));
+    fireEvent.keyDown(handle, { key: "ArrowRight", shiftKey: true });
+    expect(useAppStore.getState().leftSidebarWidth).toBe(380);
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("380");
+    fireEvent.keyDown(handle, { key: "Home" });
+    fireEvent.keyDown(handle, { key: "ArrowLeft" });
+    expect(useAppStore.getState().leftSidebarWidth).toBe(290);
+    expect(aside.style.width).toBe("calc(290px - var(--desktop-rail-width))");
+    fireEvent.keyDown(handle, { key: "End" });
+    expect(useAppStore.getState().leftSidebarWidth).toBe(520);
+    fireEvent.keyDown(handle, { key: "Enter" });
+    expect(useAppStore.getState().leftSidebarWidth).toBe(340);
+    fireEvent.keyDown(handle, { key: "ArrowRight" });
+    fireEvent.doubleClick(handle);
+    expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(340);
+  });
+
+  it("starts a global-rail drag from the total, then collapses and restores without losing its draft", async () => {
+    useAppStore.getState().setLeftSidebarWidth(340);
+    useAppStore.setState({ draft: "global rail resize draft" });
+    const { container } = render(<SidebarLeft withGlobalRail />);
+    const aside = container.querySelector<HTMLElement>(".mc-sidebar-left")!;
+    const inner = container.querySelector<HTMLElement>(".mc-sidebar-left-inner")!;
+    const handle = screen.getByRole("separator", { name: "调整左侧栏宽度" });
+    handle.setPointerCapture = vi.fn();
+    fireEvent(handle, new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 340 }));
+    fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 380 }));
+    await waitFor(() => expect(useAppStore.getState().leftSidebarWidth).toBe(380));
+    expect(aside.style.width).toBe("calc(380px - var(--desktop-rail-width))");
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("340");
+    fireEvent(handle, new MouseEvent("pointerup", { bubbles: true, clientX: 380 }));
+    expect(localStorage.getItem("minicode.layout.left-expanded-width")).toBe("380");
+    fireEvent(handle, new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 380 }));
+    fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 145 }));
+    await waitFor(() => expect(useAppStore.getState().leftSidebarWidth).toBe(290));
+    fireEvent(handle, new MouseEvent("pointermove", { bubbles: true, clientX: 144 }));
+    await waitFor(() => expect(useAppStore.getState().leftSidebarWidth).toBe(0));
+    fireEvent(handle, new MouseEvent("pointerup", { bubbles: true, clientX: 144 }));
+    expect(aside.style.width).toBe("0px");
+    expect(inner.isConnected).toBe(true);
+    expect(inner.style.width).toBe("calc(380px - var(--desktop-rail-width))");
+    act(() => useAppStore.getState().setLeftSidebarWidth(useAppStore.getState().leftSidebarExpandedWidth));
+    expect(aside.style.width).toBe("calc(380px - var(--desktop-rail-width))");
+    expect(useAppStore.getState().draft).toBe("global rail resize draft");
+    expect(document.body.classList.contains("layout-dragging")).toBe(false);
+  });
+
+  it("keeps an embedded drawer at full width without subtracting the external rail twice", () => {
+    useAppStore.getState().setLeftSidebarWidth(340);
+    const { container } = render(<SidebarLeft embedded withGlobalRail />);
+    expect(container.querySelector<HTMLElement>(".mc-sidebar-left")!.style.width).toBe("100%");
+    expect(container.querySelector<HTMLElement>(".mc-sidebar-left-inner")!.style.width).toBe("100%");
+    expect(screen.queryByRole("separator", { name: "调整左侧栏宽度" })).toBeNull();
+    expect(useAppStore.getState().leftSidebarWidth).toBe(340);
+  });
+
   it("collapses below half the minimum and retains the saved expanded width and draft", async () => {
     useAppStore.getState().setLeftSidebarWidth(300);
     useAppStore.setState({ draft: "unfinished resize draft" });
@@ -231,6 +294,26 @@ describe("SidebarLeft session status", () => {
     act(() => measured([{ target: workspace, contentRect: { width: 580 } } as ResizeObserverEntry], {} as ResizeObserver));
     expect(container.querySelector<HTMLElement>(".mc-sidebar-left")!.style.width).toBe("340px");
     expect(localStorage.getItem("minicode.layout.left-width")).toBe("520");
+  });
+
+  it("uses the shell width including the global rail while retaining the requested total", () => {
+    let measured: ResizeObserverCallback;
+    const observe = vi.fn();
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(callback: ResizeObserverCallback) { measured = callback; }
+      observe = observe;
+      disconnect() {}
+    });
+    useAppStore.getState().setLeftSidebarWidth(520);
+    const { container } = render(<div className="mc-desktop-body"><nav className="mc-navigation-rail" /><div className="mc-desktop-workspace"><SidebarLeft withGlobalRail /></div></div>);
+    const body = container.querySelector(".mc-desktop-body")!;
+    expect(observe).toHaveBeenCalledWith(body);
+    act(() => measured([{ target: body, contentRect: { width: 600 } } as ResizeObserverEntry], {} as ResizeObserver));
+    expect(screen.getByRole("separator", { name: "调整左侧栏宽度" }).getAttribute("aria-valuenow")).toBe("360");
+    expect(container.querySelector<HTMLElement>(".mc-sidebar-left")!.style.width).toBe("calc(360px - var(--desktop-rail-width))");
+    expect(localStorage.getItem("minicode.layout.left-width")).toBe("520");
+    expect(useAppStore.getState().leftSidebarExpandedWidth).toBe(520);
+    vi.unstubAllGlobals();
   });
 
   it("opens the brand mode menu and retains the conversation and draft", () => {
