@@ -5,11 +5,13 @@ import { normalizeSkillList, normalizeSlashCommands } from "../lib/catalog-norma
 import { addInspectorPayload } from "./inspectorEntries";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { sendClientCommand } from "../protocol/ws-outbox";
+import { captureExtensionSettingsOwner, publishExtensionSettingsChange } from "../lib/extension-settings-events";
 
 export const handleCommandCatalogEvent = (e: ServerEvent): boolean => {
   const s = useAppStore.getState();
   switch (e.type) {
     case "skills/changed": {
+      publishExtensionSettingsChange("skills", captureExtensionSettingsOwner(), e);
       if (s.activeConversationDraftId) {
         void invalidateConversationDraftSelection(s.activeConversationDraftId);
         return true;

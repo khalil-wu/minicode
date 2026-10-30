@@ -873,7 +873,7 @@ try {
       await defaultsHeading.waitFor();
       assert.equal(await page.getByRole("link", { name: "了解更多", exact: true }).getAttribute("href"), "https://developers.openai.com/codex/config-basic");
       const scope = page.getByRole("button", { name: /^配置作用域，当前：/ });
-      const verbosity = page.getByRole("button", { name: /^回复详细程度，当前：/ });
+      const verbosity = page.getByRole("button", { name: /^输出详细程度，当前：/ });
       const configGeometry = await page.evaluate(() => {
         const description = document.querySelector(".settings-page-heading-copy p");
         const heading = document.querySelector(".settings-tab-pane:not([hidden]) .settings-group-title");
@@ -919,7 +919,7 @@ try {
       assert.equal(saved.write.status, "applied");
       assert.equal(saved.write.path, path.join(profile, "settings.json"));
       assert.equal(JSON.parse(await readFile(saved.write.path, "utf8")).model_verbosity, "high");
-      await page.getByRole("button", { name: "回复详细程度，当前：高", exact: true }).waitFor();
+      await page.getByRole("button", { name: "输出详细程度，当前：高", exact: true }).waitFor();
       await capture("settings-06-config-user-saved");
       await verbosity.click();
       const [unsetResponse] = await Promise.all([
@@ -930,7 +930,7 @@ try {
       const unset = await unsetResponse.json();
       assert.equal(unset.write.fields.model_verbosity.requested_value, null);
       assert.equal(Object.hasOwn(JSON.parse(await readFile(unset.write.path, "utf8")), "model_verbosity"), false);
-      await page.getByRole("button", { name: "回复详细程度，当前：模型默认值", exact: true }).waitFor();
+      await page.getByRole("button", { name: "输出详细程度，当前：模型默认值", exact: true }).waitFor();
       checks.push("Real User/Admin scope menu, managed field lock, actual User file write and explicit-null override removal");
       await auditProjectConfig({ page, app, workspace, profile, capture, checks, wire, trace });
     }

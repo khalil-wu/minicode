@@ -14,7 +14,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   const comments = initialProject.split(/\r?\n/).filter(line => line.trimStart().startsWith("#"));
   assert(comments.length > 0, "The real project fixture must contain preserved comments");
   const scope = page.getByRole("button", { name: /^配置作用域，当前：/ });
-  const verbosity = page.getByRole("button", { name: /^回复详细程度，当前：/ });
+  const verbosity = page.getByRole("button", { name: /^输出详细程度，当前：/ });
   const currentId = () => page.locator(".config-scope-select select").inputValue();
   const assertProjectFormatting = text => {
     for (const comment of comments) assert(text.includes(comment), `Project comment was lost: ${comment}`);
@@ -49,7 +49,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
     assert.equal(response.status(), 200);
     trace("config:reopen:headers", { owner });
     await scope.waitFor();
-    await page.waitForFunction(() => !document.querySelector('[aria-label^="回复详细程度，当前："]').disabled);
+    await page.waitForFunction(() => !document.querySelector('[aria-label^="输出详细程度，当前："]').disabled);
     assert.equal(await page.locator('[data-settings-tab="config"] p[role="alert"]').count(), 0,
       "Reopen must not accept a cached snapshot after a real config-load failure");
     trace("config:reopen:ready", { owner });
@@ -100,7 +100,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   assert(/^\s*model_verbosity\s*=\s*["']high["']/m.test(projectText));
   assertProjectFormatting(projectText);
   assert.equal(await readFile(userFile, "utf8"), initialUser);
-  await page.getByRole("button", { name: "回复详细程度，当前：高", exact: true }).waitFor();
+  await page.getByRole("button", { name: "输出详细程度，当前：高", exact: true }).waitFor();
   await capture("settings-06-project-saved", { scopeId: projectId, file: saved.write.path });
   const unset = await writeVerbosity("模型默认值", projectId);
   assert.equal(unset.write.fields.model_verbosity.requested_value, null);
@@ -109,7 +109,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   assert.equal(/^\s*model_verbosity\s*=/m.test(projectText), false);
   assertProjectFormatting(projectText);
   assert.equal(await readFile(userFile, "utf8"), initialUser);
-  await page.getByRole("button", { name: "回复详细程度，当前：模型默认值", exact: true }).waitFor();
+  await page.getByRole("button", { name: "输出详细程度，当前：模型默认值", exact: true }).waitFor();
   await capture("settings-06-project-unset");
   checks.push("Project scope writes and unsets the actual TOML field, retains comments and unrelated network access, and leaves the real User file unchanged");
 
@@ -139,7 +139,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
   const warning = page.locator(".config-scope-warning");
   await warning.waitFor();
   assert.equal(await warning.innerText(), disabled.disabled_reason);
-  for (const name of ["审批策略", "沙箱模式", "网页搜索", "回复详细程度", "推理摘要"]) {
+  for (const name of ["批准策略", "沙箱设置", "网页搜索", "输出详细程度", "推理摘要"]) {
     assert.equal(await page.getByRole("button", { name: new RegExp(`^${name}，当前：`) }).isDisabled(), true);
   }
   assert.equal(await page.getByRole("switch", { name: "允许网络访问" }).isDisabled(), true);
@@ -232,7 +232,7 @@ export async function auditProjectConfig({ page, app, workspace, profile, captur
       active: describe(document.activeElement), scrollTop: document.querySelector(".settings-center-main").scrollTop,
       open: document.querySelector(".config-scope-select").dataset.open,
       triggerDisabled: document.querySelector(".config-scope-select .mc-select-trigger").disabled,
-      fieldDisabled: document.querySelector('[aria-label^="回复详细程度，当前："]').disabled });
+      fieldDisabled: document.querySelector('[aria-label^="输出详细程度，当前："]').disabled });
     const onEvent = event => record(event.type, { target: describe(event.target), related: describe(event.relatedTarget),
       path: event.composedPath().slice(0, 5).map(describe) });
     const kinds = ["pointerdown", "pointerup", "click", "focusin", "focusout", "scroll", "resize"];

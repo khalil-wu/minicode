@@ -1,8 +1,14 @@
 /* @vitest-environment jsdom */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCommandCatalogEvent } from "./commandCatalogEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
+import { subscribeExtensionSettingsChanges } from "../lib/extension-settings-events";
+import * as draftSelections from "../stores/conversation-drafts";
+import { sendClientCommand } from "../protocol/ws-outbox";
+
+vi.mock("../protocol/ws-outbox", async original => ({ ...await original<typeof import("../protocol/ws-outbox")>(), sendClientCommand: vi.fn(() => true) }));
+afterEach(() => vi.restoreAllMocks());
 
 const commandEntry = (overrides: Record<string, unknown> = {}) => ({
   id: "extension:review",
@@ -32,6 +38,8 @@ describe("handleCommandCatalogEvent", () => {
     vi.clearAllMocks();
     useAppStore.setState({
       conversationId: "conv-active",
+      activeConversationDraftId: null,
+      workingDirectory: "C:/current",
       availableSkills: [{ name: "frontend-dev", description: "Frontend workflow", source_level: "project", active: false }],
       selectedSkills: [],
       slashCommands: [{
@@ -44,6 +52,33 @@ describe("handleCommandCatalogEvent", () => {
       inspectorEntries: [],
       inspectorFocus: null,
     });
+  });
+
+  it.each([null, "draft-current"])("invalidates open inventory before refreshing the executable owner (draft=%s)", activeConversationDraftId => {
+    useAppStore.setState({ activeConversationDraftId });
+    const before = useAppStore.getState().availableSkills;
+    const changed = vi.fn();
+    const unsubscribe = subscribeExtensionSettingsChanges("skills", {}, changed);
+    const invalidate = vi.spyOn(draftSelections, "invalidateConversationDraftSelection").mockImplementation(async () => {
+      expect(changed).toHaveBeenCalledOnce();
+      return true;
+    });
+    try {
+      expect(handleCommandCatalogEvent({ type: "skills/changed" })).toBe(true);
+      expect(changed).toHaveBeenCalledOnce();
+      expect(useAppStore.getState().availableSkills).toBe(before);
+      if (activeConversationDraftId) {
+        expect(invalidate).toHaveBeenCalledExactlyOnceWith(activeConversationDraftId);
+        expect(sendClientCommand).not.toHaveBeenCalled();
+      } else {
+        expect(invalidate).not.toHaveBeenCalled();
+        expect(vi.mocked(sendClientCommand).mock.calls).toEqual([
+          [{ type: "skills.list", conversation_id: "conv-active", workspace_root: "C:/current" }, { silent: true }],
+          [{ type: "commands.list", conversation_id: "conv-active", workspace_root: "C:/current" }, { silent: true }],
+          [{ type: "runtime.capabilities.inspect", conversation_id: "conv-active", workspace_root: "C:/current", source: "skills.changed" }, { silent: true }],
+        ]);
+      }
+    } finally { unsubscribe(); }
   });
 
   it("normalizes skill metadata from skills.list", () => {

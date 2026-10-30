@@ -1,5 +1,5 @@
 /* @vitest-environment jsdom */
-import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSkillSettings } from "./useSkillSettings";
 import { useAppStore } from "../stores";
@@ -8,6 +8,7 @@ import { captureExtensionSettingsOwner, publishExtensionSettingsChange } from ".
 import * as draftSelections from "../stores/conversation-drafts";
 import { handleCommandCatalogEvent } from "../chat/commandCatalogEvents";
 import type { ClientCommand } from "../protocol/events";
+import { SkillsTab } from "./SkillsTab";
 
 const mocks = vi.hoisted(() => ({ fetch: vi.fn(), toast: vi.fn(), send: vi.fn(), runtimeCatalog: vi.fn(), base: "http://test.local", token: "owner-token" }));
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { writable: true,
@@ -43,6 +44,79 @@ beforeEach(() => {
     availableSkills: payload("C:/A").available_skills, draft: "Keep draft", selectedSkills: [user], marketplaceSkills: [{ name: "user-directory", title: "User", description: "Installed", triggers: [], installed: true }] });
 });
 afterEach(cleanup);
+
+it.each([null, "draft-current"])("refreshes an open inventory page from skills/changed and defers hidden reads (draft=%s)", async activeConversationDraftId => {
+  const invalidate = vi.spyOn(draftSelections, "invalidateConversationDraftSelection").mockResolvedValue(true);
+  const executable = [{ name: "executor-only", description: "Conversation-owned", path: "C:/runtime/SKILL.md" }];
+  useAppStore.setState({ activeConversationDraftId, availableSkills: executable });
+  mocks.runtimeCatalog.mockReturnValue(executable);
+  let name = "User skill";
+  mocks.fetch.mockImplementation(async () => response({ ...payload("C:/A"), skills: [{ ...user, display_name: name }] }));
+  try {
+    const view = render(<SkillsTab active />);
+    await screen.findByRole("button", { name: "查看技能详情 User skill" });
+    name = "Changed externally";
+    act(() => { handleCommandCatalogEvent({ type: "skills/changed" }); });
+    await screen.findByRole("button", { name: "查看技能详情 Changed externally" });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(mocks.fetch).toHaveBeenLastCalledWith("http://test.local/api/skills/settings?workspace_root=C%3A%2FA",
+      expect.objectContaining({ cache: "no-store", signal: expect.any(AbortSignal) }));
+    expect(useAppStore.getState().availableSkills).toMatchObject(executable);
+    if (activeConversationDraftId) {
+      expect(invalidate).toHaveBeenCalledExactlyOnceWith(activeConversationDraftId);
+      expect(mocks.send).not.toHaveBeenCalled();
+    } else expect(mocks.send).toHaveBeenCalledWith({ type: "skills.list", conversation_id: "owner-a", workspace_root: "C:/A" }, { silent: true });
+    view.rerender(<SkillsTab active={false} />);
+    name = "Changed while hidden";
+    await act(async () => { handleCommandCatalogEvent({ type: "skills/changed" }); });
+    expect(mocks.fetch).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "查看技能详情 Changed while hidden" })).toBeNull();
+    view.rerender(<SkillsTab active />);
+    await screen.findByRole("button", { name: "查看技能详情 Changed while hidden" });
+    expect(mocks.fetch).toHaveBeenCalledTimes(3);
+    expect(useAppStore.getState().draft).toBe("Keep draft");
+  } finally { invalidate.mockRestore(); }
+});
+
+it("refreshes the Marketplace inventory with its existing include-projects GET on a server notification", async () => {
+  let changed = false;
+  mocks.fetch.mockImplementation(async () => response(payload("C:/A", changed)));
+  const view = renderHook(() => useSkillSettings(true, undefined, true));
+  await waitFor(() => expect(view.result.current.skills).toHaveLength(1));
+  changed = true;
+  act(() => { handleCommandCatalogEvent({ type: "skills/changed" }); });
+  await waitFor(() => expect(view.result.current.skills[0].enabled).toBe(false));
+  expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  expect(mocks.fetch.mock.calls.every(([url, init]) => url === "http://test.local/api/skills/settings?workspace_root=C%3A%2FA&include_projects=true"
+    && !init.method && init.cache === "no-store")).toBe(true);
+});
+
+it.each(["workspace", "base", "token"] as const)("keeps a notification-triggered old read out of the new %s owner", async field => {
+  const old = deferred();
+  let reads = 0;
+  const current = () => ({ ...payload(useAppStore.getState().workingDirectory), skills: [{ ...user, display_name: `Current ${field}` }] });
+  mocks.fetch.mockImplementation(async () => ++reads === 2 ? old.promise : response(reads === 1 ? payload("C:/A") : current()));
+  const view = renderHook(() => useSkillSettings(true));
+  await waitFor(() => expect(view.result.current.skills[0]?.display_name).toBe("User skill"));
+  act(() => { handleCommandCatalogEvent({ type: "skills/changed" }); });
+  const obsoleteSignal = mocks.fetch.mock.calls[1][1].signal as AbortSignal;
+  if (field === "workspace") act(() => useAppStore.setState({ workingDirectory: "C:/B", conversationId: "owner-b" }));
+  else if (field === "base") mocks.base = "http://new-backend.test";
+  else mocks.token = "new-token";
+  act(() => { handleCommandCatalogEvent({ type: "skills/changed" }); });
+  await waitFor(() => expect(view.result.current.skills[0]?.display_name).toBe(`Current ${field}`));
+  expect(obsoleteSignal.aborted).toBe(true);
+  await act(async () => old.resolve(response({ ...payload("C:/A"), skills: [{ ...user, display_name: "Obsolete inventory" }] })));
+  expect(view.result.current.skills[0].display_name).toBe(`Current ${field}`);
+  expect(view.result.current.error).toBe("");
+  expect(view.result.current.loading).toBe(false);
+  const palette = useAppStore.getState().availableSkills;
+  act(() => { handleCommandCatalogEvent({ type: "skills.list", conversation_id: "old-owner", workspace_root: "C:/A",
+    skills: [{ name: "obsolete-executor", description: "Old scope" }] }); });
+  expect(useAppStore.getState().availableSkills).toBe(palette);
+  expect(mocks.fetch.mock.calls.at(-1)?.[0]).toContain(`${mocks.base}/api/skills/settings?workspace_root=${encodeURIComponent(useAppStore.getState().workingDirectory)}`);
+  expect(new Headers(mocks.fetch.mock.calls.at(-1)?.[1].headers).get("X-MiniCode-Token")).toBe(mocks.token);
+});
 
 it.each((["old-before", "old-after", "return-c"] as const).flatMap(order =>
   (["user-toggle", "plugin-toggle", "uninstall"] as const).map(operation => ({ order, operation }))))(

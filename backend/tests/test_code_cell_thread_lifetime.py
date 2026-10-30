@@ -142,8 +142,11 @@ def test_normal_final_retains_real_process_cell_and_next_turn_consumes_its_outpu
             cell_id = model.report["cell_id"]
             assert first.terminal_status == "completed" and model.report["status"] == "running"
             assert tool.process.returncode is None and cell_id in session.code_store.cells
+            cell = session.code_store.cells[cell_id]
             assert not session.lifecycle_cleanup_tasks
             (tmp_path / "release").write_text("complete", encoding="utf-8")
+            # Await the actual completed receipt before its next-turn consumption.
+            await cell.task
             second, _ = await query_turn(tmp_path, model, session, runtime, ToolCallEvent(id="join", name="tool_wait",
                 arguments={"cell_id": cell_id, "yield_time_ms": 10000}))
             assert second.terminal_status == "completed"
