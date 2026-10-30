@@ -25,14 +25,17 @@
 :root {
   --desktop-rail-width: 52px;
   --height-toolbar: 46px;
-  --height-toolbar-sm: 36px;
+  --height-toolbar-sm: 44px;
   --height-toolbar-pane: 40px;
   --sidebar-navigation-header-height: 52px;
   --app-shell-header-height: var(--height-toolbar);
-  --shell-page-inset-top: 8px;
-  --shell-page-inset-end: 4px;
-  --shell-page-inset-bottom: 4px;
-  --shell-page-radius: 12px;
+  /* The chat toolbar and the right panel header share one height so their
+     bottom borders land on the same line across the divider. */
+  --chat-toolbar-height: 70px;
+  --shell-page-inset-top: 0px;
+  --shell-page-inset-end: 0px;
+  --shell-page-inset-bottom: 0px;
+  --shell-page-radius: 0px;
   --thread-outer-width: 768px;
   --sidebar-min-width: 240px;
   --sidebar-max-width: 520px;
@@ -128,8 +131,8 @@ html[data-theme="dark"] ::selection {
   justify-content: flex-end;
   flex: 0 0 auto;
   min-width: 0;
-  height: var(--app-shell-header-height);
-  min-height: var(--app-shell-header-height);
+  height: var(--chat-toolbar-height);
+  min-height: var(--chat-toolbar-height);
   gap: 8px;
   padding: 0 8px;
   border-bottom: 1px solid var(--border-subtle);

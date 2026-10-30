@@ -44,7 +44,7 @@ select {
 }
 
 @keyframes thinking-pulse {
-  0%, 100% { opacity: 0.44; transform: scale(0.94); }
+  0%, 100% { opacity: 0.35; transform: scale(0.82); }
   50% { opacity: 1; transform: scale(1); }
 }
 
@@ -241,6 +241,8 @@ select {
 
 
 
+/* Breathing dot: 1.4s reads as "alive" where 2.4s read as stalled, and the
+   sine-like easing keeps the loop seamless at both ends. */
 .thinking-mini-dot {
   width: 5px;
   height: 5px;
@@ -248,12 +250,19 @@ select {
   background: var(--accent-primary);
   box-shadow: none;
   will-change: transform, opacity;
-  animation: thinking-pulse 2.4s var(--easing-pulse) infinite;
+  animation: thinking-pulse 1.4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
   flex-shrink: 0;
 }
 
 .thinking-pulse-dot {
-  animation: thinking-pulse 2.4s var(--easing-pulse) infinite;
+  animation: thinking-pulse 1.4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not([data-reduced-motion="false"]) .thinking-mini-dot,
+  html:not([data-reduced-motion="false"]) .thinking-pulse-dot {
+    animation: none;
+  }
 }
 
 .panel-skeleton-shimmer {

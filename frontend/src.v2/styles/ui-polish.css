@@ -348,6 +348,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .mc-sidebar-right:not([data-embedded="true"]) {
   margin: 0 !important;
   border: 0 !important;
+  border-top: 1px solid var(--border-subtle) !important;
   border-left: 1px solid var(--border-subtle) !important;
   border-radius: 0 !important;
   background: var(--surface-base) !important;
@@ -356,6 +357,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .mc-sidebar-right[data-open="false"]:not([data-embedded="true"]) {
   border-left-width: 0 !important;
+  border-top-width: 0 !important;
 }
 
 .mc-sidebar-right,
@@ -374,8 +376,8 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 }
 
 .mc-sidebar-right-header {
-  height: var(--app-shell-header-height);
-  min-height: var(--app-shell-header-height) !important;
+  height: var(--chat-toolbar-height);
+  min-height: var(--chat-toolbar-height) !important;
   padding: 0 6px 0 8px !important;
   border-bottom: 1px solid var(--border-subtle) !important;
   background: var(--surface-base) !important;
@@ -466,12 +468,12 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   font-weight: var(--fw-regular);
 }
 
-/* User bubble — neutral gray surface, visually separate from assistant prose. */
+/* User bubble — neutral, theme-relative surface, visually separate from assistant prose. */
 .user-cell-bubble {
   padding: 10px 16px !important;
   border: 0 !important;
   border-radius: 22px !important;
-  background: var(--surface-selected) !important;
+  background: var(--message-user-bg) !important;
   color: var(--text-primary) !important;
   box-shadow: none !important;
 }

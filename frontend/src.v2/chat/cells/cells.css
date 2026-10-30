@@ -144,20 +144,22 @@
 }
 
 /* ════════════════════════════════════════════════════════
-   Streaming cursor — single canonical 7px accent dot, rendered as an inline
+   Streaming cursor — single canonical 8px accent dot, rendered as an inline
    ::after on the streaming answer body.
    ════════════════════════════════════════════════════════ */
 
 .assistant-cell-wrap[data-streaming="true"] .assistant-cell-content::after {
   content: "";
   display: inline-block;
-  width: 7px;
-  height: 7px;
-  margin-left: 7px;
+  width: 8px;
+  height: 8px;
+  margin-left: 8px;
   border-radius: var(--radius-full);
   background: var(--accent-primary);
-  box-shadow: 0 0 0 4px color-mix(in oklch, var(--accent-primary) 12%, transparent);
-  animation: thinking-pulse 2.4s var(--easing-pulse) infinite;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent-primary) 14%, transparent);
+  vertical-align: middle;
+  will-change: transform, opacity;
+  animation: thinking-pulse 1.4s cubic-bezier(0.37, 0, 0.63, 1) infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2577,7 +2579,10 @@ button.diff-cell-file-path:hover {
 }
 
 .md-prose .md-table-wrap > table {
-  width: 100%;
+  /* Natural column widths: a grid squeezed into the chat column used to break
+     words mid-token ("TSCeptio n"); wide tables scroll inside the wrapper. */
+  width: max-content;
+  min-width: 100%;
   margin: 0;
   overflow: hidden;
   border-collapse: collapse;
@@ -2591,11 +2596,15 @@ button.diff-cell-file-path:hover {
   background: var(--surface-soft);
   font-weight: var(--fw-semibold);
   text-align: left;
+  /* Cells inherit break-word from the answer body; keep tokens intact and let
+     the wrapper scroll instead of splitting identifiers across lines. */
+  word-break: normal;
 }
 
 .md-prose td {
   padding: 8px 12px;
   border-bottom: 0;
+  word-break: normal;
 }
 
 .md-prose tbody tr:nth-child(even) {

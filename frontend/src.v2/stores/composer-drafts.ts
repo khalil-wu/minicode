@@ -312,6 +312,40 @@ export function persistComposerDrafts(snapshot: DraftSnapshot) {
   startWriting();
 }
 
+const PERSIST_DEBOUNCE_MS = 200;
+const PERSIST_MAX_WAIT_MS = 1000;
+let scheduledCollect: (() => DraftSnapshot) | null = null;
+let scheduleTimer: ReturnType<typeof setTimeout> | null = null;
+let scheduledSince = 0;
+
+/**
+ * Typing changes the draft on every keystroke. Coalesce a burst into one
+ * collection and one IndexedDB write, bounded by a max wait so a dirty draft
+ * is never held for long; `flushComposerDrafts` drains the schedule first.
+ */
+export function scheduleComposerDraftPersist(collect: () => DraftSnapshot) {
+  const now = Date.now();
+  if (!scheduledCollect) scheduledSince = now;
+  scheduledCollect = collect;
+  if (now - scheduledSince >= PERSIST_MAX_WAIT_MS) {
+    runScheduledPersist();
+    return;
+  }
+  if (scheduleTimer !== null) clearTimeout(scheduleTimer);
+  scheduleTimer = setTimeout(runScheduledPersist, PERSIST_DEBOUNCE_MS);
+  publishStorageStatus();
+}
+
+function runScheduledPersist() {
+  if (scheduleTimer !== null) {
+    clearTimeout(scheduleTimer);
+    scheduleTimer = null;
+  }
+  const collect = scheduledCollect;
+  scheduledCollect = null;
+  if (collect) persistComposerDrafts(collect());
+}
+
 function startWriting() {
   if (writing) return;
   publishStorageStatus();
@@ -363,14 +397,19 @@ function startWriting() {
   });
 }
 
-export const hasPendingComposerDrafts = () => Boolean(writing || pending || deletions.size);
+export const hasPendingComposerDrafts = () => Boolean(scheduledCollect || writing || pending || deletions.size);
 export async function flushComposerDrafts() {
+  runScheduledPersist();
   if (pending && failure !== undefined) startWriting();
   const retries = [...deletions].filter(([, operation]) => !operation.promise && operation.error !== undefined)
     .map(([conversationId]) => deleteConversationComposerDrafts(conversationId));
   await Promise.allSettled(retries);
-  let active: Promise<void>[];
-  while ((active = [...(writing ? [writing] : []), ...[...deletions.values()].flatMap(operation => operation.promise ? [operation.promise] : [])]).length) {
+  // A draft scheduled while an earlier write was awaited must also land before
+  // the caller continues, so drain the schedule on every pass.
+  for (;;) {
+    runScheduledPersist();
+    const active = [...(writing ? [writing] : []), ...[...deletions.values()].flatMap(operation => operation.promise ? [operation.promise] : [])];
+    if (!active.length) break;
     await Promise.allSettled(active);
   }
   const error = storageFailure();
@@ -430,6 +469,8 @@ export async function resetComposerDraftStorageForTests(preserveDatabase = false
   }
   deletions.clear();
   deletedConversationOwners.clear();
+  if (scheduleTimer !== null) { clearTimeout(scheduleTimer); scheduleTimer = null; }
+  scheduledCollect = null;
   pending = null; failure = undefined;
   collectedSnapshot = undefined; storedRecords.clear();
   storedKeys.clear(); storedFiles.clear(); storedFileReferences.clear(); committedRevision = 0;

@@ -44,6 +44,7 @@ import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
 import { ScrollablePanel } from "./SidebarShared";
 import { ActivityTab } from "./tabs/ActivityTab";
+import { PanelVisibilityContext } from "./panelVisibility";
 import { closeMcpAppPanel, McpAppPanelSlot, mcpAppTabId, useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
 import {
   selectActiveConversationPreview,
@@ -763,6 +764,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         style={{ display: activeTab === panelTab ? "flex" : "none" }}
       >
         <div className="panel-content-wrapper" style={{ minHeight: 0, minWidth: 0, overflow: "hidden" }}>
+          <PanelVisibilityContext.Provider value={visible && rightPanelOpen && activeTab === panelTab}>
           {panelTab.startsWith("mcp-app:") && <McpAppPanelSlot id={panelTab.slice("mcp-app:".length)} />}
           {panelTab.startsWith("file:") && <Suspense fallback={<PanelSkeleton kind="preview" />}><LazyFileViewerPanel tabId={panelTab.slice(5)} active={visible && rightPanelOpen && activeTab === panelTab} /></Suspense>}
           {panelTab === "sidechat" && sideChatOpen && <SideChatPanel active={visible && activeTab === "sidechat" && rightPanelOpen} />}
@@ -810,6 +812,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           {panelTab === "artifacts" && <Suspense fallback={<PanelSkeleton kind="artifacts" />}><ScrollablePanel><LazyArtifactsTab /></ScrollablePanel></Suspense>}
           {panelTab === "inspector" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><ScrollablePanel><LazyInspectorTab /></ScrollablePanel></Suspense>}
           {panelTab === "diagnostics" && debugAllowed && <Suspense fallback={<PanelSkeleton kind="diagnostics" />}><ScrollablePanel><LazyDiagnosticsTab /></ScrollablePanel></Suspense>}
+          </PanelVisibilityContext.Provider>
         </div>
       </div>)}
       {automationEditors.filter(editor => mountedAutomationEditors.current.has(editor.id)).map(editor => {

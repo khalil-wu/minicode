@@ -4665,7 +4665,10 @@ class SessionAgentRunnerMixin:
         run_context.retain_model = lambda adapter, task: _lease_session_llm_for_task(self, adapter, task)
         run_context.refresh_model_auth = lambda snapshot, force, task: _refresh_session_model_auth(self, snapshot, force, task)
 
-        run_context_builder.load_snapshot(run_context_snapshot)
+        # Rebuilding the full history and its token cache is CPU-bound and
+        # grows with the conversation; keep it off the event loop so other
+        # sessions' deltas and this socket's acknowledgements keep flowing.
+        await asyncio.to_thread(run_context_builder.load_snapshot, run_context_snapshot)
         normalized_attachments = list(attachments or [])
         # These values are host capabilities or concrete runtime owners, never
         # transport metadata. A local adapter/checkpoint resume may supply
@@ -5059,7 +5062,7 @@ class SessionAgentRunnerMixin:
                 )
                 if latest is None:
                     raise RuntimeError("conversation disappeared during turn admission")
-                saved_snapshot = run_context_builder.export_snapshot()
+                saved_snapshot = await asyncio.to_thread(run_context_builder.export_snapshot)
                 _merge_ui_agent_state_into_snapshot(
                     saved_snapshot,
                     run_context_snapshot if run_metadata.get("_retry_projection") is not None

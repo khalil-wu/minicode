@@ -24,7 +24,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { emptyConversationWorkbenchState } from "./ui-slice";
 import { mergeRetainedComposerMessages, reconcileRecoveredInputOutcomes, retainedInputMessage } from "../composer/retainedComposerInputs";
 import {
-  loadComposerDrafts, collectComposerDrafts, persistComposerDrafts, watchComposerDraftStorage,
+  loadComposerDrafts, collectComposerDrafts, scheduleComposerDraftPersist, watchComposerDraftStorage,
   selectComposerDraftInputs, composerDraftInputsEqual, composerWorkspaceKey,
   hasComposerDraft, hasPendingComposerDrafts, flushComposerDrafts, composerDraftOf,
 } from "./composer-drafts";
@@ -58,8 +58,14 @@ useAppStore.subscribe(
 
 let composerSnapshotRevision = 0;
 watchComposerDraftStorage(status => {
-  useAppStore.setState({ composerDraftStoragePending: status.pending, composerDraftRevision: status.revision,
-    composerDraftStorageError: status.error });
+  // Storage status is republished on every scheduled write; only a real
+  // change may notify the store's subscribers.
+  useAppStore.setState(state => (
+    state.composerDraftStoragePending === status.pending && state.composerDraftRevision === status.revision
+      && state.composerDraftStorageError === status.error
+      ? state
+      : { composerDraftStoragePending: status.pending, composerDraftRevision: status.revision, composerDraftStorageError: status.error }
+  ));
   if (status.error) pushToast(`无法保存输入草稿：${status.error}。请保留窗口和未发送内容。`, "error");
 });
 const composerRecovery = loadComposerDrafts().then(records => {
@@ -175,8 +181,9 @@ const composerRecovery = loadComposerDrafts().then(records => {
 void composerRecovery.catch(error => console.error("Composer draft recovery failed", error));
 export const waitComposerDraftRecovery = () => composerRecovery;
 useAppStore.subscribe(selectComposerDraftInputs, () => {
-  const state = useAppStore.getState();
-  if (state.composerDraftsReady) persistComposerDrafts(collectComposerDrafts(state, ++composerSnapshotRevision));
+  if (!useAppStore.getState().composerDraftsReady) return;
+  // Collect at write time so a typing burst persists its latest draft once.
+  scheduleComposerDraftPersist(() => collectComposerDrafts(useAppStore.getState(), ++composerSnapshotRevision));
 }, { equalityFn: composerDraftInputsEqual });
 
 useAppStore.subscribe(

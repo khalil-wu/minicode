@@ -10,7 +10,6 @@ import {
   Terminal,
 } from "../lib/icons";
 import { useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { AgentAvatar } from "../components/AgentAvatar";
 import { BrandIcon } from "../components/BrandIcon";
 import { RollingNumber } from "../components/RollingNumber";
@@ -48,7 +47,7 @@ import { getWebSocket } from "../hooks/useWebSocket";
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from "./openAttachmentPreview";
 import { openWebTarget } from "./openWebTarget";
 import { useTurnChanges } from "./useTurnChanges";
-import { collectConversationSources, markdownSourceLabelKey } from "./conversationSources";
+import { chatContextInputsKey, collectConversationSources } from "./conversationSources";
 import { threadSummaryDisplayMode, threadSummarySurface } from "./thread-summary-layout";
 import { openSettings } from "../lib/settings-navigation";
 import { handoffConversationWorktree } from "../lib/handoff-worktree";
@@ -344,10 +343,7 @@ export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.
   displayMode?: ReturnType<typeof threadSummaryDisplayMode>;
 } = {}) => {
   const { t: tr } = useI18n();
-  const contextInputs = useAppStore(useShallow((state) => state.messages.flatMap((message) => [
-    message.id, message.isStreaming ? "" : markdownSourceLabelKey(message.content), message.citations, message.attachmentRefs, message.replyAttachments, message.artifacts,
-    ...getToolCallsFromMessage(message),
-  ])));
+  const contextInputsKey = useAppStore((state) => chatContextInputsKey(state.messages));
   const subagents = useAppStore((state) => state.subagents);
   const backgroundTasks = useAppStore((state) => state.backgroundTasks);
   const conversationId = useAppStore((state) => state.conversationId);
@@ -383,7 +379,7 @@ export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.
   const { sources, attachments } = useMemo(() => {
     const messages = useAppStore.getState().messages;
     return { sources: collectConversationSources(messages), attachments: collectAttachments(messages, conversationId || undefined) };
-  }, [conversationId, contextInputs]);
+  }, [conversationId, contextInputsKey]);
 
   useEffect(() => {
     if (!isDesktop()) return;

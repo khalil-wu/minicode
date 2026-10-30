@@ -306,7 +306,7 @@ uses in its UI. The `--cjk-leading` and
   --cjk-spacing:  0.02em; /* Tighter horizontal spacing for Chinese */
 
   /* ── Message semantic colors (Phase 1 optimization) ──── */
-  --message-user-bg:      var(--surface-soft);
+  --message-user-bg:      color-mix(in oklab, var(--text-primary) 5%, transparent);
   --message-assistant-bg: color-mix(in oklch, var(--accent-soft) 3%, transparent);
   --message-activity-bg:  var(--surface-page);
   --message-error-bg:     color-mix(in oklch, var(--state-danger) 8%, transparent);
@@ -384,8 +384,9 @@ uses in its UI. The `--cjk-leading` and
   --desktop-edge-glow: inset 0 0 24px 3px #87cefa2b, inset 0 0 64px 8px #87cefa12;
 
   /* Light mode uses white content planes with neutral, low-contrast interaction
-     fills. This keeps hierarchy without turning every page into a grey card. */
-  --message-user-bg: #fff;
+     fills. This keeps hierarchy without turning every page into a grey card.
+     The user bubble stays theme-relative so it reads on both planes. */
+  --message-user-bg: color-mix(in oklab, var(--text-primary) 5%, transparent);
   --attachment-chip-bg: oklch(0.975 0 0);
   --attachment-chip-fg: var(--text-secondary);
 

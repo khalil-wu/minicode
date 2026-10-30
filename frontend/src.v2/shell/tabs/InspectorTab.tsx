@@ -3,6 +3,7 @@
  * and DetailsTab (inspector entries / recent tool calls).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { usePanelMessages } from '../panelVisibility'
 import { ChevronDown, Copy, Database, Download, FolderOpen, GitBranch, TerminalSquare, Upload } from 'lucide-react'
 import { isDesktop, revealPath } from '../../desktop/runtime'
 import { fetchWorkspaceGitStatus, type WorkspaceGitStatusResponse } from '../../protocol/workspace'
@@ -231,7 +232,7 @@ const ControlPlaneSection = () => {
 }
 
 const RunOverviewSection = () => {
-  const messages = useAppStore((s) => s.messages)
+  const messages = usePanelMessages()
   const agentProgress = useAppStore((s) => s.agentProgress)
   const replayEvents = useMemo(() => buildRunReplayEvents(messages, agentProgress), [messages, agentProgress])
   const summary = useMemo(() => buildRunReplaySummary(replayEvents), [replayEvents])
@@ -257,7 +258,7 @@ const RunOverviewSection = () => {
 }
 
 const RunTimelineSection = ({ traceExportEnabled }: { traceExportEnabled: boolean }) => {
-  const messages = useAppStore((s) => s.messages)
+  const messages = usePanelMessages()
   const agentProgress = useAppStore((s) => s.agentProgress)
   const conversationId = useAppStore((s) => s.conversationId)
   const [expanded, setExpanded] = useState(false)
@@ -512,7 +513,7 @@ const ContextTab = () => {
 // ── Details Tab ────────────────────────────────────────────────
 
 const RuntimeMetricsSection = () => {
-  const messages = useAppStore((s) => s.messages)
+  const messages = usePanelMessages()
   const agentProgress = useAppStore((s) => s.agentProgress)
   const inspectorEntries = useAppStore((s) => s.inspectorEntries)
   const conversationId = useAppStore((s) => s.conversationId)
@@ -545,7 +546,7 @@ const RuntimeMetricsSection = () => {
 
 const DetailsTab = ({ traceExportEnabled, focusedOnly = false }: { traceExportEnabled: boolean; focusedOnly?: boolean }) => {
   const allLiveEntries = useAppStore((s) => s.inspectorEntries)
-  const messages = useAppStore((s) => s.messages)
+  const messages = usePanelMessages()
   const conversationId = useAppStore((s) => s.conversationId)
   const liveEntries = useMemo(() => allLiveEntries.filter((entry) => !entry.conversationId || entry.conversationId === conversationId), [allLiveEntries, conversationId])
   // Hydration restores canonical records, not transient Inspector events.

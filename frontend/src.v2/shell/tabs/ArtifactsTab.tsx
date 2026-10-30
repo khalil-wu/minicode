@@ -2,6 +2,7 @@ import { collectArtifacts, mergeResourceInventory, type ArtifactItem } from "../
 export { collectArtifacts, mergeResourceInventory } from "../../lib/conversation-artifact-items";
 import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { usePanelMessages } from '../panelVisibility'
 import { EmptyState } from '../../components/EmptyState'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { useAppStore } from '../../stores'
@@ -22,7 +23,7 @@ export const ArtifactsTab = () => {
   const conversation = useAppStore((s) => s.conversations.find((item) => item.id === s.conversationId))
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId)
   const executionCwd = conversation?.executionCwd || conversation?.worktreePath || conversation?.workspaceRoot || ''
-  const messages = useAppStore((s) => s.messages)
+  const messages = usePanelMessages()
   const previewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact)
   const [inventory, setInventory] = useState<{ conversationId: string; executionCwd: string; page: ConversationResourcePage } | null>(null)
   const [loading, setLoading] = useState(false)

@@ -3,6 +3,7 @@
  */
 import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MessageSquare, MonitorPlay, Layers, Paperclip, SquareTerminal, CalendarClock, Activity } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import { usePanelMessages } from '../panelVisibility'
 import { BackgroundCommandDetails } from './BackgroundCommandDetails'
 import { EmptyState } from '../../components/EmptyState'
 import { useAppStore } from '../../stores'
@@ -40,7 +41,7 @@ export const ActivityTab = () => {
   const conversationId = useAppStore((s) => s.conversationId)
   const [backgroundDetail, setBackgroundDetail] = useState<{ conversationId: string; commandId: string } | null>(null)
   const hasActiveConversation = useAppStore((s) => hasVisibleActiveConversation(s.conversationId, s.conversations))
-  const messages = useAppStore((s) => s.messages)
+  const messages = usePanelMessages()
   const isStreaming = useAppStore((s) => s.isStreaming)
   const todos = useAppStore((s) => s.todos)
   const plan = useAppStore((s) => s.plan)

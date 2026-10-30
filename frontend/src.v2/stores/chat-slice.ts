@@ -1135,8 +1135,12 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
         const identity = thinkingMetadata.item_id;
         let userInputIndex = blocks.length - 1;
         while (userInputIndex >= 0 && blocks[userInputIndex].type !== "user_input") userInputIndex -= 1;
+        // Mirror the backend's thinking-block merge key: a provider that
+        // numbers summary parts with content_index starts a new block, so two
+        // adjacent "**title**" sections never glue into "****".
         const matchingIndex = identity
-          ? blocks.findIndex((block, index) => index > userInputIndex && block.type === "thinking" && block.item_id === identity)
+          ? blocks.findIndex((block, index) => index > userInputIndex && block.type === "thinking" && block.item_id === identity
+            && thinkingMetadataMatches(block, thinkingMetadata))
           : -1;
         const lastIndex = blocks.length - 1;
         const fallbackIndex = matchingIndex >= 0

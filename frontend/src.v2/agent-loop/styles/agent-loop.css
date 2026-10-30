@@ -116,7 +116,7 @@
 }
 
 /* 用户气泡的表面/几何由 ui-polish 的 .user-cell-bubble 单一定义
-   (--message-user-bg + radius-lg + border-soft + 无影)。本文件不再重复覆盖。 */
+   (--message-user-bg + 22px 圆角 + 无边框无影)。本文件不再重复覆盖。 */
 .agent-loop-user-cell .user-cell-bubble {
   width: fit-content;
   max-width: 100%;

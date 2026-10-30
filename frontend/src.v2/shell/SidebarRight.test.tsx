@@ -1366,7 +1366,9 @@ describe("SidebarRight activity", () => {
 
     fireEvent.doubleClick(handle);
 
-    expect(useAppStore.getState().rightSidebarWidth).toBe(760);
+    // The default width is capped at 640 (matching the reference panel); the
+    // old expectation encoded the uncapped height term of the previous formula.
+    expect(useAppStore.getState().rightSidebarWidth).toBe(640);
   });
 
   it("supports keyboard resizing from the right sidebar separator", () => {
@@ -1383,7 +1385,7 @@ describe("SidebarRight activity", () => {
     expect(handle.getAttribute("aria-valuenow")).toBe("908");
     expect(handle.getAttribute("aria-valuemax")).toBe("908");
     fireEvent.keyDown(handle, { key: "Enter" });
-    expect(useAppStore.getState().rightSidebarWidth).toBe(760);
+    expect(useAppStore.getState().rightSidebarWidth).toBe(640);
   });
 
   it("keeps rendered width and separator bounds equal after the viewport shrinks", () => {

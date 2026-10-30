@@ -159,7 +159,7 @@
 
 .mc-chat-context-card-header {
   min-height: 44px;
-  padding: 4px 12px 0 20px;
+  padding: 0 12px 0 20px;
   border-bottom: 0;
   color: var(--text-secondary);
   font-size: var(--text-sm);

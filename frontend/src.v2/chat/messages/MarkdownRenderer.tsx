@@ -1507,13 +1507,18 @@ const markdownCodeRanges = (value: string): { start: number; end: number }[] => 
   return ranges;
 };
 
+// Code nodes come only from backtick or tilde fences and spans, or from lines
+// indented by four spaces or a tab. Text without those markers has no code
+// ranges to protect, so the streaming tail can skip the parser pre-pass.
+const mayContainMarkdownCode = (value: string): boolean => /[`~]|(?:^|\n)[ \t]*(?: {4}|\t)/.test(value);
+
 const normalizeMarkdownSource = (value: string): string => {
   if (!/[\\$]/.test(value)) return value;
-  let codeRanges = markdownCodeRanges(value);
+  let codeRanges = mayContainMarkdownCode(value) ? markdownCodeRanges(value) : [];
   // Rewrite the destination as a whole so code-formatted link labels remain
   // valid, while Windows links shown inside literal code stay untouched.
   const linked = preserveWindowsMarkdownFileLinks(value, codeRanges);
-  if (linked !== value) codeRanges = markdownCodeRanges(linked);
+  if (linked !== value) codeRanges = mayContainMarkdownCode(linked) ? markdownCodeRanges(linked) : [];
   let output = "";
   let cursor = 0;
   for (const { start, end } of codeRanges) {

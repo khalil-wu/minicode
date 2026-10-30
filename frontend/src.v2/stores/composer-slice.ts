@@ -88,10 +88,13 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   selectedSkills: [],
   slashPanelOpen: false,
   mentionPanelOpen: false,
-  setDraft: (d, richDraft) => set(state => ({ draft: d,
-    richDraft: d ? richDraft ?? (state.draft === d ? state.richDraft : undefined) : undefined })),
+  setDraft: (d, richDraft) => set(state => {
+    const nextRichDraft = d ? richDraft ?? (state.draft === d ? state.richDraft : undefined) : undefined;
+    // Clearing an already empty composer must not notify every subscriber.
+    return state.draft === d && state.richDraft === nextRichDraft ? state : { draft: d, richDraft: nextRichDraft };
+  }),
   setQuotedMessage: (message) => set({ quotedMessage: message }),
-  clearQuotedMessage: () => set({ quotedMessage: null }),
+  clearQuotedMessage: () => set(state => (state.quotedMessage === null ? state : { quotedMessage: null })),
   addAttachment: (a) =>
     set((s) => ({ attachments: [...s.attachments, a] })),
   updateAttachment: (id, patch) =>
@@ -125,6 +128,10 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     }),
   clearAttachments: () =>
     set((s) => {
+      // With no live attachments there is nothing to remove from any draft.
+      // Returning the same state keeps dormant draft identities, so draft
+      // persistence does not re-serialize every record on each send.
+      if (s.attachments.length === 0) return s;
       // Revoke every blob: dataURL so image blob URLs don't leak when the
       // composer is cleared on send / conversation switch / long sessions.
       for (const attachment of s.attachments) revokeBlobDataUrl(attachment.dataUrl);
@@ -271,7 +278,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
   setPRMonitor: (pr) => set({ prMonitor: pr }),
   setPRStatusIssue: (prStatusIssue) => set({ prStatusIssue }),
   setActionChip: (c) => set({ actionChip: c }),
-  setMentionResults: (items) => set({ mentionResults: items }),
+  setMentionResults: (items) => set((s) => (s.mentionResults === items || (items.length === 0 && s.mentionResults.length === 0) ? s : { mentionResults: items })),
   addSelectedMention: (item) =>
     set((s) => ({
       selectedMentions: s.selectedMentions.some((existing) => (
@@ -290,7 +297,7 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
           : item.path !== path
       )),
     })),
-  clearSelectedMentions: () => set({ selectedMentions: [] }),
+  clearSelectedMentions: () => set((s) => (s.selectedMentions.length === 0 ? s : { selectedMentions: [] })),
   addSelectedSkill: (skill) =>
     set((s) => ({
       selectedSkills: s.selectedSkills.some((existing) => (
@@ -303,9 +310,9 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     })),
   removeSelectedSkill: (name) =>
     set((s) => ({ selectedSkills: s.selectedSkills.filter((skill) => skill.name !== name) })),
-  clearSelectedSkills: () => set({ selectedSkills: [] }),
+  clearSelectedSkills: () => set((s) => (s.selectedSkills.length === 0 ? s : { selectedSkills: [] })),
   openSlashPanel: () => set({ slashPanelOpen: true, mentionPanelOpen: false }),
-  closeSlashPanel: () => set({ slashPanelOpen: false }),
+  closeSlashPanel: () => set((s) => (s.slashPanelOpen ? { slashPanelOpen: false } : s)),
   openMentionPanel: () => set({ mentionPanelOpen: true, slashPanelOpen: false }),
-  closeMentionPanel: () => set({ mentionPanelOpen: false }),
+  closeMentionPanel: () => set((s) => (s.mentionPanelOpen ? { mentionPanelOpen: false } : s)),
 });

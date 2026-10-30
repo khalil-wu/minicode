@@ -1,8 +1,12 @@
 // Codex CPt / DPt / OPt, app-shell:right-panel-width:v3 (26.1007.2314).
 export const rightPanelMaximumWidth = (mainContentWidth: number) => Math.max(320, mainContentWidth - 352);
 
+// Cap the first-run default at 640 and floor it at 320; the height term only
+// limits tall-narrow windows. The previous Math.max over both clamps returned
+// the larger bound, so a wide window opened with a panel wider than half the
+// shell.
 export const rightPanelDefaultWidth = (mainContentWidth: number, shellHeight: number) =>
-  Math.max(320, Math.min(shellHeight * 1.6, mainContentWidth - 500), Math.min(640, mainContentWidth - 352));
+  Math.max(320, Math.min(640, shellHeight * 1.6, mainContentWidth - 500));
 
 export const rightPanelWidthRatio = (width: number, mainContentWidth: number) => {
   const range = rightPanelMaximumWidth(mainContentWidth) - 320;

@@ -540,6 +540,38 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     ]);
   });
 
+  it("starts a new reasoning block when the provider moves to the next summary part", () => {
+    const part = (content: string, contentIndex: number) => ({
+      type: "thinking_delta" as const,
+      content,
+      source: "provider",
+      visibility: "timeline",
+      phase: "model",
+      provider_reasoning_type: "reasoning_summary_text",
+      item_id: "reasoning-1",
+      content_index: contentIndex,
+      message_id: "assistant-stream",
+    });
+    handle(part("**Formatting metric tables**", 0) as ServerEvent);
+    handle(part("**Compiling grouped metric tables**", 1) as ServerEvent);
+    handle(part("\n\nDone", 1) as ServerEvent);
+
+    expect(useAppStore.getState().messages[0]?.blocks).toEqual([
+      expect.objectContaining({
+        type: "thinking",
+        content: "**Formatting metric tables**",
+        item_id: "reasoning-1",
+        content_index: 0,
+      }),
+      expect.objectContaining({
+        type: "thinking",
+        content: "**Compiling grouped metric tables**\n\nDone",
+        item_id: "reasoning-1",
+        content_index: 1,
+      }),
+    ]);
+  });
+
   it("keeps reasoning item identity when a stream resumes before the next delta", () => {
     handle({
       type: "stream_resume",

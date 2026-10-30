@@ -60,3 +60,42 @@ export function collectConversationSources(messages: ChatMessage[]): Conversatio
   }
   return [...sources.values()].reverse();
 }
+
+const contextInputKeyCache = new WeakMap<ChatMessage, string>();
+const fieldIdentities = new WeakMap<object, number>();
+let nextFieldIdentity = 0;
+const identityOf = (value: object | null | undefined): number => {
+  if (!value) return 0;
+  let identity = fieldIdentities.get(value);
+  if (identity === undefined) {
+    identity = ++nextFieldIdentity;
+    fieldIdentities.set(value, identity);
+  }
+  return identity;
+};
+
+/**
+ * Change-detection key for the thread summary. Store updates replace a message
+ * object whenever one of its fields changes, so caching per message object is
+ * exact, and the Markdown parse behind `markdownSourceLabelKey` runs once per
+ * settled message instead of on every store notification.
+ */
+export const chatContextInputKey = (message: ChatMessage): string => {
+  const cached = contextInputKeyCache.get(message);
+  if (cached !== undefined) return cached;
+  const key = JSON.stringify([
+    message.id,
+    message.isStreaming ? "" : markdownSourceLabelKey(message.content),
+    identityOf(message.citations), identityOf(message.attachmentRefs), identityOf(message.replyAttachments), identityOf(message.artifacts),
+    getToolCallsFromMessage(message).map(identityOf),
+  ]);
+  contextInputKeyCache.set(message, key);
+  return key;
+};
+
+/** One primitive key for the whole transcript; equal strings mean no relevant change. */
+export const chatContextInputsKey = (messages: ChatMessage[]): string => {
+  let key = "";
+  for (const message of messages) key += chatContextInputKey(message);
+  return key;
+};
