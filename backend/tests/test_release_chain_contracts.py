@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import asyncio
 import os
 import subprocess
 import sys
@@ -144,6 +145,7 @@ def test_missing_selected_skill_does_not_switch_to_same_named_workflow(instructi
 
 @pytest.mark.asyncio
 async def test_interrupt_replay_cannot_stop_a_different_turn():
+    current_run = asyncio.create_task(asyncio.Event().wait())
     session = SimpleNamespace(
         active_conversation_id='conversation',
         ws_manager=None,
@@ -155,12 +157,17 @@ async def test_interrupt_replay_cannot_stop_a_different_turn():
         ),
         command_dispatcher=SimpleNamespace(interrupt_user_message_admission=AsyncMock(return_value=False)),
         cancel_agent_runs=AsyncMock(),
+        running_agent_task_for=lambda cid: current_run if cid == 'conversation' else None,
     )
-    await handle_interrupt_command(session, {'conversation_id': 'conversation', 'message_id': 'old-message'})
-    await handle_interrupt_command(session, {'conversation_id': 'conversation'})
-    session.cancel_agent_runs.assert_not_awaited()
-    await handle_interrupt_command(session, {'conversation_id': 'conversation', 'message_id': 'new-message'})
-    session.cancel_agent_runs.assert_awaited_once_with(conversation_id='conversation', reason='user_interrupted')
+    try:
+        await handle_interrupt_command(session, {'conversation_id': 'conversation', 'message_id': 'old-message'})
+        await handle_interrupt_command(session, {'conversation_id': 'conversation'})
+        session.cancel_agent_runs.assert_not_awaited()
+        await handle_interrupt_command(session, {'conversation_id': 'conversation', 'message_id': 'new-message'})
+        session.cancel_agent_runs.assert_awaited_once_with(conversation_id='conversation', reason='user_interrupted')
+    finally:
+        current_run.cancel()
+        await asyncio.gather(current_run, return_exceptions=True)
 
 
 def test_resume_rejects_a_checkpoint_replaced_after_selection(monkeypatch):

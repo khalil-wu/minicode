@@ -457,7 +457,12 @@ test("real Electron workbench supports read-only child transcripts, lazy results
     const window = await app.firstWindow();
     await window.setViewportSize(desktopViewport);
     await expect.poll(() => backend.commands.some((command) => command.type === "session.sync"), { timeout: 30_000 }).toBe(true);
-    await window.getByRole("button", { name: "Electron agents", exact: true }).click();
+    // Startup may already have restored this reader before the row is clicked.
+    // Open a real local draft so selecting the fixture thread exercises a switch.
+    await window.getByRole("button", { name: "新聊天", exact: true }).click();
+    await expect(window.getByRole("heading", { name: "我们要构建什么？", exact: true })).toBeVisible();
+    await window.getByRole("list", { name: "最近聊天", exact: true })
+      .getByRole("button", { name: "Electron agents", exact: true }).click();
     await expect.poll(() => backend.commands.some((command) => command.type === "conversation.switch"
       && command.conversation_id === ownerId)).toBe(true);
     await expect(window.getByText("Continue with the recovered verification path.", { exact: true })).toBeVisible();

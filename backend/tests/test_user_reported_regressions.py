@@ -11,6 +11,7 @@ import pytest
 from starlette.requests import Request
 
 from backend.api import auth as api_auth
+from backend.config import AppConfig, LLMSettings
 from backend.conversations.models import ConversationRecord
 from backend.conversations.repository import ConversationRepository
 from backend.artifact.store import ArtifactStore
@@ -249,7 +250,10 @@ def test_workspace_set_accepts_camel_case_workspace_root_alias(monkeypatch) -> N
 
 @pytest.mark.parametrize("command", ["workspace.import", "workspace.switch", "workspace.set"])
 def test_workspace_activation_errors_reply_to_the_requested_command(tmp_path, command: str) -> None:
-    session = SimpleNamespace(send_event=AsyncMock())
+    session = SimpleNamespace(
+        config=AppConfig(llm=LLMSettings(api_key="")),
+        send_event=AsyncMock(),
+    )
 
     handled = asyncio.run(workspace_handlers.HANDLERS[command](
         session, {"path": str(tmp_path / "missing-project")},
@@ -260,6 +264,8 @@ def test_workspace_activation_errors_reply_to_the_requested_command(tmp_path, co
     assert event.type == "command.result"
     assert event.data["command"] == command
     assert event.data["level"] == "error"
+    assert event.data["message"] == f"Session workspace does not exist: {tmp_path / 'missing-project'}"
+    assert event.data["data"]["error_code"] == "workspace_missing"
 
 
 def test_generated_image_artifact_preserves_media_type_after_cold_reload(tmp_path) -> None:
@@ -405,6 +411,7 @@ def test_conversation_create_emits_authoritative_switch_for_the_new_task(
         assert data["activated"] is True
 
     session = SimpleNamespace(
+        config=AppConfig(llm=LLMSettings(api_key="")),
         active_conversation_id="conv-old-task",
         ws_manager=None,
         # This unit test calls the handler without a durable dispatcher claim.

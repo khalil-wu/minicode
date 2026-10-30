@@ -28,6 +28,26 @@ class OAuthPeer(GatePeer):
             raise MCPAuthenticationRequired("https://authorization.invalid/explicit-only")
 
 
+class CleanupPeer(OAuthPeer):
+    def __init__(self, interactive, *, close_outcome, fail=None):
+        super().__init__(interactive, ready=False, fail=fail)
+        self.close_outcome = close_outcome
+        self.cleanup_entered, self.cleanup_release = asyncio.Event(), asyncio.Event()
+
+    async def close(self):
+        self.closes += 1
+        if isinstance(self.close_outcome, Exception):
+            raise self.close_outcome
+        self.connected = False
+        return self.close_outcome
+
+    async def finish_pending_cleanup(self):
+        self.cleanup_entered.set()
+        await self.cleanup_release.wait()
+        self.close_outcome = True
+        return await self.close()
+
+
 def host(tmp_path, monkeypatch, *peers):
     manager = MCPServerManager(config_path=tmp_path / "mcp.json", workspace_root=tmp_path)
     plans, created = deque(peers), []
@@ -192,4 +212,188 @@ async def test_failed_login_is_shared_but_the_next_explicit_attempt_can_retry(tm
         await manager.oauth_login(config.name)
         assert created[-1] is replacement and manager.get_client(config.name) is replacement
     finally:
+        await manager.stop_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cancel_startup", "stop_server", "logout", "replace_config"])
+async def test_oauth_cancel_cleanup_error_reaches_owner_and_retains_the_actual_cleanup(tmp_path, monkeypatch, operation):
+    error = OSError("actual SDK callback cleanup failed")
+    peer = CleanupPeer(True, close_outcome=error)
+    manager, created = host(tmp_path, monkeypatch, OAuthPeer(False), peer)
+    config = server()
+    notifications = []
+
+    async def notify(name, status):
+        notifications.append((name, status))
+
+    manager._on_status_change = notify
+    await manager.start_server(config)
+    observer = asyncio.create_task(manager.oauth_login(config.name))
+    await entered(peer)
+    try:
+        if operation == "cancel_startup":
+            # The original reported gap: no window remains to observe the producer.
+            observer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await observer
+            assert peer.closes == 0
+        with pytest.raises(OSError) as raised:
+            if operation == "logout":
+                await manager.oauth_logout(config.name)
+            elif operation == "stop_server":
+                await manager.stop_server(config.name)
+            elif operation == "replace_config":
+                await manager.start_server(replace(config, url="https://replacement.invalid/mcp"))
+            else:
+                await manager.cancel_startup()
+        assert raised.value is error
+        result = (await asyncio.gather(observer, return_exceptions=True))[0]
+        if operation == "cancel_startup":
+            assert isinstance(result, asyncio.CancelledError)
+        else:
+            assert result is error
+        await asyncio.wait_for(peer.cleanup_entered.wait(), 2)
+        state = manager._servers[config.name]
+        reaper = manager._cleanup_reaper_tasks[config.name]
+        assert state.config.url == config.url and created[-1] is peer
+        assert state.client is peer and not reaper.done()
+        assert state.status is ServerStatus.ERROR and state.last_exception is error
+        assert str(error) in state.last_error
+        assert str(error) in state.operation_failures["cleanup"]["message"]
+        assert "connect" not in state.operation_failures
+        assert notifications[-1] == (config.name, ServerStatus.ERROR)
+        assert manager._oauth_login_attempts == {}
+        peer.cleanup_release.set()
+        await asyncio.wait_for(reaper, 2)
+        assert state.client is None and state.status is ServerStatus.OFFLINE
+        assert "cleanup" not in state.operation_failures
+        assert not manager._cleanup_reaper_tasks
+        assert notifications[-1] == (config.name, ServerStatus.OFFLINE)
+    finally:
+        peer.cleanup_release.set()
+        await asyncio.gather(*manager._cleanup_reaper_tasks.values())
+        await manager.stop_all()
+        await asyncio.gather(observer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_oauth_cancel_keeps_expected_cancellation_while_cleanup_is_pending(tmp_path, monkeypatch):
+    peer = CleanupPeer(True, close_outcome=False)
+    manager, _ = host(tmp_path, monkeypatch, OAuthPeer(False), peer)
+    config = server()
+    await manager.start_server(config)
+    observer = asyncio.create_task(manager.oauth_login(config.name))
+    await entered(peer)
+    try:
+        await manager.cancel_startup()
+        with pytest.raises(asyncio.CancelledError):
+            await observer
+        await asyncio.wait_for(peer.cleanup_entered.wait(), 2)
+        state = manager._servers[config.name]
+        reaper = manager._cleanup_reaper_tasks[config.name]
+        assert state.client is peer and not reaper.done()
+        assert state.status is ServerStatus.ERROR
+        assert state.operation_failures["cleanup"]["failure_kind"] == "cleanup_pending"
+        assert "connect" not in state.operation_failures
+        peer.cleanup_release.set()
+        await asyncio.wait_for(reaper, 2)
+        assert state.client is None and state.status is ServerStatus.OFFLINE
+    finally:
+        peer.cleanup_release.set()
+        await asyncio.gather(*manager._cleanup_reaper_tasks.values())
+        await manager.stop_all()
+        await asyncio.gather(observer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_failed_connection_keeps_both_primary_error_and_real_cleanup_owner(tmp_path, monkeypatch):
+    primary = ConnectionError("actual connect failure")
+    cleanup = OSError("actual SDK close failure")
+    peer = CleanupPeer(False, close_outcome=cleanup, fail=primary)
+    manager, _ = host(tmp_path, monkeypatch, peer)
+    config = server()
+    peer.release.set()
+    try:
+        await manager.start_server(config)
+        await asyncio.wait_for(peer.cleanup_entered.wait(), 2)
+        state = manager._servers[config.name]
+        reaper = manager._cleanup_reaper_tasks[config.name]
+        assert state.client is peer and not reaper.done()
+        assert state.status is ServerStatus.ERROR and state.last_exception is primary
+        assert str(primary) in state.operation_failures["connect"]["message"]
+        assert str(cleanup) in state.operation_failures["cleanup"]["message"]
+        peer.cleanup_release.set()
+        await asyncio.wait_for(reaper, 2)
+        assert state.client is None and state.status is ServerStatus.OFFLINE
+        assert str(primary) in state.operation_failures["connect"]["message"]
+        assert "cleanup" not in state.operation_failures
+    finally:
+        peer.cleanup_release.set()
+        await asyncio.gather(*manager._cleanup_reaper_tasks.values())
+        await manager.stop_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_servers", [1, 2])
+async def test_cancel_startup_drains_every_owned_authentication_before_raising_cleanup_errors(tmp_path, monkeypatch, failed_servers):
+    errors = [OSError(f"actual cleanup failure {index}") for index in range(failed_servers)]
+    failed = [CleanupPeer(True, close_outcome=error) for error in errors]
+    other = OAuthPeer(True, ready=False)
+    peers = [*failed, other]
+    configs = [server(f"docs-{index}") for index in range(len(peers))]
+    manager, _ = host(tmp_path, monkeypatch, *[OAuthPeer(False) for _ in peers], *peers)
+    observers = []
+    try:
+        for config in configs:
+            await manager.start_server(config)
+        for config, peer in zip(configs, peers, strict=True):
+            observers.append(asyncio.create_task(manager.oauth_login(config.name)))
+            await entered(peer)
+        expected = OSError if failed_servers == 1 else ExceptionGroup
+        with pytest.raises(expected) as raised:
+            await manager.cancel_startup()
+        actual_errors = [raised.value] if failed_servers == 1 else list(raised.value.exceptions)
+        assert actual_errors == errors
+        results = await asyncio.gather(*observers, return_exceptions=True)
+        assert results[:-1] == errors
+        assert isinstance(results[-1], asyncio.CancelledError)
+        assert other.closes == 1 and manager._servers[configs[-1].name].status is ServerStatus.OFFLINE
+        assert manager._oauth_login_attempts == {}
+        for config, peer in zip(configs[:-1], failed, strict=True):
+            await asyncio.wait_for(peer.cleanup_entered.wait(), 2)
+            assert manager._servers[config.name].client is peer
+            assert not manager._cleanup_reaper_tasks[config.name].done()
+    finally:
+        for peer in failed:
+            peer.cleanup_release.set()
+        await asyncio.gather(*manager._cleanup_reaper_tasks.values())
+        await manager.stop_all()
+        await asyncio.gather(*observers, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancel_startup_propagates_owned_non_oauth_producer_cleanup_failure(tmp_path, monkeypatch):
+    error = OSError("actual owned startup cleanup failure")
+    peer = CleanupPeer(False, close_outcome=error)
+    manager, _ = host(tmp_path, monkeypatch, peer)
+    config = server()
+    await manager.register_config(config)
+    producer = manager._launch_server_startup(manager._servers[config.name])
+    await entered(peer)
+    try:
+        with pytest.raises(OSError) as raised:
+            await manager.cancel_startup()
+        assert raised.value is error
+        with pytest.raises(OSError) as producer_error:
+            await producer
+        assert producer_error.value is error
+        await asyncio.wait_for(peer.cleanup_entered.wait(), 2)
+        state = manager._servers[config.name]
+        assert state.client is peer and state.status is ServerStatus.ERROR
+        assert not manager._cleanup_reaper_tasks[config.name].done()
+        assert str(error) in state.operation_failures["cleanup"]["message"]
+    finally:
+        peer.cleanup_release.set()
+        await asyncio.gather(*manager._cleanup_reaper_tasks.values())
         await manager.stop_all()

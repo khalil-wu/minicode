@@ -7,7 +7,7 @@ import path from "node:path";
 export async function auditImportFlow({ page, profile, sourceHome, capture, checks, trace }) {
   assert.equal(process.env.CI, "true");
   await page.getByRole("navigation", { name: "设置分类", exact: true }).getByRole("button", { name: "导入", exact: true }).click();
-  const importButton = page.getByRole("button", { name: "导入 Claude Code", exact: true });
+  const importButton = page.getByRole("button", { name: "从 Claude Code 导入", exact: true });
   await importButton.click();
   const providers = page.getByRole("dialog", { name: "从其他 AI 应用导入", exact: true });
   await capture("import-01-actual-provider-menu");
@@ -135,7 +135,7 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
   const pendingItem = detection.items[0];
   assert.equal(pendingItem.item_type, "commands");
   assert.equal(path.resolve(pendingItem.source_path), path.resolve(commandSource));
-  await page.getByRole("button", { name: "导入 Claude Code", exact: true }).click();
+  await page.getByRole("button", { name: "从 Claude Code 导入", exact: true }).click();
   await page.getByRole("dialog", { name: "从其他 AI 应用导入", exact: true }).getByRole("button", { name: "继续", exact: true }).click();
   const destination = path.dirname(pendingItem.target_path);
   assert(destination.startsWith(profile));

@@ -17,7 +17,7 @@ from backend.llm.base import LLMAdapter, StreamEvent, StreamEventType
 from backend.llm.provider_contracts import ProviderAdapterSpec
 from backend.realtime.protocol import AudioChunk, Start
 from backend.realtime.runtime import Delegation, RealtimeRuntime
-from backend.realtime.session import capture_config, start_runtime, thread_runtime
+from backend.realtime.session import capture_config, project_capabilities, start_runtime, thread_runtime
 from backend.realtime.transport import RealtimeConfig, RealtimeConnection, session_config, websocket_url
 from backend.tests.test_ws_cold_connection import _connection, _release_session
 from backend.ws.manager import WebSocketManager
@@ -115,21 +115,92 @@ def test_provider_capture_uses_original_selection_auth_proxy_and_never_publishes
     def resolve(provider, model): resolved.append((provider, model)); return spec
     provider_reads = []
     runtime = SimpleNamespace(get_provider=lambda provider: provider_reads.append(provider) or SimpleNamespace(configured=True),
-        get_available_snapshot=lambda: (SimpleNamespace(provider="original-provider"),),
+        provider_payload=lambda provider, model: {"base_url": "https://original.example/v1", "wire_api": "responses", "models_source": "extension"},
+        _provider_aws_config=lambda provider: None,
         get_model=lambda provider, model: SimpleNamespace(api="openai-responses", base_url="https://original.example/v1"), resolve_adapter_spec=resolve)
     session = SimpleNamespace(conversation_repo=SimpleNamespace(get_conversation_summary=lambda _owner: SimpleNamespace(
         model_selection={"provider": "original-provider", "model": "original-model"})),
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda _conversation: "original-workspace"),
         _model_runtime_for_conversation=lambda _owner: runtime)
     monkeypatch.setattr(module, "load_config", lambda **_kwargs: config)
-    public = capture_config(session, "original-thread", credentials=False).capabilities()
+    public = project_capabilities(session, "original-thread")
     assert public["configured"] and not resolved and not provider_reads
     assert not any(secret in json.dumps(public) for secret in ("base-provider-secret", "original-provider-secret", "actual-header-secret"))
-    captured = capture_config(session, "original-thread", credentials=True)
+    captured = capture_config(session, "original-thread")
     assert provider_reads == ["original-provider"]
     assert resolved == [("original-provider", "original-model")]
     assert captured.base_url == "https://original.example/v1" and captured.proxy_mode == "disabled"
     assert captured.headers == {"x-runtime-auth": "actual-header-secret", "Authorization": "Bearer original-provider-secret"}
+
+
+@pytest.mark.parametrize("provider,wire_api,models_source,aws,endpoint,configured", [
+    ("custom", "responses", "settings", None, None, True),
+    ("custom", "anthropic", "settings", None, None, False),
+    ("Removed-Provider", "", "unavailable", None, None, False),
+    ("custom", "responses", "settings", {"region": "us-east-1"}, None, False),
+    ("custom", "anthropic", "settings", None, "http://127.0.0.1:8091/v1", True),
+])
+def test_capability_projection_reuses_selected_snapshot_without_startup_or_credentials(
+    monkeypatch, provider, wire_api, models_source, aws, endpoint, configured,
+):
+    from backend.realtime import session as module
+
+    settings = {"llm": {provider: {"aws": aws}}, "experimental_realtime_ws_base_url": endpoint}
+    config = AppConfig(llm=LLMSettings(api_key="unrelated-provider-secret", provider="openai",
+        base_url="https://unrelated.example/v1", default_headers=(("Authorization", "unrelated-header-secret"),)),
+        config_layer_stack=SimpleNamespace(effective_config=lambda: settings))
+    session = SimpleNamespace(_model_runtime_for_conversation=lambda owner: None)
+    selected = {"provider": provider, "base_url": "https://selected.example/v1" if wire_api else "",
+        "wire_api": wire_api, "models_source": models_source}
+    monkeypatch.setattr(module, "load_config", lambda **kwargs: pytest.fail("The captured metadata must not reload config"))
+    monkeypatch.setattr(module, "capture_config", lambda *_args, **_kwargs: pytest.fail("A projection must not prepare a realtime start"))
+
+    public = project_capabilities(session, "original-thread", config=config, model_selection=selected)
+
+    assert public["configured"] is configured
+    assert public["transports"] == (["websocket"] if configured else [])
+    assert public["enabled"] is True
+    assert "headers" not in public
+    assert "secret" not in json.dumps(public)
+
+
+def test_actual_realtime_capture_rejects_removed_provider_without_borrowing_global_auth(monkeypatch):
+    from backend.realtime import session as module
+
+    config = AppConfig(llm=LLMSettings(api_key="unrelated-provider-secret", provider="openai",
+        base_url="https://unrelated.example/v1", wire_api="responses"))
+    runtime = SimpleNamespace(get_provider=lambda _provider: None, get_model=lambda _provider, _model: None,
+        resolve_adapter_spec=lambda *_args: pytest.fail("A removed provider has no adapter specification"))
+    session = SimpleNamespace(conversation_repo=SimpleNamespace(get_conversation_summary=lambda _owner: SimpleNamespace(
+        model_selection={"provider": "Removed-Provider", "model": "removed-model"})),
+        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda _conversation: "original-workspace"),
+        _model_runtime_for_conversation=lambda _owner: runtime)
+    monkeypatch.setattr(module, "load_config", lambda **_kwargs: config)
+
+    with pytest.raises(ValueError, match="selected provider is unavailable"):
+        capture_config(session, "original-thread")
+
+
+@pytest.mark.asyncio
+async def test_endpoint_projection_does_not_replace_actual_start_authentication(monkeypatch):
+    from backend.realtime import session as module
+
+    config = AppConfig(llm=LLMSettings(api_key="", provider="openai",
+        base_url="https://selected.example/v1", wire_api="responses"))
+    conversation = SimpleNamespace(archived=False, model_selection={"provider": "openai", "model": "text-model"})
+    owner = SimpleNamespace(realtime_runtime=None)
+    session = SimpleNamespace(conversation_repo=SimpleNamespace(get_conversation=lambda _owner: conversation,
+        get_conversation_summary=lambda _owner: conversation),
+        session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda _conversation: "original-workspace"),
+        _model_runtime_for_conversation=lambda _owner: None)
+    monkeypatch.setattr(module, "load_config", lambda **_kwargs: config)
+    monkeypatch.setattr(module, "thread_runtime", lambda _session, _owner: owner)
+    selected = {"provider": "openai", "base_url": config.llm.base_url, "wire_api": "responses", "models_source": "settings"}
+
+    assert project_capabilities(session, "original-thread", config=config, model_selection=selected)["configured"] is True
+    with pytest.raises(ValueError, match="no configured realtime endpoint/authentication"):
+        await start_runtime(session, Start(threadId="original-thread", outputModality="audio"))
+    assert owner.realtime_runtime is None
 
 
 @pytest.mark.asyncio

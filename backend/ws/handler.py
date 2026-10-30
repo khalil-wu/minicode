@@ -928,8 +928,9 @@ class WebSocketSession(
         snapshot["permission"] = self._runtime_permission_payload()
         snapshot["mcp_registry_version"] = self._mcp_registry_version_snapshot
         snapshot["provider_capabilities"] = self._provider_capabilities_payload(model_selection)
-        from backend.realtime.session import capture_config
-        snapshot["realtime"] = capture_config(self, str(self.active_conversation_id or ""), credentials=False).capabilities()
+        from backend.realtime.session import project_capabilities
+        snapshot["realtime"] = project_capabilities(self, str(self.active_conversation_id or ""),
+            config=config_snapshot, model_selection=model_selection)
         return snapshot
 
     def runtime_capabilities_payload(

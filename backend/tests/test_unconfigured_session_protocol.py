@@ -522,21 +522,26 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             removed = session.conversation_repo.create_conversation(title="Removed provider task", transcript=history,
                 context_snapshot={"history": history}, model_selection={"provider": "Removed-Provider", "model": "removed-model", "reasoning_effort": "low"})
 
-            summarize_capabilities = session.runtime_capability_summary
+            snapshot_capabilities = session.runtime_capability_snapshot
 
-            def summary_after_public_history(**kwargs):
+            def snapshot_after_public_history(**kwargs):
                 if session.active_conversation_id == saved.id:
                     assert any(event["type"] == "conversation.switched" and event.get("conversation_id") == saved.id
                         and event.get("is_hydrating") is True for event in socket.sent)
-                return summarize_capabilities(**kwargs)
+                    assert any(event["type"] == "conversation.switched" and event.get("conversation_id") == saved.id
+                        and event.get("is_hydrating") is False for event in socket.sent)
+                return snapshot_capabilities(**kwargs)
 
-            monkeypatch.setattr(session, "runtime_capability_summary", summary_after_public_history)
+            monkeypatch.setattr(session, "runtime_capability_snapshot", snapshot_after_public_history)
 
             await socket.command("conversation.switch", conversation_id=saved.id)
             pending = await socket.until("conversation.switched", conversation_id=saved.id, is_hydrating=True)
             complete = await socket.until("conversation.switched", conversation_id=saved.id, is_hydrating=False)
             assert pending["conversation"]["transcript"][-1]["content"] == complete["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
-            current = complete["session"]["capabilities"]["provider_capabilities"]
+            assert "capabilities" not in complete["session"]
+            capabilities = await socket.until("runtime.capabilities", conversation_id=saved.id,
+                source="workspace.activate.conversation.switch")
+            current = capabilities["capabilities"]["provider_capabilities"]
             assert current["provider"] == "custom" and current["model"] == "catalog-model"
             assert current["context_window"] == 32000 and current["vision"] is False
             assert current["effective_reasoning_effort"] == "high" and current["parallel_tool_calls"] is False
@@ -571,7 +576,10 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
                 await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=True)
                 restored = await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=False)
                 assert restored["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
-                current = restored["session"]["capabilities"]["provider_capabilities"]
+                assert "capabilities" not in restored["session"]
+                capabilities = await socket.until("runtime.capabilities", conversation_id=old_task.id,
+                    source="workspace.activate.conversation.switch")
+                current = capabilities["capabilities"]["provider_capabilities"]
                 assert current["provider"] == old_task.model_selection["provider"]
                 assert current["model"] == old_task.model_selection["model"]
                 if old_task.id == removed.id:

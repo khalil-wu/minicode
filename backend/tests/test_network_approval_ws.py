@@ -91,7 +91,7 @@ async def receive(server, kind):
 
 
 async def start_review(server, *, protocol="http", persist=None):
-    registration = register(server.host, persist=persist)
+    registration = await register(server.host, persist=persist)
     result = asyncio.create_task(registration.decide(native_request(registration, protocol=protocol)))
     wire = await receive(server, "control_request")
     assert wire["request_id"] == wire["request"]["tool_use_id"]

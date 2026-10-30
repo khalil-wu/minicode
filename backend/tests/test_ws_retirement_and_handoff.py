@@ -44,6 +44,9 @@ async def drain_commands(session):
 async def make_session(tmp_path, monkeypatch):
     sessions = []
     monkeypatch.setattr('backend.hooks.runtime.run_session_end_hook', AsyncMock())
+    monkeypatch.setattr('backend.api._state.bootstrap', SimpleNamespace(
+        create_tool_registry=lambda _artifact_store, **kwargs: ToolRegistry(),
+    ))
 
     def make(session_id='retirement-oracle'):
         session = WebSocketSession(
@@ -145,6 +148,9 @@ async def test_live_callback_done_gate_then_true_claim_release_dispatches_once(m
     async def run_locked(content, *, metadata, run_context, query_claim, **kwargs):
         nonlocal old_claim
         assert conversation_query_guards().owns(query_claim)
+        registry = session._conversation_tool_registry(cid)
+        assert run_context.start_request.tool_registry is not registry
+        assert run_context.start_request.tool_registry.schema_source is registry.schema_source
         admitted.append(content)
         session.conversation_repo.append_transcript_message(cid, {
             'id': metadata['user_message_id'], 'role': 'user', 'content': content,
@@ -246,6 +252,8 @@ async def test_old_cleanup_handoff_keeps_new_stream_and_captured_message_owner(m
     async def old_runner(content, *, metadata, **kwargs):
         captured['old_id'] = metadata['assistant_message_id']
         captured['old_task_id'] = metadata['_run_task_id']
+        captured['old_claim'] = kwargs['run_context'].reserved_query_claim
+        assert conversation_query_guards().owns(captured['old_claim'])
         metadata['run_id'] = 'admitted-old-without-record'
         session._conversation_streams[cid] = create_stream_state(cid, metadata['assistant_message_id'])
         # Register a real task's completion callback before the cleanup waiter
@@ -273,6 +281,7 @@ async def test_old_cleanup_handoff_keeps_new_stream_and_captured_message_owner(m
     finish_old.set()
     await asyncio.wait_for(cleanup_finished.wait(), 3)
     await session.event_outbox.drain_delivery()
+    assert not conversation_query_guards().owns(captured['old_claim'])
     new = captured['new']
     assert not new.done()
     assert session.run_manager.run_tasks[cid] is new

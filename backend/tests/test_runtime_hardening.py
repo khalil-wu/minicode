@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -543,6 +543,8 @@ def test_interrupt_does_not_emit_done_before_run_cleanup_finishes() -> None:
         def __init__(self) -> None:
             self.delivered: set[str] = set()
             self.run_task_ids: dict[str, str] = {}
+            self.set_user_queue_paused = Mock()
+            self.queued_user_message_snapshot = Mock(return_value=[])
 
         def is_delivery_complete(self, conversation_id: str) -> bool:
             return conversation_id in self.delivered
@@ -562,9 +564,11 @@ def test_interrupt_does_not_emit_done_before_run_cleanup_finishes() -> None:
                 }
             }
             self.events: list[dict] = []
+            self.cancel_calls: list[dict] = []
 
-        async def cancel_agent_runs(self, **_kwargs) -> bool:
+        async def cancel_agent_runs(self, **kwargs) -> bool:
             # The run owner emits DONE after its cleanup and persistence fence.
+            self.cancel_calls.append(kwargs)
             return True
 
         async def send_event(self, event) -> None:
@@ -572,7 +576,13 @@ def test_interrupt_does_not_emit_done_before_run_cleanup_finishes() -> None:
 
     async def scenario() -> tuple[list[dict], set[str], set[str]]:
         session = Session()
-        assert await handle_interrupt_command(session, {}) is True
+        assert await handle_interrupt_command(session, {
+            "conversation_id": "conv-cancel", "turn_id": "turn-cancel",
+            "message_id": "assistant-cancel",
+        }) is True
+        assert session.cancel_calls == [{
+            "conversation_id": "conv-cancel", "reason": "user_interrupted",
+        }]
         return (
             session.events,
             session.run_manager.delivered,
@@ -829,8 +839,12 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
             self.run_manager = SimpleNamespace(
                 run_task_ids={"conv-stop": "task-live"}, set_user_queue_paused=Mock(),
                 queued_user_message_snapshot=Mock(return_value=[]),
+                cancel_mcp_startup=AsyncMock(),
             )
             self.cancel_calls: list[dict] = []
+
+        def running_agent_task_for(self, conversation_id):
+            return self.run_manager.run_tasks.get(conversation_id)
 
         async def cancel_agent_runs(self, **kwargs) -> bool:
             self.cancel_calls.append(kwargs)
@@ -838,15 +852,23 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
 
     async def live() -> list[dict]:
         session = LiveSession()
-        assert (
-            await handle_interrupt_command(session, {"conversation_id": "conv-stop"})
-            is True
-        )
-        assert session.cancel_calls == []
-        await handle_interrupt_command(session, {"conversation_id": "conv-stop", "task_id": "task-old"})
-        assert session.cancel_calls == []
-        await handle_interrupt_command(session, {"conversation_id": "conv-stop", "task_id": "task-live"})
-        return session.cancel_calls
+        current_run = asyncio.create_task(asyncio.Event().wait())
+        session.run_manager.run_tasks = {"conv-stop": current_run}
+        try:
+            assert (
+                await handle_interrupt_command(session, {"conversation_id": "conv-stop"})
+                is True
+            )
+            assert session.cancel_calls == []
+            await handle_interrupt_command(session, {"conversation_id": "conv-stop", "task_id": "task-old"})
+            assert session.cancel_calls == []
+            await handle_interrupt_command(session, {"conversation_id": "conv-stop", "task_id": "task-live"})
+            session.run_manager.cancel_mcp_startup.assert_not_awaited()
+            assert session.cancel_calls == [{"conversation_id": "conv-stop", "reason": "user_interrupted"}]
+            return session.cancel_calls
+        finally:
+            current_run.cancel()
+            await asyncio.gather(current_run, return_exceptions=True)
 
     # A current task identity also permits cancellation before an assistant
     # message exists; a stale or missing identity never targets a newer turn.
@@ -857,6 +879,7 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
             super().__init__()
             self._conversation_streams = {}
             self.run_manager.run_task_ids = {}
+            self.run_manager.run_tasks = {}
 
     async def idle() -> list[dict]:
         session = IdleSession()
@@ -864,6 +887,7 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
             await handle_interrupt_command(session, {"conversation_id": "conv-stop"})
             is True
         )
+        session.run_manager.cancel_mcp_startup.assert_awaited_once_with("conv-stop")
         return session.cancel_calls
 
     # A durable replay arriving after the turn finished stays a no-op.

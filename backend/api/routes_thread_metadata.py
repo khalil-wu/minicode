@@ -26,7 +26,7 @@ def _repository(session_id):
 
 @router.get("/{conversation_id}/voice")
 def voice_target(conversation_id: str, response: Response, session_id: str = Query(..., min_length=1)):
-    from backend.realtime.session import capture_config
+    from backend.realtime.session import project_capabilities
     session = _session(session_id)
     if not session.is_connected:
         raise HTTPException(404, "The original session is not connected")
@@ -35,7 +35,7 @@ def voice_target(conversation_id: str, response: Response, session_id: str = Que
         raise HTTPException(404, "The destination voice task does not exist or is archived")
     response.headers["Cache-Control"] = "no-store"
     try:
-        capability = capture_config(session, conversation_id, credentials=False).capabilities()
+        capability = project_capabilities(session, conversation_id)
     except ValueError as error:
         raise HTTPException(409, str(error)) from error
     return {"conversationId": conversation_id, "realtime": capability}

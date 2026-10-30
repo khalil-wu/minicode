@@ -689,20 +689,31 @@ def test_malformed_legacy_cancellation_preserves_original_bytes_with_error_evide
 
 @pytest.mark.asyncio
 async def test_stop_of_local_run_without_client_id_before_runner_first_step(session):
+    from backend.agent.conversation_query_guard import conversation_query_guards
+
     entered, stops = [], []
     async def runner(*args, **kwargs):
         entered.append(True)
         await asyncio.Event().wait()
+    async def stop():
+        context = session.run_manager.context_for('conv_stop_owner')
+        assert context.start_request is session.capture_agent_run_request.return_value
+        assert context.turn_owner_task is session.running_agent_task_for('conv_stop_owner')
+        assert conversation_query_guards().owns(context.reserved_query_claim)
+        await handle_interrupt_command(session,
+            {'conversation_id': 'conv_stop_owner', 'message_id': 'assistant_input'})
     def create(kind, coro):
         from types import SimpleNamespace
-        stops.append(asyncio.create_task(handle_interrupt_command(session,
-            {'conversation_id': 'conv_stop_owner', 'message_id': 'assistant_input'})))
+        stops.append(asyncio.create_task(stop()))
         return SimpleNamespace(id='local-run', task=asyncio.create_task(coro))
     session._run_agent = runner
     session.task_manager.create = create
     result = await WebSocketSession.start_agent_run(session, 'local resume',
         conversation_id='conv_stop_owner', metadata={'assistant_message_id': 'assistant_input'})
     await asyncio.gather(*stops)
+    session.capture_agent_run_request.assert_called_once_with('conv_stop_owner')
+    await asyncio.gather(*session.execution_cleanup_tasks)
+    assert conversation_query_guards().active_claim('conv_stop_owner') is None
     assert result == 'local-run' and entered == []
     assert [(event.type, event.data.get('status')) for event in session.events if event.type == 'done'] == [('done', 'cancelled')]
     assert not [event for event in session.events if event.type == 'command.result']

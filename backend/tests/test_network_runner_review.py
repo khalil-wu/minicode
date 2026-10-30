@@ -138,7 +138,7 @@ async def test_result_retains_audit_emitted_by_the_original_proxy_release():
 async def test_network_consumer_error_answers_the_original_native_rpc_waiter(network_host):
     host = network_host
     host.context.approval_handler = AsyncMock(side_effect=ExecutorProtocolError("original approval transport failed"))
-    registration = register(host)
+    registration = await register(host)
     native = NativeNetworkRuntime()
     native.deciders[registration.execution_id] = registration.decide
     # Exercise the production inbound handler without starting a native peer;

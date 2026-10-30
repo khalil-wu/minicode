@@ -1,12 +1,14 @@
 """Integration regressions for accepted input ownership and explicit Stop."""
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 import asyncio
 
 import pytest
 import pytest_asyncio
 
 from backend.agent.message import UserCommand
+from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.conversations.repository import ConversationRepository
 from backend.ws.command_dispatcher import SessionCommandDispatcher
 from backend.ws.durable_user_queue import DurableUserMessageQueue
@@ -74,6 +76,9 @@ async def session(tmp_path):
         conversation_lifecycle_lock=lambda: lock,
         cancel_pending_approvals=_noop, cleanup_tasks=set(), _cleanup_tasks=set(), execution_cleanup_tasks=set(),
         task_manager=SimpleNamespace(cancel=lambda task_id: None),
+        # These scheduling tests replace the runner before provider setup.
+        # The scheduler still captures one immutable request for its owner.
+        capture_agent_run_request=Mock(return_value=object()),
         start_agent_run=start, send_event=send_event, git_branch_for=lambda path: "",
         events=events, started=started,
     )
@@ -176,8 +181,15 @@ async def test_stop_before_runner_first_step_delivers_terminal_and_consumes_comm
         runner_entered.append(True)
         await asyncio.Event().wait()
 
+    async def stop():
+        context = session.run_manager.context_for("conv_stop_owner")
+        assert context.start_request is session.capture_agent_run_request.return_value
+        assert context.turn_owner_task is session.running_agent_task_for("conv_stop_owner")
+        assert conversation_query_guards().owns(context.reserved_query_claim)
+        await handle_interrupt_command(session, {"conversation_id": "conv_stop_owner", "message_id": "assistant_input"})
+
     def create(kind, coro):
-        stops.append(asyncio.create_task(handle_interrupt_command(session, {"conversation_id": "conv_stop_owner", "message_id": "assistant_input"})))
+        stops.append(asyncio.create_task(stop()))
         return SimpleNamespace(id="task_input", task=asyncio.create_task(coro))
 
     session._run_agent = runner
@@ -188,6 +200,9 @@ async def test_stop_before_runner_first_step_delivers_terminal_and_consumes_comm
     assert durable.persist_client_command(command)
     await session.command_dispatcher._run_durable_client_command("client_assistant_input", 1)
     await asyncio.gather(*stops)
+    session.capture_agent_run_request.assert_called_once_with("conv_stop_owner")
+    await asyncio.gather(*session.execution_cleanup_tasks)
+    assert conversation_query_guards().active_claim("conv_stop_owner") is None
     assert runner_entered == []
     assert [(event.type, event.data.get("status")) for event in session.events if event.type == "done"] == [("done", "cancelled")]
     assert session._conversation_streams == {}

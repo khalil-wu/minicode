@@ -12,13 +12,38 @@ from backend.realtime.runtime import RealtimeRuntime
 from backend.realtime.transport import RealtimeConfig
 
 
-def capture_config(session, conversation_id: str, *, credentials: bool) -> RealtimeConfig:
+def project_capabilities(session, conversation_id: str, *, config=None, model_selection=None) -> dict:
+    """Describe the thread's endpoint configuration without resolving startup auth."""
+    from backend.services.llm_config_service import llm_model_updated_payload
+
+    runtime = session._model_runtime_for_conversation(conversation_id)
+    if model_selection is None:
+        conversation = session.conversation_repo.get_conversation_summary(conversation_id) if conversation_id else None
+        workspace = session.session_lifecycle.workspace_root_for_conversation(conversation)
+        config = load_config(cwd=workspace, resolve_credentials=False)
+        selection = conversation.model_selection if conversation is not None else {}
+        provider = selection.get("provider", config.llm.provider)
+        model = selection.get("model", config.llm.model)
+        metadata = runtime.provider_payload(provider, model) if runtime is not None else None
+        settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+        model_selection = llm_model_updated_payload(provider=provider, selected_model=model, available_models=[],
+            workspace_root=workspace, settings_data=settings, provider_metadata=metadata,
+            models_source="unavailable" if provider not in {"openai", "anthropic", "custom"} and not metadata else "")
+    provider = model_selection["provider"]
+    settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    aws = (runtime._provider_aws_config(provider) if runtime is not None
+        else settings.get("llm", {}).get(provider, {}).get("aws"))
+    llm = replace(config.llm, provider=provider, base_url=model_selection["base_url"],
+        wire_api=model_selection["wire_api"], aws=aws, api_key="", default_headers=())
+    return _realtime_config(config, llm,
+        configured_provider=model_selection["models_source"] != "unavailable").capabilities()
+
+
+def capture_config(session, conversation_id: str) -> RealtimeConfig:
+    """Capture the original thread's provider and credentials for an actual start."""
     conversation = session.conversation_repo.get_conversation_summary(conversation_id) if conversation_id else None
     workspace = session.session_lifecycle.workspace_root_for_conversation(conversation)
-    config = load_config(cwd=workspace, resolve_credentials=credentials)
-    settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
-    realtime = settings.get("realtime", {})
-    enabled = config.feature_flags.enabled("realtime_conversation", True)
+    config = load_config(cwd=workspace)
     llm = config.llm
     runtime = session._model_runtime_for_conversation(conversation_id)
     selection = conversation.model_selection if conversation is not None else {}
@@ -26,24 +51,26 @@ def capture_config(session, conversation_id: str, *, credentials: bool) -> Realt
     model = selection.get("model", llm.model)
     configured_provider = bool(llm.api_key or llm.default_headers)
     if runtime is not None:
-        if credentials:
-            available = runtime.get_provider(provider)
-            configured_provider = available.configured if available is not None else configured_provider
-        else:
-            configured_provider = any(model.provider == provider for model in runtime.get_available_snapshot())
+        available = runtime.get_provider(provider)
+        configured_provider = available.configured if available is not None else False
         definition = runtime.get_model(provider, model) if model else None
         if definition is not None:
-            wire = {"openai-responses": "responses", "openai-completions": "chat", "anthropic-messages": "anthropic"}[definition.api]
-            llm = replace(llm, provider=provider, model=model, base_url=definition.base_url, wire_api=wire)
-        if credentials and definition is not None:
             spec = runtime.resolve_adapter_spec(provider, model)
+            wire = {"openai-responses": "responses", "openai-completions": "chat", "anthropic-messages": "anthropic"}[spec.api]
             llm = replace(llm, provider=provider, model=model, base_url=spec.base_url,
                 api_key=spec.api_key, default_headers=tuple(spec.headers.items()), auth_header=spec.auth_header,
-                proxy_mode=spec.proxy_mode, aws=spec.aws)
+                proxy_mode=spec.proxy_mode, aws=spec.aws, wire_api=wire)
     if provider != llm.provider:
         raise ValueError("The realtime thread's selected provider is unavailable")
+    return _realtime_config(config, llm, configured_provider=configured_provider)
+
+
+def _realtime_config(config, llm, *, configured_provider: bool) -> RealtimeConfig:
+    settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    realtime = settings.get("realtime", {})
+    enabled = config.feature_flags.enabled("realtime_conversation", True)
     headers = dict(llm.default_headers)
-    if credentials and llm.api_key and not any(key.lower() == "authorization" for key in headers):
+    if llm.api_key and not any(key.lower() == "authorization" for key in headers):
         headers["Authorization"] = "Bearer " + llm.api_key
     explicit_endpoint = settings.get("experimental_realtime_ws_base_url")
     base_url = explicit_endpoint or llm.base_url
@@ -51,7 +78,7 @@ def capture_config(session, conversation_id: str, *, credentials: bool) -> Realt
         and (configured_provider or explicit_endpoint))
     if llm.aws is not None and not explicit_endpoint:
         configured = False
-    return RealtimeConfig(base_url=base_url, headers=headers if credentials else {}, proxy_mode=llm.proxy_mode,
+    return RealtimeConfig(base_url=base_url, headers=headers, proxy_mode=llm.proxy_mode,
         version=realtime.get("version", "v2"), model=settings.get("experimental_realtime_ws_model"),
         voice=realtime.get("voice"), session_type=realtime.get("type", "conversational"),
         call_base_url=settings.get("experimental_realtime_webrtc_call_base_url") or llm.base_url, enabled=enabled,
@@ -92,7 +119,7 @@ async def start_runtime(session, params: Start, *, desktop_voice=None):
     owner = thread_runtime(session, conversation_id)
     if owner.realtime_runtime is not None:
         await owner.realtime_runtime.aclose()
-    config = capture_config(session, conversation_id, credentials=True)
+    config = capture_config(session, conversation_id)
     if not config.configured:
         raise ValueError("The selected provider has no configured realtime endpoint/authentication")
     session.ws_manager.load_conversation_execution(conversation_id, session)

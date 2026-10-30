@@ -190,10 +190,11 @@ async def test_voice_target_preflight_uses_the_original_connected_store_and_no_c
     current = SimpleNamespace(conversation_repo=repository, is_connected=True)
     monkeypatch.setattr(routes._state, "ws_manager", SimpleNamespace(get_session=lambda value: current if value == "original-session" else None))
     captured = []
-    def capture(session, conversation_id, *, credentials):
-        captured.append((session, conversation_id, credentials))
-        return RealtimeConfig("http://provider.invalid", {}, configured=True)
-    monkeypatch.setattr(module, "capture_config", capture)
+    def project(session, conversation_id):
+        captured.append((session, conversation_id))
+        return RealtimeConfig("http://provider.invalid", {}, configured=True).capabilities()
+    monkeypatch.setattr(module, "project_capabilities", project)
+    monkeypatch.setattr(module, "capture_config", lambda *_args, **_kwargs: pytest.fail("Voice preflight must not capture startup credentials"))
     app = FastAPI(); app.include_router(routes.router)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://metadata") as client:
         path = f"/api/thread-metadata/{original.id}/voice"
@@ -202,7 +203,7 @@ async def test_voice_target_preflight_uses_the_original_connected_store_and_no_c
         assert response.status_code == 200, response.text
         assert response.headers["cache-control"] == "no-store"
         assert response.json()["conversationId"] == original.id
-        assert captured == [(current, original.id, False)]
+        assert captured == [(current, original.id)]
         assert (await client.get(f"/api/thread-metadata/{elsewhere.id}/voice", params=query)).status_code == 404
         repository.set_archived(original.id, True)
         assert (await client.get(path, params=query)).status_code == 404

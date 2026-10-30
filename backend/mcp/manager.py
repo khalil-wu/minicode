@@ -1874,16 +1874,25 @@ class MCPServerManager:
 
     async def cancel_startup(self) -> None:
         """An idle/owner interrupt cancels producers; view retirement only releases views."""
+        failures = []
         for name in tuple(self._oauth_login_attempts):
             async with self._oauth_operation_locks.setdefault(name, asyncio.Lock()):
-                await self._cancel_oauth_login_unlocked(name)
+                try:
+                    await self._cancel_oauth_login_unlocked(name)
+                except Exception as exc:
+                    failures.append(exc)
         views = tuple(self._shared_connection_views.values()) + tuple(self._node_companion_views.values())
-        await asyncio.gather(*(view.connection.cancel_startup() for view in views))
+        results = await asyncio.gather(*(view.connection.cancel_startup() for view in views), return_exceptions=True)
         pending = [task for task in self._startup_tasks.values() if not task.done()]
         for task in pending:
             task.cancel()
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            results.extend(await asyncio.gather(*pending, return_exceptions=True))
+        failures.extend(result for result in results if isinstance(result, Exception))
+        if len(failures) == 1:
+            raise failures[0]
+        if failures:
+            raise ExceptionGroup("MCP startup cleanup failed", failures)
 
     async def oauth_login(self, name: str) -> None:
         """Run the official MCP SDK OAuth flow after an explicit user action."""
@@ -1897,7 +1906,7 @@ class MCPServerManager:
                     or attempt.scope != scope or not _same_runtime_config(attempt.config, state.config)):
                 await self._cancel_oauth_login_unlocked(name)
                 config = deepcopy(state.config)
-                task = asyncio.create_task(self._perform_oauth_login(name, state, config), name=f"mcp-oauth-login-{name}")
+                task = asyncio.create_task(self._perform_oauth_login(name, config), name=f"mcp-oauth-login-{name}")
                 attempt = _OAuthLoginAttempt(state, config, scope, task)
                 self._oauth_login_attempts[name] = attempt
                 def settled(completed, attempt=attempt):
@@ -1932,14 +1941,14 @@ class MCPServerManager:
         if not attempt.task.done():
             attempt.task.cancel()
         await asyncio.gather(attempt.task, return_exceptions=True)
-        if self._oauth_login_attempts.get(name) is attempt:
-            self._oauth_login_attempts.pop(name)
+        # Cancellation is expected; a failed producer remains the owner's error.
+        if not attempt.task.cancelled():
+            attempt.task.result()
 
-    async def _perform_oauth_login(self, name: str, state: MCPServerState, config: MCPServerConfig) -> None:
+    async def _perform_oauth_login(self, name: str, config: MCPServerConfig) -> None:
         if not await self._stop_server_transport(name):
             raise RuntimeError(f"MCP server '{name}' is still shutting down and cannot log in")
         await self._restart_connection_owner(name, config)
-        state.retry_count = 0
         await self.start_server(
             config,
             interactive_oauth=True,
@@ -1949,26 +1958,23 @@ class MCPServerManager:
     async def oauth_logout(self, name: str) -> None:
         async with self._oauth_operation_locks.setdefault(name, asyncio.Lock()):
             await self._cancel_oauth_login_unlocked(name)
-            await self._perform_oauth_logout(name)
-
-    async def _perform_oauth_logout(self, name: str) -> None:
-        state = self._servers.get(name)
-        if state is None:
-            raise KeyError(f"MCP server '{name}' is not configured")
-        if not await self._stop_server_transport(name):
-            raise RuntimeError(
-                f"MCP server '{name}' is still shutting down and cannot log out"
+            state = self._servers.get(name)
+            if state is None:
+                raise KeyError(f"MCP server '{name}' is not configured")
+            if not await self._stop_server_transport(name):
+                raise RuntimeError(
+                    f"MCP server '{name}' is still shutting down and cannot log out"
+                )
+            await self._restart_connection_owner(name, state.config)
+            store = self._token_store.for_server(state.config.url or "", state.config.oauth_client_id)
+            await to_thread_cancel_safe(store.clear, state.config.oauth_credential_name())
+            self._resource_subscriptions.pop(name, None)
+            state.auth_status = (
+                MCPAuthStatus.NOT_LOGGED_IN
+                if state.config.oauth_client_id
+                else MCPAuthStatus.UNSUPPORTED
             )
-        await self._restart_connection_owner(name, state.config)
-        store = self._token_store.for_server(state.config.url or "", state.config.oauth_client_id)
-        await to_thread_cancel_safe(store.clear, state.config.oauth_credential_name())
-        self._resource_subscriptions.pop(name, None)
-        state.auth_status = (
-            MCPAuthStatus.NOT_LOGGED_IN
-            if state.config.oauth_client_id
-            else MCPAuthStatus.UNSUPPORTED
-        )
-        await self._notify_status(name, ServerStatus.OFFLINE)
+            await self._notify_status(name, ServerStatus.OFFLINE)
 
     def get_all_tools(self) -> dict[str, list[MCPToolDef]]:
         result: dict[str, list[MCPToolDef]] = {}
@@ -2257,40 +2263,39 @@ class MCPServerManager:
                 state.operation_failures.pop("resource_restore", None)
             state.operation_failures.pop("tool_catalog", None)
             await self._notify_status(name, ServerStatus.CONNECTED)
-        except asyncio.CancelledError:
-            borrowed = self._shared_connection_views.pop(name, None)
-            if borrowed is not None:
-                await borrowed.aclose()
-                closed = True
-            else:
-                closed = await self._close_client_owner(name, client) if client is not None else True
-            state.client = None if closed else client
-            state.tools = []
-            state.status = ServerStatus.OFFLINE if closed else ServerStatus.ERROR
-            state.last_error = "" if closed else "MCP initialization cancelled; cleanup is pending"
-            if not closed:
-                self._schedule_cleanup_reaper(name, state, client)
-            await self._notify_status(name, state.status)
-            raise
-        except Exception as exc:
-            cleanup_error: BaseException | None = None
+        except (asyncio.CancelledError, Exception) as exc:
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            cleanup_error: Exception | None = None
             cleanup_pending = False
-            if self._connection_view(name) is not None:
+            borrowed = self._shared_connection_views.get(name) if cancelled else None
+            if not cancelled and self._connection_view(name) is not None:
                 # The connection producer closed its failed transport. Retain
                 # this view's exact settled attempt until view retirement or an
                 # explicit reconnect; its failure must not become "pending".
                 client = None
-            elif client is not None:
+            elif borrowed is not None or client is not None:
                 try:
-                    cleanup_pending = not await self._close_client_owner(name, client)
+                    if borrowed is not None:
+                        await borrowed.aclose()
+                        self._shared_connection_views.pop(name)
+                        client = None
+                    else:
+                        cleanup_pending = not await self._close_client_owner(name, client)
                 except Exception as close_exc:
                     cleanup_error = close_exc
+                    if borrowed is not None:
+                        client = borrowed.client
             state.client = client if cleanup_pending or cleanup_error is not None else None
-            state.status = ServerStatus.ERROR
-            state.last_exception = exc
+            state.status = (
+                ServerStatus.ERROR
+                if not cancelled or cleanup_pending or cleanup_error is not None
+                else ServerStatus.OFFLINE
+            )
+            state.last_exception = cleanup_error if cancelled else exc
             state.tools = []
-            state.last_error = f"{exc.__class__.__name__}: {exc}"
-            _record_operation_failure(state, "connect", exc, retryable=True)
+            state.last_error = "MCP initialization cancelled" if cancelled else f"{exc.__class__.__name__}: {exc}"
+            if not cancelled:
+                _record_operation_failure(state, "connect", exc, retryable=True)
             if cleanup_pending:
                 state.last_error += "; cleanup is still pending"
                 state.operation_failures["cleanup"] = {
@@ -2310,6 +2315,15 @@ class MCPServerManager:
                     cleanup_error,
                     retryable=True,
                 )
+                if client is not None:
+                    self._schedule_cleanup_reaper(name, state, client)
+            if cancelled:
+                if not cleanup_pending and cleanup_error is None:
+                    state.last_error = ""
+                await self._notify_status(name, state.status)
+                if cleanup_error is not None:
+                    raise cleanup_error from exc
+                raise
             phase, _, _ = classify_mcp_phase(state.status, state.last_error, exc)
             if phase in {"auth_required", "expired"}:
                 state.auth_status = MCPAuthStatus.NOT_LOGGED_IN

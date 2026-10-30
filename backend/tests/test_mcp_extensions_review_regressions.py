@@ -182,18 +182,21 @@ def test_project_approval_uses_original_server_identity(tmp_path, monkeypatch):
     async def run():
         manager = MCPServerManager(workspace_root=tmp_path)
         starts = []
+        registered = []
 
-        async def start(config):
-            starts.append(config.name)
+        def start(state):
+            starts.append(state.config.name)
 
         async def register(config):
-            pass
+            registered.append(config)
 
-        manager.start_server = start
+        manager._launch_server_startup = start
         manager.register_config = register
         status = settings.project_mcp_server_status("safe_name", tmp_path)
         config = manager._config_from_mapping("safe_name", {"transport": "stdio", "command": sys.executable}, source="project", priority=0, base_dir=tmp_path, approval_status=status)
-        await manager._start_or_register_config(config)
+        assert config.approval_status == "pending"
+        await manager.ensure_server_startup(config)
+        assert registered == [config]
         assert starts == []
 
     asyncio.run(run())
