@@ -15,7 +15,7 @@ export function MarketplaceSettings({ marketplaces, search, loading, error, busy
 }) {
   const { t } = useI18n();
   const query = search.trim().toLocaleLowerCase();
-  const sources = marketplaces.filter(source => !source.isBuiltIn && `${source.name} ${marketplaceName(source)} ${source.materialized_path || ""}`.toLocaleLowerCase().includes(query));
+  const sources = marketplaces.filter(source => !source.isBuiltIn && source.isConfigured !== false && `${source.name} ${marketplaceName(source)} ${source.materialized_path || ""}`.toLocaleLowerCase().includes(query));
   return <section className="plugin-marketplace-settings" aria-label={t("插件市场")}>
     {loading && marketplaces.length === 0 && <div className="settings-mcp-empty">{t("正在加载插件市场…")}</div>}
     {error && <div className="plugin-load-error" role="alert"><div><strong>{t("无法加载插件市场")}</strong><code>{error}</code></div><button type="button" disabled={loading} onClick={onRetry}>{t("重试")}</button></div>}
@@ -25,11 +25,11 @@ export function MarketplaceSettings({ marketplaces, search, loading, error, busy
         {source.materialized_path && <span className="plugin-marketplace-path" title={source.materialized_path}>{source.materialized_path}</span>}
         {source.error && <code>{source.error}</code>}
       </div>
-      <button type="button" className="settings-action-button" disabled={busy || !isGit(source)}
+      {source.canManage !== false && <><button type="button" className="settings-action-button" disabled={busy || !isGit(source)}
         title={isGit(source) ? t("升级插件市场") : t("只有 Git 插件市场可以升级")}
         aria-busy={upgrading === source.name} aria-label={t("升级插件市场 {name}", { name: marketplaceName(source) })} onClick={() => onUpgrade(source)}>{upgrading === source.name && <LoaderCircle size={13} className="settings-spin" />}{t("升级")}</button>
       <button type="button" className="settings-icon-button" disabled={busy} title={t("移除插件市场")}
-        aria-label={t("移除插件市场 {name}", { name: marketplaceName(source) })} onClick={() => onRemove(source)}><Trash2 size={16} /></button>
+        aria-label={t("移除插件市场 {name}", { name: marketplaceName(source) })} onClick={() => onRemove(source)}><Trash2 size={16} /></button></>}
     </article>)}
     {!loading && !error && sources.length === 0 && <div className="settings-mcp-empty">{t("没有找到插件市场")}</div>}
   </section>;

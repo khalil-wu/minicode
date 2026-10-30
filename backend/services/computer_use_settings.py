@@ -49,8 +49,9 @@ def _selection(manager, session_id, conversation_id, workspace_root):
     receiving_ids = tuple(sorted(receiving_ids))
     controls, revision = [], None
     if (receiving_known and all(identity == "local" for identity in receiving_ids) and os.name == "nt"
-            and (selected is None or selected.environment_id == "local")):
-        controls, revision, installed, stack = computer_use_plugin_controls(owner["workspace_root"])
+            and (selected is None or (selected.environment_id == "local"
+                and selected.env.get("MINICODE_CUA_PROVIDER") == "minicode-win32"))):
+        controls, revision, installed, stack = computer_use_plugin_controls(owner["workspace_root"], selected.plugin_id if selected else None)
         if selected is None and installed is not None and mcp is not None:
             from backend.mcp.cua_repl import plugin_cua_declaration
             try:

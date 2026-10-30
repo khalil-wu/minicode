@@ -68,7 +68,7 @@ it("uses the existing uninstall and registry endpoints with the captured backend
 });
 
 it("does not offer a hosted archive upload without the hosted service consumer", async () => {
-  mocks.fetch.mockImplementation(async url => response(String(url).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [] }));
+  mocks.fetch.mockImplementation(async url => response(new URL(String(url)).pathname.endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [] }));
   const toolbar = document.createElement("div"); document.body.appendChild(toolbar);
   const view = render(<PluginsTab catalog toolbarHost={toolbar} />);
   fireEvent.click(await screen.findByRole("button", { name: "添加", exact: true }));
@@ -180,7 +180,7 @@ it.each([200, 403])("does not revive a removed marketplace from an older directo
         oldSignal = init!.signal!;
         return new Promise<Response>(resolve => { finishOld = resolve; });
       }
-      return Promise.resolve(response({ marketplaces: [source] }));
+      return Promise.resolve(response({ marketplaces: deletes ? [] : [source] }));
     }
     return Promise.resolve(response({ plugins: [] }));
   });
@@ -199,5 +199,33 @@ it.each([200, 403])("does not revive a removed marketplace from an older directo
   expect(screen.getByText("没有找到插件市场")).toBeTruthy();
   expect(counts).toHaveBeenLastCalledWith(0);
   expect(deletes).toBe(1);
-  expect(directoryReads).toBe(2);
+  expect(directoryReads).toBe(3);
+});
+
+it("rebuilds the current project's directory after removing a source requested from another project", async () => {
+  let finishRemoval!: (value: Response) => void;
+  const projectSource = { ...source, source: { source: "directory", path: "C:/B" },
+    isConfigured: false, canManage: false, plugins: [{ id: "project@team", name: "project" }] };
+  let removed = false;
+  mocks.fetch.mockImplementation((input: string, init?: RequestInit) => {
+    const url = new URL(input);
+    if (init?.method === "DELETE") return new Promise<Response>(resolve => { finishRemoval = resolve; });
+    if (url.pathname.endsWith("/marketplaces")) {
+      const current = url.searchParams.get("workspace_root");
+      return Promise.resolve(response({ marketplaces: current === "C:/B" && removed ? [projectSource] : [source] }));
+    }
+    return Promise.resolve(response({ plugins: [] }));
+  });
+  render(<PluginsTab catalog />);
+  fireEvent.click(screen.getByRole("tab", { name: "个人", exact: true }));
+  const view = render(<PluginsTab managedToolbar managedView="marketplaces" />);
+  fireEvent.click(await screen.findByRole("button", { name: "移除插件市场 team" }));
+  fireEvent.click(await screen.findByRole("button", { name: "移除", exact: true }));
+  await waitFor(() => expect(finishRemoval).toBeTypeOf("function"));
+  act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
+  removed = true;
+  await act(async () => finishRemoval(response({ marketplaces: [] })));
+  await waitFor(() => expect(screen.getByRole("button", { name: "查看插件详情 project@team" })).toBeTruthy());
+  expect(useAppStore.getState().workingDirectory).toBe("C:/B");
+  view.unmount();
 });

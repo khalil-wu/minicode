@@ -8,7 +8,7 @@ from pathlib import Path
 
 from backend.atomic_io import canonical_file_path_key
 from backend.config import STATE_ROOT
-from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_manifest_path
+from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORIES, plugin_manifest_path
 from backend.plugins.manifest import plugin_directory_for_manifest
 
 
@@ -47,10 +47,10 @@ def _iter_plugin_manifests(plugin_roots: Iterable[Path]) -> list[Path]:
     for raw_root in plugin_roots:
         root = Path(raw_root).expanduser()
         candidates: list[Path] = []
-        if root.is_file() and root.name == "plugin.json" and (root.parent.name == PLUGIN_MANIFEST_DIRECTORY or plugin_manifest_path(root.parent) == root):
+        if root.is_file() and root.name == "plugin.json" and (root.parent.name in PLUGIN_MANIFEST_DIRECTORIES or plugin_manifest_path(root.parent) == root):
             candidates.append(root)
         elif root.is_dir():
-            if root.name == PLUGIN_MANIFEST_DIRECTORY:
+            if root.name in PLUGIN_MANIFEST_DIRECTORIES:
                 candidates.append(root / "plugin.json")
             else:
                 candidates.extend(plugin_manifest_path(child) for child in root.iterdir() if child.is_dir())

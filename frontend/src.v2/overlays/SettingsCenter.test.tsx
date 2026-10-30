@@ -387,9 +387,9 @@ describe("SettingsCenter reasoning effort visibility", () => {
     }
   });
 
-  it("keeps settings navigation at the existing expanded width when the chat sidebar is collapsed and preserves page search", async () => {
+  it.each([false, true])("keeps settings navigation at the saved total with external rail=%s through collapse and page search", async (withGlobalRail) => {
     useAppStore.setState({ settingsTab: "shortcuts", leftSidebarWidth: 340, leftSidebarExpandedWidth: 340 });
-    const { container } = render(<SettingsCenter />);
+    const { container } = render(<SettingsCenter withGlobalRail={withGlobalRail} />);
     fireEvent.change(await screen.findByPlaceholderText("搜索快捷键"), { target: { value: "终端" } });
     fireEvent.click(screen.getByRole("button", { name: "导入", exact: true }));
     expect(screen.getByRole("heading", { name: "导入", exact: true })).toBeTruthy();
@@ -397,7 +397,8 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.getByPlaceholderText("搜索快捷键")).toHaveProperty("value", "终端");
     act(() => useAppStore.getState().setLeftSidebarWidth(0));
     expect(container.querySelector(".settings-workspace-sidebar")).toHaveProperty("hidden", false);
-    expect(container.querySelector(".settings-workspace")?.getAttribute("style")).toContain("--settings-sidebar-width: 340px");
+    expect(container.querySelector(".settings-workspace")?.getAttribute("style")).toContain(withGlobalRail
+      ? "--settings-sidebar-width: calc(340px - var(--desktop-rail-width))" : "--settings-sidebar-width: 340px");
     expect(screen.getByRole("navigation", { name: "设置分类" })).toBeTruthy();
     expect(screen.getByPlaceholderText("搜索快捷键")).toHaveProperty("value", "终端");
     act(() => useAppStore.getState().setLeftSidebarWidth(340));
@@ -955,7 +956,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
   it("uses one configured marketplace inventory for its conditional tab, count and search", async () => {
     const markets = [{ name: "git-team", interface: { displayName: "Team tools" }, status: "ready", source: { source: "git", url: "https://test.local/team.git" }, plugins: [], materialized_path: "C:/catalogs/team" },
       { name: "local-team", status: "ready", source: { source: "directory", path: "C:/catalogs/local" }, plugins: [] }];
-    vi.stubGlobal("fetch", vi.fn(async input => new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: markets } : { plugins: [] }), { status: 200 })));
+    vi.stubGlobal("fetch", vi.fn(async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces: markets } : { plugins: [] }), { status: 200 })));
     useAppStore.setState({ settingsTab: "marketplace" });
     render(<SettingsCenter />);
     const tab = await screen.findByRole("button", { name: "插件市场", exact: true });
@@ -970,7 +971,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
 
   it("keeps MCP available when the real plugins feature is disabled", async () => {
     pluginsFeature.enabled = false;
-    vi.stubGlobal("fetch", vi.fn(async input => new Response(JSON.stringify(String(input).endsWith("/marketplaces")
+    vi.stubGlobal("fetch", vi.fn(async input => new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces")
       ? { marketplaces: [{ name: "team", status: "ready", source: { source: "git" }, plugins: [] }] } : { plugins: [] }), { status: 200 })));
     useAppStore.setState({ settingsTab: "marketplace" });
     render(<SettingsCenter />);
@@ -2432,7 +2433,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     let pluginEnabled = true;
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
+      if (new URL(url).pathname.endsWith("/api/plugins/marketplaces")) return new Response(JSON.stringify({ marketplaces: [] }), { status: 200 });
       if (url.split("?")[0].endsWith("/api/plugins") && (!init?.method || init.method === "GET")) {
         return new Response(JSON.stringify({
           plugins: [
@@ -2482,7 +2483,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
       expect.objectContaining({ method: "PUT" }),
     ));
     const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT");
-    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({ enabled: false });
+    expect(JSON.parse(String(putCall?.[1]?.body))).toEqual({ enabled: false, workspace_root: useAppStore.getState().workingDirectory });
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list" }, { silent: true });
     expect(sendClientCommand).toHaveBeenCalledWith({ type: "mcp.list" }, { silent: true });
     expect(sendClientCommand).toHaveBeenCalledWith({
@@ -2525,10 +2526,10 @@ describe("SettingsCenter reasoning effort visibility", () => {
     await waitFor(() => expect(install).toHaveProperty("disabled", false));
     fireEvent.click(install);
     await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/install") && init?.method === "POST")).toBe(true));
-    const add = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/marketplaces") && init?.method === "POST")!;
-    expect(JSON.parse(String(add[1]?.body))).toEqual({ source: "C:/team-market", ref_name: null, sparse_paths: null });
+    const add = fetchMock.mock.calls.find(([input, init]) => new URL(String(input)).pathname.endsWith("/marketplaces") && init?.method === "POST")!;
+    expect(JSON.parse(String(add[1]?.body))).toEqual({ source: "C:/team-market", ref_name: null, sparse_paths: null, workspace_root: useAppStore.getState().workingDirectory });
     const installation = fetchMock.mock.calls.find(([input, init]) => String(input).endsWith("/install") && init?.method === "POST")!;
-    expect(JSON.parse(String(installation[1]?.body))).toEqual({ plugin_name: "review", marketplace: "local-team", refresh_marketplace: false });
+    expect(JSON.parse(String(installation[1]?.body))).toEqual({ plugin_name: "review", marketplace: "local-team", refresh_marketplace: false, workspace_root: useAppStore.getState().workingDirectory });
     expect(screen.queryByRole("textbox", { name: "插件文件夹或安装包路径" })).toBeNull();
     expect(screen.queryByRole("button", { name: "打包", exact: true })).toBeNull();
     expect(fetchMock.mock.calls.some(([input]) => /\/(?:import|validate|package)$/.test(String(input)))).toBe(false);

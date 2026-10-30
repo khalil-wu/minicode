@@ -822,6 +822,7 @@ class MCPServerManager:
                     raise ValueError(f"Plugin manifest {manifest_path} must contain an object")
                 manifest = loaded.payload
                 agent_plugin = loaded.format == "agent_plugin"
+                codex_plugin = not agent_plugin and manifest_path.parent.name in {".codex-plugin", ".claude-plugin", ".cursor-plugin"}
 
                 declaration = manifest.get("mcp_servers")
                 server_maps: list[Mapping[str, Any]] = []
@@ -840,7 +841,7 @@ class MCPServerManager:
                     self._apply_agent_plugin_env_overlay(plugin_root, servers)
                     server_maps.append(servers)
                 elif isinstance(declaration, Mapping):
-                    server_maps.append(declaration)
+                    server_maps.append(declaration.get("mcpServers", declaration) if codex_plugin else declaration)
                 else:
                     config_path = plugin_root / ".mcp.json"
                     if isinstance(declaration, str) and declaration.strip():
@@ -863,13 +864,13 @@ class MCPServerManager:
                             ) from exc
                         if not isinstance(payload, Mapping):
                             raise ValueError(f"Plugin MCP config {config_path} must contain an object")
-                        unknown_root_fields = sorted(set(payload) - {"servers"})
+                        unknown_root_fields = [] if codex_plugin and "mcpServers" not in payload else sorted(set(payload) - {"servers", "mcpServers"})
                         if unknown_root_fields:
                             raise ValueError(
                                 f"Plugin MCP config {config_path} contains unsupported fields: "
                                 + ", ".join(str(field) for field in unknown_root_fields)
                             )
-                        servers = payload.get("servers")
+                        servers = payload.get("servers", payload.get("mcpServers", payload if codex_plugin else None))
                         if not isinstance(servers, Mapping):
                             raise ValueError(
                                 f"Plugin MCP config {config_path} must contain an object field named servers"
@@ -881,6 +882,13 @@ class MCPServerManager:
                         plugin_settings = config_stack.effective_config().get("plugins", {}).get(plugin_id, {})
                         policy_override = plugin_settings.get("mcp_servers", {}).get(name, {})
                         raw_config = deepcopy(raw_config)
+                        if codex_plugin and isinstance(raw_config, dict):
+                            raw_config.pop("type", None)
+                            if "transport" not in raw_config:
+                                if "command" in raw_config:
+                                    raw_config["transport"] = "stdio"
+                                elif "url" in raw_config:
+                                    raw_config["transport"] = "http"
                         for field_name in ("enabled", "enabled_tools", "disabled_tools", "default_tools_approval_mode"):
                             if field_name in policy_override:
                                 raw_config[field_name] = policy_override[field_name]

@@ -158,10 +158,12 @@ async def get_plugin_asset_api(
     plugin_path: str = Query(..., min_length=1),
     variant: str = Query("logo", pattern="^(composer|logo|logo-dark)$"),
     asset_token: str | None = Query(None),
+    workspace_root: str | None = None,
 ) -> FileResponse:
     """Serve an official plugin interface asset from an installed bundle."""
     _ = asset_token
-    asset = resolve_plugin_asset(plugin_path, variant)
+    stack, root = _plugin_scope(workspace_root)
+    asset = resolve_plugin_asset(plugin_path, variant, config_stack=stack, workspace_root=root)
     if asset is None:
         raise HTTPException(status_code=404, detail="Plugin asset not found")
     media_type = _SKILL_ASSET_MEDIA_TYPES.get(asset.suffix.lower())
@@ -207,30 +209,42 @@ async def get_extensions_marketplace_api(response: Response, refresh: bool = Fal
 @router.get("/api/plugins")
 def list_plugins_api(response: Response, workspace_root: str | None = None) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    stack, _ = _plugin_scope(workspace_root)
+    payload = get_plugin_settings(config_stack=stack)
+    from backend.config_layers import ConfigLayerSource
+    origins = stack.origins()
+    for plugin in payload["plugins"]:
+        origin = origins.get(f"plugins.{plugin['id']}.enabled")
+        plugin["user_config_writable"] = origin is None or origin.source.precedence <= ConfigLayerSource("user").precedence
+    return payload
+
+
+def _plugin_scope(workspace_root: str | None):
     if workspace_root is None:
-        return get_plugin_settings()
+        from backend.workspace.state import get_explicit_active_workspace_root
+        root = get_explicit_active_workspace_root()
+        return load_config_layer_stack(cwd=root), root
     root = Path(workspace_root).expanduser().resolve() if workspace_root.strip() else None
     if root is not None and not root.is_dir():
         raise HTTPException(status_code=409, detail="Workspace folder does not exist.")
-    stack = load_config_layer_stack(cwd=root)
-    return get_plugin_settings(config_stack=stack)
+    return load_config_layer_stack(cwd=root), root
 
 
 @router.get("/api/plugins/marketplaces")
-def list_plugin_marketplaces_api(response: Response) -> dict[str, Any]:
+def list_plugin_marketplaces_api(response: Response, workspace_root: str | None = None) -> dict[str, Any]:
     """List registered marketplace sources and their materialized metadata."""
     response.headers["Cache-Control"] = "no-store"
+    stack, root = _plugin_scope(workspace_root)
     try:
         from backend.plugins.policy import _plugin_policy_from_stack
 
-        stack = load_config_layer_stack()
         policy = _plugin_policy_from_stack(stack)
-        registry = MarketplaceRegistry()
+        registry = MarketplaceRegistry(config_stack=stack, workspace_root=root, include_bundled=True)
         return {"marketplaces": registry.list(policy=policy)}
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"Plugin policy unavailable: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"Plugin marketplace listing failed: {exc}") from exc
 
 
 @router.get("/api/plugins/reconcile")
@@ -254,10 +268,11 @@ def add_plugin_marketplace_api(
     response: Response,
 ) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    stack, _ = _plugin_scope(request.workspace_root)
     try:
         from backend.plugins.policy import _plugin_policy_from_stack
 
-        policy = _plugin_policy_from_stack(load_config_layer_stack())
+        policy = _plugin_policy_from_stack(stack)
         registry = MarketplaceRegistry()
         if isinstance(request.source, str):
             record, already_added = registry.add_source(request.source, ref_name=request.ref_name, sparse_paths=request.sparse_paths or (), policy=policy)
@@ -274,14 +289,14 @@ def add_plugin_marketplace_api(
 
 
 @router.delete("/api/plugins/marketplaces/{marketplace_name}")
-def remove_plugin_marketplace_api(marketplace_name: str, response: Response) -> dict[str, Any]:
+def remove_plugin_marketplace_api(marketplace_name: str, response: Response, workspace_root: str | None = None) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    stack, root = _plugin_scope(workspace_root)
     try:
         from backend.plugins.policy import _plugin_policy_from_stack
 
-        stack = load_config_layer_stack()
         policy = _plugin_policy_from_stack(stack)
-        registry = MarketplaceRegistry()
+        registry = MarketplaceRegistry(config_stack=stack, workspace_root=root, include_bundled=True)
         removed = registry.remove(marketplace_name, policy=policy)
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -297,16 +312,18 @@ def refresh_plugin_marketplace_api(
     marketplace_name: str,
     response: Response,
     request: PluginMarketplaceRefreshRequest | None = None,
+    workspace_root: str | None = None,
 ) -> dict[str, Any]:
     # ``request`` is accepted for clients that send a JSON body; the path is
     # authoritative and avoids two competing marketplace identities.
     del request
     response.headers["Cache-Control"] = "no-store"
+    stack, root = _plugin_scope(workspace_root)
     try:
         from backend.plugins.policy import _plugin_policy_from_stack
 
-        policy = _plugin_policy_from_stack(load_config_layer_stack())
-        refreshed = MarketplaceRegistry().refresh(marketplace_name, policy=policy)
+        policy = _plugin_policy_from_stack(stack)
+        refreshed = MarketplaceRegistry(config_stack=stack, workspace_root=root, include_bundled=True).refresh(marketplace_name, policy=policy)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Marketplace not found") from exc
     except PluginSettingsError as exc:
@@ -322,7 +339,8 @@ async def install_plugin_api(request: PluginInstallRequest, response: Response) 
     response.headers["Cache-Control"] = "no-store"
     try:
         if request.plugin_name:
-            manager = PluginManager(config_stack=await to_thread_cancel_safe(load_config_layer_stack))
+            stack, root = await to_thread_cancel_safe(_plugin_scope, request.workspace_root)
+            manager = PluginManager(config_stack=stack, workspace_root=root)
             result = await manager.install_marketplace_plugin(
                 request.marketplace,
                 request.plugin_name,
@@ -354,12 +372,18 @@ async def install_plugin_api(request: PluginInstallRequest, response: Response) 
 @router.put("/api/plugins/{plugin_name}/state")
 async def update_plugin_state_api(plugin_name: str, request: PluginStateUpdateRequest, response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    stack, _ = _plugin_scope(request.workspace_root)
+    from backend.config_layers import ConfigLayerSource
+    origin = stack.origins().get(f"plugins.{plugin_name}.enabled")
+    if origin is not None and origin.source.precedence > ConfigLayerSource("user").precedence:
+        raise HTTPException(status_code=409, detail="Plugin state is controlled by the current workspace configuration.")
     try:
         result = await update_plugin_enabled(
             plugin_name,
             request.enabled,
             settings_file=SETTINGS_FILE,
             config_change_hook=run_config_change_hook,
+            config_stack=stack,
         )
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -407,13 +431,15 @@ async def import_plugin_api(request: PluginImportRequest, response: Response) ->
 
 
 @router.delete("/api/plugins/{plugin_name}")
-async def remove_plugin_api(plugin_name: str, response: Response) -> dict[str, Any]:
+async def remove_plugin_api(plugin_name: str, response: Response, workspace_root: str | None = None) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    stack, _ = _plugin_scope(workspace_root)
     try:
         result = await remove_plugin(
             plugin_name,
             settings_file=SETTINGS_FILE,
             config_change_hook=run_config_change_hook,
+            config_stack=stack,
         )
     except PluginSettingsError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc

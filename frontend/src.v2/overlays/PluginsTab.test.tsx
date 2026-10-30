@@ -17,6 +17,7 @@ vi.hoisted(() => {
       removeEventListener: vi.fn(),
     })),
   });
+
 });
 
 vi.mock("./ToastContainer", () => ({
@@ -97,7 +98,7 @@ describe("PluginsTab loading", () => {
     let installedPlugins = [installed];
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
-      if (url.endsWith("/marketplaces")) return Promise.resolve(response({ marketplaces: [{ name: "team-b", status: "ready", source: { source: "github", repo: "org/b" }, plugins: [{ id: "review@team-b", name: "review", description: "Team B review" }] }] }));
+      if (new URL(url).pathname.endsWith("/marketplaces")) return Promise.resolve(response({ marketplaces: [{ name: "team-b", status: "ready", source: { source: "github", repo: "org/b" }, plugins: [{ id: "review@team-b", name: "review", description: "Team B review" }] }] }));
       if (url.endsWith("/install")) {
         installedPlugins = [installed, { ...installed, id: "review@team-b", path: "/plugins/b" }];
         return Promise.resolve(response({ plugins: installedPlugins, runtime_refresh: { ok: false, warnings: ["MCP unavailable"] } }));
@@ -109,7 +110,7 @@ describe("PluginsTab loading", () => {
     const install = await screen.findByRole("button", { name: "安装插件 review@team-b" });
     await waitFor(() => expect((install as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(install);
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/install", expect.objectContaining({ method: "POST", body: JSON.stringify({ plugin_name: "review", marketplace: "team-b", refresh_marketplace: false }) })));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/install", expect.objectContaining({ method: "POST", body: JSON.stringify({ plugin_name: "review", marketplace: "team-b", refresh_marketplace: false, workspace_root: "" }) })));
     await waitFor(() => expect(pushToast).toHaveBeenCalledWith(expect.stringContaining("MCP unavailable"), "warning"));
     expect(pushToast).not.toHaveBeenCalledWith("已安装插件：review", "success");
     expect((screen.getByRole("button", { name: "安装插件 review@team-b" }) as HTMLButtonElement).disabled).toBe(true);
@@ -278,7 +279,7 @@ describe("PluginsTab loading", () => {
     let registered = false;
     const marketplace = { name: "team", status: "ready", source: { source: "github", repo: "org/plugins" }, plugins: [] };
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).endsWith("/marketplaces") && init?.method === "POST") registered = true;
+      if (new URL(String(input)).pathname.endsWith("/marketplaces") && init?.method === "POST") registered = true;
       return Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplace, marketplaces: registered ? [marketplace] : [] }), { status: 200 }));
     }));
     render(<PluginsTab />);
@@ -289,14 +290,14 @@ describe("PluginsTab loading", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Git 引用" }), { target: { value: " release " } });
     fireEvent.change(screen.getByRole("textbox", { name: "稀疏路径" }), { target: { value: " .agents/plugins, plugins/review\nplugins/build " } });
     fireEvent.click(screen.getByRole("button", { name: "添加市场", exact: true }));
-    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/marketplaces", expect.objectContaining({ method: "POST", body: JSON.stringify({ source: "org/plugins", ref_name: "release", sparse_paths: [".agents/plugins", "plugins/review", "plugins/build"] }) })));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/marketplaces", expect.objectContaining({ method: "POST", body: JSON.stringify({ source: "org/plugins", ref_name: "release", sparse_paths: [".agents/plugins", "plugins/review", "plugins/build"], workspace_root: "" }) })));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(pushToast).toHaveBeenCalledWith("已添加插件市场：team", "success");
   });
 
   it("reports the actual activation outcome when dependencies keep a plugin disabled", async () => {
     const plugin = { id: "review@team", name: "review", path: "/plugins/review", enabled: false, load_errors: ["missing dependency: parser@team"] };
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin], runtime_refresh: { ok: true } }), { status: 200 }))));
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin], runtime_refresh: { ok: true } }), { status: 200 }))));
     render(<PluginsTab />);
     const toggle = await screen.findByRole("switch", { name: "启用插件 review@team" });
     await waitFor(() => expect((toggle as HTMLInputElement).disabled).toBe(false));
@@ -307,7 +308,7 @@ describe("PluginsTab loading", () => {
 
   it("opens management from the installed icon strip without inventing activation", async () => {
     const plugin = { id: "review@team", name: "review", path: "/plugins/review", enabled: false, dependencies: ["parser@team"], load_errors: ["dependency-unsatisfied"] };
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin] }), { status: 200 }))));
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin] }), { status: 200 }))));
     render(<PluginsTab catalog />);
     const icon = await screen.findByRole("button", { name: "管理插件 review@team" });
     expect(screen.queryByRole("switch", { name: "启用插件 review@team" })).toBeNull();
@@ -322,7 +323,7 @@ describe("PluginsTab loading", () => {
   it("changes to the declared dark logo when the theme changes", async () => {
     useAppStore.setState({ resolvedTheme: "light" });
     const plugin = { id: "github-helper@team", name: "github-helper", path: "/plugins/review", enabled: true, iconVariant: "logo", iconVariants: ["logo", "logo-dark"] };
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin] }), { status: 200 }))));
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [plugin] }), { status: 200 }))));
     const { container } = render(<PluginsTab />);
     await screen.findByRole("switch", { name: "停用插件 github-helper@team" });
     expect(container.querySelector("img")?.getAttribute("src")).toBe("https://test.local/icon?variant=logo");
@@ -334,7 +335,7 @@ describe("PluginsTab loading", () => {
     let resolveOld!: (response: Response) => void;
     let reads = 0;
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).endsWith("/marketplaces") && !init?.method && reads++ === 0) return new Promise<Response>((resolve) => { resolveOld = resolve; });
+      if (new URL(String(input)).pathname.endsWith("/marketplaces") && !init?.method && reads++ === 0) return new Promise<Response>((resolve) => { resolveOld = resolve; });
       const marketplace = { name: "team", directory: "personal", status: "ready", source: {}, plugins: [{ id: "actual@team", name: "actual" }] };
       return Promise.resolve(new Response(JSON.stringify({ plugins: [], marketplace, marketplaces: [marketplace] }), { status: 200 }));
     }));
@@ -354,7 +355,7 @@ describe("PluginsTab loading", () => {
 
   it("opens the complete catalog description before installing to the actual supported scope", async () => {
     const plugin = { id: "build@team", name: "build", description: "完整说明：用于项目构建和分析。", interface: { displayName: "构建助手", developerName: "Team" } };
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces") ? { marketplaces: [{ name: "team", status: "ready", source: { repo: "org/tools" }, plugins: [plugin] }] } : { plugins: [] }), { status: 200 }))));
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces: [{ name: "team", status: "ready", source: { repo: "org/tools" }, plugins: [plugin] }] } : { plugins: [] }), { status: 200 }))));
     render(<PluginsTab catalog />);
     fireEvent.click(screen.getByRole("tab", { name: "个人", exact: true }));
     fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 build@team" }));
@@ -369,7 +370,7 @@ describe("PluginsTab loading", () => {
     const plugin = { id: "computer-use@openai-bundled", name: "computer-use", description: "Actual computer control package",
       interface: { displayName: "Computer Use" }, longDescription: "Original marketplace package detail" };
     useAppStore.setState({ skillsMarketplaceSelectedPluginId: plugin.id });
-    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(String(input).endsWith("/marketplaces")
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => Promise.resolve(new Response(JSON.stringify(new URL(String(input)).pathname.endsWith("/marketplaces")
       ? { marketplaces: [{ name: "openai-bundled", status: "ready", source: { source: "local", path: "C:/actual-marketplace" }, plugins: [plugin] }] }
       : { plugins: [] }), { status: 200 }))));
     render(<PluginsTab catalog />);
@@ -391,7 +392,7 @@ describe("PluginsTab loading", () => {
       ] },
       { name: "my-market", directory: "personal", status: "ready", source: {}, plugins: [{ id: "local@my-market", name: "local", interface: { displayName: "Personal local" } }] },
     ];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).endsWith("/marketplaces") ? { marketplaces } : { plugins: [] })));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces } : { plugins: [] })));
     render(<PluginsTab catalog />);
     const tools = await screen.findByRole("region", { name: "Developer Tools" });
     expect(within(tools).getAllByRole("button", { name: /查看插件详情/ })).toHaveLength(2);
@@ -416,7 +417,7 @@ describe("PluginsTab loading", () => {
     const entry = { id: "tools@public", name: "tools", iconUrl: "https://assets.example/actual-logo.png", iconDarkUrl: "https://assets.example/actual-dark.png",
       skills: "./skills", mcpServers: "./.mcp.json", interface: { displayName: "Actual tools", category: "Developer Tools" },
       installation: { available: false, reason: "This package is unavailable on the current platform" } };
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).endsWith("/marketplaces")
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(new URL(String(input)).pathname.endsWith("/marketplaces")
       ? { marketplaces: [{ name: "public", directory: "public", status: "ready", isBuiltIn: true, source: {}, plugins: [entry] }] } : { plugins: [] })));
     useAppStore.setState({ resolvedTheme: "light" });
     const view = render(<PluginsTab catalog />);
@@ -442,7 +443,7 @@ describe("PluginsTab loading", () => {
     let committed = false, writes = 0;
     useAppStore.setState({ conversationId: "keep-owner", draft: "Keep unsent message" });
     vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
-      if (String(input).endsWith("/marketplaces")) return Promise.resolve(Response.json({ marketplaces: [
+      if (new URL(String(input)).pathname.endsWith("/marketplaces")) return Promise.resolve(Response.json({ marketplaces: [
         { name: "public", directory: "public", isBuiltIn: true, status: "ready", source: {}, plugins: [plugin] },
       ] }));
       if (init?.method === "POST") { writes++; return new Promise<Response>(resolve => { commit = resolve; }); }
@@ -464,11 +465,11 @@ describe("PluginsTab loading", () => {
     expect(install.querySelector(".settings-spin")).toBeNull();
     expect(install.title).toBe("已安装");
     expect(useAppStore.getState()).toMatchObject({ conversationId: "keep-owner", draft: "Keep unsent message" });
-    expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/install", expect.objectContaining({ body: JSON.stringify({ plugin_name: "review", marketplace: "public", refresh_marketplace: false }) }));
+    expect(fetch).toHaveBeenCalledWith("http://test.local/api/plugins/install", expect.objectContaining({ body: JSON.stringify({ plugin_name: "review", marketplace: "public", refresh_marketplace: false, workspace_root: "" }) }));
   });
 
   it("opens the existing plugin settings and keeps Add separate from filtering", async () => {
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(String(input).endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [] })));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(new URL(String(input)).pathname.endsWith("/marketplaces") ? { marketplaces: [] } : { plugins: [] })));
     render(<PluginsTab catalog />);
     await screen.findByText("没有找到插件");
     fireEvent.change(screen.getByRole("textbox", { name: "搜索插件" }), { target: { value: "kept query" } });
@@ -620,5 +621,93 @@ describe("PluginsTab loading", () => {
     expect(reads).toBe(4);
     expect(writes).toBe(1);
   });
+
+  it("uses the requesting workspace for catalog discovery and ignores a late result from the previous project", async () => {
+    let finishOld!: (response: Response) => void;
+    let oldSignal!: AbortSignal;
+    const source = { name: "project-market", directory: "personal", isConfigured: false, canManage: false, status: "ready", source: { source: "directory", path: "C:/B" }, plugins: [
+      { id: "review@project-market", name: "review", path: "C:/B/plugins/review", iconVariant: "logo", iconVariants: ["logo"],
+        interface: { displayName: "Real Review", shortDescription: "Review the project", category: "Developer Tools" },
+        mcp_server_names: ["reviewer"], skill_summaries: [{ name: "review", description: "Review real changes" }] },
+    ] };
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/plugins/marketplaces") {
+        if (url.searchParams.get("workspace_root") === "C:/A") {
+          oldSignal = init!.signal!;
+          return new Promise<Response>(resolve => { finishOld = resolve; });
+        }
+        return Promise.resolve(Response.json({ marketplaces: [source] }));
+      }
+      return Promise.resolve(Response.json({ plugins: [] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    useAppStore.setState({ workingDirectory: "C:/A", draft: "Keep this draft" });
+    const view = render(<PluginsTab catalog />);
+    await waitFor(() => expect(finishOld).toBeTypeOf("function"));
+    act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
+    fireEvent.click(screen.getByRole("tab", { name: "个人", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 review@project-market" }));
+    const detail = screen.getByRole("region", { name: "插件详情" });
+    expect(within(detail).getByText("reviewer")).toBeTruthy();
+    expect(within(detail).getByText("Review real changes")).toBeTruthy();
+    expect(view.container.querySelector("img")?.getAttribute("src")).toBe("https://test.local/icon?variant=logo");
+    await act(async () => finishOld(Response.json({ marketplaces: [] })));
+    expect(oldSignal.aborted).toBe(true);
+    expect(within(screen.getByRole("region", { name: "插件详情" })).getByText("reviewer")).toBeTruthy();
+    expect(useAppStore.getState().draft).toBe("Keep this draft");
+    expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).searchParams.get("workspace_root") === "C:/B")).toBe(true);
+  });
+
+  it("uses the MCP ownership metadata for the canonical computer-use server", async () => {
+    const plugin = { id: "computer-use@minicode-bundled", name: "computer-use", displayName: "Computer Use", path: "C:/plugins/computer-use",
+      enabled: true, mcp_server_count: 1, mcp_server_names: ["cua_repl"] };
+    useAppStore.setState({ mcpServers: [{ name: "cua_repl", status: "connected", pluginId: plugin.id, pluginServerName: "cua_repl" }] });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => Response.json(new URL(String(input)).pathname.endsWith("/marketplaces")
+      ? { marketplaces: [] } : { plugins: [plugin] })));
+    render(<PluginsTab />);
+    fireEvent.click(await screen.findByRole("button", { name: `查看插件详情 ${plugin.id}` }));
+    expect(screen.getByText("cua_repl · 已连接")).toBeTruthy();
+    expect(screen.queryByText(/状态未知/)).toBeNull();
+    act(() => useAppStore.setState({ mcpServers: [{ name: "cua_repl", status: "error", phase: "failed", lastError: "real startup error", pluginId: plugin.id, pluginServerName: "cua_repl" }] }));
+    expect(screen.getByText("组件连接出错")).toBeTruthy();
+    expect(screen.getByText("cua_repl · 连接出错 · real startup error")).toBeTruthy();
+    expect(screen.queryByText("需要连接或登录")).toBeNull();
+  });
+
+  it.each([false, true])("starts an uninstalled plugin's real prompt only for the original draft (workspace changed: %s)", async changed => {
+    let finishInstall!: (response: Response) => void;
+    const entry = { id: "review@team", name: "review", defaultPrompt: ["Review these changes"], interface: { displayName: "Real Review" } };
+    const installed = { id: entry.id, name: entry.name, displayName: "Real Review", path: "C:/plugins/review", enabled: true };
+    let committed = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/marketplaces")) return Promise.resolve(Response.json({ marketplaces: [
+        { name: "team", directory: "personal", status: "ready", source: {}, plugins: [entry] },
+      ] }));
+      if (init?.method === "POST") return new Promise<Response>(resolve => { finishInstall = resolve; });
+      return Promise.resolve(Response.json({ plugins: committed ? [installed] : [] }));
+    }));
+    useAppStore.setState({ workingDirectory: "C:/A", conversationId: "prompt-owner", activeConversationDraftId: null,
+      draft: "Keep this draft", selectedMentions: [], skillsMarketplaceOpen: true });
+    render(<PluginsTab catalog />);
+    fireEvent.click(screen.getByRole("tab", { name: "个人", exact: true }));
+    fireEvent.click(await screen.findByRole("button", { name: "查看插件详情 review@team" }));
+    const prompt = screen.getByRole("button", { name: "Review these changes" });
+    await waitFor(() => expect(prompt).toHaveProperty("disabled", false));
+    fireEvent.click(prompt);
+    await waitFor(() => expect(finishInstall).toBeTypeOf("function"));
+    if (changed) act(() => useAppStore.setState({ workingDirectory: "C:/B", draft: "Keep the other draft" }));
+    committed = true;
+    await act(async () => finishInstall(Response.json({ plugins: [installed], runtime_refresh: { ok: true } })));
+    if (changed) {
+      expect(useAppStore.getState().draft).toBe("Keep the other draft");
+      expect(useAppStore.getState().selectedMentions).toEqual([]);
+    } else {
+      await waitFor(() => expect(useAppStore.getState().draft).toBe("Keep this draft\nReview these changes"));
+      expect(useAppStore.getState().selectedMentions).toMatchObject([{ kind: "plugin", configName: entry.id }]);
+    }
+  });
+
 
 });

@@ -15,7 +15,7 @@ from filelock import FileLock
 from backend.async_cleanup import to_thread_cancel_safe
 
 from .identity import normalize_plugin_id, parse_plugin_id, plugin_id
-from .layout import PLUGIN_MANIFEST_DIRECTORY, MARKETPLACE_MANIFEST_FILENAME
+from .layout import PLUGIN_MANIFEST_DIRECTORY, MARKETPLACE_MANIFEST_FILENAME, plugin_manifest_path
 from .materializer import (
     MaterializationError,
     MaterializedSource,
@@ -26,6 +26,8 @@ from .materializer import (
     recover_materialization_artifacts,
 )
 
+BUNDLED_MARKETPLACE_ROOT = Path(__file__).parent / "bundled"
+
 
 def _effective_marketplace_policy(policy: Any | None) -> Any:
     """Return one current policy snapshot; ``None`` never means unrestricted."""
@@ -35,6 +37,12 @@ def _effective_marketplace_policy(policy: Any | None) -> Any:
     from backend.plugins.policy import _plugin_policy_from_stack
 
     return _plugin_policy_from_stack()
+
+
+def _plugins_enabled(stack: Any) -> bool:
+    from backend.feature_flags import load_feature_flags
+
+    return load_feature_flags(stack.effective_config(), managed_requirements=stack.requirements.feature_requirements).enabled("plugins")
 
 
 @dataclass(frozen=True)
@@ -71,9 +79,11 @@ class PluginManager:
         *,
         plugin_roots: Iterable[Path] | None = None,
         config_stack: Any | None = None,
+        workspace_root: Path | None = None,
     ) -> None:
         self.plugin_roots = tuple(Path(path) for path in plugin_roots) if plugin_roots is not None else None
         self.config_stack = config_stack
+        self.workspace_root = workspace_root
         self._snapshot: PluginSnapshot | None = None
 
     def snapshot(self, *, force_refresh: bool = False) -> PluginSnapshot:
@@ -215,8 +225,11 @@ class PluginManager:
         from backend.hooks.runtime import run_config_change_hook
         from backend.services.plugin_settings_service import import_plugin_from_path
 
-        registry = MarketplaceRegistry()
+        registry = MarketplaceRegistry(config_stack=self.config_stack, workspace_root=self.workspace_root, include_bundled=True)
         from backend.plugins.policy import _plugin_policy_from_stack
+        if self.config_stack is not None and not _plugins_enabled(self.config_stack):
+            from backend.plugins.policy import PluginSettingsError
+            raise PluginSettingsError("Plugins feature is disabled", status_code=409)
 
         policy = await to_thread_cancel_safe(_plugin_policy_from_stack, self.config_stack)
         if refresh:
@@ -399,6 +412,42 @@ def _read_marketplace_plugins(root: Path, marketplace: str) -> list[dict[str, An
                     item["path"] = str(resolved)
                 except MaterializationError as exc:
                     item["load_error"] = str(exc)
+        if item.get("resolved_path") and not item.get("load_error"):
+            from backend.plugins.manifest import _load_plugin_manifest, _merge_manifest_metadata, _manifest_mcp_server_names, plugin_skill_sources
+            from backend.skills.loader import SkillLoader
+
+            plugin_root = Path(item["resolved_path"])
+            manifest_path = plugin_manifest_path(plugin_root)
+            if manifest_path.is_file():
+                loaded = _load_plugin_manifest(manifest_path)
+                if loaded is not None:
+                    manifest = loaded.payload
+                    metadata: dict[str, Any] = {}
+                    _merge_manifest_metadata(metadata, manifest_path)
+                    interface = {**dict(manifest.get("interface") or {}), **dict(raw.get("interface") or {})}
+                    if raw.get("category"):
+                        interface["category"] = raw["category"]
+                    item.update({key: value for key, value in metadata.items() if key not in {"manifest_format", "skill_discovery_mode"}})
+                    item["interface"] = interface
+                    item["mcp_server_names"] = _manifest_mcp_server_names(manifest_path, plugin_id=item["id"])
+                    skill_roots, direct_children = plugin_skill_sources(plugin_root, [manifest_path])
+                    loader = SkillLoader()
+                    skills = [loader._parse_frontmatter(path, "plugin") for skill_root in skill_roots if skill_root.is_dir()
+                              for path in loader.skill_files_for_root(skill_root, direct_children=direct_children)]
+                    item["skill_summaries"] = [{"name": skill.name, "displayName": skill.display_name,
+                        "description": skill.short_description or skill.description}
+                        for skill in skills if skill is not None and (not skill.products or "codex" in skill.products)]
+                    for field, target in (("skills", "skills"), ("mcp_servers", "mcpServers"), ("apps", "apps"), ("hooks", "hooks")):
+                        if field in manifest:
+                            item[target] = manifest[field]
+                else:
+                    item["load_error"] = f"Plugin manifest is invalid: {manifest_path}"
+            else:
+                item["load_error"] = f"Plugin manifest not found: {manifest_path}"
+        try:
+            _assert_marketplace_plugin_installable(item, product=_current_product())
+        except MaterializationError as exc:
+            item["installation"] = {"available": False, "reason": str(exc)}
         result.append(item)
     return result
 
@@ -571,8 +620,12 @@ class MarketplaceRegistry:
     provenance and never executed implicitly during discovery.
     """
 
-    def __init__(self, path: Path | None = None) -> None:
+    def __init__(self, path: Path | None = None, *, config_stack: Any | None = None,
+                 workspace_root: Path | None = None, include_bundled: bool = False) -> None:
         self.path = Path(path or _registry_path()).expanduser()
+        self.config_stack = config_stack
+        self.workspace_root = workspace_root
+        self.include_bundled = include_bundled
         self._read_error: str = ""
         # MiniCode serializes marketplace sync across processes.  Registry
         # instances are short-lived here, so the lock must be path-based.
@@ -582,10 +635,13 @@ class MarketplaceRegistry:
     def list(self, *, policy: Any | None = None) -> list[dict[str, Any]]:
         effective_policy = _effective_marketplace_policy(policy)
         effective_policy.assert_policy_valid()
+        if self.include_bundled and self.config_stack is not None and not _plugins_enabled(self.config_stack):
+            return []
         from backend.plugins.policy import PluginSettingsError
 
-        payload = self._raw_records()
+        payload = self._catalog_records()
         result: list[dict[str, Any]] = []
+        names: set[str] = set()
         for item in payload:
             source = item.get("source") if isinstance(item.get("source"), Mapping) else {}
             try:
@@ -595,8 +651,67 @@ class MarketplaceRegistry:
                 # blocked by the current managed policy.  Policy compilation
                 # errors were checked above and therefore cannot be swallowed.
                 continue
+            name = item["name"].casefold()
+            if name in names:
+                continue
+            names.add(name)
             result.append(dict(item))
         return result
+
+    def _catalog_records(self) -> list[dict[str, Any]]:
+        records = self._raw_records()
+        if self._read_error:
+            raise MaterializationError(f"Marketplace registry is corrupt: {self._read_error}")
+        if not self.include_bundled:
+            return records
+
+        discovered: list[dict[str, Any]] = []
+        roots: list[tuple[Path, dict[str, Any], bool, bool]] = []
+        bundled = BUNDLED_MARKETPLACE_ROOT
+        roots.append((bundled, {"source": "directory", "path": str(bundled.resolve())}, True, False))
+        home = Path.home()
+        roots.append((home, {"source": "directory", "path": str(home)}, False, False))
+        if self.workspace_root is not None:
+            workspace = self.workspace_root.resolve()
+            repo = next((path for path in (workspace, *workspace.parents) if (path / ".git").exists()), workspace)
+            roots.append((workspace, {"source": "directory", "path": str(workspace)}, False, False))
+            if repo != workspace:
+                roots.append((repo, {"source": "directory", "path": str(repo)}, False, False))
+        if self.config_stack is not None:
+            from backend.config import STATE_ROOT
+            for name, config in self.config_stack.effective_config().get("marketplaces", {}).items():
+                source_type, source = config.get("source_type"), config.get("source")
+                root = Path(source).expanduser() if source_type == "local" else STATE_ROOT / ".tmp" / "marketplaces" / name
+                descriptor = {"source": "directory", "path": str(root.resolve())} if source_type == "local" else {"source": "git", "url": source}
+                roots.append((root, descriptor, False, True))
+        seen_paths: set[Path] = set()
+        for root, source, built_in, configured in roots:
+            manifest = next((root.joinpath(*layout) for layout in _MARKETPLACE_MANIFEST_LAYOUTS if root.joinpath(*layout).is_file()), None)
+            if manifest is None or manifest.resolve() in seen_paths:
+                continue
+            seen_paths.add(manifest.resolve())
+            try:
+                _, payload = _read_marketplace_manifest(root)
+                name = str(payload["name"]).strip()
+                discovered.append({"name": name, "interface": dict(payload.get("interface") or {}),
+                    "source": source, "materialized_path": str(root.resolve()), "plugins": _read_marketplace_plugins(root, name),
+                    "status": "ready", "error": "", "directory": "public" if built_in else "personal",
+                    "isBuiltIn": built_in, "isConfigured": configured, "canManage": False})
+            except ValueError as exc:
+                discovered.append({"name": root.name, "source": source, "materialized_path": str(root.resolve()),
+                    "plugins": [], "status": "error", "error": str(exc), "directory": "public" if built_in else "personal",
+                    "isBuiltIn": built_in, "isConfigured": configured, "canManage": False})
+
+        # Registered materializations can outlive the process that created them;
+        # read their active manifests instead of presenting the old snapshot.
+        for record in records:
+            if record.get("status") == "ready":
+                root = Path(record["materialized_path"])
+                try:
+                    record["plugins"] = _read_marketplace_plugins(root, record["name"])
+                except ValueError as exc:
+                    record.update(status="error", error=str(exc), plugins=[])
+        return [*discovered, *records]
 
     def _raw_records(self) -> list[dict[str, Any]]:
         payload = self._read()
@@ -777,7 +892,10 @@ class MarketplaceRegistry:
         if self._read_error:
             raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
         if target is None:
-            raise KeyError(name)
+            target = self.get(name, policy=effective_policy)
+            if target is None:
+                raise KeyError(name)
+            return target
         source = target.get("source") if isinstance(target.get("source"), Mapping) else {}
         parsed = parse_marketplace_source(source)
         effective_policy.assert_source_allowed(parsed.to_dict())

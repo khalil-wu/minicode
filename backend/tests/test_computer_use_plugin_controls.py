@@ -92,9 +92,9 @@ def has_plugin_skill(scope):
 async def test_exact_source_identity_requires_real_registered_catalog(control_scope):
     scope = control_scope
     async with scope.client:
-        assert (await read(scope))["controls"] == []
+        assert (await read(scope))["controls"][0]["plugin_id"] == "computer-use@minicode-bundled"
         register_catalog(scope.root, marketplace="other-market")
-        assert (await read(scope))["controls"] == []
+        assert (await read(scope))["controls"][0]["plugin_id"] == "computer-use@minicode-bundled"
         register_catalog(scope.root)
         snapshot = await read(scope)
         assert snapshot["controls"] == [{"kind": "plugin", "id": "any-app", "plugin_id": PLUGIN_ID,

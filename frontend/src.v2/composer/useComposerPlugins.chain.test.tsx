@@ -75,3 +75,11 @@ it("replaces a pending same-scope menu request after a commit without accepting 
   expect(result.current.plugins).toEqual([current]);
   expect(fetch).toHaveBeenCalledTimes(2);
 });
+
+it("keeps installed plugins visible but removes them from enabled mentions when the feature is off", async () => {
+  vi.mocked(fetch).mockImplementation(async () => Response.json({ plugins_enabled: false,
+    plugins: [{ id: "review@team", name: "review", marketplace: "team", enabled: true }] }));
+  const { result } = renderHook(() => useComposerPlugins(true, "C:/A"));
+  await waitFor(() => expect(result.current.loading).toBe(false));
+  expect(result.current.plugins).toEqual([{ id: "review@team", name: "review", marketplace: "team", enabled: false }]);
+});

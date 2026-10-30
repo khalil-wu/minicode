@@ -41,8 +41,8 @@ export function useComposerPlugins(open: boolean, workspaceRoot: string) {
           headers: authHeaders(), signal: controller.signal,
         });
         if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), `HTTP ${response.status}`));
-        const payload = await response.json() as { plugins: ComposerPlugin[] };
-        if (!controller.signal.aborted) setPlugins(payload.plugins);
+        const payload = await response.json() as { plugins: ComposerPlugin[]; plugins_enabled?: boolean };
+        if (!controller.signal.aborted) setPlugins(payload.plugins.map(plugin => ({ ...plugin, enabled: plugin.enabled && payload.plugins_enabled !== false })));
       } catch (failure) {
         if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : String(failure));
       } finally {

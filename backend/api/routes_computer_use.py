@@ -68,10 +68,11 @@ async def mutate_plugin_control(request: PluginControlAction, response: Response
         **{key: value for key, value in values.items() if key != "enabled"})
     if request.action == "install":
         mutation = await routes_skills.install_plugin_api(routes_skills.PluginInstallRequest(
-            plugin_name=control["plugin_name"], marketplace=control["marketplace"], refresh_marketplace=False), response)
+            plugin_name=control["plugin_name"], marketplace=control["marketplace"], refresh_marketplace=False,
+            workspace_root=request.workspace_root or ""), response)
     else:
         mutation = await routes_skills.update_plugin_state_api(control["plugin_id"],
-            routes_skills.PluginStateUpdateRequest(enabled=request.enabled), response)
+            routes_skills.PluginStateUpdateRequest(enabled=request.enabled, workspace_root=request.workspace_root or ""), response)
     result = await to_thread_cancel_safe(get_computer_use_settings, _state.ws_manager, session_id=request.session_id,
         conversation_id=request.conversation_id, workspace_root=request.workspace_root)
     if "runtime_refresh" in mutation:

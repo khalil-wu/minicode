@@ -246,12 +246,14 @@ export const pluginAssetResourceUrlWithToken = (
   pluginPath: string,
   variant: "composer" | "logo" | "logo-dark" = "logo",
   base = apiBase(),
+  workspaceRoot?: string,
 ): string => {
   if (!pluginPath.trim()) return "";
   const url = safeURL(`${base}/api/plugins/asset`, currentHttpOrigin());
   if (!url) return "";
   url.searchParams.set("plugin_path", pluginPath);
   url.searchParams.set("variant", variant);
+  if (workspaceRoot !== undefined) url.searchParams.set("workspace_root", workspaceRoot);
   const assetToken = pluginAssetToken(pluginPath, variant);
   if (assetToken) url.searchParams.set("asset_token", assetToken);
   return url.toString();

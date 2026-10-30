@@ -248,6 +248,7 @@ class SkillImportRequest(BaseModel):
 
 class PluginStateUpdateRequest(BaseModel):
     enabled: bool
+    workspace_root: str | None = None
 
 
 class PluginImportRequest(BaseModel):
@@ -270,6 +271,7 @@ class PluginMarketplaceRequest(BaseModel):
     source: dict[str, Any] | str
     ref_name: str | None = None
     sparse_paths: list[str] | None = None
+    workspace_root: str | None = None
 
 
 class PluginMarketplaceRefreshRequest(BaseModel):
@@ -282,6 +284,7 @@ class PluginInstallRequest(BaseModel):
     marketplace: str = Field(default="local", min_length=1)
     plugin_name: str | None = Field(default=None, min_length=1)
     refresh_marketplace: bool = True
+    workspace_root: str | None = None
 
 
 class LLMModelsRefreshResponse(BaseModel):

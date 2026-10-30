@@ -16,7 +16,7 @@ from backend.plugins.identity import (
     parse_plugin_id,
     parse_plugin_id_strict,
 )
-from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORY, plugin_install_root, plugin_manifest_path
+from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORIES, plugin_install_root, plugin_manifest_path
 from backend.plugins.source_agent_manifest import resolve_agent_manifest
 
 def plugin_name_from_directory(plugin_dir: Path) -> str:
@@ -41,7 +41,7 @@ def plugin_name_from_manifest(manifest_path: Path) -> str:
 
 def plugin_directory_for_manifest(manifest_path: Path) -> Path:
     manifest_path = Path(manifest_path)
-    if manifest_path.parent.name in {PLUGIN_MANIFEST_DIRECTORY, ".codex-plugin"}:
+    if manifest_path.parent.name in PLUGIN_MANIFEST_DIRECTORIES:
         return manifest_path.parent.parent
     return manifest_path.parent
 
@@ -59,6 +59,9 @@ def _resolve_plugin_manifest(payload: Mapping[str, Any], manifest_path: Path) ->
             resolve_agent_manifest(payload, plugin_root),
             "agent_plugin",
         )
+    if "mcpServers" in payload:
+        payload = {**payload, "mcp_servers": payload["mcpServers"]}
+        del payload["mcpServers"]
     return LoadedPluginManifest(payload, "legacy")
 
 
@@ -421,7 +424,7 @@ def _validate_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
         except ValueError as exc:
             errors.append(f"{rel_manifest}: invalid plugin identity: {exc}")
     unsupported = sorted(str(key) for key in raw.keys() if str(key) not in _PLUGIN_MANIFEST_FIELDS)
-    if unsupported:
+    if unsupported and manifest_path.parent.name == ".minicode-plugin":
         errors.append(
             f"{rel_manifest}: unsupported manifest fields: {', '.join(unsupported)}."
         )
@@ -556,7 +559,7 @@ def _declared_component_payload(
     container_key: str,
 ) -> Any:
     if isinstance(declaration, Mapping):
-        return declaration.get(container_key, declaration)
+        return declaration.get(container_key, declaration.get("mcpServers", declaration)) if container_key == "servers" else declaration.get(container_key, declaration)
     inline_payloads: list[Any] = []
     if isinstance(declaration, list) and container_key == "hooks":
         paths = []
@@ -581,7 +584,7 @@ def _declared_component_payload(
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
         if isinstance(payload, Mapping):
-            payloads.append(payload.get(container_key, payload))
+            payloads.append(payload.get(container_key, payload.get("mcpServers", payload)) if container_key == "servers" else payload.get(container_key, payload))
     payloads = [*inline_payloads, *payloads]
     if len(payloads) == 1:
         return payloads[0]

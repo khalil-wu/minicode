@@ -621,8 +621,9 @@ async def update_plugin_enabled(
     *,
     settings_file: Path,
     config_change_hook: ConfigChangeHook,
+    config_stack: Any | None = None,
 ) -> dict[str, Any]:
-    policy = _plugin_policy_from_stack()
+    policy = _plugin_policy_from_stack(config_stack) if config_stack is not None else _plugin_policy_from_stack()
     clean_name = str(name or "").strip()
     if not feature_enabled("plugin_lifecycle_api", True):
         raise PluginSettingsError("Plugin lifecycle API is disabled", status_code=404)
@@ -630,7 +631,7 @@ async def update_plugin_enabled(
         raise PluginSettingsError("Plugin name is required", status_code=400)
     if not isinstance(enabled, bool):
         raise PluginSettingsError("Plugin enabled must be a boolean", status_code=400)
-    known_plugins = get_plugin_settings(policy=policy)
+    known_plugins = get_plugin_settings(config_stack=config_stack, policy=policy)
     target = _resolve_plugin_inventory_item(
         clean_name,
         known_plugins.get("plugins", []),
@@ -661,8 +662,9 @@ async def remove_plugin(
     *,
     settings_file: Path,
     config_change_hook: ConfigChangeHook,
+    config_stack: Any | None = None,
 ) -> dict[str, Any]:
-    policy = _plugin_policy_from_stack()
+    policy = _plugin_policy_from_stack(config_stack) if config_stack is not None else _plugin_policy_from_stack()
     clean_name = str(name or "").strip()
     if not feature_enabled("plugin_lifecycle_api", True):
         raise PluginSettingsError("Plugin lifecycle API is disabled", status_code=404)
@@ -670,7 +672,7 @@ async def remove_plugin(
         raise PluginSettingsError("Plugin name is required", status_code=400)
     install_root = plugin_install_root()
     store_root = plugin_install_root().parent / "store"
-    inventory = get_plugin_settings([install_root, store_root], policy=policy).get("plugins", [])
+    inventory = get_plugin_settings([install_root, store_root], config_stack=config_stack, policy=policy).get("plugins", [])
     target = _resolve_plugin_inventory_item(clean_name, inventory)
     plugin_id = str(target.get("id") or plugin_id_for_name(
         str(target.get("name") or ""), str(target.get("marketplace") or "local")
@@ -692,7 +694,7 @@ async def remove_plugin(
     store_removal: Any | None = None
     reverse_dependents = find_reverse_dependents(
         plugin_id,
-        get_plugin_snapshot(policy=policy).get("plugins", []),
+        get_plugin_snapshot(config_stack=config_stack, policy=policy).get("plugins", []),
     )
     # Gate the lifecycle mutation before staging or removing physical files.
     hook_result = await config_change_hook(source="plugins", file_path=str(settings_file))
@@ -1412,17 +1414,23 @@ def _resolve_plugin_inventory_item(
     return candidates[0]
 
 
-def resolve_plugin_asset(plugin_path: str | Path, variant: str) -> Path | None:
-    """Resolve one official interface asset from an installed plugin."""
+def resolve_plugin_asset(plugin_path: str | Path, variant: str, *, config_stack: Any | None = None,
+                         workspace_root: Path | None = None) -> Path | None:
+    """Resolve an interface asset from an installed or discoverable plugin."""
     try:
         requested = Path(plugin_path).expanduser().resolve()
     except OSError:
         return None
     installed = {
         Path(str(entry.get("path") or "")).expanduser().resolve()
-        for entry in get_plugin_settings().get("plugins", [])
+        for entry in get_plugin_settings(config_stack=config_stack).get("plugins", [])
         if str(entry.get("path") or "").strip()
     }
+    from backend.plugins.manager import MarketplaceRegistry
+
+    policy = _plugin_policy_from_stack(config_stack)
+    for marketplace in MarketplaceRegistry(config_stack=config_stack, workspace_root=workspace_root, include_bundled=True).list(policy=policy):
+        installed.update(Path(plugin["resolved_path"]).resolve() for plugin in marketplace["plugins"] if plugin.get("resolved_path"))
     if requested not in installed:
         return None
     manifest = _primary_plugin_manifest(requested)

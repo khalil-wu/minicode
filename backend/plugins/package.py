@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from backend.feature_flags import feature_enabled
 from backend.plugins.layout import (
-    PLUGIN_MANIFEST_DIRECTORY,
+    PLUGIN_MANIFEST_DIRECTORIES,
     plugin_install_root,
     plugin_manifest_path,
 )
@@ -254,7 +254,7 @@ def _plugin_name_from_package(package_path: Path) -> str:
         candidates = [
             (info, rel)
             for info, rel in _validated_plugin_package_infos(archive)
-            if Path(rel).parts[-2:] == (PLUGIN_MANIFEST_DIRECTORY, "plugin.json")
+            if len(Path(rel).parts) >= 2 and Path(rel).parts[-2] in PLUGIN_MANIFEST_DIRECTORIES and Path(rel).name == "plugin.json"
         ]
         from backend.plugins.source_agent_manifest import is_agent_plugin_schema, resolve_agent_manifest
 

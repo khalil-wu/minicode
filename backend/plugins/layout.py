@@ -8,6 +8,7 @@ import json
 
 
 PLUGIN_MANIFEST_DIRECTORY = ".minicode-plugin"
+PLUGIN_MANIFEST_DIRECTORIES = (PLUGIN_MANIFEST_DIRECTORY, ".codex-plugin", ".claude-plugin", ".cursor-plugin")
 PLUGIN_MANIFEST_FILENAME = "plugin.json"
 MARKETPLACE_MANIFEST_FILENAME = "marketplace.json"
 
@@ -23,6 +24,10 @@ def plugin_manifest_path(plugin_root: Path) -> Path:
             raw = None
         if isinstance(raw, dict) and is_agent_plugin_schema(raw):
             return root_manifest
+    for directory in PLUGIN_MANIFEST_DIRECTORIES:
+        manifest = plugin_root / directory / PLUGIN_MANIFEST_FILENAME
+        if manifest.is_file():
+            return manifest
     return plugin_root / PLUGIN_MANIFEST_DIRECTORY / PLUGIN_MANIFEST_FILENAME
 
 

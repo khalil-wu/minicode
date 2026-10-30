@@ -114,7 +114,8 @@ async def test_home_settings_read_real_native_store_and_return_fresh_revoke_list
         snapshot = response.json()
         assert snapshot["navigation_visible"] and snapshot["available"]
         assert snapshot["capabilities"]["persist_modes"] == ["session", "always"]
-        assert snapshot["controls"] == [] and snapshot["owner"]["conversation_id"] is None
+        assert snapshot["controls"][0]["plugin_id"] == "computer-use@minicode-bundled"
+        assert snapshot["owner"]["conversation_id"] is None
         assert snapshot["approved_apps"] == [{"app_id": "fixture.editor", "display_name": "Fixture Editor", "icon_data_url": None}]
         removed = await client.post("/api/settings/computer-use/app-approvals/remove", json={**query,
             "provider_id": snapshot["provider_id"], "selection_id": snapshot["selection_id"], "app_id": "fixture.editor"})

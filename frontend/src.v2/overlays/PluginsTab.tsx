@@ -87,6 +87,8 @@ export type PluginEntry = {
   disabled?: boolean;
   managed?: boolean;
   policy_managed?: boolean;
+  user_config_writable?: boolean;
+  feature_disabled?: boolean;
   managed_enabled?: boolean | null;
   mcp_server_names?: string[];
   enablement_source?: string;
@@ -94,6 +96,7 @@ export type PluginEntry = {
 
 type PluginSettingsPayload = {
   plugins?: PluginEntry[];
+  plugins_enabled?: boolean;
   runtime_refresh?: { ok?: boolean; warnings?: string[]; errors?: string[]; refreshed?: string[] };
 };
 
@@ -103,7 +106,7 @@ type CatalogPlugin = {
   description?: string;
   category?: string;
   load_error?: string;
-  interface?: { displayName?: string; shortDescription?: string; developerName?: string; category?: string;
+  interface?: { displayName?: string; shortDescription?: string; longDescription?: string; developerName?: string; category?: string;
     capabilities?: string[]; websiteUrl?: string; privacyPolicyUrl?: string; termsOfServiceUrl?: string };
   version?: string;
   longDescription?: string;
@@ -114,6 +117,11 @@ type CatalogPlugin = {
   hooks?: string | unknown[] | Record<string, unknown>;
   iconUrl?: string;
   iconDarkUrl?: string;
+  iconVariant?: "composer" | "logo" | "logo-dark";
+  iconVariants?: ("composer" | "logo" | "logo-dark")[];
+  path?: string;
+  mcp_server_names?: string[];
+  skill_summaries?: { name: string; displayName?: string; description?: string }[];
   defaultPrompt?: string[];
   skill_count?: number;
   mcp_server_count?: number;
@@ -122,7 +130,7 @@ type CatalogPlugin = {
   installation?: { available: boolean; reason?: string };
 };
 export type PluginMarketplace = { name: string; status: string; error?: string; source: Record<string, string>; plugins: CatalogPlugin[];
-  isBuiltIn?: boolean; directory?: "public" | "personal"; interface?: { displayName?: string }; materialized_path?: string };
+  isBuiltIn?: boolean; isConfigured?: boolean; canManage?: boolean; directory?: "public" | "personal"; interface?: { displayName?: string }; materialized_path?: string };
 type MarketplaceRemoval = { source: PluginMarketplace; api: string; headers: HeadersInit; workspaceRoot: string };
 
 const runtimeErrors = (payload: PluginSettingsPayload): string[] => {
@@ -131,9 +139,11 @@ const runtimeErrors = (payload: PluginSettingsPayload): string[] => {
   return errors.length ? errors : ["运行时能力刷新未完成。"];
 };
 
-const normalizePlugins = (plugins: PluginEntry[] | undefined): PluginEntry[] => (
+const normalizePlugins = (plugins: PluginEntry[] | undefined, pluginsEnabled = true): PluginEntry[] => (
   (Array.isArray(plugins) ? plugins : []).map((plugin) => ({
     ...plugin,
+    enabled: plugin.enabled && pluginsEnabled,
+    feature_disabled: !pluginsEnabled,
     iconUrl: plugin.iconUrl || (plugin.iconVariant
       ? pluginAssetResourceUrlWithToken(plugin.path, plugin.iconVariant)
       : undefined),
@@ -268,12 +278,14 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     setMarketplaceError("");
     setMarketplacesLoading(true);
     try {
-      const response = await fetchWithTimeout(`${apiBase()}/api/plugins/marketplaces`, { cache: "no-store", headers: authHeaders(), signal: controller.signal });
+      const workspaceRoot = useAppStore.getState().workingDirectory;
+      const query = new URLSearchParams({ workspace_root: workspaceRoot });
+      const response = await fetchWithTimeout(`${apiBase()}/api/plugins/marketplaces?${query}`, { cache: "no-store", headers: authHeaders(), signal: controller.signal });
       await requireSuccessfulResponse(response, "插件来源加载失败");
       const payload = await response.json() as { marketplaces: PluginMarketplace[] };
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && workspaceRootsEqual(workspaceRoot, useAppStore.getState().workingDirectory)) {
         setMarketplaces(payload.marketplaces);
-        onMarketplacesChange?.(payload.marketplaces.filter(source => !source.isBuiltIn).length);
+        onMarketplacesChange?.(payload.marketplaces.filter(source => !source.isBuiltIn && source.isConfigured !== false).length);
         return true;
       }
     } catch (error) {
@@ -321,7 +333,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     setRuntimeWarnings(payload.runtime_refresh?.ok === false ? payload.runtime_refresh.warnings || ["运行时尚未完成插件加载，请刷新后查看组件状态。"] : []);
     try {
       const scopedPayload = await readPluginSettings(workspaceRoot);
-      const updatedPlugins = normalizePlugins(scopedPayload.plugins);
+      const updatedPlugins = normalizePlugins(scopedPayload.plugins, scopedPayload.plugins_enabled);
       if (loadSeqRef.current === seq && ownsView()) {
         setPlugins(updatedPlugins);
         onPluginsChange?.(updatedPlugins.length);
@@ -344,7 +356,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     try {
       const payload = await readPluginSettings(workspaceRoot);
       if (loadSeqRef.current !== seq || !workspaceRootsEqual(workspaceRoot, useAppStore.getState().workingDirectory)) return;
-      const inventory = normalizePlugins(payload.plugins);
+      const inventory = normalizePlugins(payload.plugins, payload.plugins_enabled);
       setPlugins(inventory);
       onPluginsChange?.(inventory.length);
       setRuntimeWarnings(payload.runtime_refresh?.ok === false ? payload.runtime_refresh.warnings || ["运行时尚未完成插件加载，请刷新后查看组件状态。"] : []);
@@ -359,10 +371,11 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     }
   }, [readPluginSettings, workingDirectory, onPluginsChange]);
 
-  useEffect(() => { setPlugins([]); setDetail(null); setRuntimeWarnings([]); }, [workingDirectory]);
+  useEffect(() => { setPlugins([]); setMarketplaces([]); setMarketplaceError(""); setDetail(null); setRuntimeWarnings([]); }, [workingDirectory]);
 
   useEffect(() => {
     if (loadInventory) { void refresh(); void loadMarketplaces(); }
+    return () => marketplaceRequestRef.current?.abort();
   }, [loadInventory, refresh, loadMarketplaces]);
   useEffect(() => {
     if (!loadInventory) return;
@@ -375,7 +388,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
   useEffect(() => { if (!active) setAddMenu(null); }, [active]);
 
   const setPluginEnabled = async (plugin: PluginEntry, enabled: boolean) => {
-    if (plugin.policy_managed) return;
+    if (plugin.policy_managed || plugin.user_config_writable === false || plugin.feature_disabled) return;
     if (!beginOperation("state")) return;
     const owner = captureExtensionSettingsOwner();
     const pluginKey = plugin.id || plugin.name;
@@ -387,7 +400,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
         {
           method: "PUT",
           headers: authHeaders({ "content-type": "application/json" }),
-          body: JSON.stringify({ enabled }),
+          body: JSON.stringify({ enabled, workspace_root: workingDirectory }),
         },
         {
           timeoutMs: LONG_HTTP_TIMEOUT_MS,
@@ -435,7 +448,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     let committed = false;
     try {
       const response = await fetchWithTimeout(
-        `${apiBase()}/api/plugins/${encodeURIComponent(pluginKey)}`,
+        `${apiBase()}/api/plugins/${encodeURIComponent(pluginKey)}?${new URLSearchParams({ workspace_root: workingDirectory })}`,
         {
           method: "DELETE",
           headers: authHeaders(),
@@ -485,18 +498,25 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
       ? pluginAssetResourceUrlWithToken(plugin.path, "logo-dark") : plugin.iconUrl}
     websiteUrl={plugin.websiteUrl}
   />;
-  const catalogLogo = (plugin: CatalogPlugin, size: number) => <BrandIcon value={plugin.interface?.displayName || plugin.name}
-    inferBrand={false} fallback="plugin" size={size} iconUrl={resolvedTheme === "dark" ? plugin.iconDarkUrl || plugin.iconUrl : plugin.iconUrl} />;
+  const catalogLogo = (plugin: CatalogPlugin, size: number) => {
+    const variant = resolvedTheme === "dark" && plugin.iconVariants?.includes("logo-dark") ? "logo-dark" : plugin.iconVariant;
+    const localIcon = plugin.path && variant ? pluginAssetResourceUrlWithToken(plugin.path, variant, undefined, workingDirectory) : undefined;
+    return <BrandIcon value={plugin.interface?.displayName || plugin.name} inferBrand={false} fallback="plugin" size={size}
+      iconUrl={resolvedTheme === "dark" ? plugin.iconDarkUrl || plugin.iconUrl || localIcon : plugin.iconUrl || localIcon} />;
+  };
 
-  const installPlugin = async (plugin: CatalogPlugin, marketplace: string) => {
+  const installPlugin = async (plugin: CatalogPlugin, marketplace: string, prompt?: string) => {
     if (!beginOperation("install")) return;
     const owner = captureExtensionSettingsOwner();
+    const draftOwner = useAppStore.getState();
+    const conversationId = draftOwner.conversationId;
+    const draftId = draftOwner.activeConversationDraftId;
     setSavingName(plugin.id);
     let committed = false;
     try {
       const response = await fetchWithTimeout(`${apiBase()}/api/plugins/install`, {
         method: "POST", headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify({ plugin_name: plugin.name, marketplace, refresh_marketplace: false }),
+        body: JSON.stringify({ plugin_name: plugin.name, marketplace, refresh_marketplace: false, workspace_root: workingDirectory }),
       }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "插件安装超时，请刷新查看安装状态。" });
       await requireSuccessfulResponse(response, "安装插件失败");
       committed = true;
@@ -505,8 +525,15 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
       sendClientCommand({ type: "skills.list" }, { silent: true });
       sendClientCommand({ type: "mcp.list" }, { silent: true });
       sendClientCommand({ type: "runtime.capabilities.inspect", source: "plugins.install" }, { silent: true });
-      await applyMutationPayload(payload, owner);
+      const inventory = await applyMutationPayload(payload, owner);
       if (ready) pushToast(`已安装插件：${plugin.name}`, "success");
+      const current = useAppStore.getState();
+      const installed = inventory.plugins.find(item => (item.id || item.name) === plugin.id);
+      if (ready && prompt && installed?.enabled && extensionSettingsOwnerMatches(owner)
+        && workspaceRootsEqual(workingDirectory, inventory.workspaceRoot)
+        && current.conversationId === conversationId && current.activeConversationDraftId === draftId) {
+        tryPlugin(installed, installed.displayName || plugin.interface?.displayName || plugin.name, prompt);
+      }
     } catch (error) {
       pushToast(`${committed ? "插件已安装，但状态刷新失败" : "插件安装失败"}：${operationError(error)}`, committed ? "warning" : "error");
     } finally {
@@ -519,7 +546,8 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     const owner = captureExtensionSettingsOwner();
     setUpgradingMarketplace(name);
     try {
-      const response = await fetchWithTimeout(`${apiBase()}/api/plugins/marketplaces/${encodeURIComponent(name)}/refresh`, {
+      const query = new URLSearchParams({ workspace_root: workingDirectory });
+      const response = await fetchWithTimeout(`${apiBase()}/api/plugins/marketplaces/${encodeURIComponent(name)}/refresh?${query}`, {
         method: "POST", headers: authHeaders({ "content-type": "application/json" }),
       }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "插件来源操作超时，请刷新查看状态。" });
       await requireSuccessfulResponse(response, "插件来源更新失败");
@@ -537,7 +565,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
   const addMarketplace = async (params: MarketplaceAddParams) => {
     const owner = captureExtensionSettingsOwner();
     const response = await fetchWithTimeout(`${apiBase()}/api/plugins/marketplaces`, {
-      method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify(params),
+      method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ ...params, workspace_root: workingDirectory }),
     }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "添加插件市场超时，请刷新查看状态。" });
     await requireSuccessfulResponse(response, "添加插件市场失败");
     const payload = await response.json() as { marketplace: PluginMarketplace; already_added: boolean };
@@ -554,12 +582,12 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     const response = await fetchWithTimeout(`${target.api}/api/plugins?${query}`, { cache: "no-store", headers: target.headers, signal });
     await requireSuccessfulResponse(response, "无法加载已安装插件");
     const payload = await response.json() as PluginSettingsPayload;
-    return normalizePlugins(payload.plugins).filter(plugin => plugin.marketplace?.toLocaleLowerCase() === name.toLocaleLowerCase());
+    return normalizePlugins(payload.plugins, payload.plugins_enabled).filter(plugin => plugin.marketplace?.toLocaleLowerCase() === name.toLocaleLowerCase());
   }, [removingMarketplace]);
 
   const uninstallMarketplacePlugin = async (plugin: PluginEntry) => {
     const target = removingMarketplace!;
-    const response = await fetchWithTimeout(`${target.api}/api/plugins/${encodeURIComponent(plugin.id || plugin.name)}`, {
+    const response = await fetchWithTimeout(`${target.api}/api/plugins/${encodeURIComponent(plugin.id || plugin.name)}?${new URLSearchParams({ workspace_root: target.workspaceRoot })}`, {
       method: "DELETE", headers: target.headers,
     }, { timeoutMs: LONG_HTTP_TIMEOUT_MS, timeoutMessage: "卸载插件超时，请重试。" });
     await requireSuccessfulResponse(response, "卸载插件失败");
@@ -586,15 +614,20 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
 
   const removeMarketplace = async (source: PluginMarketplace) => {
     const target = removingMarketplace!;
-    const response = await fetchWithTimeout(`${target.api}/api/plugins/marketplaces/${encodeURIComponent(source.name)}`, { method: "DELETE", headers: target.headers });
+    const query = new URLSearchParams({ workspace_root: target.workspaceRoot });
+    const response = await fetchWithTimeout(`${target.api}/api/plugins/marketplaces/${encodeURIComponent(source.name)}?${query}`, { method: "DELETE", headers: target.headers });
     await requireSuccessfulResponse(response, "移除插件市场失败");
     const payload = await response.json() as { marketplaces: PluginMarketplace[] };
     if (removalOwnerActive(target)) {
-      marketplaceRequestRef.current?.abort();
-      setMarketplacesLoading(false);
-      setMarketplaceError("");
-      setMarketplaces(payload.marketplaces);
-      onMarketplacesChange?.(payload.marketplaces.filter(entry => !entry.isBuiltIn).length);
+      if (workspaceRootsEqual(target.workspaceRoot, useAppStore.getState().workingDirectory)) {
+        marketplaceRequestRef.current?.abort();
+        setMarketplacesLoading(false);
+        setMarketplaceError("");
+        setMarketplaces(payload.marketplaces);
+        onMarketplacesChange?.(payload.marketplaces.filter(entry => !entry.isBuiltIn && entry.isConfigured !== false).length);
+      } else {
+        await loadMarketplaces();
+      }
       publishExtensionSettingsChange("marketplaces", {
         base: target.api, token: new Headers(target.headers).get("X-MiniCode-Token") || "",
       }, marketplaceRequestRef);
@@ -610,7 +643,9 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
         const installed = plugins.find((plugin) => (plugin.id || plugin.name) === detail.id);
         const entry = detail.catalog;
         const name = installed?.displayName || entry?.interface?.displayName || installed?.name || entry?.name || detail.id;
-        const starterPrompts = (installed?.defaultPrompt || []).map(prompt => prompt.trim()).filter(Boolean);
+        const starterPrompts = (installed?.defaultPrompt || entry?.defaultPrompt || []).map(prompt => prompt.trim()).filter(Boolean);
+        const shortDescription = installed?.shortDescription || entry?.interface?.shortDescription || installed?.description || entry?.description;
+        const longDescription = installed?.longDescription || entry?.interface?.longDescription || entry?.longDescription || installed?.description || entry?.description;
         const componentSkills = installed ? pluginSkills.filter(skill => skill.source_level === "plugin" && skill.path
           && normalizeWorkspaceRoot(skill.path).startsWith(`${normalizeWorkspaceRoot(installed.path)}/`)) : [];
         const developer = installed?.developerName || entry?.interface?.developerName;
@@ -625,36 +660,48 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
         const hasInformation = developer || category || capabilities?.length || version || informationLinks.some(link => link.url);
         const failures = installed?.load_errors || (entry?.load_error ? [entry.load_error] : []);
         const mcpPrefix = `plugin:${installed?.id || detail.id}:`;
-        const declaredMcp = (installed?.mcp_server_names || []).map((name) => ({ name, id: `${mcpPrefix}${name}` }));
-        const componentMcp = mcpServers.filter((server) => declaredMcp.some((component) => component.id === server.name));
-        const observedNames = new Set(componentMcp.map((server) => server.name));
-        const missingMcp = declaredMcp.filter((component) => !observedNames.has(component.id)).map((component) => component.name);
-        const disconnected = componentMcp.filter((server) => !['connected', 'disabled'].includes(server.phase || server.status));
-        const status = failures.length ? "加载失败" : !installed ? "尚未安装" : !installed.enabled ? "已安装 · 已停用" : disconnected.length ? "需要连接或登录" : missingMcp.length ? "组件状态待同步" : "已启用";
+        const declaredMcp = installed?.mcp_server_names || [];
+        const componentMcp = mcpServers.filter(server => (server.pluginId === installed?.id && declaredMcp.includes(server.pluginServerName || ""))
+          || declaredMcp.some(name => server.name === `${mcpPrefix}${name}`));
+        const componentName = (server: typeof mcpServers[number]) => server.pluginServerName || server.name.slice(mcpPrefix.length);
+        const observedNames = new Set(componentMcp.map(componentName));
+        const missingMcp = declaredMcp.filter(name => !observedNames.has(name));
+        const needsLogin = componentMcp.some(server => server.phase === "auth_required" || server.phase === "expired");
+        const connectionFailed = componentMcp.some(server => server.phase === "failed" || (server.status === "error" && !needsLogin));
+        const disconnected = componentMcp.some(server => server.status === "disconnected" || server.status === "offline");
+        const status = failures.length ? "加载失败" : !installed ? "尚未安装" : !installed.enabled ? "已安装 · 已停用" : needsLogin ? "需要连接或登录"
+          : connectionFailed ? "组件连接出错" : missingMcp.length ? "组件状态待同步" : disconnected ? "尚未连接" : "已启用";
+        const mcpStatus = (server: typeof mcpServers[number]) => server.phase === "auth_required" || server.phase === "expired" ? t("需要登录")
+          : server.enabled === false || server.phase === "stopped" ? t("已停用")
+          : server.phase === "failed" || server.status === "error" ? t("连接出错")
+          : server.phase === "connecting" || server.status === "starting" ? t("正在连接")
+          : server.phase === "reconnecting" || server.status === "reconnecting" ? t("正在重连")
+          : (server.phase || server.status) === "connected" ? t("已连接") : t("尚未连接");
         const openConfiguration = (tab: "connectors" | "skills") => { useAppStore.setState({ skillsMarketplaceOpen: false }); openSettings(tab); };
         return <section ref={detailRef} tabIndex={-1} className="plugin-detail-page" aria-label={t("插件详情")} onKeyDown={(event) => {
           if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeDetail(); }
         }}>
           <nav className="plugin-detail-breadcrumb" aria-label={t("插件位置")}><button type="button" className="plugin-detail-back" aria-label={t("返回插件列表")} onClick={closeDetail}>{t("插件")}<ChevronDown size={14} /></button><span>{name}</span></nav>
-          <div className="plugin-detail-heading">{installed ? pluginLogo(installed, 40) : entry ? catalogLogo(entry, 40) : null}<div><h2>{name}</h2><span>{status}{installed?.version || entry?.version ? ` · ${installed?.version || entry?.version}` : ""}</span></div>
-            {installed ? <button type="button" className="plugin-primary-button plugin-detail-try" disabled={busy || Boolean(installed.policy_managed && !installed.enabled)} onClick={() => installed.enabled ? tryPlugin(installed, name) : void setPluginEnabled(installed, true)}>{installed.enabled ? t("立即试用") : t("启用插件")}</button>
+          <div className="plugin-detail-heading"><div className="plugin-detail-identity">{installed ? pluginLogo(installed, 48) : entry ? catalogLogo(entry, 48) : null}<div><h2>{name}</h2>{shortDescription && <span>{shortDescription}</span>}{installed && <span>{t(status)}{installed.version ? ` · ${installed.version}` : ""}</span>}</div></div>
+            {installed ? <button type="button" className="plugin-primary-button plugin-detail-try" disabled={busy || installed.feature_disabled || Boolean((installed.policy_managed || installed.user_config_writable === false) && !installed.enabled)} onClick={() => installed.enabled ? tryPlugin(installed, name) : void setPluginEnabled(installed, true)}>{installed.enabled ? t("立即试用") : t("启用插件")}</button>
               : entry && detail.source && <button type="button" className="plugin-primary-button plugin-detail-try" disabled={busy || Boolean(entry.load_error) || entry.installation?.available === false}
                 title={entry.installation?.reason || entry.load_error} onClick={() => void installPlugin(entry, detail.source!.name)}>{savingName === entry.id ? <LoaderCircle size={16} className="settings-spin" /> : <Plus size={16} />}{savingName === entry.id ? t("安装中…") : t("安装插件")}</button>}</div>
-          <p className="plugin-detail-description">{installed?.longDescription || entry?.longDescription || installed?.description || entry?.description || installed?.shortDescription || entry?.interface?.shortDescription || t("此来源未提供用途说明。")}</p>
-          {installed?.enabled && starterPrompts.length ? <div className="plugin-starter-prompts" aria-label="插件起始提示">
-            {starterPrompts.map(prompt => <button key={prompt} type="button" onClick={() => tryPlugin(installed, name, prompt)}>{prompt}<ChevronDown size={15} /></button>)}
+          {starterPrompts.length ? <div className="plugin-starter-prompts" aria-label="插件起始提示">
+            {starterPrompts.map(prompt => <button key={prompt} type="button" aria-label={prompt} disabled={busy || (installed ? !installed.enabled : Boolean(entry?.load_error) || entry?.installation?.available === false)}
+              onClick={() => installed ? tryPlugin(installed, name, prompt) : void installPlugin(entry!, detail.source!.name, prompt)}><span>{installed ? pluginLogo(installed, 18) : entry ? catalogLogo(entry, 18) : null}<strong>{name}</strong>{prompt}</span><ChevronRight size={15} /></button>)}
           </div> : null}
+          {longDescription && longDescription !== shortDescription && <p className="plugin-detail-description">{longDescription}</p>}
 
           {(failures.length > 0 || runtimeWarnings.length > 0) && <div className="plugin-detail-issues" role="status"><strong>{t("需要处理")}</strong>
             {failures.map((failure) => <p key={failure}>{failure === "dependency-unsatisfied" ? `插件依赖尚未满足：${installed?.dependencies?.join("、") || "查看插件清单中的依赖"}` : failure}</p>)}
             {runtimeWarnings.map((warning) => <p key={warning}>{warning}</p>)}
             <button type="button" className="skills-text-button" onClick={() => { void refresh({ showToast: true }); void reloadSkills(); }} disabled={busy}>刷新加载状态</button>
           </div>}
-          <section className="plugin-detail-components" aria-label="插件组件"><h3>包含的组件</h3>
+          <section className="plugin-detail-components" aria-label="插件组件">
             {installed ? <>
               {Boolean(installed.mcp_server_count) && <div><span>MCP 服务器 · {installed.mcp_server_count}</span><button type="button" className="skills-text-button" onClick={() => openConfiguration("connectors")}>配置 MCP 服务</button></div>}
-              {componentMcp.map((server) => <p className="plugin-component-status" key={server.name}>{server.name.slice(mcpPrefix.length)} · {server.phase === "auth_required" || server.phase === "expired" ? t("需要登录") : (server.phase || server.status) === "connected" ? t("已连接") : t("尚未连接")}{server.lastError ? ` · ${server.lastError}` : ""}</p>)}
-              {missingMcp.map((name) => <p className="plugin-component-status" key={name}>{name} · 状态未知（待同步）</p>)}
+              {componentMcp.map((server) => <p className="plugin-component-status" key={server.name}>{componentName(server)} · {mcpStatus(server)}{server.lastError ? ` · ${server.lastError}` : ""}</p>)}
+              {missingMcp.map((name) => <p className="plugin-component-status" key={name}>{name} · {installed.enabled ? "状态未知（待同步）" : t("已停用")}</p>)}
               {(componentSkills.length > 0 || skillsLoading || skillsError) && <section className="plugin-detail-skills" aria-label={t("技能")}><h3>{t("技能")}{!skillsLoading && ` · ${componentSkills.length}`}</h3>
                 {skillsLoading && <p aria-live="polite">{t("正在读取技能…")}</p>}
                 {skillsError && <p role="alert">{skillsError}</p>}
@@ -668,11 +715,10 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
               {Boolean(installed.app_count) && <div><span>App · {installed.app_count}{installed.runtime_support?.apps === false ? "（仅清单，当前未执行）" : ""}</span></div>}
               {Boolean(installed.hook_count) && <div><span>Hook · {installed.hook_count}{installed.runtime_support?.hooks === false ? "（当前未执行）" : ""}</span></div>}
             </> : <>
-              {entry?.skills && <div><span>{t("技能")}</span></div>}
-              {entry?.mcpServers && Object.keys(entry.mcpServers).length > 0 && <div><span>MCP 服务器</span></div>}
+              {entry?.mcp_server_names?.length ? <section className="plugin-detail-skills"><h3>MCP 服务器 · {entry.mcp_server_names.length}</h3>{entry.mcp_server_names.map(name => <p key={name}>{name}</p>)}</section> : entry?.mcpServers && <div><span>MCP 服务器</span></div>}
+              {entry?.skill_summaries?.length ? <section className="plugin-detail-skills"><h3>{t("技能")} · {entry.skill_summaries.length}</h3>{entry.skill_summaries.map(skill => <div className="plugin-detail-skill" key={skill.name}><div className="plugin-detail-skill-copy"><strong>{skill.displayName || skill.name}</strong><span>{skill.description}</span></div></div>)}</section> : entry?.skills && <div><span>{t("技能")}</span></div>}
               {entry?.apps && Object.keys(entry.apps).length > 0 && <div><span>App</span></div>}
               {entry?.hooks && Object.keys(entry.hooks).length > 0 && <div><span>Hook</span></div>}
-              {!entry?.skills && !entry?.mcpServers && !entry?.apps && !entry?.hooks && <p>{entry?.capabilities?.length ? entry.capabilities.join("、") : t("来源尚未提供完整组件清单，安装后可查看技能、MCP、App 和 Hook 的实际状态。")}</p>}
             </>}
           </section>
           {hasInformation && <section className="plugin-detail-registration" aria-label={t("插件信息")}><h3>{t("插件信息")}</h3><dl className="plugin-detail-meta">
@@ -685,7 +731,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
               : t("插件信息不可用")}</dd></div>)}
           </dl></section>}
           {entry?.installation?.available === false && !installed && <p className="plugin-section-description" role="status">{entry.installation.reason}</p>}
-          <div className="plugin-detail-actions">{installed?.enabled && !installed.policy_managed ? <button type="button" className="skills-text-button" disabled={busy} onClick={() => void setPluginEnabled(installed, false)}>{t("停用插件")}</button> : null}
+          <div className="plugin-detail-actions">{installed?.enabled && !installed.policy_managed && installed.user_config_writable !== false ? <button type="button" className="skills-text-button" disabled={busy} onClick={() => void setPluginEnabled(installed, false)}>{t("停用插件")}</button> : null}
             {installed?.managed && !installed.policy_managed && <button type="button" className="skills-text-button" disabled={busy} onClick={() => void removePlugin(installed)}>{t("卸载插件")}</button>}
           </div>
           {installed && <details className="plugin-detail-location"><summary>{t("本地文件")}</summary><code>{installed.path}</code>{installed.manifest_path && <code>{installed.manifest_path}</code>}</details>}
@@ -786,8 +832,9 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
                     role="switch"
                     aria-checked={plugin.enabled}
                     aria-label={`${plugin.enabled ? t("停用") : t("启用")}插件 ${pluginKey}`}
+                    title={plugin.user_config_writable === false ? t("此插件由当前工作区配置控制") : undefined}
                     checked={plugin.enabled}
-                    disabled={busy || plugin.policy_managed}
+                    disabled={busy || plugin.policy_managed || plugin.user_config_writable === false || plugin.feature_disabled}
                     onChange={(event) => void setPluginEnabled(plugin, event.currentTarget.checked)}
                   />
                   <span><i /></span>
