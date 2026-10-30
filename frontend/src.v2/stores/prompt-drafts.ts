@@ -22,6 +22,6 @@ export const removePromptDrafts = (drafts: Record<string, AgentPromptDraft>, req
   persistPromptDrafts(Object.fromEntries(
     Object.entries(drafts).filter(([, draft]) => !requestIds.includes(draft.requestId)
       || (conversationId !== undefined && draft.conversationId !== conversationId)
-      || (inputOwner !== undefined && (draft.inputOwner?.turnId !== inputOwner.turnId
+      || (inputOwner !== undefined && (draft.inputOwner === undefined || draft.inputOwner.turnId !== inputOwner.turnId
         || draft.inputOwner?.messageId !== inputOwner.messageId || draft.inputOwner?.taskId !== inputOwner.taskId))),
   ));

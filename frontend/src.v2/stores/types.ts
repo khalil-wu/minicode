@@ -2060,6 +2060,8 @@ export interface PendingAskUser {
   turnId?: string;
   messageId?: string;
   taskId?: string;
+  status?: "submitted" | "error";
+  error?: string;
   prompt?: string;
   question: string;
   provider?: string;
@@ -2129,6 +2131,7 @@ export interface ApprovalSlice {
   clearDiffReview: (requestId?: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   clearDiffReviews: (requestIds: string[], owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   setAskUser: (a: PendingAskUser) => void;
+  updateAskUserStatus: (requestId: string, patch: Pick<PendingAskUser, "status" | "error">, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   clearAskUser: (requestId?: string, conversationId?: string, inputOwner?: AgentPromptDraft["inputOwner"]) => void;
   clearAskUsers: (requestIds: string[], conversationId?: string, inputOwner?: AgentPromptDraft["inputOwner"]) => void;
 }

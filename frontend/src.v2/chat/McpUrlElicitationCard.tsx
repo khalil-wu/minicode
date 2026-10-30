@@ -10,18 +10,20 @@ import type { PendingAskUser } from "../stores/types";
 export function McpUrlElicitationCard({ request }: { request: PendingAskUser & { elicitation: NonNullable<PendingAskUser["elicitation"]> } }) {
   const { t } = useI18n();
   const [opened, setOpened] = useState(false);
-  const [responding, setResponding] = useState(false);
+  const responding = request.status === "submitted";
   const [opening, setOpening] = useState(false);
-  const [error, setError] = useState("");
   const respond = async (action: "accept" | "decline" | "cancel") => {
-    setResponding(true); setError("");
+    useAppStore.getState().updateAskUserStatus(request.requestId, { status: "submitted", error: undefined }, request);
     try {
       const result = await sendPromptResponseCommand(buildElicitationResponseCommand(request.requestId, action, undefined,
         { conversationId: request.conversationId, turnId: request.turnId, messageId: request.messageId, taskId: request.taskId }));
       if (!commandResultSucceeded(result)) throw new Error(result.message || t("回答未被后端接受"));
       useAppStore.getState().clearAskUser(request.requestId, request.conversationId,
         { turnId: request.turnId, messageId: request.messageId, taskId: request.taskId });
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); setResponding(false); }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      useAppStore.getState().updateAskUserStatus(request.requestId, { status: "error", error: message }, request);
+    }
   };
   const openLink = async () => {
     setOpening(true);
@@ -38,7 +40,7 @@ export function McpUrlElicitationCard({ request }: { request: PendingAskUser & {
         <div className="inline-mcp-url"><span>URL</span><span>{request.elicitation.url}</span></div>
       </div>
     </div>
-    {error && <div role="alert" className="inline-prompt-error">{error}</div>}
+    {request.error && <div role="alert" className="inline-prompt-error">{request.error}</div>}
     <div className="inline-prompt-footer inline-prompt-button-row">
       <button type="button" className="inline-request-submit" disabled={responding || opening} onClick={() => void respond("decline")}>{t("拒绝")}</button>
       <button type="submit" className="inline-request-submit" data-has-answer="true" disabled={responding || opening}>

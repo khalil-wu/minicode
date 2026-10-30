@@ -37,16 +37,14 @@ export function ComputerUseApprovalCard({ request }: { request: ComputerUseReque
   const appDisplayName = meta.tool_params_display.find(parameter => parameter.name === "app")!.value;
   const title = t("允许 ChatGPT 使用 {appDisplayName}？", { appDisplayName });
   const [showDisclosure] = useState(() => localStorage.getItem(approvedAppDisclosureKey) !== "true");
-  const [responding, setResponding] = useState(false);
-  const [error, setError] = useState("");
+  const responding = request.status === "submitted";
   const pending = useRef(false);
   const respond = async (action: "accept" | "decline", persist?: PersistMode) => {
     if (pending.current) return;
     pending.current = true;
-    setResponding(true);
-    setError("");
     const owner = { conversationId: request.conversationId, turnId: request.turnId,
       messageId: request.messageId, taskId: request.taskId };
+    useAppStore.getState().updateAskUserStatus(request.requestId, { status: "submitted", error: undefined }, owner);
     try {
       const result = await sendPromptResponseCommand(buildElicitationResponseCommand(request.requestId,
         action, action === "accept" && persist ? { persist } : undefined, owner));
@@ -55,9 +53,9 @@ export function ComputerUseApprovalCard({ request }: { request: ComputerUseReque
       useAppStore.getState().clearAskUser(request.requestId, request.conversationId,
         { turnId: request.turnId, messageId: request.messageId, taskId: request.taskId });
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      useAppStore.getState().updateAskUserStatus(request.requestId, { status: "error", error: message }, owner);
       pending.current = false;
-      setResponding(false);
     }
   };
   const allowConversation = () => void respond("accept", meta.persist.includes("session") ? "session" : undefined);
@@ -75,7 +73,7 @@ export function ComputerUseApprovalCard({ request }: { request: ComputerUseReque
       <div className="inline-prompt-title">{title}</div>
       {showDisclosure && <div className="inline-prompt-subtitle">{t("电脑操作应用访问说明")}</div>}
     </div>
-    {error && <div role="alert" className="inline-prompt-error">{error}</div>}
+    {request.error && <div role="alert" className="inline-prompt-error">{request.error}</div>}
     <div ref={actions} className="inline-approval-actions">
       {meta.persist.includes("always") && <Button variant="secondary" size="sm" className="inline-approval-leading"
         disabled={responding} onClick={() => void respond("accept", "always")}>{t("始终允许")}</Button>}

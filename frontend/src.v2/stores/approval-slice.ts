@@ -6,12 +6,11 @@ import { pendingPromptKey, pendingPromptMatchesOwner } from "../lib/pending-prom
 import type { AgentPromptDraft, PendingApproval } from "./types";
 import type { PromptOwner } from "../protocol/prompt-responses";
 
-const removeApprovalDrafts = (drafts: Record<string, AgentPromptDraft>, removed: PendingApproval[], remaining: PendingApproval[]) => {
+const removeApprovalDrafts = (drafts: Record<string, AgentPromptDraft>, removed: PendingApproval[]) => {
   let next = drafts;
   for (const request of removed) {
-    if (!remaining.some(item => item.requestId === request.requestId && item.conversationId === request.conversationId)) {
-      next = removePromptDrafts(next, [request.requestId], request.conversationId);
-    }
+    next = removePromptDrafts(next, [request.requestId], request.conversationId,
+      { turnId: request.turnId, messageId: request.messageId, taskId: request.taskId });
   }
   return next;
 };
@@ -73,13 +72,13 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       if (requestId && !matches(s.pendingApproval)) {
         const remaining = s.approvalQueue.filter(item => !matches(item));
         return {
-          promptDrafts: removeApprovalDrafts(s.promptDrafts, s.approvalQueue.filter(matches), [s.pendingApproval, ...remaining].filter((item): item is PendingApproval => item !== null)),
+          promptDrafts: removeApprovalDrafts(s.promptDrafts, s.approvalQueue.filter(matches)),
           approvalQueue: remaining,
         };
       }
       const [next, ...rest] = s.approvalQueue;
       return {
-        promptDrafts: removeApprovalDrafts(s.promptDrafts, s.pendingApproval ? [s.pendingApproval] : [], s.approvalQueue),
+        promptDrafts: removeApprovalDrafts(s.promptDrafts, s.pendingApproval ? [s.pendingApproval] : []),
         pendingApproval: next ?? null,
         approvalQueue: rest,
       };
@@ -96,7 +95,7 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       const approvalQueue = s.approvalQueue.filter((queued) => !matches(queued));
       const [next, ...rest] = approvalQueue;
       return {
-        promptDrafts: removeApprovalDrafts(s.promptDrafts, all.filter(matches), all.filter(item => !matches(item))),
+        promptDrafts: removeApprovalDrafts(s.promptDrafts, all.filter(matches)),
         pendingApproval: pendingApproval ?? next ?? null,
         approvalQueue: pendingApproval ? approvalQueue : rest,
       };
@@ -191,6 +190,13 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       if (!s.pendingAskUser) return { pendingAskUser: a };
       return { askUserQueue: [...s.askUserQueue, a] };
     }),
+  updateAskUserStatus: (requestId, patch, owner) => set(s => {
+    const matches = (request: typeof s.pendingAskUser) => request?.requestId === requestId && pendingPromptMatchesOwner(request, owner);
+    return {
+      pendingAskUser: s.pendingAskUser && matches(s.pendingAskUser) ? { ...s.pendingAskUser, ...patch } : s.pendingAskUser,
+      askUserQueue: s.askUserQueue.map(request => matches(request) ? { ...request, ...patch } : request),
+    };
+  }),
   clearAskUser: (requestId, conversationId, inputOwner) =>
     set((s) => {
       const matches = (request: typeof s.pendingAskUser) => request !== null && request.requestId === requestId

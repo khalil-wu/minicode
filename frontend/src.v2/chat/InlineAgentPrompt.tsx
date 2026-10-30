@@ -37,7 +37,6 @@ import { SelectMenu } from "../components/SelectMenu";
 import { ContextMenu } from "../components/ContextMenu";
 import { PromptSourceIcon } from "../lib/prompt-source-icons";
 import { openWorkspaceFilePreview } from "./openAttachmentPreview";
-import { pushToast } from "../overlays/ToastContainer";
 import { MarkdownRenderer } from "./messages/MarkdownRenderer";
 import { Button } from "../components/Button";
 import { parseUnifiedDiffLines, type UnifiedDiffLine } from "../lib/unified-diff";
@@ -512,7 +511,9 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   const initialPlan = typeof request.args.plan === "string" ? request.args.plan : "";
   const planFilePath = typeof request.args.plan_file_path === "string" ? request.args.plan_file_path : "";
   const commandPrompts = normalizeCommandPrompts(request.args.command_prompts);
-  const savedDraft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
+  const draftRequest = { requestId: request.requestId, conversationId: request.conversationId,
+    inputOwner: { turnId: request.turnId, messageId: request.messageId, taskId: request.taskId } };
+  const savedDraft = useAppStore((s) => s.promptDrafts[promptDraftKey(draftRequest)]);
   const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
   const draft = savedDraft?.initialPlan === initialPlan ? savedDraft : undefined;
   const plan = draft?.plan ?? initialPlan;
@@ -520,7 +521,7 @@ const PlanApprovalCard = ({ request }: { request: PendingApproval }) => {
   const planExpanded = draft?.planExpanded ?? false;
   const rejecting = draft?.rejecting ?? false;
   const rejectionFeedback = draft?.rejectionFeedback ?? "";
-  const updatePlanDraft = (patch: Partial<NonNullable<typeof draft>>) => updatePromptDraft(request, {
+  const updatePlanDraft = (patch: Partial<NonNullable<typeof draft>>) => updatePromptDraft(draftRequest, {
     initialPlan, plan, editing, planExpanded, rejecting, rejectionFeedback, ...patch,
   });
   const [localResponding, setResponding] = useState(false);
@@ -664,8 +665,7 @@ export const SubagentPlanReviewCard = (
   { request, review }: { request: PendingAskUser; review: PendingSubagentPlanReview },
 ) => {
   const { t: tr } = useI18n();
-  const [responding, setResponding] = useState(false);
-  const [error, setError] = useState("");
+  const responding = request.status === "submitted";
   const plan = review.planContent ?? "";
   const subagents = useAppStore((s) => s.subagents);
   const teammate = approvalSourceLabel(tr, {
@@ -676,14 +676,9 @@ export const SubagentPlanReviewCard = (
     sourceAgent: review.teammateName || review.subagentId,
   }, subagents, review.teammateName);
 
-  useEffect(() => {
-    setResponding(false);
-    setError("");
-  }, [request.requestId]);
-
   const respond = async (approved: boolean) => {
     if (responding) return;
-    setResponding(true);
+    useAppStore.getState().updateAskUserStatus(request.requestId, { status: "submitted", error: undefined }, request);
     try {
       const result = await sendClientCommandAwaitResult({
         type: "subagent.plan_review",
@@ -703,9 +698,7 @@ export const SubagentPlanReviewCard = (
       store.clearAskUser(request.requestId, request.conversationId, request);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : tr("计划审批提交失败，请重试。");
-      setError(message);
-      pushToast(message, "error", 4500);
-      setResponding(false);
+      useAppStore.getState().updateAskUserStatus(request.requestId, { status: "error", error: message }, request);
     }
   };
 
@@ -717,7 +710,7 @@ export const SubagentPlanReviewCard = (
           <div className="inline-prompt-title">{tr("批准子智能体的计划？")}</div>
           <div className="inline-prompt-question">{teammate} {tr("提交了计划，需要你批准后才能开始实现。")}</div>
           {review.teamName && <div className="inline-prompt-subtitle">{tr("团队：")}{review.teamName}</div>}
-          {error && <div role="alert" className="inline-prompt-error inline-prompt-ask-error">{error}</div>}
+          {request.error && <div role="alert" className="inline-prompt-error inline-prompt-ask-error">{request.error}</div>}
         </div>
       </div>
 
@@ -896,7 +889,9 @@ const useApprovalExpiry = (expiresAt?: number): { label: string; urgent: boolean
 
 const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const { t: tr } = useI18n();
-  const draft = useAppStore((s) => s.promptDrafts[promptDraftKey(request)]);
+  const draftRequest = { requestId: request.requestId, conversationId: request.conversationId,
+    inputOwner: { turnId: request.turnId, messageId: request.messageId, taskId: request.taskId } };
+  const draft = useAppStore((s) => s.promptDrafts[promptDraftKey(draftRequest)]);
   const updatePromptDraft = useAppStore((s) => s.updatePromptDraft);
   const persistDraft = !request.secret && !request.provider && request.promptType !== "secret" && request.promptType !== "manual_code";
   const [transientAnswer, setTransientAnswer] = useState("");
@@ -909,17 +904,16 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
   const fieldValues = { ...defaultValues, ...(persistDraft ? draft?.elicitationValues : transientValues) };
   const updateField = (name: string, value: string | boolean | string[] | undefined) => {
     const elicitationValues = { ...fieldValues, [name]: value };
-    if (persistDraft) updatePromptDraft(request, { elicitationValues });
+    if (persistDraft) updatePromptDraft(draftRequest, { elicitationValues });
     else setTransientValues(elicitationValues);
   };
   const answer = persistDraft ? draft?.answer ?? "" : transientAnswer;
   const selectedOption = persistDraft ? draft?.selectedOption ?? null : transientOption;
   const updateAnswer = (answer: string, selectedOption: number | null) => {
-    if (persistDraft) updatePromptDraft(request, { answer, selectedOption });
+    if (persistDraft) updatePromptDraft(draftRequest, { answer, selectedOption });
     else { setTransientAnswer(answer); setTransientOption(selectedOption); }
   };
-  const [responding, setResponding] = useState(false);
-  const [error, setError] = useState("");
+  const responding = request.status === "submitted";
   const inputRef = useRef<HTMLInputElement>(null);
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const questionId = useId();
@@ -933,15 +927,12 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
     setTransientAnswer("");
     setTransientOption(null);
     setTransientValues({});
-    setResponding(false);
-    setError("");
     if (hasCustomInput && !hasOptions) window.setTimeout(() => inputRef.current?.focus(), 40);
   }, [request.requestId]);
 
   const respond = async (text: string) => {
     if (responding) return;
-    setResponding(true);
-    setError("");
+    useAppStore.getState().updateAskUserStatus(request.requestId, { status: "submitted", error: undefined }, request);
     try {
       const owner = request;
       if (structured && formContent.error) throw new Error(formContent.error);
@@ -952,16 +943,13 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
       useAppStore.getState().clearAskUser(request.requestId, request.conversationId, request);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : tr("回答发送失败，请重试。");
-      setError(message);
-      pushToast(message, "error", 4500);
-      setResponding(false);
+      useAppStore.getState().updateAskUserStatus(request.requestId, { status: "error", error: message }, request);
     }
   };
 
   const cancel = async () => {
     if (responding) return;
-    setResponding(true);
-    setError("");
+    useAppStore.getState().updateAskUserStatus(request.requestId, { status: "submitted", error: undefined }, request);
     try {
       const command = structured ? buildElicitationResponseCommand(request.requestId, "cancel", undefined,
         request) : {
@@ -977,9 +965,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
       useAppStore.getState().clearAskUser(request.requestId, request.conversationId, request);
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : tr("取消发送失败，请重试。");
-      setError(message);
-      pushToast(message, "error", 4500);
-      setResponding(false);
+      useAppStore.getState().updateAskUserStatus(request.requestId, { status: "error", error: message }, request);
     }
   };
 
@@ -1006,7 +992,7 @@ const AskUserCard = ({ request }: { request: PendingAskUser }) => {
               {expiry.label}
             </div>
           )}
-          {error && <div role="alert" className="inline-prompt-error inline-prompt-ask-error">{error}</div>}
+          {request.error && <div role="alert" className="inline-prompt-error inline-prompt-ask-error">{request.error}</div>}
         </div>
       </div>
 

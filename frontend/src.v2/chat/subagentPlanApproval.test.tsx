@@ -144,7 +144,7 @@ describe("teammate plan approval prompt", () => {
     await waitFor(() => expect(useAppStore.getState().pendingAskUser).toBeNull());
   });
 
-  it("keeps the prompt and toasts when the backend refuses the decision", async () => {
+  it("keeps the refusal on its original pending request when the backend rejects the decision", async () => {
     mocks.sendClientCommandAwaitResult.mockResolvedValueOnce({
       type: "command.result",
       command: "subagent.plan_review",
@@ -157,11 +157,10 @@ describe("teammate plan approval prompt", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "批准子智能体的计划" }));
 
-    await waitFor(() => expect(mocks.pushToast).toHaveBeenCalledWith(
-      "Teammate sub-7 is not running; the request is no longer actionable.",
-      "error",
-      4500,
-    ));
+    await waitFor(() => expect(useAppStore.getState().pendingAskUser).toMatchObject({
+      status: "error", error: "Teammate sub-7 is not running; the request is no longer actionable.",
+    }));
+    expect(mocks.pushToast).not.toHaveBeenCalled();
     expect(useAppStore.getState().pendingAskUser?.requestId).toBe("plan-req-1");
     expect(screen.getByRole("alert").textContent).toContain("no longer actionable");
   });

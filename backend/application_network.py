@@ -17,6 +17,8 @@ from weakref import WeakSet
 
 import httpx
 import certifi
+
+from backend.async_cleanup import to_thread_cancel_safe
 from websockets.asyncio.client import connect as WebSocketConnect
 
 
@@ -278,16 +280,29 @@ class ApplicationHttpClient(httpx.AsyncClient):
         self.policy, self.factory = policy, factory
         self.owns_clients = owns_clients
         self.routes = {}
+        self._route_build_lock = asyncio.Lock()
 
     async def send(self, request, *, stream=False, auth=httpx.USE_CLIENT_DEFAULT, follow_redirects=httpx.USE_CLIENT_DEFAULT):
+        if self.is_closed:
+            raise RuntimeError("Cannot send a request, as the client has been closed.")
         follows = self.follow_redirects if follow_redirects is httpx.USE_CLIENT_DEFAULT else follow_redirects
         history = []
         while True:
-            permit = self.policy.acquire(str(request.url))
+            destination = str(request.url)
+            permit = self.policy.acquire(destination)
             route = (request.url.scheme, request.url.netloc)
             # factory owns proxy resolution, so it must remain inside admission.
             if route not in self.routes:
-                self.routes[route] = self.factory(str(request.url))
+                async with self._route_build_lock:
+                    if self.is_closed:
+                        raise RuntimeError("Cannot send a request, as the client has been closed.")
+                    if route not in self.routes:
+                        def build_route():
+                            permit.check()
+                            # The existing map owns the result even if cancellation
+                            # arrives before the awaiting task resumes.
+                            self.routes[route] = self.factory(destination)
+                        await to_thread_cancel_safe(build_route)
             client = self.routes[route]
             raw = await permit.run(lambda: client.send(request, stream=True, auth=auth, follow_redirects=False))
             response = ApplicationResponse(raw, permit)
@@ -309,14 +324,18 @@ class ApplicationHttpClient(httpx.AsyncClient):
             return response
 
     async def aclose(self):
-        if self.owns_clients:
-            await asyncio.gather(*(client.aclose() for client in set(self.routes.values())))
-        await super().aclose()
+        async with self._route_build_lock:
+            if self.owns_clients:
+                await asyncio.gather(*(client.aclose() for client in set(self.routes.values())))
+            await super().aclose()
 
     async def __aexit__(self, exc_type=None, exc_value=None, traceback=None):
         # HTTPX's context exit closes only its own transport; admitted route
         # clients are owned here and must follow the same close boundary.
         await self.aclose()
+
+
+_HTTP_SSL_CONTEXT_LOCK = threading.Lock()
 
 
 @lru_cache(maxsize=1)
@@ -326,9 +345,10 @@ def _load_http_ssl_context(cafile: str, modified_ns: int, size: int) -> ssl.SSLC
 
 def application_http_ssl_context() -> ssl.SSLContext:
     """Reuse HTTPX's verified, environment-independent default CA bundle."""
-    cafile = certifi.where()
-    stat = os.stat(cafile)
-    return _load_http_ssl_context(cafile, stat.st_mtime_ns, stat.st_size)
+    with _HTTP_SSL_CONTEXT_LOCK:
+        cafile = certifi.where()
+        stat = os.stat(cafile)
+        return _load_http_ssl_context(cafile, stat.st_mtime_ns, stat.st_size)
 
 
 def application_http_client(url, *, policy=None, proxy_mode="inherit", **kwargs):

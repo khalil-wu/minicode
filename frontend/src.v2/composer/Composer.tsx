@@ -180,7 +180,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   ], s.conversationId));
   const hasPendingApproval = useAppStore((s) => !s.pendingConversationSwitchId && hasLocalPendingPromptForConversation([
     s.pendingApproval, ...s.approvalQueue, s.pendingDiffReview, ...s.diffReviewQueue,
-    ...[s.pendingAskUser, ...s.askUserQueue].filter(request => request?.requestUserInput || request?.elicitation),
+    ...[s.pendingAskUser, ...s.askUserQueue].filter(request => request?.requestUserInput || request?.elicitation || request?.planReview),
   ], s.conversationId));
   const skillCatalog = useAppStore((s) => s.availableSkills);
   const activeGoal = useAppStore((s) => capabilityFeatureEnabled(s.runtimeCapabilities, "goals") ? s.activeGoal : null);
