@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextvars import ContextVar
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -52,8 +54,8 @@ async def test_user_settings_inventory_keeps_disabled_skills_out_of_the_executab
     response = Response()
     payload = await routes_skills.get_skill_settings_api(response)
     assert response.headers["Cache-Control"] == "no-store"
-    assert {skill["name"]: skill["enabled"] for skill in payload["skills"]} == {"one": True, "two": False}
-    assert {skill["uninstall_name"] for skill in payload["skills"]} == {"one", "two"}
+    assert {skill["name"]: skill["enabled"] for skill in payload["skills"]} == {"one": True, "two": False, "builtin": True}
+    assert {skill["uninstall_name"] for skill in payload["skills"]} == {"one", "two", None}
     assert {skill["name"] for skill in payload["available_skills"]} == {"one", "builtin", "plugin-owned"}
     assert fixture.manager.snapshot().get_meta_by_path(fixture.paths["two"]) is None
 
@@ -82,7 +84,7 @@ async def test_toggle_persists_path_rules_and_the_next_turn_sees_them_without_mu
     captured = fixture.manager.snapshot()
     request = routes_skills.SkillEnabledRequest(path=str(fixture.paths["one"]), enabled=False)
     result = await routes_skills.update_skill_settings_api(request, Response())
-    assert {skill["name"] for skill in result["skills"]} == {"one", "two"}
+    assert {skill["name"] for skill in result["skills"]} == {"one", "two", "builtin"}
     assert not any(skill["name"] == "one" for skill in result["available_skills"])
     assert fixture.manager.snapshot().load_skill_payload("one") is None
     assert captured.load_skill_payload("one")["content"].endswith("Real instructions")
@@ -97,12 +99,115 @@ async def test_toggle_persists_path_rules_and_the_next_turn_sees_them_without_mu
 
 
 @pytest.mark.asyncio
-async def test_settings_cannot_modify_a_builtin_or_undiscovered_path(skills_settings):
-    for target in (skills_settings.paths["builtin"], Path("C:/unrelated/SKILL.md")):
-        with pytest.raises(HTTPException) as error:
-            await routes_skills.update_skill_settings_api(routes_skills.SkillEnabledRequest(path=str(target), enabled=False), Response())
-        assert error.value.status_code == 400
+async def test_settings_cannot_modify_an_undiscovered_path(skills_settings):
+    with pytest.raises(HTTPException) as error:
+        await routes_skills.update_skill_settings_api(routes_skills.SkillEnabledRequest(path="C:/unrelated/SKILL.md", enabled=False), Response())
+    assert error.value.status_code == 400
     assert skills_settings.writes == []
+
+
+@pytest.mark.asyncio
+async def test_disabled_workspace_and_system_skills_remain_manageable_without_entering_runtime(skills_settings, tmp_path, monkeypatch):
+    fixture = skills_settings
+    workspace = tmp_path / "workspace"
+    workspace_skill = workspace / ".agents/skills/project-review/SKILL.md"
+    workspace_skill.parent.mkdir(parents=True)
+    workspace_skill.write_text("---\nname: project-review\ndescription: Project workflow\n---\nProject instructions", encoding="utf-8")
+    original = SkillLoader._search_dirs
+    monkeypatch.setattr(SkillLoader, "_search_dirs", lambda loader: [*original(loader), ("workspace", workspace_skill.parent.parent)])
+    fixture.settings["skills"]["config"].extend([
+        {"path": str(fixture.paths["builtin"]), "enabled": False},
+        {"path": str(workspace_skill), "enabled": False},
+    ])
+    before = await routes_skills.get_skill_settings_api(Response(), workspace_root=str(workspace))
+    by_name = {skill["name"]: skill for skill in before["skills"]}
+    assert not by_name["builtin"]["enabled"] and not by_name["project-review"]["enabled"]
+    assert {"builtin", "project-review"}.isdisjoint(skill["name"] for skill in before["available_skills"])
+    for path in (fixture.paths["builtin"], workspace_skill):
+        result = await routes_skills.update_skill_settings_api(
+            routes_skills.SkillEnabledRequest(path=str(path), enabled=True, workspace_root=str(workspace)), Response())
+        assert next(skill for skill in result["skills"] if skill["path"] == str(path))["enabled"] is True
+        assert fixture.manager.snapshot(workspace).load_skill_payload(path.parent.name, path) is not None
+    assert fixture.settings["unrelated"] == {"draft_setting": "preserved"}
+
+
+@pytest.mark.asyncio
+async def test_disabled_skill_still_counts_as_installed_in_the_public_catalog(skills_settings):
+    path = skills_settings.paths["two"]
+    path.write_text("---\nname: pdf\ndescription: Installed PDF workflow\n---\nInstructions", encoding="utf-8")
+    catalog = await skills_api_service.skills_marketplace_payload(skill_manager=skills_settings.manager)
+    assert next(skill for skill in catalog["skills"] if skill["name"] == "pdf")["installed"] is True
+    assert skills_settings.manager.snapshot().load_skill_payload("pdf", path) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fails", [False, True])
+async def test_marketplace_websocket_scans_on_a_worker_with_the_session_context(monkeypatch, fails):
+    from backend.skills import marketplace
+    from backend.ws.handlers.misc import handle_skills_marketplace_list
+
+    owner = object()
+    context = ContextVar("skill_marketplace_owner", default="")
+    context.set("session-owner")
+    event_loop_thread = threading.get_ident()
+    observed, sent = [], []
+
+    def scan(manager):
+        observed.append((manager, threading.get_ident(), context.get()))
+        if fails:
+            raise RuntimeError("actual scan error")
+        return {"pdf"}
+
+    async def list_catalog(*, installed_names):
+        assert installed_names == {"pdf"}
+        return {"skills": [{"name": "pdf", "installed": True}]}
+
+    async def send_payload(payload, *, log_context):
+        sent.append((payload, log_context))
+
+    monkeypatch.setattr(skills_api_service, "installed_skill_names", scan)
+    monkeypatch.setattr(marketplace, "list_extensions_marketplace", list_catalog)
+    session = SimpleNamespace(skill_manager=owner, send_payload=send_payload)
+    if fails:
+        with pytest.raises(RuntimeError, match="actual scan error"):
+            await handle_skills_marketplace_list(session, {})
+        assert sent == []
+    else:
+        assert await handle_skills_marketplace_list(session, {}) is True
+        assert sent == [({"type": "skills.marketplace.list", "skills": [{"name": "pdf", "installed": True}]}, "skills.marketplace.list")]
+    assert observed[0][0] is owner and observed[0][1] != event_loop_thread and observed[0][2] == "session-owner"
+
+
+@pytest.mark.asyncio
+async def test_directory_inventory_includes_registered_projects_with_their_own_scope(skills_settings, tmp_path, monkeypatch):
+    from backend.workspace import recent_projects
+
+    fixture = skills_settings
+    roots = [tmp_path / "project-a", tmp_path / "project-b"]
+    for root in roots:
+        path = root / ".agents/skills" / root.name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\nname: {root.name}\ndescription: Owned by {root.name}\n---\nInstructions", encoding="utf-8")
+    monkeypatch.setattr(recent_projects, "DEFAULT_STORE_PATH", tmp_path / "recent-projects.json")
+    store = recent_projects.RecentProjectStore()
+    store.add(str(roots[0]), "Project A")
+    store.add(str(roots[1]), "Project B")
+    original = SkillLoader._search_dirs
+    monkeypatch.setattr(SkillLoader, "_search_dirs", lambda loader: [*original(loader),
+        *(([("workspace", loader._project_root / ".agents/skills")]) if loader._project_root else [])])
+    app = FastAPI()
+    app.include_router(routes_skills.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://local") as client:
+        response = await client.get("/api/skills/settings", params={"workspace_root": str(roots[0]), "include_projects": True})
+        assert response.status_code == 200
+        scoped = {skill["name"]: skill for skill in response.json()["skills"] if skill["source_level"] == "workspace"}
+        assert set(scoped) == {"project-a", "project-b"}
+        assert scoped["project-a"]["catalog_scope"]["workspace_root"] == str(roots[0])
+        assert scoped["project-b"]["catalog_scope"] == {"workspace_root": str(roots[1]), "group_id": str(roots[1]), "group_name": "Project B"}
+        disabled = await client.put("/api/skills/settings", json={"path": scoped["project-b"]["path"], "enabled": False, "workspace_root": str(roots[1])})
+        assert disabled.status_code == 200
+        refreshed = (await client.get("/api/skills/settings", params={"workspace_root": str(roots[0]), "include_projects": True})).json()
+        assert next(skill for skill in refreshed["skills"] if skill["name"] == "project-b")["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -187,7 +292,7 @@ async def test_plugin_skill_disable_keeps_details_and_reenable_while_removing_ex
     captured = fixture.manager.snapshot()
     result = await routes_skills.update_skill_settings_api(
         routes_skills.SkillEnabledRequest(path=str(path), enabled=False), Response())
-    assert {skill["name"] for skill in result["skills"]} == {"one", "two"}
+    assert {skill["name"] for skill in result["skills"]} == {"one", "two", "builtin"}
     assert [(skill["name"], skill["enabled"]) for skill in result["plugin_skills"]] == [("plugin-owned", False)]
     snapshot = fixture.manager.snapshot()
     assert snapshot.get_meta_by_path(path) is None

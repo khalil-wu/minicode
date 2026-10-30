@@ -120,7 +120,8 @@ describe("Skills settings inventory", () => {
     await waitFor(() => expect((within(dialog).getByRole("button", { name: "立即试用" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(within(dialog).getByRole("button", { name: "立即试用" }));
     expect(useAppStore.getState().selectedSkills).toMatchObject([{ name: "same", path: two.path }]);
-    expect(useAppStore.getState().draft).toBe("Keep my draft\nFollow the second workflow");
+    expect(useAppStore.getState().draft).toBe("Follow the second workflow");
+    expect(useAppStore.getState().conversationWorkbenchStates["owner-a"].draft).toBe("Keep my draft");
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 

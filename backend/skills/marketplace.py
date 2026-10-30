@@ -5,6 +5,7 @@ from backend.async_cleanup import to_thread_cancel_safe
 import asyncio
 import copy
 import inspect
+import json
 import os
 import re
 import shutil
@@ -23,20 +24,14 @@ from backend.skills.frontmatter import parse_skill_frontmatter
 USER_SKILLS_DIR = get_minicode_config_home_dir() / "skills"
 _SKILL_DIRECTORY_NAME = re.compile(r"(?!.*\.\.)[a-z0-9][a-z0-9._-]*")
 
-OPENAI_SKILLS_CONTENTS_URL = "https://api.github.com/repos/openai/skills/contents/skills/.curated?ref=main"
-OPENAI_SKILL_RAW_URL = "https://raw.githubusercontent.com/openai/skills/main/skills/.curated/{name}/SKILL.md"
+PUBLIC_SKILLS_CATALOG = Path(__file__).parent / "public-catalog.json"
 MCP_REGISTRY_SERVERS_URL = "https://registry.modelcontextprotocol.io/v0.1/servers?limit=10"
 MARKETPLACE_CACHE_TTL_SECONDS = 15 * 60
 MARKETPLACE_ERROR_CACHE_TTL_SECONDS = 60
 MARKETPLACE_HTTP_TIMEOUT_SECONDS = 8.0
 MCP_REGISTRY_SOURCE_TIMEOUT_SECONDS = 4.0
-OPENAI_SKILLS_CATALOG_TIMEOUT_SECONDS = 7.0
-OPENAI_SKILLS_SOURCE_TIMEOUT_SECONDS = 5.0
-OPENAI_SKILLS_METADATA_LIMIT = 24
-OPENAI_SKILLS_METADATA_CONCURRENCY = 8
 
 FetchJson = Callable[[str], Awaitable[Any] | Any]
-FetchText = Callable[[str], Awaitable[str] | str]
 
 
 _MARKETPLACE_CACHE: dict[str, Any] | None = None
@@ -59,14 +54,6 @@ async def _default_fetch_json(url: str) -> Any:
         response = await client.get(url, headers=headers)
         response.raise_for_status()
         return response.json()
-
-
-async def _default_fetch_text(url: str) -> str:
-    timeout = httpx.Timeout(MARKETPLACE_HTTP_TIMEOUT_SECONDS, connect=4.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        response = await client.get(url, headers={"User-Agent": "MiniCode/0.2"})
-        response.raise_for_status()
-        return response.text
 
 
 def _error_message(exc: Exception) -> str:
@@ -101,80 +88,24 @@ def _slug(value: str) -> str:
     return slug or "mcp-provider"
 
 
-def _title_from_name(name: str) -> str:
-    return " ".join(part.capitalize() for part in re.split(r"[-_]+", name) if part) or name
+def bundled_skills_marketplace(installed_names: set[str] | None = None) -> dict[str, Any]:
+    catalog = json.loads(PUBLIC_SKILLS_CATALOG.read_text(encoding="utf-8"))
+    installed = installed_names or set()
+    skills = [{**skill, "installed": skill["name"] in installed} for skill in catalog["skills"]]
+    return {"skills": skills, "source_status": {"openai_skills": {
+        "source": "bundled", "ok": True, "count": len(skills), "revision": catalog["revision"],
+    }}, "generated_at": _utc_now_iso()}
 
 
-def _openai_directory_skill_entry(name: str) -> dict[str, Any]:
-    return {
-        "name": name,
-        "title": _title_from_name(name),
-        "description": f"OpenAI curated Skill: {name}",
-        "installed": False,
-        "source": "openai",
-        "path": f"skills/.curated/{name}",
-    }
+def bundled_skill_detail(skill_name: str) -> dict[str, str]:
+    from backend.skills.loader import SkillLoader
 
-
-async def _fetch_openai_curated_skills(
-    fetch_json: FetchJson,
-    fetch_text: FetchText,
-    *,
-    enrich_metadata: bool = True,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    directory_payload = await _maybe_await(fetch_json(OPENAI_SKILLS_CONTENTS_URL))
-    if not isinstance(directory_payload, list):
-        raise ValueError("OpenAI Skills directory response was not a list.")
-
-    skill_names = [
-        str(item.get("name", "")).strip().lower()
-        for item in directory_payload
-        if isinstance(item, dict) and item.get("type") == "dir" and item.get("name")
-    ]
-    skill_names = [_safe_skill_name(name) for name in skill_names[:80]]
-    skills_by_name = {name: _openai_directory_skill_entry(name) for name in skill_names}
-    # The default desktop path stays directory-first so the market opens
-    # quickly. Injected loaders (tests or future cached metadata providers)
-    # can still enrich a bounded subset without changing the public contract.
-    metadata_names = skill_names[:OPENAI_SKILLS_METADATA_LIMIT] if enrich_metadata else []
-    semaphore = asyncio.Semaphore(OPENAI_SKILLS_METADATA_CONCURRENCY)
-
-    async def load_skill(name: str) -> dict[str, Any]:
-        async with semaphore:
-            content = await _maybe_await(fetch_text(OPENAI_SKILL_RAW_URL.format(name=name)))
-            metadata = parse_skill_frontmatter(content, name)
-            return {
-                "name": name,
-                "title": metadata.get("title") or metadata.get("name") or _title_from_name(name),
-                "description": metadata.get("description") or f"OpenAI curated Skill: {name}",
-                "installed": False,
-                "source": "openai",
-                "path": f"skills/.curated/{name}",
-            }
-
-    metadata_status = "directory-only"
-    if metadata_names:
-        try:
-            enriched_skills = await asyncio.wait_for(
-                asyncio.gather(*(load_skill(name) for name in metadata_names), return_exceptions=True),
-                timeout=OPENAI_SKILLS_SOURCE_TIMEOUT_SECONDS,
-            )
-            enriched_count = 0
-            for entry in enriched_skills:
-                if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                    skills_by_name[entry["name"]] = entry
-                    enriched_count += 1
-            metadata_status = "partial" if enriched_count < len(metadata_names) else "enriched"
-        except Exception:
-            metadata_status = "directory-only"
-
-    skills = [skills_by_name[name] for name in skill_names]
-    return skills, {
-        "source": "live",
-        "ok": True,
-        "count": len(skills),
-        "metadata": metadata_status,
-    }
+    name = _safe_skill_name(skill_name)
+    catalog = json.loads(PUBLIC_SKILLS_CATALOG.read_text(encoding="utf-8"))
+    if not any(skill["name"] == name for skill in catalog["skills"]):
+        raise KeyError(name)
+    raw = (PUBLIC_SKILLS_CATALOG.parent / "curated" / name / "SKILL.md").read_text(encoding="utf-8-sig")
+    return {"content": SkillLoader._extract_body(raw), "raw_content": raw}
 
 
 def registry_server_to_marketplace_mcp(record: dict[str, Any], installed_names: set[str] | None = None) -> dict[str, Any]:
@@ -292,24 +223,22 @@ async def list_extensions_marketplace(
     *,
     installed_mcp_names: set[str] | None = None,
     fetch_json: FetchJson | None = None,
-    fetch_text: FetchText | None = None,
     force_refresh: bool = False,
 ) -> dict[str, Any]:
     global _MARKETPLACE_CACHE, _MARKETPLACE_CACHE_EXPIRES_AT
 
     installed_names = installed_names or set()
     installed_mcp_names = installed_mcp_names or set()
-    # Browsing a public catalog does not import another user's installed state.
-    # Keep the explicit offline switch, while making the catalog usable by default.
-    network_enabled = fetch_json is not None or fetch_text is not None or str(
+    bundled = bundled_skills_marketplace()
+    network_enabled = fetch_json is not None or str(
         os.environ.get("MINICODE_ENABLE_NETWORK_MARKETPLACE", "1")
     ).strip().lower() in {"1", "true", "yes", "on"}
     if not network_enabled:
         return _apply_installed_flags({
-            "skills": [],
+            "skills": bundled["skills"],
             "mcp": [],
             "source_status": {
-                "openai_skills": {"source": "disabled", "ok": True, "count": 0, "reason": "network marketplace disabled"},
+                "openai_skills": bundled["source_status"]["openai_skills"],
                 "mcp_registry": {"source": "disabled", "ok": True, "count": 0, "reason": "network marketplace disabled"},
             },
             "generated_at": _utc_now_iso(),
@@ -318,22 +247,7 @@ async def list_extensions_marketplace(
     if _MARKETPLACE_CACHE is not None and not force_refresh and now < _MARKETPLACE_CACHE_EXPIRES_AT:
         return _apply_installed_flags(_MARKETPLACE_CACHE, installed_names, installed_mcp_names)
 
-    fetch_text_was_injected = fetch_text is not None
     fetch_json = fetch_json or _default_fetch_json
-    fetch_text = fetch_text or _default_fetch_text
-
-    async def get_skills():
-        try:
-            return await asyncio.wait_for(
-                _fetch_openai_curated_skills(
-                    fetch_json,
-                    fetch_text,
-                    enrich_metadata=fetch_text_was_injected,
-                ),
-                timeout=OPENAI_SKILLS_CATALOG_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:
-            return [], {"source": "unavailable", "ok": False, "count": 0, "error": _error_message(exc)}
 
     async def get_mcp():
         try:
@@ -347,17 +261,13 @@ async def list_extensions_marketplace(
             # remain available when the Registry cannot be reached.
             return [], {"source": "unavailable", "ok": False, "count": 0, "error": _error_message(exc)}
 
-    # These two public sources frequently share a constrained desktop proxy.
-    # Fetching them in parallel can make both time out; prioritize the Skill
-    # directory, then spend a short bounded window enriching the MCP catalog.
-    skills, openai_status = await get_skills()
     mcp, mcp_status = await get_mcp()
 
     base_payload = {
-        "skills": skills,
+        "skills": bundled["skills"],
         "mcp": mcp,
         "source_status": {
-            "openai_skills": openai_status,
+            "openai_skills": bundled["source_status"]["openai_skills"],
             "mcp_registry": mcp_status,
         },
         "generated_at": _utc_now_iso(),
@@ -391,7 +301,7 @@ async def install_marketplace_skill(
             if skill_dir.exists() or skill_dir.is_symlink():
                 raise FileExistsError(f"Skill '{normalized_name}' is already installed.")
             materialize_source(
-                {"source": "github", "repo": "openai/skills", "ref": "main",
+                {"source": "github", "repo": "openai/skills", "sha": json.loads(PUBLIC_SKILLS_CATALOG.read_text(encoding="utf-8"))["revision"],
                  "path": f"skills/.curated/{normalized_name}"},
                 skill_dir,
                 overwrite=False,

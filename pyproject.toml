@@ -55,8 +55,8 @@ minicode-host = "backend.desktop_remote.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["backend*"]
-exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
+include = ["backend*", "skills"]
+exclude = ["frontend*", "desktop*", "node_modules*", "data*"]
 
 [tool.setuptools.package-data]
 "backend.permissions" = ["resources/execpolicy/*/*", "resources/permissions/**/*"]
@@ -64,13 +64,14 @@ exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 "backend.agent" = ["*.js", "codex_prompt_resources/*"]
 "backend.agent.guardian" = ["resources/*"]
 "backend.llm" = ["*.json", "SOURCE_MODEL_METADATA_NOTICE.md"]
-"backend.skills" = ["*.json"]
+"backend.skills" = ["*.json", "PUBLIC_SKILLS_NOTICE.md", "curated/*/SKILL.md", "licenses/*.txt"]
 "backend.tools" = ["*.json", "*.txt", "source_search_resources/*"]
 "backend.services" = ["*.md"]
 "backend.memory" = ["templates/*.md"]
 "backend.mcp" = ["*.js", "*.mjs"]
 "backend.plugins" = ["public-catalog.json", "PUBLIC_CATALOG_NOTICE.md", "bundled/.minicode-plugin/*.json", "bundled/*/.minicode-plugin/*.json", "bundled/*/assets/*", "bundled/*/skills/**/*"]
 "backend.tests" = ["fixtures/source_media/*"]
+"skills" = ["*/SKILL.md", "*/agents/*.yaml", "*/assets/*", "*/references/*", "*/scripts/*.py", "*/LICENSE.txt", "*/NOTICE", "UPSTREAM-*", "upstream-assets.json"]
 
 [project.optional-dependencies]
 dev = [

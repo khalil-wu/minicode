@@ -1,4 +1,5 @@
-import { forwardRef, useImperativeHandle, useLayoutEffect, useRef } from "react";
+import { forwardRef, useImperativeHandle, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { EditorState, Plugin, TextSelection, type Command } from "prosemirror-state";
 import { EditorView } from "prosemirror-view";
 import { Fragment, Slice } from "prosemirror-model";
@@ -9,10 +10,14 @@ import { InputRule, inputRules, textblockTypeInputRule, undoInputRule, wrappingI
 import { liftListItem, sinkListItem, splitListItem } from "prosemirror-schema-list";
 import { goToNextCell, tableEditing } from "prosemirror-tables";
 import type { ComposerSelection } from "./inputSelection";
-import { documentPosition, literalComposerDocument, markdownOffset, parseComposerMarkdown, restoreComposerDocument,
+import { convertComposerReferenceLinks, documentPosition, literalComposerDocument, markdownOffset, parseComposerMarkdown, restoreComposerDocument,
   richComposerSchema as schema, richDocumentState, serializeComposerDocument, type RichComposerDocument } from "./rich-composer-document";
 import { openPreferredWebLink } from "../lib/open-preferred-target";
 import { registerComposerEditHistory } from "./composer-edit-history";
+import { composerReferenceKey, composerReferenceLabel, conversationIdFromReference, type ComposerReferenceInsertion, type InlineComposerReference } from "./composer-references";
+import { ComposerReferenceIcon } from "./ComposerReferenceIcon";
+import { openContextReference } from "../chat/contextReferenceActions";
+import { useAppStore } from "../stores";
 import "./RichComposerEditor.css";
 
 export interface ComposerInputHandle {
@@ -31,6 +36,10 @@ interface Props {
   plainTextMode: boolean;
   initialSelection: ComposerSelection;
   initialFocus: boolean;
+  references?: InlineComposerReference[];
+  referenceInsertion?: ComposerReferenceInsertion;
+  workspaceRoot?: string;
+  conversationId?: string;
   onFocusChange(focused: boolean): void;
   onChange(value: string, selection: ComposerSelection, document: RichComposerDocument): void;
   onSelectionChange(value: string, selection: ComposerSelection): void;
@@ -174,13 +183,17 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
   const plainTextMode = useRef(props.plainTextMode);
   const editorHistory = useRef<Plugin>();
   const compositionEndTimer = useRef<ReturnType<typeof setTimeout>>();
+  const referenceViews = useRef(new Map<HTMLElement, { id: number; reference: InlineComposerReference }>());
+  const referenceViewId = useRef(0);
+  const [, updateReferenceViews] = useState(0);
+  const previousReferences = useRef<InlineComposerReference[]>([]);
   const readSelection = (): ComposerSelection => {
     const view = viewRef.current!;
     return { start: markdownOffset(view.state.doc, view.state.selection.from, plainTextMode.current),
       end: markdownOffset(view.state.doc, view.state.selection.to, plainTextMode.current), composing: composing.current };
   };
   const publishDocument = () => {
-    const document = richDocumentState(viewRef.current!.state.doc, plainTextMode.current);
+    const document = { ...richDocumentState(viewRef.current!.state.doc, plainTextMode.current), selection: readSelection() };
     committed.current = document.markdown;
     committedDocument.current = document;
     latest.current.onChange(document.markdown, readSelection(), document);
@@ -189,11 +202,13 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
     const view = viewRef.current!, current = latest.current;
     if (view.composing || composing.current) return;
     // Empty drafts omit their document in the store; that echo is not a replace.
-    if (current.value !== committed.current || current.document && current.document !== committedDocument.current) {
+    if (current.value !== committed.current || current.document && current.document.document !== committedDocument.current?.document) {
       const document = restoreComposerDocument(current.value, current.document, plainTextMode.current);
+      const selection = current.document?.selection;
       view.updateState(EditorState.create({ schema, doc: document,
         plugins: plugins(() => latest.current.placeholder, plainTextMode.current, editorHistory.current!),
-        selection: TextSelection.atEnd(document) }));
+        selection: selection ? TextSelection.between(document.resolve(documentPosition(document, selection.start, plainTextMode.current)),
+          document.resolve(documentPosition(document, selection.end, plainTextMode.current))) : TextSelection.atEnd(document) }));
       committed.current = current.value;
       committedDocument.current = current.document;
     }
@@ -208,6 +223,29 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
       view.dispatch(transaction);
       if (!transaction.docChanged) publishDocument();
     }
+    const references = current.references ?? [];
+    const removed = new Set(previousReferences.current.map(composerReferenceKey));
+    const byKey = new Map(references.map(reference => [composerReferenceKey(reference), reference]));
+    for (const key of byKey.keys()) removed.delete(key);
+    const transaction = view.state.tr;
+    const present = new Set<string>();
+    const nodes: Array<{ node: import("prosemirror-model").Node; position: number }> = [];
+    view.state.doc.descendants((node, position) => { if (node.type.name === "context_mention") nodes.push({ node, position }); });
+    for (const { node, position } of nodes.reverse()) {
+      const key = composerReferenceKey(node.attrs.reference);
+      if (removed.has(key)) transaction.delete(position, position + node.nodeSize);
+      else {
+        present.add(key);
+        const reference = byKey.get(key);
+        if (reference && JSON.stringify(reference) !== JSON.stringify(node.attrs.reference)) transaction.setNodeMarkup(position, undefined, { reference });
+      }
+    }
+    for (const reference of references) if (!present.has(composerReferenceKey(reference))) {
+      transaction.replaceSelectionWith(schema.nodes.context_mention.create({ reference })).insertText(" ");
+      present.add(composerReferenceKey(reference));
+    }
+    previousReferences.current = references;
+    if (transaction.docChanged) view.dispatch(transaction);
     view.setProps({ editable: () => !latest.current.disabled, attributes: { ...view.props.attributes as Record<string, string>,
       "aria-label": current.ariaLabel, "aria-disabled": String(current.disabled), "data-enter-behavior": current.enterBehavior,
       "data-plain": String(plainTextMode.current) } });
@@ -224,6 +262,7 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
     },
   }), []);
   useLayoutEffect(() => {
+    let disposed = false;
     const initial = restoreComposerDocument(props.value, props.document, props.plainTextMode);
     const initialSelection = TextSelection.between(initial.resolve(documentPosition(initial, props.initialSelection.start, props.plainTextMode)),
       initial.resolve(documentPosition(initial, props.initialSelection.end, props.plainTextMode)));
@@ -258,6 +297,14 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
         latest.current.onPaste(event);
         if (event.defaultPrevented) return true;
         const text = event.clipboardData!.getData("text/plain");
+        const conversationId = conversationIdFromReference(text.trim());
+        const inCode = view.state.selection.$from.parent.type.spec.code || view.state.selection.$from.marks().some(mark => mark.type.spec.code);
+        if (conversationId && !inCode) {
+          const conversation = useAppStore.getState().conversations.find(item => item.id === conversationId);
+          const reference = { kind: "url" as const, name: conversation?.title || text.trim(), path: text.trim() };
+          view.dispatch(view.state.tr.replaceSelectionWith(schema.nodes.context_mention.create({ reference })).insertText(" ").scrollIntoView());
+          return true;
+        }
         if (plainTextMode.current) {
           if (text) view.dispatch(view.state.tr.replaceSelection(Slice.maxOpen(literalComposerDocument(text.replace(/\r\n?/g, "\n")).content))
             .scrollIntoView().setMeta("paste", true).setMeta("uiEvent", "paste"));
@@ -274,6 +321,7 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
         }
         return false;
       },
+      transformPasted: slice => new Slice(Fragment.fromArray(slice.content.content.map(convertComposerReferenceLinks)), slice.openStart, slice.openEnd),
       clipboardTextParser(text, context, plain) {
         if (context.parent.type.spec.code) return new Slice(Fragment.from(schema.text(text)), 0, 0);
         return Slice.maxOpen((plain || plainTextMode.current ? literalComposerDocument(text) : parseComposerMarkdown(text)).content);
@@ -300,10 +348,34 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
         },
       },
       handleClickOn(view, _position, node, nodePosition, event) {
+        if (node.type === schema.nodes.context_mention && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault(); openContextReference(node.attrs.reference, latest.current.conversationId); return true;
+        }
         if (plainTextMode.current || node.type !== schema.nodes.list_item || node.attrs.checked === null || !(event.target as Element).matches('input[type="checkbox"]')) return false;
         event.preventDefault();
         if (!latest.current.disabled) view.dispatch(view.state.tr.setNodeMarkup(nodePosition, undefined, { ...node.attrs, checked: !node.attrs.checked }));
         return true;
+      },
+      nodeViews: {
+        context_mention(node) {
+          const dom = document.createElement("span");
+          dom.className = "composer-inline-reference";
+          dom.setAttribute("contenteditable", "false");
+          const entry = { id: referenceViewId.current++, reference: node.attrs.reference as InlineComposerReference };
+          const update = () => {
+            dom.setAttribute("data-composer-reference", JSON.stringify(entry.reference));
+            referenceViews.current.set(dom, entry);
+            if (!disposed) updateReferenceViews(value => value + 1);
+          };
+          update();
+          return { dom, ignoreMutation: () => true,
+            update(next) {
+              if (next.type !== schema.nodes.context_mention) return false;
+              entry.reference = next.attrs.reference; update(); return true;
+            },
+            destroy() { referenceViews.current.delete(dom); if (!disposed) updateReferenceViews(value => value + 1); },
+          };
+        },
       },
     });
     viewRef.current = view;
@@ -312,13 +384,26 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
     const initialState = richDocumentState(view.state.doc, plainTextMode.current);
     committed.current = initialState.markdown;
     committedDocument.current = initialState;
-    if (props.value || props.document) latest.current.onChange(initialState.markdown, readSelection(), initialState);
+    synchronizeView();
+    if ((props.value || props.document) && committedDocument.current === initialState) latest.current.onChange(initialState.markdown, readSelection(), initialState);
     if (props.initialFocus && !view.dom.closest('[hidden], [aria-hidden="true"]')) view.focus();
-    return () => { unregisterHistory(); clearTimeout(compositionEndTimer.current); view.destroy(); viewRef.current = undefined; };
+    return () => { disposed = true; unregisterHistory(); clearTimeout(compositionEndTimer.current); view.destroy(); viewRef.current = undefined; };
   }, []);
   useLayoutEffect(() => {
     synchronizeView();
-  }, [props.value, props.document, props.disabled, props.ariaLabel, props.enterBehavior, props.placeholder, props.plainTextMode]);
-  return <div ref={host} className="composer-rich-host" />;
+  }, [props.value, props.document, props.disabled, props.ariaLabel, props.enterBehavior, props.placeholder, props.plainTextMode, props.references]);
+  useLayoutEffect(() => {
+    if (!props.referenceInsertion) return;
+    const view = viewRef.current!, { reference, selection } = props.referenceInsertion;
+    const transaction = view.state.tr.setSelection(TextSelection.between(
+      view.state.doc.resolve(documentPosition(view.state.doc, selection.start, plainTextMode.current)),
+      view.state.doc.resolve(documentPosition(view.state.doc, selection.end, plainTextMode.current))));
+    view.dispatch(transaction.replaceSelectionWith(schema.nodes.context_mention.create({ reference })).insertText(" ").scrollIntoView());
+    view.focus();
+  }, [props.referenceInsertion]);
+  return <><div ref={host} className="composer-rich-host" />{[...referenceViews.current].map(([dom, { id, reference }]) => createPortal(<>
+    <span className="composer-inline-reference-icon"><ComposerReferenceIcon reference={reference} workspaceRoot={props.workspaceRoot ?? ""} /></span>
+    <span className="composer-inline-reference-label" title={reference.kind === "skill" ? reference.description || reference.path : reference.path}>{composerReferenceLabel(reference)}</span>
+  </>, dom, String(id)))}</>;
 });
 RichComposerEditor.displayName = "RichComposerEditor";

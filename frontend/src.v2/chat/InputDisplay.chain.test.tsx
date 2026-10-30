@@ -12,6 +12,7 @@ import { UserMessageCell } from "./cells/UserMessageCell";
 import { AssistantMarkdownCell } from "./cells/AssistantMarkdownCell";
 import { formatDiffCommentsPrompt, type DiffComment } from "../lib/diff-comments";
 import { clearDiffCommentScope, readDiffCommentState } from "../lib/diff-comment-storage";
+import { composerReferenceMarkdown, type InlineComposerReference } from "../composer/composer-references";
 
 const mocks = vi.hoisted(() => ({ send: vi.fn(() => true), receipt: vi.fn(), toast: vi.fn() }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: "input-session", send: mocks.send }) }));
@@ -69,6 +70,40 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("user input, model context and durable display", () => {
+  it("preserves inline reference names and stable icon descriptors through the actual send/hydration/display/recall envelope", async () => {
+    const references: InlineComposerReference[] = [
+      { kind: "plugin", name: "电脑", configName: "computer-use@runtime", path: "plugin://computer-use@runtime", pluginPath: "C:/plugins/computer-use", iconVariant: "composer" },
+      { kind: "skill", name: "playwright", displayName: "Playwright CLI Skill", path: "C:/skills/playwright/SKILL.md", iconVariant: "small" },
+      { kind: "url", name: "继续完成 MiniCode UI 复刻", path: "codex://threads/other-chat" },
+    ];
+    const display = references.map(composerReferenceMarkdown).join(" ") + " 123";
+    expect(sendChatMessage({ displayContent: display, backendContent: display, contextRefs: references, conversationId: "A" })).toBe(true);
+    const command = mocks.send.mock.calls.find(([value]) => value.type === "user_message")![0] as UserMessageCommand;
+    expect(command).toMatchObject({ display_content: display, context_refs: references, plugins: [{ config_name: "computer-use@runtime", path: "plugin://computer-use@runtime" }],
+      skills: [{ name: "playwright", path: "C:/skills/playwright/SKILL.md" }] });
+    const [restored] = hydrateMessages([{ id: command.user_message_id, role: "user", content: command.content,
+      display_content: command.display_content, context_refs: JSON.parse(JSON.stringify(command.context_refs)) }]);
+    useAppStore.setState({ messages: [restored], conversationMessages: { A: [restored] } });
+    render(<UserMessageCell cell={projectMessagesToTurns([restored], false)[0].userCell!} conversationId="A" isTranscriptMode />);
+    expect(document.querySelectorAll(".user-cell-content .composer-inline-reference")).toHaveLength(0);
+    expect(document.querySelector(".user-cell-content")!.textContent).toBe("123");
+    expect(document.querySelectorAll(".user-cell-attachments .user-cell-attachment-chip")).toHaveLength(3);
+    expect(document.querySelector(".user-cell-attachments")!.textContent).toContain("电脑");
+    expect(document.querySelector(".user-cell-attachments")!.textContent).toContain("Playwright CLI Skill");
+    expect(document.querySelector(".user-cell-attachments")!.textContent).toContain("继续完成 MiniCode UI 复刻");
+    expect(document.querySelector(".user-cell-bubble")!.textContent).not.toContain("plugin://");
+    expect(await useAppStore.getState().recallMessage(restored.id)).toBe(true);
+    expect(useAppStore.getState()).toMatchObject({ draft: display, selectedMentions: [references[0], references[2]], selectedSkills: [references[1]] });
+  });
+
+  it("keeps a references-only input above the transcript bubble without showing serialized wrappers or an empty bubble", () => {
+    const reference = { kind: "plugin" as const, name: "电脑", configName: "computer-use@runtime", path: "plugin://computer-use@runtime" };
+    const [message] = hydrateMessages([{ id: "only-reference", role: "user", content: composerReferenceMarkdown(reference), context_refs: [reference] }]);
+    render(<UserMessageCell cell={projectMessagesToTurns([message], false)[0].userCell!} conversationId="unlisted-history-owner" isTranscriptMode />);
+    expect(document.querySelector(".user-cell-attachments")!.textContent).toContain("电脑");
+    expect(document.querySelector(".user-cell-bubble")).toBeNull();
+    expect(document.querySelector('img[src*="/api/plugins/asset"]')).toBeNull();
+  });
   it("round trips ordinary Diff comments into a readonly count preview and restores them separately on recall", async () => {
     const comment: DiffComment = { type: "comment", content: [{ content_type: "text", text: "只改这个旧行范围" }],
       position: { path: "src/app.ts", side: "left", line: 103, start_line: 100 },

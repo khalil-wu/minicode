@@ -7,6 +7,7 @@ import { useAppStore } from "../stores";
 import type { ComposerSelection } from "./inputSelection";
 import { RichComposerEditor, type ComposerInputHandle } from "./RichComposerEditor";
 import type { RichComposerDocument } from "./rich-composer-document";
+import type { ComposerReferenceInsertion, InlineComposerReference } from "./composer-references";
 
 interface Props {
   value: string;
@@ -14,6 +15,9 @@ interface Props {
   rich?: boolean;
   richDocument?: RichComposerDocument;
   documentKey?: string;
+  references?: InlineComposerReference[];
+  referenceInsertion?: ComposerReferenceInsertion;
+  workspaceRoot?: string;
   onSelectionChange?: (v: string, selection: ComposerSelection) => void;
   selectionRequest?: ComposerSelection;
   onSubmit: () => void | Promise<void>;
@@ -66,6 +70,9 @@ export const ComposerTextarea = ({
   rich = false,
   richDocument,
   documentKey,
+  references,
+  referenceInsertion,
+  workspaceRoot,
 }: Props) => {
   const { t: tr } = useI18n();
   const draftsReady = useAppStore(state => state.composerDraftsReady);
@@ -188,7 +195,7 @@ export const ComposerTextarea = ({
       }
     }
     if (e.key === "Backspace" && ref.current!.selectionStart === 0 && ref.current!.selectionEnd === 0) {
-      if (skillTokens.length > 0) {
+      if (!rich && skillTokens.length > 0) {
         e.preventDefault();
         onRemoveLastSkill?.();
         return;
@@ -223,7 +230,7 @@ export const ComposerTextarea = ({
     }
   };
 
-  const hasContextPrefix = Boolean(commandLabel || skillTokens.length > 0);
+  const hasContextPrefix = Boolean(commandLabel || !rich && skillTokens.length > 0);
   const textarea = (
     <textarea
       disabled={!draftsReady}
@@ -277,7 +284,7 @@ export const ComposerTextarea = ({
             <X size={14} className="shrink-0 opacity-[0.62]" />
           </button>
         )}
-        {skillTokens.map((skill) => (
+        {!rich && skillTokens.map((skill) => (
           <span
             key={skill.name}
             className="composer-skill-token"
@@ -294,9 +301,10 @@ export const ComposerTextarea = ({
         ))}
       </div>}
       {rich ? <RichComposerEditor key={documentKey} ref={ref} value={value} document={richDocument} disabled={!draftsReady} plainTextMode={plainTextMode}
+        references={references} referenceInsertion={referenceInsertion} workspaceRoot={workspaceRoot} conversationId={conversationId}
         placeholder={placeholder ?? tr("随心输入")} ariaLabel={ariaLabel ?? tr("消息输入")}
         enterBehavior={sendShortcut === "mod-enter" ? "cmdAlways" : sendShortcut}
-        initialSelection={selectionRequest ?? selectionMemory.current} initialFocus={focusedRef.current}
+        initialSelection={selectionRequest ?? richDocument?.selection ?? selectionMemory.current} initialFocus={focusedRef.current}
         onFocusChange={focused => { focusedRef.current = focused; }}
         onChange={(next, selection, document) => { selectionMemory.current = selection; onChange(next, selection, document); }}
         onSelectionChange={rememberSelection}

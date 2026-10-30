@@ -13,7 +13,7 @@ import type { SettingsSkill } from "./SkillDetailsDialog";
 
 export type SkillsSettingsPayload = { skills: SettingsSkill[]; plugin_skills: SettingsSkill[]; available_skills: SkillInfo[]; workspace_root: string };
 
-export function useSkillSettings(active: boolean, onSkillsChange?: (count: number) => void) {
+export function useSkillSettings(active: boolean, onSkillsChange?: (count: number) => void, includeProjects = false) {
   const { t } = useI18n();
   const workspaceRoot = useAppStore(state => state.workingDirectory);
   const [skills, setSkills] = useState<SettingsSkill[]>([]);
@@ -29,7 +29,8 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
   useEffect(() => { setSkills([]); setPluginSkills([]); setError(""); }, [workspaceRoot]);
   const receive = useCallback((payload: SkillsSettingsPayload) => {
     const normalize = (skill: SettingsSkill): SettingsSkill => ({
-      ...normalizeSkillInfo(skill, payload.workspace_root)!, path: skill.path, enabled: skill.enabled, uninstall_name: skill.uninstall_name,
+      ...normalizeSkillInfo(skill, skill.catalog_scope?.workspace_root ?? payload.workspace_root)!,
+      path: skill.path, enabled: skill.enabled, uninstall_name: skill.uninstall_name, catalog_scope: skill.catalog_scope,
     });
     setSkills(payload.skills.map(normalize));
     setPluginSkills(payload.plugin_skills.map(normalize));
@@ -44,7 +45,7 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
       && workspaceRootsEqual(root, useAppStore.getState().workingDirectory) && extensionSettingsOwnerMatches(owner);
     setLoading(true); setError("");
     try {
-      const response = await fetchWithTimeout(`${owner.base}/api/skills/settings?workspace_root=${encodeURIComponent(root)}`, {
+      const response = await fetchWithTimeout(`${owner.base}/api/skills/settings?workspace_root=${encodeURIComponent(root)}${includeProjects ? "&include_projects=true" : ""}`, {
         headers: authHeaders(), cache: "no-store", signal: controller.signal,
       });
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), t("读取技能设置失败")));
@@ -53,7 +54,7 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
     } catch (cause) {
       if (ownsRead()) setError(cause instanceof Error ? cause.message : String(cause));
     } finally { if (ownsRead()) setLoading(false); }
-  }, [receive, t]);
+  }, [includeProjects, receive, t]);
   useEffect(() => { if (active) void reload(); return () => request.current?.abort(); }, [active, workspaceRoot, reload]);
   useEffect(() => subscribeExtensionSettingsChanges("skills", source, () => {
     request.current?.abort();
@@ -73,7 +74,8 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
     if (pending.current) return;
     pending.current = true;
     setPendingPath(skill.path);
-    const root = workspaceRoot;
+    const pageRoot = workspaceRoot;
+    const root = skill.catalog_scope?.workspace_root ?? pageRoot;
     const owner = captureExtensionSettingsOwner();
     const enabled = !skill.enabled;
     try {
@@ -84,8 +86,8 @@ export function useSkillSettings(active: boolean, onSkillsChange?: (count: numbe
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), t("更新技能设置失败")));
       const payload = await settingsCommitted(owner);
       if (extensionSettingsOwnerMatches(owner)) {
-        if (!workspaceRootsEqual(root, useAppStore.getState().workingDirectory)) pushToast(`${t("已保存")} · ${skill.display_name || skill.name}`, "success");
-        else if (payload && workspaceRootsEqual(payload.workspace_root, root)
+        if (!workspaceRootsEqual(pageRoot, useAppStore.getState().workingDirectory)) pushToast(`${t("已保存")} · ${skill.display_name || skill.name}`, "success");
+        else if (payload && workspaceRootsEqual(payload.workspace_root, pageRoot)
           && [...payload.skills, ...payload.plugin_skills].find(item => item.path === skill.path)?.enabled !== enabled) {
           pushToast(t("技能设置已保存，但当前配置尚未生效。"), "warning");
         }

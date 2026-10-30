@@ -1,6 +1,5 @@
 import { useI18n, type Translate } from "../i18n";
-import { AtSign, Blocks, Command, Folder, RefreshCw } from "lucide-react";
-import { BrandIcon } from "../components/BrandIcon";
+import { AtSign, Command, Folder, RefreshCw } from "lucide-react";
 import { fileIcon } from "../lib/file-icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
@@ -12,12 +11,15 @@ import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./me
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import { useComposerPlugins } from "./useComposerPlugins";
 import { recentGuardianDenials, useGuardianApprovalState } from "../chat/guardianApprovalState";
+import { ComposerReferenceIcon } from "./ComposerReferenceIcon";
+import { composerPluginReference, type InlineComposerReference } from "./composer-references";
+import type { ConversationMeta } from "../stores/types";
 
 interface Props {
   open: boolean;
   kind: "slash" | "mention" | "skill";
   filter?: string;
-  onSelect: (value: string) => void;
+  onSelect: (value: string, reference?: InlineComposerReference) => void;
   placement?: "above" | "below";
   workspaceRoot?: string;
 }
@@ -27,7 +29,7 @@ type FileItem = MentionFileItem;
 interface MenuItem {
   name: string;
   description: string;
-  type?: "file" | "folder" | "plugin" | "skill" | "command" | "argument";
+  type?: "file" | "folder" | "plugin" | "skill" | "command" | "argument" | "conversation";
   path?: string;
   section?: string;
   keywords?: string[];
@@ -40,6 +42,7 @@ interface MenuItem {
   defaultPrompt?: string;
   skillPath?: string;
   marketplace?: string;
+  reference?: InlineComposerReference;
 }
 
 const MENTION_SEARCH_DEBOUNCE_MS = 150;
@@ -47,6 +50,7 @@ const MENTION_CACHE_LIMIT = 80;
 const SLASH_MENU_LIMIT = 18;
 const ROOT_SLASH_SKILL_PREVIEW_LIMIT = 6;
 const NO_GUARDIAN_MESSAGES = [] as const;
+const NO_CONVERSATIONS: ConversationMeta[] = [];
 
 const rememberMentionResults = (cache: Map<string, FileItem[]>, key: string, results: FileItem[]) => {
   if (!cache.has(key) && cache.size >= MENTION_CACHE_LIMIT) {
@@ -73,6 +77,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
   const availableSkills = useAppStore((s) => s.availableSkills);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
   const workingDirectory = useAppStore((s) => workspaceRoot ?? s.workingDirectory);
+  const conversations = useAppStore(s => open && kind === "mention" ? s.conversations : NO_CONVERSATIONS);
   const { plugins: pluginResults, loading: pluginLoading, error: pluginLoadError, refresh: refreshPlugins } = useComposerPlugins(open && kind === "mention", workingDirectory);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
   const slashFilter = filter ?? "";
@@ -172,9 +177,11 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
     ? fuzzyFilter(
         pluginResults
           .filter((plugin) => plugin.enabled)
-          .map((plugin) => ({
-            name: `@${plugin.displayName || plugin.name}`,
-            displayName: plugin.displayName || plugin.name,
+          .map((plugin) => {
+            const reference = composerPluginReference(plugin, { computerUse: tr("电脑") });
+            return {
+            name: `@${reference.name}`,
+            displayName: reference.name,
             description: plugin.shortDescription || plugin.description || [
               plugin.skill_count ? tr("{count} 个技能", { count: plugin.skill_count }) : "",
               plugin.mcp_server_count ? tr("{count} 个 MCP 服务", { count: plugin.mcp_server_count }) : "",
@@ -183,11 +190,19 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
             path: `plugin:${encodeURIComponent(plugin.id)}`,
             marketplace: plugin.marketplace,
             section: tr("插件"),
-          })),
+            keywords: [plugin.name],
+            reference,
+          }; }),
         mentionSearchQuery,
-        (plugin) => [plugin.name, plugin.displayName, plugin.description].filter(Boolean).join(" "),
+        (plugin) => [plugin.name, plugin.displayName, plugin.description, ...(plugin.keywords ?? [])].filter(Boolean).join(" "),
       ).slice(0, 8)
     : [];
+  const mentionConversationItems: MenuItem[] = kind === "mention" ? fuzzyFilter(conversations
+    .filter(conversation => conversation.id !== guardianOwner && !conversation.archived)
+    .map(conversation => ({ name: conversation.title, description: conversation.workspaceRoot || "", type: "conversation" as const,
+      section: tr("聊天"), path: `conversation:${conversation.id}`, reference: { kind: "url" as const, name: conversation.title,
+        path: `minicode://conversation?conversation_id=${encodeURIComponent(conversation.id)}` } })), mentionSearchQuery,
+    conversation => conversation.name).slice(0, 8) : [];
 
   useEffect(() => {
     setActiveIndex(0);
@@ -340,7 +355,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
       ? slashItems.slice(0, SLASH_MENU_LIMIT)
       : kind === "skill"
         ? explicitSkillItems
-      : [...mentionPluginItems, ...fileResults].slice(0, 18);
+      : [...mentionPluginItems, ...fileResults, ...mentionConversationItems].slice(0, 18);
 
   useEffect(() => {
     if (!open) return;
@@ -373,7 +388,11 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
         setActiveIndex((i) => (i - 1 + items.length) % items.length);
       } else if (e.key === "Enter" || e.key === "Tab") {
         e.preventDefault();
-        if (items[activeIndex]) onSelect(items[activeIndex].path ?? items[activeIndex].name);
+        if (items[activeIndex]) {
+          const item = items[activeIndex];
+          if (item.reference) onSelect(item.path ?? item.name, item.reference);
+          else onSelect(item.path ?? item.name);
+        }
       } else if (e.key === "Escape") {
         e.preventDefault();
         onSelect("");
@@ -443,7 +462,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
                   role="option"
                   aria-selected={i === activeIndex}
                   onMouseEnter={() => setActiveIndex(i)}
-                  onClick={() => onSelect(it.path ?? it.name)}
+                  onClick={() => it.reference ? onSelect(it.path ?? it.name, it.reference) : onSelect(it.path ?? it.name)}
                   className="composer-menu-item"
                   data-active={i === activeIndex ? "true" : "false"}
                   data-selected={it.active ? "true" : "false"}
@@ -453,7 +472,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
                   }}
                 >
                   <span style={menuIconStyle}>
-                    {renderMenuIcon(it)}
+                    {renderMenuIcon(it, workingDirectory)}
                   </span>
                   <span style={menuBodyStyle}>
                     <span style={menuTitleRowStyle}>
@@ -599,11 +618,11 @@ const activeBadgeStyle: React.CSSProperties = {
   fontFamily: "var(--font-ui)",
 };
 
-function renderMenuIcon(item: MenuItem) {
+function renderMenuIcon(item: MenuItem, workspaceRoot: string) {
   if (item.type === "folder") return <Folder size={14} />;
   if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 16, className: "composer-context-icon-svg" });
-  if (item.type === "skill") return <BrandIcon value={item.displayName || item.name} iconUrl={item.icon} inferBrand={false} fallback="skill" size={14} />;
-  if (item.type === "plugin") return <Blocks size={14} />;
+  if (item.type === "skill") return <ComposerReferenceIcon reference={{ kind: "skill", name: item.name, icon: item.icon }} workspaceRoot={workspaceRoot} size={16} />;
+  if (item.reference) return <ComposerReferenceIcon reference={item.reference} workspaceRoot={workspaceRoot} size={16} />;
   if (item.type === "argument") return <AtSign size={14} />;
   return <Command size={14} />;
 }

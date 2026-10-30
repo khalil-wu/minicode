@@ -1,7 +1,7 @@
 import { useEffect, useId, useState } from "react";
 import { createPortal } from "react-dom";
 import { MoreHorizontal, X } from "../lib/icons";
-import { BrandIcon } from "../components/BrandIcon";
+import { SkillIcon } from "../components/SkillIcon";
 import { ContextMenu } from "../components/ContextMenu";
 import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -11,15 +11,17 @@ import type { SkillInfo } from "../stores/types";
 import { copyText } from "../lib/clipboard";
 import "./SkillDetailsDialog.css";
 
-export type SettingsSkill = SkillInfo & { path: string; enabled: boolean; uninstall_name?: string | null };
+export type SettingsSkill = SkillInfo & { path: string; enabled: boolean; uninstall_name?: string | null;
+  catalog_scope?: { workspace_root: string; group_id: string; group_name: string } };
 
-export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = false, canToggle = true, canOpen, canReveal, onOpen, onReveal, onToggle, onUninstall, onTry, onClose }: {
+export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = false, canToggle = true, canOpen, canReveal, onOpen, onReveal, onToggle, onUninstall, onTry, onClose, publicPreview }: {
   skill: SettingsSkill; workspaceRoot: string; pending: boolean;
   canOpen: boolean; canReveal: boolean; onOpen: () => void; onReveal: () => void;
   readOnly?: boolean;
   canToggle?: boolean;
   onToggle: () => void; onTry: () => void; onClose: () => void;
   onUninstall?: () => void;
+  publicPreview?: { name: string; iconAsset?: string; installed: boolean; onInstall: () => void };
 }) {
   const { t } = useI18n();
   const titleId = useId();
@@ -35,7 +37,8 @@ export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = f
     const load = async () => {
       try {
         const query = new URLSearchParams({ skill_path: skill.path, workspace_root: workspaceRoot });
-        const response = await fetchWithTimeout(`${apiBase()}/api/skills/detail?${query}`, {
+        const url = publicPreview ? `${apiBase()}/api/skills/marketplace/${encodeURIComponent(publicPreview.name)}` : `${apiBase()}/api/skills/detail?${query}`;
+        const response = await fetchWithTimeout(url, {
           headers: authHeaders(), cache: "no-store", signal: controller.signal,
         });
         if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), t("读取技能详情失败")));
@@ -47,7 +50,7 @@ export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = f
     };
     void load();
     return () => controller.abort();
-  }, [skill.path, workspaceRoot, t, reload]);
+  }, [skill.path, workspaceRoot, publicPreview?.name, t, reload]);
   const name = skill.display_name || skill.name;
   return createPortal(<div className="skill-details-backdrop" onClick={onClose}>
     <div ref={dialog} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="skill-details-dialog"
@@ -55,7 +58,7 @@ export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = f
         if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); onClose(); }
       }}>
       <header className="skill-details-toolbar">
-        <BrandIcon value={name} inferBrand={false} fallback="skill" size={40} iconUrl={skill.icon_large || skill.icon} />
+        <SkillIcon value={name} size={40} iconUrl={skill.icon_large || skill.icon} iconAsset={publicPreview?.iconAsset} />
         <div>{!readOnly && <>{canToggle && <button type="button" className="settings-toggle" role="switch" aria-checked={skill.enabled} data-active={skill.enabled}
           disabled={pending} aria-label={`${skill.enabled ? t("停用") : t("启用")} ${name}`} onClick={onToggle}><span /></button>}
           <button type="button" className="skill-details-more" aria-label={t("技能更多操作")} title={t("技能更多操作")}
@@ -69,7 +72,8 @@ export function SkillDetailsDialog({ skill, workspaceRoot, pending, readOnly = f
         {detail && <div className="skill-details-body"><MarkdownRenderer content={detail.content.replace(/^# [^\r\n]*(?:\r?\n|$)/, "")} workspaceRoot={skill.path.replace(/[/\\][^/\\]+$/, "")} /></div>}
       </div>
       <footer>{!readOnly && onUninstall && <button type="button" className="skill-details-uninstall settings-action-button" disabled={pending} onClick={onUninstall}>{t("卸载")}</button>}
-        {readOnly ? <button type="button" className="plugin-primary-button" onClick={onClose}>{t("关闭")}</button>
+        {publicPreview ? <button type="button" className="plugin-primary-button" disabled={pending || publicPreview.installed} onClick={publicPreview.onInstall}>{publicPreview.installed ? t("已安装") : t("安装")}</button>
+        : readOnly ? <button type="button" className="plugin-primary-button" onClick={onClose}>{t("关闭")}</button>
         : <button type="button" className="plugin-primary-button" disabled={!skill.enabled || skill.user_invocable === false || pending} onClick={onTry}>{t("立即试用")}</button>}</footer>
       {!readOnly && menu && <ContextMenu position={{ x: 0, y: 0 }} anchor={menu} onClose={() => setMenu(null)} ariaLabel={t("技能更多操作")} items={[
         { label: t("打开"), disabled: !canOpen, onClick: onOpen },

@@ -6,6 +6,7 @@ import { openWebTarget } from "./openWebTarget";
 import { returnToBrowserPage } from "./openWebInBrowser";
 
 export function contextReferenceLabel(ref: MessageContextRef): string {
+  if (ref.kind === "skill") return ref.displayName || ref.name;
   if (ref.kind !== "file" || !ref.range) return ref.name;
   const { startLineNumber, endLineNumber, endColumn } = ref.range;
   const last = endLineNumber > startLineNumber && endColumn === 1 ? endLineNumber - 1 : endLineNumber;

@@ -1,5 +1,6 @@
 import { useAppStore } from "../stores";
 import type { SkillInfo } from "../stores/types";
+import { composerSkillReference } from "../composer/composer-references";
 
 export const selectSkillForComposer = (skill: SkillInfo, { prefillDefaultPrompt = false }: { prefillDefaultPrompt?: boolean } = {}) => {
   const state = useAppStore.getState();
@@ -8,7 +9,7 @@ export const selectSkillForComposer = (skill: SkillInfo, { prefillDefaultPrompt 
   const skillName = skill.name.toLowerCase();
   const alreadyMentioned = normalizedPrompt.includes(`[$${skillName}](`)
     || (!skill.path && normalizedPrompt.includes(`$${skillName}`));
-  if (!alreadyMentioned) state.addSelectedSkill({ name: skill.name, path: skill.path, description: skill.description, sourceLevel: skill.source_level });
+  if (!alreadyMentioned) state.addSelectedSkill(composerSkillReference(skill));
   if (prompt) state.setDraft(state.draft ? `${state.draft}\n${prompt}` : prompt);
   const chat = state.panelSlots.find((slot) => slot.kind === "chat");
   if (chat) {

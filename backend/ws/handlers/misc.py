@@ -1141,10 +1141,12 @@ async def handle_skills_install(session: "WebSocketSession", data: dict[str, Any
 
 
 async def handle_skills_marketplace_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    from backend.async_cleanup import to_thread_cancel_safe
     from backend.skills.marketplace import list_extensions_marketplace
     from backend.services.skills_api_service import installed_skill_names
 
-    payload = await list_extensions_marketplace(installed_names=installed_skill_names(session.skill_manager))
+    installed_names = await to_thread_cancel_safe(installed_skill_names, session.skill_manager)
+    payload = await list_extensions_marketplace(installed_names=installed_names)
     marketplace_skills = payload["skills"]
     await session.send_payload({"type": "skills.marketplace.list", "skills": marketplace_skills}, log_context="skills.marketplace.list")
     return True

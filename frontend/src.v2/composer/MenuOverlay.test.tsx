@@ -25,6 +25,7 @@ vi.mock("../protocol/workspace", () => ({
 import { useAppStore } from "../stores";
 import { MenuOverlay } from "./MenuOverlay";
 import { __clearMentionFileCacheForTests } from "./mentionCache";
+import { pluginAssetResourceUrlWithToken } from "../protocol/api";
 
 describe("MenuOverlay mentions", () => {
   beforeEach(() => {
@@ -47,10 +48,54 @@ describe("MenuOverlay mentions", () => {
     __clearMentionFileCacheForTests();
     useAppStore.setState({
       workingDirectory: "",
+      conversations: [],
       selectedSkills: [],
       availableSkills: [],
       slashCommands: [],
     });
+  });
+
+  it("keeps the actual plugin label, stable icon descriptor and model identity through the mention picker", async () => {
+    const plugin = { id: "computer-use@runtime", name: "figma", displayName: "电脑", marketplace: "runtime", enabled: true,
+      path: "C:/plugins/computer-use", iconVariant: "composer", iconVariants: ["composer", "logo", "logo-dark"] };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ plugins: [plugin] })));
+    fsListTree.mockResolvedValue([]);
+    useAppStore.setState({ workingDirectory: "C:/owner", resolvedTheme: "dark" });
+    const select = vi.fn();
+    render(<MenuOverlay open kind="mention" filter="@" onSelect={select} />);
+    const item = await screen.findByRole("option", { name: /@电脑/ });
+    expect(item.querySelector("img")?.getAttribute("src")).toBe(pluginAssetResourceUrlWithToken(plugin.path, "composer", undefined, "C:/owner"));
+    fireEvent.click(item);
+    expect(select).toHaveBeenCalledWith(`plugin:${encodeURIComponent(plugin.id)}`, expect.objectContaining({
+      kind: "plugin", name: "电脑", configName: plugin.id, path: `plugin://${plugin.id}`, pluginPath: plugin.path, iconVariant: "composer",
+    }));
+  });
+
+  it("selects an existing chat's actual title and original local deep link as URL context", async () => {
+    fsListTree.mockResolvedValue([]);
+    useAppStore.setState({ conversationId: "current", conversations: [{ id: "current", title: "Current" },
+      { id: "other-chat", title: "继续完成 MiniCode UI 复刻", workspaceRoot: "C:/other" }] });
+    const select = vi.fn();
+    render(<MenuOverlay open kind="mention" filter="@复刻" onSelect={select} />);
+    fireEvent.click(await screen.findByRole("option", { name: /继续完成 MiniCode UI 复刻/ }));
+    expect(select).toHaveBeenCalledWith("conversation:other-chat", { kind: "url", name: "继续完成 MiniCode UI 复刻", path: "minicode://conversation?conversation_id=other-chat" });
+  });
+
+  it("localizes only the actually declared bundled Computer Use identity and preserves third-party names", async () => {
+    useAppStore.setState({ workingDirectory: "C:/namespace-owner" });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ plugins: [
+      { id: "computer-use@minicode-bundled", name: "computer-use", displayName: "Computer Use", marketplace: "minicode-bundled", enabled: true },
+      { id: "computer-use@personal", name: "computer-use", displayName: "我的电脑插件", marketplace: "personal", enabled: true },
+      { id: "browser@personal", name: "browser", displayName: "自定义浏览器", marketplace: "personal", enabled: true },
+    ] })));
+    fsListTree.mockResolvedValue([]);
+    const select = vi.fn();
+    render(<MenuOverlay open kind="mention" filter="@" onSelect={select} />);
+    fireEvent.click(await screen.findByRole("option", { name: /@电脑/ }));
+    expect(select).toHaveBeenLastCalledWith(`plugin:${encodeURIComponent("computer-use@minicode-bundled")}`, expect.objectContaining({ name: "电脑", configName: "computer-use@minicode-bundled" }));
+    fireEvent.click(screen.getByRole("option", { name: /@我的电脑插件/ }));
+    expect(select).toHaveBeenLastCalledWith(`plugin:${encodeURIComponent("computer-use@personal")}`, expect.objectContaining({ name: "我的电脑插件", configName: "computer-use@personal" }));
+    expect(screen.getByRole("option", { name: /@自定义浏览器/ })).toBeTruthy();
   });
 
   afterEach(() => {

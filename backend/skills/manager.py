@@ -370,10 +370,11 @@ class SkillManager:
 
         return [self._public_meta(meta) for meta in self._loader.list_metas()]
 
-    def list_settings(self, *, source_level: str = "user") -> list[dict[str, Any]]:
+    def list_settings(self, *, source_level: str | None = None) -> list[dict[str, Any]]:
         self._ensure_discovered()
         return [{**self._public_meta(meta), "enabled": enabled}
-            for meta, enabled in self._loader.list_settings_metas() if meta.source_level == source_level]
+            for meta, enabled in self._loader.list_settings_metas()
+            if source_level is None or meta.source_level == source_level]
 
     def read_skill_detail(self, source_path: str | Path) -> dict[str, Any] | None:
         self._ensure_discovered()

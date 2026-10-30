@@ -19,7 +19,6 @@ export function InstalledSkillDetailsDialog({ skill, workspaceRoot, pending, rea
   const mounted = useRef(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   return <SkillDetailsDialog skill={skill} workspaceRoot={workspaceRoot} pending={pending} readOnly={readOnly}
-    canToggle={skill.source_level === "user" || skill.source_level === "plugin"}
     onUninstall={!readOnly && skill.source_level === "user" && skill.uninstall_name && onUninstall
       ? () => { void onUninstall().then(removed => { if (removed && mounted.current && selected.current === owner) onClose(); }); } : undefined}
     canOpen={!window.__MINICODE_RUNTIME__?.remoteHost} canReveal={isDesktop() && !window.__MINICODE_RUNTIME__?.remoteHost}
@@ -31,5 +30,11 @@ export function InstalledSkillDetailsDialog({ skill, workspaceRoot, pending, rea
       }
     }}
     onReveal={() => { void revealRegisteredSkill({ path: skill.path, workspaceRoot })?.catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); }}
-    onTry={() => { onClose(); selectSkillForComposer(skill, { prefillDefaultPrompt: true }); }} />;
+    onTry={() => {
+      onClose();
+      const state = useAppStore.getState();
+      state.startConversationDraft({ forceNew: true, workspaceRoot: workspaceRoot || undefined,
+        bindWorkspace: Boolean(workspaceRoot), appMode: state.appMode });
+      selectSkillForComposer(skill, { prefillDefaultPrompt: true });
+    }} />;
 }

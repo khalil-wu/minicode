@@ -215,17 +215,17 @@ export const startConversationDraft = (options: ConversationDraftOptions = {}): 
   const key = conversationDraftTargetKey(workspaceRoot, options.sidebarSectionId);
   const savedId = state.homeConversationDraftIds[key];
   const saved = savedId ? state.conversationDrafts[savedId] : undefined;
-  if (saved && !saved.conversationId && !materializations.has(saved.id)) { selectConversationDraft(saved.id); return saved.id; }
+  if (!options.forceNew && saved && !saved.conversationId && !materializations.has(saved.id)) { selectConversationDraft(saved.id); return saved.id; }
   if (state.conversationId) state.snapshotAgentState(state.conversationId);
   state.snapshotWorkbenchState();
   const context = newConversationDraftContext(state, workspaceRoot, bindWorkspace, options);
-  transferDiffComments(getDiffCommentScope(null, workspaceRoot), getDiffCommentScope(context.id, workspaceRoot));
+  if (!options.forceNew) transferDiffComments(getDiffCommentScope(null, workspaceRoot), getDiffCommentScope(context.id, workspaceRoot));
   useAppStore.setState(current => {
     const bodies = { ...current.workspaceComposerDrafts };
     const legacyKey = composerWorkspaceKey(workspaceRoot);
-    const body = bodies[legacyKey] ?? (!current.conversationId && !current.activeConversationDraftId
+    const body = options.forceNew ? emptyComposerDraft() : bodies[legacyKey] ?? (!current.conversationId && !current.activeConversationDraftId
       && workspaceRootsEqual(current.workingDirectory, workspaceRoot) ? composerDraftOf(current) : emptyComposerDraft());
-    delete bodies[legacyKey];
+    if (!options.forceNew) delete bodies[legacyKey];
     bodies[context.id] = body;
     return { conversationDrafts: { ...current.conversationDrafts, [context.id]: context },
       workspaceComposerDrafts: bodies, homeConversationDraftIds: { ...current.homeConversationDraftIds, [key]: context.id } };

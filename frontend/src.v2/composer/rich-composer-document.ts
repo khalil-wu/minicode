@@ -1,11 +1,14 @@
-import { Schema, type Mark, type Node } from "prosemirror-model";
+import { Fragment, Schema, type Mark, type Node } from "prosemirror-model";
 import { defaultMarkdownParser, defaultMarkdownSerializer, MarkdownParser, MarkdownSerializer, schema as markdownSchema, type MarkdownSerializerState } from "prosemirror-markdown";
 import { tableNodes } from "prosemirror-tables";
+import { composerReferenceFromLink, composerReferenceKey, composerReferenceLabel, composerReferenceMarkdown, type InlineComposerReference } from "./composer-references";
+import type { ComposerSelection } from "./inputSelection";
 
 export interface RichComposerDocument {
   markdown: string;
   document: ReturnType<Node["toJSON"]>;
   plainTextMode?: boolean;
+  selection?: ComposerSelection;
 }
 
 // Remote pasted images remain document data. They must not bypass the existing
@@ -22,7 +25,13 @@ export const richComposerSchema = new Schema({
     toDOM: node => node.attrs.checked === null ? ["li", 0] : ["li", { "data-checked": String(node.attrs.checked) },
       ["input", { type: "checkbox", checked: node.attrs.checked ? "checked" : null, contenteditable: "false", "aria-label": node.textContent }],
       ["div", 0]],
-  }).append(tableNodes({ tableGroup: "block", cellContent: "block+", cellAttributes: {} })),
+  }).append(tableNodes({ tableGroup: "block", cellContent: "block+", cellAttributes: {} })).addToEnd("context_mention", {
+    inline: true, group: "inline", atom: true,
+    attrs: { reference: {} },
+    leafText: node => composerReferenceMarkdown(node.attrs.reference),
+    parseDOM: [{ tag: "span[data-composer-reference]", getAttrs: dom => ({ reference: JSON.parse((dom as HTMLElement).getAttribute("data-composer-reference")!) }) }],
+    toDOM: node => ["span", { "data-composer-reference": JSON.stringify(node.attrs.reference), contenteditable: "false" }, composerReferenceLabel(node.attrs.reference)],
+  }),
   marks: markdownSchema.spec.marks.update("link", {
     ...markdownSchema.marks.link.spec,
     attrs: { ...markdownSchema.marks.link.spec.attrs, automatic: { default: false } },
@@ -33,6 +42,10 @@ export const richComposerSchema = new Schema({
 });
 
 const tokenizer = defaultMarkdownParser.tokenizer.enable(["strikethrough", "linkify", "table"]).set({ linkify: true });
+const normalizeLink = tokenizer.normalizeLink, validateLink = tokenizer.validateLink;
+tokenizer.normalizeLink = link => /^(?:plugin:|codex(?:-dev)?:|minicode:|file:|[a-z]:[/\\])/i.test(link) || !/^[a-z][a-z\d+.-]*:/i.test(link)
+  ? link : normalizeLink(link);
+tokenizer.validateLink = link => /^file:/i.test(link) || validateLink(link);
 tokenizer.core.ruler.after("inline", "composer_tasks_and_cells", state => {
   const items: Array<{ token: typeof state.tokens[number]; first: boolean }> = [];
   const tokens: typeof state.tokens = [];
@@ -238,6 +251,7 @@ function richProjection(document: Node, preserveParagraphSpacing = false): Markd
   };
   const nodeSerializers: MarkdownSerializer["nodes"] = {
     ...defaultMarkdownSerializer.nodes,
+    context_mention: (state, node) => state.write(composerReferenceMarkdown(node.attrs.reference)),
     text: (state, node) => state.text(node.text!, !node.marks.some(mark => mark.type.name === "link" && mark.attrs.automatic)),
     list_item: (state, node) => {
       if (node.attrs.checked !== null) state.write(node.attrs.checked ? "[x] " : "[ ] ");
@@ -320,7 +334,40 @@ function projectionOf(document: Node, plainTextMode: boolean): MarkdownProjectio
 
 export function literalComposerDocument(value: string): Node {
   return richComposerSchema.node("doc", null, value.split("\n").map(line =>
-    richComposerSchema.node("paragraph", null, line ? richComposerSchema.text(line) : undefined)));
+    richComposerSchema.node("paragraph", null, literalInlineReferences(line))));
+}
+
+function literalInlineReferences(value: string): Node[] {
+  const nodes: Node[] = [];
+  let end = 0;
+  for (const match of value.matchAll(/\[((?:\\.|[^\]\\\n])+)\]\((<[^>\n]*>|(?:\\.|[^)\n])*)\)/g)) {
+    const label = match[1].replace(/\\([\\[\]])/g, "$1");
+    const href = match[2].replace(/^<|>$/g, "").replace(/\\([\\()])/g, "$1");
+    const reference = composerReferenceFromLink(label, href);
+    if (!reference) continue;
+    if (match.index! > end) nodes.push(richComposerSchema.text(value.slice(end, match.index)));
+    nodes.push(richComposerSchema.nodes.context_mention.create({ reference }));
+    end = match.index! + match[0].length;
+  }
+  if (end < value.length) nodes.push(richComposerSchema.text(value.slice(end)));
+  return nodes;
+}
+
+export function convertComposerReferenceLinks(node: Node): Node {
+  if (node.isText) {
+    const link = node.marks.find(mark => mark.type.name === "link");
+    const reference = link && composerReferenceFromLink(node.text!, link.attrs.href);
+    return reference ? richComposerSchema.nodes.context_mention.create({ reference }) : node;
+  }
+  return node.isLeaf ? node : node.copy(Fragment.fromArray(node.content.content.map(convertComposerReferenceLinks)));
+}
+
+export function inlineComposerReferences(document: RichComposerDocument): InlineComposerReference[] {
+  const references = new Map<string, InlineComposerReference>();
+  richComposerSchema.nodeFromJSON(document.document).descendants(node => {
+    if (node.type.name === "context_mention") references.set(composerReferenceKey(node.attrs.reference), node.attrs.reference);
+  });
+  return [...references.values()];
 }
 
 export function serializeComposerDocument(document: Node, plainTextMode = false): string {
@@ -333,7 +380,7 @@ export function restoreComposerDocument(value: string, saved?: RichComposerDocum
 }
 
 export function parseComposerMarkdown(value: string): Node {
-  const parsed = richComposerParser.parse(value);
+  const parsed = convertComposerReferenceLinks(richComposerParser.parse(value));
   let formatted = false;
   parsed.descendants(node => {
     if (node.type.name !== "paragraph" && !node.isText || node.marks.length > 0) formatted = true;

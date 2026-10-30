@@ -6,11 +6,11 @@ import { promptDraftKey } from "../stores/prompt-drafts";
 import { deriveSendState } from "../lib/send-state";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { captureSteerTurnId } from "../lib/steer-command";
-import type { ComposerQuote, FollowUpBehavior, MessageAttachmentRef } from "../stores/types";
+import type { AppStore, ComposerQuote, FollowUpBehavior, MessageAttachmentRef } from "../stores/types";
 import { ContextChipRegion } from "./ActionChipRegion";
 import { AttachmentStrip } from "./AttachmentStrip";
 import { ComposerTextarea } from "./ComposerTextarea";
-import { appendComposerTokenAnchor, composerTokenAtSelection, removeComposerToken, type ComposerSelection } from "./inputSelection";
+import { appendComposerTokenAnchor, composerTokenAtSelection, type ComposerSelection } from "./inputSelection";
 import { MenuOverlay } from "./MenuOverlay";
 import { FooterRow } from "./FooterRow";
 import { ProjectScopePicker } from "./ProjectScopePicker";
@@ -57,10 +57,14 @@ import { emptyConversationWorkbenchState } from "../stores/ui-slice";
 import { emptyComposerDraft } from "../stores/composer-drafts";
 import { GoalBar } from "./GoalBar";
 import { enterComposerGoalMode, submitComposerGoal } from "./goal-state";
-import { hasRichComposerContent, type RichComposerDocument } from "./rich-composer-document";
+import { hasRichComposerContent, inlineComposerReferences, type RichComposerDocument } from "./rich-composer-document";
+import { composerSkillReference, type ComposerReferenceInsertion, type InlineComposerReference } from "./composer-references";
 
 let initialCatalogRequested = false;
 const CodeReviewMenu = lazy(() => import("./CodeReviewMenu").then(module => ({ default: module.CodeReviewMenu })));
+const selectedContextReferences = (state: Pick<AppStore, "richDraft" | "selectedMentions" | "selectedSkills">) => state.richDraft
+  ? [...inlineComposerReferences(state.richDraft), ...state.selectedMentions.filter(reference => reference.kind === "browser_annotation")]
+  : [...state.selectedMentions, ...state.selectedSkills];
 
 // Agent prompts and template slash commands share the context pipeline:
 // resolves the target conversation, uploads @mention/skill context attachments,
@@ -71,13 +75,10 @@ const buildOutgoingContext = async (requestedConversationId: string, tr: Transla
   const targetConversationId = String(
     requestedConversationId || stateAtSend.conversationId || "",
   ).trim();
-  const contextRefs = [
-    ...stateAtSend.selectedMentions,
-    ...stateAtSend.selectedSkills,
-  ];
+  const contextRefs = selectedContextReferences(stateAtSend);
   const comments = cloneDiffComments(submittedComments ?? readDiffCommentState(getDiffCommentScope(
     targetConversationId || stateAtSend.activeConversationDraftId, stateAtSend.workingDirectory)).comments);
-  const skillInvocations = buildSkillInvocationLine(stateAtSend.selectedSkills);
+  const skillInvocations = stateAtSend.richDraft ? "" : buildSkillInvocationLine(stateAtSend.selectedSkills);
   const contextPayload = await buildContextPayload(contextRefs);
   let nativeContext: Awaited<ReturnType<typeof buildContextNativeAttachments>> = {
     attachments: [] as Record<string, unknown>[],
@@ -168,7 +169,6 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const addSelectedMention = useAppStore((s) => s.addSelectedMention);
   const clearSelectedMentions = useAppStore((s) => s.clearSelectedMentions);
   const clearSelectedSkills = useAppStore((s) => s.clearSelectedSkills);
-  const addSelectedSkill = useAppStore((s) => s.addSelectedSkill);
   const removeSelectedSkill = useAppStore((s) => s.removeSelectedSkill);
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const selectedSkills = useAppStore((s) => s.selectedSkills);
@@ -214,6 +214,12 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const inputSelectionRef = useRef<ComposerSelection>({ start: draft.length, end: draft.length });
   const [selectionRequest, setSelectionRequest] = useState<ComposerSelection>();
+  const [referenceInsertion, setReferenceInsertion] = useState<{ owner: string; request: ComposerReferenceInsertion }>();
+  const inlineReferences = useMemo(() => [...selectedMentions.filter((reference): reference is Exclude<typeof reference, { kind: "browser_annotation" }> => reference.kind !== "browser_annotation"),
+    ...selectedSkills.map(skill => {
+      const metadata = skillCatalog.find(item => skill.path ? workspaceFilePathsEqual(item.path, skill.path, workingDirectory) : item.name === skill.name);
+      return metadata ? composerSkillReference(metadata) : skill;
+    })], [selectedMentions, selectedSkills, skillCatalog, workingDirectory]);
   const submittingRef = useRef(new Map<string, object>());
   const [submittingOwners, setSubmittingOwners] = useState<ReadonlySet<string>>(() => new Set());
   const submitting = submittingOwners.has(editorKey);
@@ -245,6 +251,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     historySavedDocumentRef.current = undefined;
     setHistoryOpen(false);
     setSelectionRequest(undefined);
+    setReferenceInsertion(undefined);
   }, [editorKey]);
   const hasReadyAttachment = useAppStore((s) => s.attachments.some((a) => a.status === "ready"));
   const hasComposerAttachments = useAppStore((s) => s.attachments.length > 0);
@@ -820,7 +827,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       return;
     }
 
-    const submittedContextRefs = [...capturedComposer.selectedMentions, ...capturedComposer.selectedSkills,
+    const submittedContextRefs = [...selectedContextReferences(capturedComposer),
       ...submittedComments.map(comment => ({ kind: "diff_comment" as const, name: comment.position.path,
         path: comment.position.path, comment }))];
     const submittedUserMessage = {
@@ -994,6 +1001,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   };
 
   const handleChange = (v: string, selection: ComposerSelection = { start: v.length, end: v.length }, rich?: RichComposerDocument) => {
+    setReferenceInsertion(undefined);
     if (reviewOwner && v !== reviewOwner.input) setReviewOwner(undefined);
     if (guardianApprovalOwner && v !== guardianApprovalOwner.input) setGuardianApprovalOwner(undefined);
     if (historyOpen) setHistoryOpen(false);
@@ -1003,12 +1011,23 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       const items = readPromptHistory(workingDirectory);
       if (v !== items[historyCursorRef.current]) historyCursorRef.current = -1;
     }
-    setDraft(v, rich);
+    if (rich) {
+      const references = inlineComposerReferences(rich);
+      useAppStore.setState(state => ({ draft: v, richDraft: v ? rich : undefined,
+        selectedMentions: [...references.filter((reference): reference is Exclude<InlineComposerReference, { kind: "skill" }> => reference.kind !== "skill"),
+          ...state.selectedMentions.filter(reference => reference.kind === "browser_annotation")],
+        selectedSkills: references.filter((reference): reference is Extract<InlineComposerReference, { kind: "skill" }> => reference.kind === "skill"),
+      }));
+    } else setDraft(v);
     refreshInputMenus(v, selection);
   };
 
   const refreshInputMenus = (v: string, selection: ComposerSelection) => {
     inputSelectionRef.current = selection;
+    const document = useAppStore.getState().richDraft;
+    if (document && (document.selection?.start !== selection.start || document.selection?.end !== selection.end)) {
+      useAppStore.setState({ richDraft: { ...document, selection } });
+    }
     if (reviewOwner && v === reviewOwner.input) return;
     if (selection.composing || selection.start !== selection.end) {
       closeMentionPanel(); closeSlashPanel(); setSkillPanelOpen(false); setMenuFilter(""); return;
@@ -1045,7 +1064,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
   };
 
-  const handleMenuSelect = (value: string) => {
+  const handleMenuSelect = (value: string, reference?: InlineComposerReference) => {
     if (!value) {
       closeSlashPanel();
       closeMentionPanel();
@@ -1055,6 +1074,11 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     }
 
     const selectedToken = composerTokenAtSelection(draft, inputSelectionRef.current);
+    const insertReference = (reference: InlineComposerReference, selection = selectedToken
+      ? { start: selectedToken.start, end: selectedToken.end } : inputSelectionRef.current) => {
+      setReferenceInsertion({ owner: editorKey, request: { reference, selection } });
+      setMentionResults([]); closeMentionPanel(); closeSlashPanel(); setSkillPanelOpen(false); setMenuFilter("");
+    };
     if (skillPanelOpen) {
       const encodedPath = value.match(/^skill-path:(.+)$/)?.[1];
       const encodedName = value.match(/^skill-name:(.+)$/)?.[1];
@@ -1066,14 +1090,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
           : item.name === skillName
       ));
       if (skill) {
-        addSelectedSkill({
-          name: skill.name,
-          path: skill.path,
-          description: skill.description,
-          sourceLevel: skill.source_level,
-        });
+        insertReference(composerSkillReference(skill));
       }
-      if (selectedToken?.kind === "skill") { setDraft(removeComposerToken(draft, selectedToken)); setSelectionRequest({ start: selectedToken.start, end: selectedToken.start }); }
       setSkillPanelOpen(false);
       setMenuFilter("");
       return;
@@ -1104,9 +1122,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         return;
       }
       if (selection.kind === "skill") {
-        addSelectedSkill(selection.skill);
+        const metadata = skillCatalog.find(item => selection.skill.path ? workspaceFilePathsEqual(item.path, selection.skill.path, workingDirectory) : item.name === selection.skill.name);
+        insertReference(metadata ? composerSkillReference(metadata) : { ...selection.skill, kind: "skill" }, { start: 0, end: draft.length });
         setSelectedSlashCommand(null);
-        setDraft("");
         closeSlashPanel();
         setMenuFilter("");
         return;
@@ -1121,16 +1139,16 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       closeSlashPanel();
       setMenuFilter("");
     } else if (mentionPanelOpen) {
+      if (reference?.kind === "url") { insertReference(reference); return; }
       const encodedPlugin = value.match(/^plugin:(.+)$/)?.[1];
       if (encodedPlugin) {
         const configName = decodeURIComponent(encodedPlugin);
-        addSelectedMention({
+        insertReference(reference ?? {
           kind: "plugin",
           name: configName,
           configName,
           path: `plugin://${configName}`,
         });
-        if (selectedToken?.kind === "mention") { setDraft(removeComposerToken(draft, selectedToken)); setSelectionRequest({ start: selectedToken.start, end: selectedToken.start }); }
         setMentionResults([]);
         closeMentionPanel();
         setMenuFilter("");
@@ -1141,8 +1159,7 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       const kind = typed?.[1] === "folder" || rawPath.endsWith("/") || rawPath.endsWith("\\") ? "folder" : "file";
       const name = rawPath.split(/[/\\]/).filter(Boolean).pop() || rawPath;
 
-      addSelectedMention({ path: rawPath, name, kind: kind as "file" | "folder" });
-      if (selectedToken?.kind === "mention") { setDraft(removeComposerToken(draft, selectedToken)); setSelectionRequest({ start: selectedToken.start, end: selectedToken.start }); }
+      insertReference({ path: rawPath, name, kind: kind as "file" | "folder", workspaceRoot: workingDirectory });
       setMentionResults([]);
       closeMentionPanel();
       setMenuFilter("");
@@ -1238,6 +1255,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
         rich
         richDocument={richDraft}
         documentKey={editorKey}
+        references={inlineReferences}
+        referenceInsertion={referenceInsertion?.owner === editorKey ? referenceInsertion.request : undefined}
+        workspaceRoot={workingDirectory}
         value={draft}
         onChange={handleChange}
         onSelectionChange={refreshInputMenus}

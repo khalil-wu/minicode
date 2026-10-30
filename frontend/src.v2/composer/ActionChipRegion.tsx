@@ -1,14 +1,14 @@
 import { useI18n } from "../i18n";
-import { Blocks, Folder, MessageSquareText, X } from "lucide-react";
-import { fileIcon } from "../lib/file-icons";
+import { MessageSquareText, X } from "lucide-react";
 import { useAppStore } from "../stores";
-import { contextReferenceLabel, openContextReference } from "../chat/contextReferenceActions";
+import { openContextReference } from "../chat/contextReferenceActions";
 
 export const ContextChipRegion = () => {
   const { t: tr } = useI18n();
   const actionChip = useAppStore((s) => s.actionChip);
   const mentionResults = useAppStore((s) => s.mentionResults);
   const selectedMentions = useAppStore((s) => s.selectedMentions);
+  const separateMentions = selectedMentions.filter(item => item.kind === "browser_annotation");
   const setMentionResults = useAppStore((s) => s.setMentionResults);
   const addSelectedMention = useAppStore((s) => s.addSelectedMention);
   const removeSelectedMention = useAppStore((s) => s.removeSelectedMention);
@@ -16,7 +16,7 @@ export const ContextChipRegion = () => {
   const visibleActionChip = actionChip && !actionChip.label.toLowerCase().startsWith("skill selected")
     ? actionChip
     : null;
-  if (!visibleActionChip && mentionResults.length === 0 && selectedMentions.length === 0) return null;
+  if (!visibleActionChip && mentionResults.length === 0 && separateMentions.length === 0) return null;
   return (
     <div style={tokenRowStyle}>
       {visibleActionChip && (
@@ -25,34 +25,12 @@ export const ContextChipRegion = () => {
           {visibleActionChip.description && <span style={tokenDetailStyle}>{visibleActionChip.description}</span>}
         </span>
       )}
-      {selectedMentions.map((item) => (
+      {separateMentions.map((item) => (
         <span key={item.path} title={item.path} style={mentionTokenStyle}>
-          {item.kind === "file" ? (
-            <button
-              type="button"
-              aria-label={tr("打开 {name}", { name: item.name })}
-              onClick={() => openContextReference(item)}
-              style={mentionLabelButtonStyle}
-            >
-              {fileIcon(item.name || item.path || "file", { size: 12, className: "composer-context-icon-svg" })}
-              <span style={mentionNameStyle}>@{contextReferenceLabel(item)}</span>
-            </button>
-          ) : item.kind === "browser_annotation" ? (
-            <button type="button" onClick={() => openContextReference(item)} style={mentionLabelButtonStyle} title={`${item.url}\n${item.note}`}>
-              <MessageSquareText size={14} />
-              <span style={mentionNameStyle}>@{item.name}</span>
-            </button>
-          ) : item.kind === "plugin" ? (
-            <span style={mentionLabelStyle}>
-              <Blocks size={14} />
-              <span style={mentionNameStyle}>@{item.name}</span>
-            </span>
-          ) : (
-            <span style={mentionLabelStyle}>
-              <Folder size={14} />
-              <span style={mentionNameStyle}>@{item.name}</span>
-            </span>
-          )}
+          <button type="button" onClick={() => openContextReference(item)} style={mentionLabelButtonStyle} title={`${item.url}\n${item.note}`}>
+            <MessageSquareText size={14} />
+            <span style={mentionNameStyle}>@{item.name}</span>
+          </button>
           <button
             type="button"
             aria-label={tr("从上下文中移除 {name}", { name: item.name })}

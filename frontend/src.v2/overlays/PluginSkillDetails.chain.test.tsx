@@ -106,9 +106,11 @@ it("opens exact Skill contents and keeps disabled entries visible, readable and 
   await within(dialog).findByRole("switch", { name: "停用 Review notes" });
   fireEvent.click(within(dialog).getByRole("button", { name: "立即试用" }));
   expect(useAppStore.getState().selectedSkills).toMatchObject([{ name: "notes:review", path }]);
-  expect(useAppStore.getState().draft).toBe("Keep draft");
-  expect(useAppStore.getState().attachments[0].name).toBe("Keep.png");
-  expect(useAppStore.getState().conversationId).toBe("owner");
+  expect(useAppStore.getState().draft).toBe("");
+  expect(useAppStore.getState().attachments).toEqual([]);
+  expect(useAppStore.getState().conversationWorkbenchStates["owner"].draft).toBe("Keep draft");
+  expect(useAppStore.getState().conversationWorkbenchStates["owner"].attachments[0].name).toBe("Keep.png");
+  expect(useAppStore.getState().conversationId).toBeNull();
   expect(useAppStore.getState().skillsMarketplaceOpen).toBe(false);
   expect(sendClientCommand).toHaveBeenCalledTimes(2);
   expect(vi.mocked(sendClientCommand).mock.calls.every(([command]) => command.type === "skills.list")).toBe(true);
@@ -138,7 +140,8 @@ it("prefills the Skill's actual default prompt with its exact selection without 
   fireEvent.click(screen.getByRole("button", { name: "查看技能详情 notes:review" }));
   const dialog = await screen.findByRole("dialog", { name: "Review notes" });
   fireEvent.click(within(dialog).getByRole("button", { name: "立即试用" }));
-  expect(useAppStore.getState().draft).toBe("Keep draft\nReview the full notes");
+  expect(useAppStore.getState().draft).toBe("Review the full notes");
+  expect(useAppStore.getState().conversationWorkbenchStates["owner"].draft).toBe("Keep draft");
   expect(useAppStore.getState().selectedSkills).toMatchObject([{ name: "notes:review", path }]);
   expect(sendClientCommand).not.toHaveBeenCalled();
 });
@@ -149,7 +152,8 @@ it("keeps the Skill reference already present in its default prompt without addi
   fireEvent.click(screen.getByRole("button", { name: "查看技能详情 notes:review" }));
   const dialog = await screen.findByRole("dialog", { name: "Review notes" });
   fireEvent.click(within(dialog).getByRole("button", { name: "立即试用" }));
-  expect(useAppStore.getState().draft).toBe(`Keep draft\n${skillPrompt}`);
+  expect(useAppStore.getState().draft).toBe(skillPrompt);
+  expect(useAppStore.getState().conversationWorkbenchStates["owner"].draft).toBe("Keep draft");
   expect(useAppStore.getState().selectedSkills).toEqual([]);
   expect(sendClientCommand).not.toHaveBeenCalled();
 });

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -163,18 +165,45 @@ def test_marketplace_defaults_to_minicode_private_skill_dir() -> None:
 def test_marketplace_network_catalog_respects_explicit_offline_mode(monkeypatch) -> None:
     monkeypatch.setenv("MINICODE_ENABLE_NETWORK_MARKETPLACE", "0")
     payload = asyncio.run(list_extensions_marketplace(force_refresh=True))
-    assert payload["skills"] == []
-    assert payload["source_status"]["openai_skills"]["source"] == "disabled"
+    assert len(payload["skills"]) == 39
+    assert payload["source_status"]["openai_skills"]["source"] == "bundled"
+    assert payload["source_status"]["mcp_registry"]["source"] == "disabled"
 
 
 def test_marketplace_public_catalog_is_available_without_hidden_opt_in(monkeypatch) -> None:
     monkeypatch.delenv("MINICODE_ENABLE_NETWORK_MARKETPLACE", raising=False)
     def catalog_response(url):
-        return [{"name": "review", "type": "dir"}] if "api.github.com" in url else {"servers": []}
+        assert "registry.modelcontextprotocol.io" in url
+        return {"servers": []}
     monkeypatch.setattr("backend.skills.marketplace._default_fetch_json", catalog_response)
     payload = asyncio.run(list_extensions_marketplace(force_refresh=True))
-    assert [skill["name"] for skill in payload["skills"]] == ["review"]
+    assert "pdf" in {skill["name"] for skill in payload["skills"]}
+    assert payload["source_status"]["openai_skills"]["source"] == "bundled"
     assert payload["source_status"]["openai_skills"]["ok"] is True
+
+
+def test_bundled_skill_catalog_uses_declared_metadata_and_existing_assets() -> None:
+    catalog = json.loads(marketplace.PUBLIC_SKILLS_CATALOG.read_text(encoding="utf-8"))
+    assert catalog["revision"] == "49f948faa9258a0c61caceaf225e179651397431"
+    assert len(catalog["skills"]) == 39
+    pdf = next(skill for skill in catalog["skills"] if skill["name"] == "pdf")
+    assert pdf["title"] == "PDF Skill" and pdf["shortDescription"] == "Create, edit, and review PDFs"
+    assert pdf["description"].startswith("Use when tasks involve reading, creating, or reviewing PDF files")
+    assets = Path(__file__).resolve().parents[1] / "frontend/public"
+    assert all((assets / skill["iconAsset"]).is_file() for skill in catalog["skills"] if "iconAsset" in skill)
+
+
+def test_public_skill_detail_serves_the_actual_bundled_instructions() -> None:
+    from fastapi import FastAPI
+    from backend.api.routes_skills import router
+
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+    response = client.get("/api/skills/marketplace/pdf")
+    assert response.status_code == 200 and "When to use" in response.json()["content"]
+    assert response.json()["raw_content"].startswith('---\nname: "pdf"')
+    assert client.get("/api/skills/marketplace/not-in-catalog").status_code == 404
 
 
 def test_import_local_skill_copies_only_real_skill_tree(tmp_path) -> None:
@@ -256,11 +285,6 @@ def test_skill_remove_api_deletes_installed_skill_and_refreshes_skill_list(monke
 
 def test_extensions_marketplace_aggregates_openai_skills_and_mcp_registry() -> None:
     async def fake_json(url: str) -> dict:
-        if "api.github.com" in url:
-            return [
-                {"name": "pdf", "type": "dir"},
-                {"name": "gh-fix-ci", "type": "dir"},
-            ]
         if "registry.modelcontextprotocol.io" in url:
             return {
                 "servers": [
@@ -284,43 +308,19 @@ def test_extensions_marketplace_aggregates_openai_skills_and_mcp_registry() -> N
             }
         raise AssertionError(f"unexpected json url {url}")
 
-    async def fake_text(url: str) -> str:
-        if url.endswith("/pdf/SKILL.md"):
-            return "---\nname: pdf\ndescription: Work with PDF documents.\n---\n# PDF\n"
-        if url.endswith("/gh-fix-ci/SKILL.md"):
-            return "---\nname: gh-fix-ci\ndescription: Diagnose and fix GitHub Actions CI.\n---\n# CI\n"
-        raise AssertionError(f"unexpected text url {url}")
-
     payload = asyncio.run(
         list_extensions_marketplace(
             installed_names={"pdf"},
             installed_mcp_names={"example-com-docs"},
             fetch_json=fake_json,
-            fetch_text=fake_text,
             force_refresh=True,
         )
     )
 
-    assert payload["source_status"]["openai_skills"]["source"] == "live"
+    assert payload["source_status"]["openai_skills"]["source"] == "bundled"
     assert payload["source_status"]["mcp_registry"]["source"] == "live"
-    assert payload["skills"] == [
-        {
-            "name": "pdf",
-            "title": "pdf",
-            "description": "Work with PDF documents.",
-            "installed": True,
-            "source": "openai",
-            "path": "skills/.curated/pdf",
-        },
-        {
-            "name": "gh-fix-ci",
-            "title": "gh-fix-ci",
-            "description": "Diagnose and fix GitHub Actions CI.",
-            "installed": False,
-            "source": "openai",
-            "path": "skills/.curated/gh-fix-ci",
-        },
-    ]
+    assert next(skill for skill in payload["skills"] if skill["name"] == "pdf")["installed"] is True
+    assert next(skill for skill in payload["skills"] if skill["name"] == "gh-fix-ci")["installed"] is False
     registry_entry = next(item for item in payload["mcp"] if item["name"] == "example.com/docs")
     assert registry_entry["actionable"] is True
     assert registry_entry["provider_name"] == "example-com-docs"
@@ -331,44 +331,15 @@ def test_extensions_marketplace_aggregates_openai_skills_and_mcp_registry() -> N
     assert registry_entry["config_snippet"]["server"]["auto_start"] is False
 
 
-def test_extensions_marketplace_uses_openai_directory_when_skill_metadata_fetch_hangs(monkeypatch) -> None:
-    monkeypatch.setattr(marketplace, "OPENAI_SKILLS_SOURCE_TIMEOUT_SECONDS", 0.02, raising=False)
+def test_skill_catalog_does_not_wait_for_the_mcp_registry(monkeypatch) -> None:
+    from backend.services.skills_api_service import skills_marketplace_payload
 
-    async def fake_json(url: str) -> dict | list[dict]:
-        if "api.github.com" in url:
-            return [{"name": "pdf", "type": "dir"}]
-        if "registry.modelcontextprotocol.io" in url:
-            return {"servers": []}
-        raise AssertionError(f"unexpected json url {url}")
-
-    async def hanging_text(_url: str) -> str:
+    async def hanging_registry(_url):
         await asyncio.sleep(10)
-        return ""
-
-    async def load_payload() -> dict:
-        return await asyncio.wait_for(
-            list_extensions_marketplace(
-                fetch_json=fake_json,
-                fetch_text=hanging_text,
-                force_refresh=True,
-            ),
-            timeout=0.5,
-        )
-
-    payload = asyncio.run(load_payload())
-
-    assert payload["source_status"]["openai_skills"]["source"] == "live"
-    assert payload["source_status"]["openai_skills"]["ok"] is True
-    assert payload["skills"] == [
-        {
-            "name": "pdf",
-            "title": "Pdf",
-            "description": "OpenAI curated Skill: pdf",
-            "installed": False,
-            "source": "openai",
-            "path": "skills/.curated/pdf",
-        }
-    ]
+    monkeypatch.setattr(marketplace, "_default_fetch_json", hanging_registry)
+    payload = asyncio.run(asyncio.wait_for(skills_marketplace_payload(skill_manager=None), timeout=1))
+    assert payload["source_status"]["openai_skills"]["source"] == "bundled"
+    assert any(skill["name"] == "pdf" for skill in payload["skills"])
 
 
 def test_registry_package_only_server_is_preview_not_fake_action() -> None:
@@ -398,7 +369,6 @@ def test_marketplace_reports_named_timeout_without_fabricating_connectors() -> N
     payload = asyncio.run(
         list_extensions_marketplace(
             fetch_json=fake_json,
-            fetch_text=lambda _url: "",
             force_refresh=True,
         )
     )
@@ -426,7 +396,7 @@ def test_install_marketplace_skill_preserves_complete_bundle(monkeypatch, tmp_pa
             archive.writestr(name, content)
 
     def staged_bundle(source, destination, **kwargs):
-        assert source == {"source": "github", "repo": "openai/skills", "ref": "main", "path": "skills/.curated/gh-fix-ci"}
+        assert source == {"source": "github", "repo": "openai/skills", "sha": "49f948faa9258a0c61caceaf225e179651397431", "path": "skills/.curated/gh-fix-ci"}
         return materialize_source({"source": "file", "path": str(bundle)}, destination, **kwargs)
 
     monkeypatch.setattr("backend.skills.marketplace.materialize_source", staged_bundle)

@@ -54,6 +54,7 @@ export {
   Blocks,
   BookOpenText,
   Bot,
+  Box,
   Braces,
   Bug,
   CalendarClock,

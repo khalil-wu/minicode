@@ -9,8 +9,9 @@ import type { CodeSelectionContext, FollowUpBehavior, MessageContextRef, Permiss
 import { contextReferenceLabel, openContextReference } from "../chat/contextReferenceActions";
 import { AttachmentStrip } from "../composer/AttachmentStrip";
 import { ComposerTextarea } from "../composer/ComposerTextarea";
-import { hasRichComposerContent } from "../composer/rich-composer-document";
-import { appendComposerTokenAnchor, composerTokenAtSelection, removeComposerToken, type ComposerSelection } from "../composer/inputSelection";
+import { hasRichComposerContent, inlineComposerReferences } from "../composer/rich-composer-document";
+import { appendComposerTokenAnchor, composerTokenAtSelection, type ComposerSelection } from "../composer/inputSelection";
+import type { ComposerReferenceInsertion, InlineComposerReference } from "../composer/composer-references";
 import { MenuOverlay } from "../composer/MenuOverlay";
 import { QueuedMessageList } from "../composer/QueuedMessageList";
 import { cancelComposerUpload, uploadComposerFiles } from "../composer/uploads";
@@ -81,6 +82,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   const ensureSideChat = useAppStore((s) => s.ensureSideChat);
   const removeSideChat = useAppStore((s) => s.removeSideChat);
   const setDraft = useAppStore((s) => s.setSideChatDraft);
+  const [referenceInsertion, setReferenceInsertion] = useState<{ owner: string; request: ComposerReferenceInsertion }>();
   const isConnected = useAppStore((s) => s.isConnected);
   const workingDirectory = owner.workspaceRoot;
   const permissionMode = owner.permissionMode;
@@ -90,6 +92,8 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
   // Each mounted side-chat thread should observe only its own projection;
   // another agent's stream must not rerender every hidden side panel.
   const thread = useAppStore((s) => s.sideChats[id]);
+  const inlineReferences = useMemo(() => (thread?.contextRefs ?? []).filter((reference): reference is InlineComposerReference =>
+    reference.kind !== "browser_annotation" && reference.kind !== "diff_comment"), [thread?.contextRefs]);
   const waitingForInput = useAppStore((s) => hasLocalPendingPromptForConversation([
     s.pendingApproval, ...s.approvalQueue, s.pendingAskUser, ...s.askUserQueue,
     s.pendingDiffReview, ...s.diffReviewQueue,
@@ -310,7 +314,7 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
     if (!serverReady) { pushToast(tr("侧边对话正在准备，完成后即可添加附件。"), "info"); return; }
     uploadComposerFiles(files, id);
   };
-  const onMentionSelect = (value: string) => {
+  const onMentionSelect = (value: string, reference?: InlineComposerReference) => {
     setMentionFilter(null);
     if (!value) return;
     const token = composerTokenAtSelection(thread?.draft ?? "", inputSelectionRef.current);
@@ -318,16 +322,16 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
     const typed = value.match(/^(file|folder):(.*)$/);
     const path = appendComposerTokenAnchor(typed?.[2] ?? value, token?.value ?? "");
     const configName = plugin ? decodeURIComponent(plugin) : "";
-    const ref: MessageContextRef = plugin ? { kind: "plugin", name: configName, configName, path: `plugin://${configName}` }
-      : { kind: typed?.[1] === "folder" ? "folder" : "file", name: path.split(/[/\\]/).filter(Boolean).pop() || path, path, workspaceRoot: workingDirectory };
-    updateContext([...(thread?.contextRefs ?? []).filter((item) => item.path !== ref.path), ref]);
-    if (token?.kind === "mention") {
-      setDraft(id, removeComposerToken(thread!.draft, token));
-      setSelectionRequest({ start: token.start, end: token.start });
-    }
+    const ref: InlineComposerReference = reference ?? (plugin ? { kind: "plugin", name: configName, configName, path: `plugin://${configName}` }
+      : { kind: typed?.[1] === "folder" ? "folder" : "file", name: path.split(/[/\\]/).filter(Boolean).pop() || path, path, workspaceRoot: workingDirectory });
+    setReferenceInsertion({ owner: id, request: { reference: ref, selection: token ? { start: token.start, end: token.end } : inputSelectionRef.current } });
   };
   const refreshMentionMenu = (value: string, selection: ComposerSelection) => {
     inputSelectionRef.current = selection;
+    const document = useAppStore.getState().sideChats[id]?.richDraft;
+    if (document && (document.selection?.start !== selection.start || document.selection?.end !== selection.end)) {
+      useAppStore.setState(state => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], richDraft: { ...document, selection } } } }));
+    }
     const token = composerTokenAtSelection(value, selection);
     setMentionFilter(token?.kind === "mention" ? token.value : null);
   };
@@ -394,13 +398,21 @@ const SideChatThreadPanel = ({ active, owner }: { active: boolean; owner: SideCh
             </div>
             <pre>{thread.selectedContext.text}</pre>
           </details>}
-          <div className="side-chat-context-chips">{thread.contextRefs?.map((ref) => <span key={ref.path}>
+          <div className="side-chat-context-chips">{thread.contextRefs?.filter(ref => ref.kind === "browser_annotation" || ref.kind === "diff_comment").map((ref) => <span key={ref.path}>
             <button type="button" onClick={() => openContextReference(ref, id)} title={ref.path}>{contextReferenceLabel(ref)}</button>
             <button type="button" aria-label={tr("移除 {v0}", { v0: ref.name })} onClick={() => updateContext(thread.contextRefs!.filter((item) => item !== ref))}><X size={12} /></button>
           </span>)}</div>
           <AttachmentStrip conversationId={id} />
           <ComposerTextarea rich richDocument={thread.richDraft} documentKey={id} value={thread.draft} conversationId={id} ariaLabel={tr("侧边对话消息")}
-            onChange={(value, selection = { start: value.length, end: value.length }, rich) => { setDraft(id, value, rich); refreshMentionMenu(value, selection); }}
+            references={inlineReferences} referenceInsertion={referenceInsertion?.owner === id ? referenceInsertion.request : undefined} workspaceRoot={workingDirectory}
+            onChange={(value, selection = { start: value.length, end: value.length }, rich) => {
+              setReferenceInsertion(undefined);
+              if (rich) useAppStore.setState(state => ({ sideChats: { ...state.sideChats, [id]: { ...state.sideChats[id], draft: value,
+                richDraft: value ? rich : undefined, contextRefs: [...inlineComposerReferences(rich), ...(state.sideChats[id].contextRefs ?? [])
+                  .filter(reference => reference.kind === "browser_annotation" || reference.kind === "diff_comment")] } } }));
+              else setDraft(id, value);
+              refreshMentionMenu(value, selection);
+            }}
             onSelectionChange={refreshMentionMenu}
             selectionRequest={selectionRequest}
             onSubmit={submit} onAlternateSubmit={submitAlternateFollowUp} isResponseInProgress={thread.isStreaming}

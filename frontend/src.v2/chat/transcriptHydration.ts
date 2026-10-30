@@ -804,13 +804,17 @@ export const normalizeMessageContextRefs = (value: unknown): MessageContextRef[]
     }
     if (kind === "skill" && name) {
       refs.push({ kind, name, path: path || undefined, description: stringValue(item.description),
-        sourceLevel: stringValue(item.sourceLevel ?? item.source_level) });
+        sourceLevel: stringValue(item.sourceLevel ?? item.source_level), displayName: stringValue(item.displayName), icon: stringValue(item.icon),
+        iconVariant: item.iconVariant as "small" | "large" | undefined });
       return refs;
     }
     if (kind === "plugin") {
       const configName = String(item.configName ?? item.config_name ?? name).trim();
       if (configName && path.startsWith("plugin://")) {
-        refs.push({ kind, name: name || configName, configName, path, description: stringValue(item.description) });
+        refs.push({ kind, name: name || configName, configName, path, description: stringValue(item.description),
+          pluginPath: stringValue(item.pluginPath), iconUrl: stringValue(item.iconUrl),
+          iconVariant: item.iconVariant as "composer" | "logo" | "logo-dark" | undefined,
+          iconVariants: item.iconVariants as ("composer" | "logo" | "logo-dark")[] | undefined });
       }
     }
     return refs;

@@ -12,7 +12,6 @@ import { openPreferredWebLink } from "../lib/open-preferred-target";
 import { closeAutomations, openAutomations } from "../lib/automations-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useComposerPlugins } from "../composer/useComposerPlugins";
-import { selectSkillForComposer } from "../lib/select-skill-for-composer";
 import { MenuSourceIcon } from "../lib/menu-source-icons";
 import { BrandIcon } from "../components/BrandIcon";
 import { pluginAssetResourceUrlWithToken } from "../protocol/api";
@@ -279,15 +278,13 @@ function CatalogSidebar({ workspaceRoot, onNavigate }: { workspaceRoot: string; 
   const { t: tr } = useI18n();
   const tab = useAppStore(state => state.skillsMarketplaceTab);
   const resolvedTheme = useAppStore(state => state.resolvedTheme);
-  const skills = useAppStore(state => state.availableSkills);
   const { plugins, loading, error, refresh } = useComposerPlugins(true, workspaceRoot);
   return <div className="mc-sidebar-catalog">
     <nav aria-label={tr("自定义导航")}>
       <SidebarAction icon={<Puzzle />} label={tr("插件")} active={tab === "plugins"} onClick={() => { useAppStore.setState({ skillsMarketplaceTab: "plugins" }); onNavigate?.(); }} />
       <SidebarAction icon={<BookOpenText />} label={tr("技能")} active={tab === "skills"} onClick={() => { useAppStore.setState({ skillsMarketplaceTab: "skills" }); onNavigate?.(); }} />
     </nav>
-    <div className="mc-sidebar-catalog-heading">{tab === "plugins" ? tr("已安装") : tr("可用技能")}</div>
-    {tab === "plugins" ? <>
+    <div className="mc-sidebar-catalog-heading">{tr("已安装")}</div>
       {loading && <div className="mc-sidebar-catalog-status" role="status">{tr("正在读取插件…")}</div>}
       {error && <div className="mc-sidebar-catalog-status" role="alert">{error}<button type="button" onClick={refresh}>{tr("重新读取")}</button></div>}
       {!loading && !error && !plugins.length && <div className="mc-sidebar-catalog-status">{tr("未安装任何插件")}</div>}
@@ -297,7 +294,6 @@ function CatalogSidebar({ workspaceRoot, onNavigate }: { workspaceRoot: string; 
         return <SidebarAction key={plugin.id} icon={<BrandIcon value={plugin.displayName || plugin.name} iconUrl={iconUrl} inferBrand={false} size={16} fallbackIcon={<Puzzle size={16} />} />} label={plugin.displayName || plugin.name} onClick={() => {
         useAppStore.setState({ skillsMarketplaceTab: "plugins", skillsMarketplaceSelectedPluginId: plugin.id }); onNavigate?.();
       }} />; })}
-    </> : skills.filter(skill => skill.user_invocable !== false).map(skill => <SidebarAction key={skill.path || skill.name} icon={<BookOpenText />} label={skill.display_name || skill.name} onClick={() => { selectSkillForComposer(skill); onNavigate?.(); }} />)}
   </div>;
 }
 

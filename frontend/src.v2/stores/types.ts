@@ -983,6 +983,9 @@ export interface SkillContextRef {
   path?: string;
   description?: string;
   sourceLevel?: string;
+  displayName?: string;
+  icon?: string;
+  iconVariant?: "small" | "large";
 }
 
 export interface PluginContextRef {
@@ -991,6 +994,10 @@ export interface PluginContextRef {
   path: string;
   configName: string;
   description?: string;
+  pluginPath?: string;
+  iconUrl?: string;
+  iconVariant?: "composer" | "logo" | "logo-dark";
+  iconVariants?: ("composer" | "logo" | "logo-dark")[];
 }
 
 export interface BrowserAnnotationContextRef {
@@ -1568,6 +1575,7 @@ export interface ConversationDraftOptions {
   workspaceRoot?: string;
   appMode?: AppMode;
   sidebarSectionId?: string;
+  forceNew?: boolean;
 }
 
 export interface ChatSlice {

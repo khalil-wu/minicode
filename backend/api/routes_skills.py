@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.skills.marketplace import list_extensions_marketplace
+from backend.skills.marketplace import bundled_skill_detail, list_extensions_marketplace
 from backend.services.skills_api_service import (
     extensions_marketplace_payload,
     install_skill_from_marketplace,
@@ -72,10 +72,10 @@ def _settings_skill_manager():
 
 
 @router.get("/api/skills/settings")
-async def get_skill_settings_api(response: Response, workspace_root: str = "") -> dict[str, Any]:
+async def get_skill_settings_api(response: Response, workspace_root: str = "", include_projects: bool = False) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     return await to_thread_cancel_safe(skills_settings_payload,
-        skill_manager=_settings_skill_manager(), workspace_root=workspace_root)
+        skill_manager=_settings_skill_manager(), workspace_root=workspace_root, include_projects=include_projects)
 
 
 @router.put("/api/skills/settings")
@@ -183,13 +183,22 @@ async def get_plugin_asset_api(
 
 @router.get("/api/skills/marketplace")
 async def get_skills_marketplace_api(response: Response, refresh: bool = False) -> dict[str, Any]:
-    """Compatibility endpoint for clients that only know about Skill marketplace entries."""
+    """List the bundled public Skill metadata and current installed state."""
     response.headers["Cache-Control"] = "no-store"
     return await skills_marketplace_payload(
         skill_manager=_state.bootstrap.skill_manager if _state.bootstrap is not None else None,
-        list_marketplace=list_extensions_marketplace,
-        force_refresh=refresh,
     )
+
+
+@router.get("/api/skills/marketplace/{skill_name}")
+async def get_bundled_skill_detail_api(skill_name: str, response: Response) -> dict[str, str]:
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await to_thread_cancel_safe(bundled_skill_detail, skill_name)
+    except KeyError as error:
+        raise HTTPException(404, detail="Skill not found") from error
+    except ValueError as error:
+        raise HTTPException(400, detail=str(error)) from error
 
 
 @router.get("/api/extensions/marketplace")

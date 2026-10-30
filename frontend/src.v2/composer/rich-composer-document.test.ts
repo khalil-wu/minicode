@@ -1,10 +1,50 @@
 import { describe, expect, it } from "vitest";
 import type { Node } from "prosemirror-model";
+import { composerReferenceMarkdown, type InlineComposerReference } from "./composer-references";
 import {
   documentPosition, hasRichComposerContent, literalComposerDocument, markdownOffset,
   parseComposerMarkdown, restoreComposerDocument, richComposerSchema as schema,
   richDocumentState, serializeComposerDocument,
+  inlineComposerReferences,
 } from "./rich-composer-document";
+
+const references: InlineComposerReference[] = [
+  { kind: "plugin", name: "电脑", configName: "computer-use@runtime", path: "plugin://computer-use@runtime", pluginPath: "C:/plugins/computer-use", iconVariant: "composer" },
+  { kind: "skill", name: "playwright", displayName: "Playwright CLI Skill", path: "C:/skills/playwright/SKILL.md" },
+  { kind: "url", name: "继续完成 MiniCode UI 复刻", path: "codex://threads/owned-reference" },
+  { kind: "file", name: "文件(草稿).ts", path: "C:/项目/文件(草稿).ts" },
+  { kind: "folder", name: "资料", path: "C:/项目/资料" },
+];
+
+it.each([false, true])("keeps five inline reference identities, atom boundaries and Unicode carets in plain=%s", plain => {
+  const document = schema.node("doc", null, schema.node("paragraph", null, [
+    ...references.flatMap(reference => [schema.nodes.context_mention.create({ reference }), schema.text(" ")]), schema.text("123🙂"),
+  ]));
+  const markdown = serializeComposerDocument(document, plain);
+  expect(markdown).toBe(references.map(composerReferenceMarkdown).join(" ") + " 123🙂");
+  const saved = richDocumentState(document, plain);
+  expect(restoreComposerDocument(markdown, saved, plain).toJSON()).toEqual(document.toJSON());
+  expect(inlineComposerReferences(saved)).toEqual(references);
+  const parsed = plain ? literalComposerDocument(markdown) : parseComposerMarkdown(markdown);
+  expect(inlineComposerReferences(richDocumentState(parsed, plain))).toMatchObject(references.map(({ kind, name, path }) => ({ kind, name, path: kind === "folder" ? `${path}/` : path })));
+  expect(serializeComposerDocument(parsed, plain)).toBe(markdown);
+  assertCaretRoundtrip(document, plain);
+});
+
+it("leaves mention-looking Markdown literal inside actual code", () => {
+  const markdown = "```text\n" + references.map(composerReferenceMarkdown).join(" ") + "\n```";
+  const parsed = parseComposerMarkdown(markdown);
+  expect(parsed.firstChild?.type.name).toBe("code_block");
+  expect(inlineComposerReferences(richDocumentState(parsed))).toEqual([]);
+});
+
+it("serializes Windows filesystem separators without changing the saved original target or a deep-link href", () => {
+  const reference = { kind: "file" as const, name: "notes.md", path: "C:\\项目\\(初稿) notes.md" };
+  const markdown = composerReferenceMarkdown(reference);
+  expect(markdown).toBe("[notes.md](<C:/项目/(初稿) notes.md>)");
+  expect(inlineComposerReferences(richDocumentState(parseComposerMarkdown(markdown)))).toMatchObject([{ path: "C:/项目/(初稿) notes.md" }]);
+  expect(composerReferenceMarkdown({ kind: "url", name: "chat", path: "codex://threads/real?owner=a%2Fb#source" })).toBe("[chat](codex://threads/real?owner=a%2Fb#source)");
+});
 
 const text = (value: string, mark?: string) => schema.text(value, mark ? [schema.marks[mark].create()] : []);
 const paragraph = (...children: Node[]) => schema.node("paragraph", null, children);

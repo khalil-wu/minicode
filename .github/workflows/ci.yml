@@ -466,6 +466,13 @@ jobs:
             output/playwright/ui-alignment-current/plugins-catalog.png
             output/playwright/ui-alignment-current/plugins-figma-detail.png
           if-no-files-found: error
+      - name: Upload focused composer reference screenshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-composer-visual
+          path: output/playwright/ui-alignment-current/composer-inline-references.png
+          if-no-files-found: error
 
   electron-frontend:
     name: Electron Playwright integration

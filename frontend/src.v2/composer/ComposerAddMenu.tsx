@@ -1,8 +1,10 @@
 import { useI18n } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { PromptSourceIcon } from "../lib/prompt-source-icons";
-import { BrandIcon } from "../components/BrandIcon";
 import { useComposerPlugins } from "./useComposerPlugins";
+import { ComposerReferenceIcon } from "./ComposerReferenceIcon";
+import { composerPluginReference } from "./composer-references";
+import type { PluginContextRef } from "../stores/types";
 
 export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGoal, goalAvailable, onFiles, onRemoteFiles, onGoal, onPlan, onPlugin, onClose }: {
   workspaceRoot: string;
@@ -14,7 +16,7 @@ export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGo
   onRemoteFiles?: () => void;
   onGoal: () => void;
   onPlan: () => void;
-  onPlugin: (id: string, displayName: string) => void;
+  onPlugin: (reference: PluginContextRef) => void;
   onClose: (restoreFocus: boolean) => void;
 }) {
   const { t: tr } = useI18n();
@@ -61,10 +63,12 @@ export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGo
     <div className="composer-add-section"><span>{tr("插件")}</span></div>
     {loading && <div className="composer-add-status" role="status">{tr("正在读取插件…")}</div>}
     {error && <div className="composer-add-status" role="alert">{error}</div>}
-    {plugins.filter(plugin => plugin.enabled && plugin.id).map(plugin => <button key={plugin.id} type="button" role="menuitem" data-add-menu-item={plugin.id}
+    {plugins.filter(plugin => plugin.enabled && plugin.id).map(plugin => {
+      const reference = composerPluginReference(plugin, { computerUse: tr("电脑") });
+      return <button key={plugin.id} type="button" role="menuitem" data-add-menu-item={plugin.id}
       data-highlighted={highlighted === plugin.id || undefined} aria-current={highlighted === plugin.id || undefined}
-      onMouseMove={() => setHighlighted(plugin.id)} onClick={() => choose(() => onPlugin(plugin.id, plugin.displayName || plugin.name))}>
-      <BrandIcon value={plugin.name} size={16} /><span>{plugin.displayName || plugin.name}</span><small>{plugin.shortDescription || plugin.description}</small>
-    </button>)}
+      onMouseMove={() => setHighlighted(plugin.id)} onClick={() => choose(() => onPlugin(reference))}>
+      <ComposerReferenceIcon reference={reference} workspaceRoot={workspaceRoot} /><span>{reference.name}</span><small>{plugin.shortDescription || plugin.description}</small>
+    </button>; })}
   </div>;
 }

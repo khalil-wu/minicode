@@ -21,6 +21,7 @@ import "./cells.css";
 import { useTranscriptSearch } from "../TranscriptSearchContext";
 import { DiffCommentAttachments } from "../../composer/DiffCommentAttachments";
 import { restoreRetainedComposerInput } from "../../composer/retainedComposerInputs";
+import { composerReferenceTextParts, type InlineComposerReference } from "../../composer/composer-references";
 
 const COLLAPSE_CHAR_THRESHOLD = 900;
 const COLLAPSE_LINE_THRESHOLD = 14;
@@ -128,12 +129,15 @@ export function UserMessageCell({
     });
   }, [cell.id, ownerConversationId]);
 
-  const visibleContent = cell.content.trim();
+  const textParts = useMemo(() => composerReferenceTextParts(cell.content, (cell.contextRefs ?? []).filter((reference): reference is InlineComposerReference =>
+    reference.kind !== "diff_comment" && reference.kind !== "browser_annotation")), [cell.content, cell.contextRefs]);
+  const displayContent = textParts.some(part => typeof part !== "string") ? textParts.filter(part => typeof part === "string").join("").trim() : cell.content;
+  const visibleContent = displayContent.trim();
   const ordinaryRefs = cell.contextRefs?.filter(ref => ref.kind !== "diff_comment") ?? [];
   const diffComments = cell.contextRefs?.flatMap(ref => ref.kind === "diff_comment" ? [ref.comment] : []) ?? [];
   const collapsible = Boolean(visibleContent) && (
-    cell.content.length > COLLAPSE_CHAR_THRESHOLD
-    || cell.content.split(/\r\n|\r|\n/).length > COLLAPSE_LINE_THRESHOLD
+    displayContent.length > COLLAPSE_CHAR_THRESHOLD
+    || displayContent.split(/\r\n|\r|\n/).length > COLLAPSE_LINE_THRESHOLD
   );
 
   useEffect(() => {
@@ -203,7 +207,7 @@ export function UserMessageCell({
                 className={`user-cell-content${collapsible && !expanded ? " user-cell-content-collapsed" : ""}`}
                 data-collapsed={collapsible && !expanded ? "true" : "false"}
               >
-                {cell.content}
+                {displayContent}
               </div>
               {collapsible ? (
                 <button

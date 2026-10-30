@@ -8,6 +8,10 @@ import { emptyComposerDraft } from "../stores/composer-drafts";
 import { ComposerTextarea } from "./ComposerTextarea";
 import { Composer } from "./Composer";
 import { documentPosition, markdownOffset, parseComposerMarkdown, richComposerSchema as schema, richDocumentState, serializeComposerDocument } from "./rich-composer-document";
+import { composerReferenceMarkdown, type InlineComposerReference } from "./composer-references";
+import { pluginAssetResourceUrlWithToken } from "../protocol/api";
+import { EditorView } from "prosemirror-view";
+import * as contextActions from "../chat/contextReferenceActions";
 
 const mocks = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", { configurable: true,
@@ -63,6 +67,127 @@ beforeEach(() => {
     sendShortcut: "enter", conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, sideChats: {} });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
+
+const inlineReferences: InlineComposerReference[] = [
+  { kind: "plugin", name: "电脑", configName: "computer-use@runtime", path: "plugin://computer-use@runtime", pluginPath: "C:/plugins/computer-use", iconVariant: "composer" },
+  { kind: "skill", name: "playwright", displayName: "Playwright CLI Skill", path: "C:/skills/playwright/SKILL.md" },
+  { kind: "url", name: "继续完成 MiniCode UI 复刻", path: "codex://threads/another-chat" },
+  { kind: "file", name: "main.ts", path: "C:/rich-owner/main.ts" },
+  { kind: "folder", name: "src", path: "C:/rich-owner/src" },
+];
+const referenceDocument = () => richDocumentState(schema.node("doc", null, schema.node("paragraph", null, [
+  ...inlineReferences.flatMap(reference => [schema.nodes.context_mention.create({ reference }), schema.text(" ")]), schema.text("123"),
+])));
+const seedInlineReferences = () => {
+  const document = referenceDocument();
+  useAppStore.setState({ draft: document.markdown, richDraft: document,
+    selectedSkills: inlineReferences.filter((reference): reference is Extract<InlineComposerReference, { kind: "skill" }> => reference.kind === "skill"),
+    selectedMentions: inlineReferences.filter((reference): reference is Exclude<InlineComposerReference, { kind: "skill" }> => reference.kind !== "skill") });
+  return document;
+};
+
+it("renders plugin, Skill, conversation, file and folder atoms beside ordinary text in the same actual paragraph", async () => {
+  seedInlineReferences();
+  render(<Composer />);
+  const input = screen.getByRole("textbox");
+  await waitFor(() => expect(input.querySelectorAll(".composer-inline-reference")).toHaveLength(5));
+  expect(input.querySelectorAll("p")).toHaveLength(1);
+  expect(input.querySelector("p")!.textContent).toBe("电脑 Playwright CLI Skill 继续完成 MiniCode UI 复刻 main.ts src 123");
+  for (const reference of input.querySelectorAll("[data-composer-reference]")) expect(reference.querySelector("svg, img")).toBeTruthy();
+  expect(input.querySelector(".brand-icon img[src]")?.getAttribute("src")).toBe(pluginAssetResourceUrlWithToken("C:/plugins/computer-use", "composer", undefined, "C:/rich-owner"));
+  expect(input.querySelectorAll("[data-composer-reference][contenteditable=false]")).toHaveLength(5);
+  expect(screen.queryByText("@computer-use@runtime")).toBeNull();
+  expect(document.querySelector(".composer-context-prefix-row")).toBeNull();
+});
+
+it("removes the matching implicit plugin selection with native Backspace and restores it with the editor's real undo", async () => {
+  seedInlineReferences();
+  render(<Composer />);
+  const input = screen.getByRole("textbox");
+  act(() => {
+    input.focus();
+    const range = document.createRange(); range.selectNode(input.querySelector("[data-composer-reference]")!);
+    window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await waitFor(() => expect(useAppStore.getState().richDraft!.selection!.end).toBeGreaterThan(useAppStore.getState().richDraft!.selection!.start));
+  fireEvent.keyDown(input, { key: "Backspace", keyCode: 8 });
+  expect(useAppStore.getState().selectedMentions.some(reference => reference.kind === "plugin")).toBe(false);
+  expect(useAppStore.getState().draft).not.toContain("plugin://computer-use@runtime");
+  expect(useAppStore.getState().selectedSkills).toHaveLength(1);
+  fireEvent.keyDown(input, { key: "z", ctrlKey: true });
+  await waitFor(() => expect(useAppStore.getState().selectedMentions.find(reference => reference.kind === "plugin")).toMatchObject({ name: "电脑", configName: "computer-use@runtime", iconVariant: "composer" }));
+  expect(useAppStore.getState().draft).toContain(composerReferenceMarkdown(inlineReferences[0]));
+  act(() => {
+    const skill = [...input.querySelectorAll("[data-composer-reference]")].find(element => JSON.parse(element.getAttribute("data-composer-reference")!).kind === "skill")!;
+    const range = document.createRange(); range.selectNode(skill);
+    window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await waitFor(() => expect(useAppStore.getState().richDraft!.selection!.start).toBeGreaterThan(0));
+  fireEvent.keyDown(input, { key: "Backspace", keyCode: 8 });
+  expect(useAppStore.getState().selectedSkills).toEqual([]);
+  expect(useAppStore.getState().selectedMentions.find(reference => reference.kind === "plugin")).toMatchObject({ name: "电脑" });
+});
+
+it("sends the original model paths and display metadata from the same rich document then clears only the submitted input", async () => {
+  const saved = seedInlineReferences();
+  render(<Composer />);
+  fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter", keyCode: 13 });
+  await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+  expect(mocks.send.mock.calls[0][0]).toMatchObject({ displayContent: saved.markdown, contextRefs: inlineReferences });
+  expect(mocks.send.mock.calls[0][0].backendContent).toContain("plugin://computer-use@runtime");
+  expect(useAppStore.getState()).toMatchObject({ draft: "", selectedSkills: [], selectedMentions: [] });
+});
+
+it("turns a pasted known chat deep link into its real title without replacing the surrounding draft", async () => {
+  useAppStore.setState({ conversations: [{ id: "other-chat", title: "继续完成 MiniCode UI 复刻", workspaceRoot: "C:/other" }], draft: "before " });
+  render(<Composer />);
+  const input = screen.getByRole("textbox");
+  paste(input, "minicode://conversation?conversation_id=other-chat");
+  await waitFor(() => expect(input.textContent).toBe("before 继续完成 MiniCode UI 复刻 "));
+  expect(useAppStore.getState().selectedMentions).toMatchObject([{ kind: "url", name: "继续完成 MiniCode UI 复刻", path: "minicode://conversation?conversation_id=other-chat" }]);
+});
+
+it.each(["code_block", "code_mark"])("keeps a pasted known chat URL literal inside an actual %s", async kind => {
+  const url = "minicode://conversation?conversation_id=literal-code-chat";
+  const body = kind === "code_block" ? schema.nodes.code_block.create({ params: "text" }, schema.text("before "))
+    : schema.nodes.paragraph.create(null, schema.text("before ", [schema.marks.code.create()]));
+  const saved = richDocumentState(schema.node("doc", null, body));
+  useAppStore.setState({ draft: saved.markdown, richDraft: saved,
+    conversations: [{ id: "literal-code-chat", title: "This label must not replace code" }] });
+  render(<Composer />);
+  const input = screen.getByRole("textbox");
+  paste(input, url);
+  await waitFor(() => expect(input.querySelector(kind === "code_block" ? "pre code" : "p")?.textContent).toBe("before " + url));
+  expect(input.querySelector("[data-composer-reference]")).toBeNull();
+  expect(input.querySelectorAll("p")).toHaveLength(kind === "code_block" ? 0 : 1);
+  expect(useAppStore.getState().selectedMentions).toEqual([]);
+});
+
+it("passes the original side conversation owner through the real atom Ctrl-click handler", () => {
+  const reference = { kind: "file" as const, name: "side.ts", path: "C:/side-owner/side.ts", workspaceRoot: "C:/side-owner" };
+  const saved = richDocumentState(schema.node("doc", null, schema.node("paragraph", null, schema.nodes.context_mention.create({ reference }))));
+  const open = vi.spyOn(contextActions, "openContextReference").mockImplementation(() => {});
+  vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue({ pos: 1, inside: 1 });
+  render(<ComposerTextarea rich value={saved.markdown} richDocument={saved} documentKey="side-source" conversationId="side-source"
+    workspaceRoot="C:/side-owner" onChange={() => {}} onSubmit={() => {}} />);
+  const atom = screen.getByRole("textbox").querySelector("[data-composer-reference]")!;
+  fireEvent.mouseDown(atom, { button: 0, clientX: 8, clientY: 8, ctrlKey: true });
+  fireEvent.mouseUp(atom, { button: 0, clientX: 8, clientY: 8, ctrlKey: true });
+  expect(open).toHaveBeenCalledWith(reference, "side-source");
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "rich-owner", workingDirectory: "C:/rich-owner" });
+});
+
+it("restores one selected-code atom from history with its original range and descriptor", async () => {
+  const reference = { kind: "file" as const, name: "main.ts", path: "C:/rich-owner/main.ts", workspaceRoot: "C:/rich-owner",
+    range: { startLineNumber: 4, startColumn: 2, endLineNumber: 8, endColumn: 1 }, text: "selected code" };
+  useAppStore.setState({ draft: composerReferenceMarkdown(reference) + " review", richDraft: undefined, selectedMentions: [reference] });
+  render(<Composer />);
+  await waitFor(() => expect(screen.getByRole("textbox").querySelectorAll("[data-composer-reference]")).toHaveLength(1));
+  expect(screen.getByRole("textbox").textContent).toBe("main.ts:4–7 review");
+  expect(useAppStore.getState().selectedMentions).toEqual([reference]);
+});
 
 it("round-trips real code, task lists, tables and links while keeping remote images out of the editor network", () => {
   const source = [fence + "ts", "const value = 1;", fence, "", "- [x] done", "- [ ] next", "",

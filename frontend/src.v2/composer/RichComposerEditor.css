@@ -20,3 +20,7 @@
 .composer-rich-text a { color: var(--accent-primary); text-decoration: none; }
 .composer-rich-text [data-rich-image] { color: var(--text-secondary); }
 .composer-rich-text .ProseMirror-selectednode { outline: 1px solid var(--border-focus); }
+.composer-inline-reference { display: inline-flex; align-items: center; gap: 4px; vertical-align: -0.15em; max-width: 100%; color: var(--text-info); font-family: inherit; font-size: inherit; font-weight: var(--fw-semibold); line-height: 1.25; white-space: nowrap; }
+.composer-inline-reference-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.composer-inline-reference-icon > svg, .composer-inline-reference-icon .brand-icon { width: 1em; height: 1em; }
+.composer-inline-reference-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }

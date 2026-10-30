@@ -2,7 +2,10 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Profiler } from "react";
+import { Profiler, useLayoutEffect } from "react";
+import type { ComposerSelection } from "./inputSelection";
+import type { RichComposerDocument } from "./rich-composer-document";
+import type { ComposerReferenceInsertion } from "./composer-references";
 import type { SendChatMessageOptions } from "../chat/sendChatMessage";
 import { emptyComposerDraft, flushComposerDrafts } from "../stores/composer-drafts";
 import { retainFailedComposerInput, restoreRetainedComposerInput } from "./retainedComposerInputs";
@@ -67,18 +70,28 @@ vi.mock("./AttachmentStrip", () => ({
   AttachmentStrip: () => null,
 }));
 
-vi.mock("./ComposerTextarea", () => ({
+vi.mock("./ComposerTextarea", async () => {
+  const { insertLiteralReference } = await import("../../test/literal-composer-editor");
+  return {
   ComposerTextarea: ({
     value,
     placeholder,
     onChange,
     onSubmit,
+    referenceInsertion,
   }: {
     value: string;
     placeholder?: string;
-    onChange: (value: string) => void;
+    onChange: (value: string, selection?: ComposerSelection, document?: RichComposerDocument) => void;
     onSubmit: () => void | Promise<void>;
-  }) => (
+    referenceInsertion?: ComposerReferenceInsertion;
+  }) => {
+    useLayoutEffect(() => {
+      if (!referenceInsertion) return;
+      const next = insertLiteralReference(value, referenceInsertion);
+      onChange(next.value, next.selection, next.document);
+    }, [referenceInsertion]);
+    return (
     <textarea
       aria-label="composer"
       value={value}
@@ -91,8 +104,10 @@ vi.mock("./ComposerTextarea", () => ({
         }
       }}
     />
-  ),
-}));
+    );
+  },
+  };
+});
 
 vi.mock("./MenuOverlay", () => ({
   MenuOverlay: ({ open, kind, onSelect }: { open: boolean; kind: string; onSelect: (value: string) => void }) => (
@@ -876,7 +891,7 @@ describe("Composer goal bar", () => {
     expect(useAppStore.getState().selectedSkills).toMatchObject([
       { name: "openai-docs", sourceLevel: "builtin" },
     ]);
-    expect(useAppStore.getState().draft).toBe("");
+    expect(useAppStore.getState().draft).toBe("[$openai-docs]() ");
   });
 
   it("turns an explicit $skill picker selection into a composer skill chip", async () => {
@@ -911,7 +926,7 @@ describe("Composer goal bar", () => {
     expect(useAppStore.getState().selectedSkills).toMatchObject([
       { name: "openai-docs", description: "Use official OpenAI docs", sourceLevel: "builtin" },
     ]);
-    expect(useAppStore.getState().draft).toBe("");
+    expect(useAppStore.getState().draft).toBe("[$openai-docs]() ");
   });
 
   it("does not add git chrome to the code composer", async () => {

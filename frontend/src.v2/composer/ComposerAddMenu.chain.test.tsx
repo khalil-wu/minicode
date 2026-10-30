@@ -10,6 +10,7 @@ vi.mock("./RichComposerEditor", async () => ({ RichComposerEditor: (await import
 import { sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
 import { ComposerAddMenu } from "./ComposerAddMenu";
 import { ComposerTextarea } from "./ComposerTextarea";
+import { pluginAssetResourceUrlWithToken } from "../protocol/api";
 const remote = vi.hoisted(() => ({ pick: vi.fn(), upload: vi.fn(), list: vi.fn() }));
 
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => null }));
@@ -100,6 +101,20 @@ it("adds the actual plugin registration to context without replacing a draft", a
   expect(screen.queryByRole("menuitem",{name:"disabled"})).toBeNull();
   fireEvent.click(plugin);
   expect(useAppStore.getState().selectedMentions).toMatchObject([{kind:"plugin",configName:"notes@personal",path:"plugin://notes@personal"}]);
+  expect(useAppStore.getState().draft).toBe("Keep this draft");
+});
+
+it("uses the same declared composer icon and full selection metadata in the add menu", async () => {
+  const plugin = { id: "computer-use@runtime", name: "figma", displayName: "电脑", marketplace: "runtime", enabled: true,
+    path: "C:/plugins/computer-use", iconVariant: "composer", iconVariants: ["composer", "logo", "logo-dark"] };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ plugins: [plugin] })));
+  useAppStore.setState({ resolvedTheme: "dark" });
+  render(<FooterRow sendState="idle" onSend={() => {}} />);
+  fireEvent.click(screen.getByRole("button", { name: "添加文件等内容" }));
+  const item = await screen.findByRole("menuitem", { name: "电脑" });
+  expect(item.querySelector("img")?.getAttribute("src")).toBe(pluginAssetResourceUrlWithToken(plugin.path, "composer", undefined, "C:/menu-project"));
+  fireEvent.click(item);
+  expect(useAppStore.getState().selectedMentions).toMatchObject([{ name: "电脑", configName: plugin.id, pluginPath: plugin.path, iconVariant: "composer" }]);
   expect(useAppStore.getState().draft).toBe("Keep this draft");
 });
 

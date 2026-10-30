@@ -67,7 +67,7 @@ def test_local_import_publishes_complete_bundle_and_matching_catalog(tmp_path, m
     assert entry["default_prompt"] == "Run the workflow"
     assert (final / "scripts/run.py").read_bytes() == (source / "scripts/run.py").read_bytes()
     assert entry["description"] in SkillExecutor(manager).build_layer1_summary()
-    assert manager.load_skill_payload("folded-skill")["content"] == (source / "SKILL.md").read_text(encoding="utf-8")
+    assert manager.load_skill_payload("folded-skill")["content"] == (source / "SKILL.md").read_bytes().decode("utf-8")
 
 
 @pytest.mark.parametrize("content", [

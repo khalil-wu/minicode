@@ -1,0 +1,43 @@
+# Public Skill catalog
+
+The catalog metadata, preview instructions and declared icons come from `openai/skills` at `49f948faa9258a0c61caceaf225e179651397431`. Each Skill retains its own license; the corresponding bundled notice is listed below. The catalog does not install or enable any Skill.
+
+- `aspnet-core`: `backend/skills/licenses/LICENSE-49bbe9114e49214d.txt`
+- `chatgpt-apps`: `backend/skills/licenses/LICENSE-f40b718f40ec4b8f.txt`
+- `cli-creator`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `cloudflare-deploy`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `define-goal`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `figma`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-code-connect-components`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-create-design-system-rules`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-create-new-file`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-generate-design`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-generate-library`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-implement-design`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `figma-use`: `backend/skills/licenses/LICENSE-5e03f69e3ec4950a.txt`
+- `gh-address-comments`: `backend/skills/licenses/LICENSE-49bbe9114e49214d.txt`
+- `gh-fix-ci`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `hatch-pet`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `jupyter-notebook`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `linear`: `backend/skills/licenses/LICENSE-49bbe9114e49214d.txt`
+- `migrate-to-codex`: `backend/skills/licenses/LICENSE-49bbe9114e49214d.txt`
+- `netlify-deploy`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `notion-knowledge-capture`: `backend/skills/licenses/LICENSE-bfb72d6e9280fef2.txt`
+- `notion-meeting-intelligence`: `backend/skills/licenses/LICENSE-bfb72d6e9280fef2.txt`
+- `notion-research-documentation`: `backend/skills/licenses/LICENSE-bfb72d6e9280fef2.txt`
+- `notion-spec-to-implementation`: `backend/skills/licenses/LICENSE-bfb72d6e9280fef2.txt`
+- `openai-docs`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `pdf`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `playwright`: `backend/skills/licenses/LICENSE-9a7110fc2d2f9640.txt`
+- `playwright-interactive`: `backend/skills/licenses/LICENSE-9a7110fc2d2f9640.txt`
+- `render-deploy`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `screenshot`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `security-best-practices`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `security-ownership-map`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `security-threat-model`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `sentry`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `speech`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `transcribe`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`
+- `vercel-deploy`: `backend/skills/licenses/LICENSE-879778c7455042a2.txt`
+- `winui-app`: `backend/skills/licenses/LICENSE-49bbe9114e49214d.txt`
+- `yeet`: `backend/skills/licenses/LICENSE-44e03f7e263eb3ad.txt`

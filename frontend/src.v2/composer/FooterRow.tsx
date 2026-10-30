@@ -476,7 +476,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, submitting = fal
         onFiles={openFilePicker}
         onRemoteFiles={remoteHost ? () => void openRemoteFilePicker() : undefined}
         onGoal={() => void editGoal()} onPlan={togglePlanMode}
-        onPlugin={(id, name) => useAppStore.getState().addSelectedMention({ kind: "plugin", name, configName: id, path: `plugin://${id}` })}
+        onPlugin={reference => useAppStore.getState().addSelectedMention(reference)}
         onClose={restoreFocus => { setAddOpen(false); if (restoreFocus) window.dispatchEvent(new Event("composer:focus")); }} />}
       {prMonitor && (
         <div style={prMonitorStyle(prMonitor.ciStatus)}>

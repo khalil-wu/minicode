@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 import { createServer } from "node:http";
 import { createServer as createPortServer } from "node:net";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -381,6 +381,9 @@ async function auditPluginCatalog() {
       && (!plugin.asset || image.currentSrc === new URL(plugin.asset, document.baseURI).href);
   }), declaredImages);
   assert.equal(await rows.locator("img:visible").count(), declaredImages.length);
+  const nativeCua = entries.find(plugin => plugin.id === "computer-use@minicode-bundled");
+  assert(nativeCua?.path && nativeCua.iconVariant, "The real native Cua catalog descriptor must declare its local icon");
+  const nativeCuaIcon = await catalog.getByRole("button", { name: `查看插件详情 ${nativeCua.id}`, exact: true }).locator("img").evaluate(image => image.currentSrc);
   for (const name of ["Slack", "Figma"]) assert.equal(await rows.getByText(name, { exact: true }).isVisible(), true);
   const counts = { official: official.plugins.length, public: entries.length, declaredImages: declaredImages.length,
     categories: await catalog.locator(".plugin-source-catalog").count(), revision: official.revision };
@@ -418,6 +421,165 @@ async function auditPluginCatalog() {
   }), owner);
   checks.push({ scenario: "Real public plugin GET matches the fixed catalog; every title is visible and every declared image decodes; Figma details render actual prompts, MCP and Skills without installing or logging in; returning preserves owner and drafts", ...counts, rendered });
   trace("plugins:catalog:complete", counts);
+  return { nativeCua, nativeCuaIcon };
+}
+async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon }) {
+  trace("composer:inline-references:begin");
+  const file = path.join(workspace, ".minicode", "config.toml"), folder = path.join(workspace, ".minicode");
+  assert((await stat(file)).isFile() && (await stat(folder)).isDirectory(), "Composer file references must use the existing audit workspace");
+  await page.waitForFunction(() => window.__zustandStore.getState().availableSkills.some(skill => skill.path && skill.active !== false && skill.plugin_enabled !== false && skill.user_invocable !== false));
+  const editor = page.locator('.composer-input-region [data-rich-composer]').first();
+  await editor.waitFor({ state: "visible" });
+  const requestCount = requests.length, wireStart = wire.length;
+  try {
+    const fixture = await page.evaluate(({ nativeCua, workspace, file, folder }) => {
+      const store = window.__zustandStore, state = store.getState();
+      if (state.draft !== "KEEP_SETTINGS_DRAFT" || state.workingDirectory !== workspace || !state.conversationId) throw new Error("Expected the original settings draft and actual conversation owner");
+      const conversation = state.conversations.find(item => item.id === state.conversationId);
+      const skills = state.availableSkills.filter(item => item.path && item.active !== false && item.plugin_enabled !== false && item.user_invocable !== false);
+      const skill = skills.find(item => item.name === "ui-import-skill") ?? skills[0];
+      if (!conversation?.title || !skill?.path) throw new Error("Real conversation and Skill identities are required");
+      const input = document.querySelector('.composer-input-region [data-rich-composer]');
+      const endpoint = (node, offset) => {
+        if (!node || !input.contains(node)) return { node, offset };
+        const indices = [];
+        while (node !== input) { indices.unshift([...node.parentNode.childNodes].indexOf(node)); node = node.parentNode; }
+        return { indices, offset };
+      };
+      const selection = window.getSelection();
+      const fields = ["draft", "richDraft", "attachments", "quotedMessage", "selectedMentions", "selectedSkills", "allowedRemoteImageDomains", "queuedEdit", "retainedInputEdit", "goalMode"];
+      const original = Object.fromEntries(fields.map(key => [key, state[key]]));
+      window.__uiAlignmentComposerAudit = {
+        original, conversationId: state.conversationId, workspaceRoot: state.workingDirectory,
+        workbenches: state.conversationWorkbenchStates, workspaceDrafts: state.workspaceComposerDrafts,
+        focused: document.activeElement, input,
+        selection: { anchor: endpoint(selection.anchorNode, selection.anchorOffset), focus: endpoint(selection.focusNode, selection.focusOffset) },
+        references: [
+          { kind: "plugin", name: nativeCua.interface.displayName, configName: nativeCua.id, path: `plugin://${nativeCua.id}`,
+            pluginPath: nativeCua.path, iconVariant: nativeCua.iconVariant, iconVariants: nativeCua.iconVariants, description: nativeCua.description },
+          { kind: "skill", name: skill.name, displayName: skill.display_name, path: skill.path, description: skill.description,
+            sourceLevel: skill.source_level, iconVariant: skill.icon ? "small" : undefined },
+          { kind: "url", name: conversation.title, path: `codex://threads/${encodeURIComponent(conversation.id)}` },
+          { kind: "file", name: "config.toml", path: file, workspaceRoot: workspace },
+          { kind: "folder", name: ".minicode", path: folder, workspaceRoot: workspace },
+        ],
+      };
+      store.setState({ draft: "", richDraft: undefined, selectedMentions: [], selectedSkills: [] });
+      return { conversationId: conversation.id, title: conversation.title, skill: { name: skill.name, path: skill.path, declaredIcon: Boolean(skill.icon) },
+        labels: window.__uiAlignmentComposerAudit.references.map(reference => reference.displayName || reference.name) };
+    }, { nativeCua, workspace, file, folder });
+    assert((await stat(fixture.skill.path)).isFile(), "The selected Skill must have a real local file");
+    await page.waitForFunction(() => document.querySelector('.composer-input-region [data-rich-composer]').textContent === "");
+    await editor.focus();
+    for (let index = 0; index < 5; index++) {
+      await page.evaluate(index => {
+        const state = window.__zustandStore.getState(), reference = window.__uiAlignmentComposerAudit.references[index];
+        if (reference.kind === "skill") state.addSelectedSkill(reference); else state.addSelectedMention(reference);
+      }, index);
+      await page.waitForFunction(count => {
+        const document = window.__zustandStore.getState().richDraft?.document;
+        return document?.content?.length === 1 && document.content[0].type === "paragraph"
+          && document.content[0].content.filter(node => node.type === "context_mention").length === count
+          && window.document.querySelectorAll('.composer-input-region [data-composer-reference]').length === count;
+      }, index + 1);
+    }
+    await editor.press("End");
+    await page.keyboard.type("123");
+    await page.waitForFunction(() => window.__zustandStore.getState().draft.endsWith("123"));
+    await page.waitForFunction(() => {
+      const images = [...document.querySelectorAll('.composer-input-region [data-rich-composer] .composer-inline-reference img')];
+      return images.length >= 1 && images.every(image => image.complete && image.naturalWidth > 0 && !image.hidden);
+    });
+    const geometry = await editor.evaluate(async input => {
+      await document.fonts.ready;
+      const images = [...input.querySelectorAll('.composer-inline-reference img')];
+      await Promise.all(images.map(image => image.decode()));
+      const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom }; };
+      const paragraph = input.querySelector(":scope > p");
+      const refs = [...input.querySelectorAll("[data-composer-reference]")];
+      const text = [...paragraph.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent.endsWith("123"));
+      const range = document.createRange();
+      range.setStart(text, text.textContent.length - 3); range.setEnd(text, text.textContent.length);
+      const ordinary = range.getBoundingClientRect();
+      return {
+        paragraphs: input.querySelectorAll(":scope > p").length, text: paragraph.textContent, ordinaryColor: getComputedStyle(paragraph).color,
+        ordinary: { x: ordinary.x, y: ordinary.y, width: ordinary.width, height: ordinary.height, bottom: ordinary.bottom },
+        separateChipRows: document.querySelectorAll(".composer-context-prefix-row, .composer-skill-tokens").length,
+        references: refs.map(element => {
+          const icon = element.querySelector(".composer-inline-reference-icon"), label = element.querySelector(".composer-inline-reference-label");
+          const glyph = icon.querySelector("img:not([hidden]), svg"), i = rect(icon), l = rect(label);
+          const labelRange = document.createRange(); labelRange.selectNodeContents(label);
+          const labelText = labelRange.getBoundingClientRect();
+          return { reference: JSON.parse(element.dataset.composerReference), sameParagraph: element.parentElement === paragraph,
+            display: getComputedStyle(element).display, color: getComputedStyle(label).color, label: label.textContent,
+            gap: l.x - i.right, centerOffset: Math.abs(i.y + i.height / 2 - l.y - l.height / 2), icon: i, labelRect: l,
+            labelText: { y: labelText.y, bottom: labelText.bottom },
+            glyph: glyph?.tagName.toLowerCase(), glyphClass: glyph?.getAttribute("class"), glyphSize: glyph ? rect(glyph) : null };
+        }),
+        images: images.map(image => ({ src: image.currentSrc, decoded: image.complete && image.naturalWidth > 0,
+          visible: !image.hidden && getComputedStyle(image).visibility !== "hidden" && image.getClientRects().length > 0 })),
+      };
+    });
+    assert.equal(geometry.paragraphs, 1);
+    assert.equal(geometry.separateChipRows, 0);
+    assert.deepEqual(geometry.references.map(item => item.reference.kind), ["plugin", "skill", "url", "file", "folder"]);
+    assert.deepEqual(geometry.references.map(item => item.label), fixture.labels);
+    assert.equal(geometry.text, `${fixture.labels.join(" ")} 123`);
+    for (const reference of geometry.references) {
+      assert(reference.sameParagraph && reference.display === "inline-flex", "Every reference must stay in the actual paragraph's inline flow");
+      assert(reference.glyphSize?.width > 0 && reference.glyphSize.height > 0, `Missing rendered ${reference.reference.kind} icon`);
+      assert(reference.labelRect.width > 0 && reference.labelRect.height > 0, `Reference label is not visibly laid out: ${reference.label}`);
+      assert(reference.gap >= 3 && reference.gap <= 5 && reference.centerOffset <= 1, `Icon/label alignment drift: ${reference.label}`);
+      assert.notEqual(reference.color, geometry.ordinaryColor, "Reference labels and ordinary text retain their distinct Source colors");
+    }
+    assert(geometry.ordinary.width > 0 && geometry.ordinary.height > 0);
+    const lastReference = geometry.references.at(-1);
+    // If 123 wraps onto the next line it is still valid inline flow. When it
+    // follows the final atom on the same line, their text baselines must agree.
+    if (geometry.ordinary.x >= lastReference.labelRect.right - 1) {
+      assert(Math.abs(lastReference.labelText.bottom - geometry.ordinary.bottom) <= 2, "Reference and ordinary text baselines diverged");
+    }
+    assert(geometry.images.length >= 1 && geometry.images.every(image => image.decoded && image.visible));
+    const assetIdentity = value => { const url = new URL(value); url.searchParams.delete("asset_token"); return url.href; };
+    assert.equal(assetIdentity(geometry.images[0].src), assetIdentity(nativeCuaIcon), "The composer must reuse the real decoded catalog icon and workspace scope");
+    if (!fixture.skill.declaredIcon) assert.match(geometry.references[1].glyphClass, /box/);
+    assert.match(geometry.references[2].glyphClass, /message-circle/);
+    assert.match(geometry.references[3].glyphClass, /mc-file-icon/);
+    assert.match(geometry.references[4].glyphClass, /folder/);
+    await capture("composer-inline-references", { fixture, geometry,
+      referenceBoundary: "Actual catalog descriptor quoted for visual reference only; not installed, enabled or executed. Real current Skill/conversation/workspace identities; wrapping is allowed within the same paragraph." });
+    checks.push({ scenario: "Production context_mention renders five real inline reference kinds with decoded images and ordinary keyboard text", fixture, geometry });
+  } finally {
+    const restored = await page.evaluate(async () => {
+      const saved = window.__uiAlignmentComposerAudit;
+      if (!saved) return null;
+      const store = window.__zustandStore;
+      store.setState(saved.original);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      saved.focused.focus({ preventScroll: true });
+      const nodeFor = endpoint => endpoint.indices ? endpoint.indices.reduce((node, index) => node.childNodes[index], saved.input) : endpoint.node;
+      const selection = window.getSelection(), anchor = nodeFor(saved.selection.anchor), focus = nodeFor(saved.selection.focus);
+      selection.removeAllRanges();
+      if (anchor && focus) selection.setBaseAndExtent(anchor, saved.selection.anchor.offset, focus, saved.selection.focus.offset);
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const state = store.getState();
+      const result = { draft: state.draft, owner: state.conversationId === saved.conversationId && state.workingDirectory === saved.workspaceRoot,
+        originalObjects: Object.entries(saved.original).every(([key, value]) => state[key] === value),
+        hiddenDrafts: state.workspaceComposerDrafts === saved.workspaceDrafts && state.conversationWorkbenchStates === saved.workbenches,
+        selection: selection.anchorNode === anchor && selection.anchorOffset === saved.selection.anchor.offset
+          && selection.focusNode === focus && selection.focusOffset === saved.selection.focus.offset };
+      delete window.__uiAlignmentComposerAudit;
+      return result;
+    });
+    if (restored) {
+      assert.equal(restored.draft, "KEEP_SETTINGS_DRAFT");
+      assert(restored.owner && restored.originalObjects && restored.hiddenDrafts && restored.selection, "Composer audit must restore original object identities, owner and selection");
+      checks.push({ scenario: "Composer visual audit restores original authoring objects and selection inside the page, including File identities", ...restored });
+    }
+  }
+  assert.equal(requests.length, requestCount, "Reference rendering must not invoke a model");
+  assert.equal(wire.slice(wireStart).filter(event => event.direction === "client" && /^(?:user_message|plugin\.(?:install|enable)|mcp\.(?:call|invoke))$/.test(event.message.type)).length, 0);
+  trace("composer:inline-references:complete");
 }
 async function persistEvidence(extra = {}) {
   const draftDiagnostics = page && !page.isClosed() ? await page.evaluate(() => window.__uiAlignmentDraftTrace ?? null) : null;
@@ -776,7 +938,8 @@ try {
   await page.keyboard.press("Escape");
   await page.locator(".settings-center").waitFor({ state: "hidden" });
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
-  await auditPluginCatalog();
+  const pluginCatalog = await auditPluginCatalog();
+  await auditComposerInlineReferences(pluginCatalog);
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
   trace("shell:menus");
   await auditShellMenus({ page, capture, checks });

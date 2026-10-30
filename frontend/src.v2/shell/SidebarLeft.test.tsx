@@ -159,9 +159,13 @@ describe("SidebarLeft session status", () => {
       expect(new URL(dark.src).searchParams.get("variant")).toBe("logo-dark");
       fireEvent.load(dark);
       expect(dark.hidden).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "技能", exact: true }));
+      expect(screen.getByText("已安装", { exact: true })).toBeTruthy();
+      expect(screen.queryByText("可用技能", { exact: true })).toBeNull();
+      expect(screen.getByRole("button", { name: "Local Brand", exact: true })).toBe(local);
       fireEvent.click(local);
       expect(useAppStore.getState()).toMatchObject({ skillsMarketplaceSelectedPluginId: "local@team", draft: "keep plugin draft" });
-      expect(navigate).toHaveBeenCalledOnce();
+      expect(navigate).toHaveBeenCalledTimes(2);
       expect(fetchPlugins).toHaveBeenCalledOnce();
     } finally { cleanup(); vi.unstubAllGlobals(); }
   });

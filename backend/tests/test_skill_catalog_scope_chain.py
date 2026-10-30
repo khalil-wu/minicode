@@ -33,6 +33,52 @@ def make_skill(root: Path, name: str) -> Path:
     return directory / "SKILL.md"
 
 
+def test_agents_skill_roots_follow_the_configured_project_boundary(tmp_path, monkeypatch):
+    from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    monkeypatch.setenv("MINICODE_CONFIG_DIR", str(tmp_path / "minicode-config"))
+    monkeypatch.setattr("backend.skills.loader._get_managed_minicode_dir", lambda: tmp_path / "managed")
+    monkeypatch.setattr(SkillLoader, "_plugin_search_dirs", lambda self, stack=None: [])
+
+    def write(root: Path, name: str) -> Path:
+        path = root / ".agents/skills" / name / "SKILL.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"---\nname: {name}\ndescription: {name} instructions\n---\nActual body", encoding="utf-8")
+        return path
+
+    user = write(home, "user-agents")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    project = write(repo, "repo-agents")
+    nested = write(repo / "sub", "nested-agents")
+    outside = write(tmp_path, "outside-repo")
+    cwd = repo / "sub" / "leaf"
+    cwd.mkdir(parents=True)
+    stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user"), {}),))
+    loader = SkillLoader(cwd)
+    loader._config_stack = stack
+    paths = {meta.source_path for meta in loader.discover()}
+    assert {user, project, nested} <= paths and outside not in paths
+    assert SkillManager(loader).load_skill_payload("repo-agents", project)["content"].endswith("Actual body")
+
+    plain = tmp_path / "plain"
+    plain_cwd = plain / "child"
+    plain_cwd.mkdir(parents=True)
+    parent_skill = write(plain, "outside-unmarked-project")
+    local_skill = write(plain_cwd, "inside-unmarked-project")
+    loader = SkillLoader(plain_cwd)
+    marker_stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user"), {"project_root_markers": [".project-marker"]}),))
+    loader._config_stack = marker_stack
+    paths = {meta.source_path for meta in loader.discover()}
+    assert local_skill in paths and parent_skill not in paths
+    (plain / ".project-marker").touch()
+    loader = SkillLoader(plain_cwd)
+    loader._config_stack = marker_stack
+    assert parent_skill in {meta.source_path for meta in loader.discover()}
+
+
 def test_explicit_projectless_skill_snapshot_clears_parent_project_scope(tmp_path, monkeypatch):
     monkeypatch.setenv("MINICODE_CONFIG_DIR", str(tmp_path / "user-config"))
     root_a, root_b = tmp_path / "a", tmp_path / "b"

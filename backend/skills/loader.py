@@ -171,14 +171,19 @@ class SkillLoader:
             return path.absolute()
 
     def _search_dirs(self) -> list[tuple[str, Path]]:
+        from backend.config import load_config_layer_stack
+
+        stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
         dirs: list[tuple[str, Path]] = []
-        plugin_only = self._plugin_only_customization()
-        workspace_ancestors = self._workspace_ancestors()
+        plugin_only = self._plugin_only_customization(stack)
+        workspace_ancestors = self._workspace_ancestors(stack)
         dirs.append(("managed", _get_managed_minicode_dir() / "skills"))
-        dirs.extend(self._plugin_search_dirs())
+        dirs.extend(self._plugin_search_dirs(stack))
         dirs.append(("user", get_minicode_config_home_dir() / "skills"))
+        dirs.append(("user", Path.home() / ".agents" / "skills"))
         dirs.extend(("user", path) for path in self._extra_roots)
         dirs.extend(("workspace", path / ".minicode" / "skills") for path in workspace_ancestors)
+        dirs.extend(("workspace", path / ".agents" / "skills") for path in reversed(workspace_ancestors))
         dirs.append(("builtin", PROJECT_ROOT / "skills"))
 
         if plugin_only:
@@ -203,11 +208,11 @@ class SkillLoader:
             deduped.append((level, expanded))
         return deduped
 
-    def _plugin_only_customization(self) -> bool:
+    def _plugin_only_customization(self, stack: Any = None) -> bool:
         try:
             from backend.config import load_config_layer_stack
 
-            stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
+            stack = stack if stack is not None else self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
             return stack.requirements.restricts_customization_to_plugins("skills")
         except Exception:
             # A managed policy read failure must never silently widen the
@@ -219,15 +224,14 @@ class SkillLoader:
             )
             return True
 
-    def _workspace_ancestors(self) -> list[Path]:
+    def _workspace_ancestors(self, stack: Any) -> list[Path]:
         current = self._project_root
         if current is None:
             return []
-        repository_root = current
-        for candidate in (current, *current.parents):
-            repository_root = candidate
-            if any((candidate / marker).exists() for marker in (".git", ".hg", ".svn")):
-                break
+        from backend.config_layers import _find_project_root, _project_root_markers
+
+        markers = _project_root_markers(stack.effective_non_project_config())
+        repository_root = _find_project_root(current, markers)
         ancestors: list[Path] = []
         for candidate in (current, *current.parents):
             ancestors.append(candidate)
@@ -235,7 +239,7 @@ class SkillLoader:
                 break
         return ancestors
 
-    def _plugin_search_dirs(self) -> list[tuple[str, Path]]:
+    def _plugin_search_dirs(self, stack: Any = None) -> list[tuple[str, Path]]:
         try:
             from backend.plugins.manager import PluginManager
         except Exception:
@@ -245,7 +249,7 @@ class SkillLoader:
         try:
             from backend.config import load_config_layer_stack
 
-            stack = self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
+            stack = stack if stack is not None else self._config_stack if self._config_stack is not None else load_config_layer_stack(cwd=self._project_root)
             flags = load_feature_flags(
                 stack.effective_config(),
                 managed_requirements=stack.requirements.feature_requirements,

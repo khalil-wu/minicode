@@ -50,6 +50,64 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it.each(["发送快捷键", "默认文件打开位置", "集成终端 Shell", "语言", "关闭窗口前确认", "自动归档闲置聊天", "任务完成通知", "通知声音"])(
+  "retires the %s dropdown with its page without changing the saved preference or draft", async label => {
+    const view = render(<GeneralTab active />);
+    await act(async () => {});
+    const name = new RegExp(`^${label}，当前：`);
+    const initialLabel = screen.getByRole("button", { name }).textContent;
+    fireEvent.click(screen.getByRole("button", { name }));
+    expect(screen.getByRole("listbox", { name: label })).toBeTruthy();
+    view.rerender(<GeneralTab active={false} />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    view.rerender(<GeneralTab active />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.getByRole("button", { name }).textContent).toBe(initialLabel);
+    expect(screen.getByRole("button", { name })).toHaveProperty("disabled", false);
+    expect(native.update).not.toHaveBeenCalled();
+    expect(useAppStore.getState()).toMatchObject({ draft: "ORIGINAL UNSENT DRAFT", permissionMode: "confirm", sendShortcut: "enter" });
+  },
+);
+
+it("retires unconfirmed Full Access availability when leaving General without changing permissions", async () => {
+  native.preferences = { ...native.preferences!, showFullAccess: false };
+  const view = render(<GeneralTab active />);
+  await act(async () => {});
+  fireEvent.click(screen.getByRole("switch", { name: "完整访问权限" }));
+  expect(screen.getByRole("dialog", { name: "要启用完整访问权限吗？" })).toBeTruthy();
+  view.rerender(<GeneralTab active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  view.rerender(<GeneralTab active />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(native.update).not.toHaveBeenCalled();
+  expect(screen.getByRole("switch", { name: "完整访问权限" }).getAttribute("aria-checked")).toBe("false");
+  expect(useAppStore.getState()).toMatchObject({ permissionMode: "confirm", draft: "ORIGINAL UNSENT DRAFT" });
+});
+
+it("reads Startup Apps only for the active page and ignores a read retired during navigation", async () => {
+  let finish!: (value: boolean) => void;
+  native.getStartupStatus.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+  const view = render(<GeneralTab active={false} />);
+  fireEvent.focus(window);
+  expect(native.getStartupStatus).not.toHaveBeenCalled();
+  view.rerender(<GeneralTab active />);
+  expect(native.getStartupStatus).toHaveBeenCalledOnce();
+  view.rerender(<GeneralTab active={false} />);
+  fireEvent.focus(window);
+  expect(native.getStartupStatus).toHaveBeenCalledOnce();
+  view.rerender(<GeneralTab active />);
+  const row = screen.getByText("登录时启动").closest(".settings-row")! as HTMLElement;
+  await within(row).findByText("已关闭");
+  await act(async () => finish(true));
+  expect(within(row).getByText("已关闭")).toBeTruthy();
+  expect(native.getStartupStatus).toHaveBeenCalledTimes(2);
+  native.getStartupStatus.mockResolvedValueOnce(true);
+  fireEvent.focus(window);
+  await within(row).findByText("已开启");
+  expect(native.getStartupStatus).toHaveBeenCalledTimes(3);
+  expect(native.update).not.toHaveBeenCalled();
+});
+
 it("renders the real discovered app icon and full label and changes only the global preference", () => {
   const view = render(<GeneralTab />);
   const trigger = screen.getByRole("button", { name: "默认文件打开位置，当前：VS Code" });

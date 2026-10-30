@@ -65,9 +65,9 @@ describe("actual composer input consumers", () => {
     typeAtCaret(input, `review ${token} after @later`, 7 + token.length);
     expect(screen.getByRole("button", { name: "Select context" }).getAttribute("data-filter")).toBe(token);
     fireEvent.click(screen.getByRole("button", { name: "Select context" }));
-    expect(useAppStore.getState().draft).toBe("review  after @later");
+    expect(useAppStore.getState().draft).toBe("review [input.ts#4-8](src/input.ts#4-8)  after @later");
     expect(useAppStore.getState().selectedMentions[0]).toMatchObject({ path: "src/input.ts#4-8", kind: "file" });
-    expect(input.selectionStart).toBe(7);
+    expect(input.selectionStart).toBe("review [input.ts#4-8](src/input.ts#4-8) ".length);
     expect(document.activeElement).toBe(input);
   });
 
@@ -78,9 +78,9 @@ describe("actual composer input consumers", () => {
     expect(screen.getByRole("button", { name: "Select context" }).getAttribute("data-kind")).toBe("skill");
     mocks.selected = `skill-path:${encodeURIComponent("C:/skills/review")}`;
     fireEvent.click(screen.getByRole("button", { name: "Select context" }));
-    expect(useAppStore.getState().draft).toBe("please  carefully");
+    expect(useAppStore.getState().draft).toBe("please [$review](C:/skills/review)  carefully");
     expect(useAppStore.getState().selectedSkills[0].name).toBe("review");
-    expect(input.selectionStart).toBe(7);
+    expect(input.selectionStart).toBe("please [$review](C:/skills/review) ".length);
   });
 
   it("tracks caret movement and closes the picker for selected text and active composition", () => {
@@ -105,10 +105,10 @@ describe("actual composer input consumers", () => {
     typeAtCaret(input, "side @input#4 after", 13);
     fireEvent.click(screen.getByRole("button", { name: "Select context" }));
     const side = Object.values(useAppStore.getState().sideChats)[0];
-    expect(side.draft).toBe("side  after");
+    expect(side.draft).toBe("side [input.ts#4](src/input.ts#4)  after");
     expect(side.contextRefs[0]).toMatchObject({ path: "src/input.ts#4", workspaceRoot: "C:/original" });
     expect(useAppStore.getState().draft).toBe("main draft");
-    expect(input.selectionStart).toBe(5);
+    expect(input.selectionStart).toBe("side [input.ts#4](src/input.ts#4) ".length);
   });
 
   it("opens an explicit side context picker and removes only its appended token", () => {
@@ -118,6 +118,6 @@ describe("actual composer input consumers", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加上下文" }));
     expect(input.selectionStart).toBe(input.value.length);
     fireEvent.click(screen.getByRole("button", { name: "Select context" }));
-    expect(Object.values(useAppStore.getState().sideChats)[0].draft).toBe("side note ");
+    expect(Object.values(useAppStore.getState().sideChats)[0].draft).toBe("side note [input.ts](src/input.ts) ");
   });
 });

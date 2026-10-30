@@ -48,7 +48,7 @@ export const GeneralTab = ({
         {isDesktop() && <ComposerContextUsagePreference />}
         <SettingsRow title={t("发送快捷键")} description={t("选择按 Enter 时是发送提示还是插入新行")}>
           <SelectMenu ariaLabel={t("发送快捷键")} className="settings-select settings-select-regular" align="end" value={sendShortcut}
-            onValueChange={(value) => setSendShortcut(value as SendShortcut)}>
+            disabled={!active} onValueChange={(value) => setSendShortcut(value as SendShortcut)}>
             {SEND_SHORTCUT_CHOICES.map(choice => <option key={choice.id} value={choice.id} title={t(choice.title)}>{t(choice.label, { modifierSymbol })}</option>)}
           </SelectMenu>
         </SettingsRow>
@@ -69,7 +69,7 @@ export const GeneralTab = ({
       </SettingsGroup>
 
       {isDesktop() && <PopoutWindowPreferences active={active} />}
-      {isDesktop() && <DesktopNotificationPreferences />}
+      {isDesktop() && <DesktopNotificationPreferences active={active} />}
       {isDesktop() && <ToysPreferences />}
     </div>
   );
@@ -124,6 +124,7 @@ const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean
   const { preferences, error, update } = useDesktopPreferences();
   const { targets, error: targetsError } = useDesktopPreferenceTargets(active, preferences?.terminalShell);
   const [fullAccessConfirmation, setFullAccessConfirmation] = useState(false);
+  useEffect(() => { if (!active) setFullAccessConfirmation(false); }, [active]);
   const [changingTaskDirectory, setChangingTaskDirectory] = useState(false);
   if (error) return <p role="alert">{error}</p>;
   if (!preferences) return <p role="status">{t("正在读取桌面设置…")}</p>;
@@ -154,7 +155,7 @@ const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean
       </SettingsRow>
       <SettingsRow title={t("默认文件打开位置")} description={t("默认打开文件和文件夹的位置。")}>
         <SelectMenu ariaLabel={t("默认文件打开位置")} className="settings-select settings-select-regular" align="end" menuMaxHeight={320}
-          disabled={!targets} selectedLabel={!targets ? t("正在读取桌面设置…") : undefined}
+          disabled={!active || !targets} selectedLabel={!targets ? t("正在读取桌面设置…") : undefined}
           renderOptionIcon={targets ? (value) => <FileOpenTargetIcon target={targets.fileOpenTargets.find(target => target.id === value)!} /> : undefined}
           value={preferences.fileOpenTarget} onValueChange={(value) => void update({ fileOpenTarget: value as typeof preferences.fileOpenTarget })}>
           {targets?.fileOpenTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
@@ -162,18 +163,18 @@ const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean
         {targetsError && <p role="alert">{targetsError}</p>}
       </SettingsRow>
       <SettingsRow title={t("集成终端 Shell")} description={t("选择要在集成终端中打开的 Shell。")}>
-        <SelectMenu ariaLabel={t("集成终端 Shell")} className="settings-select settings-select-regular" align="end" disabled={!targets} selectedLabel={!targets ? t("正在读取桌面设置…") : undefined}
+        <SelectMenu ariaLabel={t("集成终端 Shell")} className="settings-select settings-select-regular" align="end" disabled={!active || !targets} selectedLabel={!targets ? t("正在读取桌面设置…") : undefined}
           value={preferences.terminalShell} onValueChange={(value) => void update({ terminalShell: value as typeof preferences.terminalShell })}>
           {targets?.terminalShellTargets.map((target) => <option key={target.id} value={target.id}>{target.label}</option>)}
         </SelectMenu>
       </SettingsRow>
       <SettingsRow title={t("语言")} description={t("应用界面语言。")}>
-        <SelectMenu ariaLabel={t("语言")} className="settings-select settings-select-regular" align="end" value={preferences.localeOverride ?? "auto"} onValueChange={(value) => void update({ localeOverride: value === "auto" ? null : value as "zh-CN" | "en-US" })}>
+        <SelectMenu ariaLabel={t("语言")} className="settings-select settings-select-regular" align="end" disabled={!active} value={preferences.localeOverride ?? "auto"} onValueChange={(value) => void update({ localeOverride: value === "auto" ? null : value as "zh-CN" | "en-US" })}>
           <option value="auto">{t("自动检测")}</option><option value="zh-CN">简体中文</option><option value="en-US">English</option>
         </SelectMenu>
       </SettingsRow>
       <SettingsRow title={t("关闭窗口前确认")} description={preferences.confirmBeforeClose === "keyboardOnly" ? t("当关闭标签页快捷键将关闭窗口时提醒。") : t("选择何时在关闭窗口前提醒；Alt+F4 和关闭按钮仅在始终确认时提醒。")}>
-        <SelectMenu ariaLabel={t("关闭窗口前确认")} className="settings-select settings-select-regular" align="end" value={preferences.confirmBeforeClose} onValueChange={(value) => void update({ confirmBeforeClose: value as typeof preferences.confirmBeforeClose })}>
+        <SelectMenu ariaLabel={t("关闭窗口前确认")} className="settings-select settings-select-regular" align="end" disabled={!active} value={preferences.confirmBeforeClose} onValueChange={(value) => void update({ confirmBeforeClose: value as typeof preferences.confirmBeforeClose })}>
           <option value="never">{t("从不")}</option><option value="keyboardOnly">{t("仅关闭快捷键")}</option><option value="always">{t("始终")}</option>
         </SelectMenu>
       </SettingsRow>
@@ -182,14 +183,14 @@ const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean
           aria-checked={preferences.defaultWorkspaceFullView} data-active={preferences.defaultWorkspaceFullView}
           onClick={() => void update({ defaultWorkspaceFullView: !preferences.defaultWorkspaceFullView })}><span /></button>
       </SettingsRow>
-      {desktop()!.platformInfo.platform === "win32" && <StartupAppsPreference />}
+      {desktop()!.platformInfo.platform === "win32" && <StartupAppsPreference active={active} />}
       <SettingsRow title={t("底部面板")} description={t("在应用顶部显示底部面板入口。") }>
         <button type="button" className="settings-toggle" role="switch" aria-label={t("底部面板")}
           aria-checked={preferences.showBottomPanel} data-active={preferences.showBottomPanel}
           onClick={() => void update({ showBottomPanel: !preferences.showBottomPanel })}><span /></button>
       </SettingsRow>
       <SettingsRow title={t("自动归档闲置聊天")} description={t("在一段时间没有活动后归档本地聊天。") }>
-        <SelectMenu ariaLabel={t("自动归档闲置聊天")} className="settings-select settings-select-regular" align="end"
+        <SelectMenu ariaLabel={t("自动归档闲置聊天")} className="settings-select settings-select-regular" align="end" disabled={!active}
           value={String(preferences.autoArchiveAfterDays)} onValueChange={value => void update({ autoArchiveAfterDays: Number(value) as typeof preferences.autoArchiveAfterDays })}>
           {[0, 1, 7, 14, 30, 90].map(days => <option key={days} value={days}>{days === 0 ? t("从不") : t("{count} 天", { count: days })}</option>)}
         </SelectMenu>
@@ -205,7 +206,7 @@ const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean
       <PluginsFeaturePreference />
     </SettingsGroup>
 
-    {fullAccessConfirmation && <FullAccessAvailabilityDialog onClose={() => setFullAccessConfirmation(false)} onConfirm={() => {
+    {active && fullAccessConfirmation && <FullAccessAvailabilityDialog onClose={() => setFullAccessConfirmation(false)} onConfirm={() => {
       void update({ showFullAccess: true });
       setFullAccessConfirmation(false);
     }} />}
@@ -289,20 +290,21 @@ const PluginsFeaturePreference = () => {
   </SettingsRow>;
 };
 
-const StartupAppsPreference = () => {
+const StartupAppsPreference = ({ active }: { active: boolean }) => {
   const { t } = useI18n();
   const [status, setStatus] = useState<boolean | null>();
   const [error, setError] = useState("");
   const [opening, setOpening] = useState(false);
   useEffect(() => {
-    let active = true;
+    if (!active) return;
+    let current = true;
     const read = () => void desktop()!.preferences.getStartupStatus().then(value => {
-      if (active) { setStatus(value); setError(""); }
-    }).catch(reason => { if (active) { setStatus(null); setError(reason instanceof Error ? reason.message : String(reason)); } });
+      if (current) { setStatus(value); setError(""); }
+    }).catch(reason => { if (current) { setStatus(null); setError(reason instanceof Error ? reason.message : String(reason)); } });
     read();
     window.addEventListener("focus", read);
-    return () => { active = false; window.removeEventListener("focus", read); };
-  }, []);
+    return () => { current = false; window.removeEventListener("focus", read); };
+  }, [active]);
   return <SettingsRow title={t("登录时启动")} description={<span title={error || undefined}>{
     status === undefined ? t("正在检查启动状态…") : status === null ? t("启动状态不可用") : status ? t("已开启") : t("已关闭")
   }</span>}>
@@ -315,7 +317,7 @@ const StartupAppsPreference = () => {
   </SettingsRow>;
 };
 
-const DesktopNotificationPreferences = () => {
+const DesktopNotificationPreferences = ({ active }: { active: boolean }) => {
   const { t } = useI18n();
   const { preferences, error, update } = useDesktopPreferences();
   const [soundImporting, setSoundImporting] = useState(false);
@@ -344,7 +346,7 @@ const DesktopNotificationPreferences = () => {
   return (
     <SettingsGroup title={t("通知")}>
       <SettingsRow title={t("任务完成通知")} description={t("任务或回复完成时提醒。")}>
-        <SelectMenu ariaLabel={t("任务完成通知")} className="settings-select settings-select-regular" align="end" value={preferences.turnCompletionNotifications} onValueChange={(value) => void update({ turnCompletionNotifications: value as typeof preferences.turnCompletionNotifications })}>
+        <SelectMenu ariaLabel={t("任务完成通知")} className="settings-select settings-select-regular" align="end" disabled={!active} value={preferences.turnCompletionNotifications} onValueChange={(value) => void update({ turnCompletionNotifications: value as typeof preferences.turnCompletionNotifications })}>
           <option value="never">{t("从不")}</option><option value="onlyWhenUnfocused">{t("仅在应用未聚焦时")}</option><option value="always">{t("始终")}</option>
         </SelectMenu>
       </SettingsRow>
@@ -352,7 +354,7 @@ const DesktopNotificationPreferences = () => {
         <button type="button" className="settings-toggle" role="switch" aria-label={label} aria-checked={preferences[key]} data-active={preferences[key]} onClick={() => void update({ [key]: !preferences[key] })}><span /></button>
       </SettingsRow>)}
       <SettingsRow title={t("通知声音")} description={t("任务完成、权限请求和提问时播放的声音。") }>
-        <SelectMenu ariaLabel={t("通知声音")} className="settings-select settings-select-regular" align="end" disabled={soundImporting}
+        <SelectMenu ariaLabel={t("通知声音")} className="settings-select settings-select-regular" align="end" disabled={!active || soundImporting}
           value={typeof preferences.notificationSound === "object" ? "custom" : preferences.notificationSound}
           onValueChange={value => void setNotificationSound(value)}>
           <option value="default">{t("默认")}</option><option value="classic">{t("经典")}</option><option value="none">{t("无")}</option>
