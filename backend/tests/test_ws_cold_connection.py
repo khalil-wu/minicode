@@ -14,6 +14,7 @@ from starlette.websockets import WebSocketState
 from backend import main
 from backend.artifact.store import ArtifactStore
 from backend.config import AppConfig, LLMSettings
+from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
 from backend.permissions.checker import PermissionChecker
 from backend.tools.registry import ToolRegistry
 from backend.ws import handler
@@ -75,7 +76,9 @@ class RecordingArtifacts(ArtifactStore):
 
 
 def _connection(tmp_path, session_id="cold-session"):
-    config = AppConfig(llm=LLMSettings(api_key=""))
+    config = AppConfig(llm=LLMSettings(api_key=""), config_layer_stack=ConfigLayerStack((
+        ConfigLayer(ConfigLayerSource("user", file=str(tmp_path / "settings.json")), {}),
+    )))
     return {
         "websocket": RecordingSocket(session_id),
         "llm": RecordingLLM(),
