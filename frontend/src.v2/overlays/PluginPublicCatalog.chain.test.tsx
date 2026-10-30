@@ -35,7 +35,7 @@ it("shows actual names and logos in both the installed and public directory", as
       interface: { displayName: "Computer Use", shortDescription: "Work with Windows apps", category: "Developer Tools" } },
   ] };
   const installed = { id: "computer-use@minicode-bundled", name: "computer-use", displayName: "Computer Use",
-    path: "C:/installed/computer-use", enabled: true };
+    path: "C:/installed/computer-use", iconVariant: "logo", iconVariants: ["logo"], enabled: true };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const path = new URL(String(input)).pathname;
     return Response.json(path.endsWith("/marketplaces") ? { marketplaces: [publicCatalog, bundled] } : { plugins: [installed] });

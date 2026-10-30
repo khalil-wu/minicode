@@ -28,6 +28,7 @@ from backend.plugins.identity import (
 )
 from backend.plugins.layout import plugin_data_root, plugin_install_root
 from backend.plugins.manifest import (
+    _bundled_plugin_asset_manifest,
     _count_plugin_skills,
     _declared_component_payload,
     _declared_plugin_component_path,
@@ -424,6 +425,13 @@ def get_plugin_settings(
         plugin_id = str(entry.get("id") or plugin_id_for_name(
             str(entry.get("name") or ""), str(entry.get("marketplace") or "local")
         ))
+        if not entry.get("iconVariant"):
+            bundled_manifest = _bundled_plugin_asset_manifest(entry)
+            if bundled_manifest is not None:
+                bundled_metadata: dict[str, Any] = {}
+                _merge_manifest_metadata(bundled_metadata, bundled_manifest)
+                entry["iconVariant"] = bundled_metadata.get("iconVariant", "")
+                entry["iconVariants"] = bundled_metadata.get("iconVariants", [])
         managed_state = effective_policy.managed_state(
             plugin_id,
             str(entry.get("version") or ""),
@@ -1421,27 +1429,31 @@ def resolve_plugin_asset(plugin_path: str | Path, variant: str, *, config_stack:
         requested = Path(plugin_path).expanduser().resolve()
     except OSError:
         return None
-    installed = {
-        Path(str(entry.get("path") or "")).expanduser().resolve()
-        for entry in get_plugin_settings(config_stack=config_stack).get("plugins", [])
-        if str(entry.get("path") or "").strip()
-    }
-    from backend.plugins.manager import MarketplaceRegistry
-
+    installed = next((entry for entry in get_plugin_settings(config_stack=config_stack).get("plugins", [])
+        if Path(entry["path"]).expanduser().resolve() == requested), None)
     policy = _plugin_policy_from_stack(config_stack)
-    for marketplace in MarketplaceRegistry(config_stack=config_stack, workspace_root=workspace_root, include_bundled=True).list(policy=policy):
-        installed.update(Path(plugin["resolved_path"]).resolve() for plugin in marketplace["plugins"] if plugin.get("resolved_path"))
-    if requested not in installed:
-        return None
+    policy.assert_policy_valid()
+    if installed is None:
+        from backend.plugins.manager import MarketplaceRegistry
+
+        catalog_paths = {Path(plugin["resolved_path"]).resolve()
+            for marketplace in MarketplaceRegistry(config_stack=config_stack, workspace_root=workspace_root, include_bundled=True).list(policy=policy)
+            for plugin in marketplace["plugins"] if plugin.get("resolved_path")}
+        if requested not in catalog_paths:
+            return None
     manifest = _primary_plugin_manifest(requested)
     if manifest is None:
         return None
-    try:
-        payload = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
+    payload = _read_plugin_manifest(manifest)
     interface = payload.get("interface") if isinstance(payload, Mapping) else None
     if not isinstance(interface, Mapping):
         return None
     field = {"composer": "composerIcon", "logo": "logo", "logo-dark": "logoDark"}.get(variant)
-    return _resolve_manifest_asset(manifest, interface.get(field)) if field else None
+    asset = _resolve_manifest_asset(manifest, interface.get(field)) if field else None
+    if asset is not None or installed is None or field is None:
+        return asset
+    bundled_manifest = _bundled_plugin_asset_manifest(installed)
+    if bundled_manifest is None:
+        return None
+    bundled = _read_plugin_manifest(bundled_manifest)
+    return _resolve_manifest_asset(bundled_manifest, bundled.get("interface", {}).get(field))

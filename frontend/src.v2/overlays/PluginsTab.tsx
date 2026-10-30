@@ -480,7 +480,6 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
   const q = (search ?? query).trim().toLocaleLowerCase();
   const filteredPlugins = useMemo(() => plugins.filter((plugin) => !q || `${plugin.name} ${plugin.displayName} ${plugin.description}`.toLocaleLowerCase().includes(q)), [plugins, q]);
   const installedPluginIds = useMemo(() => new Set(plugins.map(plugin => plugin.id || plugin.name)), [plugins]);
-  const catalogById = useMemo(() => new Map(marketplaces.flatMap(source => source.plugins.map(entry => [entry.id, entry] as const))), [marketplaces]);
   const directorySources = useMemo(() => marketplaces.filter(source => (source.directory ?? "personal") === directory), [marketplaces, directory]);
   const catalogSections = useMemo(() => {
     const sections = new Map<string, { title: string; items: { plugin: CatalogPlugin; source: PluginMarketplace }[] }>();
@@ -505,10 +504,6 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
       iconUrl={resolvedTheme === "dark" ? plugin.iconDarkUrl || plugin.iconUrl || localIcon : plugin.iconUrl || localIcon} />;
   };
   const pluginLogo = (plugin: PluginEntry, size: number) => {
-    if (!plugin.iconUrl && !plugin.iconVariant) {
-      const catalogEntry = catalogById.get(plugin.id || plugin.name);
-      if (catalogEntry) return catalogLogo(catalogEntry, size);
-    }
     return <BrandIcon value={plugin.displayName || plugin.name} inferBrand={false} size={size}
       fallbackIcon={<span className="plugin-icon-initial">{(plugin.displayName || plugin.name).slice(0, 1).toLocaleUpperCase()}</span>}
       iconUrl={resolvedTheme === "dark" && plugin.iconVariants?.includes("logo-dark")

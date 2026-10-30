@@ -15,6 +15,7 @@ from backend.plugins.identity import (
     normalize_plugin_id,
     parse_plugin_id,
     parse_plugin_id_strict,
+    plugin_id,
 )
 from backend.plugins.layout import PLUGIN_MANIFEST_DIRECTORIES, plugin_install_root, plugin_manifest_path
 from backend.plugins.source_agent_manifest import resolve_agent_manifest
@@ -84,6 +85,27 @@ def _primary_plugin_manifest(plugin_dir: Path) -> Path | None:
         if manifest.is_file():
             return manifest
     return None
+
+
+def _bundled_plugin_asset_manifest(entry: Mapping[str, Any]) -> Path | None:
+    """Find the packaged assets belonging to an installed bundled version."""
+    from backend.plugins.manager import BUNDLED_MARKETPLACE_ROOT, _read_marketplace_manifest
+
+    source = entry.get("source_descriptor") or {}
+    if source.get("source") != "directory" or _filesystem_path_key(source.get("path")) != _filesystem_path_key(BUNDLED_MARKETPLACE_ROOT.resolve()):
+        return None
+    if entry.get("store_valid") is False:
+        return None
+    _, marketplace = _read_marketplace_manifest(BUNDLED_MARKETPLACE_ROOT)
+    for item in marketplace["plugins"]:
+        if plugin_id(item["name"], marketplace["name"]) != entry["id"]:
+            continue
+        manifest = plugin_manifest_path(BUNDLED_MARKETPLACE_ROOT / item["source"]["path"])
+        payload = _read_plugin_manifest(manifest)
+        if payload is not None and payload.get("version") == entry.get("version"):
+            return manifest
+    return None
+
 
 def _looks_like_versioned_store(plugin_dir: Path) -> bool:
     """Recognize ``marketplace/name/version`` stores without trusting names."""

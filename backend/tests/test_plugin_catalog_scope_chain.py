@@ -14,6 +14,7 @@ from backend.commands import plugins as commands
 from backend.mcp.manager import MCPServerManager
 from backend.plugins import package
 from backend.plugins.manager import MarketplaceRegistry
+from backend.plugins.store import PluginStore
 from backend.services import plugin_settings_service as plugins
 from backend.services.computer_use_controls import computer_use_plugin_controls
 
@@ -218,3 +219,52 @@ def test_configured_marketplace_and_registered_snapshot_are_read_from_current_so
     listing = env.client.get("/api/plugins/marketplaces", params={"workspace_root": ""}).json()["marketplaces"]
     failed = next(item for item in listing if item["name"] == "registered")
     assert failed["status"] == "error" and failed["error"] and failed["plugins"] == []
+
+
+@pytest.mark.parametrize("case", ["canonical", "disabled", "foreign-source", "other-market", "other-version", "own-logo"])
+def test_installed_bundled_icon_uses_matching_source_and_version_without_rewriting_the_install(catalog_home, case, monkeypatch):
+    env = catalog_home
+    bundled = Path(__file__).resolve().parents[1] / "plugins/bundled"
+    current_manifest = bundled / "computer-use/.minicode-plugin/plugin.json"
+    payload = json.loads(current_manifest.read_text(encoding="utf8"))
+    payload["interface"].pop("logo")
+    if case == "other-version":
+        payload["version"] = "0.2.1"
+    source = env.root / "old-package"
+    manifest = source / ".minicode-plugin/plugin.json"
+    manifest.parent.mkdir(parents=True)
+    if case == "own-logo":
+        payload["interface"]["logo"] = "./custom.svg"
+        (source / "custom.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><title>Custom</title></svg>', encoding="utf8")
+    manifest.write_text(json.dumps(payload), encoding="utf8")
+    market = "other" if case == "other-market" else "minicode-bundled"
+    origin = env.root if case == "foreign-source" else bundled
+    record = PluginStore().materialize(source, name="computer-use", marketplace=market, version=payload["version"],
+        source={"source": "directory", "path": str(origin.resolve())})
+    settings = json.loads(env.settings.read_text(encoding="utf8"))
+    settings["plugins"] = {record.plugin_id: {"enabled": case != "disabled"}}
+    env.settings.write_text(json.dumps(settings), encoding="utf8")
+    installed_manifest = record.path / ".minicode-plugin/plugin.json"
+    selector = record.path.parent / "active.json"
+    before = [path.read_bytes() for path in (installed_manifest, selector, env.settings)]
+
+    response = env.client.get("/api/plugins", params={"workspace_root": ""})
+    assert response.status_code == 200, response.text
+    plugin = next(item for item in response.json()["plugins"] if item["id"] == record.plugin_id)
+    assert plugin["path"] == str(record.path) and plugin["enabled"] is (case != "disabled")
+    logo = env.client.get("/api/plugins/asset", params={"plugin_path": plugin["path"], "variant": "logo", "workspace_root": ""})
+    if case in {"canonical", "disabled", "own-logo"}:
+        assert plugin["iconVariant"] == "logo" and plugin["iconVariants"] == ["logo"]
+        assert logo.status_code == 200
+        expected = source / "custom.svg" if case == "own-logo" else bundled / "computer-use/assets/app-icon.png"
+        assert logo.content == expected.read_bytes()
+    else:
+        assert not plugin["iconVariant"] and plugin["iconVariants"] == []
+        assert logo.status_code == 404
+    if case == "canonical":
+        invalid_policy = plugins.ManagedPluginPolicy({}, None, (), {}, policy_errors=("invalid marketplace rule",))
+        monkeypatch.setattr(plugins, "_plugin_policy_from_stack", lambda *_: invalid_policy)
+        with pytest.raises(plugins.PluginSettingsError, match="Managed plugin policy is invalid") as error:
+            env.client.get("/api/plugins/asset", params={"plugin_path": plugin["path"], "variant": "logo", "workspace_root": ""})
+        assert error.value.status_code == 503
+    assert [path.read_bytes() for path in (installed_manifest, selector, env.settings)] == before
