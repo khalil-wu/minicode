@@ -49,7 +49,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.model_execution import ModelExecutionSnapshot, capture_model_config
 from backend.agent.turn_state import AgentTurnState, record_user_input_block
 from backend.artifact.store import MAX_CONTENT_LENGTH as MAX_ARTIFACT_CONTENT_CHARS
-from backend.config import AppConfig, get_available_models, get_llm_provider, load_config
+from backend.config import AppConfig, get_available_models, get_llm_provider, load_config, load_llm_settings
 from backend.conversations.public_projection import project_public_transcript_message
 from backend.agent.conversation_query_guard import (
     ConversationQueryClaim,
@@ -1448,7 +1448,7 @@ class SessionAgentRunnerMixin:
             model_override=bool(self._model_override_active) if active else False,
             agent_mode=conversation.agent_mode,
             permission=self.permission_context_for_conversation(conversation, source="agent.run"),
-            tool_registry=self._conversation_tool_registry(conversation_id, workspace_root=root).fork(),
+            tool_registry=self._conversation_tool_registry(conversation_id, workspace_root=root, config=config).fork(),
             skill_manager=skills, skill_executor=self.skill_executor,
             mcp_manager=self._mcp_manager_for_workspace(root), memory_manager=self.memory_manager,
             skill_snapshot_pending=skill_snapshot_pending)
@@ -1927,6 +1927,7 @@ class SessionAgentRunnerMixin:
         *,
         workspace_root: Path | None = None,
         force_rebuild: bool = False,
+        config: AppConfig | None = None,
     ) -> Any:
         """Return the MiniCode-owned tool registry for one conversation."""
 
@@ -1960,7 +1961,8 @@ class SessionAgentRunnerMixin:
                 # later turn rebuilds after the MCP/config generation changes.
                 return registry
 
-        effective_config = load_config(cwd=workspace_root, resolve_credentials=False)
+        effective_config = (load_config(cwd=workspace_root, resolve_credentials=False) if config is None
+            else replace(config, llm=load_llm_settings(config.config_layer_stack.effective_config(), resolve_credentials=False)))
         registry = self._build_conversation_tool_registry(
             clean_id,
             workspace_root=workspace_root,
@@ -4208,7 +4210,7 @@ class SessionAgentRunnerMixin:
         execution_journal = admission_runtime.execution_journal(journal_owner)
         run_context.execution_journal = execution_journal
 
-        conversation = self.session_lifecycle.bind_execution_for_operation(conversation)
+        conversation = self.session_lifecycle.bind_execution_for_operation(conversation, metadata_only=True)
         run_workspace_root = request_snapshot.workspace_root
         if conversation.execution_cwd.startswith("file:"):
             run_context.execution_cwd_uri = conversation.execution_cwd

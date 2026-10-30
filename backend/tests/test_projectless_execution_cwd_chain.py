@@ -346,7 +346,8 @@ def test_production_browser_raw_signed_url_authorizes_exact_owner_and_route(tmp_
         client.close()
 
 
-def test_legacy_empty_attachment_scope_is_retained_when_real_execution_owner_is_fixed(tmp_path):
+@pytest.mark.parametrize("metadata_only", [False, True])
+def test_legacy_empty_attachment_scope_is_retained_when_real_execution_owner_is_fixed(tmp_path, metadata_only):
     directory = tmp_path / "actual-original-operation"
     directory.mkdir()
     snapshot = {"history": [{"role": "user", "content": "original request", "runtime_context": f"<environment_context><cwd>{directory}</cwd></environment_context>"}]}
@@ -360,7 +361,7 @@ def test_legacy_empty_attachment_scope_is_retained_when_real_execution_owner_is_
     old_metadata = ConversationSummary.from_dict({"id": "conv_legacy_owner", "title": "original", "workspace_root": ""})
     assert session.session_lifecycle.workspace_root_for_conversation(old_metadata) is None
     assert session.attachment_store.get(attachment_id, conversation_id="conv_legacy_owner", workspace_root=directory) is None
-    bound = session.session_lifecycle.bind_execution_for_operation(old_metadata)
+    bound = session.session_lifecycle.bind_execution_for_operation(old_metadata, metadata_only=metadata_only)
     assert bound.execution_cwd == str(directory)
     assert session.session_lifecycle.workspace_root_for_conversation(bound) == directory
     assert session.attachment_store.get(attachment_id, conversation_id="conv_legacy_owner", workspace_root=directory) == "original uploaded file"
@@ -425,7 +426,8 @@ async def test_real_rest_admission_uses_fixed_cwd_and_preserves_legacy_resource_
         runtime.close(release_lease=True)
 
 
-def test_unrecorded_projectless_read_only_navigation_does_not_guess_or_bind_cwd(tmp_path, monkeypatch):
+@pytest.mark.parametrize("metadata_only", [False, True])
+def test_unrecorded_projectless_read_only_navigation_does_not_guess_or_bind_cwd(tmp_path, monkeypatch, metadata_only):
     directory = tmp_path / "actual-operation"
     directory.mkdir()
     repository = ConversationRepository(tmp_path / "conversations")
@@ -436,7 +438,7 @@ def test_unrecorded_projectless_read_only_navigation_does_not_guess_or_bind_cwd(
     assert session.session_lifecycle.current_workspace_root() is None
     assert session.session_lifecycle.workspace_root_for_conversation(conversation) is None
     assert repository.get_conversation(conversation.id).execution_cwd == ""
-    bound = session.session_lifecycle.bind_execution_for_operation(conversation)
+    bound = session.session_lifecycle.bind_execution_for_operation(conversation, metadata_only=metadata_only)
     assert bound.execution_cwd == str(directory)
     assert bound.workspace_root == ""
     assert session.session_lifecycle.current_workspace_root() == directory

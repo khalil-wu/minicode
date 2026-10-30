@@ -1267,9 +1267,16 @@ class SessionLifecycle:
         # until hydration or a real execution boundary establishes its owner.
         return str(target.execution_cwd or target.worktree_path or target.workspace_root or "").strip()
 
-    def bind_execution_for_operation(self, conversation: Any) -> Any:
-        """Fix cwd at a real execution boundary, preserving historical grants."""
-        record = self._session.conversation_repo.get_conversation(conversation.id)
+    def bind_execution_for_operation(self, conversation: Any, *, metadata_only: bool = False) -> Any:
+        """Bind cwd/grants; metadata callers need no already-bound full record."""
+        repository = self._session.conversation_repo
+        if metadata_only:
+            record = repository.get_conversation_summary(conversation.id)
+            if not record.execution_cwd:
+                # Old records may derive their original cwd from retained history.
+                record = repository.get_conversation(conversation.id)
+        else:
+            record = repository.get_conversation(conversation.id)
         if not record.execution_cwd:
             actual_directory = Path.cwd().resolve()
             record = self._session.conversation_repo.bind_execution_cwd(record.id, str(actual_directory))

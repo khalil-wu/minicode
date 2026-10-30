@@ -431,6 +431,7 @@ class _Session(SessionAgentRunnerMixin, SessionApprovalRuntimeMixin):
         *,
         workspace_root=None,
         force_rebuild: bool = False,
+        config=None,
     ):
         # Production builds one registry generation per conversation through the
         # app bootstrap. These tests own a fixed registry instead of a bootstrap.
