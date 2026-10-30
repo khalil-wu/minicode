@@ -46,17 +46,12 @@ def _machine_passphrase() -> bytes:
 
 
 class EnvVault:
-    """Manages encrypted environment variables stored locally."""
+    """Read the current index inside each credential operation's lock."""
 
     def __init__(self, vault_path: Path | None = None) -> None:
         self._path = vault_path or VAULT_FILE
         self._entries: dict[str, _VaultEntry] = {}
         self._service = f"minicode:{hashlib.sha256(str(self._path.resolve()).encode()).hexdigest()[:20]}"
-        self._load()
-
-    def _load(self) -> None:
-        with file_mutation_locks([self._path]):
-            self._load_unlocked()
 
     def _load_unlocked(self) -> None:
         self._entries = {}
@@ -189,13 +184,14 @@ class EnvVault:
             self.set_many({name: (None, "", "")})
             return True
 
-    def list_names(self) -> list[dict[str, str]]:
+    def list_names(self, *, prefix: str = "") -> list[dict[str, str]]:
         with file_mutation_locks([self._path]):
             self._load_unlocked()
             return [
                 {"name": name, "description": entry.description, "scope": entry.scope,
                  "credential_status": "stored" if self._get_unlocked(name, entry) is not None else "missing"}
                 for name, entry in self._entries.items()
+                if name.startswith(prefix)
             ]
 
     def inject_into_env(self, scope: str = "global") -> dict[str, str]:
@@ -208,17 +204,12 @@ class EnvVault:
         )
         with file_mutation_locks([self._path]):
             self._load_unlocked()
-            names = [
-                name for name, entry in self._entries.items()
-                if entry.scope in (scope, "global")
-                and name.upper() not in provider_keys
-                and not name.upper().startswith(provider_prefixes)
-            ]
-        result: dict[str, str] = {}
-        for name in names:
-            value = self.get(name)
-            if value is not None:
-                result[name] = value
+            result: dict[str, str] = {}
+            for name, entry in self._entries.items():
+                if entry.scope in (scope, "global") and name.upper() not in provider_keys and not name.upper().startswith(provider_prefixes):
+                    value = self._get_unlocked(name, entry)
+                    if value is not None:
+                        result[name] = value
         return result
 
 

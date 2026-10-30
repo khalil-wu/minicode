@@ -121,6 +121,15 @@ async function connectDesktop(scale = 1) {
   else await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setContentSize(1280, 900));
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
 }
+async function waitForCommittedComposerDrafts() {
+  // Reload and DPI relaunch verify persisted recovery. Pending native unload
+  // is exercised by window-unload-electron.test.js without Playwright's dialog handler.
+  await page.waitForFunction(() => {
+    const state = window.__zustandStore.getState();
+    if (state.composerDraftStorageError) throw new Error(state.composerDraftStorageError);
+    return state.composerDraftsReady && !state.composerDraftStoragePending;
+  });
+}
 async function auditRealtimeWorklet() {
   trace("realtime:worklet:begin");
   const entries = await page.locator('script[type="module"][src]').evaluateAll(scripts =>
@@ -640,6 +649,7 @@ try {
   assert.equal(ownedRateLimit.turn_id, busyRetryReceipt.turn_id);
   assert.equal(await page.locator('.toast-container [role="alert"]').count(), 0, "The owned retry has one transcript row without a duplicate provider toast");
   await capture("02-actual-provider-busy-reconnect-one");
+  await waitForCommittedComposerDrafts();
   await page.reload();
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
   await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor();
@@ -707,6 +717,7 @@ try {
   await composer.waitFor({ state: "visible" });
   assert.equal(await composer.innerText(), "KEEP_A_DRAFT");
   await capture("04-return-to-running-owner");
+  await waitForCommittedComposerDrafts();
   await page.reload();
   await page.waitForFunction(() => window.__zustandStore?.getState().isConnected, null, { timeout: 60000 });
   await page.locator('.stream-error-cell[data-retry-attempt="2"]').waitFor();
@@ -974,6 +985,7 @@ try {
   // Relaunch only the isolated CI desktop with actual Chromium device scales.
   // These captures exclude OS decorations; Windows-native scaling is separate.
   for (const scale of [1.25, 1.5]) {
+    await waitForCommittedComposerDrafts();
     await app.close();
     await connectDesktop(scale);
     const dpr = await page.evaluate(() => devicePixelRatio);

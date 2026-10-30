@@ -2,7 +2,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useEffect, useState } from "react";
+import { Profiler, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 
 const {
@@ -119,6 +119,10 @@ import type { ChatMessage } from "../stores/types";
 import { useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
 import { getAutomationsPageState, openThreadAutomationEditor } from "../lib/automations-navigation";
 import { readGoalEditor } from "../composer/goal-state";
+import { PanelVisibilityContext } from "./panelVisibility";
+import { ActivityTab } from "./tabs/ActivityTab";
+import { ArtifactsTab } from "./tabs/ArtifactsTab";
+import { InspectorTab } from "./tabs/InspectorTab";
 
 const chatMessage = (patch: Partial<ChatMessage> & Pick<ChatMessage, "id" | "role">): ChatMessage => ({
   content: "",
@@ -133,8 +137,8 @@ const resetSidebarState = () => {
   useMcpAppSurfaces.setState({ entries: [] });
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 1600, writable: true });
   vi.stubGlobal("ResizeObserver", class {
-    constructor(callback: () => void) { notifyTabResize = callback; }
-    observe() {}
+    constructor(private callback: () => void) {}
+    observe(target: Element) { if (target.getAttribute("role") === "tablist") notifyTabResize = this.callback; }
     disconnect() {}
   });
   Object.defineProperty(Element.prototype, "scrollIntoView", {
@@ -234,6 +238,36 @@ describe("SidebarRight activity", () => {
     cleanup();
     vi.unstubAllEnvs();
     window.__MINICODE_RUNTIME__ = undefined;
+  });
+
+  it.each([
+    ["Activity", ActivityTab], ["Artifacts", ArtifactsTab], ["Inspector", InspectorTab],
+  ] as const)("stops %s message projection while hidden and resumes with current stream evidence", async (_name, Panel) => {
+    const owner = "projection-owner";
+    useAppStore.setState({ conversationId: owner, conversations: [{ id: owner, title: "Projection", updatedAt: "today" }],
+      isConnected: false, workingDirectory: "", isStreaming: true, agentProgress: [], inspectorEntries: [], inspectorFocus: null,
+      messages: [chatMessage({ id: "streamed-answer", role: "assistant", turnId: "streamed-turn", isStreaming: true })] });
+    const commit = vi.fn();
+    const panel = (visible: boolean) => <PanelVisibilityContext.Provider value={visible}>
+      <Profiler id="panel-projection" onRender={commit}><Panel /></Profiler>
+    </PanelVisibilityContext.Provider>;
+    const view = render(panel(false));
+    await act(async () => {});
+    commit.mockClear();
+    for (let index = 0; index < 25; index += 1) act(() => {
+      useAppStore.getState().appendAgentMessageDelta("reply", `word ${index} `, owner, "streamed-answer", "reply");
+    });
+    act(() => useAppStore.setState(state => ({ messages: state.messages.map(message => ({ ...message,
+      artifacts: [{ artifactId: "streamed-artifact", kind: "file", summary: "current-stream.txt" }],
+    })) })));
+    expect(commit).not.toHaveBeenCalled();
+    expect(screen.queryByText("current-stream.txt")).toBeNull();
+    view.rerender(panel(true));
+    if (_name !== "Inspector") expect(screen.getByText("current-stream.txt")).toBeTruthy();
+    expect(useAppStore.getState().messages[0].blocks?.some(block => block.type === "text" && block.content.includes("word 24"))).toBe(true);
+    commit.mockClear();
+    act(() => useAppStore.getState().appendAgentMessageDelta("reply", "visible update", owner, "streamed-answer", "reply"));
+    expect(commit).toHaveBeenCalled();
   });
 
   it("keeps separate heartbeat drafts across owner switches and closing a right-panel tab", async () => {
@@ -402,6 +436,60 @@ describe("SidebarRight activity", () => {
     fireEvent.click(screen.getByRole("button", { name: "已打开的面板" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "浏览器" }));
     expect(useAppStore.getState().rightStackTab).toBe("browser");
+  });
+
+  it.each(["visible", "open", "ancestor", "conversation"])("retires header menus when their %s owner changes and keeps retained panels", async (source) => {
+    useAppStore.setState({ conversationId: "menu-owner", rightStackTab: "diff", draft: "Keep panel draft" });
+    const panel = (visible: boolean) => <PanelVisibilityContext.Provider value={source === "ancestor" ? visible : true}>
+      <SidebarRight visible={source === "visible" ? visible : true} />
+    </PanelVisibilityContext.Provider>;
+    const view = render(panel(true));
+    const content = await screen.findByText("Diff panel");
+    const switchAway = () => {
+      if (source === "open") act(() => useAppStore.setState({ rightPanelOpen: false }));
+      else if (source === "conversation") act(() => useAppStore.setState({ conversationId: "another-owner" }));
+      else view.rerender(panel(false));
+    };
+    const switchBack = () => {
+      if (source === "open") act(() => useAppStore.setState({ rightPanelOpen: true }));
+      else if (source === "conversation") act(() => useAppStore.setState({ conversationId: "menu-owner" }));
+      else view.rerender(panel(true));
+    };
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "打开变更" }).closest('[data-sidebar-tab-frame]')!);
+    expect(screen.getByRole("menu", { name: "标签页操作" })).toBeTruthy();
+    switchAway(); expect(screen.queryByRole("menu")).toBeNull();
+    switchBack(); expect(screen.queryByRole("menu")).toBeNull();
+    const track = screen.getByRole("tablist", { name: "右侧栏面板" });
+    Object.defineProperty(track, "scrollWidth", { configurable: true, value: 680 });
+    Object.defineProperty(track, "clientWidth", { configurable: true, value: 260 });
+    act(() => notifyTabResize());
+    fireEvent.click(screen.getByRole("button", { name: "已打开的面板" }));
+    expect(screen.getByRole("menu")).toBeTruthy();
+    switchAway(); expect(screen.queryByRole("menu")).toBeNull();
+    switchBack(); expect(screen.queryByRole("menu")).toBeNull();
+    if (source !== "conversation") expect(screen.getByText("Diff panel")).toBe(content);
+    expect(useAppStore.getState().draft).toBe("Keep panel draft");
+  });
+
+  it("keeps embedded terminal ownership independent of the right drawer while respecting its containing panel", async () => {
+    useAppStore.setState({ rightPanelOpen: false });
+    const panel = (visible: boolean) => <PanelVisibilityContext.Provider value={visible}>
+      <SidebarRight embedded initialTab="terminal" />
+    </PanelVisibilityContext.Provider>;
+    const view = render(panel(true));
+    const terminal = await screen.findByText("Terminal panel");
+    const aside = view.container.querySelector("aside")!;
+    expect(aside.dataset.open).toBe("true");
+    fireEvent.contextMenu(screen.getByRole("tab").closest('[data-sidebar-tab-frame]')!);
+    expect(screen.getByRole("menu", { name: "标签页操作" })).toBeTruthy();
+    view.rerender(panel(false));
+    expect(aside.dataset.open).toBe("false");
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(terminal.isConnected).toBe(true);
+    view.rerender(panel(true));
+    expect(screen.getByText("Terminal panel")).toBe(terminal);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(useAppStore.getState().rightPanelOpen).toBe(false);
   });
 
   it("mixes browser pages and panels in one draggable keyboard order without remounting owners", async () => {

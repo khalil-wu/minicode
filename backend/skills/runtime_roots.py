@@ -17,6 +17,8 @@ class RuntimeSkillRoots:
         self._throttle_seconds = throttle_seconds
         self._observer = None
         self._pending: asyncio.Task | None = None
+        self._dirty = False
+        self._next_allowed = 0.0
         self._loop = asyncio.get_running_loop()
         self._closed = False
 
@@ -26,6 +28,8 @@ class RuntimeSkillRoots:
         self.roots = tuple(dict.fromkeys(Path(value).resolve() for value in values))
         if self._pending is not None and not self._pending.done():
             self._pending.cancel()
+        self._pending = None
+        self._dirty = False
         if self._observer is None and self.roots:
             self._observer = Observer()
         if self._observer is not None:
@@ -59,23 +63,31 @@ class RuntimeSkillRoots:
     def _changed(self):
         if self._closed:
             return
+        self._dirty = True
         if self._pending is not None and not self._pending.done():
             return
 
         async def notify():
-            await asyncio.sleep(self._throttle_seconds)
-            self.revision += 1
-            await self._on_changed()
+            while self._dirty:
+                delay = self._next_allowed - self._loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                self._dirty = False
+                self.revision += 1
+                self._next_allowed = self._loop.time() + self._throttle_seconds
+                await self._on_changed()
 
         self._pending = asyncio.create_task(notify(), name="skills-extra-roots-changed")
 
     async def aclose(self):
         self._closed = True
+        self._dirty = False
+        if self._pending is not None:
+            self._pending.cancel()
         if self._observer is not None:
             self._observer.stop()
             await asyncio.to_thread(self._observer.join)
         if self._pending is not None:
-            self._pending.cancel()
             try:
                 await self._pending
             except asyncio.CancelledError:

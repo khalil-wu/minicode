@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SelectMenu } from "./SelectMenu";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { PanelVisibilityContext } from "../shell/panelVisibility";
 
 const ControlledSelect = ({ disabled = false }: { disabled?: boolean }) => {
   const [value, setValue] = useState("auto");
@@ -19,6 +20,34 @@ const ControlledSelect = ({ disabled = false }: { disabled?: boolean }) => {
 
 describe("SelectMenu", () => {
   afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+  it.each(["", "settings-select"])("closes a retained %s select on panel hide while preserving its selected value", async (className) => {
+    const change = vi.fn();
+    const Panel = ({ visible }: { visible: boolean }) => {
+      const [value, setValue] = useState("main");
+      return <PanelVisibilityContext.Provider value={visible}><SelectMenu ariaLabel="Baseline" className={className}
+        value={value} onValueChange={next => { change(next); setValue(next); }}>
+        <option value="main">Main</option><option value="feature">Feature</option>
+      </SelectMenu></PanelVisibilityContext.Provider>;
+    };
+    const view = render(<Panel visible />);
+    fireEvent.click(screen.getByRole("button", { name: "Baseline，当前：Main" }));
+    fireEvent.click(screen.getByRole("option", { name: "Feature" }));
+    const trigger = screen.getByRole("button", { name: "Baseline，当前：Feature" });
+    fireEvent.click(trigger);
+    await waitFor(() => expect(screen.getByRole("listbox").contains(document.activeElement)).toBe(true));
+    const focus = vi.spyOn(trigger, "focus");
+    view.rerender(<Panel visible={false} />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(focus).not.toHaveBeenCalled();
+    view.rerender(<Panel visible />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(screen.getByRole("button", { name: "Baseline，当前：Feature" })).toBe(trigger);
+    expect(change).toHaveBeenCalledExactlyOnceWith("feature");
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(screen.getByRole("listbox")).toBeTruthy();
+  });
 
   it("portals out of clipping parents, bounds the menu to the viewport, and retains model typography", () => {
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ left: 950, right: 1150, top: 100, bottom: 138, width: 200, height: 38 } as DOMRect);

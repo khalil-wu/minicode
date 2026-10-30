@@ -2,7 +2,7 @@ import { collectArtifacts, mergeResourceInventory, type ArtifactItem } from "../
 export { collectArtifacts, mergeResourceInventory } from "../../lib/conversation-artifact-items";
 import { ChevronRight, FileText, FileType, FolderOpen, Image, Link, Paperclip } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { usePanelMessages } from '../panelVisibility'
+import { usePanelMessages } from '../usePanelMessages'
 import { EmptyState } from '../../components/EmptyState'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { useAppStore } from '../../stores'

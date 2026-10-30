@@ -2,6 +2,8 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ContextMenu } from "./ContextMenu";
+import { useState } from "react";
+import { PanelVisibilityContext } from "../shell/panelVisibility";
 
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
@@ -11,6 +13,38 @@ const menuLayout = (width: number, height: number) => {
 };
 
 describe("ContextMenu keyboard navigation", () => {
+  it("retires an open menu and flyout when its retained panel hides without selecting or restoring hidden focus", () => {
+    const action = vi.fn(), close = vi.fn();
+    const Panel = ({ visible }: { visible: boolean }) => {
+      const [open, setOpen] = useState(false);
+      return <PanelVisibilityContext.Provider value={visible}>
+        <button onClick={() => setOpen(true)}>Open options</button>
+        {open && <ContextMenu position={{ x: 20, y: 20 }} onClose={() => { close(); setOpen(false); }} items={[
+          { label: "Open in", submenu: [{ label: "Editor", onClick: action }] },
+        ]} />}
+      </PanelVisibilityContext.Provider>;
+    };
+    const view = render(<Panel visible />);
+    const trigger = screen.getByRole("button", { name: "Open options" });
+    trigger.focus(); fireEvent.click(trigger);
+    screen.getByRole("menuitem", { name: "Open in" }).focus();
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    expect(screen.getByRole("menuitem", { name: "Editor" })).toBeTruthy();
+    const focus = vi.spyOn(trigger, "focus");
+    view.rerender(<Panel visible={false} />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(close).toHaveBeenCalledOnce();
+    expect(focus).not.toHaveBeenCalled();
+    expect(action).not.toHaveBeenCalled();
+    view.rerender(<Panel visible />);
+    expect(screen.queryByRole("menu")).toBeNull();
+    fireEvent.click(trigger);
+    screen.getByRole("menuitem", { name: "Open in" }).focus();
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    fireEvent.click(document.activeElement!);
+    expect(action).toHaveBeenCalledOnce();
+  });
+
   it("typeaheads and returns through a five-level submenu without selecting a different level", () => {
     const action = vi.fn(), close = vi.fn();
     render(<ContextMenu position={{ x: 0, y: 0 }} onClose={close} items={[

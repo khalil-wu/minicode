@@ -373,10 +373,7 @@ def _vault_has_scoped_provider_keys(provider: str) -> bool:
         return True
     from backend.vault import EnvVault
 
-    return any(
-        str(entry.get("name") or "").startswith(prefix)
-        for entry in EnvVault().list_names()
-    )
+    return bool(EnvVault().list_names(prefix=prefix))
 
 
 def _global_provider_key_matches_base_url(provider: str, base_url: str) -> bool:

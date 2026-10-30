@@ -1,8 +1,5 @@
 import { afterEach, beforeEach, vi } from "vitest";
 import "fake-indexeddb/auto";
-import { resetEditorDraftStorageForTests } from "../src.v2/stores/editor-drafts";
-import { flushEditorDrafts } from "../src.v2/stores/editor-drafts";
-import { flushComposerDrafts } from "../src.v2/stores/composer-drafts";
 
 // JSDOM has no layout observer. Geometry/lifetime specs install their own
 // callbacks; other UI specs still need the browser API at shared primitives.
@@ -23,6 +20,7 @@ beforeEach(async () => {
     const { resetComposerDraftStorageForTests } = await import("../src.v2/stores/composer-drafts");
     await resetComposerDraftStorageForTests();
   }
+  const { resetEditorDraftStorageForTests } = await import("../src.v2/stores/editor-drafts");
   await resetEditorDraftStorageForTests();
   vi.stubGlobal("ResizeObserver", class {
     observe() {}
@@ -34,6 +32,10 @@ afterEach(async () => {
   if (typeof window !== "undefined" && (window as Window & { __zustandStore?: unknown }).__zustandStore) {
     const { waitComposerDraftRecovery, waitEditorDraftRecovery } = await import("../src.v2/stores");
     await Promise.all([waitComposerDraftRecovery(), waitEditorDraftRecovery()]);
+    // Startup specs reset modules. Drain the same storage instances as their store.
+    const [{ flushComposerDrafts }, { flushEditorDrafts }] = await Promise.all([
+      import("../src.v2/stores/composer-drafts"), import("../src.v2/stores/editor-drafts"),
+    ]);
     await Promise.all([flushComposerDrafts(), flushEditorDrafts()]);
   }
 });

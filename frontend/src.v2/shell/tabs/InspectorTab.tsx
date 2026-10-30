@@ -3,7 +3,7 @@
  * and DetailsTab (inspector entries / recent tool calls).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { usePanelMessages } from '../panelVisibility'
+import { usePanelMessages } from '../usePanelMessages'
 import { ChevronDown, Copy, Database, Download, FolderOpen, GitBranch, TerminalSquare, Upload } from 'lucide-react'
 import { isDesktop, revealPath } from '../../desktop/runtime'
 import { fetchWorkspaceGitStatus, type WorkspaceGitStatusResponse } from '../../protocol/workspace'

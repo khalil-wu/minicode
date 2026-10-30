@@ -20,6 +20,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { MarkdownRenderer } from "../chat/messages/MarkdownRenderer";
 import { ConversationFilesTree } from "../shell/tabs/ConversationFilesTree";
 import { fileViewerRows } from "./file-viewer-rows";
+import { PanelVisibilityContext, usePanelVisible } from "../shell/panelVisibility";
 import "./FileViewerPanel.css";
 
 export interface FileViewerPanelProps { tabId: string; active?: boolean }
@@ -27,7 +28,8 @@ const NO_COLORIZED_FILE_ROWS: ReturnType<typeof fileViewerRows> = [];
 
 export function FileViewerPanel({ tabId, active = true }: FileViewerPanelProps) {
   const tab = useAppStore(state => state.workspaceFileTabs.find(value => value.id === tabId));
-  return tab ? <FileViewer key={tab.id} tabId={tab.id} active={active} /> : null;
+  const visible = usePanelVisible() && active;
+  return tab ? <PanelVisibilityContext.Provider value={visible}><FileViewer key={tab.id} tabId={tab.id} active={visible} /></PanelVisibilityContext.Provider> : null;
 }
 
 function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
@@ -68,6 +70,7 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
   const [query, setQuery] = useState("");
   const [hit, setHit] = useState(0);
   const [menu, setMenu] = useState<{ kind: "branches" | "open"; x: number; y: number } | null>(null);
+  useEffect(() => { setMenu(null); }, [fileKey]);
   const [mediaSource, setMediaUrl] = useState<{ key: string; url: string }>();
   const mediaUrl = mediaSource?.key === refreshKey ? mediaSource.url : "";
   const [mediaLoading, setMediaLoading] = useState(false);

@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import type { CSSProperties, KeyboardEvent, OptionHTMLAttributes, ReactElement, ReactNode } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { MenuControlSourceIcon } from "../lib/menu-control-source-icons";
+import { usePanelVisible } from "../shell/panelVisibility";
 import "./select-menu.css";
 
 type SelectOption = {
@@ -89,7 +90,9 @@ export const SelectMenu = ({
   renderOptionIcon,
   optionDescriptions,
 }: SelectMenuProps) => {
-  const [open, setOpen] = useState(false);
+  const visible = usePanelVisible();
+  const [expanded, setOpen] = useState(false);
+  const open = expanded && visible;
   const [position, setPosition] = useState({ left: 0, top: 0, width: 0, maxHeight: menuMaxHeight, above: false });
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -104,8 +107,8 @@ export const SelectMenu = ({
   const enabledOptions = options.filter((option) => !option.disabled);
 
   useEffect(() => {
-    if (disabled) setOpen(false);
-  }, [disabled]);
+    if (disabled || !visible) setOpen(false);
+  }, [disabled, visible]);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -179,7 +182,7 @@ export const SelectMenu = ({
   }, [open, settingsSelect]);
 
   const openMenu = (keyboard = false) => {
-    if (disabled) return;
+    if (disabled || !visible) return;
     openedByKeyboard.current = keyboard;
     typeahead.current = { value: "", time: 0 };
     setOpen(true);

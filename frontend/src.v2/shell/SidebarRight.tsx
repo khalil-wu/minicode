@@ -44,7 +44,7 @@ import { ChunkErrorBoundary, SafeBoundary } from "./ChunkErrorBoundary";
 import { PanelErrorFallback } from "../components/PanelErrorFallback";
 import { ScrollablePanel } from "./SidebarShared";
 import { ActivityTab } from "./tabs/ActivityTab";
-import { PanelVisibilityContext } from "./panelVisibility";
+import { PanelVisibilityContext, usePanelVisible } from "./panelVisibility";
 import { closeMcpAppPanel, McpAppPanelSlot, mcpAppTabId, useMcpAppSurfaces } from "../chat/mcp-apps/app-surfaces";
 import {
   selectActiveConversationPreview,
@@ -158,12 +158,14 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
   const requestedActiveTab = initialTab === undefined ? rightStackTab : localTab;
   const normalizedRequestedTab = requestedActiveTab === "plan" ? "tasks" : requestedActiveTab;
   const activeTab = normalizedRequestedTab;
+  const ownerVisible = usePanelVisible() && visible && (embedded || rightPanelOpen);
   const expanded = initialTab === undefined && rightPanelExpanded;
   const canExpand = initialTab === undefined && (activeTab !== "goal" || goalsEnabled) && (["browser", "preview", "diff", "artifacts", "terminal", "sidechat", "files", "subagents", "goal"].includes(activeTab) || activeTab.startsWith("mcp-app:") || activeTab.startsWith("automation:") || activeTab.startsWith("file:"));
   const setActiveTab = initialTab === undefined ? setRightStackTab : setLocalTab;
   useEffect(() => {
-    if (!visible) { setOpenedPanelPosition(null); }
-  }, [visible]);
+    setOpenedPanelPosition(null);
+    setTabMenu(null);
+  }, [ownerVisible, conversationId]);
 
   const subagents = useAppStore((s) => s.subagents);
   const activePreviewArtifact = useAppStore((s) => selectActiveConversationPreview(s).previewArtifact);
@@ -594,8 +596,8 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
       className="mc-sidebar-right relative flex flex-col"
       data-embedded={embedded ? "true" : "false"}
       data-expanded={expanded ? "true" : "false"}
-      data-open={visible && (embedded || rightPanelOpen) ? "true" : "false"}
-      aria-hidden={!visible || (!embedded && !rightPanelOpen)}
+      data-open={ownerVisible ? "true" : "false"}
+      aria-hidden={!ownerVisible}
       style={{
         "--right-sidebar-width": `${sidebarWidth}px`,
         position: "relative",
@@ -729,7 +731,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           )}
         </div>
       </div>
-      {openedPanelPosition && <ContextMenu
+      {ownerVisible && openedPanelPosition && <ContextMenu
         position={openedPanelPosition}
         onClose={() => setOpenedPanelPosition(null)}
         items={orderedTabs.map((tab) => ({
@@ -738,7 +740,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           onClick: () => activateSharedTab(tab.key),
         }))}
       />}
-      {tabMenu && tabMenuFrame && (() => {
+      {ownerVisible && tabMenu && tabMenuFrame && (() => {
         const frame = tabMenuFrame;
         const file = frame.panel.id.startsWith("file:") ? workspaceFileTabs.find(tab => `file:${tab.id}` === frame.panel.id) : undefined;
         const right = orderedTabs.slice(orderedTabs.indexOf(frame) + 1).map(tab => tab.key);
@@ -764,10 +766,10 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         style={{ display: activeTab === panelTab ? "flex" : "none" }}
       >
         <div className="panel-content-wrapper" style={{ minHeight: 0, minWidth: 0, overflow: "hidden" }}>
-          <PanelVisibilityContext.Provider value={visible && rightPanelOpen && activeTab === panelTab}>
+          <PanelVisibilityContext.Provider value={ownerVisible && activeTab === panelTab}>
           {panelTab.startsWith("mcp-app:") && <McpAppPanelSlot id={panelTab.slice("mcp-app:".length)} />}
-          {panelTab.startsWith("file:") && <Suspense fallback={<PanelSkeleton kind="preview" />}><LazyFileViewerPanel tabId={panelTab.slice(5)} active={visible && rightPanelOpen && activeTab === panelTab} /></Suspense>}
-          {panelTab === "sidechat" && sideChatOpen && <SideChatPanel active={visible && activeTab === "sidechat" && rightPanelOpen} />}
+          {panelTab.startsWith("file:") && <Suspense fallback={<PanelSkeleton kind="preview" />}><LazyFileViewerPanel tabId={panelTab.slice(5)} active={ownerVisible && activeTab === panelTab} /></Suspense>}
+          {panelTab === "sidechat" && sideChatOpen && <SideChatPanel active={ownerVisible && activeTab === "sidechat"} />}
           {panelTab === "preview" && (
             <ChunkErrorBoundary>
               <Suspense fallback={<PanelSkeleton kind="preview" />}>
@@ -786,12 +788,12 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
               </Suspense>
             </ChunkErrorBoundary>
           )}
-          {panelTab === "terminal" && rightPanelOpen && <Suspense fallback={<PanelSkeleton kind="terminal" />}>
-            <LazyTerminalPanel visible={visible && activeTab === "terminal"} />
+          {panelTab === "terminal" && (embedded || rightPanelOpen) && <Suspense fallback={<PanelSkeleton kind="terminal" />}>
+            <LazyTerminalPanel visible={ownerVisible && activeTab === "terminal"} />
           </Suspense>}
-          {panelTab === "files" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyFilesPanel active={visible && rightPanelOpen && activeTab === "files"} /></Suspense>}
+          {panelTab === "files" && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyFilesPanel active={ownerVisible && activeTab === "files"} /></Suspense>}
           {panelTab === "goal" && goalsEnabled && <Suspense fallback={<PanelSkeleton kind="inspector" />}><LazyGoalPanel key={conversationId || ""}
-            active={visible && rightPanelOpen && activeTab === "goal"} onClose={closeGoalEditor} /></Suspense>}
+            active={ownerVisible && activeTab === "goal"} onClose={closeGoalEditor} /></Suspense>}
           {panelTab === "tasks" && <ScrollablePanel><ActivityTab /></ScrollablePanel>}
           {panelTab === "diff" && (
             <ChunkErrorBoundary>
@@ -822,7 +824,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           id={`right-panel-${panelTab}`} role="tabpanel" aria-labelledby={`right-tab-${panelTab}`} hidden={!active}
           style={{ display: active ? "flex" : "none" }}>
           <Suspense fallback={<PanelSkeleton kind="inspector" />}>
-            <LazySchedulerTab editor={editor} active={visible && rightPanelOpen && active} onClose={() => closeOpenTab(panelTab as StackTab)} />
+            <LazySchedulerTab editor={editor} active={ownerVisible && active} onClose={() => closeOpenTab(panelTab as StackTab)} />
           </Suspense>
         </div>;
       })}

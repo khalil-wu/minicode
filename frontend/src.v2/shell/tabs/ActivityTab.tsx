@@ -3,7 +3,7 @@
  */
 import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MessageSquare, MonitorPlay, Layers, Paperclip, SquareTerminal, CalendarClock, Activity } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { usePanelMessages } from '../panelVisibility'
+import { usePanelMessages } from '../usePanelMessages'
 import { BackgroundCommandDetails } from './BackgroundCommandDetails'
 import { EmptyState } from '../../components/EmptyState'
 import { useAppStore } from '../../stores'

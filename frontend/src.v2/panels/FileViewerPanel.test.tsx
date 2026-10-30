@@ -21,6 +21,7 @@ vi.mock("../lib/clipboard", () => ({ copyText: mocks.copy }));
 import { useAppStore } from "../stores";
 import { FileViewerPanel } from "./FileViewerPanel";
 import { workspaceFileAbsolutePath } from "../protocol/file-workspace";
+import { PanelVisibilityContext } from "../shell/panelVisibility";
 
 beforeEach(() => {
   const BrowserURL = URL;
@@ -39,6 +40,62 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 const gitBranches = (base = "main") => ({ is_git_repo: true, current_branch: "feature", default_base_branch: base, branches: [base, "feature"], commits: [] });
+
+it.each(["active", "ancestor"])("retires file menus on %s hiding and retains reading state and drafts", async (source) => {
+  const owner = { scopeId: "home:C:/home", conversationId: null, executionCwd: "C:/home", browserRoot: "C:/home" };
+  mocks.branches.mockResolvedValue(gitBranches());
+  const id = useAppStore.getState().openWorkspaceFileTab(owner, "file.ts");
+  const panel = (visible: boolean) => <PanelVisibilityContext.Provider value={source === "ancestor" ? visible : true}>
+    <FileViewerPanel tabId={id} active={source === "active" ? visible : true} />
+  </PanelVisibilityContext.Provider>;
+  const view = render(panel(true));
+  const baseline = await screen.findByRole("button", { name: "文件比较基线" });
+  fireEvent.click(baseline);
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "feature" }));
+  await waitFor(() => expect(mocks.diff).toHaveBeenLastCalledWith(owner, "file.ts", "feature", expect.any(AbortSignal)));
+  fireEvent.click(screen.getByRole("button", { name: "在文件中搜索" }));
+  const search = screen.getByRole("textbox", { name: "在文件中搜索" });
+  fireEvent.change(search, { target: { value: "saved" } });
+  const content = view.container.querySelector<HTMLElement>(".mc-file-viewer-content")!;
+  content.scrollTop = 120;
+  const options = screen.getByRole("button", { name: "打开选项菜单" });
+  fireEvent.click(options);
+  expect(screen.getByRole("menu", { name: "打开选项菜单" })).toBeTruthy();
+  view.rerender(panel(false));
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(options.getAttribute("aria-expanded")).toBe("false");
+  view.rerender(panel(true));
+  await act(async () => {});
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "在文件中搜索" })).toBe(search);
+  expect((search as HTMLInputElement).value).toBe("saved");
+  expect(screen.getByRole("button", { name: "文件比较基线" }).textContent).toBe("feature");
+  expect(content.scrollTop).toBe(120);
+  expect(useAppStore.getState().draft).toBe("unsent");
+  fireEvent.click(baseline);
+  view.rerender(panel(false));
+  view.rerender(panel(true));
+  expect(screen.queryByRole("menu")).toBeNull();
+});
+
+it("closes old file actions when the same tab changes owner and opens actions for its current file", async () => {
+  const one = { scopeId: "home:C:/one", conversationId: null, executionCwd: "C:/one", browserRoot: "C:/one" };
+  const two = { scopeId: "home:D:/two", conversationId: null, executionCwd: "D:/two", browserRoot: "D:/two" };
+  const id = useAppStore.getState().openWorkspaceFileTab(one, "first.ts");
+  render(<FileViewerPanel tabId={id} />);
+  await screen.findByText("saved first.ts");
+  fireEvent.click(screen.getByRole("button", { name: "打开选项菜单" }));
+  expect(screen.getByRole("menuitem", { name: "Cursor" })).toBeTruthy();
+  await act(async () => useAppStore.setState(state => ({ workspaceFileTabs: state.workspaceFileTabs.map(tab => tab.id === id
+    ? { ...tab, owner: two, path: "second.ts", title: "second.ts" } : tab) })));
+  await screen.findByText("saved second.ts");
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(mocks.external).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "打开选项菜单" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Cursor" }));
+  expect(mocks.external).toHaveBeenCalledExactlyOnceWith("D:/two/second.ts", undefined,
+    { targetId: "cursor", workspaceRoot: "D:/two", persistPreferredTargetPath: "D:/two" });
+});
 
 it("requests one comparison per file refresh even when the refreshed branches arrive as a new object", async () => {
   const owner = { scopeId: "home:C:/home", conversationId: null, executionCwd: "C:/home", browserRoot: "C:/home" };

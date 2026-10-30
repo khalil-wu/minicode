@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { MenuSourceIcon } from "../lib/menu-source-icons";
 import { SidebarSortSourceIcon } from "../lib/sidebar-sort-icons";
 import { Tip } from "./Tooltip";
+import { usePanelVisible } from "../shell/panelVisibility";
 
 export interface ContextMenuItem {
   label: string;
@@ -43,6 +44,7 @@ interface ContextMenuProps {
 }
 
 export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className, style, itemFontSize, returnFocusTo, anchor, side = "bottom", align = "end", alignOffset = 0 }: ContextMenuProps) => {
+  const visible = usePanelVisible();
   const surfaces = useRef(new Set<HTMLElement>());
   const triggerRef = useRef(returnFocusTo ?? document.activeElement as HTMLElement);
   const focusListenerRef = useRef<(event: FocusEvent) => void>();
@@ -53,6 +55,7 @@ export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className
 
   // Dismiss on outside mousedown or Escape; arrow/Home/End roving focus
   useEffect(() => {
+    if (!visible) return;
     const containsEvent = (event: Event) => (anchor != null && event.composedPath().includes(anchor))
       || [...surfaces.current].some(surface => event.composedPath().includes(surface));
     const handleMouseDown = (e: MouseEvent) => {
@@ -72,12 +75,13 @@ export const ContextMenu = ({ items, position, onClose, id, ariaLabel, className
       window.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("focusin", handleFocus);
     };
-  }, [onClose, anchor]);
+  }, [onClose, anchor, visible]);
+  useEffect(() => { if (!visible) onClose(); }, [visible, onClose]);
 
   const dismiss = () => { closeMenu(); triggerRef.current?.focus({ preventScroll: true }); };
   const select = (item: ContextMenuItem) => { dismiss(); item.onClick?.(); };
-  return createPortal(<MenuSurface items={items} position={position} surfaces={surfaces.current} onDismiss={dismiss} onSelect={select}
-    id={id} ariaLabel={ariaLabel} className={className} style={style} itemFontSize={itemFontSize} trigger={anchor} side={side} align={align} alignOffset={alignOffset} />, document.body);
+  return visible ? createPortal(<MenuSurface items={items} position={position} surfaces={surfaces.current} onDismiss={dismiss} onSelect={select}
+    id={id} ariaLabel={ariaLabel} className={className} style={style} itemFontSize={itemFontSize} trigger={anchor} side={side} align={align} alignOffset={alignOffset} />, document.body) : null;
 };
 
 const surfaceStyle: CSSProperties = {

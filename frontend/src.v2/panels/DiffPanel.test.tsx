@@ -20,6 +20,7 @@ import * as clipboard from "../lib/clipboard";
 import { toggleChangesPanel } from "../lib/changes-panel";
 import * as reviewHistory from "../lib/review-history";
 import * as codeReview from "../chat/codeReview";
+import { PanelVisibilityContext } from "../shell/panelVisibility";
 
 const commandIds = vi.hoisted(() => ({ next: 0 }));
 
@@ -177,6 +178,32 @@ afterEach(() => {
 });
 
 describe("conversation review streaming work", () => {
+  it("closes the actual source menu when its panel hides and retains file expansion on return", async () => {
+    const patch = (path: string) => `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+new`;
+    useAppStore.setState({ draft: "Keep review draft", gitChanges: gitFixture([
+      { path: "a.ts", patch: patch("a.ts"), additions: 1, deletions: 1 },
+      { path: "b.ts", patch: patch("b.ts"), additions: 1, deletions: 1 },
+    ]) });
+    const panel = (visible: boolean) => <PanelVisibilityContext.Provider value={visible}><DiffPanel /></PanelVisibilityContext.Provider>;
+    const view = render(panel(true));
+    await act(async () => {});
+    const first = openGitFile("a.ts");
+    fireEvent.click(first);
+    const second = openGitFile("b.ts");
+    fireEvent.click(screen.getByRole("button", { name: /Diff 来源/ }));
+    expect(screen.getByRole("menuitemradio", { name: "未暂存", exact: true })).toBeTruthy();
+    view.rerender(panel(false));
+    expect(screen.queryByRole("menu")).toBeNull();
+    view.rerender(panel(true));
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(gitFileTrigger("a.ts")).toBe(first);
+    expect(first.getAttribute("aria-expanded")).toBe("false");
+    expect(gitFileTrigger("b.ts")).toBe(second);
+    expect(second.getAttribute("aria-expanded")).toBe("true");
+    expect(useAppStore.getState().draft).toBe("Keep review draft");
+    chooseDiffSource("未暂存");
+  });
+
   const patch = (path: string, value: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n-old\n+${value}`;
   const answer = (id: string): ChatMessage => ({ id, role: "assistant", turnId: `turn-${id}`, content: "Done", timestamp: 2, artifacts: [],
     blocks: [{ type: "tool_call", record: { id: `edit-${id}`, name: "apply_patch", status: "success", startedAt: 1,

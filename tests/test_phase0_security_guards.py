@@ -627,7 +627,7 @@ def test_settings_save_does_not_report_success_after_vault_failure(monkeypatch, 
     class Vault:
         def get(self, name):
             return None
-        def list_names(self):
+        def list_names(self, *, prefix=""):
             return []
         def set(self, *args, **kwargs):
             raise OSError("fixture vault unavailable")
