@@ -435,7 +435,7 @@ jobs:
       - name: Install isolated desktop dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xauth bubblewrap ripgrep
+          sudo apt-get install -y xvfb xauth bubblewrap ripgrep fonts-noto-cjk
           python -m pip install -e .
           npm ci --prefix frontend
           npm ci --prefix desktop
@@ -493,8 +493,8 @@ jobs:
       - name: Install desktop
         working-directory: desktop
         run: npm ci
-      - name: Install Xvfb
-        run: sudo apt-get update && sudo apt-get install -y xvfb xauth
+      - name: Install Xvfb and system fonts
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth fonts-noto-cjk
       - name: Run Electron-facing frontend tests
         working-directory: frontend
         run: xvfb-run -a npm run test:e2e:electron
