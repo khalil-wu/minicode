@@ -69,7 +69,7 @@ exclude = ["frontend*", "desktop*", "node_modules*", "data*", "skills*"]
 "backend.services" = ["*.md"]
 "backend.memory" = ["templates/*.md"]
 "backend.mcp" = ["*.js", "*.mjs"]
-"backend.plugins" = ["bundled/.minicode-plugin/*.json", "bundled/*/.minicode-plugin/*.json", "bundled/*/skills/**/*"]
+"backend.plugins" = ["public-catalog.json", "PUBLIC_CATALOG_NOTICE.md", "bundled/.minicode-plugin/*.json", "bundled/*/.minicode-plugin/*.json", "bundled/*/assets/*", "bundled/*/skills/**/*"]
 "backend.tests" = ["fixtures/source_media/*"]
 
 [project.optional-dependencies]

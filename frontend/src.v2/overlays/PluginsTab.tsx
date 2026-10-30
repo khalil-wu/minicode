@@ -117,6 +117,8 @@ type CatalogPlugin = {
   hooks?: string | unknown[] | Record<string, unknown>;
   iconUrl?: string;
   iconDarkUrl?: string;
+  iconAsset?: string;
+  iconDarkAsset?: string;
   iconVariant?: "composer" | "logo" | "logo-dark";
   iconVariants?: ("composer" | "logo" | "logo-dark")[];
   path?: string;
@@ -478,6 +480,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
   const q = (search ?? query).trim().toLocaleLowerCase();
   const filteredPlugins = useMemo(() => plugins.filter((plugin) => !q || `${plugin.name} ${plugin.displayName} ${plugin.description}`.toLocaleLowerCase().includes(q)), [plugins, q]);
   const installedPluginIds = useMemo(() => new Set(plugins.map(plugin => plugin.id || plugin.name)), [plugins]);
+  const catalogById = useMemo(() => new Map(marketplaces.flatMap(source => source.plugins.map(entry => [entry.id, entry] as const))), [marketplaces]);
   const directorySources = useMemo(() => marketplaces.filter(source => (source.directory ?? "personal") === directory), [marketplaces, directory]);
   const catalogSections = useMemo(() => {
     const sections = new Map<string, { title: string; items: { plugin: CatalogPlugin; source: PluginMarketplace }[] }>();
@@ -492,17 +495,24 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
     }
     return Array.from(sections, ([id, section]) => ({ id, ...section }));
   }, [directorySources, directory, q]);
-  const pluginLogo = (plugin: PluginEntry, size: number) => <BrandIcon
-    value={plugin.displayName || plugin.name} inferBrand={false} size={size}
-    iconUrl={resolvedTheme === "dark" && plugin.iconVariants?.includes("logo-dark")
-      ? pluginAssetResourceUrlWithToken(plugin.path, "logo-dark") : plugin.iconUrl}
-    websiteUrl={plugin.websiteUrl}
-  />;
   const catalogLogo = (plugin: CatalogPlugin, size: number) => {
+    const asset = resolvedTheme === "dark" ? plugin.iconDarkAsset || plugin.iconAsset : plugin.iconAsset;
+    if (asset) return <img className="plugin-catalog-asset" src={new URL(asset, document.baseURI).href} width={size} height={size} alt="" />;
     const variant = resolvedTheme === "dark" && plugin.iconVariants?.includes("logo-dark") ? "logo-dark" : plugin.iconVariant;
     const localIcon = plugin.path && variant ? pluginAssetResourceUrlWithToken(plugin.path, variant, undefined, workingDirectory) : undefined;
     return <BrandIcon value={plugin.interface?.displayName || plugin.name} inferBrand={false} fallback="plugin" size={size}
+      fallbackIcon={<span className="plugin-icon-initial">{(plugin.interface?.displayName || plugin.name).slice(0, 1).toLocaleUpperCase()}</span>}
       iconUrl={resolvedTheme === "dark" ? plugin.iconDarkUrl || plugin.iconUrl || localIcon : plugin.iconUrl || localIcon} />;
+  };
+  const pluginLogo = (plugin: PluginEntry, size: number) => {
+    if (!plugin.iconUrl && !plugin.iconVariant) {
+      const catalogEntry = catalogById.get(plugin.id || plugin.name);
+      if (catalogEntry) return catalogLogo(catalogEntry, size);
+    }
+    return <BrandIcon value={plugin.displayName || plugin.name} inferBrand={false} size={size}
+      fallbackIcon={<span className="plugin-icon-initial">{(plugin.displayName || plugin.name).slice(0, 1).toLocaleUpperCase()}</span>}
+      iconUrl={resolvedTheme === "dark" && plugin.iconVariants?.includes("logo-dark")
+        ? pluginAssetResourceUrlWithToken(plugin.path, "logo-dark") : plugin.iconUrl} websiteUrl={plugin.websiteUrl} />;
   };
 
   const installPlugin = async (plugin: CatalogPlugin, marketplace: string, prompt?: string) => {
@@ -780,7 +790,7 @@ export const PluginsTab = ({ catalog = false, toolbarHost, active = true, loadIn
           {filteredPlugins.map((plugin) => <button type="button" key={plugin.id || plugin.name} className="plugin-installed-tile" disabled={busy}
             data-enabled={plugin.enabled} title={`${plugin.displayName || plugin.name} · ${plugin.enabled ? t("已启用") : t("已停用")}`}
             aria-label={`管理插件 ${plugin.id || plugin.name}`} onClick={() => openDetail({ id: plugin.id || plugin.name, installed: plugin })}>
-            {pluginLogo(plugin, 32)}
+            {pluginLogo(plugin, 32)}<span>{plugin.displayName || plugin.name}</span>
           </button>)}
           {filteredPlugins.length === 0 && <p className="plugin-section-description">没有匹配的已安装插件。</p>}
         </div> : <div className="plugin-local-list">

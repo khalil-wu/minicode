@@ -62,6 +62,7 @@ _MCP_SERVER_FIELDS = frozenset({
     "requires_user_action", "setup_hint", "docs_url",
     "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
 })
+_PLUGIN_MCP_DISPLAY_FIELDS = frozenset({"title", "description", "icons", "note"})
 
 
 class ServerStatus(Enum):
@@ -884,6 +885,8 @@ class MCPServerManager:
                         raw_config = deepcopy(raw_config)
                         if codex_plugin and isinstance(raw_config, dict):
                             raw_config.pop("type", None)
+                            for field in _PLUGIN_MCP_DISPLAY_FIELDS:
+                                raw_config.pop(field, None)
                             if "transport" not in raw_config:
                                 if "command" in raw_config:
                                     raw_config["transport"] = "stdio"

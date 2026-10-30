@@ -27,6 +27,7 @@ from .materializer import (
 )
 
 BUNDLED_MARKETPLACE_ROOT = Path(__file__).parent / "bundled"
+PUBLIC_CATALOG_FILE = Path(__file__).parent / "public-catalog.json"
 
 
 def _effective_marketplace_policy(policy: Any | None) -> Any:
@@ -527,7 +528,7 @@ def _normalize_marketplace_plugin_policy(raw_policy: Any) -> dict[str, Any]:
         products = []
         for value in products_raw:
             product = str(value or "").strip().upper()
-            if product != "MINICODE":
+            if product not in {"MINICODE", "CODEX", "CHATGPT", "ATLAS"}:
                 raise MaterializationError(f"unsupported marketplace product: {product or '<empty>'}")
             if product not in products:
                 products.append(product)
@@ -570,6 +571,8 @@ def _assert_marketplace_plugin_installable(plugin: Mapping[str, Any], *, product
         raise MaterializationError(
             f"plugin '{plugin.get('name') or plugin.get('id') or ''}' is not available for product {product.upper()}"
         )
+    if plugin.get("runtime_blocker"):
+        raise MaterializationError(str(plugin["runtime_blocker"]))
 
 
 def _is_verified_external_materialization(
@@ -666,6 +669,16 @@ class MarketplaceRegistry:
             return records
 
         discovered: list[dict[str, Any]] = []
+        public = json.loads(PUBLIC_CATALOG_FILE.read_text(encoding="utf8"))
+        public["materialized_path"] = str(PUBLIC_CATALOG_FILE.parent)
+        public["isConfigured"] = False
+        public["canManage"] = False
+        for plugin in public["plugins"]:
+            try:
+                _assert_marketplace_plugin_installable(plugin, product=_current_product())
+            except MaterializationError as exc:
+                plugin["installation"] = {"available": False, "reason": str(exc)}
+        discovered.append(public)
         roots: list[tuple[Path, dict[str, Any], bool, bool]] = []
         bundled = BUNDLED_MARKETPLACE_ROOT
         roots.append((bundled, {"source": "directory", "path": str(bundled.resolve())}, True, False))

@@ -64,7 +64,8 @@ def write_marketplace(root: Path, name: str = "project-market") -> Path:
     manifest.write_text(json.dumps({"name": "review", "version": "1.0.0", "description": "Actual review package",
         "skills": "./skills", "mcpServers": "./.mcp.json", "interface": {"displayName": "Real Review",
         "shortDescription": "Review the project", "logo": "./logo.svg"}}), encoding="utf8")
-    (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": {"reviewer": {"command": "review-server"}}}), encoding="utf8")
+    (plugin / ".mcp.json").write_text(json.dumps({"mcpServers": {"reviewer": {"command": "review-server",
+        "title": "Review", "description": "Local review", "icons": [], "note": "Display metadata"}}}), encoding="utf8")
     (plugin / "logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>', encoding="utf8")
     skill = plugin / "skills/review/SKILL.md"
     skill.parent.mkdir(parents=True)
@@ -111,6 +112,40 @@ def test_bundled_catalog_install_runtime_and_feature_switch(catalog_home):
     denied = client.post("/api/plugins/install", json={"marketplace": marketplace["name"], "plugin_name": plugin["name"], "workspace_root": ""})
     assert denied.status_code == 409
     assert json.loads(env.settings.read_text(encoding="utf8"))["unrelated"] == "keep"
+
+
+def test_public_catalog_uses_real_pinned_metadata_assets_and_runtime_restrictions(catalog_home):
+    env = catalog_home
+    response = env.client.get("/api/plugins/marketplaces", params={"workspace_root": ""})
+    assert response.status_code == 200, response.text
+    markets = response.json()["marketplaces"]
+    public = next(item for item in markets if item["name"] == "openai-curated")
+    bundled = next(item for item in markets if item["name"] == "minicode-bundled")
+    assert public["revision"] == "0722921d5542fc593105c27bd52630babd8b8c2a"
+    assert len(public["plugins"]) == 65 and len(bundled["plugins"]) == 1
+    assert len({item["id"] for item in public["plugins"]}) == 65
+    figma = next(item for item in public["plugins"] if item["name"] == "figma")
+    assert figma["interface"]["displayName"] == "Figma"
+    assert figma["interface"]["shortDescription"] == "Figma design-to-code workflows"
+    assert figma["mcp_server_names"] == ["figma"] and len(figma["skill_summaries"]) == 12
+    assert figma["installation"]["available"] is False and "oauth_resource" in figma["installation"]["reason"]
+    assert next(item for item in public["plugins"] if item["name"] == "remotion")["installation"]["available"] is False
+    assert next(item for item in public["plugins"] if item["name"] == "teams")["installation"]["available"] is False
+    source = next(item for item in public["plugins"] if item["name"] == "mixpanel-headless")["source"]
+    assert source["sha"] == public["revision"] and source["path"] == "plugins/mixpanel-headless"
+    assets = Path(__file__).resolve().parents[2] / "frontend/public"
+    for item in public["plugins"]:
+        for key in ("iconAsset", "iconDarkAsset"):
+            if item.get(key):
+                assert (assets / item[key]).is_file()
+    assert sum("iconAsset" in item for item in public["plugins"]) == 61
+    logo = env.client.get("/api/plugins/asset", params={"plugin_path": bundled["plugins"][0]["path"], "variant": "logo", "workspace_root": ""})
+    assert logo.status_code == 200 and logo.content == (assets / "apps/computer-use.png").read_bytes()
+    for name in ("figma", "remotion", "teams"):
+        denied = env.client.post("/api/plugins/install", json={"marketplace": public["name"], "plugin_name": name,
+            "refresh_marketplace": False, "workspace_root": ""})
+        assert denied.status_code == 400
+    assert env.client.get("/api/plugins", params={"workspace_root": ""}).json()["plugins"] == []
 
 
 def test_workspace_catalog_manifest_assets_install_and_project_override(catalog_home):

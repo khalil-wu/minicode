@@ -285,6 +285,10 @@ async function auditSettingsRefresh({ selector, paths, name, size, spinner }) {
     await button.click();
     await ready.promise;
     assert.deepEqual([...actualReads].sort(), [...paths].sort());
+    await page.waitForFunction(selector => {
+      const element = document.querySelector(selector);
+      return element.disabled && element.getAttribute("aria-busy") === "true";
+    }, selector);
     assert.equal(await button.isDisabled(), true);
     assert.equal(await button.getAttribute("aria-busy"), "true");
     const pending = await button.evaluate(element => ({ spinner: element.querySelector(".settings-refresh-spinner") !== null,

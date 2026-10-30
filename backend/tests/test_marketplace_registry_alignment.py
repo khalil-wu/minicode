@@ -147,14 +147,17 @@ def test_marketplace_plugin_policy_is_enforced_at_install(
         registry.materialize_plugin("demo-market", "demo-plugin")
 
 
-def test_marketplace_rejects_non_minicode_product_identity(tmp_path: Path) -> None:
+def test_marketplace_lists_codex_product_but_rejects_install_for_minicode(tmp_path: Path) -> None:
     _plugin(tmp_path)
     _write_catalog(tmp_path, policy={"products": ["CODEX"]})
     registry = MarketplaceRegistry(tmp_path / "registry.json")
     registry.add("demo-market", {"source": "directory", "path": str(tmp_path)})
 
-    with pytest.raises(MaterializationError, match="unsupported marketplace product: CODEX"):
-        registry.refresh("demo-market")
+    plugin = registry.refresh("demo-market")["plugins"][0]
+    assert plugin["installation"]["available"] is False
+    assert "not available for product MINICODE" in plugin["installation"]["reason"]
+    with pytest.raises(MaterializationError, match="not available for product MINICODE"):
+        registry.materialize_plugin("demo-market", "demo-plugin")
 
 
 def test_marketplace_local_plugin_path_cannot_escape_root(tmp_path: Path) -> None:
@@ -380,7 +383,7 @@ def test_desktop_add_api_preserves_source_contract_and_reports_validation_errors
     registry = MarketplaceRegistry(tmp_path / "state" / "registry.json")
     policy = ManagedPluginPolicy({}, None, (), {})
     monkeypatch.setattr(routes_skills, "MarketplaceRegistry", lambda: registry)
-    monkeypatch.setattr(routes_skills, "load_config_layer_stack", lambda: None)
+    monkeypatch.setattr(routes_skills, "load_config_layer_stack", lambda **_kwargs: None)
     monkeypatch.setattr("backend.plugins.policy._plugin_policy_from_stack", lambda _stack: policy)
 
     request = PluginMarketplaceRequest(source=str(source_root), ref_name=None, sparse_paths=None)
