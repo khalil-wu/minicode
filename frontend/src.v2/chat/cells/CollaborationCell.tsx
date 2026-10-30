@@ -94,9 +94,7 @@ export const CollaborationCell = memo(function CollaborationCell({
         const agent = agentFor(entry.agentId);
         const label = agentNames.get(entry.agentId);
         const content = <><AgentAvatar identityKey={entry.agentIdentity || agent?.identityKey || entry.agentId} size="small" showStatus={false} />
-          <span className="collaboration-completion-label"><span className="collaboration-completion-name">{label}</span>
-            <span className="collaboration-completion-status">{statusLabel}</span>
-          </span></>;
+          <span className="collaboration-completion-label">{label} {statusLabel}</span></>;
         const canOpen = entry.agentId.trim() && (agent || entry.agentStatus) && conversationId === activeConversationId;
         return canOpen
           ? <button key={entry.agentId} type="button" className="collaboration-completion-row" aria-label={`打开子智能体：${label}`}

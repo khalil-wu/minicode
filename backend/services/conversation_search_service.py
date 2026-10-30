@@ -44,7 +44,8 @@ def conversation_search_page(
 
     candidates = [summary for summary in summaries if summary.archived == archived
                   and (project_key is None or canonical_workspace_root(
-                      summary.project_id or summary.workspace_root or summary.worktree_path) == project_key)]
+                      summary.project_id if summary.project_id is not None
+                      else summary.workspace_root or summary.worktree_path) == project_key)]
     candidates.sort(key=sort_key, reverse=sort != "alphabetical")
     if after is not None:
         candidates = [summary for summary in candidates if

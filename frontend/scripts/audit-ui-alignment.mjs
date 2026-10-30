@@ -460,7 +460,7 @@ try {
 
   await composer.fill("KEEP_SETTINGS_DRAFT");
   const archivedTitle = await page.evaluate(id => window.__zustandStore.getState().conversations.find(chat => chat.id === id).title, owner);
-  await page.locator(`[data-session-row][data-session-presentation$=":${owner}"]`).first().getByRole("button", { name: "会话操作", exact: true }).click();
+  await page.locator(`[data-session-row][data-session-presentation$=":${owner}"]`).first().click({ button: "right" });
   await page.getByRole("menuitem", { name: "归档", exact: true }).click();
   await page.waitForFunction(id => window.__zustandStore.getState().conversations.find(chat => chat.id === id)?.archived, owner);
   await page.evaluate(() => { const state = window.__zustandStore.getState(); state.setSettingsTab("appearance"); state.toggleSettings(); });

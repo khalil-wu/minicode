@@ -123,14 +123,19 @@ it("sorts by real creation time and groups isolated worktrees under their projec
   expect(titles.map(title => title.textContent)).toEqual(["Created later", "Updated later", "Unknown creation"]);
 });
 
-it("labels projectless rows without inventing a project actions menu", () => {
-  useAppStore.setState({ conversations: [{ id: "none", title: "Standalone chat", archived: true, workspaceRoot: "", updatedAt: "2026-10-23T03:38:00Z" }] });
+it("keeps a detached chat projectless in its row and body-search request", async () => {
+  useAppStore.setState({ conversations: [{ id: "none", title: "Standalone chat", archived: true, projectId: "", workspaceRoot: "C:/alpha", worktreePath: "C:/worktrees/one", updatedAt: "2026-10-23T03:38:00Z" }] });
   render(<ArchivedTab />);
   expect(screen.getByRole("heading", { name: "无项目" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "归档项目操作 无项目" })).toBeNull();
-  const date = screen.getByText(/^2026年10月23日, /);
+  const date = screen.getByText(/^2026年10月23日，/);
   expect(date.getAttribute("datetime")).toBe("2026-10-23T03:38:00Z");
   expect(screen.getByText("Standalone chat").tagName).toBe("SPAN");
+  fireEvent.click(screen.getByRole("button", { name: "归档项目" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "无项目" }));
+  fireEvent.change(screen.getByLabelText("搜索已归档任务"), { target: { value: "detached body" } });
+  await waitFor(() => expect(readSearch).toHaveBeenCalled());
+  expect(readSearch.mock.calls.at(-1)![0].searchParams.get("project")).toBe("");
 });
 
 it("requires confirmation for single, project and global archive deletion", async () => {
@@ -148,6 +153,7 @@ it("requires confirmation for single, project and global archive deletion", asyn
 it("deletes the full confirmed project independently of text filtering and stops on a rejected delete", async () => {
   useAppStore.setState(state => ({ conversations: [...state.conversations,
     { id: "archive-A2", title: "Other alpha chat", archived: true, workspaceRoot: "C:/alpha", updatedAt: "2026-10-03" },
+    { id: "detached", title: "Detached chat", archived: true, projectId: "", workspaceRoot: "C:/alpha", updatedAt: "2026-10-03" },
   ] }));
   confirm.mockResolvedValueOnce(true);
   deleteCommand.mockResolvedValueOnce(false);
@@ -158,5 +164,5 @@ it("deletes the full confirmed project independently of text filtering and stops
   await waitFor(() => expect(deleteCommand).toHaveBeenCalledTimes(1));
   expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ message: "这会永久删除此项目中的 2 个本地已归档聊天。" }));
   expect(deleteCommand).toHaveBeenCalledWith({ type: "conversation.delete", conversation_id: "archive-A", cleanup_worktree: false });
-  expect(useAppStore.getState().conversations).toHaveLength(3);
+  expect(useAppStore.getState().conversations).toHaveLength(4);
 });

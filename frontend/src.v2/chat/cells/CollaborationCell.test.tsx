@@ -276,9 +276,8 @@ describe("CollaborationCell agent navigation", () => {
     const { container } = render(<CollaborationCell cell={{ ...cell, action: "completed", collapsed: true,
       entries: [{ agentId: "worker-a", agentLabel: "Ada", agentIdentity: "/root/a" }],
     }} conversationId="collaboration-owner" />);
-    expect(screen.getByText("Ada")).toBeTruthy();
-    expect(screen.getByText("已完成")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada已完成");
+    expect(screen.getByText("Ada 已完成")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "打开子智能体：Ada" }).textContent).toBe("Ada 已完成");
     expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
     expect(screen.queryByText("查看运行详情")).toBeNull();
     expect(screen.queryByText("委派指令")).toBeNull();
@@ -292,21 +291,19 @@ describe("CollaborationCell agent navigation", () => {
     render(<CollaborationCell cell={{ ...cell, action: "completed", status: "cancelled",
       entries: [{ agentId: "retired", agentLabel: "Verify prediction", agentIdentity: "/root/verify_prediction" }],
     }} conversationId="collaboration-owner" />);
-    expect(screen.getByText("Verify prediction")).toBeTruthy();
-    expect(screen.getByText("已停止")).toBeTruthy();
+    expect(screen.getByText("Verify prediction 已停止")).toBeTruthy();
     expect(screen.queryByText("已完成")).toBeNull();
     expect(screen.queryByRole("button", { name: /打开子智能体/ })).toBeNull();
   });
 
   it.each([
     ["success", "已完成"], ["failed", "失败"], ["partial", "部分完成"], ["cancelled", "已停止"],
-  ] as const)("keeps the real %s completion suffix next to a long name without replacing its identity", (status, suffix) => {
+  ] as const)("keeps the real %s status and original long name in one summary", (status, suffix) => {
     const name = "Subagent surface alignment ".repeat(16).trim();
     useAppStore.setState((state) => ({ subagents: state.subagents.map((agent) => ({ ...agent, teammateName: name })) }));
     const { container } = render(<CollaborationCell cell={{ ...cell, action: "completed", status }} conversationId="collaboration-owner" />);
-    expect(screen.getByRole("button", { name: `打开子智能体：${name}` }).textContent).toBe(`${name}${suffix}`);
-    expect(container.querySelector(".collaboration-completion-label > .collaboration-completion-name")?.textContent).toBe(name);
-    expect(container.querySelector(".collaboration-completion-label > .collaboration-completion-status")?.textContent).toBe(suffix);
+    expect(screen.getByRole("button", { name: `打开子智能体：${name}` }).textContent).toBe(`${name} ${suffix}`);
+    expect(container.querySelector(".collaboration-completion-label")?.textContent).toBe(`${name} ${suffix}`);
     expect(container.querySelector(".mc-agent-avatar-status")).toBeNull();
     expect(screen.queryByText("开始工作")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: `打开子智能体：${name}` }));

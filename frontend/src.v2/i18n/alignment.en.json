@@ -6,5 +6,6 @@
   "已复制 git apply 命令": "Copied git apply command",
   "打开底部终端": "Open bottom terminal",
   "终端选项": "Terminal options",
-  "未能确认终端已删除，请重试。": "Terminal removal could not be confirmed. Try again."
+  "未能确认终端已删除，请重试。": "Terminal removal could not be confirmed. Try again.",
+  "{date}，{time}": "{date}, {time}"
 }

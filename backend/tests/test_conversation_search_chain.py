@@ -87,6 +87,51 @@ def test_search_pagination_keeps_project_archive_sort_and_session_owner(tmp_path
             conversation_search_page(owner, **{**params, **changed}, cursor=first["next_cursor"])
 
 
+@pytest.mark.parametrize("selected_project,expected_names", [
+    ("", {"detached"}), ("old-project", {"assigned", "legacy"}),
+])
+def test_archived_body_search_preserves_explicit_project_removal_with_execution_workspace(
+    tmp_path, monkeypatch, selected_project, expected_names,
+):
+    workspace = tmp_path / "old-project"
+    workspace.mkdir()
+    repo = ConversationRepository(tmp_path / "conversations")
+    records = {name: conversation(repo, f"{name.title()} task", ["needle exists only in the real message body"],
+        archived=True, root=str(workspace)) for name in ("detached", "assigned", "legacy")}
+    repo.set_conversation_project(records["detached"].id, str(workspace))
+    repo.set_conversation_project(records["detached"].id, "")
+    repo.set_conversation_project(records["assigned"].id, str(workspace))
+    cold = ConversationRepository(tmp_path / "conversations")
+    scanned = []
+    find = cold.find_transcript_match
+
+    def find_selected(conversation_id, pattern):
+        scanned.append(conversation_id)
+        return find(conversation_id, pattern)
+
+    monkeypatch.setattr(cold, "find_transcript_match", find_selected)
+    owner = session(cold)
+    monkeypatch.setattr(_state.ws_manager, "get_session", lambda session_id: owner if session_id == "original-owner" else None)
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        response = client.get("/api/conversations/search", params={"session_id": "original-owner",
+            "query": "needle", "archived": True, "project": str(workspace) if selected_project else ""})
+
+    assert response.status_code == 200
+    page = response.json()
+    expected_ids = {records[name].id for name in expected_names}
+    assert {result["conversation"]["id"] for result in page["data"]} == set(scanned) == expected_ids
+    assert page["next_cursor"] is None
+    memberships = {records["detached"].id: "", records["assigned"].id: str(workspace), records["legacy"].id: None}
+    for result in page["data"]:
+        assert result["message_id"] == "m0" and "needle" in result["snippet"]
+        assert result["conversation"]["workspace_root"] == result["conversation"]["execution_cwd"] == str(workspace)
+        assert result["conversation"]["project_id"] == memberships[result["conversation"]["id"]]
+    detached = cold.get_conversation_summary(records["detached"].id)
+    assert detached.project_id == "" and detached.workspace_root == detached.execution_cwd == str(workspace)
+
+
 @pytest.mark.parametrize("position", [0, 997])
 def test_cold_compressed_long_transcript_uses_one_forward_stream_and_stops_at_first_match(tmp_path, monkeypatch, position):
     repo = ConversationRepository(tmp_path)
