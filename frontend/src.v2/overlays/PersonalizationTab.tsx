@@ -22,6 +22,7 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
   const [hosts, setHosts] = useState<PersonalizationHost[]>([selectedHost]);
   const [hostError, setHostError] = useState("");
   const [hostMenu, setHostMenu] = useState(false);
+  useEffect(() => { if (!active) setHostMenu(false); }, [active]);
   const hostButton = useRef<HTMLButtonElement>(null);
   const [memories, setMemories] = useState<Record<string, MemoryState>>({});
   const memoryEpoch = useRef<Record<string, number>>({});
@@ -144,7 +145,7 @@ export const PersonalizationTab = ({ active = true }: { active?: boolean }) => {
         </button>
         <a href="https://developers.openai.com/codex/memories" target="_blank" rel="noreferrer">{tr("了解更多")}</a>
       </div>
-      {hostMenu && <ContextMenu anchor={hostButton.current!} position={{ x: 0, y: 0 }} onClose={() => setHostMenu(false)} items={hosts.map(host => ({ label: host.kind === "local" ? tr("本地主机") : host.displayName, checked: host.id === hostId, checkType: "radio", onClick: () => setSelectedHost(host) }))} />}
+      {active && hostMenu && <ContextMenu anchor={hostButton.current!} position={{ x: 0, y: 0 }} onClose={() => setHostMenu(false)} items={hosts.map(host => ({ label: host.kind === "local" ? tr("本地主机") : host.displayName, checked: host.id === hostId, checkType: "radio", onClick: () => setSelectedHost(host) }))} />}
       {hostError && <p role="alert" className="personalization-inline-error">{hostError}</p>}
       {!payload && memory.loading && <div className="personalization-loading" role="status"><LoaderCircle className="settings-spin" aria-hidden="true" />{tr("正在读取记忆设置…")}</div>}
       {memory.loadError && <div className="personalization-editor-error" role="alert"><span>{memory.loadError}</span><button type="button" className="settings-action-button" onClick={() => void loadMemory(hostId)} disabled={busy}>{tr("重试")}</button></div>}

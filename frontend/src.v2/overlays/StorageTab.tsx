@@ -7,7 +7,6 @@ import { commandResultSucceeded, sendClientCommandAwaitResult, LONG_COMMAND_RESU
 import { getWebSocket } from "../hooks/useWebSocket";
 import { SelectMenu } from "../components/SelectMenu";
 import { isDesktop } from "../desktop/runtime";
-import { showConfirm } from "./DialogService";
 import { useFocusTrap } from "../hooks/useFocusTrap";
 import { Check, LoaderCircle, X } from "../lib/icons";
 import { dismissToast, pushToast } from "./ToastContainer";
@@ -39,6 +38,7 @@ export function StorageTab({ active = true }: { active?: boolean }) {
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
   const [reviewOpen, setReviewOpen] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState("");
   const reviewRequest = useRef<AbortController | null>(null);
@@ -57,7 +57,7 @@ export function StorageTab({ active = true }: { active?: boolean }) {
   const chats = useMemo(() => review ? filterReview(review, days, archivedOnly) : [], [review, days, archivedOnly]);
   useEffect(() => {
     if (reviewOpen && active) cancelRef.current!.focus({ preventScroll: true });
-  }, [reviewOpen, active]);
+  }, [reviewOpen, active, confirming]);
   const categoryLabels = { chats: t("聊天"), archived: t("已归档聊天"), subagents: t("子智能体"), unclassified: t("未分类聊天"), worktrees: t("工作树"), other: t("其他") };
   const categories = usage?.categories.flatMap(({ name, bytes: size }) => name === "unclassified" ? [] : [{
     name, bytes: name === "other" ? size + usage.categories.find(category => category.name === "unclassified")!.bytes : size,
@@ -74,7 +74,7 @@ export function StorageTab({ active = true }: { active?: boolean }) {
     return () => controller.abort();
   }, [active, revision]);
   useEffect(() => {
-    setReviewOpen(false); setReview(null); setReviewLoading(false); setReviewError("");
+    setReviewOpen(false); setConfirming(false); setReview(null); setReviewLoading(false); setReviewError("");
     return () => reviewRequest.current?.abort();
   }, [active, sessionId]);
   const openReview = async () => {
@@ -90,7 +90,7 @@ export function StorageTab({ active = true }: { active?: boolean }) {
       if (controller.signal.aborted) return;
       setReview(next); setDays(90); setArchivedOnly(true); setVisible(50);
       setSelected(new Set(filterReview(next, 90, true).map(chat => chat.id)));
-      setReviewOpen(true);
+      setConfirming(false); setReviewOpen(true);
     } catch (reason) {
       if (!controller.signal.aborted) setReviewError(String(reason));
     } finally {
@@ -105,10 +105,6 @@ export function StorageTab({ active = true }: { active?: boolean }) {
   const removeSelected = async () => {
     const targets = chats.filter(chat => selected.has(chat.id));
     setBusy(true);
-    if (!await showConfirm({ title: t("删除选中的聊天？"), message: t("这将永久删除 {count} 个聊天及其子智能体，无法撤销。", { count: targets.length }), confirmLabel: t("删除"), danger: true })) {
-      setBusy(false);
-      return;
-    }
     setReviewOpen(false);
     const pendingToast = pushToast(t("正在删除聊天…"), "info", 0);
     let deleted = 0, skipped = 0, failed = 0;
@@ -123,6 +119,10 @@ export function StorageTab({ active = true }: { active?: boolean }) {
     dismissToast(pendingToast);
     pushToast(t("已删除：{deleted}。已变化并跳过：{skipped}。未完成：{failed}。", { deleted, skipped, failed }), failed ? "error" : "success");
     setBusy(false); setRevision(value => value + 1);
+  };
+  const dismissReview = () => {
+    if (busy) return;
+    if (confirming) setConfirming(false); else setReviewOpen(false);
   };
   return <>
     {error && <p role="alert">{error}</p>}
@@ -146,8 +146,12 @@ export function StorageTab({ active = true }: { active?: boolean }) {
       <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("已归档聊天")}</div><div className="settings-row-description">{t("恢复或删除单个已归档聊天。")}</div></div><button type="button" className="settings-action-button" onClick={() => useAppStore.getState().setSettingsTab("archived")}>{t("管理")}</button></div>
     </div></section>
     </div>
-    {reviewOpen && active && createPortal(<div className="settings-storage-review-backdrop" onClick={() => { if (!busy) setReviewOpen(false); }}><div ref={reviewRef} role="dialog" aria-modal="true" tabIndex={-1} className="settings-storage-review" aria-labelledby={reviewTitleId} aria-describedby={reviewWarningId} onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); event.stopPropagation(); if (!busy) setReviewOpen(false); } }}>
-      <form onSubmit={event => { event.preventDefault(); if (!busy && selected.size > 0) void removeSelected(); }}>
+    {reviewOpen && active && createPortal(<div className="settings-storage-review-backdrop" onClick={dismissReview}><div ref={reviewRef} role="dialog" aria-modal="true" tabIndex={-1} className="settings-storage-review" aria-labelledby={reviewTitleId} aria-describedby={reviewWarningId} onClick={event => event.stopPropagation()} onKeyDown={event => { if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); event.stopPropagation(); dismissReview(); } }}>
+      {confirming ? <form onSubmit={event => { event.preventDefault(); if (!busy && selected.size > 0) void removeSelected(); }}>
+        <header><h2 id={reviewTitleId}>{t("删除选中的聊天？")}</h2></header>
+        <div className="settings-storage-review-section"><p id={reviewWarningId} className="settings-section-description">{t("这将永久删除 {count} 个聊天及其子智能体，无法撤销。", { count: selected.size })}</p></div>
+        <footer className="settings-storage-review-section settings-storage-review-actions"><button ref={cancelRef} type="button" className="settings-action-button" disabled={busy} onClick={() => setConfirming(false)}>{t("取消")}</button><button type="submit" className="settings-action-button" data-danger="true" disabled={busy}>{t("删除")}</button></footer>
+      </form> : <form onSubmit={event => { event.preventDefault(); if (!busy && selected.size > 0) setConfirming(true); }}>
         <header><h2 id={reviewTitleId}>{t("查看旧聊天")}</h2><p id={reviewWarningId}>{t("大小包含子智能体。删除聊天及其子智能体将永久生效。")}</p></header>
         <div className="settings-storage-review-section"><div className="settings-card settings-storage-review-filters">
           <div className="settings-row"><span>{t("最后更新")}</span><SelectMenu className="settings-select" ariaLabel={t("最后更新")} value={String(days)} onValueChange={value => changeReviewFilter(Number(value), archivedOnly)} disabled={busy}>{[30, 90, 180, 365].map(day => <option key={day} value={day}>{t("超过 {days} 天", { days: day })}</option>)}</SelectMenu></div>
@@ -158,8 +162,8 @@ export function StorageTab({ active = true }: { active?: boolean }) {
           {visible < chats.length && <button type="button" className="settings-action-button" onClick={() => setVisible(value => value + 50)}>{t("显示更多聊天")}</button>}
         </div>
         <footer className="settings-storage-review-section"><p aria-live="polite">{t("已选聊天：{count} · 子智能体：{subagents}", { count: selected.size, subagents: chats.filter(chat => selected.has(chat.id)).reduce((sum, chat) => sum + chat.subagent_count, 0) })}</p><div className="settings-storage-review-actions"><button ref={cancelRef} type="button" className="settings-action-button" disabled={busy} onClick={() => setReviewOpen(false)}>{t("取消")}</button><button type="submit" className="settings-action-button" data-danger="true" disabled={busy || selected.size === 0}>{t("删除所选")}</button></div></footer>
-      </form>
-      <button type="button" className="settings-storage-review-close" aria-label={t("关闭")} disabled={busy} onClick={() => setReviewOpen(false)}><X size={12} aria-hidden="true" /></button>
+      </form>}
+      {!confirming && <button type="button" className="settings-storage-review-close" aria-label={t("关闭")} disabled={busy} onClick={() => setReviewOpen(false)}><X size={12} aria-hidden="true" /></button>}
     </div></div>, document.body)}
   </>;
 }

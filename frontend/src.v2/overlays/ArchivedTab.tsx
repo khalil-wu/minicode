@@ -32,6 +32,9 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
   const [type, setType] = useState<"all" | "local">("all");
   const [menu, setMenu] = useState<ArchiveMenu | null>(null);
   const [projectMenu, setProjectMenu] = useState<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!active) { setMenu(null); setProjectMenu(null); }
+  }, [active]);
   const bodySearch = useConversationSearch({ query, enabled: active && capabilityFeatureEnabled(runtimeCapabilities, "global_search", true),
     archived: true, project, sort });
   const searchEnd = useRef<HTMLDivElement>(null);
@@ -125,8 +128,8 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
       {bodySearch.error && <p role="alert">{bodySearch.error}</p>}
     </div>
     {matching.length === 0 && !bodySearch.loading && !bodySearch.error && <div className="settings-archive-empty"><Archive aria-hidden="true" /><strong>{archived.length ? t("没有匹配的任务") : t("没有已归档任务")}</strong><span>{archived.length ? t("试试其他标题或项目。") : t("从会话菜单归档的任务会显示在这里。")}</span></div>}
-    {menu && <ContextMenu position={{ x: menu.anchor.getBoundingClientRect().right - 220, y: menu.anchor.getBoundingClientRect().bottom + 6 }} anchor={menu.anchor} onClose={() => setMenu(null)} items={menuItems} />}
-    {projectMenu && <ContextMenu position={{ x: projectMenu.getBoundingClientRect().right - 240, y: projectMenu.getBoundingClientRect().bottom + 6 }} anchor={projectMenu} onClose={() => setProjectMenu(null)} items={[
+    {active && menu && <ContextMenu position={{ x: menu.anchor.getBoundingClientRect().right - 220, y: menu.anchor.getBoundingClientRect().bottom + 6 }} anchor={menu.anchor} onClose={() => setMenu(null)} items={menuItems} />}
+    {active && projectMenu && <ContextMenu position={{ x: projectMenu.getBoundingClientRect().right - 240, y: projectMenu.getBoundingClientRect().bottom + 6 }} anchor={projectMenu} onClose={() => setProjectMenu(null)} items={[
       { label: t("全部项目"), checked: project === null, onClick: () => setProject(null) },
       { label: "", separator: true },
       ...projects.map(root => ({ label: projectName(root), tooltip: root, icon: <Folder size={15} />, checked: project === root, onClick: () => setProject(root) })),

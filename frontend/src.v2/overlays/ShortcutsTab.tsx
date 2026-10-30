@@ -105,14 +105,14 @@ export const ShortcutsTab = ({ searchTarget, active = true }: { searchTarget?: s
     {showPreference(`${copy.number} ${copy.numberDescription} ${copy.tabs} ${copy.chats}`) && <div className="settings-card settings-shortcut-preference"><div className="settings-row">
       <div className="settings-row-copy"><div className="settings-row-title">{copy.number}</div><div className="settings-row-description">{copy.numberDescription}</div>
         {Object.values(bindings).flat().some(binding => /^(Mod|Alt)\+(Digit)?[1-9]$/.test(binding)) && <div className="settings-row-description">{copy.conflicts}</div>}</div>
-      <SelectMenu ariaLabel={copy.number} className="settings-select settings-select-regular" align="end" disabled={!preferences || savingPreferences}
+      <SelectMenu ariaLabel={copy.number} className="settings-select settings-select-regular" align="end" disabled={!active || !preferences || savingPreferences}
         value={preferences?.primaryNumberShortcutTarget || "tabs"} onValueChange={value => void savePreference({ primaryNumberShortcutTarget: value as PrimaryNumberShortcutTarget })}>
         <option value="tabs">{copy.tabs}</option><option value="sidebar">{copy.chats}</option>
       </SelectMenu>
     </div></div>}
     {showPreference(`${copy.external} ${copy.externalDescription}`) && <div className="settings-card settings-shortcut-preference"><div className="settings-row">
       <div className="settings-row-copy"><div className="settings-row-title">{copy.external}</div><div className="settings-row-description">{copy.externalDescription}</div></div>
-      <SelectMenu ariaLabel={copy.external} className="settings-select settings-select-regular" align="end" disabled={!preferences || savingPreferences}
+      <SelectMenu ariaLabel={copy.external} className="settings-select settings-select-regular" align="end" disabled={!active || !preferences || savingPreferences}
         value={preferences?.externalBrowserLinkShortcut || "primary"} onValueChange={value => void savePreference({ externalBrowserLinkShortcut: value as ExternalBrowserLinkShortcut })}>
         <option value="unassigned">{copy.unassigned}</option><option value="primary">{primary}{copy.click}</option><option value="alt">{mac ? "⌥" : "Alt+"}{copy.click}</option><option value="primaryShift">{primary}{mac ? "⇧" : "Shift+"}{copy.click}</option>
       </SelectMenu>

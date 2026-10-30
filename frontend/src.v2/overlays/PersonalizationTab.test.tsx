@@ -25,6 +25,26 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it("closes the selected-host menu with its page without resetting the host or authored instructions", async () => {
+  const view = render(<PersonalizationTab />);
+  await selectRemote();
+  fireEvent.click(screen.getByRole("button", { name: "选择记忆主机" }));
+  expect(screen.getByRole("menu")).toBeTruthy();
+  view.rerender(<PersonalizationTab active={false} />);
+  expect(screen.queryByRole("menu")).toBeNull();
+  view.rerender(<PersonalizationTab active />);
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(screen.getByRole("button", { name: "选择记忆主机" }).textContent).toContain("Lab host");
+  fireEvent.click(screen.getByRole("button", { name: "编辑所选主机指令" }));
+  const editor = await screen.findByRole("textbox", { name: "自定义指令" });
+  fireEvent.change(editor, { target: { value: "keep this host's unsaved instructions" } });
+  view.rerender(<PersonalizationTab active={false} />);
+  view.rerender(<PersonalizationTab active />);
+  expect(screen.getByRole("textbox", { name: "自定义指令" })).toHaveProperty("value", "keep this host's unsaved instructions");
+  expect(mocks.request.mock.calls.filter(([, action]) => action === "update-instructions")).toHaveLength(0);
+  expect(useAppStore.getState().draft).toBe("unsent chat draft");
+});
+
 it("saves selected-host memory preferences without rewriting the current task mode", async () => {
   useAppStore.setState({ conversationId: "task", conversations: [{ id: "task", title: "Task", updatedAt: "", memoryMode: "polluted", memoryPolluted: true }] });
   render(<PersonalizationTab />);

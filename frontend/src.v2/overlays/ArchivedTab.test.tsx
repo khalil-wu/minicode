@@ -32,6 +32,33 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
+it.each(["filter", "project", "project-actions"])("closes the %s portal when its page becomes inactive and keeps the chosen search and filters", kind => {
+  const view = render(<ArchivedTab />);
+  fireEvent.change(screen.getByLabelText("搜索已归档任务"), { target: { value: "alpha" } });
+  fireEvent.click(screen.getByRole("button", { name: "归档类型和排序" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "本地" }));
+  fireEvent.click(screen.getByRole("button", { name: "归档类型和排序" }));
+  fireEvent.click(screen.getByRole("menuitemradio", { name: "创建时间" }));
+  if (kind !== "project-actions") {
+    fireEvent.click(screen.getByRole("button", { name: "归档项目" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "alpha" }));
+  }
+  const trigger = kind === "filter" ? "归档类型和排序" : kind === "project" ? "归档项目" : "归档项目操作 alpha";
+  fireEvent.click(screen.getByRole("button", { name: trigger }));
+  expect(screen.getByRole("menu")).toBeTruthy();
+  view.rerender(<ArchivedTab active={false} />);
+  expect(screen.queryByRole("menu")).toBeNull();
+  view.rerender(<ArchivedTab active />);
+  expect(screen.queryByRole("menu")).toBeNull();
+  expect(screen.getByLabelText("搜索已归档任务")).toHaveProperty("value", "alpha");
+  expect(screen.getByRole("button", { name: "归档类型和排序" }).textContent).toBe("本地");
+  if (kind !== "project-actions") expect(screen.getByRole("button", { name: "归档项目" }).textContent).toBe("alpha");
+  fireEvent.click(screen.getByRole("button", { name: "归档类型和排序" }));
+  expect(screen.getByRole("menuitemradio", { name: "创建时间" }).getAttribute("aria-checked")).toBe("true");
+  expect(useAppStore.getState().draft).toBe("unsent current owner text");
+  expect(deleteCommand).not.toHaveBeenCalled();
+});
+
 it("finds archived body-only matches without reading or reprojecting their transcript", async () => {
   readSearch.mockResolvedValueOnce({ ok: true, json: async () => ({ data: [{
     conversation: { id: "archive-A", title: "检查项目", archived: true, workspace_root: "C:/alpha", updated_at: "2026-10-01" },

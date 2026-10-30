@@ -55,9 +55,10 @@ function completedImport(outcome: ImportOutcome, id: string | null): ImportProgr
       : outcome.results.some(result => result.status === "success") ? "success" : "unchanged" };
 }
 
-async function request<T>(path: string, body?: unknown, method = "POST"): Promise<T> {
+async function request<T>(path: string, body?: unknown, method = "POST", signal?: AbortSignal): Promise<T> {
   const response = await fetchWithTimeout(new URL(`/api/settings/import${path}`, apiBase()), {
     method: body === undefined ? "GET" : method,
+    signal,
     headers: authHeaders(body === undefined ? undefined : { "Content-Type": "application/json" }),
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   }, { timeoutMs: LONG_HTTP_TIMEOUT_MS });
@@ -119,11 +120,13 @@ export function ImportSettingsTab({ active = true, variant = "page" }: {
   }, [active, rootsKey]);
   useEffect(() => {
     if (!active || !(importing || state?.running_import || progress?.status === "running")) return;
-    const timer = window.setInterval(() => { void request<ImportState>("").then(next => {
+    const controller = new AbortController();
+    const timer = window.setInterval(() => { void request<ImportState>("", undefined, "GET", controller.signal).then(next => {
+      if (controller.signal.aborted) return;
       receiveState(next);
       if (!next.running_import && !importing) void load();
-    }).catch(reason => setError(String(reason))); }, 2000);
-    return () => window.clearInterval(timer);
+    }).catch(reason => { if (!controller.signal.aborted) setError(String(reason)); }); }, 2000);
+    return () => { window.clearInterval(timer); controller.abort(); };
   }, [active, state?.running_import?.id, progress?.status, importing, rootsKey]);
 
   const apply = async (itemIds: string[]) => {

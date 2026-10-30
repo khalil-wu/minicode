@@ -31,6 +31,23 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
+it.each(["数字快捷键", "在默认浏览器中打开网页链接"])("closes the %s preference menu when hidden without writing or resetting its search", async label => {
+  const view = render(<ShortcutsTab active />);
+  await waitFor(() => expect(screen.getByRole("button", { name: new RegExp(`^${label}，当前：`) })).toHaveProperty("disabled", false));
+  fireEvent.change(screen.getByRole("textbox", { name: "搜索快捷键" }), { target: { value: label } });
+  const trigger = screen.getByRole("button", { name: new RegExp(`^${label}，当前：`) });
+  fireEvent.click(trigger);
+  expect(screen.getByRole("listbox")).toBeTruthy();
+  view.rerender(<ShortcutsTab active={false} />);
+  expect(screen.queryByRole("listbox")).toBeNull();
+  view.rerender(<ShortcutsTab active />);
+  expect(screen.queryByRole("listbox")).toBeNull();
+  expect(screen.getByRole("textbox", { name: "搜索快捷键" })).toHaveProperty("value", label);
+  expect(screen.getByRole("button", { name: new RegExp(`^${label}，当前：`) })).toHaveProperty("disabled", false);
+  expect(native.set).not.toHaveBeenCalled();
+  expect(useAppStore.getState().draft).toBe("Keep keyboard draft");
+});
+
 it("persists the two Source preference rows through the real preferences hook and exposes four modifier choices", async () => {
   render(<><Behavior /><ShortcutsTab /></>);
   await waitFor(() => expect(screen.getByRole("button", { name: /^数字快捷键，当前：/ })).toHaveProperty("disabled", false));

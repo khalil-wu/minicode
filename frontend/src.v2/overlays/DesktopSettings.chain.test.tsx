@@ -139,6 +139,7 @@ it("rechecks Storage snapshots through the authoritative delete command and repo
   const dialog = await screen.findByRole("dialog", { name: "查看旧聊天" });
   await within(dialog).findByText("已选聊天：3 · 子智能体：3");
   fireEvent.click(within(dialog).getByRole("button", { name: "删除所选" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "删除选中的聊天？" })).getByRole("button", { name: "删除" }));
   await screen.findByText("已删除：1。已变化并跳过：1。未完成：1。");
   expect(mocks.command.mock.calls.map(([command]) => command.storage_review)).toEqual(chats.map(chat => chat.snapshot));
   expect(mocks.command.mock.calls.every(([command]) => command.client_resource_cleanup === false)).toBe(true);

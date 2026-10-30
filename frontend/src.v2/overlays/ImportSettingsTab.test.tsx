@@ -54,7 +54,7 @@ beforeEach(() => {
     return Response.json(response);
   }));
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 it("opens the General row's real two-step import and keeps no-data and hidden states truthful", async () => {
   const view = render(<ImportSettingsTab variant="general-row" active={false} />);
@@ -430,4 +430,60 @@ it("restores actual running import items before detection completes and follows 
   expect(within(completed).queryByRole("link")).toBeNull();
   fireEvent.click(completed.closest(".mc-project-dialog-backdrop")!);
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+it.each(["hidden", "workspace"])("retires an in-flight import progress read after the page is %s without reloading or replacing the current state", async change => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  const running = { ...state(), connected_provider_ids: ["claude"], running_import: { id: "old-operation", item_types: ["instructions"] },
+    import_progress: { id: "old-operation", detection_id: "old-detection", status: "running", items: [item("old-instruction", "instructions")], results: [] } };
+  let reads = 0, release!: (response: Response) => void, signal!: AbortSignal;
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    if (new URL(String(input)).pathname === "/api/settings/import" && init?.method === "GET") {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(Response.json(running));
+      if (reads === 2) { signal = init.signal!; return new Promise(resolve => { release = resolve; }); }
+      return Promise.resolve(Response.json({ ...state(), connected_provider_ids: ["claude"], sync: { enabled: true, item_types: ["instructions"] } }));
+    }
+    return fetcher(input, init);
+  });
+  const view = render(<ImportSettingsTab />);
+  await screen.findByRole("dialog", { name: "正在导入外部智能体配置" });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(reads).toBe(2);
+  if (change === "hidden") view.rerender(<ImportSettingsTab active={false} />);
+  else {
+    act(() => useAppStore.setState({ workingDirectory: "C:/next-project" }));
+    await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入内容同步" }).getAttribute("aria-checked")).toBe("true"));
+  }
+  expect(signal.aborted).toBe(true);
+  const requests = vi.mocked(fetch).mock.calls.length;
+  await act(async () => release(Response.json({ ...running, running_import: null, import_progress: {
+    ...running.import_progress, status: "success", results: [],
+  } })));
+  expect(vi.mocked(fetch).mock.calls).toHaveLength(requests);
+  if (change === "hidden") expect(screen.queryByRole("dialog")).toBeNull();
+  else expect(screen.getByRole("switch", { name: "保持导入内容同步" }).getAttribute("aria-checked")).toBe("true");
+  expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
+});
+
+it("does not publish an old progress-read error after the import page is hidden", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+  const fetcher = vi.mocked(fetch).getMockImplementation()!;
+  let reads = 0, reject!: (error: Error) => void;
+  vi.mocked(fetch).mockImplementation((input, init) => {
+    if (new URL(String(input)).pathname === "/api/settings/import" && init?.method === "GET") {
+      reads += 1;
+      if (reads === 1) return Promise.resolve(Response.json({ ...state(), running_import: { id: "retired-read", item_types: ["instructions"] } }));
+      return new Promise((_resolve, fail) => { reject = fail; });
+    }
+    return fetcher(input, init);
+  });
+  const view = render(<ImportSettingsTab />);
+  await screen.findByText("正在导入");
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  view.rerender(<ImportSettingsTab active={false} />);
+  await act(async () => reject(new Error("retired progress read")));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(reads).toBe(2);
 });

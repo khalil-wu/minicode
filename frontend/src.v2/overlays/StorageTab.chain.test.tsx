@@ -10,11 +10,9 @@ const runtime = vi.hoisted(() => {
   vi.stubGlobal("__MINICODE_RUNTIME__", value);
   return value;
 });
-const confirm = vi.hoisted(() => vi.fn(async () => false));
 const command = vi.hoisted(() => vi.fn());
 const toast = vi.hoisted(() => ({ push: vi.fn(() => "storage-pending-toast"), dismiss: vi.fn() }));
 vi.mock("../hooks/useWebSocket", () => ({ getWebSocket: () => ({ sessionId: session.id }) }));
-vi.mock("./DialogService", () => ({ showConfirm: confirm }));
 vi.mock("./ToastContainer", () => ({ pushToast: toast.push, dismissToast: toast.dismiss }));
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommandAwaitResult: (...args: unknown[]) => command(...args),
@@ -38,7 +36,6 @@ const review = () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  confirm.mockResolvedValue(false);
   command.mockResolvedValue({ type: "command.result", level: "info", data: { deleted: true } });
   vi.stubGlobal("__MINICODE_RUNTIME__", runtime);
   vi.stubGlobal("matchMedia", () => ({ matches: false, addEventListener() {}, removeEventListener() {} }));
@@ -134,12 +131,14 @@ it("keeps a failed inventory closed and supports an actual retry and Close focus
 });
 
 it("closes on confirmed deletion, keeps the real snapshot contract, and reports changed chats as skipped", async () => {
-  confirm.mockResolvedValue(true);
   let finish!: (value: unknown) => void;
   command.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
   render(<StorageTab />);
   const dialog = await readyReview();
   fireEvent.click(within(dialog).getByRole("button", { name: "删除所选" }));
+  const confirmation = screen.getByRole("dialog", { name: "删除选中的聊天？" });
+  expect(command).not.toHaveBeenCalled();
+  fireEvent.click(within(confirmation).getByRole("button", { name: "删除" }));
   await waitFor(() => expect(command).toHaveBeenCalledTimes(1));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(screen.getByRole("button", { name: "查看" })).toHaveProperty("disabled", true);
@@ -149,4 +148,52 @@ it("closes on confirmed deletion, keeps the real snapshot contract, and reports 
   await waitFor(() => expect(screen.getByRole("button", { name: "查看" })).toHaveProperty("disabled", false));
   expect(toast.dismiss).toHaveBeenCalledWith("storage-pending-toast");
   expect(toast.push).toHaveBeenCalledWith("已删除：0。已变化并跳过：1。未完成：0。", "success");
+});
+
+it.each(["cancel", "escape", "outside"])("replaces the review with confirmation and restores its exact selection on %s", async dismiss => {
+  render(<StorageTab />);
+  const reviewDialog = await readyReview();
+  fireEvent.click(within(reviewDialog).getByRole("button", { name: /^包含，当前/ }));
+  fireEvent.click(screen.getByRole("option", { name: "所有聊天" }));
+  fireEvent.click(within(reviewDialog).getByRole("button", { name: /^最后更新，当前/ }));
+  fireEvent.click(screen.getByRole("option", { name: "超过 30 天" }));
+  fireEvent.click(within(reviewDialog).getByRole("checkbox", { name: "Archived parent" }));
+  const requests = vi.mocked(fetch).mock.calls.length;
+  fireEvent.click(within(reviewDialog).getByRole("button", { name: "删除所选" }));
+  const confirmation = screen.getByRole("dialog", { name: "删除选中的聊天？" });
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(screen.queryByRole("dialog", { name: "查看旧聊天" })).toBeNull();
+  expect(screen.queryByRole("checkbox")).toBeNull();
+  expect(within(confirmation).queryByRole("button", { name: "关闭" })).toBeNull();
+  expect(within(confirmation).getByText("这将永久删除 2 个聊天及其子智能体，无法撤销。")).toBeTruthy();
+  expect(document.activeElement).toBe(within(confirmation).getByRole("button", { name: "取消" }));
+  if (dismiss === "cancel") fireEvent.click(within(confirmation).getByRole("button", { name: "取消" }));
+  else if (dismiss === "escape") fireEvent.keyDown(confirmation, { key: "Escape" });
+  else fireEvent.click(confirmation.parentElement!);
+  const restored = screen.getByRole("dialog", { name: "查看旧聊天" });
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
+  expect(within(restored).getByRole("button", { name: /^包含，当前/ }).textContent).toContain("所有聊天");
+  expect(within(restored).getByRole("button", { name: /^最后更新，当前/ }).textContent).toContain("超过 30 天");
+  expect(within(restored).getByRole("checkbox", { name: "Archived parent" })).toHaveProperty("checked", false);
+  expect(within(restored).getByRole("checkbox", { name: "Unarchived parent" })).toHaveProperty("checked", true);
+  expect(within(restored).getByRole("checkbox", { name: "Recent archive" })).toHaveProperty("checked", true);
+  expect(within(restored).getByText("已选聊天：2 · 子智能体：1")).toBeTruthy();
+  expect(document.activeElement).toBe(within(restored).getByRole("button", { name: "取消" }));
+  expect(vi.mocked(fetch).mock.calls).toHaveLength(requests);
+  expect(command).not.toHaveBeenCalled();
+  expect(useAppStore.getState().draft).toBe("Keep this unsent draft");
+});
+
+it("retires both review and confirmation when the settings page is hidden", async () => {
+  const view = render(<StorageTab />);
+  const dialog = await readyReview();
+  fireEvent.click(within(dialog).getByRole("button", { name: "删除所选" }));
+  expect(screen.getByRole("dialog", { name: "删除选中的聊天？" })).toBeTruthy();
+  view.rerender(<StorageTab active={false} />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  view.rerender(<StorageTab active />);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(command).not.toHaveBeenCalled();
+  expect(await readyReview()).toBeTruthy();
+  expect(screen.queryByRole("dialog", { name: "删除选中的聊天？" })).toBeNull();
 });
