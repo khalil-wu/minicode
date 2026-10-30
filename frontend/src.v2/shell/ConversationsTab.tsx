@@ -372,15 +372,22 @@ export const ConversationsTab = ({
   const sidebarProjects = useMemo(() => recentWorkspaces.filter(project => project.pinned !== false
     || sectionProjectKeys.has(workspaceGroupIdentity(project.path))), [recentWorkspaces, sectionProjectKeys]);
 
-  const workspaceConversations = useMemo(() => {
-    const opened = new Set(sidebarProjects.map((workspace) => workspaceGroupIdentity(workspace.path)));
-    return filtered.map(conversation => {
+  // Legacy chats have no explicit project id. Resolve their source-folder
+  // membership once for every occurrence, including pinned and recent rows.
+  const projectConversations = useMemo(() => filtered.map(conversation => {
       if (conversation.projectId !== undefined && conversation.projectId !== null) return conversation;
       const project = recentWorkspaces.find(project => project.named && projectOwnsWorkspace(project, conversation.workspaceRoot || conversation.worktreePath || ""));
       return project ? { ...conversation, projectId: project.path } : conversation;
-    }).filter((conversation) => !conversation.pinned && !sectionByThread.has(conversation.id) && isWorkspaceConversation(conversation)
+    }), [filtered, recentWorkspaces]);
+  const projectMemberships = useMemo(() => new Map(projectConversations.map(conversation => {
+    const path = conversationWorkspacePath(conversation);
+    return [conversation.id, path ? workspaceGroupIdentity(path) : ""];
+  })), [projectConversations]);
+  const workspaceConversations = useMemo(() => {
+    const opened = new Set(sidebarProjects.map((workspace) => workspaceGroupIdentity(workspace.path)));
+    return projectConversations.filter((conversation) => !conversation.pinned && !sectionByThread.has(conversation.id) && isWorkspaceConversation(conversation)
       && opened.has(workspaceGroupIdentity(conversationWorkspacePath(conversation))));
-  }, [filtered, recentWorkspaces, sidebarProjects, sectionByThread]);
+  }, [projectConversations, sidebarProjects, sectionByThread]);
   const allProjectGroups = useMemo(() => groupByWorkspace(workspaceConversations, sidebarProjects.map((workspace) => workspace.path),
     new Map(recentWorkspaces.filter(project => project.named).map(project => [workspaceGroupIdentity(project.path), project.name]))), [workspaceConversations, sidebarProjects, recentWorkspaces]);
   const projectGroups = useMemo(() => new Map([...allProjectGroups].filter(([, group]) => !sectionProjectKeys.has(workspaceGroupIdentity(group.path)))), [allProjectGroups, sectionProjectKeys]);
@@ -681,7 +688,7 @@ export const ConversationsTab = ({
       sectionOptions={sections} currentSection={sectionByThread.get(conversation.id)} onSectionChange={moveToSection}
       onNewSection={createSectionForThread}
       pullRequest={pullRequestStatuses[conversation.id]?.pr}
-      currentProject={conversationWorkspacePath(conversation) ? workspaceGroupIdentity(conversationWorkspacePath(conversation)) : ""}
+      currentProject={projectMemberships.get(conversation.id) ?? ""}
       treeDepth={conversation.treeDepth}
     />
   ), [
@@ -700,7 +707,7 @@ export const ConversationsTab = ({
     renaming,
     renamingRow,
     startRename,
-    setPinned, setReadState, setProject, projectOptions, sections, sectionByThread, pullRequestStatuses,
+    setPinned, setReadState, setProject, projectOptions, projectMemberships, sections, sectionByThread, pullRequestStatuses,
     moveToSection, createSectionForThread,
   ]);
 

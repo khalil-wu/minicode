@@ -922,7 +922,6 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   .settings-card,
   .settings-section,
   .settings-source-list,
-  .settings-archive-list,
   .settings-skill-list,
   .settings-mcp-list,
   .settings-mcp-editor,
@@ -950,7 +949,6 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .settings-center-main :where(
   .settings-source-row,
-  .settings-archive-row,
   .settings-skill-row,
   .provider-card,
   .plugin-local-row,
@@ -961,7 +959,6 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 
 .settings-center-main :where(
   .settings-source-copy > strong,
-  .settings-archive-copy > strong,
   .settings-skill-copy strong,
   .provider-card-title,
   .provider-settings-heading h3
@@ -973,7 +970,6 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   .settings-page-note,
   .settings-personalization-note,
   .settings-source-copy > code,
-  .settings-archive-copy > span,
   .settings-skill-copy p,
   .provider-settings-heading p
 ) {

@@ -7,6 +7,7 @@ export interface ToastItem {
   type: "info" | "success" | "warning" | "error";
   duration: number;
   createdAt: number;
+  action?: { id: string; label: string; onClick: () => void };
 }
 
 let toastListeners: ((t: ToastItem) => void)[] = [];
@@ -16,16 +17,18 @@ export const pushToast = (
   message: string,
   type: ToastItem["type"] = "info",
   duration?: number,
+  action?: ToastItem["action"],
 ): string | null => {
   const text = message.trim();
   if (!text) return null;
   const createdAt = Date.now();
   const item: ToastItem = {
-    id: `t-${createdAt}-${Math.random().toString(36).slice(2, 5)}`,
+    id: action?.id ?? `t-${createdAt}-${Math.random().toString(36).slice(2, 5)}`,
     message: text,
     type,
     duration: duration ?? (type === "error" ? 6000 : type === "warning" ? 4500 : 2600),
     createdAt,
+    action,
   };
   for (const fn of toastListeners) fn(item);
   return item.id;
@@ -77,7 +80,7 @@ export const ToastContainer = ({ placement = "top" }: { placement?: "top" | "bot
 
   useEffect(() => {
     const addHandler = (t: ToastItem) => setToasts((prev) => {
-      const deduped = prev.filter((item) => item.message !== t.message || item.type !== t.type);
+      const deduped = prev.filter((item) => t.action ? item.id !== t.id : item.message !== t.message || item.type !== t.type);
       return [...deduped.slice(-2), t];
     });
     const dismissHandler = (id: string) => dismiss(id);
@@ -128,6 +131,7 @@ export const ToastContainer = ({ placement = "top" }: { placement?: "top" | "bot
         <div
           key={t.id}
           className={`toast-card ${exiting.has(t.id) ? "toast-exit" : "toast-enter"}`}
+          data-has-action={t.action ? "true" : undefined}
           data-type={t.type}
           data-paused={paused.has(t.id) ? "true" : undefined}
           role={t.type === "error" || t.type === "warning" ? "alert" : "status"}
@@ -139,6 +143,7 @@ export const ToastContainer = ({ placement = "top" }: { placement?: "top" | "bot
             {TYPE_ICONS[t.type]}
           </span>
           <span className="toast-message">{t.message}</span>
+          {t.action && <button type="button" className="toast-action" onClick={() => { dismiss(t.id); t.action!.onClick(); }}>{t.action.label}</button>}
           <button
             type="button"
             aria-label="关闭通知"

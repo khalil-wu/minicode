@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { pushToast, ToastContainer } from "./ToastContainer";
 
 describe("ToastContainer", () => {
@@ -26,6 +26,33 @@ describe("ToastContainer", () => {
     expect(screen.getByRole("status").textContent).toContain("Saved");
     // Every toast is dismissible now, including transient success ones.
     expect(screen.queryByRole("button", { name: "关闭通知" })).not.toBeNull();
+  });
+
+  it("executes the explicit action and dismisses its notification", async () => {
+    const onClick = vi.fn();
+    render(<ToastContainer />);
+    act(() => pushToast("Chat unarchived", "success", 0, { id: "unarchive-A", label: "View", onClick }));
+    expect(onClick).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "View" }));
+    expect(onClick).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByText("Chat unarchived")).toBeNull());
+  });
+
+  it("keeps different owners' actions when their message text is identical", () => {
+    const first = vi.fn(), second = vi.fn(), updated = vi.fn();
+    render(<ToastContainer />);
+    act(() => {
+      pushToast("Chat unarchived", "success", 0, { id: "unarchive-A", label: "View", onClick: first });
+      pushToast("Chat unarchived", "success", 0, { id: "unarchive-B", label: "View", onClick: second });
+      pushToast("Chat unarchived", "success", 0, { id: "unarchive-B", label: "View", onClick: updated });
+    });
+    const actions = screen.getAllByRole("button", { name: "View" });
+    expect(actions).toHaveLength(2);
+    fireEvent.click(actions[0]);
+    fireEvent.click(actions[1]);
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).not.toHaveBeenCalled();
+    expect(updated).toHaveBeenCalledTimes(1);
   });
 
   it("deduplicates notifications and keeps only the newest three", () => {

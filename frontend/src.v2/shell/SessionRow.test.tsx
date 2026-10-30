@@ -1,7 +1,12 @@
 /* @vitest-environment jsdom */
+import { loadConversationMenu } from "./ConversationMenu";
+
+// These action suites use a ready interaction module; cold ownership is covered separately.
+beforeAll(async () => { await loadConversationMenu(); });
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import { SessionRow } from "./SessionRow";
 
 const callbacks = {
@@ -25,6 +30,43 @@ describe("SessionRow hydration status", () => {
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+  });
+
+  it("leaves the native text context menu available while the conversation title is being edited", () => {
+    render(<SessionRow conversation={{ id: "renaming-owner", title: "Original title", updatedAt: "today" }}
+      sessionStatus="idle" active={false} menuOpen={false} renaming renameValue="Unsubmitted title" waitingLabel={null} {...callbacks} />);
+    const input = screen.getByRole("textbox", { name: "重命名 Original title" });
+    expect(fireEvent.contextMenu(input, { clientX: 50, clientY: 60 })).toBe(true);
+    expect(fireEvent.keyDown(input, { key: "ContextMenu" })).toBe(true);
+    expect(callbacks.onSetMenuFor).not.toHaveBeenCalled();
+    expect(callbacks.onCommitRename).not.toHaveBeenCalled();
+    expect(input).toHaveProperty("value", "Unsubmitted title");
+  });
+
+  it.each([
+    { label: "重命名", action: callbacks.onStartRename, args: ["menu-owner", "Menu owner", "recent:menu-owner"] },
+    { label: "移到本地工作区", action: callbacks.onHandoff, args: ["menu-owner", "local"] },
+    { label: "归档", action: callbacks.onArchive, args: ["menu-owner", true] },
+  ])("dismisses the original menu once before $label", ({ label, action, args }) => {
+    function MenuRow() {
+      const [menuFor, setMenuFor] = useState<string | null>(null);
+      return <SessionRow {...callbacks} rowId="recent:menu-owner"
+        conversation={{ id: "menu-owner", title: "Menu owner", updatedAt: "today", gitIsolated: true }}
+        sessionStatus="idle" active={false} menuOpen={menuFor === "recent:menu-owner"}
+        renaming={false} renameValue="" waitingLabel={null}
+        onSetMenuFor={id => { callbacks.onSetMenuFor(id); setMenuFor(id); }} />;
+    }
+    render(<MenuRow />);
+    fireEvent.click(screen.getByRole("button", { name: "会话操作" }));
+    callbacks.onSetMenuFor.mockClear();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: label, exact: true }));
+
+    expect(callbacks.onSetMenuFor).toHaveBeenCalledExactlyOnceWith(null);
+    expect(action).toHaveBeenCalledExactlyOnceWith(...args);
+    expect(callbacks.onSetMenuFor.mock.invocationCallOrder[0]).toBeLessThan(action.mock.invocationCallOrder[0]);
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(callbacks.onSwitch).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("animates a real running row with active=%s", (active) => {

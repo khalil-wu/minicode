@@ -56,30 +56,10 @@
 .scheduler-task-next, .scheduler-run-date { display: block; color: var(--text-muted); font-size: var(--mc-font-caption); padding-top: 3px; }
 .scheduler-cron-detail { font-size: var(--mc-font-caption); color: var(--text-muted); }
 .scheduler-cron-detail code { display: block; padding: 8px 0; }
-.settings-archive-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 18px; }
-.settings-archive-filters .settings-search { flex: 1 1 240px; }
-.settings-archive-filters > label:not(.settings-search) { display: flex; gap: 5px; align-items: center; color: var(--text-muted); font-size: var(--mc-font-caption); }
-.settings-archive-filters select, .settings-archive-filters input[type="date"] { min-width: 0; max-width: 180px; }
-.settings-archive-count { margin-left: auto; color: var(--text-muted); font-size: var(--mc-font-caption); font-variant-numeric: tabular-nums; }
-.settings-archive-title { border: 0; padding: 0; color: var(--text-primary); background: transparent; text-align: left; font-weight: var(--fw-medium); font-size: var(--mc-font-body); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.settings-archive-title:hover { color: var(--accent-primary); }
-.settings-archive-copy time { color: var(--text-muted); font-size: var(--mc-font-caption); }
-.settings-archive-more { position: relative; }
-.settings-archive-more summary { display: grid; place-items: center; width: 32px; height: 32px; color: var(--text-muted); cursor: pointer; border-radius: var(--radius-sm); list-style: none; }
-.settings-archive-more summary::-webkit-details-marker { display: none; }
-.settings-archive-more summary:hover, .settings-archive-more summary:focus-visible { background: var(--surface-soft); color: var(--text-primary); }
-.settings-archive-more > button { position: absolute; z-index: 1; top: 36px; right: 0; background: var(--surface-base); box-shadow: var(--shadow-soft); white-space: nowrap; }
-.settings-archive-preview { margin-bottom: 8px; padding: 12px 0 20px 40px; border-bottom: 1px solid var(--border-subtle); }
-.settings-archive-preview-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 8px; color: var(--text-secondary); font-size: var(--mc-font-secondary); }
-.settings-archive-transcript { max-height: 520px; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 8px 16px 0 0; }
-.settings-archive-transcript article { padding: 14px 0; font-size: var(--mc-font-body); }
-.settings-archive-transcript article[data-role="user"] { margin-left: 20%; }
-.settings-archive-message-label { color: var(--text-muted); font-size: var(--mc-font-caption); margin-bottom: 6px; }
 @media (max-width: 760px) {
   .scheduler-task-row { flex-wrap: wrap; }
   .scheduler-task-row > .flex-1 { flex-basis: calc(100% - 22px); }
   .scheduler-task-last { display: none; }
-  .settings-archive-preview { padding-left: 0; }
 }
 
 .settings-workspace-sidebar {
@@ -1262,8 +1242,7 @@
 .settings-skill-icon,
 .settings-memory-icon,
 .settings-browser-summary-icon,
-.settings-browser-row-icon,
-.settings-archive-icon {
+.settings-browser-row-icon {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
@@ -1609,97 +1588,6 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--surface-base);
-}
-
-/* ── 已归档 ───────────────────────────────────────────────────────────── */
-
-/* 圆角 / 描边 / 底色由 ui-polish 接管，这里只留裁剪。 */
-.settings-archive-list {
-  overflow: hidden;
-}
-
-.settings-archive-row {
-  min-height: 64px;
-  display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.settings-archive-row:last-child {
-  border-bottom: 0;
-}
-
-.settings-archive-icon {
-  width: 28px;
-  height: 28px;
-  border: 0;
-  background: transparent;
-}
-
-.settings-archive-icon > svg {
-  width: 16px;
-  height: 16px;
-  stroke-width: var(--mc-icon-stroke);
-}
-
-.settings-archive-copy {
-  min-width: 0;
-  display: grid;
-  gap: 3px;
-}
-
-.settings-archive-copy > strong {
-  overflow: hidden;
-  color: var(--text-primary);
-  font-weight: var(--fw-semibold);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-archive-copy > span {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-weight: var(--fw-normal);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-archive-actions {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 7px;
-}
-
-.settings-archive-empty {
-  min-height: 190px;
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  gap: 6px;
-  padding: 24px;
-  color: var(--text-muted);
-  text-align: center;
-}
-
-.settings-archive-empty > svg {
-  width: 22px;
-  height: 22px;
-  margin-bottom: 3px;
-  stroke-width: var(--mc-icon-stroke);
-}
-
-.settings-archive-empty > strong {
-  color: var(--text-primary);
-  font-size: var(--text-sm);
-  font-weight: var(--fw-bold);
-}
-
-.settings-archive-empty > span {
-  font-weight: var(--fw-medium);
 }
 
 /* ── 定时任务 ─────────────────────────────────────────────────────────── */
@@ -2318,16 +2206,6 @@
   .settings-browser-permission-row .settings-row-control {
     grid-column: 2;
     justify-self: start;
-  }
-
-  .settings-archive-row {
-    grid-template-columns: 28px minmax(0, 1fr);
-  }
-
-  .settings-archive-actions {
-    grid-column: 2;
-    justify-self: start;
-    flex-wrap: wrap;
   }
 
   .settings-skill-summary {

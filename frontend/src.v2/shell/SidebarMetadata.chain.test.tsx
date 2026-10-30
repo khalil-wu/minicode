@@ -1,6 +1,10 @@
 /* @vitest-environment jsdom */
+import { loadConversationMenu } from "./ConversationMenu";
+
+// These action suites use a ready interaction module; cold ownership is covered separately.
+beforeAll(async () => { await loadConversationMenu(); });
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { beforeAll, afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { ConversationsTab } from "./ConversationsTab";
 import { handleSessionEvent } from "../chat/sessionEvents";
@@ -100,4 +104,66 @@ it("moves the pinned task to a real project then removes membership while preser
   expect(useAppStore.getState().workingDirectory).toBe("C:/B");
   expect(useAppStore.getState().conversationId).toBe("reader");
   expect(useAppStore.getState().draft).toBe("Original reader draft");
+});
+
+it.each(["pinned", "recent", "project"] as const)("uses the same legacy named-project membership in the %s occurrence instead of its execution folder", async occurrence => {
+  useAppStore.setState({ recentWorkspaces: [
+    { path: "C:/A", name: "Project A", projectType: "project", lastOpened: 1, named: true, sourceFolders: ["C:/source-a", "C:/second-a"] },
+    { path: "C:/B", name: "Project B", projectType: "project", lastOpened: 2, named: true, sourceFolders: ["C:/B"] },
+  ] });
+  publish({ revision: 2, project_id: null, pinned: occurrence === "pinned", workspace_root: "C:/source-a",
+    worktree_path: "C:/source-a/.minicode/worktrees/task", execution_cwd: "C:/source-a/.minicode/worktrees/task" });
+  show();
+  menuFor(screen.getByRole("region", { name: occurrence === "pinned" ? "已固定" : occurrence === "recent" ? "最近" : "工作区 Project A" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
+  expect(screen.getByRole("menuitem", { name: "从 Project A 移出", exact: true })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: "Project A", exact: true })).toBeNull();
+  expect(screen.queryByRole("menuitem", { name: /worktrees|source-a/ })).toBeNull();
+  fireEvent.click(screen.getByRole("menuitem", { name: "Project B", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.project.set", conversation_id: "task", project_id: "c:/b" },
+    "conversation.project.set", expect.anything()));
+  expect(useAppStore.getState().conversations.find(item => item.id === "task")).toMatchObject({ projectId: null,
+    executionCwd: "C:/source-a/.minicode/worktrees/task" });
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "reader", workingDirectory: "C:/B", draft: "Original reader draft" });
+});
+
+it("keeps explicit removal from a named project authoritative even when its old source folder still matches", () => {
+  useAppStore.setState({ recentWorkspaces: [
+    { path: "C:/A", name: "Project A", projectType: "project", lastOpened: 1, named: true, sourceFolders: ["C:/source-a"] },
+    { path: "C:/B", name: "Project B", projectType: "project", lastOpened: 2, named: true, sourceFolders: ["C:/B"] },
+  ] });
+  publish({ revision: 2, project_id: "", workspace_root: "C:/source-a", execution_cwd: "C:/source-a/.minicode/worktrees/task" });
+  show(); menuFor(screen.getByRole("region", { name: "最近" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "项目", exact: true }));
+  expect(screen.getByRole("menuitem", { name: "Project A", exact: true })).toBeTruthy();
+  expect(screen.getByRole("menuitem", { name: "Project B", exact: true })).toBeTruthy();
+  expect(screen.queryByRole("menuitem", { name: /^从 / })).toBeNull();
+  expect(send).not.toHaveBeenCalled();
+});
+
+it("opens a background conversation's real context menu at the pointer without selecting or rewriting the reader", async () => {
+  show();
+  const row = within(screen.getByRole("region", { name: "工作区 A" })).getByRole("button", { name: "Actual task", exact: true });
+  fireEvent.contextMenu(row, { clientX: 180, clientY: 90 });
+  const menu = screen.getByRole("menu", { name: "会话操作" });
+  expect(menu.style.left).toBe("180px");
+  expect(menu.style.top).toBe("90px");
+  fireEvent.click(screen.getByRole("menuitem", { name: "固定", exact: true }));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.pin.set", conversation_id: "task", pinned: true },
+    "conversation.pin.set", expect.anything()));
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "reader", workingDirectory: "C:/B", draft: "Original reader draft" });
+});
+
+it.each([{ key: "ContextMenu" }, { key: "F10", shiftKey: true }])("opens the row menu with $key and restores that occurrence on Escape", async shortcut => {
+  show();
+  const row = within(screen.getByRole("region", { name: "最近" })).getByRole("button", { name: "Actual task", exact: true });
+  row.focus();
+  fireEvent.keyDown(row, { ...shortcut, isComposing: true });
+  expect(screen.queryByRole("menu", { name: "会话操作" })).toBeNull();
+  fireEvent.keyDown(row, shortcut);
+  fireEvent.keyDown(screen.getByRole("menu", { name: "会话操作" }), { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("menu", { name: "会话操作" })).toBeNull());
+  expect(document.activeElement).toBe(row);
+  expect(send).not.toHaveBeenCalled();
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "reader", draft: "Original reader draft" });
 });

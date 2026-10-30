@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { memo, useRef } from "react";
+import { memo, useRef, useState } from "react";
 import type { Ref } from "react";
 import type { DraggableAttributes } from "@dnd-kit/core";
 import { Clock3, GitBranch, LoaderCircle, MoreHorizontal } from "lucide-react";
@@ -80,6 +80,7 @@ const SessionRowComponent = ({
   const c = conversation;
   const rowRef = useRef<HTMLDivElement>(null);
   const menuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [contextInvocation, setContextInvocation] = useState<{ position: { x: number; y: number }; target: HTMLButtonElement } | null>(null);
   const presentationId = rowId || c.id;
   const menuId = `conversation-actions-${presentationId}`;
   return (
@@ -89,6 +90,22 @@ const SessionRowComponent = ({
       data-session-row="true"
       data-session-presentation={presentationId}
       data-active={active || undefined}
+      onContextMenu={event => {
+        if (renaming || deleting) return;
+        event.preventDefault(); event.stopPropagation();
+        const target = rowRef.current!.querySelector<HTMLButtonElement>(":scope > button")!;
+        setContextInvocation({ position: { x: event.clientX, y: event.clientY }, target });
+        onSetMenuFor(presentationId);
+      }}
+      onKeyDown={event => {
+        if (renaming || deleting || event.nativeEvent.isComposing || event.keyCode === 229
+          || !(event.key === "ContextMenu" || event.key === "F10" && event.shiftKey)) return;
+        event.preventDefault(); event.stopPropagation();
+        const target = rowRef.current!.querySelector<HTMLButtonElement>(":scope > button")!;
+        const bounds = target.getBoundingClientRect();
+        setContextInvocation({ position: { x: bounds.left, y: bounds.bottom + 4 }, target });
+        onSetMenuFor(presentationId);
+      }}
       style={{
         ...sessionRowStyle,
         paddingLeft: `calc(var(--conversation-row-indent, 40px) + ${Math.min(treeDepth, 6) * 16}px)`,
@@ -196,14 +213,15 @@ const SessionRowComponent = ({
           expanded={menuOpen}
           controls={menuOpen ? menuId : undefined}
           disabled={deleting}
-          onClick={(e) => { e.stopPropagation(); onSetMenuFor(menuOpen ? null : presentationId); }}
+          onClick={(e) => { e.stopPropagation(); setContextInvocation(null); onSetMenuFor(menuOpen ? null : presentationId); }}
         >
           <MoreHorizontal size={14} />
         </IconAction>
       </span>
       {!deleting && menuOpen && (
         <ConversationMenu
-          anchor={menuButtonRef.current}
+          anchor={contextInvocation?.target ?? menuButtonRef.current}
+          position={contextInvocation?.position}
           menuId={menuId}
           conversationId={c.id}
           workspaceRoot={c.executionCwd || c.worktreePath || c.workspaceRoot}
@@ -219,12 +237,12 @@ const SessionRowComponent = ({
           onProjectChange={projectId => onProjectChange(c.id, projectId)}
           sectionOptions={sectionOptions} currentSection={currentSection}
           onSectionChange={sectionId => onSectionChange?.(c.id, sectionId)} onNewSection={onNewSection ? () => onNewSection(c.id) : undefined}
-          onRename={() => { onSetMenuFor(null); onStartRename(c.id, c.title, presentationId); }}
+          onRename={() => onStartRename(c.id, c.title, presentationId)}
           onCopyLink={() => onCopyLink(c.id)}
           onCopyMarkdown={() => onCopyMarkdown(c.id)}
           onCopy={() => onCopy(c.executionCwd || c.worktreePath || c.workspaceRoot)}
-          onHandoff={() => { onSetMenuFor(null); onHandoff(c.id, c.gitIsolated ? "local" : "worktree"); }}
-          onArchive={() => { onSetMenuFor(null); onArchive(c.id, !c.archived); }}
+          onHandoff={() => onHandoff(c.id, c.gitIsolated ? "local" : "worktree")}
+          onArchive={() => onArchive(c.id, !c.archived)}
           onClose={() => onSetMenuFor(null)}
         />
       )}

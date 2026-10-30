@@ -1,6 +1,10 @@
 // @vitest-environment jsdom
+import { loadConversationMenu } from "./ConversationMenu";
+
+// These action suites use a ready interaction module; cold ownership is covered separately.
+beforeAll(async () => { await loadConversationMenu(); });
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, expect, it, vi } from "vitest";
+import { beforeAll, afterEach, expect, it, vi } from "vitest";
 import { ChatActionsButton } from "./ChatActionsButton";
 import { ConversationsTab } from "./ConversationsTab";
 import { useAppStore, waitComposerDraftRecovery } from "../stores";

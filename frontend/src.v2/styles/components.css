@@ -631,6 +631,9 @@ body:has(.settings-workspace.settings-center) .toast-container {
   pointer-events: auto;
 }
 
+.toast-card[data-has-action="true"] { grid-template-columns: 18px minmax(0, 1fr) auto auto; }
+.toast-action { padding: 4px 8px; border: 0; border-radius: var(--radius-sm); background: var(--surface-soft); color: var(--text-primary); font: inherit; white-space: nowrap; cursor: pointer; }
+
 .toast-icon {
   display: inline-flex;
   align-items: center;

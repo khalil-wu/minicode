@@ -18,7 +18,7 @@ export const SidebarSortMenu = ({ section, mode, onSelect, onNewSection }: {
         const bounds = event.currentTarget.getBoundingClientRect();
         setPosition(position ? null : { x: bounds.left, y: bounds.bottom + 4 });
       }}><SidebarSortSourceIcon kind="options" /></button>
-    {position && <ContextMenu position={position} onClose={() => setPosition(null)} returnFocusTo={trigger.current!} ariaLabel={label}
+    {position && <ContextMenu position={position} anchor={trigger.current!} align="start" onClose={() => setPosition(null)} returnFocusTo={trigger.current!} ariaLabel={label}
       items={[{ label: tr("排序方式"), icon: <SidebarSortSourceIcon kind="sort" />, submenu: [
         { label: tr("最近活动"), checked: mode === "updated_at", onClick: () => onSelect("updated_at") },
         { label: tr("手动"), checked: mode === "manual", onClick: () => onSelect("manual") },

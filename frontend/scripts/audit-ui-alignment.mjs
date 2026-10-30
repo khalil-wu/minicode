@@ -459,6 +459,10 @@ try {
   checks.push("Actual exhausted 429 retries and their terminal rate-limit notification retain the original owner, Wi-Fi evidence and one standalone notice without a duplicate provider toast");
 
   await composer.fill("KEEP_SETTINGS_DRAFT");
+  const archivedTitle = await page.evaluate(id => window.__zustandStore.getState().conversations.find(chat => chat.id === id).title, owner);
+  await page.locator(`[data-session-row][data-session-presentation$=":${owner}"]`).first().getByRole("button", { name: "会话操作", exact: true }).click();
+  await page.getByRole("menuitem", { name: "归档", exact: true }).click();
+  await page.waitForFunction(id => window.__zustandStore.getState().conversations.find(chat => chat.id === id)?.archived, owner);
   await page.evaluate(() => { const state = window.__zustandStore.getState(); state.setSettingsTab("appearance"); state.toggleSettings(); });
   await page.getByRole("radio", { name: "浅色", exact: true }).click();
   const trigger = page.locator(".appearance-code-theme-picker .mc-select-trigger").first();
@@ -523,6 +527,38 @@ try {
   const settingsPages = await page.locator(".settings-center-tab").evaluateAll(elements => elements.map(element => element.getAttribute("aria-label")));
   for (const [index, label] of settingsPages.entries()) {
     await page.locator(".settings-center-tab").filter({ hasText: label }).click();
+    if (label === "已归档的聊天") {
+      const title = page.locator(".settings-archive-title").filter({ hasText: archivedTitle });
+      await title.waitFor();
+      const archiveGeometry = await title.evaluate(element => {
+        const row = element.closest(".settings-row"), date = row.querySelector("time"), copy = element.parentElement;
+        const titleStyle = getComputedStyle(element), dateStyle = getComputedStyle(date), rowStyle = getComputedStyle(row);
+        const deleteStyle = getComputedStyle(row.querySelector(".settings-archive-icon-action"));
+        return { tag: element.tagName, titleSize: titleStyle.fontSize, titleWeight: titleStyle.fontWeight,
+          dateSize: dateStyle.fontSize, dateHeight: dateStyle.lineHeight, gap: getComputedStyle(copy).gap,
+          padding: [rowStyle.paddingTop, rowStyle.paddingRight, rowStyle.paddingBottom, rowStyle.paddingLeft],
+          leftDifference: element.getBoundingClientRect().left - date.getBoundingClientRect().left,
+          deleteButton: { width: deleteStyle.width, height: deleteStyle.height, border: deleteStyle.borderTopWidth, background: deleteStyle.backgroundColor } };
+      });
+      assert.deepEqual(archiveGeometry, { tag: "SPAN", titleSize: "13px", titleWeight: "500", dateSize: "12px", dateHeight: "16px", gap: "2px",
+        padding: ["12px", "16px", "12px", "16px"], leftDifference: 0,
+        deleteButton: { width: "28px", height: "28px", border: "0px", background: "rgba(0, 0, 0, 0)" } });
+      await title.click();
+      assert.equal(await page.evaluate(() => window.__zustandStore.getState().conversationId), terminalError.conversation_id);
+      assert.equal(await page.evaluate(() => window.__zustandStore.getState().draft), "KEEP_SETTINGS_DRAFT");
+      await capture("settings-archive-populated", { archiveGeometry });
+      await page.getByRole("button", { name: `恢复 ${archivedTitle}`, exact: true }).click();
+      await page.getByRole("button", { name: "查看", exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => window.__zustandStore.getState().conversationId), terminalError.conversation_id);
+      await page.getByRole("button", { name: "查看", exact: true }).click();
+      await page.waitForFunction(id => window.__zustandStore.getState().conversationId === id && !window.__zustandStore.getState().pendingConversationSwitchId, owner);
+      await page.evaluate(id => window.__zustandStore.getState().requestConversationSwitch(id), terminalError.conversation_id);
+      await page.waitForFunction(id => window.__zustandStore.getState().conversationId === id && !window.__zustandStore.getState().pendingConversationSwitchId, terminalError.conversation_id);
+      await composer.waitFor({ state: "visible" });
+      assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
+      await page.evaluate(() => window.__zustandStore.getState().toggleSettings());
+      checks.push({ scenario: "Actual archived row reuses Source settings typography and spacing; title leaves owner/draft intact; unarchive navigates only through View and preserves the hidden draft", archiveGeometry });
+    }
     if (label === "存储") {
       const chart = page.locator('.settings-storage-chart[role="img"]');
       await chart.waitFor();
