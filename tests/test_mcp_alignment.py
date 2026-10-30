@@ -229,6 +229,9 @@ class _PolicyManager:
     def get_server_contract(self, _name: str):
         return None
 
+    def catalog_is_cached(self, _name: str) -> bool:
+        return False
+
 
 @pytest.mark.parametrize(
     "mode, read_only, expected",

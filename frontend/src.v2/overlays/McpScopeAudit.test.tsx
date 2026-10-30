@@ -47,15 +47,18 @@ it("clears the previous MCP catalog when one conversation changes workspace", ()
   expect(useAppStore.getState().mcpServers).toEqual([]);
 });
 
-it("requests the committed owner's catalog when startup precedes the switch event", () => {
+it("requests the committed owner's catalog when startup precedes the switch event", async () => {
   handlePeripheralEvent({ type: "mcp_status", conversation_id: "B", workspace_root: "C:/workspace-B", servers: [{ name: "current-B", status: "connected" }] });
   expect(useAppStore.getState().mcpServers[0].name).toBe("shared");
   handleSessionEvent({ type: "conversation.switched", conversation_id: "B", conversation: {
     id: "B", title: "B", workspace_root: "C:/workspace-B", transcript: [],
   } }, { textStreamBuffer: createStreamBuffer(() => {}), thinkingStreamBuffer: createStreamBuffer(() => {}) });
-  expect(sendClientCommand).toHaveBeenCalledWith({
+  expect(useAppStore.getState()).toMatchObject({ conversationId: "B", workingDirectory: "C:/workspace-B" });
+  // Catalog work is deferred until after the new transcript owner commits.
+  expect(sendClientCommand).not.toHaveBeenCalled();
+  await waitFor(() => expect(sendClientCommand).toHaveBeenCalledWith({
     type: "mcp.list", conversation_id: "B", workspace_root: "C:/workspace-B",
-  }, { silent: true });
+  }, { silent: true }));
   handlePeripheralEvent({ type: "mcp_status", conversation_id: "B", workspace_root: "C:/workspace-B", servers: [{ name: "current-B", status: "connected" }] });
   expect(useAppStore.getState().mcpServers[0].name).toBe("current-B");
 });

@@ -4,6 +4,7 @@ import asyncio
 import pytest
 
 from backend.commands.plugins import default_plugin_roots
+from backend.mcp.client import MCPClient
 from backend.mcp.oauth import MCPAuthenticationRequired, create_loopback_callback
 from backend.mcp.manager import (
     MCPAuthStatus,
@@ -281,6 +282,7 @@ def test_manager_get_server_lifecycle_and_progress(tmp_path) -> None:
 
 
 class _ConnectFailsClient:
+    PROTOCOL_VERSION = MCPClient.PROTOCOL_VERSION
     instances: list["_ConnectFailsClient"] = []
 
     def __init__(self, *args, **kwargs) -> None:
@@ -327,6 +329,9 @@ def test_manager_closes_and_discards_client_after_failed_start(monkeypatch) -> N
 
 
 class _OAuthGateClient:
+    PROTOCOL_VERSION = MCPClient.PROTOCOL_VERSION
+    tool_catalog_cacheable = False
+    instructions = ""
     instances: list["_OAuthGateClient"] = []
 
     def __init__(self, *args, interactive_oauth: bool = False, **kwargs) -> None:

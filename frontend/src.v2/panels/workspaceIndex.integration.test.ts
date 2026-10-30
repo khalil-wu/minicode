@@ -18,6 +18,9 @@ import { WorkspaceTypeScriptService } from "./workspaceTypeScriptService";
 import { WORKSPACE_TYPESCRIPT_METADATA_URI, type WorkspaceTypeScriptMetadata } from "./workspaceTypeScriptContract";
 
 const publication = vi.hoisted(() => {
+  // Monaco's native clipboard contribution probes this browser API while its
+  // TS worker graph loads. JSDOM has no native clipboard command support.
+  Object.defineProperty(document, "queryCommandSupported", { configurable: true, value: () => false });
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: () => ({ matches: false, media: "", addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }),

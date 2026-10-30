@@ -8,13 +8,15 @@ import type { DesktopPetState } from "../desktop/runtime";
 import { DEFAULT_SHORTCUT_BINDINGS } from "../lib/keyboard-shortcuts";
 import { closeAutomations, getAutomationsPageState } from "../lib/automations-navigation";
 
-const fixture = vi.hoisted(() => ({ available: true, getState: vi.fn(), update: vi.fn(), changed: vi.fn(), openLink: vi.fn(), toast: vi.fn() }));
-vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => fixture.available ? { pets: api } : null }));
+const fixture = vi.hoisted(() => {
+  const api = { getState: vi.fn(), update: vi.fn(), onStateChanged: vi.fn() };
+  return { available: true, api, getState: api.getState, update: api.update, changed: api.onStateChanged, openLink: vi.fn(), toast: vi.fn() };
+});
+vi.mock("../desktop/runtime", async original => ({ ...await original<typeof import("../desktop/runtime")>(), desktop: () => fixture.available ? { pets: fixture.api } : null }));
 vi.mock("../hooks/useDesktopPreferences", () => ({ useDesktopPreferences: () => ({ preferences: null, error: "", update: vi.fn() }) }));
 vi.mock("../lib/open-preferred-target", () => ({ openPreferredWebLink: fixture.openLink }));
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: fixture.toast }));
 const listeners = new Set<(state: DesktopPetState) => void>();
-const api = { getState: fixture.getState, update: fixture.update, onStateChanged: fixture.changed };
 let state: DesktopPetState;
 const publish = (next: DesktopPetState) => { state = next; for (const listener of listeners) listener(next); };
 const openProfile = () => fireEvent.click(screen.getByRole("button", { name: "打开个人资料菜单" }));

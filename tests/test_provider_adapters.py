@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import ssl
 from types import SimpleNamespace
 
 import httpx
@@ -160,7 +161,12 @@ def test_owned_openai_and_anthropic_transports_apply_explicit_direct_networking(
     )
     anthropic_adapter._get_http_client()
 
-    assert openai_http_kwargs == [{"trust_env": False}]
+    assert len(openai_http_kwargs) == 1
+    assert openai_http_kwargs[0]["trust_env"] is False
+    assert openai_http_kwargs[0]["proxy"] is None
+    assert isinstance(openai_http_kwargs[0]["verify"], ssl.SSLContext)
+    assert openai_http_kwargs[0]["verify"].verify_mode == ssl.CERT_REQUIRED
+    assert openai_http_kwargs[0]["verify"].check_hostname is True
     assert len(anthropic_http_kwargs) == 1
     assert all(kwargs.get("proxy") is None for kwargs in anthropic_http_kwargs)
     assert all(kwargs.get("trust_env") is False for kwargs in anthropic_http_kwargs)

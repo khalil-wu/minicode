@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from backend.async_cleanup import to_thread_cancel_safe
+from backend.async_cleanup import _consume_task_result, to_thread_cancel_safe
 
 import asyncio
 import base64
@@ -499,6 +499,14 @@ def _has_tool_catalog_error(state: MCPServerState) -> bool:
     )
 
 
+@dataclass
+class _OAuthLoginAttempt:
+    state: MCPServerState
+    config: MCPServerConfig
+    scope: Any
+    task: asyncio.Task[None]
+
+
 class MCPServerManager:
     def __init__(
         self,
@@ -547,6 +555,8 @@ class MCPServerManager:
         self._pending_tool_refreshes: dict[str, MCPClient] = {}
         self._cleanup_reaper_tasks: dict[str, asyncio.Task[Any]] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
+        self._oauth_operation_locks: dict[str, asyncio.Lock] = {}
+        self._oauth_login_attempts: dict[str, _OAuthLoginAttempt] = {}
         self._node_companion_views: dict[str, Any] = {}
         self._shared_connection_views: dict[str, Any] = {}
         self._startup_tasks: dict[str, asyncio.Task] = {}
@@ -1610,6 +1620,7 @@ class MCPServerManager:
         if not _config_can_connect(config):
             await self.register_config(config)
             return
+        await self._retire_oauth_login_for_config(config)
         # A server owns exactly one connect/OAuth attempt. Config reloads cannot
         # start another browser flow while one is already in progress.
         await self._cancel_reconnect_task(config.name)
@@ -1642,6 +1653,7 @@ class MCPServerManager:
 
     async def register_config(self, config: MCPServerConfig) -> None:
         """Track an installed MCP server without starting it."""
+        await self._retire_oauth_login_for_config(config)
         await self._cancel_reconnect_task(config.name)
         lock = self._connection_locks.get(config.name)
         if lock is None:
@@ -1684,6 +1696,11 @@ class MCPServerManager:
         return await client.close()
 
     async def stop_server(self, name: str) -> bool:
+        async with self._oauth_operation_locks.setdefault(name, asyncio.Lock()):
+            await self._cancel_oauth_login_unlocked(name)
+            return await self._stop_server_transport(name)
+
+    async def _stop_server_transport(self, name: str) -> bool:
         state = self._servers.get(name)
         if state is None:
             return True
@@ -1811,6 +1828,7 @@ class MCPServerManager:
         self._servers.pop(name, None)
         self._resource_subscriptions.pop(name, None)
         self._connection_locks.pop(name, None)
+        self._oauth_operation_locks.pop(name, None)
         await self._notify_status(name, ServerStatus.OFFLINE)
 
     async def stop_all(self) -> None:
@@ -1856,6 +1874,9 @@ class MCPServerManager:
 
     async def cancel_startup(self) -> None:
         """An idle/owner interrupt cancels producers; view retirement only releases views."""
+        for name in tuple(self._oauth_login_attempts):
+            async with self._oauth_operation_locks.setdefault(name, asyncio.Lock()):
+                await self._cancel_oauth_login_unlocked(name)
         views = tuple(self._shared_connection_views.values()) + tuple(self._node_companion_views.values())
         await asyncio.gather(*(view.connection.cancel_startup() for view in views))
         pending = [task for task in self._startup_tasks.values() if not task.done()]
@@ -1866,24 +1887,75 @@ class MCPServerManager:
 
     async def oauth_login(self, name: str) -> None:
         """Run the official MCP SDK OAuth flow after an explicit user action."""
-        state = self._servers.get(name)
-        if state is None:
-            raise KeyError(f"MCP server '{name}' is not configured")
-        if not await self.stop_server(name):
+        async with self._oauth_operation_locks.setdefault(name, asyncio.Lock()):
+            state = self._servers.get(name)
+            if state is None:
+                raise KeyError(f"MCP server '{name}' is not configured")
+            scope = self._oauth_login_scope(state.config)
+            attempt = self._oauth_login_attempts.get(name)
+            if (attempt is None or attempt.task.done() or attempt.state is not state
+                    or attempt.scope != scope or not _same_runtime_config(attempt.config, state.config)):
+                await self._cancel_oauth_login_unlocked(name)
+                config = deepcopy(state.config)
+                task = asyncio.create_task(self._perform_oauth_login(name, state, config), name=f"mcp-oauth-login-{name}")
+                attempt = _OAuthLoginAttempt(state, config, scope, task)
+                self._oauth_login_attempts[name] = attempt
+                def settled(completed, attempt=attempt):
+                    if self._oauth_login_attempts.get(name) is attempt:
+                        self._oauth_login_attempts.pop(name)
+                    _consume_task_result(completed)
+                task.add_done_callback(settled)
+        # A window waiting on authentication is an observer. The configured
+        # manager owns cancellation and drains the SDK/callback producer.
+        await asyncio.shield(attempt.task)
+
+    def _oauth_login_scope(self, config: MCPServerConfig):
+        from backend.mcp.catalog_identity import connection_identity
+        return self.workspace_root, connection_identity(config, self.environment_runtime,
+            self._client_capability_identity(config), None,
+            requires_read_only_tools=self._requires_read_only_tools)
+
+    async def _retire_oauth_login_for_config(self, config: MCPServerConfig) -> None:
+        attempt = self._oauth_login_attempts.get(config.name)
+        if attempt is not None and attempt.task is asyncio.current_task():
+            return
+        async with self._oauth_operation_locks.setdefault(config.name, asyncio.Lock()):
+            attempt = self._oauth_login_attempts.get(config.name)
+            if attempt is not None and (attempt.state is not self._servers.get(config.name)
+                    or attempt.scope != self._oauth_login_scope(config) or not _same_runtime_config(attempt.config, config)):
+                await self._cancel_oauth_login_unlocked(config.name)
+
+    async def _cancel_oauth_login_unlocked(self, name: str) -> None:
+        attempt = self._oauth_login_attempts.get(name)
+        if attempt is None or attempt.task is asyncio.current_task():
+            return
+        if not attempt.task.done():
+            attempt.task.cancel()
+        await asyncio.gather(attempt.task, return_exceptions=True)
+        if self._oauth_login_attempts.get(name) is attempt:
+            self._oauth_login_attempts.pop(name)
+
+    async def _perform_oauth_login(self, name: str, state: MCPServerState, config: MCPServerConfig) -> None:
+        if not await self._stop_server_transport(name):
             raise RuntimeError(f"MCP server '{name}' is still shutting down and cannot log in")
-        await self._restart_connection_owner(name, state.config)
+        await self._restart_connection_owner(name, config)
         state.retry_count = 0
         await self.start_server(
-            state.config,
+            config,
             interactive_oauth=True,
             force=True,
         )
 
     async def oauth_logout(self, name: str) -> None:
+        async with self._oauth_operation_locks.setdefault(name, asyncio.Lock()):
+            await self._cancel_oauth_login_unlocked(name)
+            await self._perform_oauth_logout(name)
+
+    async def _perform_oauth_logout(self, name: str) -> None:
         state = self._servers.get(name)
         if state is None:
             raise KeyError(f"MCP server '{name}' is not configured")
-        if not await self.stop_server(name):
+        if not await self._stop_server_transport(name):
             raise RuntimeError(
                 f"MCP server '{name}' is still shutting down and cannot log out"
             )

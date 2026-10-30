@@ -42,17 +42,30 @@ def stage_known_manifest_samples(directory, target):
 @pytest.mark.parametrize("host,target", [("win-amd64", WINDOWS_TARGET), ("linux-x86_64", LINUX_TARGET)])
 def test_native_build_validates_both_manifests_and_tags_the_actual_host(native_commands, tmp_path, monkeypatch, host, target):
     stage_known_manifest_samples(tmp_path, target)
+    public = tmp_path / "frontend/public"
+    for relative, data in (("apps/menu-settings.svg", b"<svg/>"), ("pets/codex.webp", b"RIFF-known-image"), ("theme-boot.js", b"document.documentElement.dataset.theme='light';")):
+        asset = public / relative
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_bytes(data)
     native_commands["__file__"] = str(tmp_path / "setup.py")
     monkeypatch.setattr(native_commands["sysconfig"], "get_platform", lambda: host)
     copied = []
     monkeypatch.setattr(native_commands["build_py"], "run", lambda command: copied.append(command))
     distribution = native_commands["NativeDistribution"]()
     command = native_commands["NativeBuild"](distribution)
+    command.build_lib = str(tmp_path / "build-lib")
     command.run()
 
     assert copied == [command]
     assert distribution.has_ext_modules()
     assert native_commands["NativeWheel"](distribution).get_tag() == ("py3", "none", host.replace("-", "_"))
+    packaged = Path(command.build_lib) / "backend/public"
+    for asset in public.rglob("*"):
+        if asset.is_file():
+            assert (packaged / asset.relative_to(public)).read_bytes() == asset.read_bytes()
+    namespace = {"__file__": str(packaged.parent / "public_asset_root.py")}
+    exec((packaged.parent / "public_asset_root.py").read_text(encoding="utf-8"), namespace)
+    assert namespace["PUBLIC_ASSET_ROOT"] == packaged
 
 
 @pytest.mark.parametrize("resources", RESOURCE_FAMILIES)

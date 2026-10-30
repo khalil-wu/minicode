@@ -189,6 +189,9 @@ async def native_companion(tmp_path, monkeypatch, *, choice, app_access=None, bl
         environment_runtime=runtime, runtime_configs=(registered,), elicitation_handler=approve)
     try:
         await manager.start_all()
+        # These protocol cases execute tools; optional catalog readiness alone
+        # does not promise that the receiving connection is already available.
+        await manager.capture_startup_readiness(required_servers=("cua_repl",))
         client = manager.get_client("cua_repl")
         assert client is not None, manager.get_all_status()
         yield SimpleNamespace(client=client, owner=owner, approvals=approvals, log=log, config=registered)

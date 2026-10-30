@@ -128,7 +128,7 @@ async def test_dispatcher_owner_does_not_borrow_active_workspace(tmp_path, data,
 ])
 async def test_rejected_restore_projection_reports_correlated_command_failure(tmp_path, command_type, event_type):
     events, socket = outbox(tmp_path)
-    host = SimpleNamespace(active_conversation_id="conversation-a", event_outbox=events,
+    host = SimpleNamespace(session_id="command-owner", active_conversation_id="conversation-a", event_outbox=events,
         ws_manager=None, connection_generation=1,
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: "/workspace-a"))
     host.session_lifecycle = SessionLifecycle(host)

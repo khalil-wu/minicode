@@ -45,8 +45,10 @@ it("projects real retry wire fields into one stable Wi-Fi disclosure through liv
   expect(view.container.textContent).toContain("Reconnecting 2/5");
   expect(view.container.textContent).not.toContain("stream closed");
   fireEvent.click(screen.getByRole("button", { name: "Reconnecting 2/5" }));
-  expect(view.container.textContent).toContain("stream closed 2");
-  expect(view.container.textContent).not.toContain("stream closed 1");
+  // The row tracks the newest retry; its disclosure retains every real
+  // failure, in receipt order, for both live delivery and restored history.
+  const details = () => Array.from(view.container.querySelectorAll(".stream-error-details"), node => node.textContent);
+  expect(details()).toEqual(["stream closed 1 · 0.2 秒后重试", "stream closed 2 · 0.2 秒后重试"]);
   expect(state.isStreaming).toBe(true);
   expect(state.draft).toBe("unsent A");
 
@@ -54,4 +56,7 @@ it("projects real retry wire fields into one stable Wi-Fi disclosure through liv
   const restoredCells = projectMessagesToTurns(restored, true)[0].committedCells;
   expect(restoredCells).toHaveLength(1);
   expect(restoredCells[0]).toMatchObject({ id: first.id, progress: { retryAttempt: 2, errorMessage: "stream closed 2" } });
+  view.rerender(<LanguageProvider locale="en-US"><HistoryCellRenderer cell={restoredCells[0]} conversationId="A" /></LanguageProvider>);
+  expect(screen.getByRole("button", { name: "Reconnecting 2/5" }).getAttribute("aria-expanded")).toBe("true");
+  expect(details()).toEqual(["stream closed 1 · 0.2 秒后重试", "stream closed 2 · 0.2 秒后重试"]);
 });

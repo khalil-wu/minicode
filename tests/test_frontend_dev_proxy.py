@@ -1,7 +1,13 @@
 import importlib
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi.testclient import TestClient
+
+
+@asynccontextmanager
+async def _no_service_lifespan(_app):
+    yield
 
 
 def test_dev_index_supports_react_refresh_proxy(monkeypatch, tmp_path) -> None:
@@ -16,6 +22,7 @@ def test_dev_index_supports_react_refresh_proxy(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(backend_config, "PROJECT_ROOT", tmp_path)
 
     reloaded_main = importlib.reload(backend_main)
+    reloaded_main.app.router.lifespan_context = _no_service_lifespan
 
     class _FakeViteClient:
         def __init__(self) -> None:

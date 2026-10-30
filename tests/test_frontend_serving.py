@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
@@ -8,6 +9,11 @@ import pytest
 from starlette.websockets import WebSocket
 
 from backend import main
+
+
+@asynccontextmanager
+async def _request_only_lifespan(_app):
+    yield
 
 
 @pytest.mark.parametrize(("host", "origin", "allowed"), [
@@ -34,6 +40,14 @@ def test_loopback_frontend_origin_tracks_its_actual_server_port(monkeypatch, hos
 def test_same_origin_production_frontend_can_connect_on_a_custom_port(monkeypatch) -> None:
     monkeypatch.delenv("MINICODE_RUNTIME_TOKEN", raising=False)
     monkeypatch.setenv("MINICODE_DISABLE_DEV_CORS", "1")
+    monkeypatch.setattr(main.app.router, "lifespan_context", _request_only_lifespan)
+    bootstrap = main.AppBootstrap(
+        build_tool_registry=main.build_tool_registry,
+        create_session_llm=main._create_session_llm,
+        ws_manager=main._state.ws_manager,
+        on_mcp_status_change=main._broadcast_mcp_status_change,
+    )
+    monkeypatch.setattr(main._state, "bootstrap", bootstrap)
     with TestClient(main.app) as client:
         with client.websocket_connect(
             "ws://127.0.0.1:18765/ws?session_id=session_custom_port_audit",
@@ -49,6 +63,7 @@ def test_theme_boot_script_is_available_in_both_frontend_modes(monkeypatch, tmp_
     monkeypatch.setattr(main, "IS_PRODUCTION", production)
     monkeypatch.setattr(main, "FRONTEND_DIST", tmp_path / "dist")
     monkeypatch.setattr(main, "FRONTEND_SRC", tmp_path / "frontend")
+    monkeypatch.setattr(main, "PUBLIC_ASSET_ROOT", tmp_path / "frontend" / "public")
     directory = tmp_path / "dist" if production else tmp_path / "frontend" / "public"
     directory.mkdir(parents=True)
     script = "document.documentElement.dataset.theme = 'light';"

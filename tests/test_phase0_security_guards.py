@@ -128,7 +128,8 @@ def test_permission_checker_blocks_destructive_home_and_system_deletes(tmp_path:
     assert reason == ""
 
 
-def test_bypass_ignores_tool_owned_confirm_defaults(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_bypass_ignores_tool_owned_confirm_defaults(tmp_path: Path) -> None:
     from backend.config import permission_settings_from_config
     from backend.sandbox import SandboxPolicy
     from backend.tests.test_codex_mcp_approval_producer import authorize, proxy
@@ -143,7 +144,7 @@ def test_bypass_ignores_tool_owned_confirm_defaults(tmp_path: Path) -> None:
         (bypass_context, SandboxPolicy.bypass(), PermissionLevel.AUTO),
         (bypass_context, SandboxPolicy.workspace_default(tmp_path), PermissionLevel.ALWAYS_DENY),
     ):
-        result, _, _ = authorize(tool, tmp_path, sandbox, permission,
+        result, _, _ = await authorize(tool, tmp_path, sandbox, permission,
             permission_settings=permission_settings_from_config({}), arguments={"value": "original"})
         assert result.permission_decision.permission_level == expected
 

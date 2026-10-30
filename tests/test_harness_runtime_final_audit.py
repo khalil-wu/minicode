@@ -42,7 +42,9 @@ def test_stream_journal_reduces_deltas_without_a_worker_per_token(tmp_path, monk
         for _ in range(1000):
             await recorder.record_event_async(AgentEvent.agent_message_delta("x", item_id="answer"))
         await recorder.record_event_async(AgentEvent(type="thinking_delta", data={"delta": "reasoning"}))
-        assert worker_calls == ["append"]
+        # Text reduction schedules its ordered writer without waiting for disk.
+        # The completed-item boundary below must drain those receipts first.
+        assert worker_calls == []
         clock[0] += 0.13
         await recorder.record_event_async(AgentEvent.agent_message_delta("tail", item_id="answer", source="model_final"))
         await recorder.record_event_async(AgentEvent.agent_message_completed(

@@ -34,6 +34,7 @@ from backend.agent.message import AgentEvent
 from backend.artifact.store import ArtifactStore
 from backend.bootstrap.app import AppBootstrap
 from backend.config import DATA_ROOT, PROJECT_ROOT, load_config
+from backend.public_asset_root import PUBLIC_ASSET_ROOT
 from backend.runtime_env import ensure_utf8_console_logging
 from backend.version import __version__
 from backend.llm.model_registry import create_session_llm as _create_session_llm
@@ -402,7 +403,7 @@ app.include_router(create_workspace_router())
 # ── Static file serving ──
 
 # Prefer Vite build artifacts (dist/), proxy to Vite dev server in development
-_public_dir = FRONTEND_DIST if IS_PRODUCTION else FRONTEND_SRC / "public"
+_public_dir = FRONTEND_DIST if IS_PRODUCTION else PUBLIC_ASSET_ROOT
 mimetypes.add_type("image/svg+xml", ".svg")
 mimetypes.add_type("image/webp", ".webp")
 app.mount("/apps", StaticFiles(directory=str(_public_dir / "apps")), name="app-icons")
@@ -475,7 +476,7 @@ async def favicon():
 
 @app.get("/theme-boot.js")
 async def theme_boot():
-    root = FRONTEND_DIST if IS_PRODUCTION else FRONTEND_SRC / "public"
+    root = FRONTEND_DIST if IS_PRODUCTION else PUBLIC_ASSET_ROOT
     return FileResponse(root / "theme-boot.js", media_type="application/javascript")
 
 

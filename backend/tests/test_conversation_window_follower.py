@@ -10,6 +10,7 @@ import asyncio
 from contextlib import suppress
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -417,6 +418,14 @@ async def test_idle_follower_start_preserves_origin_through_actual_scheduler_and
     from backend.agent.runtime import default_runtime
 
     manager, owner, follower, conversation, other, _, drain = windows
+    registries = []
+    def create_registry(artifact_store, *, workspace_root, config, mcp_manager):
+        assert artifact_store is owner.artifact_store
+        assert workspace_root == Path(conversation.execution_cwd)
+        registry = ToolRegistry()
+        registries.append(registry)
+        return registry
+    monkeypatch.setattr("backend.api._state.bootstrap", SimpleNamespace(create_tool_registry=create_registry))
     manager.register_conversation_execution_owner(conversation.id, owner)
     owner.active_conversation_id = other.id
     follower_origin = follower.run_manager.durable_client_commands.path.stem
@@ -465,6 +474,9 @@ async def test_idle_follower_start_preserves_origin_through_actual_scheduler_and
         await asyncio.wait_for(entered.wait(), 5)
         await drain()
         assert len(observed) == 1
+        captured_registry = observed[0][1].start_request.tool_registry
+        assert captured_registry is not registries[0]
+        assert captured_registry.schema_source == registries[0].schema_source
         assert observed[0][1].window_binding_token == owner._window_binding_token
         assert owner.active_conversation_id == other.id
         assert follower.run_manager.run_tasks == {}

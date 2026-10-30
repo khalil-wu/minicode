@@ -104,6 +104,9 @@ class _FakeWebSocket:
 
 
 class _ReusableClient:
+    PROTOCOL_VERSION = MCPClient.PROTOCOL_VERSION
+    tool_catalog_cacheable = False
+    instructions = ""
     instances = 0
 
     def __init__(self, **kwargs) -> None:

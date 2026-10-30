@@ -13,6 +13,8 @@ from backend.agent.context import ContextBuilder
 from backend.agent.state import AgentState
 from backend.agent.message import AgentEvent
 from backend.agent.query_terminal import QueryTerminalTransaction
+from backend.agent.query_journal import QueryJournalRecorder
+from backend.agent.execution_journal import ExecutionJournal
 from backend.conversations.repository import ConversationRepository
 from backend.llm.base import LLMMessage, ToolCallEvent, UsageInfo, estimate_llm_context_tokens
 from backend.ws.event_log import WebSocketReplayEventStore
@@ -132,19 +134,31 @@ async def test_replay_window_appends_between_batched_trims(tmp_path, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_cancelling_terminal_publication_finishes_the_same_transaction():
+async def test_cancelling_terminal_publication_finishes_the_same_transaction(tmp_path):
     entered, release = threading.Event(), threading.Event()
     recorded = []
 
-    def intent(event):
-        recorded.append(("intent", event.data["status"]))
-        entered.set()
-        assert release.wait(5)
+    class GatedRecorder(QueryJournalRecorder):
+        def record_terminal_intent(self, event):
+            super().record_terminal_intent(event)
+            recorded.append(("intent", event.data["status"]))
+            entered.set()
+            assert release.wait(5)
+
+        def record_terminal(self, event):
+            super().record_terminal(event)
+            recorded.append(("terminal", event.data["status"]))
+
+    state, context = AgentState(user_message="task", reply="done"), ContextBuilder()
+    journal = ExecutionJournal("terminal-cancellation", base_dir=tmp_path)
+    recorder = GatedRecorder(journal, {}, state, context, None, "conv-terminal")
+    await recorder.record_event_async(AgentEvent("agent_message.delta", {
+        "item_id": "answer", "delta": "done", "source": "model_final",
+    }))
 
     transaction = QueryTerminalTransaction(
-        turn_ctx=SimpleNamespace(state=AgentState(user_message='task', reply='done'), turn_kernel=None, metadata={}, run_context=RunContext()),
-        journal=SimpleNamespace(record_terminal_intent=intent,
-                                record_terminal=lambda event: recorded.append(("terminal", event.data["status"]))),
+        turn_ctx=SimpleNamespace(state=state, context_builder=context, turn_kernel=None, metadata={}, run_context=RunContext()),
+        journal=recorder,
     )
     task = asyncio.create_task(transaction.commit(AgentEvent.done(status="completed"), validate=False))
     assert await asyncio.to_thread(entered.wait, 2)
@@ -158,3 +172,8 @@ async def test_cancelling_terminal_publication_finishes_the_same_transaction():
     assert result.status == "completed"
     assert transaction.finalized
     assert recorded == [("intent", "completed"), ("terminal", "completed")]
+    entries = ExecutionJournal("terminal-cancellation", base_dir=tmp_path).read_events()
+    progress = next(entry for entry in entries if entry.event_type == "progress")
+    intent = next(entry for entry in entries if entry.payload.get("lifecycle") == "terminal_intent")
+    assert progress.payload["content_delta"] == "done" and progress.seq < intent.seq
+    assert not result.evidence_events

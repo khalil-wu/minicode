@@ -337,7 +337,8 @@ def test_managed_read_deny_cannot_be_reopened_by_user_allow_read(tmp_path: Path)
     assert policy.resolve(cwd=tmp_path).resolve_access(denied) is FileSystemAccessMode.DENY
 
 
-def test_legacy_command_flags_do_not_replace_frozen_source_authority(
+@pytest.mark.asyncio
+async def test_legacy_command_flags_do_not_replace_frozen_source_authority(
     tmp_path: Path,
 ) -> None:
     policy = sandbox_policy_from_config_snapshot(
@@ -362,13 +363,13 @@ def test_legacy_command_flags_do_not_replace_frozen_source_authority(
     assert policy.auto_allow_commands_if_sandboxed is True
     assert policy.excluded_commands == ("docker:*",)
     for command in ("python -V", "docker ps"):
-        captured = authorize_command_call(ToolCallEvent(id="sandboxed-command", name=tool.name, arguments={"command": command}), context)
+        captured = await authorize_command_call(ToolCallEvent(id="sandboxed-command", name=tool.name, arguments={"command": command}), context)
         assert not captured.error, captured.error
         assert captured.request.exec_policy.kind == "skip"
         assert captured.permission_decision.permission_level is PermissionLevel.AUTO
         assert captured.request.exec_policy.command.sandbox_permissions == "use_default"
         assert captured.request.exec_policy.command.policy.resolve(cwd=tmp_path).resolve_access(tmp_path / "inside").can_write
-    escalated = authorize_command_call(ToolCallEvent(id="escalated-command", name=tool.name,
+    escalated = await authorize_command_call(ToolCallEvent(id="escalated-command", name=tool.name,
         arguments={"command": "python -V", "sandbox_permissions": "require_escalated"}), context)
     assert not escalated.error, escalated.error
     assert escalated.request.exec_policy.kind == "needs_approval"

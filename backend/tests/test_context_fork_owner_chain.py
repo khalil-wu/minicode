@@ -49,7 +49,7 @@ async def test_stale_fork_settles_origin_receipt_without_forking_visible_context
         await outbox.send_payload({"type": event.type, **event.data}, log_context="fork")
 
     lock = asyncio.Lock()
-    session = SimpleNamespace(conversation_repo=repo, active_conversation=visible,
+    session = SimpleNamespace(session_id="fork-owner", conversation_repo=repo, active_conversation=visible,
         active_conversation_id=visible.id, context_builder=context, ws_manager=None,
         connection_generation=1, event_outbox=outbox, send_event=send,
         conversation_lifecycle_lock=lambda: lock)

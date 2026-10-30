@@ -203,9 +203,11 @@ def test_message_cwd_keeps_the_existing_isolated_worktree(tmp_path: Path, monkey
     worktree.mkdir()
     owner = SimpleNamespace(id="isolated-task", workspace_root=str(tmp_path / "repo"), worktree_path=str(worktree), git_isolated=True)
     update_binding = Mock()
+    read_summary = Mock(return_value=owner)
+    read_transcript = Mock(side_effect=AssertionError("Workspace identity checks do not need the transcript"))
     session = SimpleNamespace(
         session_id="worktree-session", active_conversation_id=owner.id,
-        conversation_repo=SimpleNamespace(get_conversation=lambda _id: owner, update_workspace_binding=update_binding),
+        conversation_repo=SimpleNamespace(get_conversation_summary=read_summary, get_conversation=read_transcript, update_workspace_binding=update_binding),
         activate_workspace_path=AsyncMock(), send_event=AsyncMock(),
     )
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
@@ -214,4 +216,6 @@ def test_message_cwd_keeps_the_existing_isolated_worktree(tmp_path: Path, monkey
     assert asyncio.run(dispatcher._handle_user_message_workspace(str(worktree), owner.id)) == (True, owner.id)
     assert (owner.workspace_root, owner.worktree_path, owner.git_isolated) == (str(tmp_path / "repo"), str(worktree), True)
     update_binding.assert_not_called()
+    read_summary.assert_called_once_with(owner.id)
+    read_transcript.assert_not_called()
     session.activate_workspace_path.assert_not_awaited()

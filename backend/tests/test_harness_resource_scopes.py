@@ -16,10 +16,10 @@ def test_unrelated_windows_proceed_but_same_task_and_global_changes_wait():
         release = asyncio.Event()
         held = asyncio.Event()
 
-        def dispatcher(name):
+        def dispatcher(name, window_id):
             lock = asyncio.Lock()
             session = SimpleNamespace(
-                active_conversation_id=name, ws_manager=manager, connection_generation=1,
+                session_id=window_id, active_conversation_id=name, ws_manager=manager, connection_generation=1,
                 conversation_lifecycle_lock=lambda: lock,
                 event_outbox=SimpleNamespace(bind_connection_generation=lambda _: nullcontext()),
             )
@@ -34,9 +34,9 @@ def test_unrelated_windows_proceed_but_same_task_and_global_changes_wait():
             instance._handle_command_inner = handler
             return instance
 
-        a, b, other_a = dispatcher("a"), dispatcher("b"), dispatcher("a")
+        a, b, other_a = dispatcher("a", "window-a1"), dispatcher("b", "window-b"), dispatcher("a", "window-a2")
         task = asyncio.create_task(a._handle_command(UserCommand(type="workspace.set")))
-        await held.wait()
+        await asyncio.wait_for(held.wait(), timeout=1)
         await asyncio.wait_for(b._handle_command(UserCommand(type="user_message")), timeout=1)
         assert ("b", "user_message") in entered
         same_task = asyncio.create_task(other_a._handle_command(UserCommand(type="conversation.rename")))
@@ -46,7 +46,7 @@ def test_unrelated_windows_proceed_but_same_task_and_global_changes_wait():
         assert ("b", "llm.config.set") not in entered
         await asyncio.wait_for(b._handle_command(UserCommand(type="interrupt")), timeout=1)
         release.set()
-        await asyncio.wait_for(asyncio.gather(task, same_task, global_change), timeout=1)
+        assert await asyncio.wait_for(asyncio.gather(task, same_task, global_change), timeout=1) == [True, True, True]
         assert ("b", "llm.config.set") in entered
 
     asyncio.run(scenario())

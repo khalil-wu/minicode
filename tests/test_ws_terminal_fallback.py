@@ -32,7 +32,7 @@ class _FakeWebSocket:
         self.sent.append(dict(payload))
 
 
-def _session(tmp_path: Path, monkeypatch) -> WebSocketSession:
+def _session(tmp_path: Path, monkeypatch, conversation_id: str | None = None) -> WebSocketSession:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "backend.ws.handler.CONVERSATION_DATA_DIR",
@@ -47,7 +47,6 @@ def _session(tmp_path: Path, monkeypatch) -> WebSocketSession:
         "backend.ws.handler.get_models_source",
         lambda _provider="openai": "test",
     )
-    monkeypatch.setattr("backend.ws.agent_runner._get_or_create_session_llm", lambda session, **_kwargs: session.llm)
     monkeypatch.setattr(WebSocketSession, "_build_conversation_tool_registry", lambda self, conversation_id="", **_kwargs: self.tool_registry)
     session = WebSocketSession(
         session_id="session-terminal-fallback",
@@ -60,12 +59,15 @@ def _session(tmp_path: Path, monkeypatch) -> WebSocketSession:
     )
     # Runtime capability notifications are unrelated to these lifecycle tests.
     session.task_manager = TaskManager()
+    if conversation_id is not None:
+        session.conversation_repo.create_conversation(conversation_id=conversation_id,
+            workspace_root=str(tmp_path), memory_mode="none", permission_mode="bypass")
     return session
 
 
 async def _wait_for_run_cleanup(session: WebSocketSession, task_id: str) -> None:
     try:
-        await session.task_manager.wait(task_id)
+        await asyncio.wait_for(session.task_manager.wait(task_id), timeout=5)
     except (asyncio.CancelledError, RuntimeError):
         pass
     for _ in range(100):
@@ -75,7 +77,7 @@ async def _wait_for_run_cleanup(session: WebSocketSession, task_id: str) -> None
     assert not session.run_manager.run_tasks
     persist_tail = session.event_outbox.persistence_tail
     if persist_tail is not None:
-        await asyncio.shield(persist_tail)
+        await asyncio.wait_for(asyncio.shield(persist_tail), timeout=5)
 
 
 def test_start_agent_run_setup_exception_emits_one_failed_done_and_idle(
@@ -83,7 +85,7 @@ def test_start_agent_run_setup_exception_emits_one_failed_done_and_idle(
     monkeypatch,
 ) -> None:
     async def scenario() -> tuple[WebSocketSession, list[dict[str, object]]]:
-        session = _session(tmp_path, monkeypatch)
+        session = _session(tmp_path, monkeypatch, "conv-setup-failure")
 
         async def fail_setup(*_args, **_kwargs) -> None:
             raise RuntimeError("setup exploded")
@@ -101,7 +103,7 @@ def test_start_agent_run_setup_exception_emits_one_failed_done_and_idle(
         await _wait_for_run_cleanup(session, task_id)
         return session, session.ws.sent
 
-    session, events = asyncio.run(scenario())
+    session, events = asyncio.run(asyncio.wait_for(scenario(), timeout=15))
     done = [event for event in events if event.get("type") == "done"]
     idle = [event for event in events if event.get("type") == "session.state_changed"]
     errors = [event for event in events if event.get("type") == "error"]
@@ -125,6 +127,7 @@ def test_start_agent_run_does_not_duplicate_canonical_terminal_delivery(
     monkeypatch,
 ) -> None:
     async def scenario() -> list[dict[str, object]]:
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-5.4")
         session = _session(tmp_path, monkeypatch)
         # This oracle owns one foreground terminal transaction. Memory jobs
         # have their own model transport and completion contracts.
@@ -142,10 +145,11 @@ def test_start_agent_run_does_not_duplicate_canonical_terminal_delivery(
             async def simple_chat(self, messages, *, max_tokens=None):
                 return "Owned terminal reply"
 
-        # Keep the actual QueryEngine/TurnIterationRuntime/AnswerCommitter;
-        # only the model transport is controlled. The session factory seam
-        # returns this captured model for the real run-scoped binding.
+        # Keep the actual model capture/cache and query/commit path. The
+        # public factory builds the transport from that run's current config.
         session.llm = FinalReplyModel(session.config.llm)
+        monkeypatch.setattr("backend.llm.model_registry.create_session_llm",
+            lambda config, model_override=None, **_kwargs: FinalReplyModel(config.llm))
         conversation = session.conversation_repo.create_conversation(
             title="Canonical terminal", permission_mode="bypass",
         )
@@ -155,13 +159,14 @@ def test_start_agent_run_does_not_duplicate_canonical_terminal_delivery(
         )
         await _wait_for_run_cleanup(session, task_id)
         restored = session.conversation_repo.get_conversation(conversation.id)
+        assert restored.transcript, session.ws.sent
         assert restored.transcript[0]["content"] == "hello"
         assert restored.context_snapshot["turn_admissions"]
         assert any(message["role"] == "assistant" and message["content"] == "Owned terminal reply"
                    for message in restored.transcript)
         return session.ws.sent
 
-    events = asyncio.run(scenario())
+    events = asyncio.run(asyncio.wait_for(scenario(), timeout=15))
     terminal = [event for event in events if event.get("type") == "done"]
     assert len(terminal) == 1
     assert terminal[0]["status"] == "completed"
@@ -187,7 +192,7 @@ def test_start_agent_run_cancellation_emits_one_cancelled_done_and_idle(
     """
 
     async def scenario() -> tuple[WebSocketSession, list[dict[str, object]]]:
-        session = _session(tmp_path, monkeypatch)
+        session = _session(tmp_path, monkeypatch, "conv-cancelled")
         started = asyncio.Event()
 
         async def wait_forever(*_args, **kwargs) -> None:
@@ -203,15 +208,15 @@ def test_start_agent_run_cancellation_emits_one_cancelled_done_and_idle(
                 metadata={"assistant_message_id": "assistant-cancelled"},
             )
         )
-        await started.wait()
+        await asyncio.wait_for(started.wait(), timeout=5)
         task_id = session.run_manager.run_task_ids["conv-cancelled"]
         assert session.task_manager.cancel(task_id) is True
         with pytest.raises(RuntimeError, match="cancelled before the user turn was durably admitted"):
-            await start_task
+            await asyncio.wait_for(start_task, timeout=5)
         await _wait_for_run_cleanup(session, task_id)
         return session, session.ws.sent
 
-    session, events = asyncio.run(scenario())
+    session, events = asyncio.run(asyncio.wait_for(scenario(), timeout=15))
     done = [event for event in events if event.get("type") == "done"]
     idle = [event for event in events if event.get("type") == "session.state_changed"]
     assert len(done) == 1
@@ -230,7 +235,7 @@ def test_normal_return_without_terminal_fence_fails_closed(
     monkeypatch,
 ) -> None:
     async def scenario() -> list[dict[str, object]]:
-        session = _session(tmp_path, monkeypatch)
+        session = _session(tmp_path, monkeypatch, "conv-missing-terminal")
 
         async def return_without_terminal(*_args, **_kwargs) -> None:
             return None
@@ -242,46 +247,47 @@ def test_normal_return_without_terminal_fence_fails_closed(
         await _wait_for_run_cleanup(session, task_id)
         return session.ws.sent
 
-    events = asyncio.run(scenario())
+    events = asyncio.run(asyncio.wait_for(scenario(), timeout=15))
     done = [event for event in events if event.get("type") == "done"]
     assert len(done) == 1
     assert done[0]["status"] == "failed"
     assert done[0]["reason"] == "startup_rejected"
 
 
-def test_pre_admission_busy_run_emits_terminal_done_and_idle(
+def test_pre_admission_busy_run_preserves_the_active_owner_without_a_terminal(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     from backend.agent.conversation_query_guard import conversation_query_guards
 
     async def scenario() -> list[dict[str, object]]:
-        session = _session(tmp_path, monkeypatch)
+        session = _session(tmp_path, monkeypatch, "conv-busy-owner")
         guards = conversation_query_guards()
-        claim = guards.try_start("conv-busy", owner_id="other-run")
+        claim = guards.try_start("conv-busy-owner", owner_id="other-run")
         assert claim is not None
         try:
-            with pytest.raises(RuntimeError, match="exited before the user turn was durably admitted"):
+            with pytest.raises(RuntimeError, match="already owns a turn"):
                 await session.start_agent_run(
                     "hello",
-                    conversation_id="conv-busy",
+                    conversation_id="conv-busy-owner",
                     metadata={"assistant_message_id": "assistant-busy"},
                 )
             task_id = session.task_manager.list()[0].id
             await _wait_for_run_cleanup(session, task_id)
+            assert guards.active_claim("conv-busy-owner") == claim
             return session.ws.sent
         finally:
             guards.end(claim)
 
-    events = asyncio.run(scenario())
+    events = asyncio.run(asyncio.wait_for(scenario(), timeout=15))
     done = [event for event in events if event.get("type") == "done"]
     idle = [event for event in events if event.get("type") == "session.state_changed"]
 
-    assert len(done) == 1
-    assert done[0]["status"] == "failed"
-    assert done[0]["reason"] == "conversation_busy"
-    assert done[0]["message_id"] == "assistant-busy"
+    assert done == []
     assert idle == []
+    busy = [event for event in events if event.get("type") == "error" and event.get("error_code") == "agent.busy"]
+    assert len(busy) == 1
+    assert busy[0]["conversation_id"] == "conv-busy-owner"
 
 
 def test_second_run_is_refused_instead_of_orphaning_the_first(
@@ -300,7 +306,7 @@ def test_second_run_is_refused_instead_of_orphaning_the_first(
     """
 
     async def scenario() -> tuple[WebSocketSession, list[dict[str, object]], str]:
-        session = _session(tmp_path, monkeypatch)
+        session = _session(tmp_path, monkeypatch, "conv-single-owner")
         first_started = asyncio.Event()
 
         async def wait_forever(*_args, **kwargs) -> None:
@@ -315,7 +321,7 @@ def test_second_run_is_refused_instead_of_orphaning_the_first(
                 conversation_id="conv-single-owner",
             )
         )
-        await first_started.wait()
+        await asyncio.wait_for(first_started.wait(), timeout=5)
         first_task_id = session.run_manager.run_task_ids["conv-single-owner"]
 
         raised = ""
@@ -328,12 +334,12 @@ def test_second_run_is_refused_instead_of_orphaning_the_first(
         assert session.run_manager.run_task_ids["conv-single-owner"] == first_task_id
         assert await session.cancel_agent_runs(conversation_id="conv-single-owner") is True
         with pytest.raises(RuntimeError, match="cancelled before the user turn was durably admitted"):
-            await first_start_task
+            await asyncio.wait_for(first_start_task, timeout=5)
         await _wait_for_run_cleanup(session, first_task_id)
         return session, session.ws.sent, raised
 
-    session, events, raised = asyncio.run(scenario())
-    assert "already has a live agent run" in raised
+    session, events, raised = asyncio.run(asyncio.wait_for(scenario(), timeout=15))
+    assert raised == "This conversation already owns a turn or is closing"
     busy = [
         event
         for event in events

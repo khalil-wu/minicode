@@ -369,11 +369,15 @@ try {
   assert.equal(await page.evaluate(() => window.__zustandStore.getState().isStreaming), true);
   await capture("02-actual-provider-reconnect-two");
   await page.locator(".stream-error-summary").click();
-  await page.locator(".stream-error-details").waitFor();
+  const retryDetails = page.locator('.stream-error-cell[data-retry-attempt="2"] .stream-error-details');
+  await retryDetails.first().waitFor();
   const retryReceipt = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
     && row.message.retry_attempt === 2 && row.message.visibility === "timeline").message;
   assert.equal(retryReceipt.status_code, 503);
-  assert((await page.locator(".stream-error-details").innerText()).includes(retryReceipt.error_message));
+  const retainedRetryDetails = await retryDetails.allTextContents();
+  assert.equal(retainedRetryDetails.length, 2);
+  assert(retainedRetryDetails[0].includes(busyRetryReceipt.error_message));
+  assert(retainedRetryDetails[1].includes(retryReceipt.error_message));
   assert.equal(await page.locator(".stream-error-details a, .stream-error-details code").count(), 0);
   const retryGeometry = await page.locator(".stream-error-summary").evaluate(element => ({
     outerGap: getComputedStyle(element).columnGap,

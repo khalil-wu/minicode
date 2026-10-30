@@ -122,6 +122,8 @@ class MultiAgentBackend {
   constructor(readonly peer: ExternalPeer) {
     this.server = createServer((req, res) => {
       res.setHeader("access-control-allow-origin", "*");
+      res.setHeader("access-control-allow-headers", "X-MiniCode-Token, Content-Type");
+      res.setHeader("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
       res.setHeader("content-type", "application/json");
       if (req.method === "OPTIONS") {
         res.writeHead(204);
@@ -136,8 +138,17 @@ class MultiAgentBackend {
         res.end(JSON.stringify({ status: "ok", ready: true }));
         return;
       }
-      if (new URL(req.url!, "http://fixture").pathname === "/api/thread-metadata/sections") {
+      const url = new URL(req.url!, "http://fixture");
+      if (url.pathname === "/api/thread-metadata/sections") {
         res.end(JSON.stringify({ sections: [] }));
+        return;
+      }
+      if (url.pathname === "/api/llm/draft-selection") {
+        res.end(JSON.stringify({ provider: "custom", model: "gpt-5", current_model: "gpt-5", available_models: ["gpt-5"],
+          models_source: "configured", config_version: "fixture", config_cwd: url.searchParams.get("config_cwd") ?? "",
+          effective_reasoning_effort: "medium", available_permission_modes: ["confirm", "auto", "bypass"],
+          feature_flags: {}, composer_commands: [], default_model_selection: { provider: "custom", model: "gpt-5",
+            reasoning_effort: "medium", conversation_id: "", working_directory: url.searchParams.get("workspace_root") ?? "" } }));
         return;
       }
       res.end(JSON.stringify({ ok: true, providers: [], models: [] }));
@@ -165,6 +176,9 @@ class MultiAgentBackend {
           ws.send({ type: "client.command.ack", client_command_id: command.client_command_id, command_type: command.type });
         }
         if (command.type === "session.restore" || command.type === "session.sync") {
+          this.sendSessionSnapshot(ws, connection > 1, command);
+        } else if (command.type === "conversation.switch") {
+          expect(command.conversation_id).toBe(ownerId);
           this.sendSessionSnapshot(ws, connection > 1, command);
         } else if (command.type === "conversation.list") {
           this.sendConversationList(ws);
@@ -317,11 +331,15 @@ class MultiAgentBackend {
         content: "Continue with the recovered verification path.", queued_at_ms: 3 }],
     };
     ws.send({ type: "llm.model.updated", model: "gpt-5", current_model: "gpt-5", available_models: ["gpt-5"] });
-    ws.send({ type: restore ? "session.restored" : "session.synced", ...(restore ? { restored: true } : {}),
+    if (command.type !== "conversation.switch") ws.send({ type: restore ? "session.restored" : "session.synced",
+      ...(restore ? { restored: true } : { synced: true }), protocol_version: "1.0.0",
       client_command_id: command.client_command_id, active_conversation_id: ownerId,
       active_conversation: conversation, conversation, conversation_switched_follows: true, session,
       last_seq: Number(command.last_seq ?? 0), current_seq: recovered ? 2 : 0, replayed_events: 0 });
-    ws.send({ type: "conversation.switched", conversation_id: ownerId, conversation, session });
+    ws.send({ type: "conversation.switched", conversation_id: ownerId, conversation, session,
+      is_hydrating: false, context_pending: false,
+      ...(command.type === "conversation.switch" ? { client_command_id: command.client_command_id,
+        client_command_type: "conversation.switch" } : {}) });
     this.sendConversationList(ws);
   }
 }
@@ -439,6 +457,9 @@ test("real Electron workbench supports read-only child transcripts, lazy results
     const window = await app.firstWindow();
     await window.setViewportSize(desktopViewport);
     await expect.poll(() => backend.commands.some((command) => command.type === "session.sync"), { timeout: 30_000 }).toBe(true);
+    await window.getByRole("button", { name: "Electron agents", exact: true }).click();
+    await expect.poll(() => backend.commands.some((command) => command.type === "conversation.switch"
+      && command.conversation_id === ownerId)).toBe(true);
     await expect(window.getByText("Continue with the recovered verification path.", { exact: true })).toBeVisible();
     const initialNative = await nativeWindowState(app);
     nativeStates.push({ phase: "initial", ...initialNative });
@@ -527,7 +548,9 @@ test("real Electron workbench supports read-only child transcripts, lazy results
       && command.subagent_id === "subagent-historical" && command.conversation_id === ownerId)).toBe(true);
     await expect(historicalDetail.locator('[aria-label="子智能体工作记录"]'))
       .toContainText("Historical child journal loaded without an active worker.");
-    await expect(historicalDetail.getByText("6.1 Sol · high", { exact: true })).toBeVisible();
+    const historicalModel = historicalDetail.getByText("6.1 Sol · 高", { exact: true });
+    await expect(historicalModel).toBeVisible();
+    await expect(historicalModel).toHaveAttribute("title", "custom · gpt-6.1-sol · high");
     await expect(historicalDetail.getByText("Read the historical child journal", { exact: true })).toHaveCount(0);
     await historicalDetail.getByRole("button", { name: "展开处理步骤", exact: true }).click();
     await expect(historicalDetail.getByText("Read the historical child journal", { exact: true })).toBeVisible();

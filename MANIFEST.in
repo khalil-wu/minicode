@@ -1,0 +1,3 @@
+recursive-include frontend/public/apps *
+recursive-include frontend/public/pets *
+include frontend/public/theme-boot.js

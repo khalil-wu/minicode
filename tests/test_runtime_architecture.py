@@ -373,7 +373,8 @@ def test_run_command_native_cancellation_reaps_child_before_propagating(tmp_path
     assert fake_process.killed is True
 
 
-def test_native_command_cwd_keeps_issuing_filesystem_authority(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_native_command_cwd_keeps_issuing_filesystem_authority(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
     workspace.mkdir()
@@ -383,7 +384,7 @@ def test_native_command_cwd_keeps_issuing_filesystem_authority(tmp_path: Path) -
     context = _native_command_context(tool, workspace,
         sandbox_policy=SandboxPolicy(workspace_root=workspace, denied_roots=(outside,)))
     context.permission = context.permission_checker.build_context(mode="confirm")
-    authorization = _authorize_final_tool_request(
+    authorization = await _authorize_final_tool_request(
         ToolCallEvent(id="outside-cwd", name=tool.name, arguments={"command": "echo should-not-run", "cwd": str(outside)}),
         tool_registry=context.tool_registry, permission_checker=context.permission_checker,
         permission_context=context.permission, tool_ctx=context,
@@ -1270,7 +1271,8 @@ def test_minicode_permission_profile_mapping_and_sandbox_status() -> None:
         checker.build_context(mode="unsupported_mode", source="test")
 
 
-def test_auto_network_policy_requires_review_for_local_targets(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_auto_network_policy_requires_review_for_local_targets(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
     from backend.tests.test_codex_mcp_approval_producer import authorize, Transport
@@ -1311,12 +1313,13 @@ def test_auto_network_policy_requires_review_for_local_targets(tmp_path: Path) -
     proxy = MCPToolProxy("websearch", MCPToolDef(name="fetch_page", description="Fetch a page",
         input_schema={"type": "object"}), Transport())
     for url in ("https://example.com/docs", "http://localhost:8000"):
-        result, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), auto_context,
+        result, _, _ = await authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), auto_context,
             permission_settings=permission_settings_from_config({}), arguments={"url": url})
         assert result.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
-def test_auto_network_policy_checks_url_like_mcp_arguments(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_auto_network_policy_checks_url_like_mcp_arguments(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
     from backend.tests.test_codex_mcp_approval_producer import authorize
@@ -1351,17 +1354,18 @@ def test_auto_network_policy_checks_url_like_mcp_arguments(tmp_path: Path) -> No
         {"endpoint": "http://127.0.0.1:8000/api"}):
         for permission, sandbox in ((auto_context, SandboxPolicy.workspace_default(tmp_path)),
             (bypass_context, SandboxPolicy.bypass())):
-            result, _, _ = authorize(proxy, tmp_path, sandbox, permission,
+            result, _, _ = await authorize(proxy, tmp_path, sandbox, permission,
                 permission_settings=permission_settings_from_config({}), arguments=args)
             assert result.permission_decision.permission_level == PermissionLevel.AUTO
-        asked, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), auto_context,
+        asked, _, _ = await authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), auto_context,
             permission_settings=permission_settings_from_config({
                 "permissions": {"require_confirm": [proxy.policy_identity]},
             }), arguments=args)
         assert asked.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
-def test_auto_policy_requires_review_for_open_world_mcp_tools(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_auto_policy_requires_review_for_open_world_mcp_tools(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
     from backend.tests.test_codex_mcp_approval_producer import authorize
@@ -1389,25 +1393,26 @@ def test_auto_policy_requires_review_for_open_world_mcp_tools(tmp_path: Path) ->
     )
 
     for permission in (auto_context, bypass_context):
-        result, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
+        result, _, _ = await authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
             permission_settings=permission_settings_from_config({}), arguments={})
         assert result.permission_decision.permission_level == PermissionLevel.AUTO
     writer = MCPToolProxy("figma-desktop", MCPToolDef(name="change_design", description="Change design",
         input_schema={"type": "object"}, annotations={"readOnlyHint": False, "openWorldHint": True}), _Client())
     for mode in ("auto", "bypass"):
         permission = checker.build_context(mode=mode, source="test", approval_policy="on-request")
-        asked, _, _ = authorize(writer, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
+        asked, _, _ = await authorize(writer, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
             permission_settings=permission_settings_from_config({}), arguments={})
         assert asked.permission_decision.permission_level == PermissionLevel.CONFIRM
         never = checker.build_context(mode=mode, source="test", approval_policy="never")
         for sandbox, expected in ((SandboxPolicy.workspace_default(tmp_path), PermissionLevel.ALWAYS_DENY),
             (SandboxPolicy.bypass(), PermissionLevel.AUTO)):
-            result, _, _ = authorize(writer, tmp_path, sandbox, never,
+            result, _, _ = await authorize(writer, tmp_path, sandbox, never,
                 permission_settings=permission_settings_from_config({}), arguments={})
             assert result.permission_decision.permission_level == expected
 
 
-def test_auto_policy_requires_review_for_destructive_mcp_tools(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_auto_policy_requires_review_for_destructive_mcp_tools(tmp_path: Path) -> None:
     from backend.mcp.client import MCPToolDef
     from backend.mcp.registry import MCPToolProxy
     from backend.tests.test_codex_mcp_approval_producer import authorize
@@ -1435,14 +1440,14 @@ def test_auto_policy_requires_review_for_destructive_mcp_tools(tmp_path: Path) -
     )
 
     for permission in (auto_context, bypass_context):
-        result, _, _ = authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
+        result, _, _ = await authorize(proxy, tmp_path, SandboxPolicy.workspace_default(tmp_path), permission,
             permission_settings=permission_settings_from_config({}), arguments={"issue": 123})
         assert result.permission_decision.permission_level == PermissionLevel.CONFIRM
     for mode in ("auto", "bypass"):
         never = checker.build_context(mode=mode, source="test", approval_policy="never")
         for sandbox, expected in ((SandboxPolicy.workspace_default(tmp_path), PermissionLevel.ALWAYS_DENY),
             (SandboxPolicy.bypass(), PermissionLevel.AUTO)):
-            result, _, _ = authorize(proxy, tmp_path, sandbox, never,
+            result, _, _ = await authorize(proxy, tmp_path, sandbox, never,
                 permission_settings=permission_settings_from_config({}), arguments={"issue": 123})
             assert result.permission_decision.permission_level == expected
 

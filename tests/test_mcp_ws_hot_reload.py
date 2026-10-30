@@ -246,6 +246,9 @@ class _RealPathMcpManager:
     def get_server_contract(self, server: str):
         return (server, "") if server in self._servers else None
 
+    def catalog_is_cached(self, server: str) -> bool:
+        return False
+
 
 def _make_real_bootstrap(manager: _RealPathMcpManager) -> AppBootstrap:
     async def _noop_status(name, status):  # pragma: no cover - never invoked here

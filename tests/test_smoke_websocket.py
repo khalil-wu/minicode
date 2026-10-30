@@ -469,26 +469,22 @@ def test_conversation_switch_reemits_pending_prompts_for_target_conversation(mon
                 assert _receive_control_request(ws, "ask_1")["request"]["subtype"] == "elicitation"
                 assert _receive_next_type(ws, "done")["type"] == "done"
 
-                # Switching publishes its first page and then a hydrated snapshot.
-                # Match each command and consume both phases before switching again.
+                # A cached/empty target can complete immediately. Await each
+                # command's canonical owner before issuing the next navigation.
                 away_command_id = f"smoke-switch-away-{uuid4().hex}"
                 ws.send_json({"type": "conversation.switch", "conversation_id": other.id,
                               "client_command_id": away_command_id})
-                switching_away = _receive_next_type(ws, "conversation.switched", client_command_id=away_command_id)
-                assert switching_away["conversation_id"] == other.id
-                assert switching_away["is_hydrating"] is True
                 switched_away = _receive_next_type(ws, "conversation.switched", client_command_id=away_command_id,
                                                    is_hydrating=False)
                 assert switched_away["conversation_id"] == other.id
+                assert switched_away["session"]["active_conversation_id"] == other.id
 
                 back_command_id = f"smoke-switch-back-{uuid4().hex}"
                 ws.send_json({"type": "conversation.switch", "conversation_id": active_id,
                               "client_command_id": back_command_id})
-                switching_back = _receive_next_type(ws, "conversation.switched", client_command_id=back_command_id)
-                assert switching_back["conversation_id"] == active_id
-                assert switching_back["is_hydrating"] is True
                 switched = _receive_next_type(ws, "conversation.switched", client_command_id=back_command_id,
                                              is_hydrating=False)
+                assert switched["session"]["active_conversation_id"] == active_id
                 reemitted_approval = _receive_control_request(ws, "tool_confirm_1")
                 reemitted_ask = _receive_control_request(ws, "ask_1")
 
@@ -613,12 +609,7 @@ def test_websocket_control_protocol_forwards_structured_approval_diff(monkeypatc
 
             ws.send_json({"type": "user_message", "content": "trigger structured control request"})
 
-            approval = None
-            for _ in range(10):
-                payload = _receive_json(ws)
-                if payload.get("type") == "control_request":
-                    approval = payload
-                    break
+            approval = _receive_control_request(ws, "tool_confirm_structured")
 
     assert approval is not None
     assert approval["type"] == "control_request"
