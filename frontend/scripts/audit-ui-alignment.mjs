@@ -637,14 +637,18 @@ try {
   await composer.press("Enter");
   await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor({ timeout: 45000 });
   assert.match(await page.locator(".stream-error-summary").innerText(), /服务器繁忙，正在重连\s*1\s*\/5/u);
-  const busyRetryReceipt = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
-    && row.message.retry_attempt === 1 && row.message.visibility === "timeline").message;
+  const busyRetryRow = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
+    && row.message.retry_attempt === 1 && row.message.visibility === "timeline");
+  assert(busyRetryRow, "Expected a timeline agent.progress event for retry attempt 1 (429) on the wire");
+  const busyRetryReceipt = busyRetryRow.message;
   assert.equal(busyRetryReceipt.status_code, 429);
   assert.equal(busyRetryReceipt.provider_error_code, "controlled_retry");
   await page.waitForFunction(id => window.__zustandStore.getState().inspectorEntries.some(entry =>
     entry.targetKind === "provider" && entry.payload?.event === "rate_limit" && entry.payload.conversation_id === id), owner);
-  const ownedRateLimit = wire.findLast(row => row.direction === "server" && row.message.type === "rate_limit"
-    && row.message.conversation_id === owner).message;
+  const ownedRateLimitRow = wire.findLast(row => row.direction === "server" && row.message.type === "rate_limit"
+    && row.message.conversation_id === owner);
+  assert(ownedRateLimitRow, "Expected an owned rate_limit event on the wire");
+  const ownedRateLimit = ownedRateLimitRow.message;
   assert.equal(ownedRateLimit.message_id, busyRetryReceipt.message_id);
   assert.equal(ownedRateLimit.turn_id, busyRetryReceipt.turn_id);
   assert.equal(await page.locator('.toast-container [role="alert"]').count(), 0, "The owned retry has one transcript row without a duplicate provider toast");
@@ -671,8 +675,10 @@ try {
   await page.locator(".stream-error-summary").click();
   const retryDetails = page.locator('.stream-error-cell[data-retry-attempt="2"] .stream-error-details');
   await retryDetails.first().waitFor();
-  const retryReceipt = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
-    && row.message.retry_attempt === 2 && row.message.visibility === "timeline").message;
+  const retryRow = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
+    && row.message.retry_attempt === 2 && row.message.visibility === "timeline");
+  assert(retryRow, "Expected a timeline agent.progress event for retry attempt 2 (503) on the wire");
+  const retryReceipt = retryRow.message;
   assert.equal(retryReceipt.status_code, 503);
   const retainedRetryDetails = await retryDetails.allTextContents();
   assert.equal(retainedRetryDetails.length, 2);
@@ -753,6 +759,9 @@ try {
     && row.message.conversation_id === terminalError.conversation_id && row.message.message === terminalError.message).message;
   assert.equal(terminalRateLimit.message_id, terminalError.message_id);
   assert.equal(terminalRateLimit.turn_id, terminalError.turn_id);
+  // The failure notice paints its summary first and appends the provider
+  // detail a beat later; count only after the terminal message is present.
+  await page.getByRole("alert").filter({ hasText: terminalError.message }).waitFor({ timeout: 15000 });
   assert.equal(await page.getByRole("alert").filter({ hasText: terminalError.message }).count(), 1, "The model failure belongs to its original turn without a duplicate global toast");
   assert.equal(await page.getByText("处理失败", { exact: true }).count(), 0);
   assert(terminalAttempts > 1);

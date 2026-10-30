@@ -69,8 +69,13 @@ export async function auditThreadControls({ page, app, wire, capture, checks }) 
     assert(Math.abs(titleLeading - 1.25) < .01);
     // Source vt: independent flex scroll, shrink-0 footer with border-t/gap-2/p-panel.
     // app-shared-295ec67e1c5d.css: Electron p-panel = spacing(.25rem) * 3 = 12px.
-    assert.deepEqual({ ...layout, bottomGap: 0, paneGap: 0 }, { display: "flex", direction: "column", overflow: "auto", minHeight: "0px",
-      separateFooter: true, shrink: "0", padding: ["12px", "12px", "12px", "12px"], border: "1px", gap: "8px", align: "flex-end", bottomGap: 0, paneGap: 0 });
+    // A 1px border is snapped to whole device pixels, so fractional display
+    // scaling reports widths like 0.8px; assert presence and the 1px bound.
+    const { border: footerBorder, ...footerLayout } = layout;
+    const footerBorderPx = Number.parseFloat(footerBorder);
+    assert(footerBorderPx > 0.7 && footerBorderPx <= 1.01);
+    assert.deepEqual({ ...footerLayout, bottomGap: 0, paneGap: 0 }, { display: "flex", direction: "column", overflow: "auto", minHeight: "0px",
+      separateFooter: true, shrink: "0", padding: ["12px", "12px", "12px", "12px"], gap: "8px", align: "flex-end", bottomGap: 0, paneGap: 0 });
     assert(Math.abs(actual.bottomGap) <= 1 && Math.abs(actual.paneGap) <= 1);
     return actual;
   };

@@ -820,7 +820,15 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
     let created = false;
     try {
       const preferences = options?.preferences !== undefined ? options.preferences : desktop() ? await desktop()!.preferences.get() : null;
-      if (activate && get().pendingConversationCreateId !== id) return false;
+      // A newer navigation wins: it either installs another pending create or
+      // moves the active conversation while this IPC round-trip is in flight.
+      // A transient connection phase only clears the pending ids, so compare
+      // the conversation id as well instead of silently dropping the create.
+      const afterPreferences = get();
+      const superseded = afterPreferences.pendingConversationCreateId === null
+        ? afterPreferences.conversationId !== state.conversationId && afterPreferences.conversationId !== id
+        : afterPreferences.pendingConversationCreateId !== id;
+      if (activate && superseded) return false;
       if (preferences) {
         get().initializeWorkspaceView(id, Boolean(preferences.defaultWorkspaceFullView));
         if (activate && window.__MINICODE_RUNTIME__?.initialNavigation?.popout && preferences.popoutWindowProjectlessDefault && !options?.workspaceRoot) workspaceRoot = "";
