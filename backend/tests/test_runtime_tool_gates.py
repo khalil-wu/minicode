@@ -25,6 +25,7 @@ from backend.llm.provider_contracts import ModelDefinition
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.services.goal_runtime import new_goal
+from backend.services.llm_config_service import llm_model_updated_payload
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.tools.agent_tools import TaskTool
 from backend.tools.agent_user_tools import RequestUserInputAsyncTool, SendMessageToUserAsyncTool
@@ -288,14 +289,20 @@ async def test_runtime_inspect_and_workspace_switch_publish_the_same_fresh_scope
         return scopes[cwd]
     monkeypatch.setattr("backend.config.load_config", load)
     monkeypatch.setattr("backend.commands.catalog.get_enabled_composer_command_catalog", lambda *_args, **_kwargs: [{"name": "goal"}, {"name": "help"}])
-    monkeypatch.setattr("backend.realtime.session.capture_config", lambda *_args, **_kwargs: SimpleNamespace(capabilities=lambda: {}))
+    capture_realtime_start = Mock(side_effect=AssertionError("Capability projection must not capture realtime authentication"))
+    monkeypatch.setattr("backend.realtime.session.capture_config", capture_realtime_start)
     session = SimpleNamespace(active_conversation_id="visible", session_id="session", root=tmp_path / "on", config=on,
         run_manager=SimpleNamespace(context_for=lambda _: active), tool_registry=registry,
         refresh_tool_registry_if_mcp_changed=Mock(), permission_checker=None, permission_context=PermissionContext(),
         _mcp_registry_version_snapshot=0, _extension_runtime_states={}, provider="custom", selected_model=on.llm.model,
         _model_runtime_for_conversation=lambda _: None, skill_manager=None,
-        _llm_selection_payload=lambda: {}, _provider_capabilities_payload=lambda _: {}, _runtime_permission_payload=lambda: {},
+        _provider_capabilities_payload=lambda _: {}, _runtime_permission_payload=lambda: {},
         command_registry=SimpleNamespace(list_extension_slash_commands=lambda **_: []))
+    session._llm_selection_payload = lambda: llm_model_updated_payload(
+        provider=session.provider, selected_model=session.selected_model,
+        available_models=[session.selected_model], workspace_root=session.root,
+        settings_data=scopes[session.root].config_layer_stack.effective_config(),
+    )
     session.session_lifecycle = SimpleNamespace(workspace_root_for_conversation=lambda *_: session.root, current_workspace_root=lambda: session.root)
     session.conversation_repo = SimpleNamespace(get_conversation_summary=lambda _: SimpleNamespace(workspace_root=str(session.root)))
     session.runtime_toolset_policy = lambda registry, **kwargs: WebSocketSession.runtime_toolset_policy(session, registry, **kwargs)
@@ -313,5 +320,6 @@ async def test_runtime_inspect_and_workspace_switch_publish_the_same_fresh_scope
     assert [command["name"] for command in second["composer_commands"]] == ["help"]
     assert published[-1]["workspace_root"] == str(session.root)
     assert reads == [(tmp_path / "on", False), (tmp_path / "off", False)]
+    capture_realtime_start.assert_not_called()
     assert session.config is on and active.model_execution is captured and active.toolset_policy is admitted
     assert session.runtime_toolset_policy(registry) is admitted
