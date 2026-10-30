@@ -329,13 +329,23 @@ async function auditPluginCatalog() {
       richDraft: state.richDraft, attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts };
   });
   const rail = page.getByRole("navigation", { name: "应用导航", exact: true });
-  const [response] = await Promise.all([
-    page.waitForResponse(response => new URL(response.url()).pathname === "/api/plugins/marketplaces"
-      && response.request().method() === "GET" && new URL(response.url()).searchParams.get("workspace_root") === owner.workspace),
-    rail.getByRole("button", { name: "插件", exact: true }).click(),
-  ]);
-  assert.equal(response.status(), 200);
-  const { marketplaces } = await response.json();
+  const received = Promise.withResolvers();
+  const matcher = url => url.pathname === "/api/plugins/marketplaces" && url.searchParams.get("workspace_root") === owner.workspace;
+  const handler = route => (async () => {
+    assert.equal(route.request().method(), "GET");
+    const response = await route.fetch();
+    assert.equal(response.status(), 200);
+    const payload = await response.json();
+    await route.fulfill({ response });
+    received.resolve(payload);
+  })().catch(received.reject);
+  // Read the exact forwarded response; Electron's CDP response body may be unavailable.
+  await page.route(matcher, handler, { times: 1 });
+  let payload;
+  try {
+    [payload] = await Promise.all([received.promise, rail.getByRole("button", { name: "插件", exact: true }).click()]);
+  } finally { await page.unroute(matcher, handler); }
+  const { marketplaces } = payload;
   const publicSources = marketplaces.filter(source => source.directory === "public");
   const official = publicSources.find(source => source.name === fixedCatalog.name);
   assert(official, "The actual backend must expose the bundled official public catalog");
