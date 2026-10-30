@@ -130,6 +130,41 @@ it("removes the matching implicit plugin selection with native Backspace and res
   expect(useAppStore.getState().selectedMentions.find(reference => reference.kind === "plugin")).toMatchObject({ name: "电脑" });
 });
 
+it("opens a real file atom and removes only that file with native selection, preserving the plugin and editor undo", async () => {
+  const saved = seedInlineReferences();
+  const originalOpen = useAppStore.getState().openEditorFile;
+  const openFile = vi.fn(async () => {});
+  useAppStore.setState({ openEditorFile: openFile });
+  try {
+    let filePosition = 0;
+    schema.nodeFromJSON(saved.document).descendants((node, position) => {
+      if (node.type.name === "context_mention" && node.attrs.reference.kind === "file") filePosition = position;
+    });
+    vi.spyOn(EditorView.prototype, "posAtCoords").mockReturnValue({ pos: filePosition, inside: filePosition });
+    render(<Composer />);
+    const input = screen.getByRole("textbox");
+    const file = [...input.querySelectorAll("[data-composer-reference]")].find(element => JSON.parse(element.getAttribute("data-composer-reference")!).kind === "file")!;
+    fireEvent.mouseDown(file, { button: 0, clientX: 8, clientY: 8, ctrlKey: true });
+    fireEvent.mouseUp(file, { button: 0, clientX: 8, clientY: 8, ctrlKey: true });
+    expect(openFile).toHaveBeenCalledWith("C:/rich-owner/main.ts", "main.ts", expect.objectContaining({ exact: true }));
+    act(() => {
+      const range = document.createRange(); range.selectNode(file);
+      window.getSelection()!.removeAllRanges(); window.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event("selectionchange"));
+    });
+    await waitFor(() => expect(useAppStore.getState().richDraft!.selection!.end).toBeGreaterThan(useAppStore.getState().richDraft!.selection!.start));
+    fireEvent.keyDown(input, { key: "Backspace", keyCode: 8 });
+    expect(useAppStore.getState().selectedMentions.some(reference => reference.kind === "file")).toBe(false);
+    expect(useAppStore.getState().selectedMentions.find(reference => reference.kind === "plugin")).toMatchObject({ name: "电脑", configName: "computer-use@runtime" });
+    expect(input.querySelectorAll("[data-composer-reference]")).toHaveLength(4);
+    fireEvent.keyDown(input, { key: "z", ctrlKey: true });
+    await waitFor(() => expect(useAppStore.getState().selectedMentions.find(reference => reference.kind === "file")).toMatchObject({ path: "C:/rich-owner/main.ts" }));
+    expect(input.querySelectorAll("[data-composer-reference]")).toHaveLength(5);
+  } finally {
+    useAppStore.setState({ openEditorFile: originalOpen });
+  }
+});
+
 it("sends the original model paths and display metadata from the same rich document then clears only the submitted input", async () => {
   const saved = seedInlineReferences();
   render(<Composer />);

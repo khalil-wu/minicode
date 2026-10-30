@@ -54,8 +54,12 @@ beforeEach(() => {
     askUserQueue: [], pendingDiffReview: null, diffReviewQueue: [], quotedMessage: null, followUpBehavior: "queue" });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+const appendInput = (input: HTMLTextAreaElement, text: string) => {
+  const value = input.value + text;
+  fireEvent.change(input, { target: { value, selectionStart: value.length, selectionEnd: value.length } });
+};
 const choose = async (input: HTMLTextAreaElement, market: string) => {
-  fireEvent.change(input, { target: { value: "@same", selectionStart: 5, selectionEnd: 5 } });
+  appendInput(input, `${input.value && !/\s$/.test(input.value) ? " " : ""}@same`);
   const option = await screen.findByRole("option", { name: new RegExp(`Same Plugin.*${market}`) });
   fireEvent.click(option);
 };
@@ -66,13 +70,17 @@ it("keeps same-name plugin identities distinct from real main picker selection t
   await choose(input, "market-a");
   await choose(input, "market-b");
   expect(useAppStore.getState().selectedMentions).toEqual([
-    { kind: "plugin", name: "same@market-a", configName: "same@market-a", path: "plugin://same@market-a" },
-    { kind: "plugin", name: "same@market-b", configName: "same@market-b", path: "plugin://same@market-b" },
+    expect.objectContaining({ kind: "plugin", name: "Same Plugin", configName: "same@market-a", path: "plugin://same@market-a" }),
+    expect.objectContaining({ kind: "plugin", name: "Same Plugin", configName: "same@market-b", path: "plugin://same@market-b" }),
   ]);
-  fireEvent.change(input, { target: { value: "Use both plugins" } });
+  appendInput(input, "Use both plugins");
+  expect(input.value).toContain("plugin://same@market-a");
+  expect(input.value).toContain("plugin://same@market-b");
+  expect(input.value.endsWith("Use both plugins")).toBe(true);
   fireEvent.click(screen.getByRole("button", { name: "Send main" }));
   await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({
-    contextRefs: [expect.objectContaining({ configName: "same@market-a" }), expect.objectContaining({ configName: "same@market-b" })],
+    contextRefs: [expect.objectContaining({ name: "Same Plugin", configName: "same@market-a", path: "plugin://same@market-a" }),
+      expect.objectContaining({ name: "Same Plugin", configName: "same@market-b", path: "plugin://same@market-b" })],
   })));
   expect(mocks.command).toHaveBeenCalledWith(expect.objectContaining({ type: "user_message", conversation_id: "plugin-main",
     plugins: [{ config_name: "same@market-a", path: "plugin://same@market-a" }, { config_name: "same@market-b", path: "plugin://same@market-b" }],
@@ -87,12 +95,19 @@ it("keeps the same canonical plugin identities in side-owned outgoing context", 
   await choose(input, "market-b");
   const sideId = Object.keys(useAppStore.getState().sideChats)[0];
   expect(useAppStore.getState().sideChats[sideId].contextRefs.map((ref) => ref.path)).toEqual(["plugin://same@market-a", "plugin://same@market-b"]);
+  expect(useAppStore.getState().sideChats[sideId].contextRefs).toEqual([
+    expect.objectContaining({ kind: "plugin", name: "Same Plugin", configName: "same@market-a", path: "plugin://same@market-a" }),
+    expect.objectContaining({ kind: "plugin", name: "Same Plugin", configName: "same@market-b", path: "plugin://same@market-b" }),
+  ]);
   expect(useAppStore.getState().selectedMentions).toEqual([]);
-  fireEvent.change(input, { target: { value: "Use both here" } });
+  appendInput(input, "Use both here");
+  expect(input.value).toContain("plugin://same@market-a");
+  expect(input.value).toContain("plugin://same@market-b");
   await waitFor(() => expect(screen.getByRole("button", { name: "发送" }).hasAttribute("disabled")).toBe(false));
   fireEvent.click(screen.getByRole("button", { name: "发送" }));
   await waitFor(() => expect(mocks.send).toHaveBeenCalledWith(expect.objectContaining({ conversationId: sideId,
-    contextRefs: [expect.objectContaining({ configName: "same@market-a" }), expect.objectContaining({ configName: "same@market-b" })],
+    contextRefs: [expect.objectContaining({ name: "Same Plugin", configName: "same@market-a", path: "plugin://same@market-a" }),
+      expect.objectContaining({ name: "Same Plugin", configName: "same@market-b", path: "plugin://same@market-b" })],
   })));
   expect(mocks.command).toHaveBeenCalledWith(expect.objectContaining({ type: "user_message", conversation_id: sideId,
     plugins: [{ config_name: "same@market-a", path: "plugin://same@market-a" }, { config_name: "same@market-b", path: "plugin://same@market-b" }],

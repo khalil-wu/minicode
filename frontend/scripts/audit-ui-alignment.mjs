@@ -412,6 +412,32 @@ async function auditPluginCatalog() {
     skills: figma.skill_summaries.length, mcpServers: figma.mcp_server_names.length });
   await detail.getByRole("button", { name: "返回插件列表", exact: true }).click();
   await catalog.getByRole("tab", { name: "公开", exact: true }).waitFor();
+  trace("composer:skill-registry:begin");
+  const skillsReceived = Promise.withResolvers();
+  const skillsMatcher = url => url.pathname === "/api/skills/settings"
+    && url.searchParams.get("workspace_root") === owner.workspace && url.searchParams.get("include_projects") === "true";
+  const skillsHandler = route => (async () => {
+    assert.equal(route.request().method(), "GET");
+    const response = await route.fetch();
+    assert.equal(response.status(), 200);
+    const payload = await response.json();
+    await route.fulfill({ response });
+    skillsReceived.resolve(payload);
+  })().catch(skillsReceived.reject);
+  // Capture the real Skills page's normal inventory read; a conversation's
+  // deferred availableSkills projection is not the standalone registry.
+  await page.route(skillsMatcher, skillsHandler, { times: 1 });
+  let skillSettings;
+  try {
+    [skillSettings] = await Promise.all([skillsReceived.promise,
+      page.getByRole("navigation", { name: "自定义导航", exact: true }).getByRole("button", { name: "技能", exact: true }).click()]);
+  } finally { await page.unroute(skillsMatcher, skillsHandler); }
+  assert.equal(skillSettings.workspace_root, owner.workspace);
+  const referenceSkills = skillSettings.skills.filter(skill => skill.path && skill.enabled === true && skill.user_invocable === true
+    && skill.source_level !== "plugin" && (!skill.catalog_scope || skill.catalog_scope.workspace_root === owner.workspace));
+  const skill = referenceSkills.find(item => item.name === "ui-import-skill") ?? referenceSkills[0];
+  assert(skill, "The real standalone registry must contain an enabled user-invocable Skill");
+  trace("composer:skill-registry:complete", { name: skill.name, path: skill.path, workspace: skillSettings.workspace_root });
   await rail.getByRole("button", { name: "首页", exact: true }).click();
   await page.locator(".skills-workspace").waitFor({ state: "hidden" });
   assert.deepEqual(await page.evaluate(() => {
@@ -420,24 +446,23 @@ async function auditPluginCatalog() {
       richDraft: state.richDraft, attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts };
   }), owner);
   checks.push({ scenario: "Real public plugin GET matches the fixed catalog; every title is visible and every declared image decodes; Figma details render actual prompts, MCP and Skills without installing or logging in; returning preserves owner and drafts", ...counts, rendered });
+  checks.push({ scenario: "The actual Skills page GET supplies the enabled standalone reference fixture without a side fetch or modifying the conversation skill projection",
+    workspace: skillSettings.workspace_root, skill: { name: skill.name, path: skill.path, enabled: skill.enabled, userInvocable: skill.user_invocable } });
   trace("plugins:catalog:complete", counts);
-  return { nativeCua, nativeCuaIcon };
+  return { nativeCua, nativeCuaIcon, skill };
 }
-async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon }) {
+async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }) {
   trace("composer:inline-references:begin");
   const file = path.join(workspace, ".minicode", "config.toml"), folder = path.join(workspace, ".minicode");
   assert((await stat(file)).isFile() && (await stat(folder)).isDirectory(), "Composer file references must use the existing audit workspace");
-  await page.waitForFunction(() => window.__zustandStore.getState().availableSkills.some(skill => skill.path && skill.active !== false && skill.plugin_enabled !== false && skill.user_invocable !== false));
   const editor = page.locator('.composer-input-region [data-rich-composer]').first();
   await editor.waitFor({ state: "visible" });
   const requestCount = requests.length, wireStart = wire.length;
   try {
-    const fixture = await page.evaluate(({ nativeCua, workspace, file, folder }) => {
+    const fixture = await page.evaluate(({ nativeCua, skill, workspace, file, folder }) => {
       const store = window.__zustandStore, state = store.getState();
       if (state.draft !== "KEEP_SETTINGS_DRAFT" || state.workingDirectory !== workspace || !state.conversationId) throw new Error("Expected the original settings draft and actual conversation owner");
       const conversation = state.conversations.find(item => item.id === state.conversationId);
-      const skills = state.availableSkills.filter(item => item.path && item.active !== false && item.plugin_enabled !== false && item.user_invocable !== false);
-      const skill = skills.find(item => item.name === "ui-import-skill") ?? skills[0];
       if (!conversation?.title || !skill?.path) throw new Error("Real conversation and Skill identities are required");
       const input = document.querySelector('.composer-input-region [data-rich-composer]');
       const endpoint = (node, offset) => {
@@ -467,7 +492,7 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon }) {
       store.setState({ draft: "", richDraft: undefined, selectedMentions: [], selectedSkills: [] });
       return { conversationId: conversation.id, title: conversation.title, skill: { name: skill.name, path: skill.path, declaredIcon: Boolean(skill.icon) },
         labels: window.__uiAlignmentComposerAudit.references.map(reference => reference.displayName || reference.name) };
-    }, { nativeCua, workspace, file, folder });
+    }, { nativeCua, skill, workspace, file, folder });
     assert((await stat(fixture.skill.path)).isFile(), "The selected Skill must have a real local file");
     await page.waitForFunction(() => document.querySelector('.composer-input-region [data-rich-composer]').textContent === "");
     await editor.focus();
