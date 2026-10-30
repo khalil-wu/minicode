@@ -457,6 +457,15 @@ jobs:
           name: current-archive-visual
           path: output/playwright/ui-alignment-current/settings-archive-populated.png
           if-no-files-found: error
+      - name: Upload focused plugin screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-plugins-visual
+          path: |
+            output/playwright/ui-alignment-current/plugins-catalog.png
+            output/playwright/ui-alignment-current/plugins-figma-detail.png
+          if-no-files-found: error
 
   electron-frontend:
     name: Electron Playwright integration

@@ -125,6 +125,47 @@ describe("SidebarLeft session status", () => {
     expect(useAppStore.getState().skillsMarketplaceTab).toBe("plugins");
   });
 
+  it("uses declared installed-plugin icons in the current workspace and theme without guessing brands", async () => {
+    const navigate = vi.fn();
+    const fetchPlugins = vi.fn(async () => Response.json({ plugins: [
+      { id: "local@team", name: "local", displayName: "Local Brand", path: "C:/plugins/local", marketplace: "team", enabled: false,
+        iconVariant: "logo", iconVariants: ["logo", "logo-dark"] },
+      { id: "remote@team", name: "remote", displayName: "Remote Brand", path: "C:/plugins/remote", marketplace: "team", enabled: true,
+        iconUrl: "https://assets.example/plugin.png" },
+      { id: "figma@team", name: "figma", path: "C:/plugins/plain", marketplace: "team", enabled: true },
+    ] }));
+    vi.stubGlobal("fetch", fetchPlugins);
+    useAppStore.setState({ skillsMarketplaceOpen: true, skillsMarketplaceTab: "plugins", resolvedTheme: "light", draft: "keep plugin draft" });
+    try {
+      render(<SidebarLeft withGlobalRail onNavigate={navigate} />);
+      const local = await screen.findByRole("button", { name: "Local Brand", exact: true });
+      const light = local.querySelector("img")!;
+      const asset = new URL(light.src);
+      expect(asset.pathname).toBe("/api/plugins/asset");
+      expect(asset.searchParams.get("plugin_path")).toBe("C:/plugins/local");
+      expect(asset.searchParams.get("workspace_root")).toBe("C:\\Desktop\\MiniCode");
+      expect(asset.searchParams.get("variant")).toBe("logo");
+      fireEvent.load(light);
+      expect(light.hidden).toBe(false);
+      const remote = screen.getByRole("button", { name: "Remote Brand", exact: true }).querySelector("img")!;
+      expect(remote.src).toBe("https://assets.example/plugin.png");
+      fireEvent.load(remote);
+      expect(remote.hidden).toBe(false);
+      const plain = screen.getByRole("button", { name: "figma", exact: true });
+      expect(plain.querySelector("img")).toBeNull();
+      expect(plain.querySelector(".brand-icon")?.getAttribute("data-brand")).toBe("generic");
+      act(() => useAppStore.setState({ resolvedTheme: "dark" }));
+      const dark = local.querySelector("img")!;
+      expect(new URL(dark.src).searchParams.get("variant")).toBe("logo-dark");
+      fireEvent.load(dark);
+      expect(dark.hidden).toBe(false);
+      fireEvent.click(local);
+      expect(useAppStore.getState()).toMatchObject({ skillsMarketplaceSelectedPluginId: "local@team", draft: "keep plugin draft" });
+      expect(navigate).toHaveBeenCalledOnce();
+      expect(fetchPlugins).toHaveBeenCalledOnce();
+    } finally { cleanup(); vi.unstubAllGlobals(); }
+  });
+
   it("hides empty recent-session chrome", () => {
     useAppStore.setState({ conversations: [], conversationId: null });
 

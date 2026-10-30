@@ -320,6 +320,95 @@ async function assertSettingsInfoColor(expected) {
   checks.push({ scenario: "Source default desktop text-info is independent of the neutral control accent", actual });
   return actual;
 }
+async function auditPluginCatalog() {
+  trace("plugins:catalog:begin");
+  const fixedCatalog = JSON.parse(await readFile(path.join(root, "backend/plugins/public-catalog.json"), "utf8"));
+  const owner = await page.evaluate(() => {
+    const state = window.__zustandStore.getState();
+    return { workspace: state.workingDirectory, conversation: state.conversationId, draft: state.draft,
+      richDraft: state.richDraft, attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts };
+  });
+  const rail = page.getByRole("navigation", { name: "应用导航", exact: true });
+  const [response] = await Promise.all([
+    page.waitForResponse(response => new URL(response.url()).pathname === "/api/plugins/marketplaces"
+      && response.request().method() === "GET" && new URL(response.url()).searchParams.get("workspace_root") === owner.workspace),
+    rail.getByRole("button", { name: "插件", exact: true }).click(),
+  ]);
+  assert.equal(response.status(), 200);
+  const { marketplaces } = await response.json();
+  const publicSources = marketplaces.filter(source => source.directory === "public");
+  const official = publicSources.find(source => source.name === fixedCatalog.name);
+  assert(official, "The actual backend must expose the bundled official public catalog");
+  assert.equal(official.status, "ready");
+  assert.equal(official.revision, fixedCatalog.revision);
+  assert.deepEqual(official.plugins.map(({ id, name, interface: metadata, iconAsset }) => ({ id, name, title: metadata.displayName, iconAsset })),
+    fixedCatalog.plugins.map(({ id, name, interface: metadata, iconAsset }) => ({ id, name, title: metadata.displayName, iconAsset })));
+  const entries = publicSources.flatMap(source => source.plugins);
+  const catalog = page.locator(".plugins-catalog");
+  await page.getByRole("navigation", { name: "自定义导航", exact: true }).getByRole("button", { name: "插件", exact: true }).click();
+  await catalog.getByRole("tab", { name: "公开", exact: true }).click();
+  await page.waitForFunction(count => document.querySelectorAll(".plugins-catalog #plugin-directory-results .plugin-discover-row").length === count, entries.length);
+  const rows = catalog.locator("#plugin-directory-results .plugin-discover-row");
+  assert.equal(await rows.locator(".plugin-local-title > span:visible").count(), entries.length,
+    "Every real public catalog title must be rendered visibly, including titles hidden by inherited CSS regressions");
+  const categories = [...new Set(publicSources.flatMap(source => source.plugins.map(plugin =>
+    plugin.interface?.category || plugin.category || source.interface?.displayName || source.name)))];
+  assert.deepEqual(await catalog.locator(".plugin-catalog-heading h3").allTextContents(), categories);
+  const rendered = await rows.evaluateAll(elements => elements.map(element => ({
+    id: element.querySelector(".plugin-catalog-open").getAttribute("aria-label").slice("查看插件详情 ".length),
+    title: element.querySelector(".plugin-local-title > span").innerText,
+  })));
+  const byId = (left, right) => left.id.localeCompare(right.id);
+  assert.deepEqual(rendered.sort(byId), entries.map(plugin => ({ id: plugin.id, title: plugin.interface?.displayName || plugin.name })).sort(byId));
+  const dark = await page.evaluate(() => window.__zustandStore.getState().resolvedTheme === "dark");
+  const declaredImages = entries.filter(plugin => plugin.iconAsset || plugin.iconUrl || (plugin.path && plugin.iconVariant))
+    .map(plugin => ({ id: plugin.id, asset: dark ? plugin.iconDarkAsset || plugin.iconAsset : plugin.iconAsset }));
+  await page.waitForFunction(entries => entries.every(plugin => {
+    const button = [...document.querySelectorAll(".plugins-catalog .plugin-catalog-open")]
+      .find(element => element.getAttribute("aria-label") === `查看插件详情 ${plugin.id}`);
+    const image = button.querySelector("img");
+    return image && image.complete && image.naturalWidth > 0 && !image.hidden && image.getClientRects().length > 0
+      && (!plugin.asset || image.currentSrc === new URL(plugin.asset, document.baseURI).href);
+  }), declaredImages);
+  assert.equal(await rows.locator("img:visible").count(), declaredImages.length);
+  for (const name of ["Slack", "Figma"]) assert.equal(await rows.getByText(name, { exact: true }).isVisible(), true);
+  const counts = { official: official.plugins.length, public: entries.length, declaredImages: declaredImages.length,
+    categories: await catalog.locator(".plugin-source-catalog").count(), revision: official.revision };
+  await catalog.locator(".plugin-catalog-page-header").scrollIntoViewIfNeeded();
+  await capture("plugins-catalog", counts);
+
+  trace("plugins:figma-detail:begin");
+  const figma = official.plugins.find(plugin => plugin.name === "figma");
+  await catalog.getByRole("button", { name: `查看插件详情 ${figma.id}`, exact: true }).click();
+  const detail = catalog.getByRole("region", { name: "插件详情", exact: true });
+  await detail.getByRole("heading", { name: "Figma", exact: true }).waitFor();
+  assert.equal(await catalog.locator(".plugin-list-page").isVisible(), false);
+  assert.equal(await detail.getByRole("button", { name: "安装插件", exact: true }).isVisible(), true);
+  assert.equal(await detail.locator(".plugin-starter-prompts button").count(), figma.defaultPrompt.length);
+  for (const prompt of figma.defaultPrompt) assert.equal(await detail.getByRole("button", { name: prompt, exact: true }).isVisible(), true);
+  assert.equal(await detail.getByRole("heading", { name: `MCP 服务器 · ${figma.mcp_server_names.length}`, exact: true }).isVisible(), true);
+  assert.equal(await detail.getByRole("heading", { name: `技能 · ${figma.skill_summaries.length}`, exact: true }).isVisible(), true);
+  assert.deepEqual(await detail.locator(".plugin-detail-skill strong").allTextContents(), figma.skill_summaries.map(skill => skill.displayName || skill.name));
+  await page.waitForFunction(count => {
+    const images = [...document.querySelectorAll(".plugins-catalog .plugin-detail-page img")];
+    return images.length === count && images.every(image => image.complete && image.naturalWidth > 0 && !image.hidden && image.getClientRects().length > 0);
+  }, 1 + figma.defaultPrompt.length);
+  assert.equal(await detail.locator("img:visible").count(), 1 + figma.defaultPrompt.length);
+  await detail.locator(".plugin-detail-breadcrumb").scrollIntoViewIfNeeded();
+  await capture("plugins-figma-detail", { pluginId: figma.id, starterPrompts: figma.defaultPrompt.length,
+    skills: figma.skill_summaries.length, mcpServers: figma.mcp_server_names.length });
+  await detail.getByRole("button", { name: "返回插件列表", exact: true }).click();
+  await catalog.getByRole("tab", { name: "公开", exact: true }).waitFor();
+  await rail.getByRole("button", { name: "首页", exact: true }).click();
+  await page.locator(".skills-workspace").waitFor({ state: "hidden" });
+  assert.deepEqual(await page.evaluate(() => {
+    const state = window.__zustandStore.getState();
+    return { workspace: state.workingDirectory, conversation: state.conversationId, draft: state.draft,
+      richDraft: state.richDraft, attachments: state.attachments, hiddenDrafts: state.workspaceComposerDrafts };
+  }), owner);
+  checks.push({ scenario: "Real public plugin GET matches the fixed catalog; every title is visible and every declared image decodes; Figma details render actual prompts, MCP and Skills without installing or logging in; returning preserves owner and drafts", ...counts, rendered });
+  trace("plugins:catalog:complete", counts);
+}
 async function persistEvidence(extra = {}) {
   const draftDiagnostics = page && !page.isClosed() ? await page.evaluate(() => window.__uiAlignmentDraftTrace ?? null) : null;
   await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
@@ -676,6 +765,8 @@ try {
   checks.push("Actual default Dialog overlay uses the Source #0002 value in light import progress and dark theme import");
   await page.keyboard.press("Escape");
   await page.locator(".settings-center").waitFor({ state: "hidden" });
+  assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
+  await auditPluginCatalog();
   assert.equal(await composer.innerText(), "KEEP_SETTINGS_DRAFT");
   trace("shell:menus");
   await auditShellMenus({ page, capture, checks });

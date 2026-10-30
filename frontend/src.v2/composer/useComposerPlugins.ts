@@ -9,6 +9,10 @@ export interface ComposerPlugin {
   displayName?: string;
   description?: string;
   shortDescription?: string;
+  path: string;
+  iconUrl?: string;
+  iconVariant?: "composer" | "logo" | "logo-dark";
+  iconVariants?: ("composer" | "logo" | "logo-dark")[];
   skill_count?: number;
   mcp_server_count?: number;
   enabled: boolean;
