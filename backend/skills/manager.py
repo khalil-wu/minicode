@@ -204,40 +204,41 @@ class SkillManager:
 
         # Linked mentions select the exact discovery path even when names collide.
         # App, MCP and plugin links never become plain Skill-name invocations.
-        for meta in self._loader.list_metas():
-            key = self._skill_key(meta.source_path)
-            if not meta.user_invocable or key in selected_paths or key not in mentioned_paths:
-                continue
-            selected_paths.add(key)
-            selected_names.add(meta.name.casefold())
-            candidates.append(SkillDetection(
-                name=meta.name,
-                trigger_mode="explicit",
-                reason=f"用户显式选择 Skill 路径 {meta.source_path}",
-                source_path=str(meta.source_path),
-            ))
+        if mentioned_paths:
+            for meta in self._loader.list_metas():
+                key = self._skill_key(meta.source_path)
+                if not meta.user_invocable or key in selected_paths or key not in mentioned_paths:
+                    continue
+                selected_paths.add(key)
+                selected_names.add(meta.name.casefold())
+                candidates.append(SkillDetection(
+                    name=meta.name,
+                    trigger_mode="explicit",
+                    reason=f"用户显式选择 Skill 路径 {meta.source_path}",
+                    source_path=str(meta.source_path),
+                ))
 
         all_skills = self._loader.list_skill_names()
         for name in all_skills:
             if name.casefold() in selected_names:
+                continue
+            variants = {name.casefold(), name.casefold().replace("_", "-"), name.casefold().replace("-", "_")}
+            if not mentioned_names & variants:
                 continue
             meta = self._loader.get_invocation_meta(name)
             if meta is None:
                 continue
             if not meta.user_invocable:
                 continue
-            if self._skill_key(meta.source_path) in selected_paths:
+            if selected_paths and self._skill_key(meta.source_path) in selected_paths:
                 continue
 
-            variants = {name.casefold(), name.casefold().replace("_", "-"), name.casefold().replace("-", "_")}
-            if mentioned_names & variants:
-                candidates.append(SkillDetection(
-                    name=name,
-                    trigger_mode="explicit",
-                    reason=f"用户显式调用 ${name} 或 /{name}",
-                    source_path=str(meta.source_path),
-                ))
-                continue
+            candidates.append(SkillDetection(
+                name=name,
+                trigger_mode="explicit",
+                reason=f"用户显式调用 ${name} 或 /{name}",
+                source_path=str(meta.source_path),
+            ))
 
         return candidates
 

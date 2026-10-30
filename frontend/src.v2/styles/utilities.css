@@ -411,17 +411,7 @@ html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mo
   pointer-events: auto;
 }
 
-/* ════════════════════════════════════════════════════════
-   CJK Typography — Anthropic-inspired optimization
-   
-   Interface and prose use Anthropic Sans / Noto Sans SC; both fonts load locally.
-   
-   These rules improve Chinese text readability:
-   - font-variant-east-asian: proportional-width for mixed Latin+CJK
-   - font-synthesis: disabled to prevent artificial bold on CJK
-   - text-rendering: optimizeLegibility for better kerning
-   - CJK-aware line-height and letter-spacing via tokens
-   ════════════════════════════════════════════════════════ */
+/* Shared typography; glyph widths follow the selected platform or theme font. */
 
 /* Global CJK optimization for the entire app */
 :root {
@@ -429,26 +419,12 @@ html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mo
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  font-variant-east-asian: proportional-width;  /* Mixed Latin+CJK: proportional widths */
 }
 
-/* CJK content areas get generous line-height */
-.cjk-copy,
-.md-prose {
-  font-variant-east-asian: proportional-width;
+/* Explicit CJK copy can opt into document rhythm. */
+.cjk-copy {
   line-height: var(--cjk-leading, 1.65);
   letter-spacing: var(--cjk-spacing, 0.02em);
-}
-
-/* CJK titles: snug line-height, no extra spacing */
-.cjk-title {
-  font-variant-east-asian: proportional-width;
-}
-
-/* Prose paragraphs with CJK: generous vertical rhythm */
-.md-prose p,
-.md-prose li {
-  line-height: var(--cjk-leading, 1.65);
 }
 
 /* Headings with CJK: tighter, bold weight allowed */
@@ -458,7 +434,6 @@ html[data-theme="dark"] .md-body .md-web-link-icon > img:not([data-icon-kind="mo
 .md-prose h4,
 .md-prose h5,
 .md-prose h6 {
-  font-variant-east-asian: proportional-width;
   font-synthesis-weight: auto;  /* Allow weight synthesis for headings */
 }
 

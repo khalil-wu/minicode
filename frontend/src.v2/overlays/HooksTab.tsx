@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../i18n";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
@@ -16,9 +16,10 @@ export function HooksTab({ active = true, toolbarHost }: { active?: boolean; too
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(active);
   const [revision, setRevision] = useState(0);
+  const readOperation = useRef<AbortController>();
   useEffect(() => {
     if (!active) return;
-    const controller = new AbortController();
+    const controller = readOperation.current = new AbortController();
     setError("");
     setLoading(true);
     const url = new URL("/api/settings/hooks", apiBase());
@@ -31,13 +32,15 @@ export function HooksTab({ active = true, toolbarHost }: { active?: boolean; too
     return () => controller.abort();
   }, [active, revision]);
   const update = async (updates: { key: string; enabled?: boolean; trusted_hash?: string }[]) => {
+    readOperation.current?.abort();
+    setLoading(false);
     setBusy(true); setError("");
     try {
       const response = await fetchWithTimeout(new URL("/api/settings/hooks", apiBase()), { method: "PUT", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ workspace_root: "", updates }) });
       if (!response.ok) throw new Error(errorMessageFromResponseText(await response.text(), response.statusText));
-      setSnapshot(await response.json() as Snapshot);
+      setSnapshot(await response.json() as Snapshot); setError("");
     } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); }
+    finally { readOperation.current?.abort(); setLoading(false); setBusy(false); }
   };
   const needsTrust = snapshot?.hooks.filter(hook => !hook.is_managed && ["untrusted", "modified"].includes(hook.trust_status)) || [];
   const groups = [

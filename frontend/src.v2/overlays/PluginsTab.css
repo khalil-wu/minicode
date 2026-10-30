@@ -44,12 +44,19 @@
 .plugin-detail-registration { color: var(--text-muted); }
 .plugin-detail-registration > h3 { margin: 0; color: var(--text-primary); font-size: var(--mc-font-body); font-weight: var(--fw-semibold); }
 .plugin-detail-meta a { color: var(--text-primary); text-decoration: none; }
-.plugin-starter-prompts { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 32px; border-radius: var(--radius-lg); background: radial-gradient(ellipse at 30% 0%, #eff2ff 0%, transparent 65%), linear-gradient(115deg, #a9c7ed, #d6c8f1); }
-.plugin-starter-prompts button { display: flex; gap: 14px; align-items: center; justify-content: space-between; max-width: 100%; padding: 10px 14px; border: 0; border-radius: var(--radius-full); background: rgba(255, 255, 255, .8); color: #202124; font: inherit; text-align: left; cursor: pointer; }
-.plugin-starter-prompts button > span { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.plugin-starter-prompts { display: flex; justify-content: center; padding: 2rem 1rem; border-radius: 1rem; overflow: hidden; background: linear-gradient(color-mix(in oklab, var(--surface-sunken) 70%, transparent), color-mix(in oklab, var(--surface-sunken) 70%, transparent)), url("../assets/plugin-prompt-background.png") center / cover; }
+.plugin-starter-prompt-list { display: flex; flex-direction: column; align-items: center; gap: 1rem; width: 100%; max-width: 640px; }
+.plugin-starter-prompts button { display: flex; gap: .375rem; align-items: center; max-width: 77%; padding-block: .5rem; padding-inline: .5rem .375rem; border: 0; border-radius: 1rem; background: color-mix(in oklab, var(--surface-sunken) 75%, transparent); color: var(--text-primary); font: inherit; font-size: var(--prose-font-size); line-height: inherit; text-align: start; overflow-wrap: break-word; cursor: pointer; outline: none; }
+.plugin-starter-prompt-text { flex: 1; min-width: 0; text-wrap: pretty; overflow-wrap: break-word; }
+.plugin-starter-prompt-identity { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; }
 .plugin-starter-prompts button strong { color: #1878c4; font-weight: var(--fw-semibold); }
-.plugin-starter-prompts button > svg { flex-shrink: 0; }
-.plugin-starter-prompts button:disabled { opacity: .55; cursor: default; }
+.plugin-starter-prompts button:is(:hover, :focus-visible):not(:disabled) { background: var(--surface-sunken); }
+.plugin-starter-prompts button:focus-visible:not(:disabled) { box-shadow: 0 0 0 2px var(--border-focus); }
+.plugin-starter-arrow { display: flex; align-items: center; justify-content: center; flex-shrink: 0; width: 1.75rem; height: 1.75rem; border-radius: 9999px; background: color-mix(in oklab, var(--text-primary) 10%, transparent); }
+.plugin-starter-arrow svg { transform: scaleX(-1); }
+.plugin-starter-prompts button:disabled { opacity: .5; cursor: not-allowed; }
+.plugin-starter-prompts button:disabled .plugin-starter-arrow { display: none; }
+@media (width >= 40rem) { .plugin-starter-prompts { padding-inline: 2rem; } }
 
 .plugin-center-link {
   width: 100%;
