@@ -451,6 +451,12 @@ jobs:
           name: current-desktop-ui-evidence
           path: output/playwright/ui-alignment-current/
           if-no-files-found: error
+      - name: Upload focused archive screenshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-archive-visual
+          path: output/playwright/ui-alignment-current/settings-archive-populated.png
+          if-no-files-found: error
 
   electron-frontend:
     name: Electron Playwright integration

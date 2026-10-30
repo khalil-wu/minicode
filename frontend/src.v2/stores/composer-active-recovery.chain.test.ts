@@ -2,12 +2,13 @@
 import { IDBFactory } from "fake-indexeddb";
 import { afterEach, expect, it, vi } from "vitest";
 import type { AppStore } from "./types";
+import type { DraftModelSelection } from "../protocol/api";
 import { File as NativeFile } from "node:buffer";
 
 afterEach(async () => {
   const storage = await import("./composer-drafts");
   await storage.resetComposerDraftStorageForTests(true);
-  vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.resetModules();
+  vi.restoreAllMocks(); vi.unstubAllGlobals();
   delete window.__MINICODE_RUNTIME__; localStorage.clear();
 });
 
@@ -134,9 +135,23 @@ it("hydrates the active rich goal mode before the ready snapshot can overwrite i
   await storage.flushComposerDrafts();
   await storage.resetComposerDraftStorageForTests(true);
   vi.resetModules();
+  const api = await import("../protocol/api");
+  let finishSelection!: (selection: DraftModelSelection) => void;
+  const modelRead = vi.spyOn(api, "fetchDraftModelSelection").mockReturnValue(
+    new Promise<DraftModelSelection>(resolve => { finishSelection = resolve; }));
   const { useAppStore, waitComposerDraftRecovery } = await import("./index");
   await waitComposerDraftRecovery();
   expect(useAppStore.getState()).toMatchObject({ composerDraftsReady: true, goalMode: true, draft: rich.markdown, richDraft: rich });
+  const draftId = useAppStore.getState().activeConversationDraftId!;
+  const modelReady = useAppStore.getState().refreshConversationDraftSelection(draftId);
+  expect(modelRead).toHaveBeenCalledOnce();
+  expect(useAppStore.getState().conversationDrafts[draftId].selectionLoading).toBe(true);
+  finishSelection({ provider: "custom", model: "recovery-fixture", current_model: "recovery-fixture",
+    available_models: ["recovery-fixture"], models_source: "configured", available_permission_modes: ["confirm"],
+    config_version: "recovered-selection", config_cwd: "", feature_flags: {}, composer_commands: [] });
+  expect(await modelReady).toBe(true);
+  expect(useAppStore.getState()).toMatchObject({ activeConversationDraftId: draftId, currentModel: "recovery-fixture",
+    goalMode: true, draft: rich.markdown, richDraft: rich });
   const current = await import("./composer-drafts");
   await current.flushComposerDrafts();
   const saved = (await current.loadComposerDrafts()).find(record => record.owner.kind === "draft")!;
