@@ -1304,7 +1304,7 @@ class SessionCommandDispatcher:
             ).strip()
             target_conversation_id = requested_conversation_id or self._session.active_conversation_id or ""
             if requested_conversation_id:
-                target = self._session.conversation_repo.get_conversation(requested_conversation_id)
+                target = self._session.conversation_repo.get_conversation_summary(requested_conversation_id)
                 if target is None:
                     if command.data.get("retry_from_message_id"):
                         await self._reject_regeneration(command, requested_conversation_id,

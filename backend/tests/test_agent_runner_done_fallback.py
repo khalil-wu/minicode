@@ -1284,7 +1284,9 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
     original_save = session.conversation_repo.save_context_snapshot
     retained_children = [{"id": "historical-child", "role": "explore", "status": "done", "agentPath": "/root/historical-child", "mailboxEpoch": 2,
                           "resultContent": "Retained child answer", "displayName": "Historical child"}]
-    original_save("conv_runnerdone", {"ui_agent_state": {"plan": None, "todos": [], "subagents": retained_children, "agentProgress": []}})
+    original_save("conv_runnerdone", {"ui_agent_state": {"plan": None,
+        "todos": [{"id": "previous-turn", "content": "Previous completed work", "status": "completed"}],
+        "subagents": retained_children, "agentProgress": []}})
 
     def tracked_save(conversation_id, snapshot):
         mutation_order.append("save")

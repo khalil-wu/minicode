@@ -4125,7 +4125,7 @@ class SessionAgentRunnerMixin:
         run_context.lifecycle_cleanup_tasks = self.run_manager.lifecycle_cleanup_tasks_for(
             target_conversation_id
         )
-        conversation = await to_thread_cancel_safe(self.conversation_repo.get_conversation, target_conversation_id)
+        conversation = await to_thread_cancel_safe(self.conversation_repo.get_conversation_summary, target_conversation_id)
         if conversation is None:
             await emit_conversation_not_found(self, target_conversation_id)
             return
@@ -4249,11 +4249,12 @@ class SessionAgentRunnerMixin:
                 run_context_snapshot = _reset_ui_agent_state_snapshot(
                     conversation.context_snapshot
                 )
-                await to_thread_cancel_safe(
-                    self.conversation_repo.save_context_snapshot,
-                    conversation.id,
-                    run_context_snapshot,
-                )
+                if run_context_snapshot != conversation.context_snapshot:
+                    await to_thread_cancel_safe(
+                        self.conversation_repo.save_context_snapshot,
+                        conversation.id,
+                        run_context_snapshot,
+                    )
             else:
                 # Keep the durable snapshot and retained pending projection
                 # intact until a later flush can commit it. Resetting here

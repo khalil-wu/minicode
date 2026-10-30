@@ -68,7 +68,7 @@ class GoalTurnAccounting:
         self.pending_steering = []
         self.pending_user_updates = []
         self.revision = None
-        record = repository.get_conversation(conversation_id)
+        record = repository.get_conversation_summary(conversation_id)
         if record is not None and record.goal.get("status") == "active":
             self.goal_id = record.goal["id"]
             repository.mutate_goal(conversation_id, lambda goal: {**goal, "_continuation_pending": False})

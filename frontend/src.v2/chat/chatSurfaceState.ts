@@ -1013,9 +1013,11 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
   let committedCells = base.committedCells;
   let activeCell = base.activeCell;
   let resourceKey = base.resourceKey;
+  const replacements = new Map<string, CommittedCellState>();
   const replaceCell = (index: number, cell: CommittedCellState) => {
     if (committedCells === base.committedCells) committedCells = committedCells.slice();
     committedCells[index] = cell;
+    replacements.set(cell.id, cell);
   };
   for (const [blockIndex, kind] of update.changes) {
     const block = message.blocks![blockIndex];
@@ -1067,7 +1069,21 @@ function updateTurnCells(base: ChatTurnState, message: ChatMessage): ChatTurnSta
     }
   }
   cellPositions.set(committedCells, positions);
-  return { ...base, committedCells, activeCell, resourceKey };
+  // Admitted input divides one physical turn into ordered process sections.
+  // Text tails retain those sections; a changed receipt replaces its cell in
+  // both views without projecting every completed tool again.
+  const workItems = replacements.size ? base.workItems?.map((item) => {
+    if (item.kind === "user") return item;
+    let cells = item.cells;
+    item.cells.forEach((cell, index) => {
+      const replacement = replacements.get(cell.id);
+      if (!replacement) return;
+      if (cells === item.cells) cells = cells.slice();
+      cells[index] = replacement;
+    });
+    return cells === item.cells ? item : { ...item, cells };
+  }) : base.workItems;
+  return { ...base, committedCells, activeCell, resourceKey, workItems };
 }
 
 function buildTurnMemoized(
@@ -1080,7 +1096,6 @@ function buildTurnMemoized(
   const references = assistantMessage ? inputReferencesForMessage(assistantMessage) : [];
   const inputRows = references.flatMap((block) => inputMessages.has(block.userMessageId)
     ? [inputMessages.get(block.userMessageId)!] : []);
-  const hasInputBoundary = references.length > 0;
   const anchor = (assistantMessage ?? userMessage) as object | null;
   if (anchor) {
     const entries = turnProjectionCache.get(anchor) ?? [];
@@ -1094,8 +1109,8 @@ function buildTurnMemoized(
     );
     if (cached) return cached.turn;
     const update = assistantMessage && streamingMessageUpdate(assistantMessage);
-    const incremental = update && assistantMessage && isStreaming && !hasInputBoundary
-      ? updateTurnCells(buildTurnMemoized(userMessage, update.base, isStreaming, workspaceRoot), assistantMessage)
+    const incremental = update && assistantMessage && isStreaming
+      ? updateTurnCells(buildTurnMemoized(userMessage, update.base, isStreaming, workspaceRoot, inputMessages), assistantMessage)
       : null;
     const turn = incremental ?? buildTurn(userMessage, assistantMessage, workspaceRoot, isStreaming && !assistantMessage, inputMessages);
     if (turn.status === "streaming" && !isStreaming) turn.status = "completed";
