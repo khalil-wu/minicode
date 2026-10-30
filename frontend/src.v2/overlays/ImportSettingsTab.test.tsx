@@ -197,16 +197,16 @@ it("projects detected provider identity below automatic sync and keeps its real 
 it("keeps sync unavailable before a successful import and persists its actual consumer preferences afterwards", async () => {
   const view = render(<ImportSettingsTab />);
   await screen.findByRole("button", { name: "从 Claude Code 导入" });
-  expect(screen.getByRole("switch", { name: "保持导入内容同步" })).toHaveProperty("disabled", true);
+  expect(screen.getByRole("switch", { name: "保持导入同步" })).toHaveProperty("disabled", true);
   connected = true;
   view.rerender(<ImportSettingsTab active={false} />);
   view.rerender(<ImportSettingsTab />);
-  await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入内容同步" })).toHaveProperty("disabled", false));
-  fireEvent.click(screen.getByRole("switch", { name: "保持导入内容同步" }));
-  await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入内容同步" }).getAttribute("aria-checked")).toBe("true"));
+  await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入同步" })).toHaveProperty("disabled", false));
+  fireEvent.click(screen.getByRole("switch", { name: "保持导入同步" }));
+  await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入同步" }).getAttribute("aria-checked")).toBe("true"));
   fireEvent.click(screen.getByRole("button", { name: "自定义" }));
-  fireEvent.click(within(screen.getByRole("dialog", { name: "内容" })).getByRole("checkbox", { name: "指令" }));
-  fireEvent.click(within(screen.getByRole("dialog", { name: "内容" })).getByRole("button", { name: "保存" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "同步的内容" })).getByRole("checkbox", { name: "指令" }));
+  fireEvent.click(within(screen.getByRole("dialog", { name: "同步的内容" })).getByRole("button", { name: "保存" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   const request = vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes("/sync")).at(-1)!;
   expect(JSON.parse(request[1]!.body as string)).toEqual({ enabled: true, item_types: ["skills", "instructions"] });
@@ -454,7 +454,7 @@ it.each(["hidden", "workspace"])("retires an in-flight import progress read afte
   if (change === "hidden") view.rerender(<ImportSettingsTab active={false} />);
   else {
     act(() => useAppStore.setState({ workingDirectory: "C:/next-project" }));
-    await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入内容同步" }).getAttribute("aria-checked")).toBe("true"));
+    await waitFor(() => expect(screen.getByRole("switch", { name: "保持导入同步" }).getAttribute("aria-checked")).toBe("true"));
   }
   expect(signal.aborted).toBe(true);
   const requests = vi.mocked(fetch).mock.calls.length;
@@ -463,7 +463,7 @@ it.each(["hidden", "workspace"])("retires an in-flight import progress read afte
   } })));
   expect(vi.mocked(fetch).mock.calls).toHaveLength(requests);
   if (change === "hidden") expect(screen.queryByRole("dialog")).toBeNull();
-  else expect(screen.getByRole("switch", { name: "保持导入内容同步" }).getAttribute("aria-checked")).toBe("true");
+  else expect(screen.getByRole("switch", { name: "保持导入同步" }).getAttribute("aria-checked")).toBe("true");
   expect(useAppStore.getState().draft).toBe("Keep the current chat draft");
 });
 

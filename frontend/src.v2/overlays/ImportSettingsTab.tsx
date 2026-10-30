@@ -44,7 +44,7 @@ const ZH: typeof EN = {
   checking: "正在检查可导入的内容", checkingDetail: "查找兼容的配置、项目和近期聊天", empty: "从其他 AI 应用导入", emptyDetail: "未找到可导入的配置", noNew: "未发现新内容",
   import: "导入", importTo: "导入", importFrom: "从 {provider} 导入", importing: "正在导入", importProgress: "正在导入", checkAgain: "再次检查", retry: "重试", review: "选择要导入的内容", reviewDetail: "选择要导入的内容。现有配置不会受到影响。", cancel: "取消", close: "关闭",
   dialogTitle: "从其他 AI 应用导入", appsFound: "找到的应用", continue: "继续", tools: "工具与配置", toolsDetail: "设置、指令、插件、技能", projectsDetail: "使用现有项目文件夹", chatsDetail: "最近的聊天", showTools: "展开工具与配置详情", hideTools: "收起工具与配置详情", info: "将导入的内容", imported: "导入结果",
-  syncTitle: "自动同步", sync: "保持导入内容同步", syncDetail: "自动同步已连接来源中新增和更新的内容", paused: "同步已暂停，内容选择会保留", content: "内容", customize: "自定义", afterImport: "首次导入后可用", save: "保存",
+  syncTitle: "自动同步", sync: "保持导入同步", syncDetail: "自动同步已连接来源中新增和更新的内容", paused: "同步已暂停，内容选择会保留", content: "同步的内容", customize: "自定义", afterImport: "首次导入后可用", save: "保存",
   history: "导入历史", automatic: "自动同步", viewMore: "查看更多", noneSelected: "未选择内容", categories: { sessions: "聊天会话", projects: "项目", instructions: "指令", settings: "设置", skills: "技能", plugins: "插件", mcp: "MCP 服务", agents: "Agent", hooks: "Hook", commands: "命令", memory: "记忆" },
   status: { success: "已导入", skipped: "已跳过", unsupported: "不支持", error: "导入失败" },
 };
