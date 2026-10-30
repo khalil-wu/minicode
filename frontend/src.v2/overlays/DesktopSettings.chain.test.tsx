@@ -51,7 +51,7 @@ it("saves sandbox selection to the real configuration endpoint", async () => {
     return response({ ...config, ...patch, effective: { ...configFields, ...patch } });
   });
   render(<ConfigTab active />);
-  fireEvent.click(await screen.findByRole("button", { name: /^沙箱模式，当前：/ }));
+  fireEvent.click(await screen.findByRole("button", { name: /^沙箱设置，当前：/ }));
   fireEvent.click(screen.getByRole("option", { name: /^只读/ }));
   await waitFor(() => expect(screen.queryByRole("switch", { name: "允许网络访问" })).toBeNull());
   const request = mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;

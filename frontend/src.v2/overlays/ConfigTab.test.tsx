@@ -53,10 +53,10 @@ it("uses raw User/profile values, retains legacy labels and offers only Source a
   config.origins.approval_policy = { source: { type: "project", display: "project (C:/A/.codex/config.toml)" }, version: "project-v1" };
   mocks.fetch.mockImplementation(async () => Response.json(config));
   render(<ConfigTab active />); await ready();
-  expect(button("审批策略").textContent).toBe("不受信任");
-  expect(button("沙箱模式").textContent).toBe("只读");
+  expect(button("批准策略").textContent).toBe("不受信任");
+  expect(button("沙箱设置").textContent).toBe("只读");
   expect(screen.queryByRole("switch", { name: "允许网络访问" })).toBeNull();
-  fireEvent.click(button("审批策略"));
+  fireEvent.click(button("批准策略"));
   expect(screen.getAllByRole("option").map(option => option.querySelector(".mc-select-option-label")?.textContent)).toEqual(["按需", "从不"]);
   expect(screen.getByRole("listbox").style.width).toBe("360px");
   fireEvent.keyDown(screen.getByRole("option", { name: /^按需/ }), { key: "Escape" });
@@ -77,15 +77,15 @@ it("shows only actual Admin layers, makes them readonly and locks only managed U
   config.requirements.allowed_sandbox_modes = [];
   mocks.fetch.mockImplementation(async () => Response.json(config));
   render(<ConfigTab active />); await ready();
-  expect(button("回复详细程度")).toHaveProperty("disabled", true);
-  expect(button("回复详细程度").textContent).toBe("低");
-  expect(button("沙箱模式")).toHaveProperty("disabled", true);
+  expect(button("输出详细程度")).toHaveProperty("disabled", true);
+  expect(button("输出详细程度").textContent).toBe("低");
+  expect(button("沙箱设置")).toHaveProperty("disabled", true);
   expect(button("网页搜索")).toHaveProperty("disabled", false);
   expect(screen.getByText("此值由管理员策略管理。")).toBeTruthy();
-  choose("审批策略", "从不");
+  choose("批准策略", "从不");
   await waitFor(() => expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
   choose("配置作用域", "管理员");
-  for (const name of ["审批策略", "沙箱模式", "网页搜索", "回复详细程度", "推理摘要"]) expect(button(name)).toHaveProperty("disabled", true);
+  for (const name of ["批准策略", "沙箱设置", "网页搜索", "输出详细程度", "推理摘要"]) expect(button(name)).toHaveProperty("disabled", true);
   expect(button("网页搜索").textContent).toBe("已禁用");
   expect(screen.getByRole("button", { name: "打开配置文件" })).toHaveProperty("disabled", true);
   expect(mocks.open).not.toHaveBeenCalled();
@@ -96,9 +96,9 @@ it("writes Model default as null with the real scope version and waits for the a
   mocks.fetch.mockImplementation(async (_url, init) => init?.method === "PUT"
     ? new Promise<Response>(resolve => { finish = resolve; }) : Response.json(snapshot()));
   render(<ConfigTab active />); await ready();
-  choose("回复详细程度", "模型默认值");
-  expect(button("回复详细程度").textContent).toBe("中");
-  expect(button("回复详细程度")).toHaveProperty("disabled", true);
+  choose("输出详细程度", "模型默认值");
+  expect(button("输出详细程度").textContent).toBe("中");
+  expect(button("输出详细程度")).toHaveProperty("disabled", true);
   await waitFor(() => expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
   const request = mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
   expect(JSON.parse(request[1].body)).toEqual({ workspace_root: "C:/A", scope_id: "user", expected_version: "user-v1", model_verbosity: null });
@@ -106,8 +106,8 @@ it("writes Model default as null with the real scope version and waits for the a
   next.scopes[0].version = "user-v2";
   next.write = { status: "applied", path, version: "user-v2", fields: { model_verbosity: { requested_value: null, effective_value: null } } };
   await act(async () => finish(Response.json(next)));
-  expect(button("回复详细程度").textContent).toBe("模型默认值");
-  expect(button("回复详细程度")).toHaveProperty("disabled", false);
+  expect(button("输出详细程度").textContent).toBe("模型默认值");
+  expect(button("输出详细程度")).toHaveProperty("disabled", false);
   expect(useAppStore.getState().draft).toBe("Unsent chat");
 });
 
@@ -137,14 +137,14 @@ it("keeps the existing form and unrelated draft on a version conflict and a fail
     : ++reads <= 2 ? Response.json(snapshot()) : new Response("Read failed", { status: 503 }));
   const view = render(<ConfigTab active><textarea aria-label="Unrelated draft" defaultValue="Keep this draft" /></ConfigTab>); await ready();
   fireEvent.change(screen.getByRole("textbox"), { target: { value: "Unsubmitted draft" } });
-  choose("回复详细程度", "高");
+  choose("输出详细程度", "高");
   expect((await screen.findByRole("alert")).textContent).toContain("Config file changed");
-  expect(button("回复详细程度").textContent).toBe("中");
-  await waitFor(() => expect(button("回复详细程度")).toHaveProperty("disabled", false));
+  expect(button("输出详细程度").textContent).toBe("中");
+  await waitFor(() => expect(button("输出详细程度")).toHaveProperty("disabled", false));
   view.rerender(<ConfigTab active={false}><textarea aria-label="Unrelated draft" defaultValue="Keep this draft" /></ConfigTab>);
   view.rerender(<ConfigTab active><textarea aria-label="Unrelated draft" defaultValue="Keep this draft" /></ConfigTab>);
   await screen.findByText("Read failed");
-  expect(button("回复详细程度").textContent).toBe("中");
+  expect(button("输出详细程度").textContent).toBe("中");
   expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toBe("Unsubmitted draft");
 });
 
@@ -177,10 +177,10 @@ it("serializes two captured workspace edits and refreshes the actual User versio
     return Response.json(current);
   });
   render(<ConfigTab active />); await ready();
-  choose("回复详细程度", "高");
+  choose("输出详细程度", "高");
   choose("推理摘要", "详细");
   await waitFor(() => expect(writes).toHaveLength(1));
-  expect(button("回复详细程度")).toHaveProperty("disabled", true);
+  expect(button("输出详细程度")).toHaveProperty("disabled", true);
   expect(button("推理摘要")).toHaveProperty("disabled", true);
   act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
   await ready();
@@ -199,8 +199,8 @@ it("serializes two captured workspace edits and refreshes the actual User versio
 it("retains a granular approval value as readonly and opens the selected registered User file", async () => {
   mocks.fetch.mockResolvedValue(Response.json(snapshot({}, { approval_policy: { granular: { rules: ["keep-real-policy"] } } })));
   render(<ConfigTab active />); await ready();
-  expect(button("审批策略").textContent).toBe("自定义");
-  expect(button("审批策略")).toHaveProperty("disabled", true);
+  expect(button("批准策略").textContent).toBe("自定义");
+  expect(button("批准策略")).toHaveProperty("disabled", true);
   expect(screen.queryByText("keep-real-policy")).toBeNull();
   fireEvent.click(screen.getByRole("button", { name: "打开配置文件" }));
   expect(mocks.open).toHaveBeenCalledExactlyOnceWith({ kind: "config", workspaceRoot: "C:/A", scopeId: "user" });
@@ -230,7 +230,7 @@ it("defaults to the actual current project, groups every discovered layer, and u
   await screen.findByRole("button", { name: "配置作用域，当前：App" });
   await waitFor(() => expect(button("推理摘要")).toHaveProperty("disabled", false));
   expect(button("配置作用域").title).toBe(`${workspace}/.minicode/config.toml`);
-  expect(button("沙箱模式").textContent).toBe("只读");
+  expect(button("沙箱设置").textContent).toBe("只读");
   expect(button("网页搜索").textContent).toBe("实时");
   expect(screen.queryByRole("switch")).toBeNull();
   fireEvent.click(button("配置作用域"));
@@ -241,7 +241,7 @@ it("defaults to the actual current project, groups every discovered layer, and u
   expect(within(menu).getByRole("option", { name: "Projects", exact: true }).title).toBe("C:/Projects/.minicode/config.toml");
   fireEvent.click(within(menu).getByRole("option", { name: "Projects", exact: true }));
   expect(button("网页搜索").textContent).toBe("缓存");
-  expect(button("沙箱模式").textContent).toBe("工作区写入");
+  expect(button("沙箱设置").textContent).toBe("工作区写入");
   expect(screen.getByRole("switch", { name: "允许网络访问" })).toHaveProperty("disabled", false);
 });
 
@@ -274,16 +274,16 @@ it("shows a disabled project's original warning once, disables editing, and stil
   render(<ConfigTab active />);
   expect((await screen.findByRole("alert")).textContent).toBe(reason);
   expect(screen.getAllByText(reason)).toHaveLength(1);
-  for (const label of ["审批策略", "沙箱模式", "网页搜索", "回复详细程度", "推理摘要"]) expect(button(label)).toHaveProperty("disabled", true);
+  for (const label of ["批准策略", "沙箱设置", "网页搜索", "输出详细程度", "推理摘要"]) expect(button(label)).toHaveProperty("disabled", true);
   expect(screen.getByRole("switch", { name: "允许网络访问" })).toHaveProperty("disabled", true);
-  expect(button("回复详细程度").textContent).toBe("低");
+  expect(button("输出详细程度").textContent).toBe("低");
   const open = screen.getByRole("button", { name: "打开配置文件" });
   expect(open).toHaveProperty("disabled", false); fireEvent.click(open);
   expect(mocks.open).toHaveBeenCalledExactlyOnceWith({ kind: "config", workspaceRoot: "C:/A", scopeId: "project:C:/A" });
   expect(mocks.fetch.mock.calls.every(([, init]) => init?.method !== "PUT")).toBe(true);
   choose("配置作用域", "用户");
   expect(screen.queryByRole("alert")).toBeNull();
-  await waitFor(() => expect(button("回复详细程度")).toHaveProperty("disabled", false));
+  await waitFor(() => expect(button("输出详细程度")).toHaveProperty("disabled", false));
 });
 
 it("unsets the selected project's Model default and uses the inherited effective value after an applied receipt", async () => {
@@ -292,8 +292,8 @@ it("unsets the selected project's Model default and uses the inherited effective
   mocks.fetch.mockImplementation(async (_url, init) => init?.method === "PUT" ? new Promise<Response>(resolve => { finish = resolve; }) : Response.json(initial));
   render(<ConfigTab active />);
   await screen.findByRole("button", { name: "配置作用域，当前：A" });
-  await waitFor(() => expect(button("回复详细程度")).toHaveProperty("disabled", false));
-  choose("回复详细程度", "模型默认值");
+  await waitFor(() => expect(button("输出详细程度")).toHaveProperty("disabled", false));
+  choose("输出详细程度", "模型默认值");
   await waitFor(() => expect(mocks.fetch.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true));
   const request = mocks.fetch.mock.calls.find(([, init]) => init?.method === "PUT")!;
   expect(JSON.parse(request[1].body)).toEqual({ workspace_root: "C:/A", scope_id: "project:C:/A", expected_version: "project-v1:C:/A", model_verbosity: null });
@@ -303,7 +303,7 @@ it("unsets the selected project's Model default and uses the inherited effective
     model_verbosity: { requested_value: null, effective_value: "high" },
   } };
   await act(async () => finish(Response.json(next)));
-  expect(button("回复详细程度").textContent).toBe("高");
+  expect(button("输出详细程度").textContent).toBe("高");
   expect(screen.queryByRole("status")).toBeNull();
   expect(screen.queryByRole("alert")).toBeNull();
 });
@@ -333,10 +333,10 @@ it("queues parent-project edits with their original lookup workspace, actual lay
   render(<ConfigTab active />);
   await screen.findByRole("button", { name: "配置作用域，当前：App" });
   await waitFor(() => expect(button("推理摘要")).toHaveProperty("disabled", false));
-  choose("配置作用域", "Projects"); choose("回复详细程度", "高"); choose("推理摘要", "详细");
+  choose("配置作用域", "Projects"); choose("输出详细程度", "高"); choose("推理摘要", "详细");
   await waitFor(() => expect(writes).toHaveLength(1));
   choose("配置作用域", "App");
-  expect(button("回复详细程度")).toHaveProperty("disabled", false);
+  expect(button("输出详细程度")).toHaveProperty("disabled", false);
   act(() => useAppStore.setState({ workingDirectory: "C:/B" }));
   await screen.findByRole("button", { name: "配置作用域，当前：B" });
   current = { ...original, model_verbosity: "high", effective: { ...original.effective, model_verbosity: "high" },
