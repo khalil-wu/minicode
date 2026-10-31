@@ -34,6 +34,11 @@ const deletionReferences = [
   { kind: "file", name: "main.ts", path: "C:/reference-deletion/main.ts" },
   { kind: "folder", name: "src", path: "C:/reference-deletion/src" },
 ];
+const composerMenuCommands = [
+  { name: "mcp", command: "mcp", label: "/mcp", description: "Show MCP server status", type: "local", kind: "local", source: "builtin" },
+  { name: "compact", command: "compact", label: "/compact", description: "Compact this chat's context", type: "local", kind: "local", source: "builtin" },
+  { name: "init", command: "init", label: "/init", description: "Create an AGENTS.md file", type: "template", kind: "template", source: "builtin" },
+];
 
 const processBlock = (id: string, content: string, timestamp: number) => ({
   type: "process", id, item_kind: "process_text", content, source: "model_preamble",
@@ -156,7 +161,7 @@ class MultiAgentBackend {
         res.end(JSON.stringify({ provider: "custom", model: "gpt-5", current_model: "gpt-5", available_models: ["gpt-5"],
           models_source: "configured", config_version: "fixture", config_cwd: url.searchParams.get("config_cwd") ?? "",
           effective_reasoning_effort: "medium", available_permission_modes: ["confirm", "auto", "bypass"],
-          feature_flags: {}, composer_commands: [], default_model_selection: { provider: "custom", model: "gpt-5",
+          feature_flags: {}, composer_commands: composerMenuCommands, default_model_selection: { provider: "custom", model: "gpt-5",
             reasoning_effort: "medium", conversation_id: "", working_directory: url.searchParams.get("workspace_root") ?? "" } }));
         return;
       }
@@ -498,8 +503,10 @@ test("real Electron composer deletes reference spacing without a caret jump and 
     const page = await app.firstWindow();
     await page.setViewportSize(desktopViewport);
     await expect.poll(() => backend.commands.some(command => command.type === "session.sync"), { timeout: 30_000 }).toBe(true);
-    // Finish projecting the fixture's original owner before creating a draft;
-    // receipt of the outgoing session.sync command alone is not UI readiness.
+    // A fresh profile stays on home. Select the fixture's original owner
+    // explicitly before opening the new draft under test.
+    await page.getByRole("list", { name: "最近聊天", exact: true })
+      .getByRole("button", { name: "Electron agents", exact: true }).click();
     await expect(page.getByText("Verify the desktop multi-agent recovery path.", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "新聊天", exact: true }).click();
     await expect(page.getByRole("heading", { name: "我们要构建什么？", exact: true })).toBeVisible();
@@ -631,10 +638,46 @@ test("real Electron composer deletes reference spacing without a caret jump and 
       await composer.press("Backspace");
       await expect(composer.locator("[data-composer-reference]")).toHaveCount(0);
 
-      // The empty catalog still opens the production slash menu. Alt+Enter
-      // must reach the editor's line-break keymap, not the menu or submission.
+      // The catalog arrives through the production draft-selection HTTP path.
+      // Check the real menu's row flow before sending a modified Enter key.
       await composer.pressSequentially("/");
-      await expect(page.locator('.composer-menu-list[data-kind="slash"]')).toBeVisible();
+      const menu = page.locator('.composer-menu-list[data-kind="slash"]');
+      await expect(menu).toBeVisible();
+      await expect(menu.getByRole("option")).toHaveCount(composerMenuCommands.length);
+      await menu.evaluate(async element => {
+        await Promise.all(element.getAnimations({ subtree: true })
+          .filter(animation => animation.effect!.getTiming().iterations !== Infinity)
+          .map(animation => animation.finished));
+      });
+      await expect(menu.getByText("Enter", { exact: true })).toHaveCount(0);
+      const menuRows: JsonRecord[] = [];
+      for (const command of composerMenuCommands) {
+        const option = menu.getByRole("option").filter({ has: page.getByText(command.label, { exact: true }) });
+        const title = await option.getByText(command.label, { exact: true }).boundingBox();
+        const description = await option.getByText(command.description, { exact: true }).boundingBox();
+        expect(title).not.toBeNull();
+        expect(description).not.toBeNull();
+        expect(Math.abs(title!.y + title!.height / 2 - description!.y - description!.height / 2)).toBeLessThanOrEqual(1);
+        expect(title!.x + title!.width).toBeLessThan(description!.x);
+        expect(description!.width).toBeGreaterThan(0);
+        const icon = option.locator(".composer-menu-icon");
+        await expect(icon).toBeVisible();
+        await expect(icon.locator("svg, .mc-usage-ring-meter")).toHaveCount(1);
+        menuRows.push({ command: command.command, title, description, row: await option.boundingBox(),
+          style: await option.evaluate(element => {
+            const style = getComputedStyle(element);
+            return { fontSize: style.fontSize, lineHeight: style.lineHeight, padding: style.padding, borderRadius: style.borderRadius };
+          }),
+          icon: await icon.innerHTML() });
+      }
+      expect(new Set(menuRows.map(row => row.icon)).size).toBe(composerMenuCommands.length);
+      observations.push({ mode, phase: "native-slash-menu-row-layout", menu: await menu.boundingBox(), rows: menuRows });
+      const menuPng = await app.evaluate(async ({ BrowserWindow }) =>
+        (await BrowserWindow.getAllWindows()[0]!.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString("base64"));
+      const menuScreenshotPath = testInfo.outputPath(`${mode}-slash-menu-rows.png`);
+      await writeFile(menuScreenshotPath, Buffer.from(menuPng, "base64"));
+      await testInfo.attach(`${mode}-slash-menu-rows`, { path: menuScreenshotPath, contentType: "image/png" });
+      // Alt+Enter reaches the line-break keymap with matching suggestions open.
       await composer.press("Alt+Enter");
       await expect(composer.locator("p")).toHaveCount(2);
       await expect.poll(() => composerDocument(page)).toEqual({ type: "doc", content: [

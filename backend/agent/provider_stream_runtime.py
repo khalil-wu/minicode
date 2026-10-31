@@ -18,7 +18,6 @@ from backend.agent.loop_runtime_helpers import (
     is_max_output_finish_reason,
 )
 from backend.agent.message import AgentEvent
-from backend.agent.model_request_hooks import ModelRequestHooks
 from backend.agent.provider_stream_event_dispatch import (
     ProviderDispatchResult,
     dispatch_provider_event,
@@ -130,14 +129,6 @@ async def stream_provider_response(
     provider_attempt = None
     stream_iter: Any | None = None
     stream_read_context = None
-    request_completed = False
-    hook_manager = getattr(context_builder, "hook_manager", None)
-    if hook_manager is not None and tool_context.metadata.get("internal_session_source") == "memory_consolidation":
-        hook_manager = hook_manager.for_memory_consolidation()
-    model_hooks = ModelRequestHooks(hook_manager, cancel_event=tool_context.cancel_event)
-    from backend.agent.turn_trace import turn_trace_shared
-
-    trace = turn_trace_shared(f"turn[{getattr(tool_context, 'conversation_id', '') or ''}]")
 
     def settle_attempt_usage(raw: dict[str, Any] | None = None) -> None:
         record_provider_attempt_usage(llm=llm, provider_attempt=provider_attempt, stream_state=stream_state,
@@ -152,11 +143,9 @@ async def stream_provider_response(
     try:
         while True:
             should_retry = False
-            request_completed = False
             thinking_chars = 0
             visible_text_sanitizer = ThinkingStreamSanitizer()
             budget_runtime.ensure_started()
-            trace.mark("attempt.dispatch")
             provider_attempt = await turn_kernel.start_provider_attempt(
                 iteration_id=iteration_id_value,
                 retry_index=stream_attempt,
@@ -164,14 +153,10 @@ async def stream_provider_response(
                 max_retries=max_retries,
                 progress_id=provider_progress_key,
             )
-            trace.mark("attempt.ready")
-            await model_hooks.begin()
-            trace.mark("hooks.begin")
             request_metadata = build_provider_attempt_metadata(
                 llm_request_metadata, context_builder=context_builder,
                 run_context=tool_context.run_context, run_record=turn_kernel.run_record,
             )
-            trace.mark("request.dispatch")
             stream_iter = safe_stream_chat_with_request_metadata(
                 llm,
                 messages,
@@ -180,7 +165,6 @@ async def stream_provider_response(
             ).__aiter__()
             stream_read_context = copy_context()
             first_event = True
-            stream_first_event_seen = False
             while True:
                 wait_result = None
                 try:
@@ -198,19 +182,11 @@ async def stream_provider_response(
                         if isinstance(wait_update, ProviderWaitResult):
                             wait_result = wait_update
                         else:
-                            if not stream_first_event_seen:
-                                stream_first_event_seen = True
-                                trace.mark("provider.first_event")
                             yield wait_update
                 except PhaseDeadlineExceeded:
                     raise
                 except (asyncio.TimeoutError, ProviderStreamFailure) as failure:
                     settle_attempt_usage()
-                    cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
-                    await model_hooks.finish("failed", error=str(cause) or "Provider request timed out",
-                                             usage=usage if provider_attempt.usage_reported else None)
-                    if tool_stream is not None:
-                        tool_stream.release_deferred()
                     if stream_state.committed_tool_ids:
                         async for update in committed_provider_error(failure, state=state,
                             turn_kernel=turn_kernel, provider_attempt=provider_attempt,
@@ -273,10 +249,6 @@ async def stream_provider_response(
                 if wait_result.response_phase:
                     provider_response_phase = wait_result.response_phase
                 if wait_result.action == "finish":
-                    await model_hooks.finish("failed", error="Provider stream ended before its terminal event",
-                                             usage=usage if provider_attempt.usage_reported else None)
-                    if tool_stream is not None:
-                        tool_stream.release_deferred()
                     async for projected in finish_provider_text_item(
                         stream_state=stream_state, stream_text=stream_text,
                         visible_text_sanitizer=visible_text_sanitizer,
@@ -297,8 +269,6 @@ async def stream_provider_response(
                     provider_raw_done.update(event.raw)
                 if event.type in {StreamEventType.DONE, StreamEventType.ERROR}:
                     settle_attempt_usage(event.raw)
-                if event.type == StreamEventType.DONE:
-                    request_completed = True
                 auth_retry = provider_auth_refresh_allowed(tool_context, stream_state)
                 first_event = False
                 dispatch_result = None
@@ -335,19 +305,9 @@ async def stream_provider_response(
                         yield dispatch_update
                 if dispatch_result is None:
                     raise RuntimeError("provider event dispatcher returned without a result")
-                if event.type == StreamEventType.DONE:
-                    await model_hooks.finish("completed", usage=usage if provider_attempt.usage_reported else None)
-                    if tool_stream is not None:
-                        tool_stream.release_deferred()
-                elif event.type == StreamEventType.ERROR:
-                    await model_hooks.finish("failed", error=str(event.content or "Provider request failed"),
-                                             usage=usage if provider_attempt.usage_reported else None)
-                    if tool_stream is not None:
-                        tool_stream.release_deferred()
                 if tool_stream is not None:
                     if event.type == StreamEventType.TOOL_CALL and event.tool_calls_committed:
-                        await tool_stream.submit(event.tool_calls, stream_state, stream_text, tool_tracker,
-                                                 defer_dispatch=model_hooks.defer_tool_dispatch)
+                        await tool_stream.submit(event.tool_calls, stream_state, stream_text, tool_tracker)
                     elif event.type == StreamEventType.DONE and tool_stream.started and not is_max_output_finish_reason(event.finish_reason) and event.finish_reason not in {"pause_turn", "compaction"}:
                         await tool_stream.submit(stream_state.tool_calls, stream_state, stream_text, tool_tracker)
                 usage = dispatch_result.usage
@@ -359,8 +319,6 @@ async def stream_provider_response(
                 if dispatch_result.provider_stream_steered:
                     provider_stream_steered = True
                 if dispatch_result.action == "break":
-                    if provider_stream_steered:
-                        await model_hooks.finish("cancelled", usage=usage if provider_attempt.usage_reported else None)
                     break
                 if dispatch_result.action == "error":
                     if stream_state.committed_tool_ids:
@@ -441,15 +399,7 @@ async def stream_provider_response(
             break
 
     except (asyncio.CancelledError, Exception) as exc:
-        await model_hooks.finish(
-            "completed" if request_completed else "cancelled" if isinstance(exc, asyncio.CancelledError) else "failed",
-            error=None if request_completed or isinstance(exc, asyncio.CancelledError) else str(exc),
-            usage=usage if provider_attempt is not None and provider_attempt.usage_reported else None,
-            wait=not isinstance(exc, asyncio.CancelledError),
-        )
         if isinstance(exc, asyncio.CancelledError):
-            if tool_stream is not None:
-                await tool_stream.abort_deferred()
             async for projected in finish_provider_text_item(
                 stream_state=stream_state, stream_text=stream_text,
                 visible_text_sanitizer=visible_text_sanitizer,
@@ -495,10 +445,6 @@ async def stream_provider_response(
             iteration_id=iteration_id_value):
             yield event
     finally:
-        model_hooks.abandon(completed=request_completed,
-                            usage=usage if provider_attempt is not None and provider_attempt.usage_reported else None)
-        if tool_stream is not None:
-            await tool_stream.abort_deferred()
         settle_attempt_usage()
         await finish_provider_stream(_close_stream, turn_kernel, provider_attempt)
 

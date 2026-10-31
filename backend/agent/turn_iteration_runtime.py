@@ -128,10 +128,6 @@ class TurnIterationRuntime:
         pending_turn_context: list[str],
     ) -> TurnIterationPreparation:
         run_context = self.tool_context.run_context
-        from backend.agent.turn_trace import turn_trace_shared
-
-        trace = turn_trace_shared(f"turn[{getattr(self.tool_context, 'conversation_id', '') or ''}]")
-        trace.mark("iteration.prepare.start")
         if run_context.refresh_model_auth is not None:
             while (snapshot := run_context.model_execution) is not None:
                 refreshed = await run_context.refresh_model_auth(snapshot, False, run_context.model_owner_task)
@@ -140,50 +136,19 @@ class TurnIterationRuntime:
                     break
                 # A host selection published during the await owns the next
                 # step. Refresh that choice under the same admission deadline.
-        trace.mark("refresh_model_auth")
         snapshot = run_context.model_execution
         if run_context.environment_manager is not None:
             from backend.agent.environment_runtime import refresh_run_environment_capabilities
             from backend.workspace.executor_local_policy import local_sandbox_policy
 
             self.turn_kernel.refresh_live_permission_context()
-            # The turn bootstrap already prepared this turn's environment
-            # capabilities, network step and companions. Rebuilding them here
-            # repeated the same discovery and companion registration on every
-            # iteration; reuse the prepared surface while the turn is the same.
-            prepared = run_context.environment_capabilities
-            prepared_turn = str(self.metadata.get("turn_id") or "")
-            reuse_prepared = (
-                prepared is not None
-                and run_context.network_step is not None
-                and prepared_turn != ""
-                and getattr(run_context, "environment_prepared_turn_id", "") == prepared_turn
-            )
-            if not reuse_prepared:
-                prepared = await refresh_run_environment_capabilities(run_context,
-                    agent_session=self.agent_session, permission_context=self.tool_context.permission,
-                    config_stack=snapshot.config.config_layer_stack,
-                    feature_flags=snapshot.config.feature_flags, registry=self.base_tool_registry,
-                    artifact_store=self.tool_context.artifact_store, workspace_root=self.workspace_root,
-                    conversation_id=self.tool_context.conversation_id, turn_id=self.tool_context.turn_id,
-                    mcp_optional_startup_grace_ms=snapshot.config.mcp_optional_startup_grace_ms)
-                trace.mark("refresh_environment_capabilities")
-                from backend.network.runtime import prepare_environment_network_step
-
-                run_context.network_step = await prepare_environment_network_step(
-                    environment_manager=run_context.environment_manager, snapshot=run_context.turn_environments,
-                    config_stack=snapshot.config.config_layer_stack, exec_policy_sources=run_context.exec_policy_owner.sources)
-                trace.mark("prepare_environment_network_step")
-                from backend.mcp.node_repl import register_node_companion
-
-                await register_node_companion(run_context, self.base_tool_registry, self.agent_session, execution=snapshot)
-                from backend.mcp.cua_repl import register_cua_companion
-
-                await register_cua_companion(run_context, self.agent_session, execution=snapshot)
-                trace.mark("register_cua_companion")
-                run_context.environment_prepared_turn_id = prepared_turn
-            else:
-                trace.mark("reuse_environment_capabilities")
+            prepared = await refresh_run_environment_capabilities(run_context,
+                agent_session=self.agent_session, permission_context=self.tool_context.permission,
+                config_stack=snapshot.config.config_layer_stack,
+                feature_flags=snapshot.config.feature_flags, registry=self.base_tool_registry,
+                artifact_store=self.tool_context.artifact_store, workspace_root=self.workspace_root,
+                conversation_id=self.tool_context.conversation_id, turn_id=self.tool_context.turn_id,
+                mcp_optional_startup_grace_ms=snapshot.config.mcp_optional_startup_grace_ms)
             self.context.bind_skill_manager(prepared.skill_manager, self.workspace_root)
             self.skill_manager = prepared.skill_manager
             primary = run_context.turn_environments.primary()
@@ -192,13 +157,17 @@ class TurnIterationRuntime:
             self.tool_context.allow_network = policy.allow_network if policy is not None else False
             self.tool_context.environment_id = primary.selection.environment_id if primary is not None else ""
             self.context.configure_project_instructions(snapshot.config.config_layer_stack.project_instruction_config())
-            self.skill_manager = prepared.skill_manager
-            primary = run_context.turn_environments.primary()
-            policy = local_sandbox_policy(primary.permission_scope.sandbox_context()) if primary is not None and not primary.is_remote else None
-            self.tool_context.sandbox_policy = policy
-            self.tool_context.allow_network = policy.allow_network if policy is not None else False
-            self.tool_context.environment_id = primary.selection.environment_id if primary is not None else ""
-            self.context.configure_project_instructions(snapshot.config.config_layer_stack.project_instruction_config())
+            from backend.network.runtime import prepare_environment_network_step
+
+            run_context.network_step = await prepare_environment_network_step(
+                environment_manager=run_context.environment_manager, snapshot=run_context.turn_environments,
+                config_stack=snapshot.config.config_layer_stack, exec_policy_sources=run_context.exec_policy_owner.sources)
+            from backend.mcp.node_repl import register_node_companion
+
+            await register_node_companion(run_context, self.base_tool_registry, self.agent_session, execution=snapshot)
+            from backend.mcp.cua_repl import register_cua_companion
+
+            await register_cua_companion(run_context, self.agent_session, execution=snapshot)
         model_events: list[AgentEvent] = []
         if snapshot is not None and self.context._llm is not snapshot.llm:
             target_budget = snapshot.config.token_budget
@@ -216,7 +185,6 @@ class TurnIterationRuntime:
         self.tool_context.tool_registry = self.tool_registry
         self.tool_context.run_context.active_tool_registry = self.tool_registry
         self.state.loaded_deferred_tools.intersection_update(self.tool_registry.list_tools())
-        trace.mark("tool_registry_fork")
         self.turn_kernel.refresh_live_permission_context()
         base_policy = self.active_toolset_policy_factory(
             permission_context=self.tool_context.permission,
@@ -330,7 +298,6 @@ class TurnIterationRuntime:
             previous=previous_tool_schema_state,
             permission_decisions=permission_decisions,
         )
-        trace.mark("derive_tool_schemas")
         active_capabilities = capabilities_for_adapter(self.llm)
         dedicated_image_model = is_gpt_image_model(active_capabilities.model) or (
             active_capabilities.image_generation is True
@@ -355,7 +322,6 @@ class TurnIterationRuntime:
             permission_context=self.tool_context.permission,
             run_context=self.tool_context.run_context,
         )
-        trace.mark("populate_prompt_context")
 
         tool_schemas = schema_state.tool_schemas
         if self.tool_context.run_context.extension_actions is not None:

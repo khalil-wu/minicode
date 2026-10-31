@@ -779,19 +779,30 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
 .mc-conversation-menu,
 .prompt-history-card {
   border: 1px solid var(--border-subtle) !important;
-  border-radius: var(--radius-md) !important;
   background: var(--surface-raised) !important;
   box-shadow: var(--shadow-medium) !important;
   animation: mc-dropdown-enter var(--duration-fast) var(--easing-enter-snappy) both;
   transform-origin: var(--mc-menu-origin, top center);
 }
 
+.mc-dropdown-menu:not(.composer-add-menu):not(.composer-menu-list),
+.queued-message-menu,
+.mc-conversation-menu,
+.prompt-history-card {
+  border-radius: var(--radius-md) !important;
+}
+
 .mc-dropdown-menu:not(.composer-add-menu) :where(button, [role="option"]),
 .queued-message-menu button,
 .mc-conversation-menu [role="menuitem"] {
-  border-radius: var(--radius-sm) !important;
   font-family: var(--font-ui) !important;
   letter-spacing: 0;
+}
+
+.mc-dropdown-menu:not(.composer-add-menu):not(.composer-menu-list) :where(button, [role="option"]),
+.queued-message-menu button,
+.mc-conversation-menu [role="menuitem"] {
+  border-radius: var(--radius-sm) !important;
 }
 
 /* Source U8(menu), JSn and gCn share this desktop popup surface. */

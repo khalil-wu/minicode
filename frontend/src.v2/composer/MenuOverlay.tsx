@@ -1,5 +1,7 @@
 import { useI18n, type Translate } from "../i18n";
-import { AtSign, Command, Folder, RefreshCw } from "lucide-react";
+import { Archive, AtSign, BarChart3, Box, Brain, Bug, Cpu, DollarSign, Download, File, FileText, Folder,
+  Gauge, History, Info, Layers, ListChecks, MessageCirclePlus, Paperclip,
+  Puzzle, RefreshCw, ShieldAlert, ShieldCheck, Target, Trash2 } from "../lib/icons";
 import { fileIcon } from "../lib/file-icons";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
@@ -13,7 +15,8 @@ import { useComposerPlugins } from "./useComposerPlugins";
 import { recentGuardianDenials, useGuardianApprovalState } from "../chat/guardianApprovalState";
 import { ComposerReferenceIcon } from "./ComposerReferenceIcon";
 import { composerPluginReference, type InlineComposerReference } from "./composer-references";
-import type { ConversationMeta } from "../stores/types";
+import type { ConversationMeta, SlashCommand } from "../stores/types";
+import "../shell/UsageRing.css";
 
 interface Props {
   open: boolean;
@@ -454,6 +457,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
             const displayName = displayMenuName(it, skillsPickerActive || explicitSkillPickerActive);
             const sourceLabel = it.type === "skill" ? formatSourceLevel(it.sourceLevel, tr) : it.marketplace ?? "";
             const skillPolicyLabel = it.type === "skill" ? formatSkillPolicy(it, tr) : "";
+            const command = it.type === "command"
+              ? storeCommands.find(command => (command.label?.startsWith("/") ? command.label : `/${command.command}`) === it.name)
+              : undefined;
+            const icon = renderMenuIcon(it, workingDirectory, command);
             return (
               <div key={it.path ?? it.name}>
                 {showSection && it.section && (
@@ -470,24 +477,24 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
                   className="composer-menu-item"
                   data-active={i === activeIndex ? "true" : "false"}
                   data-selected={it.active ? "true" : "false"}
+                  data-command={command?.command}
                   style={{
                     ...menuItemStyle,
                     background: i === activeIndex ? "var(--surface-hover)" : "transparent",
                   }}
                 >
-                  <span style={menuIconStyle}>
-                    {renderMenuIcon(it, workingDirectory)}
-                  </span>
+                  {icon && <span className="composer-menu-icon" style={menuIconStyle} aria-hidden="true">{icon}</span>}
                   <span style={menuBodyStyle}>
-                    <span style={menuTitleRowStyle}>
-                      <span style={menuNameStyle}>{displayName}</span>
-                      {it.active && <span style={activeBadgeStyle}>{tr("已启用")}</span>}
+                    <span className="composer-menu-row-main" style={menuMainRowStyle}>
+                      <span style={{ ...menuTitleRowStyle, maxWidth: it.description ? "60%" : undefined, flex: it.description ? "none" : "1 1 auto" }}>
+                        <span className="composer-menu-name" style={menuNameStyle}>{displayName}</span>
+                        {it.active && <span style={activeBadgeStyle}>{tr("已启用")}</span>}
+                      </span>
+                      {it.description && <span className="composer-menu-description" style={menuDescriptionStyle}>{it.description}</span>}
                     </span>
-                    {it.description && <span style={menuDescriptionStyle}>{it.description}</span>}
                     {skillPolicyLabel && <span style={menuTriggerStyle}>{skillPolicyLabel}</span>}
                   </span>
                   {sourceLabel && <span style={sourceBadgeStyle}>{sourceLabel}</span>}
-                  {i === activeIndex && <span style={menuShortcutStyle}>Enter</span>}
                 </div>
               </div>
             );
@@ -502,9 +509,9 @@ const menuListStyle: React.CSSProperties = {
   width: "100%",
   background: "var(--surface-raised)",
   border: "1px solid var(--border-subtle)",
-  borderRadius: "var(--radius-md)",
+  borderRadius: "var(--radius-lg)",
   boxShadow: "var(--shadow-medium)",
-  padding: 5,
+  padding: "var(--spacing-1)",
   maxHeight: "min(320px, calc(100vh - 230px))",
   overflowY: "auto",
   overflowX: "hidden",
@@ -518,21 +525,23 @@ const emptyMenuStyle: React.CSSProperties = {
 };
 
 const menuItemStyle: React.CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "18px minmax(0, 1fr) auto auto",
+  display: "flex",
   alignItems: "center",
-  gap: 8,
-  minHeight: 42,
-  padding: "5px 7px",
-  fontSize: "var(--text-sm)",
+  gap: "var(--spacing-2)",
+  minHeight: 0,
+  padding: "calc(var(--spacing-1) * 1.25) var(--spacing-2)",
+  border: 0,
+  fontSize: "var(--text-xs)",
+  fontWeight: "var(--fw-regular)",
+  lineHeight: "calc(1.25 / .875)",
   cursor: "pointer",
-  borderRadius: "var(--radius-sm, 5px)",
+  borderRadius: "var(--radius-md)",
   color: "var(--text-primary)",
   minWidth: 0,
 };
 
 const menuIconStyle: React.CSSProperties = {
-  width: 18,
+  width: "var(--mc-icon-md)",
   display: "inline-flex",
   justifyContent: "center",
   color: "var(--text-muted)",
@@ -540,9 +549,17 @@ const menuIconStyle: React.CSSProperties = {
 };
 
 const menuBodyStyle: React.CSSProperties = {
-  display: "grid",
-  gap: 1,
+  display: "block",
+  flex: 1,
   minWidth: 0,
+};
+
+const menuMainRowStyle: React.CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "var(--spacing-2)",
+  minWidth: 0,
+  width: "100%",
 };
 
 const menuTitleRowStyle: React.CSSProperties = {
@@ -558,7 +575,7 @@ const menuNameStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   fontFamily: "var(--font-ui)",
-  fontWeight: "var(--fw-semibold)",
+  fontWeight: "inherit",
 };
 
 const menuDescriptionStyle: React.CSSProperties = {
@@ -567,11 +584,13 @@ const menuDescriptionStyle: React.CSSProperties = {
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
   color: "var(--text-muted)",
-  fontSize: "var(--text-xs)",
-  lineHeight: 1.35,
+  fontSize: "inherit",
+  lineHeight: "inherit",
+  flex: "1 1 0",
 };
 
 const menuTriggerStyle: React.CSSProperties = {
+  display: "block",
   minWidth: 0,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -579,13 +598,6 @@ const menuTriggerStyle: React.CSSProperties = {
   color: "var(--text-muted)",
   fontSize: "var(--text-2xs)",
   lineHeight: 1.3,
-  fontFamily: "var(--font-ui)",
-};
-
-const menuShortcutStyle: React.CSSProperties = {
-  flexShrink: 0,
-  color: "var(--text-muted)",
-  fontSize: "var(--text-2xs)",
   fontFamily: "var(--font-ui)",
 };
 
@@ -622,13 +634,33 @@ const activeBadgeStyle: React.CSSProperties = {
   fontFamily: "var(--font-ui)",
 };
 
-function renderMenuIcon(item: MenuItem, workspaceRoot: string) {
-  if (item.type === "folder") return <Folder size={14} />;
+function renderMenuIcon(item: MenuItem, workspaceRoot: string, command?: SlashCommand) {
+  if (item.type === "folder") return <Folder size={16} />;
   if (item.type === "file") return fileIcon(item.name || item.path || "file", { size: 16, className: "composer-context-icon-svg" });
   if (item.type === "skill") return <ComposerReferenceIcon reference={{ kind: "skill", name: item.name, icon: item.icon }} workspaceRoot={workspaceRoot} size={16} />;
   if (item.reference) return <ComposerReferenceIcon reference={item.reference} workspaceRoot={workspaceRoot} size={16} />;
   if (item.type === "argument") return <AtSign size={14} />;
-  return <Command size={14} />;
+  if (command?.source && command.source !== "builtin") return <FileText size={16} />;
+  if (command?.source !== "builtin") return null;
+  if (command.command === "compact") return <CompactCommandIcon />;
+  const Icon = commandIcons[command.command];
+  return Icon ? <Icon size={16} /> : null;
+}
+
+const commandIcons: Record<string, typeof Archive> = {
+  review: Bug, mcp: Paperclip, init: File, new: MessageCirclePlus,
+  archive: Archive, unarchive: Archive, status: Gauge, model: Cpu,
+  plan: ListChecks, effort: Brain, permissions: ShieldCheck, bypass: ShieldAlert, approve: ShieldCheck,
+  skill: Box, skills: Box, plugins: Puzzle, goal: Target, memory: Brain, tasks: ListChecks,
+  usage: BarChart3, context: Layers, cost: DollarSign, clear: Trash2, export: Download, help: Info, resume: History,
+};
+
+function CompactCommandIcon() {
+  const contextUsage = useAppStore(state => state.contextUsage);
+  const percent = contextUsage && contextUsage.limit > 0 ? Math.min(1, contextUsage.used / contextUsage.limit) : 0;
+  return <span className="mc-usage-ring-meter" style={{ background: `conic-gradient(var(--text-secondary) ${Math.round(percent * 360)}deg, var(--surface-soft) 0deg)` }}>
+    <span className="mc-usage-ring-inner" />
+  </span>;
 }
 
 function displayMenuName(item: MenuItem, skillsPickerActive: boolean): string {

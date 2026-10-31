@@ -21,8 +21,9 @@ Hook events:
   - pre_compact:         fires before context compaction
   - stop:               fires when model produces final reply (no more tool calls)
 
-Codex hook events use Codex's stdin and structured stdout contracts. The
-additional MiniCode lifecycle events use their own existing event fields.
+Hooks receive one MiniCode JSON object on stdin and return one top-level
+snake_case JSON object. Exit code 2 supplies feedback; an explicit deny or
+blocking exit from pre_tool_use blocks the call.
 """
 from __future__ import annotations
 
@@ -33,9 +34,12 @@ import re
 import shlex
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
-from backend.hooks.models import CODEX_HOOK_EVENTS, HookEvent
+if TYPE_CHECKING:
+    from backend.hooks.runners import PendingAsyncCommand
+
+from backend.hooks.models import HookEvent
 from backend.hooks.value_utils import coerce_bool as _coerce_hook_bool
 from backend.hooks.value_utils import parse_json_object
 
@@ -66,10 +70,20 @@ def _parse_json_stdout(stdout: str) -> dict[str, Any] | None:
 def _async_hook_stdout(
     stdout: str,
 ) -> tuple[str, dict[str, Any] | None]:
-    """Parse the complete stdout as one hook response."""
+    """Remove the protocol handshake and resolve the async response object."""
 
-    response = parse_json_object(stdout)
-    visible_stdout = stdout.strip()
+    visible_lines: list[str] = []
+    response: dict[str, Any] | None = None
+    for line in str(stdout or "").splitlines():
+        candidate = line.strip()
+        parsed = parse_json_object(candidate)
+        if isinstance(parsed, dict) and parsed.get("async") is True:
+            continue
+        if response is None and isinstance(parsed, dict):
+            response = parsed
+        visible_lines.append(line)
+
+    visible_stdout = "\n".join(visible_lines).strip()
     if response is not None and response.get("suppress_output") is True:
         visible_stdout = ""
     return visible_stdout, response
@@ -80,7 +94,11 @@ def _async_hook_context_messages(
 ) -> tuple[str, ...]:
     """Extract model context from one completed async hook response.
 
-    Structured hook context is delivered separately from diagnostic stdout.
+    The async registry scans stdout line-by-line, skips the
+    ``{"async": true}`` handshake, and gives the model only ``system_message``
+    plus ``additional_context``. Plain diagnostic stdout is
+    retained for the hook response/UI, but it is not silently promoted into a
+    new model steer.
     """
 
     if response is None:
@@ -165,6 +183,19 @@ def _canonical_config_change_source(source: str, file_path: str = "") -> str:
     if "project" in raw or "settings.local" in path:
         return "local_settings" if "local" in path else "project_settings"
     return "user_settings"
+
+
+def _canonical_session_end_reason(reason: str) -> str:
+    value = str(reason or "").strip().casefold()
+    allowed = {
+        "clear",
+        "resume",
+        "logout",
+        "prompt_input_exit",
+        "other",
+        "bypass_permissions_disabled",
+    }
+    return value if value in allowed else "other"
 
 
 def hook_event_name(event: HookEvent) -> str:
@@ -301,60 +332,15 @@ def _hook_input(
     fields: dict[str, str] | None,
     workspace_root: Path | None,
 ) -> dict[str, Any]:
-    """Translate internal call-site values to the event's stdin schema."""
+    """Translate internal call-site values to MiniCode's stdin schema."""
     raw = dict(fields or {})
-    if event in CODEX_HOOK_EVENTS:
-        payload: dict[str, Any] = {
-            "session_id": raw.get("SESSION_ID", ""),
+    if event == HookEvent.INTERRUPT:
+        return {
+            "session_id": raw.get("SESSION_ID", ""), "turn_id": raw.get("TURN_ID", ""),
             "transcript_path": raw.get("TRANSCRIPT_PATH") or None,
-            "cwd": str(workspace_root or Path.cwd()),
-            "hook_event_name": "".join(part.title() for part in event.value.split("_")),
+            "cwd": str(workspace_root or Path.cwd()), "hook_event_name": "Interrupt",
+            "model": raw.get("MODEL", ""), "permission_mode": raw.get("PERMISSION_MODE", "default"),
         }
-        if event not in {HookEvent.SESSION_START, HookEvent.SESSION_END}:
-            payload["turn_id"] = raw.get("TURN_ID", "")
-        if event in {HookEvent.PRE_TOOL_USE, HookEvent.POST_TOOL_USE, HookEvent.PERMISSION_REQUEST,
-                     HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT, HookEvent.USER_PROMPT_SUBMIT,
-                     HookEvent.PRE_MODEL_REQUEST, HookEvent.POST_MODEL_REQUEST}:
-            for source, name in (("AGENT_ID", "agent_id"), ("AGENT_TYPE", "agent_type")):
-                if raw.get(source):
-                    payload[name] = raw[source]
-        if event != HookEvent.SESSION_END:
-            payload["model"] = raw.get("MODEL", "")
-        if event not in {HookEvent.SESSION_END, HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT,
-                         HookEvent.PRE_MODEL_REQUEST, HookEvent.POST_MODEL_REQUEST}:
-            payload["permission_mode"] = raw.get("PERMISSION_MODE") or "default"
-        if event in {HookEvent.PRE_TOOL_USE, HookEvent.POST_TOOL_USE, HookEvent.PERMISSION_REQUEST}:
-            payload.update(tool_name=raw.get("TOOL_NAME", ""),
-                           tool_input=_json_object(raw.get("TOOL_ARGS_JSON", "")))
-            if event != HookEvent.PERMISSION_REQUEST:
-                payload["tool_use_id"] = raw.get("TOOL_CALL_ID", "")
-            if event == HookEvent.POST_TOOL_USE:
-                payload["tool_response"] = _json_value(raw.get("TOOL_RESULT", ""), "")
-        elif event == HookEvent.USER_PROMPT_SUBMIT:
-            payload["prompt"] = raw.get("USER_PROMPT", "")
-        elif event == HookEvent.SESSION_START:
-            payload["source"] = raw.get("SESSION_SOURCE", "startup")
-        elif event == HookEvent.SESSION_END:
-            payload["reason"] = raw.get("SESSION_END_REASON", "")
-        elif event in {HookEvent.SUBAGENT_START, HookEvent.SUBAGENT_STOP}:
-            payload.update(agent_id=raw.get("SUBAGENT_ID", ""),
-                           agent_type=raw.get("SUBAGENT_AGENT_TYPE", ""))
-            if event == HookEvent.SUBAGENT_STOP:
-                payload.update(
-                    stop_hook_active=_coerce_hook_bool(raw.get("STOP_HOOK_ACTIVE"), False),
-                    agent_transcript_path=raw.get("SUBAGENT_TRANSCRIPT_PATH") or None,
-                    last_assistant_message=raw.get("SUBAGENT_SUMMARY"),
-                )
-        elif event == HookEvent.STOP:
-            payload.update(stop_hook_active=_coerce_hook_bool(raw.get("STOP_HOOK_ACTIVE"), False),
-                           last_assistant_message=raw.get("DRAFT_REPLY"))
-        elif event in {HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT}:
-            payload["trigger"] = raw.get("COMPACT_TRIGGER", "manual")
-        elif event == HookEvent.POST_MODEL_REQUEST:
-            payload.update(status=raw.get("MODEL_REQUEST_STATUS", "cancelled"),
-                           error=raw.get("MODEL_REQUEST_ERROR") or None,
-                           token_usage=_json_value(raw.get("MODEL_REQUEST_USAGE"), None))
-        return payload
     payload: dict[str, Any] = {
         "session_id": raw.get("SESSION_ID", ""),
         "transcript_path": raw.get("TRANSCRIPT_PATH", ""),
@@ -383,11 +369,16 @@ def _hook_input(
         if event != HookEvent.PERMISSION_REQUEST:
             payload["tool_use_id"] = tool_use_id
 
-    if event == HookEvent.POST_TOOL_USE_FAILURE:
+    if event == HookEvent.POST_TOOL_USE:
+        payload["tool_response"] = _json_value(raw.get("TOOL_RESULT", ""), "")
+    elif event == HookEvent.POST_TOOL_USE_FAILURE:
         payload.update({
             "error": raw.get("TOOL_ERROR", ""),
             "is_interrupt": _coerce_hook_bool(raw.get("TOOL_IS_INTERRUPT"), False),
         })
+    elif event == HookEvent.PERMISSION_REQUEST:
+        suggestions = _json_value(raw.get("PERMISSION_SUGGESTIONS_JSON", ""), [])
+        payload["permission_suggestions"] = suggestions if isinstance(suggestions, list) else []
     elif event == HookEvent.PERMISSION_DENIED:
         payload["reason"] = raw.get("PERMISSION_DENIED_REASON", "")
     elif event == HookEvent.NOTIFICATION:
@@ -402,6 +393,26 @@ def _hook_input(
             "error_details": raw.get("STOP_FAILURE_ERROR_DETAILS", ""),
             "last_assistant_message": raw.get("LAST_ASSISTANT_MESSAGE", ""),
         })
+    elif event == HookEvent.STOP:
+        payload.update({
+            "stop_hook_active": _coerce_hook_bool(
+                raw.get("STOP_HOOK_ACTIVE"), False
+            ),
+            "last_assistant_message": raw.get("DRAFT_REPLY", ""),
+        })
+    elif event == HookEvent.SUBAGENT_START:
+        payload.update({
+            "agent_id": raw.get("SUBAGENT_ID", ""),
+            "agent_type": raw.get("SUBAGENT_AGENT_TYPE", ""),
+        })
+    elif event == HookEvent.SUBAGENT_STOP:
+        payload.update({
+            "stop_hook_active": False,
+            "agent_id": raw.get("SUBAGENT_ID", ""),
+            "agent_transcript_path": raw.get("SUBAGENT_TRANSCRIPT_PATH", ""),
+            "agent_type": raw.get("SUBAGENT_AGENT_TYPE", ""),
+            "last_assistant_message": raw.get("SUBAGENT_SUMMARY", ""),
+        })
     elif event == HookEvent.TEAMMATE_IDLE:
         payload.update({"teammate_name": raw.get("TEAMMATE_NAME", ""), "team_name": raw.get("TEAM_NAME", "")})
     elif event in {HookEvent.TASK_CREATED, HookEvent.TASK_COMPLETED}:
@@ -412,6 +423,19 @@ def _hook_input(
             "teammate_name": raw.get("TEAMMATE_NAME", ""),
             "team_name": raw.get("TEAM_NAME", ""),
         })
+    elif event == HookEvent.USER_PROMPT_SUBMIT:
+        payload["prompt"] = raw.get("USER_PROMPT", "")
+    elif event == HookEvent.SESSION_START:
+        payload["source"] = raw.get("SESSION_SOURCE", "")
+    elif event == HookEvent.SESSION_END:
+        payload["reason"] = raw.get("SESSION_END_REASON", "")
+    elif event in {HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT}:
+        payload.pop("event")
+        payload["hook_event_name"] = "PreCompact" if event is HookEvent.PRE_COMPACT else "PostCompact"
+        payload.pop("permission_mode", None)
+        payload["transcript_path"] = raw.get("TRANSCRIPT_PATH") or None
+        payload.update(turn_id=raw.get("TURN_ID", ""), model=raw.get("MODEL", ""),
+                       trigger=raw.get("COMPACT_TRIGGER", "manual"))
     elif event == HookEvent.CONFIG_CHANGE:
         payload.update({"source": raw.get("CONFIG_CHANGE_SOURCE", ""), "file_path": raw.get("CONFIG_FILE_PATH", "")})
     elif event == HookEvent.CWD_CHANGED:
@@ -515,7 +539,7 @@ class HookResult:
     # Extra context injected into the conversation.
     additional_context: str = ""
     custom_instructions: str = ""
-    # Replacement tool input from a PreToolUse hook.
+    # Replacement text for user_prompt_submit hooks.
     updated_input: Any = None
     updated_mcp_tool_output: Any = None
     retry: bool = False
@@ -591,6 +615,7 @@ class _HookSessionRuntime:
     """
 
     async_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
+    async_commands: dict[asyncio.Task[Any], PendingAsyncCommand] = field(default_factory=dict)
     consumed_once_hooks: set[str] = field(default_factory=set)
     inflight_once_hooks: set[str] = field(default_factory=set)
     async_context: list[str] = field(default_factory=list)
@@ -669,31 +694,6 @@ class HookManager:
             owner_session_id=self.owner_session_id,
             scope_id=self.scope_id,
         )
-
-    def fork_for_subagent(self, *, workspace_root: Path | None, session_id: str) -> "HookManager":
-        """Give a child thread its own bindings and async hook lifetime."""
-        return HookManager(
-            hooks=self.hooks,
-            workspace_root=workspace_root,
-            allowed_http_hook_urls=self.allowed_http_hook_urls,
-            http_hook_allowed_env_vars=self.http_hook_allowed_env_vars,
-            snapshot=self.snapshot,
-            registry_fingerprint=self.registry_fingerprint,
-            owner_session_id=session_id,
-            scope_id=session_id,
-        )
-
-    def for_memory_consolidation(self) -> "HookManager":
-        """Keep policy hooks while excluding user, project and plugin hooks."""
-        manager = self.fork_for_turn(workspace_root=self.workspace_root)
-        excluded = {"user", "project", "session_flags", "plugin"}
-        manager.hooks = {
-            event: [entry for entry in entries if entry.source not in excluded]
-            for event, entries in self.hooks.items()
-        }
-        manager.bind_runtime(llm=self._llm, tool_registry=self._tool_registry,
-                             tool_context=self._tool_context, mcp_executor=self._mcp_executor)
-        return manager
 
     @classmethod
     def from_snapshot(
@@ -787,12 +787,14 @@ class HookManager:
 
     @property
     def pending_async_hooks(self) -> int:
-        return len(self._async_tasks)
+        return len(self._async_tasks | self._session_runtime.async_commands.keys())
 
     async def drain_async_hooks(self) -> None:
         while self._async_tasks:
             tasks = tuple(self._async_tasks)
             await asyncio.gather(*tasks, return_exceptions=True)
+        if self._session_runtime.async_commands:
+            await self.finalize_async_hooks()
 
     async def finalize_async_hooks(self) -> None:
         """Cancel and drain unfinished session hooks during final teardown."""
@@ -803,8 +805,22 @@ class HookManager:
                 task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        # A wrapper cancelled before its first poll never enters the coroutine's
+        # finally block. The session already owns the physical command here.
+        from backend.hooks.runners import _terminate_hook_operation
+
+        errors: list[Exception] = []
+        for task, command in tuple(self._session_runtime.async_commands.items()):
+            try:
+                await _terminate_hook_operation(command.process, command.operation, command.capture)
+            except Exception as exc:
+                errors.append(exc)
+            else:
+                self._session_runtime.async_commands.pop(task, None)
         self._async_tasks.clear()
         self._inflight_once_hooks.clear()
+        if errors:
+            raise ExceptionGroup("Async hook processes could not be finalized", errors)
 
     def take_async_context(self) -> tuple[str, ...]:
         values = tuple(self._async_context)
@@ -892,7 +908,10 @@ class HookManager:
         extras["TOOL_CALL_ID"] = tool_call_id
         extras["SESSION_ID"] = session_id
         extras["PERMISSION_MODE"] = permission_mode
-        extras["TOOL_RESULT"] = json.dumps(result_content, ensure_ascii=False, separators=(",", ":"))
+        extras["TOOL_RESULT"] = (
+            result_content[:_RESULT_TRUNCATE] if isinstance(result_content, str)
+            else json.dumps(result_content, ensure_ascii=False, separators=(",", ":"))
+        )
         return await self._run_event(
             HookEvent.POST_TOOL_USE, match_target=tool_name, env_extras=extras,
         )
@@ -960,6 +979,7 @@ class HookManager:
         tool_call_id: str = "",
         session_id: str = "",
         permission_mode: str = "",
+        permission_suggestions: list[dict[str, Any]] | None = None,
     ) -> HookResult:
         extras = self._tool_env(tool_name, args)
         extras["TOOL_CALL_ID"] = tool_call_id
@@ -967,6 +987,12 @@ class HookManager:
         extras["PERMISSION_LEVEL"] = permission_level
         extras["SESSION_ID"] = session_id
         extras["PERMISSION_MODE"] = permission_mode
+        try:
+            extras["PERMISSION_SUGGESTIONS_JSON"] = json.dumps(
+                permission_suggestions or [], ensure_ascii=False, default=str
+            )
+        except (TypeError, ValueError):
+            extras["PERMISSION_SUGGESTIONS_JSON"] = "[]"
         return await self._run_event(
             HookEvent.PERMISSION_REQUEST,
             match_target=tool_name,
@@ -1028,12 +1054,6 @@ class HookManager:
             },
         )
 
-    async def run_subagent_start_once(self, *, subagent_id: str, agent_type: str) -> HookResult:
-        if self._session_started:
-            return HookResult()
-        self._session_started = True
-        return await self.run_subagent_start(subagent_id=subagent_id, agent_type=agent_type)
-
     async def run_subagent_stop(
         self,
         *,
@@ -1041,7 +1061,6 @@ class HookManager:
         agent_type: str = "",
         status: str = "",
         summary: str = "",
-        stop_hook_active: bool = False,
     ) -> HookResult:
         return await self._run_event(
             HookEvent.SUBAGENT_STOP,
@@ -1050,8 +1069,7 @@ class HookManager:
                 "SUBAGENT_ID": subagent_id,
                 "SUBAGENT_AGENT_TYPE": agent_type,
                 "SUBAGENT_STATUS": status,
-                "SUBAGENT_SUMMARY": summary,
-                "STOP_HOOK_ACTIVE": "true" if stop_hook_active else "false",
+                "SUBAGENT_SUMMARY": summary[:_RESULT_TRUNCATE],
             },
         )
 
@@ -1270,8 +1288,19 @@ class HookManager:
     async def run_interrupt(
         self, *, turn_id: str, model: str, permission_mode: str, transcript_path: str = "",
     ) -> HookResult:
+        from backend.hooks.runners import HookRuntimeBindings
+
+        context = (
+            replace(self._tool_context, cancel_event=None, deadline_monotonic=None)
+            if self._tool_context is not None else None
+        )
+        runtime = HookRuntimeBindings(
+            workspace_root=self.workspace_root, llm=self._llm,
+            tool_registry=self._tool_registry, tool_context=context,
+            mcp_executor=self._mcp_executor,
+        )
         return await self._run_event(
-            HookEvent.INTERRUPT, match_target="", runtime=self._teardown_runtime(),
+            HookEvent.INTERRUPT, match_target="", runtime=runtime,
             env_extras={
                 "SESSION_ID": self.scope_id or self.owner_session_id, "TURN_ID": turn_id,
                 "MODEL": model, "PERMISSION_MODE": permission_mode,
@@ -1285,29 +1314,14 @@ class HookManager:
         session_id: str = "",
         reason: str = "",
     ) -> HookResult:
-        # Codex dispatches SessionEnd with the fixed matcher/reason "other".
-        del reason
+        canonical_reason = _canonical_session_end_reason(reason)
         return await self._run_event(
             HookEvent.SESSION_END,
-            match_target="other",
-            runtime=self._teardown_runtime(),
+            match_target=canonical_reason,
             env_extras={
                 "SESSION_ID": session_id,
-                "SESSION_END_REASON": "other",
+                "SESSION_END_REASON": canonical_reason,
             },
-        )
-
-    def _teardown_runtime(self) -> Any:
-        from backend.hooks.runners import HookRuntimeBindings
-
-        context = (
-            replace(self._tool_context, cancel_event=None, deadline_monotonic=None)
-            if self._tool_context is not None else None
-        )
-        return HookRuntimeBindings(
-            workspace_root=self.workspace_root, llm=self._llm,
-            tool_registry=self._tool_registry, tool_context=context,
-            mcp_executor=self._mcp_executor,
         )
 
     async def run_session_start(self, session_id: str = "", *, source: str = "startup") -> HookResult:
@@ -1331,29 +1345,8 @@ class HookManager:
     async def run_user_prompt_submit(self, user_message: str) -> HookResult:
         return await self._run_event(
             HookEvent.USER_PROMPT_SUBMIT, match_target="prompt",
-            env_extras={"USER_PROMPT": user_message},
+            env_extras={"USER_PROMPT": user_message[:_PROMPT_TRUNCATE]},
         )
-
-    async def run_pre_model_request(self) -> HookResult:
-        return await self._run_event(
-            HookEvent.PRE_MODEL_REQUEST, match_target="", runtime=self._teardown_runtime(),
-        )
-
-    def has_synchronous_post_model_request(self) -> bool:
-        return any(not entry.run_async for entry in self.hooks.get(HookEvent.POST_MODEL_REQUEST, ()))
-
-    def schedule_post_model_request(
-        self, *, status: str, error: str | None, token_usage: dict[str, int] | None,
-    ) -> asyncio.Task[Any] | None:
-        if not self.has_hooks(HookEvent.POST_MODEL_REQUEST):
-            return None
-        task = asyncio.create_task(self._run_event(
-            HookEvent.POST_MODEL_REQUEST, match_target="", runtime=self._teardown_runtime(),
-            env_extras={"MODEL_REQUEST_STATUS": status, "MODEL_REQUEST_ERROR": error or "",
-                        "MODEL_REQUEST_USAGE": json.dumps(token_usage)},
-        ), name="hook:post_model_request")
-        self._track_async_task(task, HookEvent.POST_MODEL_REQUEST)
-        return task
 
     async def run_pre_compact(
         self,
@@ -1379,7 +1372,7 @@ class HookManager:
     ) -> HookResult:
         del user_message, tool_results
         extras: dict[str, str] = {
-            "DRAFT_REPLY": draft_reply,
+            "DRAFT_REPLY": draft_reply[:_DRAFT_TRUNCATE],
             "STOP_HOOK_ACTIVE": "true" if stop_hook_active else "false",
         }
         return await self._run_event(
@@ -1431,16 +1424,7 @@ class HookManager:
 
         if not synchronous:
             return HookResult()
-        from backend.agent.turn_trace import turn_trace_shared
-
-        hook_trace = turn_trace_shared(
-            "turn[{}]".format(
-                getattr(getattr(runtime, "tool_context", None), "conversation_id", "") or ""
-            )
-        )
-        hook_trace.mark("hooks.selected[{}]={}".format(len(synchronous), ",".join(entry.entry_id for entry in synchronous)[:160]))
         try:
-            hook_trace.mark("hooks.execute.start")
             executions = await execute_handlers(
                 synchronous,
                 lambda entry: self._execute_entry(entry, event, env_extras, runtime=runtime),
@@ -1452,7 +1436,6 @@ class HookManager:
                     self._inflight_once_hooks.discard(entry.entry_id)
             raise
 
-        hook_trace.mark("hooks.execute.done")
         reduction = reduce_hook_executions(
             event,
             executions,
@@ -1464,6 +1447,8 @@ class HookManager:
             entry = execution.entry
             if not entry.once:
                 continue
+            if execution.backgrounded:
+                continue
             self._inflight_once_hooks.discard(entry.entry_id)
             if execution_succeeded_for_once(
                 event,
@@ -1472,8 +1457,6 @@ class HookManager:
             ) and not (event == HookEvent.WORKTREE_CREATE and reduction.failed):
                 self._consumed_once_hooks.add(entry.entry_id)
         self._last_run_summaries = reduction.run_summaries
-        tool_context = runtime.tool_context if runtime is not None else self._tool_context
-        additional_context = await self._materialize_context(reduction, tool_context)
         return HookResult(
             blocked=reduction.blocked,
             failed=reduction.failed,
@@ -1483,7 +1466,7 @@ class HookManager:
             errors=reduction.errors,
             permission_decision=reduction.permission_decision,
             permission_decision_reason=reduction.permission_decision_reason,
-            additional_context=additional_context,
+            additional_context=reduction.additional_context,
             custom_instructions=reduction.custom_instructions,
             updated_input=reduction.updated_input,
             updated_mcp_tool_output=reduction.updated_mcp_tool_output,
@@ -1499,18 +1482,6 @@ class HookManager:
             run_summaries=reduction.run_summaries,
         )
 
-    async def _materialize_context(self, reduction: Any, tool_context: Any | None) -> str:
-        if not reduction.additional_context_items:
-            return reduction.additional_context
-        from backend.hooks.task_output import spill_hook_context
-
-        conversation_id = str(getattr(tool_context, "conversation_id", "") or self.scope_id)
-        workspace_root = getattr(tool_context, "workspace_root", None) or self.workspace_root
-        parts = []
-        for value, entry in reduction.additional_context_items:
-            parts.append(await spill_hook_context(value, entry, conversation_id=conversation_id, workspace_root=workspace_root))
-        return "\n\n".join(parts)
-
     async def _execute_entry(
         self,
         entry: _HookEntry,
@@ -1518,6 +1489,7 @@ class HookManager:
         env_extras: dict[str, str] | None,
         *,
         runtime: Any | None = None,
+        allow_async_handshake: bool = True,
     ) -> Any:
         from backend.hooks.runners import HookRuntimeBindings, execute_hook
 
@@ -1530,30 +1502,42 @@ class HookManager:
             http_hook_allowed_env_vars=self.http_hook_allowed_env_vars,
             mcp_executor=self._mcp_executor,
         )
+        if allow_async_handshake:
+            completion_runtime = replace(
+                resolved_runtime,
+                register_async_command=None,
+            )
+            resolved_runtime = replace(
+                resolved_runtime,
+                register_async_command=lambda command: self._schedule_dynamic_async_command(
+                    command,
+                    entry,
+                    event,
+                    runtime=completion_runtime,
+                ),
+            )
         hook_fields = dict(env_extras or {})
         tool_context = resolved_runtime.tool_context
         metadata = getattr(tool_context, "metadata", {}) if tool_context is not None else {}
         if isinstance(metadata, dict):
-            hook_fields["SESSION_ID"] = str(
-                self.scope_id or metadata.get("hook_session_id")
-                or getattr(tool_context, "conversation_id", "") or hook_fields.get("SESSION_ID")
-                or metadata.get("conversation_id") or getattr(tool_context, "session_id", "")
-                or metadata.get("session_id") or ""
+            hook_fields.setdefault(
+                "SESSION_ID",
+                str(
+                    metadata.get("hook_session_id")
+                    or metadata.get("conversation_id")
+                    or metadata.get("session_id")
+                    or ""
+                ),
             )
             hook_fields.setdefault("TRANSCRIPT_PATH", str(metadata.get("transcript_path") or ""))
             hook_fields.setdefault("AGENT_ID", str(metadata.get("agent_id") or ""))
             hook_fields.setdefault("AGENT_TYPE", str(metadata.get("agent_type") or ""))
-            hook_fields.setdefault("TURN_ID", str(getattr(tool_context, "turn_id", "") or metadata.get("turn_id") or ""))
-            run_context = getattr(tool_context, "run_context", None)
-            model_snapshot = getattr(tool_context, "model_execution", None)
-            if model_snapshot is None and run_context is not None:
-                model_snapshot = run_context.active_model_execution or run_context.model_execution
-            hook_fields.setdefault("MODEL", model_snapshot.model if model_snapshot is not None else str(metadata.get("model") or ""))
-            permission = getattr(tool_context, "permission", None)
-            if permission is not None:
-                hook_fields["PERMISSION_MODE"] = "bypassPermissions" if permission.approval_policy == "never" else "default"
-            elif hook_fields.get("PERMISSION_MODE") not in {"default", "bypassPermissions"}:
-                hook_fields["PERMISSION_MODE"] = "bypassPermissions" if hook_fields.get("PERMISSION_MODE") == "bypass" else "default"
+            if event in {HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT}:
+                hook_fields.setdefault("TURN_ID", tool_context.turn_id)
+                model_snapshot = tool_context.model_execution
+                if model_snapshot is None and tool_context.run_context is not None:
+                    model_snapshot = tool_context.run_context.active_model_execution or tool_context.run_context.model_execution
+                hook_fields.setdefault("MODEL", model_snapshot.model if model_snapshot is not None else str(metadata.get("model") or ""))
         hook_input = _hook_input(event, hook_fields, self.workspace_root)
         # Keeping command-hook JSON ASCII avoids PowerShell/Git
         # Bash code-page reinterpretation on Windows.
@@ -1607,6 +1591,28 @@ class HookManager:
                 owner.retain_lifecycle_task(task, label="async_prompt_hook", llm=runtime.llm)
         self._track_async_task(task, event)
 
+    def _schedule_dynamic_async_command(
+        self,
+        command: Any,
+        entry: _HookEntry,
+        event: HookEvent,
+        *,
+        runtime: Any,
+    ) -> None:
+        process_id = f"async_hook_{command.process.pid}"
+        task = asyncio.create_task(
+            self._run_dynamic_async_command(
+                process_id,
+                command,
+                entry,
+                event,
+                runtime=runtime,
+            ),
+            name=f"hook:{event.value}:{entry.raw_matcher or '*'}:{process_id}",
+        )
+        self._session_runtime.async_commands[task] = command
+        self._track_async_task(task, event)
+
     def _track_async_task(
         self,
         task: asyncio.Task[Any],
@@ -1622,8 +1628,66 @@ class HookManager:
                 done.result()
             except Exception as exc:
                 logger.warning("Async hook failed for event %s: %s", event.value, exc)
+                if getattr(exc, "cleanup_pending", False):
+                    return
+            command = self._session_runtime.async_commands.get(done)
+            if command is not None and command.operation.done() and command.process.returncode is not None:
+                self._session_runtime.async_commands.pop(done, None)
 
         task.add_done_callback(_done)
+
+    async def _run_dynamic_async_command(
+        self,
+        process_id: str,
+        command: Any,
+        entry: _HookEntry,
+        event: HookEvent,
+        *,
+        runtime: Any,
+    ) -> None:
+        from backend.hooks.runners import HookExecutionError, finish_async_command
+
+        try:
+            result = await finish_async_command(command)
+        except asyncio.CancelledError:
+            if entry.once:
+                self._inflight_once_hooks.discard(entry.entry_id)
+            await _emit_async_hook_response(
+                process_id=process_id,
+                entry=entry,
+                event=event,
+                stdout="",
+                stderr="Hook cancelled",
+                exit_code=1,
+                outcome="cancelled",
+                tool_context=runtime.tool_context,
+            )
+            raise
+        except HookExecutionError as exc:
+            if entry.once:
+                self._inflight_once_hooks.discard(entry.entry_id)
+            await _emit_async_hook_response(
+                process_id=process_id,
+                entry=entry,
+                event=event,
+                stdout="",
+                stderr=str(exc),
+                exit_code=1,
+                outcome="error",
+                tool_context=runtime.tool_context,
+            )
+            raise
+
+        await self._complete_async_entry(
+            process_id,
+            entry,
+            event,
+            result.stdout,
+            result.stderr,
+            result.exit_code,
+            runtime=runtime,
+            semantic_stdout=result.semantic_stdout,
+        )
 
     async def _run_async_entry(
         self,
@@ -1640,6 +1704,7 @@ class HookManager:
                 event,
                 env_extras,
                 runtime=runtime,
+                allow_async_handshake=False,
             )
         except asyncio.CancelledError:
             if entry.once:
@@ -1693,16 +1758,21 @@ class HookManager:
         runtime: Any,
         semantic_stdout: str | None = None,
     ) -> None:
-        from backend.hooks.reducer import _CODEX_EVENTS
-
-        if event.value in _CODEX_EVENTS | {"interrupt", "pre_compact", "post_compact"}:
+        if event == HookEvent.INTERRUPT:
             from backend.hooks.dispatcher import HookExecution
             from backend.hooks.reducer import reduce_hook_executions
 
+            # A dynamically backgrounded command includes its async handshake
+            # in the captured output. Interrupt's remaining output still has
+            # to satisfy the complete, strict Interrupt schema.
+            output = semantic_stdout if semantic_stdout is not None else stdout
+            output = "\n".join(
+                line for line in output.splitlines()
+                if not ((payload := parse_json_object(line)) is not None and payload.get("async") is True)
+            ).strip()
             execution = HookExecution(
-                entry=entry, stdout=stdout, stderr=stderr, exit_code=exit_code,
+                entry=entry, stdout=output, stderr=stderr, exit_code=exit_code,
                 configured_order=0, completion_order=0, duration_ms=0,
-                semantic_stdout=semantic_stdout,
             )
             reduction = reduce_hook_executions(
                 event, [execution], expected_event_name=hook_event_name(event),
@@ -1711,18 +1781,12 @@ class HookManager:
                 self._inflight_once_hooks.discard(entry.entry_id)
                 if not reduction.failed:
                     self._consumed_once_hooks.add(entry.entry_id)
-            if reduction.additional_context and not entry.async_rewake:
-                self._async_context.append(await self._materialize_context(reduction, runtime.tool_context))
             await _emit_async_hook_response(
-                process_id=process_id, entry=entry, event=event,
-                stdout=reduction.stdout or reduction.system_message,
-                stderr="\n".join(dict.fromkeys(part for part in (stderr, *reduction.errors) if part)),
-                exit_code=exit_code,
+                process_id=process_id, entry=entry, event=event, stdout=stdout,
+                stderr=stderr or "\n".join(reduction.errors), exit_code=exit_code,
                 outcome="error" if reduction.failed else "success",
                 tool_context=runtime.tool_context,
             )
-            if entry.async_rewake and exit_code == 2:
-                self._enqueue_async_rewake(process_id, entry, event, stderr or stdout, tool_context=runtime.tool_context)
             return
 
         visible_stdout, response = _async_hook_stdout(

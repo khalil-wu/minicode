@@ -52,7 +52,72 @@ describe("MenuOverlay mentions", () => {
       selectedSkills: [],
       availableSkills: [],
       slashCommands: [],
+      contextUsage: null,
     });
+  });
+
+  it.each([
+    { kind: "slash" as const, filter: "/mcp", name: "/mcp", description: "Inspect MCP servers" },
+    { kind: "skill" as const, filter: "$writer", name: "Writer", description: "Write documents" },
+    { kind: "mention" as const, filter: "@helper", name: "@helper", description: "Use helper tools" },
+  ])("keeps the $kind title and ordinary description in one compact row without an invented Enter hint", async ({ kind, filter, name, description }) => {
+    useAppStore.setState({
+      slashCommands: [{ name: "mcp", command: "mcp", label: "/mcp", type: "local", source: "builtin", description: "Inspect MCP servers" }],
+      availableSkills: [{ name: "writer", display_name: "Writer", description: "Write documents" }],
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ plugins: [
+      { id: "helper@local", name: "helper", marketplace: "local", enabled: true, description: "Use helper tools" },
+    ] })));
+    render(<MenuOverlay open kind={kind} filter={filter} onSelect={vi.fn()} />);
+    const title = await screen.findByText(name, { selector: ".composer-menu-name" });
+    const detail = screen.getByText(description, { selector: ".composer-menu-description" });
+    const option = screen.getByRole("option", { name: new RegExp(description) });
+    expect(option.contains(title)).toBe(true);
+    expect(option.contains(detail)).toBe(true);
+    expect(screen.queryByText("Enter")).toBeNull();
+  });
+
+  it.each(["builtin", "project"] as const)("uses the actual %s /mcp command identity for its icon and retains keyboard selection", source => {
+    const onSelect = vi.fn();
+    useAppStore.setState({ slashCommands: [
+      { name: "mcp", command: "mcp", label: "/mcp", type: source === "builtin" ? "local" : "template", source, description: "MCP command" },
+      { name: "init", command: "init", label: "/init", type: "template", source: "builtin", description: "Initialize instructions" },
+    ] });
+    render(<MenuOverlay open kind="slash" filter="/" onSelect={onSelect} />);
+    const mcp = screen.getByRole("option", { name: /\/mcp MCP command/ });
+    const init = screen.getByRole("option", { name: /\/init Initialize instructions/ });
+    expect(mcp.querySelector(source === "builtin" ? ".lucide-paperclip" : ".lucide-file-text")).toBeTruthy();
+    expect(init.querySelector(".lucide-file")).toBeTruthy();
+    expect(mcp.querySelector(".lucide-command")).toBeNull();
+    expect(init.querySelector(".lucide-file-text")).toBeNull();
+    fireEvent.keyDown(document, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith("/mcp");
+  });
+
+  it("uses the existing context ring as the builtin compact icon without a spinner, label or tooltip", () => {
+    useAppStore.setState({ contextUsage: { used: 50, limit: 100 }, slashCommands: [
+      { name: "compact", command: "compact", label: "/compact", type: "local", source: "builtin", description: "Compact context" },
+    ] });
+    render(<MenuOverlay open kind="slash" filter="/compact" onSelect={vi.fn()} />);
+    const option = screen.getByRole("option", { name: /\/compact Compact context/ });
+    const ring = option.querySelector<HTMLElement>(".mc-usage-ring-meter")!;
+    expect(ring.style.background).toContain("180deg");
+    expect(ring.querySelector(".mc-usage-ring-inner")).toBeTruthy();
+    expect(option.querySelector(".mc-usage-ring-label, .mc-usage-details, .lucide-loader-circle")).toBeNull();
+    act(() => useAppStore.setState({ contextUsage: { used: 75, limit: 100 } }));
+    expect(ring.style.background).toContain("270deg");
+    act(() => useAppStore.setState({ contextUsage: null }));
+    expect(ring.style.background).toContain("0deg");
+  });
+
+  it("keeps a project /compact prompt distinct from the builtin context ring", () => {
+    useAppStore.setState({ contextUsage: { used: 50, limit: 100 }, slashCommands: [
+      { name: "compact", command: "compact", label: "/compact", type: "template", source: "project", description: "Project prompt" },
+    ] });
+    render(<MenuOverlay open kind="slash" filter="/compact" onSelect={vi.fn()} />);
+    const option = screen.getByRole("option", { name: /\/compact Project prompt/ });
+    expect(option.querySelector(".lucide-file-text")).toBeTruthy();
+    expect(option.querySelector(".mc-usage-ring-meter")).toBeNull();
   });
 
   it("keeps the actual plugin label, stable icon descriptor and model identity through the mention picker", async () => {

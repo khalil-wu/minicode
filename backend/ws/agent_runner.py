@@ -4668,12 +4668,7 @@ class SessionAgentRunnerMixin:
         # Rebuilding the full history and its token cache is CPU-bound and
         # grows with the conversation; keep it off the event loop so other
         # sessions' deltas and this socket's acknowledgements keep flowing.
-        from backend.agent.turn_trace import turn_trace_shared
-
-        run_trace = turn_trace_shared(f"turn[{conversation.id}]")
-        run_trace.mark("run.start")
         await asyncio.to_thread(run_context_builder.load_snapshot, run_context_snapshot)
-        run_trace.mark("run.load_snapshot")
         normalized_attachments = list(attachments or [])
         # These values are host capabilities or concrete runtime owners, never
         # transport metadata. A local adapter/checkpoint resume may supply
@@ -4794,7 +4789,7 @@ class SessionAgentRunnerMixin:
                 conversation.workspace_root or run_workspace_root,
             )
             conversation = self.conversation_repo.get_conversation(conversation.id) or conversation
-            run_permission_context = replace(self.permission_checker.build_context(
+            run_permission_context = self.permission_checker.build_context(
                 mode=run_permission_context.mode,
                 session_overrides=run_permission_context.session_overrides,
                 command_prompt_allow_rules=run_permission_context.command_prompt_allow_rules,
@@ -4810,7 +4805,7 @@ class SessionAgentRunnerMixin:
                 granular_approval=run_permission_context.granular_approval,
                 sandbox_mode=run_permission_context.sandbox_mode,
                 requirements_source=run_permission_context.requirements_source,
-            ), conversation_id=conversation.id)
+            )
 
         if run_memory_policy["enabled"] and run_workspace_root is not None and str(conversation.conversation_type) == "main":
             from backend.memory.generation import schedule_memory_startup
@@ -4866,7 +4861,7 @@ class SessionAgentRunnerMixin:
             is_active_owner = self.active_conversation_id == owner_id
             if is_active_owner:
                 self.set_permission_context_mode(target_mode, source=source)
-                self.permission_context = replace(self.permission_checker.build_context(
+                self.permission_context = self.permission_checker.build_context(
                     mode=self.permission_context.mode,
                     session_overrides=self.permission_context.session_overrides,
                     command_prompt_allow_rules=self.permission_context.command_prompt_allow_rules,
@@ -4886,17 +4881,15 @@ class SessionAgentRunnerMixin:
                     granular_approval=self.permission_context.granular_approval,
                     sandbox_mode=self.permission_context.sandbox_mode,
                     requirements_source=self.permission_context.requirements_source,
-                ), conversation_id=owner_id)
+                )
                 await self.emit_permission_mode_updated()
                 await self.session_lifecycle.send_task_runtime_update()
 
             send_conversations = getattr(self, "send_conversation_list", None)
             if callable(send_conversations):
-                run_trace.mark("preloop.conversation_list.start")
                 result = send_conversations()
                 if asyncio.iscoroutine(result):
                     await result
-                run_trace.mark("preloop.conversation_list.done")
             # ``PermissionContext`` is an immutable turn snapshot.  EnterPlanMode
             # updates the live tool context itself; mutating this frozen snapshot
             # used to raise ``FrozenInstanceError`` after the plan-mode switch.
@@ -4924,7 +4917,16 @@ class SessionAgentRunnerMixin:
             ]
             if not normalized:
                 return
-            await self.add_command_prompt_rules_for_conversation(conversation.id, normalized, source=source)
+            if self.active_conversation_id == conversation.id:
+                changed = self._add_command_prompt_allow_rules(
+                    normalized,
+                    source=source,
+                )
+                if changed:
+                    await self.emit_permission_rules_updated(
+                        conversation_id=conversation.id,
+                        source=source,
+                    )
 
         run_context.command_prompt_allow_rules_setter = _add_run_command_prompt_allow_rules
         run_manager = getattr(self, "run_manager", None)
@@ -4941,7 +4943,6 @@ class SessionAgentRunnerMixin:
         run_context.acknowledge_consumed_turn_input = (
             _acknowledge_consumed_turn_input
         )
-        run_trace.mark("runner.setup.ready")
 
         selected_skills = run_metadata.get("selected_skills")
         selected_plugins = run_metadata.get("selected_plugins")
@@ -5054,17 +5055,14 @@ class SessionAgentRunnerMixin:
                 # Pending reasoning already occupies its canonical turn_state
                 # position; publish it before the later user item as well.
                 await _flush_pending_reasoning()
-            run_trace.mark("admission.enter")
             async with self._conversation_projection_lock(conversation.id):
                 latest = await asyncio.to_thread(
                     self.conversation_repo.get_conversation,
                     conversation.id,
                 )
-                run_trace.mark("admission.load_latest")
                 if latest is None:
                     raise RuntimeError("conversation disappeared during turn admission")
                 saved_snapshot = await asyncio.to_thread(run_context_builder.export_snapshot)
-                run_trace.mark("admission.export_snapshot")
                 _merge_ui_agent_state_into_snapshot(
                     saved_snapshot,
                     run_context_snapshot if run_metadata.get("_retry_projection") is not None
@@ -5103,7 +5101,6 @@ class SessionAgentRunnerMixin:
                 if consumed_steer is not None:
                     steer_assistant = _partial_turn_message()
                     record_user_input_block(steer_assistant["blocks"], user_message_id)
-                run_trace.mark("admission.commit_start")
                 committed = await to_thread_cancel_safe(
                     self.conversation_repo.commit_turn_admission,
                     conversation.id,
@@ -5122,7 +5119,6 @@ class SessionAgentRunnerMixin:
                         and not run_metadata.get("_turn_admission_restored")
                         and not str(run_metadata.get("agent_role") or "main").startswith("subagent:") else {}),
                 )
-                run_trace.mark("admission.committed")
                 if committed is None:
                     raise RuntimeError("conversation disappeared during turn admission")
                 if consumed_steer is not None:
@@ -5185,7 +5181,6 @@ class SessionAgentRunnerMixin:
             admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
             admitted_user_id = str(admitted_input.get("user_message_id") or "")
             admitted_command_id = str(admitted_input.get("client_command_id") or "")
-            run_trace.mark("admission.journal.start")
             pending_prompt = pending_admission_journal.get(admitted_user_id)
             if pending_prompt is not None:
                 event_id, prompt_payload = pending_prompt
@@ -5203,7 +5198,6 @@ class SessionAgentRunnerMixin:
                     "run_id": str(run_metadata.get("run_id") or ""),
                 }, event_id=turn_input_consumption_id(admitted_user_id, admitted_command_id),
             )
-            run_trace.mark("admission.journal.done")
             admission_future = run_metadata.get("_turn_admission_future")
             if isinstance(admission_future, asyncio.Future) and not admission_future.done():
                 admission_future.set_result(None)
@@ -5741,7 +5735,6 @@ class SessionAgentRunnerMixin:
                 conversation_id=conversation.id,
                 reason="agent_run_started",
             ))
-            run_trace.mark("runner.pre_loop.ready")
             async for event in self.query_engine.submit(
                 QuerySubmission(
                     user_message=user_message,
