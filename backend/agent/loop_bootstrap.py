@@ -402,6 +402,10 @@ async def bootstrap_agent_loop(
             filesystem_constraints=managed_constraints,
         )
     conversation_id = str(getattr(state, "conversation_id", "") or "").strip()
+    from backend.agent.turn_trace import turn_trace_shared
+
+    trace = turn_trace_shared(f"turn[{conversation_id}]")
+    trace.mark("bootstrap.capabilities.start")
     if run_context.environment_manager is not None:
         from backend.agent.environment_runtime import refresh_run_environment_capabilities
 
@@ -420,6 +424,7 @@ async def bootstrap_agent_loop(
             mcp_optional_startup_grace_ms=model_snapshot.config.mcp_optional_startup_grace_ms)
         skill_manager = prepared_capabilities.skill_manager
         context.bind_skill_manager(skill_manager, workspace_root, config_stack=turn_config_stack)
+        trace.mark("bootstrap.capabilities.done")
         for warning in prepared_capabilities.warnings:
             if emit_event is not None:
                 await emit_event("system_notice", {"conversation_id": conversation_id,
@@ -553,7 +558,7 @@ async def bootstrap_agent_loop(
             workspace_root=Path(workspace_root).expanduser().resolve() if workspace_root else None,
         )
 
-    hook_scope_id = conversation_id or str(session_id or "").strip()
+    hook_scope_id = str(session_id or "").strip() if run_context.is_subagent else conversation_id or str(session_id or "").strip()
     context.bind_background_commands(background_manager)
     run_context.turn_diff_tracker = TurnDiffTracker()
     tool_context = ToolExecutionContext(
@@ -610,6 +615,7 @@ async def bootstrap_agent_loop(
     if run_context.turn_environments is not None:
         from backend.network.runtime import prepare_environment_network_step
 
+        trace.mark("bootstrap.companions.start")
         run_context.network_step = await prepare_environment_network_step(
             environment_manager=run_context.environment_manager, snapshot=run_context.turn_environments,
             config_stack=turn_config_stack, exec_policy_sources=owner.sources)
@@ -619,6 +625,10 @@ async def bootstrap_agent_loop(
         from backend.mcp.cua_repl import register_cua_companion
 
         await register_cua_companion(run_context, agent_session, execution=run_context.model_execution)
+        trace.mark("bootstrap.companions.done")
+        # Capabilities, network step and companions are ready for this turn;
+        # the iteration boundary reuses them instead of rebuilding the surface.
+        run_context.environment_prepared_turn_id = str(turn_kernel.metadata["turn_id"])
     context.bind_tool_context(tool_context)
     from backend.agent.model_activation import admit_model_activation
 
@@ -710,6 +720,12 @@ async def bootstrap_agent_loop(
     )
 
     hook_manager = run_context.hook_manager
+    if run_context.is_subagent and agent_session is not None:
+        if agent_session.hook_manager is not None:
+            hook_manager = agent_session.hook_manager
+        elif hook_manager is not None:
+            hook_manager = hook_manager.fork_for_subagent(workspace_root=workspace_root, session_id=hook_scope_id)
+            agent_session.hook_manager = hook_manager
     if hook_manager is None:
         hook_manager = load_hook_manager_for_workspace(
             workspace_root,
@@ -718,6 +734,10 @@ async def bootstrap_agent_loop(
             session_id=hook_scope_id,
             owner_session_id=session_id,
         )
+        if run_context.is_subagent and agent_session is not None:
+            agent_session.hook_manager = hook_manager
+    if run_context.is_subagent and resolved_metadata.get("_subagent_hook_start_source") == "resume":
+        hook_manager._session_started = True
     hook_manager.bind_runtime(
         llm=request.llm,
         tool_registry=request.tool_registry,
@@ -736,6 +756,7 @@ async def bootstrap_agent_loop(
     if agent_session is not None:
         network_service.bind_review_source(lambda: agent_session.context_builder._tool_execution_context
             if agent_session.active_turn else None)
+    trace.mark("bootstrap.preflight.start")
     preflight = await prepare_turn_input(
         user_message,
         state=state,
@@ -752,6 +773,7 @@ async def bootstrap_agent_loop(
         ),
     )
     user_message = preflight.user_message
+    trace.mark("bootstrap.preflight.done")
     # Preserve SessionStart side-channel values in the turn metadata so
     # downstream prompt/watcher integrations cannot accidentally lose them
     # when the bootstrap object is handed to the main loop.
@@ -767,11 +789,12 @@ async def bootstrap_agent_loop(
         resolved_metadata["hook_initial_user_message"] = initial_user_message
     if watch_paths:
         resolved_metadata["hook_watch_paths"] = list(watch_paths)
-    register_hook_manager_for_session(
-        hook_scope_id,
-        hook_manager,
-        owner_session_id=session_id,
-    )
+    if not run_context.is_subagent:
+        register_hook_manager_for_session(
+            hook_scope_id,
+            hook_manager,
+            owner_session_id=session_id,
+        )
     chain = QueryChainTracking(
         user_message_preview=user_message[:100],
         source=str(resolved_metadata.get("query_source") or "user"),
