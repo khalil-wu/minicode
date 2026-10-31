@@ -417,7 +417,7 @@ class SkillManager:
         return str(path)
 
 _LINKED_MENTION_RE = re.compile(r"\[\$([A-Za-z0-9_:.-]+)\]\s*\(([^)]+)\)")
-_PLAIN_MENTION_RE = re.compile(r"(?<![\w.-])[$/]([A-Za-z0-9_:.-]+)(?![\w.-])")
+_PLAIN_MENTION_RE = re.compile(r"(?<![\w./-])[$/]([A-Za-z0-9_:.-]+)(?![\w.-])")
 _ENV_VAR_NAMES = {"path", "home", "user", "shell", "pwd", "tmpdir", "temp", "tmp", "lang", "term", "xdg_config_home"}
 
 

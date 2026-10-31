@@ -20,6 +20,7 @@ def catalog(tmp_path, monkeypatch):
 
     skill("workspace", "shared")
     skill("workspace", "only")
+    skill("workspace", "same")
     skill("workspace", "no-invoke", invocable=False)
     skill("user", "shared")
     skill("user", "name_alias")
@@ -89,3 +90,37 @@ def test_relative_and_windows_case_paths_keep_existing_exact_resolution(catalog,
     assert [item.source_path for item in manager.detect(f"Use [$shared]({relative})")] == [str(path)]
     if os.name == "nt":
         assert [item.source_path for item in manager.detect(f"Use [$shared]({str(path).upper()})")] == [str(path)]
+
+
+@pytest.mark.parametrize("scheme", ["app", "mcp", "plugin"])
+@pytest.mark.parametrize("template", ["{uri}", "[@same]({uri})", "[$same]({uri})"], ids=["bare-uri", "at-link", "skill-link"])
+def test_resource_uri_does_not_invoke_a_same_named_skill(catalog, scheme, template):
+    manager, _ = catalog
+    message = template.format(uri=f"{scheme}://same")
+    assert manager.detect(message, selected_skills=[]) == []
+
+
+@pytest.mark.parametrize("message", ["$same", "/same", "Use $same", "Use /same"])
+def test_independent_skill_sigils_still_select_the_current_skill(catalog, message):
+    manager, paths = catalog
+    selected = manager.detect(message)
+    assert [(item.name, item.source_path) for item in selected] == [("same", str(paths["workspace", "same"]))]
+
+
+@pytest.mark.parametrize("prefix", ["", "skill://"], ids=["discovery-path", "skill-uri"])
+def test_plugin_reference_preserves_exact_linked_skill_selection(catalog, prefix):
+    manager, paths = catalog
+    path = paths["user", "shared"]
+    message = f"[@same](plugin://same@local) [$shared]({prefix}{path.as_posix()})"
+    selected = manager.detect(message)
+    assert [(item.name, item.source_path) for item in selected] == [("shared", str(path))]
+
+
+@pytest.mark.parametrize("plugin_reference", ["[@same](plugin://same)", "[@same](plugin://same@local)"])
+def test_deleted_skill_selection_is_not_reactivated_by_the_remaining_plugin(catalog, plugin_reference):
+    manager, paths = catalog
+    path = paths["workspace", "same"]
+    selected = manager.detect(f"[$same]({path.as_posix()}) {plugin_reference}",
+        selected_skills=[{"name": "same", "path": str(path)}])
+    assert [(item.name, item.source_path) for item in selected] == [("same", str(path))]
+    assert manager.detect(plugin_reference, selected_skills=[]) == []
