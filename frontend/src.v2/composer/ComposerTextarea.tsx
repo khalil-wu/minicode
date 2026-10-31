@@ -159,11 +159,12 @@ export const ComposerTextarea = ({
       onHistorySearch?.();
       return;
     }
-    if (menuOpen && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
+    if (menuOpen && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey
+      && ["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
       e.preventDefault();
       return;
     }
-    if (menuOpen) return;
+    if (menuOpen && e.key !== "Enter") return;
     // Escape interrupts the running turn even while the composer is focused
     // (cc: Escape is a global interrupt). Only acts when the turn is live;
     // otherwise fall through so normal Escape handling still applies.

@@ -82,6 +82,7 @@ export type RuntimeSlashMenuSelection =
 
 export type RuntimeSlashPanelDraftDeps = {
   slashPanelOpen: boolean;
+  slashCommands: SlashCommand[];
   openSlashPanel: () => void;
   closeSlashPanel: () => void;
   setMenuFilter: (filter: string) => void;
@@ -106,6 +107,15 @@ const commandProvenanceLabel = (command: SlashCommand): string => {
   if (source === "personal" || source === "user") return "Personal command";
   if (source === "managed") return "Managed command";
   return `${command.source} command`;
+};
+
+const findRuntimeSlashCommand = (command: string, slashCommands: SlashCommand[]): SlashCommand | undefined => {
+  const normalized = command.replace(/^\//, "").toLowerCase();
+  return slashCommands.find((item) =>
+    item.command.toLowerCase() === normalized ||
+    item.name.toLowerCase() === normalized ||
+    item.label.toLowerCase() === `/${normalized}`,
+  );
 };
 
 export const buildRuntimeSlashMenuItems = (slashCommands: SlashCommand[]): RuntimeSlashMenuItem[] => {
@@ -147,11 +157,7 @@ export const buildRuntimeSlashArgMenuItems = (
   const hasSpace = match[2] !== undefined;
   const partialArg = (match[3] || "").toLowerCase();
 
-  const command = slashCommands.find((item) =>
-    item.command.toLowerCase() === commandName ||
-    item.name.toLowerCase() === commandName ||
-    item.label.toLowerCase() === `/${commandName}`,
-  );
+  const command = findRuntimeSlashCommand(commandName, slashCommands);
   if (!command || command.type !== "local" || !command.args?.length) return null;
 
   // Argument stage requires the command name to be fully typed: "/effort" or
@@ -235,35 +241,41 @@ export const getActiveRuntimeSlashCommand = (value: string): string | null => {
 export const shouldTokenizeRuntimeSlashCommand = (
   command: string,
   slashCommands: SlashCommand[],
-): boolean => {
-  const normalized = command.replace(/^\//, "").toLowerCase();
-  const match = slashCommands.find((item) =>
-    item.command.toLowerCase() === normalized ||
-    item.name.toLowerCase() === normalized ||
-    item.label.toLowerCase() === `/${normalized}`
-  );
-  return match?.type === "template";
+): boolean => findRuntimeSlashCommand(command, slashCommands)?.type === "template";
+
+const isRuntimeSlashSkillCommand = (command: string, slashCommands: SlashCommand[]): boolean => {
+  if (!/^\/skills?$/i.test(command)) return false;
+  const catalogCommand = findRuntimeSlashCommand(command, slashCommands);
+  return !catalogCommand || (catalogCommand.type === "local" && (!catalogCommand.source || catalogCommand.source === "builtin"));
 };
 
-const isSkillsSlashLine = (commandLine: string): boolean => /^\/skills?(?:\s|$)/i.test(commandLine);
+export const isRuntimeSlashSkillPicker = (value: string, slashCommands: SlashCommand[]): boolean => {
+  const command = value.match(/^(\/skills?)\s+/i)?.[1];
+  return Boolean(command && isRuntimeSlashSkillCommand(command, slashCommands));
+};
 
 export const syncRuntimeSlashPanelForDraft = (
   value: string,
   deps: RuntimeSlashPanelDraftDeps,
 ): boolean => {
   const slashCommandLine = getRuntimeSlashCommandLine(value);
-  if (slashCommandLine && !deps.slashPanelOpen) {
+  const slashMenuLine = slashCommandLine && (
+    !/\s/.test(slashCommandLine) ||
+    isRuntimeSlashSkillPicker(slashCommandLine, deps.slashCommands) ||
+    buildRuntimeSlashArgMenuItems(slashCommandLine, deps.slashCommands) !== null
+  ) ? slashCommandLine : null;
+  if (slashMenuLine && !deps.slashPanelOpen) {
     deps.openSlashPanel();
-    deps.setMenuFilter(slashCommandLine);
-    if (isSkillsSlashLine(slashCommandLine)) {
+    deps.setMenuFilter(slashMenuLine);
+    if (isRuntimeSlashSkillCommand(slashMenuLine.split(/\s/)[0], deps.slashCommands)) {
       deps.sendClientCommand({ type: "skills.list" });
     }
     return true;
   }
 
   if (deps.slashPanelOpen) {
-    if (slashCommandLine) {
-      deps.setMenuFilter(slashCommandLine);
+    if (slashMenuLine) {
+      deps.setMenuFilter(slashMenuLine);
       return true;
     }
 
@@ -285,8 +297,6 @@ export const resolveRuntimeSlashMenuSelection = (
   state: RuntimeSlashMenuSelectionState,
 ): RuntimeSlashMenuSelection => {
   if (!value) return { kind: "close" };
-
-  if (/^\/skill$/i.test(value.trim())) return { kind: "skill_picker" };
 
   const encodedSkillPath = value.match(/^skill-path:(.+)$/)?.[1];
   const encodedSkillName = value.match(/^skill-name:(.+)$/)?.[1];
@@ -312,6 +322,18 @@ export const resolveRuntimeSlashMenuSelection = (
   }
 
   const command = value.match(/^(\/[a-z0-9][a-z0-9._:-]*)/i)?.[1] ?? value;
+  const slashCommands = state.slashCommands ?? [];
+  if (/^\/skill$/i.test(value.trim()) && isRuntimeSlashSkillCommand(value.trim(), slashCommands)) {
+    return { kind: "skill_picker" };
+  }
+
+  const catalogCommand = findRuntimeSlashCommand(command, slashCommands);
+  if (catalogCommand) {
+    return catalogCommand.type === "template"
+      ? { kind: "tokenize", command }
+      : { kind: "execute", commandLine: value };
+  }
+
   const commandName = command.replace(/^\//, "").toLowerCase();
   const skill = findExactRuntimeSkill(state.availableSkills, commandName);
   if (skill) {
@@ -324,10 +346,6 @@ export const resolveRuntimeSlashMenuSelection = (
         sourceLevel: skill.source_level,
       },
     };
-  }
-
-  if (shouldTokenizeRuntimeSlashCommand(command, state.slashCommands ?? [])) {
-    return { kind: "tokenize", command };
   }
 
   return { kind: "execute", commandLine: value };

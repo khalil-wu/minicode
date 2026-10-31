@@ -1,5 +1,5 @@
 .composer-rich-host { flex: 1 1 140px; min-width: 0; max-width: 100%; }
-.composer-rich-text { min-height: 28px; outline: none; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-prose); color: var(--text-primary); font-size: var(--text-md); line-height: var(--leading-relaxed); font-weight: var(--fw-regular); }
+.composer-rich-text { min-height: 28px; outline: none; overflow-wrap: anywhere; font-family: var(--font-prose); color: var(--text-primary); font-size: var(--text-md); line-height: var(--leading-relaxed); font-weight: var(--fw-regular); }
 .composer-rich-text[data-placeholder]::before { content: attr(data-placeholder); position: absolute; pointer-events: none; color: var(--text-muted); }
 .composer-rich-text p { margin: 0; }
 .composer-rich-text h1, .composer-rich-text h2, .composer-rich-text h3, .composer-rich-text h4, .composer-rich-text h5, .composer-rich-text h6 { margin: 0.4em 0; font-size: 1em; font-weight: var(--fw-semibold); }
@@ -20,7 +20,7 @@
 .composer-rich-text a { color: var(--accent-primary); text-decoration: none; }
 .composer-rich-text [data-rich-image] { color: var(--text-secondary); }
 .composer-rich-text .ProseMirror-selectednode { outline: 1px solid var(--border-focus); }
-.composer-inline-reference { display: inline-flex; align-items: center; gap: 4px; vertical-align: -0.15em; max-width: 100%; color: var(--text-info); font-family: inherit; font-size: inherit; font-weight: var(--fw-semibold); line-height: 1.25; white-space: nowrap; }
-.composer-inline-reference-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.composer-inline-reference { display: inline; color: var(--text-info); font-family: inherit; font-size: inherit; font-weight: var(--fw-medium); white-space: nowrap; }
+.composer-inline-reference-icon { display: inline-flex; box-sizing: content-box; align-items: center; justify-content: center; height: 1em; padding-inline-end: 3px; vertical-align: middle; transform: translateY(calc(.5ex - .5cap)); }
 .composer-inline-reference-icon > svg, .composer-inline-reference-icon .brand-icon { width: 1em; height: 1em; }
-.composer-inline-reference-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.composer-inline-reference-label { white-space: normal; }

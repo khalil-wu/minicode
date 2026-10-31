@@ -18,6 +18,7 @@ import { composerReferenceKey, composerReferenceLabel, conversationIdFromReferen
 import { ComposerReferenceIcon } from "./ComposerReferenceIcon";
 import { openContextReference } from "../chat/contextReferenceActions";
 import { useAppStore } from "../stores";
+import "prosemirror-view/style/prosemirror.css";
 import "./RichComposerEditor.css";
 
 export interface ComposerInputHandle {
@@ -127,8 +128,8 @@ function plugins(placeholder: () => string, plainTextMode: boolean, editorHistor
     ] })],
     editorHistory,
     keymap({ "Mod-z": undo, "Mod-Shift-z": redo, "Mod-y": redo }),
-    ...plainTextMode ? [keymap({ Enter: splitBlock, "Shift-Enter": splitBlock })] : [keymap({ Backspace: undoInputRule,
-      Enter: lineBreak, "Shift-Enter": lineBreak,
+    ...plainTextMode ? [keymap({ Enter: splitBlock, "Shift-Enter": splitBlock, "Alt-Enter": splitBlock })] : [keymap({ Backspace: undoInputRule,
+      Enter: lineBreak, "Shift-Enter": lineBreak, "Alt-Enter": lineBreak,
       ArrowDown: codeArrow(1), ArrowUp: codeArrow(-1),
       "Mod-a": (state, dispatch) => {
         const { $from, $to } = state.selection;

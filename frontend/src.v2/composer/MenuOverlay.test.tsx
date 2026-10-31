@@ -161,6 +161,30 @@ describe("MenuOverlay mentions", () => {
     expect(select).toHaveBeenCalledWith("/help");
   });
 
+  it.each([
+    { key: "Enter", shiftKey: true },
+    { key: "Enter", ctrlKey: true },
+    { key: "Enter", metaKey: true },
+    { key: "Enter", altKey: true },
+    { key: "Tab", shiftKey: true },
+    { key: "Escape", shiftKey: true },
+  ])("leaves modified $key gestures with the editor", (gesture) => {
+    const select = vi.fn(), editorKeyDown = vi.fn();
+    useAppStore.setState({ slashCommands: [{ name: "help", command: "help", label: "/help", type: "local", description: "Help" }] });
+    render(<div className="composer-container"><textarea aria-label="Draft" onKeyDown={editorKeyDown} /><MenuOverlay open kind="slash" filter="/help" onSelect={select} /></div>);
+    expect(fireEvent.keyDown(screen.getByRole("textbox", { name: "Draft" }), gesture)).toBe(true);
+    expect(editorKeyDown).toHaveBeenCalledTimes(1);
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it.each(["Enter", "Tab"])("consumes bare %s for an active empty menu without inserting a newline or choosing an item", (key) => {
+    const select = vi.fn(), editorKeyDown = vi.fn();
+    render(<div className="composer-container"><textarea aria-label="Draft" onKeyDown={editorKeyDown} /><MenuOverlay open kind="skill" filter="$missing" onSelect={select} /></div>);
+    expect(fireEvent.keyDown(screen.getByRole("textbox", { name: "Draft" }), { key })).toBe(false);
+    expect(editorKeyDown).not.toHaveBeenCalled();
+    expect(select).not.toHaveBeenCalled();
+  });
+
   it("keeps files available when plugins fail and supports retrying the plugin request", async () => {
     useAppStore.setState({ workingDirectory: "C:\\workspace" });
     fsListTree.mockResolvedValue([{ name: "app.ts", path: "app.ts", isDirectory: false }]);
@@ -311,6 +335,16 @@ describe("MenuOverlay mentions", () => {
 
     expect(screen.getByRole("option", { name: /openai-docs/ })).toBeTruthy();
     expect(screen.queryByRole("option", { name: /^\/skill/ })).toBeNull();
+  });
+
+  it("keeps a real template /skill command separate from the legacy skill argument picker", () => {
+    useAppStore.setState({
+      availableSkills: [{ name: "openai-docs", description: "Read documentation" }],
+      slashCommands: [{ name: "skill", command: "skill", label: "/skill", type: "template", source: "project", description: "Project prompt" }],
+    });
+    render(<MenuOverlay open kind="slash" filter="/skill " onSelect={vi.fn()} />);
+    expect(screen.getByRole("listbox").getAttribute("data-skills-picker")).toBe("false");
+    expect(screen.queryByRole("option", { name: /openai-docs/ })).toBeNull();
   });
 
   it("prioritizes the exact /skill command over the fuzzy /skills match on Enter", async () => {

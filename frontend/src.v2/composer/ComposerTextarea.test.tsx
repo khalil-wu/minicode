@@ -149,11 +149,11 @@ describe("ComposerTextarea paste-to-attachment", () => {
     expect(onSubmit).toHaveBeenCalledTimes(value.includes("\n") ? 1 : 2);
   });
 
-  it.each(["enter", "cmdIfMultiline", "mod-enter"] as const)("uses Source's opposite follow-up chord for %s only during a real running response", shortcut => {
+  it.each((["enter", "cmdIfMultiline", "mod-enter"] as const).flatMap(shortcut => [false, true].map(menuOpen => ({ shortcut, menuOpen }))))("uses Source's opposite follow-up chord for $shortcut only during a real running response (menu=$menuOpen)", ({ shortcut, menuOpen }) => {
     useAppStore.setState({ sendShortcut: shortcut });
     const normal = vi.fn(), alternate = vi.fn();
     const view = render(<ComposerTextarea value="follow up\nsecond line" onChange={vi.fn()} onSubmit={normal}
-      onAlternateSubmit={alternate} isResponseInProgress />);
+      onAlternateSubmit={alternate} isResponseInProgress menuOpen={menuOpen} />);
     const input = screen.getByRole("textbox");
     const chord = { key: "Enter", metaKey: true, shiftKey: shortcut !== "enter" };
     fireEvent.keyDown(input, { ...chord, isComposing: true });
@@ -164,10 +164,25 @@ describe("ComposerTextarea paste-to-attachment", () => {
     expect(alternate).toHaveBeenCalledExactlyOnceWith();
     expect(normal).not.toHaveBeenCalled();
     view.rerender(<ComposerTextarea value="follow up\nsecond line" onChange={vi.fn()} onSubmit={normal}
-      onAlternateSubmit={alternate} isResponseInProgress={false} />);
+      onAlternateSubmit={alternate} isResponseInProgress={false} menuOpen={menuOpen} />);
     fireEvent.keyDown(input, { key: "Enter", ctrlKey: true });
     expect(normal).toHaveBeenCalledExactlyOnceWith();
     expect(alternate).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a suggestion menu's bare keys separate from editor newline and submit chords", () => {
+    useAppStore.setState({ sendShortcut: "enter" });
+    const submit = vi.fn();
+    render(<ComposerTextarea value="$review" onChange={vi.fn()} onSubmit={submit} menuOpen />);
+    const input = screen.getByRole("textbox");
+    expect(fireEvent.keyDown(input, { key: "Enter" })).toBe(false);
+    expect(fireEvent.keyDown(input, { key: "Tab" })).toBe(false);
+    for (const gesture of [{ key: "Enter", shiftKey: true }, { key: "Enter", altKey: true }, { key: "Tab", shiftKey: true }]) {
+      expect(fireEvent.keyDown(input, gesture)).toBe(true);
+    }
+    expect(submit).not.toHaveBeenCalled();
+    expect(fireEvent.keyDown(input, { key: "Enter", ctrlKey: true })).toBe(false);
+    expect(submit).toHaveBeenCalledOnce();
   });
 
   it("uses one font metric set for Latin placeholder and CJK input", () => {

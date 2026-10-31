@@ -26,7 +26,7 @@ export const richComposerSchema = new Schema({
       ["input", { type: "checkbox", checked: node.attrs.checked ? "checked" : null, contenteditable: "false", "aria-label": node.textContent }],
       ["div", 0]],
   }).append(tableNodes({ tableGroup: "block", cellContent: "block+", cellAttributes: {} })).addToEnd("context_mention", {
-    inline: true, group: "inline", atom: true,
+    inline: true, group: "inline", atom: true, selectable: false,
     attrs: { reference: {} },
     leafText: node => composerReferenceMarkdown(node.attrs.reference),
     parseDOM: [{ tag: "span[data-composer-reference]", getAttrs: dom => ({ reference: JSON.parse((dom as HTMLElement).getAttribute("data-composer-reference")!) }) }],

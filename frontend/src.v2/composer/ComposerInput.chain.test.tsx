@@ -83,6 +83,30 @@ describe("actual composer input consumers", () => {
     expect(input.selectionStart).toBe("please [$review](C:/skills/review) ".length);
   });
 
+  it.each([
+    ["skill", "$review", `skill-path:${encodeURIComponent("C:/skills/review")}`, "[$review](C:/skills/review)"],
+    ["mention", "@input", "file:src/input.ts", "[input.ts](src/input.ts)"],
+  ])("gives the current %s token ownership over an already open prompt slash menu", (kind, token, selected, inserted) => {
+    useAppStore.setState({ slashCommands: [{ name: "prompts:pua", command: "prompts:pua", label: "/prompts:pua", type: "template", description: "Prompt" }] });
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;
+    typeAtCaret(input, "/prompts:pua", "/prompts:pua".length);
+    expect(screen.getByRole("button", { name: "Select context" }).getAttribute("data-kind")).toBe("slash");
+
+    const prefix = "/prompts:pua 正文 ";
+    typeAtCaret(input, `${prefix}${token} suffix`, prefix.length + token.length);
+    const option = screen.getByRole("button", { name: "Select context" });
+    expect(option.getAttribute("data-kind")).toBe(kind);
+    expect(option.getAttribute("data-filter")).toBe(token);
+    expect(useAppStore.getState().slashPanelOpen).toBe(false);
+    expect(useAppStore.getState().mentionPanelOpen).toBe(kind === "mention");
+    mocks.selected = selected;
+    fireEvent.click(option);
+    expect(useAppStore.getState().draft).toBe(`${prefix}${inserted}  suffix`);
+    expect(input.selectionStart).toBe(`${prefix}${inserted} `.length);
+    expect(screen.queryByRole("button", { name: "Select context" })).toBeNull();
+  });
+
   it("tracks caret movement and closes the picker for selected text and active composition", () => {
     render(<Composer />);
     const input = screen.getByRole("textbox", { name: "消息输入" }) as HTMLTextAreaElement;

@@ -6,7 +6,7 @@ import { isDesktop, fsListTree, fsSearchFiles } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { listWorkspaceTree, searchWorkspaceFiles } from "../protocol/workspace";
 import { fuzzyFilter } from "../lib/fuzzy-match";
-import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems } from "../lib/runtime-commands";
+import { buildRuntimeSlashArgMenuItems, buildRuntimeSlashMenuItems, isRuntimeSlashSkillPicker } from "../lib/runtime-commands";
 import { mentionSearchCache, mentionTreeCache, type MentionFileItem } from "./mentionCache";
 import { workspaceFilePathComparisonKey } from "../lib/workspace-path";
 import { useComposerPlugins } from "./useComposerPlugins";
@@ -81,6 +81,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
   const { plugins: pluginResults, loading: pluginLoading, error: pluginLoadError, refresh: refreshPlugins } = useComposerPlugins(open && kind === "mention", workingDirectory);
   const fileTreeVersion = useAppStore((s) => s.fileTreeVersion);
   const slashFilter = filter ?? "";
+  const menuGap = placement === "above" && kind !== "mention" ? 8 : 4;
   const emptyReviewComposer = useAppStore(s => !s.draft.trim() || /^\s*\/[^/\r\n]*\s*$/.test(s.draft));
   const skillKey = (path: string | undefined, name: string): string => path
     ? `path:${workspaceFilePathComparisonKey(path, workingDirectory)}`
@@ -116,7 +117,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
       defaultPrompt: skill.default_prompt,
       skillPath: skill.path,
     }));
-  const skillsPickerActive = /^\/skills?\s+/i.test(slashFilter);
+  const skillsPickerActive = kind === "slash" && isRuntimeSlashSkillPicker(slashFilter, storeCommands);
   const explicitSkillPickerActive = kind === "skill";
 
   // Argument stage: "/effort" or "/effort lo" with a local command that
@@ -370,10 +371,12 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
       const owner = listRef.current?.closest(".composer-container");
       if (owner && !owner.contains(e.target as Node)) return;
       if (e.key !== "Escape" && listRef.current?.contains(e.target as Node)) return;
+      if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
       if (["ArrowDown", "ArrowUp", "Enter", "Tab", "Escape"].includes(e.key)) {
         e.stopPropagation();
       }
       if (items.length === 0) {
+        if (e.key === "Enter" || e.key === "Tab") e.preventDefault();
         if (e.key === "Escape") {
           e.preventDefault();
           onSelect("");
@@ -412,9 +415,10 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
     <div
       style={{
         position: "absolute",
-        bottom: placement === "above" ? "calc(100% + 10px)" : undefined,
-        top: placement === "below" ? "calc(100% + 10px)" : undefined,
-        left: kind === "slash" ? 0 : 8,
+        bottom: placement === "above" ? `calc(100% + ${menuGap}px)` : undefined,
+        top: placement === "below" ? `calc(100% + ${menuGap}px)` : undefined,
+        left: 0,
+        right: 0,
         zIndex: "var(--z-dropdown)",
         maxWidth: "calc(100vw - 32px)",
       }}
@@ -425,7 +429,7 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
         className="composer-menu-list mc-dropdown-menu"
         data-kind={kind}
         data-skills-picker={skillsPickerActive || explicitSkillPickerActive ? "true" : "false"}
-        style={menuListStyle(kind, skillsPickerActive || explicitSkillPickerActive)}
+        style={menuListStyle}
       >
         {fileSearchError && <div role="alert" style={emptyMenuStyle}>{fileSearchError}</div>}
         {kind === "mention" && pluginLoadError && (
@@ -494,18 +498,18 @@ export const MenuOverlay = ({ open, kind, filter, onSelect, placement = "above",
   );
 };
 
-const menuListStyle = (kind: Props["kind"], skillsPickerActive: boolean): React.CSSProperties => ({
-  width: kind === "mention" ? "min(360px, calc(100vw - 56px))" : skillsPickerActive ? "min(520px, calc(100vw - 56px))" : "min(460px, calc(100vw - 56px))",
+const menuListStyle: React.CSSProperties = {
+  width: "100%",
   background: "var(--surface-raised)",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-md)",
   boxShadow: "var(--shadow-medium)",
   padding: 5,
-  maxHeight: skillsPickerActive ? "min(340px, calc(100vh - 230px))" : "min(292px, calc(100vh - 230px))",
+  maxHeight: "min(320px, calc(100vh - 230px))",
   overflowY: "auto",
   overflowX: "hidden",
   overscrollBehavior: "contain",
-});
+};
 
 const emptyMenuStyle: React.CSSProperties = {
   padding: "8px 10px",

@@ -1032,16 +1032,8 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
     if (selection.composing || selection.start !== selection.end) {
       closeMentionPanel(); closeSlashPanel(); setSkillPanelOpen(false); setMenuFilter(""); return;
     }
-    syncRuntimeSlashPanelForDraft(v, {
-      slashPanelOpen,
-      openSlashPanel,
-      closeSlashPanel,
-      setMenuFilter,
-      sendClientCommand,
-    });
-
     const token = composerTokenAtSelection(v, selection);
-    if (token?.kind === "skill" && !slashPanelOpen) {
+    if (token?.kind === "skill") {
       closeMentionPanel();
       closeSlashPanel();
       setSkillPanelOpen(true);
@@ -1049,19 +1041,25 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
       return;
     }
 
-    if (skillPanelOpen) {
+    if (token?.kind === "mention") {
+      closeSlashPanel();
       setSkillPanelOpen(false);
-      setMenuFilter("");
+      if (!useAppStore.getState().mentionPanelOpen) openMentionPanel();
+      setMenuFilter(token.value);
+      return;
     }
 
-    if (token?.kind === "mention") {
-      setSkillPanelOpen(false);
-      if (!mentionPanelOpen) openMentionPanel();
-      setMenuFilter(token.value);
-    } else if (mentionPanelOpen) {
-      closeMentionPanel();
-      setMenuFilter("");
-    }
+    closeMentionPanel();
+    setSkillPanelOpen(false);
+    const menuState = useAppStore.getState();
+    syncRuntimeSlashPanelForDraft(v, {
+      slashPanelOpen: menuState.slashPanelOpen,
+      slashCommands: menuState.slashCommands,
+      openSlashPanel,
+      closeSlashPanel,
+      setMenuFilter,
+      sendClientCommand,
+    });
   };
 
   const handleMenuSelect = (value: string, reference?: InlineComposerReference) => {

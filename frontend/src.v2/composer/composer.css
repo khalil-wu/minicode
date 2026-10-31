@@ -870,10 +870,6 @@
   box-shadow: 0 8px 24px color-mix(in oklch, black 10%, transparent);
 }
 
-.composer-menu-list[data-skills-picker="true"] {
-  margin-bottom: -2px;
-}
-
 .composer-menu-section-label {
   letter-spacing: 0;
 }

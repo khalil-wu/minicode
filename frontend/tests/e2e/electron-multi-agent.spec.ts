@@ -1,4 +1,4 @@
-import { _electron as electron, expect, test, type ElectronApplication, type Page } from "@playwright/test";
+import { _electron as electron, expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { createServer, type Server } from "node:http";
@@ -25,6 +25,15 @@ const ownerId = "conv-electron";
 const runningResult = "Desktop restart verification completed.";
 const lazyResult = "Recovered result body from lazy status lookup.";
 const recoveredResult = "Persisted result restored from the durable child journal.";
+
+type ComposerDocumentNode = { type: string; text?: string; content?: ComposerDocumentNode[]; attrs?: JsonRecord };
+const deletionReferences = [
+  { kind: "plugin", name: "Computer", configName: "computer-use@runtime", path: "plugin://computer-use@runtime" },
+  { kind: "skill", name: "playwright", displayName: "Playwright CLI Skill", path: "C:/skills/playwright/SKILL.md" },
+  { kind: "url", name: "Referenced chat", path: "codex://threads/referenced-chat" },
+  { kind: "file", name: "main.ts", path: "C:/reference-deletion/main.ts" },
+  { kind: "folder", name: "src", path: "C:/reference-deletion/src" },
+];
 
 const processBlock = (id: string, content: string, timestamp: number) => ({
   type: "process", id, item_kind: "process_text", content, source: "model_preamble",
@@ -440,6 +449,222 @@ async function expectReadonlyAgentDetail(window: Page, title: string) {
   await expect(detail.locator(".subagents-detail-header-actions")).toHaveCount(0);
   return detail;
 }
+
+async function composerDocument(page: Page): Promise<ComposerDocumentNode | null> {
+  return page.evaluate(() => (window as any).__zustandStore.getState().richDraft?.document ?? null);
+}
+
+async function composerDeletionSnapshot(composer: Locator) {
+  return composer.evaluate(element => {
+    const state = (window as any).__zustandStore.getState();
+    const selection = window.getSelection()!;
+    const range = selection.getRangeAt(0);
+    const focus = selection.focusNode!;
+    const caretParagraph = (focus instanceof Element ? focus : focus.parentElement!).closest("p")!;
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(caretParagraph);
+    beforeCaret.setEnd(focus, selection.focusOffset);
+    const rectangle = (rect: DOMRect) => ({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    return {
+      document: state.richDraft?.document ?? null,
+      markdown: state.draft,
+      selectedSkills: state.selectedSkills,
+      selectedMentions: state.selectedMentions,
+      whiteSpace: getComputedStyle(element).whiteSpace,
+      referenceKinds: Array.from(element.querySelectorAll("[data-composer-reference]"), reference => JSON.parse(reference.getAttribute("data-composer-reference")!).kind),
+      referenceDisplays: Array.from(element.querySelectorAll("[data-composer-reference]"), reference => getComputedStyle(reference).display),
+      paragraphs: Array.from(element.querySelectorAll("p"), paragraph => rectangle(paragraph.getBoundingClientRect())),
+      separators: Array.from(element.querySelectorAll("img.ProseMirror-separator"), separator => ({ display: getComputedStyle(separator).display, rect: rectangle(separator.getBoundingClientRect()) })),
+      trailingBreaks: Array.from(element.querySelectorAll("br.ProseMirror-trailingBreak"), br => rectangle(br.getBoundingClientRect())),
+      selection: { collapsed: selection.isCollapsed, focusNode: focus.nodeName, focusOffset: selection.focusOffset,
+        insideComposer: element.contains(focus),
+        afterTrailingBreak: beforeCaret.cloneContents().querySelector("br.ProseMirror-trailingBreak") !== null,
+        rects: Array.from(range.getClientRects(), rectangle) },
+      dom: element.outerHTML,
+    };
+  });
+}
+
+test("real Electron composer deletes reference spacing without a caret jump and preserves reference history and real newlines", async ({}, testInfo) => {
+  test.setTimeout(120_000);
+  const backend = new MultiAgentBackend(await externalPeerEnvironment());
+  const userDataDir = await mkdtemp(path.join(tmpdir(), "minicode-composer-deletion-e2e-"));
+  const entry = await writeHiddenDesktopEntry(userDataDir);
+  const observations: JsonRecord[] = [];
+  let app: ElectronApplication | undefined;
+  await backend.listen();
+  try {
+    app = await launchDesktop(backend, userDataDir, entry);
+    const page = await app.firstWindow();
+    await page.setViewportSize(desktopViewport);
+    await expect.poll(() => backend.commands.some(command => command.type === "session.sync"), { timeout: 30_000 }).toBe(true);
+    // Finish projecting the fixture's original owner before creating a draft;
+    // receipt of the outgoing session.sync command alone is not UI readiness.
+    await expect(page.getByText("Verify the desktop multi-agent recovery path.", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "新聊天", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "我们要构建什么？", exact: true })).toBeVisible();
+    const draftOwner = await page.evaluate(() => {
+      const state = (window as any).__zustandStore.getState();
+      return { id: state.activeConversationDraftId, conversationId: state.conversationId, isStreaming: state.isStreaming };
+    });
+    expect(draftOwner.id).toBeTruthy();
+    expect(draftOwner.conversationId).toBeNull();
+    expect(draftOwner.isStreaming).toBe(false);
+    const composer = page.getByRole("textbox", { name: "消息输入", exact: true });
+    await expect(composer).toHaveAttribute("data-rich-composer", "");
+    await expect(composer).toHaveAttribute("aria-disabled", "false");
+
+    for (const plain of [false, true]) {
+      const mode = plain ? "plain" : "rich";
+      await page.evaluate(value => (window as any).__zustandStore.getState().setComposerPlainTextMode(value), plain);
+      await expect(composer).toHaveAttribute("data-plain", String(plain));
+      // Invoke the same insertion action as the Skill picker. Everything from
+      // reference reconciliation through editing, history and layout is real.
+      await page.evaluate(reference => (window as any).__zustandStore.getState().addSelectedSkill(reference), deletionReferences[1]);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(1);
+      await composer.press("Control+End");
+      const inserted = await composerDocument(page);
+      expect(inserted!.content).toHaveLength(1);
+      expect(inserted!.content![0]!.content!.map(node => node.type)).toEqual(["context_mention", "text"]);
+      expect(inserted!.content![0]!.content![1]!.text).toBe(" ");
+      const before = await composerDeletionSnapshot(composer);
+      observations.push({ mode, phase: "before-native-space-delete", ...before });
+
+      // The real history plugin groups changes for 500 ms. Keep insertion and
+      // each deletion in separate native history groups so undo is deterministic.
+      await page.waitForTimeout(550);
+      await composer.press("Backspace");
+      const withoutSpace = { ...inserted!, content: [{ ...inserted!.content![0]!, content: [inserted!.content![0]!.content![0]!] }] };
+      await expect.poll(() => composerDocument(page)).toEqual(withoutSpace);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(1);
+      await expect(composer.locator("p")).toHaveCount(1);
+      const afterSpace = await composerDeletionSnapshot(composer);
+      observations.push({ mode, phase: "after-native-space-delete", ...afterSpace });
+      expect(afterSpace.selection.collapsed).toBe(true);
+      expect(afterSpace.selection.insideComposer).toBe(true);
+      expect(afterSpace.selection.afterTrailingBreak).toBe(false);
+      expect(afterSpace.whiteSpace).toBe("break-spaces");
+      expect(afterSpace.referenceDisplays).toEqual(["inline"]);
+      expect(afterSpace.separators.length).toBeGreaterThan(0);
+      expect(afterSpace.separators.every(separator => separator.display === "inline")).toBe(true);
+      expect(afterSpace.trailingBreaks).toHaveLength(1);
+      expect(Math.abs(afterSpace.paragraphs[0]!.height - before.paragraphs[0]!.height)).toBeLessThanOrEqual(1);
+      expect(afterSpace.trailingBreaks[0]!.y).toBeLessThan(afterSpace.paragraphs[0]!.y + before.paragraphs[0]!.height);
+      const png = await app.evaluate(async ({ BrowserWindow }) =>
+        (await BrowserWindow.getAllWindows()[0]!.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString("base64"));
+      const screenshotPath = testInfo.outputPath(`${mode}-after-space-delete.png`);
+      await writeFile(screenshotPath, Buffer.from(png, "base64"));
+      await testInfo.attach(`${mode}-after-space-delete`, { path: screenshotPath, contentType: "image/png" });
+
+      await page.waitForTimeout(550);
+      await composer.press("Backspace");
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(0);
+      await expect(composer.locator("p")).toHaveCount(1);
+      await expect.poll(() => page.evaluate(() => (window as any).__zustandStore.getState().selectedSkills)).toEqual([]);
+      // Empty drafts omit their persisted rich document. The live PM editor
+      // still owns its empty paragraph and its undo stack.
+      await expect.poll(() => composerDocument(page)).toBeNull();
+      observations.push({ mode, phase: "after-atom-delete", ...await composerDeletionSnapshot(composer) });
+      await composer.press("Control+z");
+      await expect.poll(() => composerDocument(page)).toEqual(withoutSpace);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(1);
+      await composer.press("Control+z");
+      await expect.poll(() => composerDocument(page)).toEqual(inserted);
+      await composer.press("Control+Shift+z");
+      await expect.poll(() => composerDocument(page)).toEqual(withoutSpace);
+      await composer.press("Control+Shift+z");
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(0);
+
+      await page.evaluate(reference => (window as any).__zustandStore.getState().addSelectedSkill(reference), deletionReferences[1]);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(1);
+      await composer.press("Control+End");
+      const beforeNewline = await composerDocument(page);
+      await composer.press("Shift+Enter");
+      await expect(composer.locator("p")).toHaveCount(2);
+      const withNewline = await composerDocument(page);
+      expect(withNewline!.content).toHaveLength(2);
+      expect(withNewline!.content![1]).toEqual({ type: "paragraph" });
+      const newline = await composerDeletionSnapshot(composer);
+      observations.push({ mode, phase: "user-created-newline", ...newline });
+      expect(newline.paragraphs[1]!.y).toBeGreaterThan(newline.paragraphs[0]!.y);
+      await composer.press("Backspace");
+      await expect.poll(() => composerDocument(page)).toEqual(beforeNewline);
+      await expect(composer.locator("p")).toHaveCount(1);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(1);
+      await composer.press("Control+a");
+      await composer.press("Backspace");
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(0);
+
+      for (const [index, reference] of deletionReferences.entries()) {
+        await page.evaluate(reference => {
+          const state = (window as any).__zustandStore.getState();
+          if (reference.kind === "skill") state.addSelectedSkill(reference);
+          else state.addSelectedMention(reference);
+        }, reference);
+        await expect(composer.locator("[data-composer-reference]")).toHaveCount(index + 1);
+      }
+      await composer.press("Control+Home");
+      // Cross the plugin, its space and the Skill using actual arrow keys.
+      // References are nonselectable inline atoms, not a two-key node selection.
+      await composer.press("ArrowRight");
+      await composer.press("ArrowRight");
+      await composer.press("ArrowRight");
+      await expect(composer.locator(".ProseMirror-selectednode")).toHaveCount(0);
+      const mixed = await composerDocument(page);
+      const beforeMixed = await composerDeletionSnapshot(composer);
+      expect(beforeMixed.referenceKinds).toEqual(["plugin", "skill", "url", "file", "folder"]);
+      await page.waitForTimeout(550);
+      await composer.press("Backspace");
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(4);
+      const afterMixed = await composerDeletionSnapshot(composer);
+      observations.push({ mode, phase: "mixed-reference-target-delete", before: beforeMixed, after: afterMixed });
+      expect(afterMixed.referenceKinds).toEqual(["plugin", "url", "file", "folder"]);
+      expect(afterMixed.selectedSkills).toEqual([]);
+      expect(afterMixed.selectedMentions).toEqual(beforeMixed.selectedMentions);
+      await composer.press("Control+z");
+      await expect.poll(() => composerDocument(page)).toEqual(mixed);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(5);
+      await composer.press("Control+Shift+z");
+      await expect.poll(() => composerDocument(page)).toEqual(afterMixed.document);
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(4);
+      await composer.press("Control+a");
+      await composer.press("Backspace");
+      await expect(composer.locator("[data-composer-reference]")).toHaveCount(0);
+
+      // The empty catalog still opens the production slash menu. Alt+Enter
+      // must reach the editor's line-break keymap, not the menu or submission.
+      await composer.pressSequentially("/");
+      await expect(page.locator('.composer-menu-list[data-kind="slash"]')).toBeVisible();
+      await composer.press("Alt+Enter");
+      await expect(composer.locator("p")).toHaveCount(2);
+      await expect.poll(() => composerDocument(page)).toEqual({ type: "doc", content: [
+        { type: "paragraph", content: [{ type: "text", text: "/" }] }, { type: "paragraph" },
+      ] });
+      const menuNewline = await composerDeletionSnapshot(composer);
+      observations.push({ mode, phase: "alt-enter-with-slash-menu", ...menuNewline });
+      expect(menuNewline.selection.insideComposer).toBe(true);
+      expect(menuNewline.paragraphs[1]!.y).toBeGreaterThan(menuNewline.paragraphs[0]!.y);
+      await composer.press("Control+a");
+      await composer.press("Backspace");
+      await expect.poll(() => composerDocument(page)).toBeNull();
+      await expect(composer.locator("p")).toHaveCount(1);
+    }
+    expect(await page.evaluate(() => {
+      const state = (window as any).__zustandStore.getState();
+      return { id: state.activeConversationDraftId, conversationId: state.conversationId, isStreaming: state.isStreaming };
+    })).toEqual(draftOwner);
+    expect(backend.commands.some(command => ["conversation.create", "user_message", "send_message"].includes(String(command.type)))).toBe(false);
+  } finally {
+    const evidencePath = testInfo.outputPath("reference-deletion-state-and-layout.json");
+    await writeFile(evidencePath, JSON.stringify({ scope: "Native Chromium editing and layout in an isolated Electron profile; loopback fixture, no model requests", observations }, null, 2));
+    await testInfo.attach("reference-deletion-state-and-layout", { path: evidencePath, contentType: "application/json" });
+    if (app) await app.close();
+    await backend.close();
+    expect(path.dirname(userDataDir)).toBe(path.resolve(tmpdir()));
+    expect(path.basename(userDataDir)).toMatch(/^minicode-composer-deletion-e2e-/);
+    await rm(userDataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
 
 test("real Electron workbench supports read-only child transcripts, lazy results, and persisted history recovery", async ({}, testInfo) => {
   test.setTimeout(180_000);

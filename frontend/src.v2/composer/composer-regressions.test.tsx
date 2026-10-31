@@ -117,6 +117,24 @@ describe("composer user-boundary regressions", () => {
     expect(useAppStore.getState().mentionPanelOpen).toBe(false);
   });
 
+  it("submits a manually typed prompt body on Enter without selecting its slash command again", async () => {
+    useAppStore.setState({ slashCommands: [{ name: "prompts:pua", command: "prompts:pua", label: "/prompts:pua", type: "template", description: "Prompt" }] });
+    render(<Composer />);
+    const input = screen.getByRole("textbox", { name: "消息输入" });
+    fireEvent.change(input, { target: { value: "/prompts:pua" } });
+    expect(screen.getByRole("listbox").getAttribute("data-kind")).toBe("slash");
+    const value = "/prompts:pua 保留正文 ARG=one 以及尾部参数";
+    fireEvent.change(input, { target: { value } });
+    expect(useAppStore.getState().slashPanelOpen).toBe(false);
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(sendChatMessage).toHaveBeenCalledTimes(1));
+    expect(sendChatMessage).toHaveBeenCalledWith(expect.objectContaining({
+      displayContent: value, backendContent: expect.stringContaining(value),
+    }));
+  });
+
   it.each([false, true])("does not steal attachment action activation (image=%s)", (image) => {
     const file = new File(["file"], image ? "file.png" : "file.txt", { type: image ? "image/png" : "text/plain" });
     useAppStore.setState({ attachments: [{ id: "attachment", name: file.name, type: file.type, size: file.size, status: "error", error: "offline", localFile: file, dataUrl: image ? "data:image/png;base64,AA==" : undefined, conversationId: "A" }] });
