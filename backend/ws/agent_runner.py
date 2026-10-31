@@ -17,6 +17,7 @@ import subprocess
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import AsyncExitStack, nullcontext
 from dataclasses import dataclass, replace
 from copy import deepcopy
 from pathlib import Path
@@ -29,7 +30,7 @@ from backend.services.conversation_projection_service import (
     replay_pending_conversation_projections as _replay_pending_conversation_projections,
 )
 from backend.services.conversation_goal_service import build_goal_updated_payload
-from backend.agent.context import ContextBuilder
+from backend.agent.context import ContextBuilder, MODEL_CONTEXT_SNAPSHOT_KEYS
 from backend.agent.execution_journal import execution_journal_owner, conversation_projection_owner_fields, turn_user_prompt_id, turn_input_consumption_id, turn_input_rejection_id
 from backend.agent.lifecycle_generation import LifecycleGenerationState
 from backend.agent.loop import AgentLoopSessionContext
@@ -46,6 +47,7 @@ from backend.agent.provider_activity import (
 from backend.agent.query_engine import AgentSession, QuerySubmission
 from backend.agent.runtime import default_runtime
 from backend.agent.run_context import RunContext
+from backend.ws.turn_settings import PreparedTurnSettings
 from backend.agent.model_execution import ModelExecutionSnapshot, capture_model_config
 from backend.agent.turn_state import AgentTurnState, record_user_input_block
 from backend.artifact.store import MAX_CONTENT_LENGTH as MAX_ARTIFACT_CONTENT_CHARS
@@ -208,6 +210,7 @@ def _generated_image_projection(
     conversation_id: str,
     message_id: str,
     text_offset: int,
+    tool_call_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     image_format = media_type.removeprefix("image/").upper()
     summary = f"Generated {image_format} image"
@@ -233,6 +236,9 @@ def _generated_image_projection(
         "media_type": media_type,
         "text_offset": max(0, int(text_offset)),
     }
+    if tool_call_id:
+        transcript_artifact["toolCallId"] = tool_call_id
+        wire_artifact["tool_call_id"] = tool_call_id
     return transcript_artifact, {
         "type": "artifact.preview",
         "conversation_id": conversation_id,
@@ -1314,18 +1320,14 @@ def _reconcile_ui_agent_state_with_runtime(
     return state, changed
 
 
-def _merge_ui_agent_state_into_snapshot(snapshot: dict[str, Any], source_snapshot: Any) -> dict[str, Any]:
+def _merge_conversation_snapshot_metadata(snapshot: dict[str, Any], source_snapshot: Any) -> dict[str, Any]:
     if isinstance(source_snapshot, dict):
         # ContextBuilder exports model-context fields. Conversation/session
         # ownership metadata (Plan slug/reference, UI projection revisions,
         # scheduled-task provenance, etc.) must be merged across that replace.
         for key, value in source_snapshot.items():
-            if key not in snapshot:
+            if key not in MODEL_CONTEXT_SNAPSHOT_KEYS:
                 snapshot[key] = value
-        if UI_AGENT_STATE_SNAPSHOT_KEY in source_snapshot:
-            snapshot[UI_AGENT_STATE_SNAPSHOT_KEY] = source_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]
-        if UI_AGENT_STATE_REVISION_KEY in source_snapshot:
-            snapshot[UI_AGENT_STATE_REVISION_KEY] = source_snapshot[UI_AGENT_STATE_REVISION_KEY]
     return snapshot
 
 
@@ -1362,7 +1364,7 @@ async def _commit_automatic_compaction(
                 )
             if not advanced:
                 raise RuntimeError("automatic compaction produced no durable summary or new context window")
-        _merge_ui_agent_state_into_snapshot(
+        _merge_conversation_snapshot_metadata(
             saved_snapshot,
             getattr(latest, "context_snapshot", None),
         )
@@ -1409,6 +1411,7 @@ class AgentRunRequest:
     mcp_manager: Any
     memory_manager: Any
     skill_snapshot_pending: bool = False
+    turn_settings: PreparedTurnSettings | None = None
 
 
 class SessionAgentRunnerMixin:
@@ -1421,14 +1424,30 @@ class SessionAgentRunnerMixin:
     services.
     """
 
-    def capture_agent_run_request(self, conversation_id: str) -> AgentRunRequest:
+    def capture_agent_run_request(self, conversation_id: str, *, turn_settings: PreparedTurnSettings | None = None) -> AgentRunRequest:
         """Resolve window-dependent inputs before handing startup to the registered run."""
-        conversation = self.conversation_repo.get_conversation_summary(conversation_id)
+        conversation = self.conversation_repo.get_conversation(conversation_id)
         if conversation is None:
             raise ValueError(f"Conversation '{conversation_id}' was not found")
-        conversation = self.session_lifecycle.bind_execution_for_operation(conversation)
+        if turn_settings is None:
+            cwd = conversation.execution_cwd or str(Path.cwd().resolve())
+            turn_settings = PreparedTurnSettings(workspace_revision=conversation.workspace_binding_revision,
+                execution_cwd=cwd if not conversation.execution_cwd else "",
+                legacy_scope_cwd=cwd if not conversation.workspace_root and not conversation.projectless_output_dir else "")
+        conversation = turn_settings.preview(conversation)
         root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         config = capture_model_config(load_config(cwd=root))
+        if conversation.permission_mode == "plan":
+            from backend.agent.plans import (
+                PLAN_SLUG_KEY, generate_plan_slug, get_plan_file_path, get_plans_directory, plan_slug_from_snapshot,
+            )
+
+            plan_settings = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+            slug = plan_slug_from_snapshot(conversation.context_snapshot) or generate_plan_slug(root,
+                plans_directory=get_plans_directory(root, settings=plan_settings, create=False))
+            plan_path = get_plan_file_path(slug, root, settings=plan_settings, create_directory=False)
+            turn_settings = replace(turn_settings or PreparedTurnSettings(), plan_slug=slug, plan_path=plan_path)
+            conversation = replace(conversation, context_snapshot={**conversation.context_snapshot, PLAN_SLUG_KEY: slug})
         skills = self.skill_manager
         from backend.skills.manager import SkillManager
         skill_snapshot_pending = isinstance(skills, SkillManager)
@@ -1451,7 +1470,66 @@ class SessionAgentRunnerMixin:
             tool_registry=self._conversation_tool_registry(conversation_id, workspace_root=root, config=config).fork(),
             skill_manager=skills, skill_executor=self.skill_executor,
             mcp_manager=self._mcp_manager_for_workspace(root), memory_manager=self.memory_manager,
-            skill_snapshot_pending=skill_snapshot_pending)
+            skill_snapshot_pending=skill_snapshot_pending, turn_settings=turn_settings)
+
+    async def _publish_admitted_turn_settings(self, conversation_id: str, settings: PreparedTurnSettings) -> None:
+        if (settings.permission_mode is None and settings.workspace_binding is None
+                and not settings.execution_cwd and not settings.legacy_scope_cwd and not settings.plan_slug):
+            return
+        manager = self.ws_manager
+        async with AsyncExitStack() as scope:
+            await scope.enter_async_context(self.conversation_lifecycle_lock())
+            if manager is not None:
+                await scope.enter_async_context(manager.conversation_resource_scope((conversation_id,)))
+            current = await to_thread_cancel_safe(self.conversation_repo.get_conversation, conversation_id)
+            if current is None:
+                raise RuntimeError("The admitted conversation disappeared while publishing its settings")
+            if (settings.legacy_scope_cwd and current.execution_cwd == settings.legacy_scope_cwd
+                    and not current.workspace_root and not current.projectless_output_dir):
+                await to_thread_cancel_safe(self.session_lifecycle.share_execution_attachments, current)
+            permission_applied = (settings.permission_mode is not None
+                and current.permission_mode_revision == settings.permission_revision + 1
+                and current.permission_mode == settings.permission_mode)
+            workspace_applied = (settings.workspace_binding is not None
+                and current.workspace_binding_revision == settings.workspace_revision + 1
+                and all(getattr(current, key) == value for key, value in settings.workspace_binding.items()))
+            cwd_applied = (bool(settings.execution_cwd) and settings.workspace_binding is None
+                and current.workspace_binding_revision == settings.workspace_revision + 1
+                and current.execution_cwd == settings.execution_cwd)
+            from backend.agent.plans import plan_slug_from_snapshot
+
+            plan_applied = (bool(settings.plan_slug) and current.permission_mode == "plan"
+                and plan_slug_from_snapshot(current.context_snapshot) == settings.plan_slug)
+            if not (permission_applied or workspace_applied or cwd_applied or plan_applied):
+                return
+            if workspace_applied:
+                await to_thread_cancel_safe(self.conversation_repo._prepend_sidebar_occurrence, current, recent=False)
+            sessions = manager.resource_sessions() if manager is not None else (self,)
+            store_identity = self.conversation_repo.store_instance_id()
+            for owner in sessions:
+                lifecycle = owner.session_lifecycle
+                if (owner.active_conversation_id != conversation_id
+                        or owner.conversation_repo.store_instance_id() != store_identity
+                        or lifecycle._foreground_navigation_pending
+                        and lifecycle._foreground_navigation_target_id != conversation_id):
+                    continue
+                with lifecycle.bind_foreground_navigation(lifecycle._foreground_navigation_receipt):
+                    if workspace_applied:
+                        activated = await lifecycle.activate_workspace_path(current.execution_cwd,
+                            announce=False, conversation_id=conversation_id, project_root=current.workspace_root,
+                            prepared_context=settings.workspace_context if owner is self else None)
+                        if not lifecycle.foreground_navigation_is_current():
+                            continue
+                        lifecycle.record_workspace_activation(conversation_id, activated)
+                    elif cwd_applied:
+                        lifecycle.workspace_root = Path(current.execution_cwd)
+                    if permission_applied or plan_applied:
+                        owner.permission_context = owner.permission_context_for_conversation(current, source="user_message")
+                    if permission_applied:
+                        await owner.emit_permission_mode_updated()
+                        await owner.command_dispatcher._handle_user_message_permission(settings.permission_mode, conversation_id)
+                    lifecycle.schedule_runtime_capabilities(source="turn.settings.applied")
+                    await lifecycle.send_task_runtime_update(include_capabilities=False)
 
     @property
     def ui_agent_state_store(self) -> UiAgentStateStore:
@@ -3934,6 +4012,9 @@ class SessionAgentRunnerMixin:
         )
         try:
             run_metadata["conversation_run_generation"] = query_claim.generation
+            if (run_context.start_request is None
+                    and self.conversation_repo.get_conversation_summary(target_conversation_id) is not None):
+                run_context.start_request = self.capture_agent_run_request(target_conversation_id)
             from backend.services.goal_runtime import GoalTurnAccounting
             if run_context.start_request is not None:
                 goal_config = run_context.start_request.config
@@ -3945,15 +4026,21 @@ class SessionAgentRunnerMixin:
                 automatic=bool(run_metadata.get("_goal_continuation"))) if goals_enabled else None)
             if run_metadata.get("_goal_continuation") and not goals_enabled:
                 return
-            await self._run_agent_locked(
-                user_message,
-                attachments=attachments,
-                conversation_id=target_conversation_id or None,
-                metadata=run_metadata,
-                cancel_event=cancel_event,
-                run_context=run_context,
-                query_claim=query_claim,
-            )
+            from backend.owner_scope import bind_prepared_projectless_scope
+
+            prepared = run_context.start_request.turn_settings if run_context.start_request is not None else None
+            scope = (bind_prepared_projectless_scope(target_conversation_id, prepared.legacy_scope_cwd)
+                     if prepared is not None and prepared.legacy_scope_cwd else nullcontext())
+            with scope:
+                await self._run_agent_locked(
+                    user_message,
+                    attachments=attachments,
+                    conversation_id=target_conversation_id or None,
+                    metadata=run_metadata,
+                    cancel_event=cancel_event,
+                    run_context=run_context,
+                    query_claim=query_claim,
+                )
             if not str(run_metadata.get("run_id") or "").strip():
                 run_manager = getattr(self, "run_manager", None)
                 delivery_complete = bool(
@@ -4127,7 +4214,11 @@ class SessionAgentRunnerMixin:
         run_context.lifecycle_cleanup_tasks = self.run_manager.lifecycle_cleanup_tasks_for(
             target_conversation_id
         )
+        from backend.agent.turn_trace import turn_trace_shared
+
+        pre_trace = turn_trace_shared(f"turn[{target_conversation_id}]")
         conversation = await to_thread_cancel_safe(self.conversation_repo.get_conversation_summary, target_conversation_id)
+        pre_trace.mark("run.summary_loaded")
         if conversation is None:
             await emit_conversation_not_found(self, target_conversation_id)
             return
@@ -4155,6 +4246,7 @@ class SessionAgentRunnerMixin:
         wait_for_hydration = getattr(conversation_runtime, "wait_for_hydration", None)
         if callable(wait_for_hydration):
             await wait_for_hydration(conversation.id)
+            pre_trace.mark("run.hydrated")
 
         if run_context.skill_snapshot_task is not None:
             skills = await asyncio.shield(run_context.skill_snapshot_task)
@@ -4210,7 +4302,8 @@ class SessionAgentRunnerMixin:
         execution_journal = admission_runtime.execution_journal(journal_owner)
         run_context.execution_journal = execution_journal
 
-        conversation = self.session_lifecycle.bind_execution_for_operation(conversation, metadata_only=True)
+        conversation = (request_snapshot.turn_settings.preview(conversation) if request_snapshot.turn_settings is not None
+                        else self.session_lifecycle.bind_execution_for_operation(conversation, metadata_only=True))
         run_workspace_root = request_snapshot.workspace_root
         if conversation.execution_cwd.startswith("file:"):
             run_context.execution_cwd_uri = conversation.execution_cwd
@@ -4228,16 +4321,20 @@ class SessionAgentRunnerMixin:
                 execution_journal,
                 conversation_id=conversation.id,
             )
+            pre_trace.mark("run.projections_replayed")
             flushed_ui_state = await self._flush_ui_agent_state_now_unlocked(conversation.id)
+            pre_trace.mark("run.ui_state_flushed")
             latest_for_turn = await asyncio.to_thread(
                 self.conversation_repo.get_conversation,
                 conversation.id,
             )
+            pre_trace.mark("run.record_loaded")
             if latest_for_turn is None:
                 raise RuntimeError(
                     "conversation disappeared while initializing a new turn"
                 )
-            conversation = latest_for_turn
+            conversation = (request_snapshot.turn_settings.preview(latest_for_turn) if request_snapshot.turn_settings is not None
+                            else latest_for_turn)
             retry_projection = run_metadata.get("_retry_projection")
             if retry_projection is not None:
                 run_context_snapshot = _reset_ui_agent_state_snapshot(retry_projection["context_snapshot"])
@@ -4268,6 +4365,7 @@ class SessionAgentRunnerMixin:
                     else {}
                 )
 
+        pre_trace.mark("run.snapshot_ready")
         # Track active streaming metadata for reconnection recovery. Prefer
         # the client-created assistant placeholder id so late events from an
         # old turn cannot attach to a newer assistant message.
@@ -4287,6 +4385,7 @@ class SessionAgentRunnerMixin:
             skill_manager=request_snapshot.skill_manager,
         )
         run_context.lifecycle_runtime = lifecycle_runtime
+        pre_trace.mark("run.lifecycle_runtime_ready")
         run_model_runtime = self._model_runtime_for_conversation(conversation.id)
         if lifecycle_runtime is not None:
             run_tool_registry = (
@@ -4330,7 +4429,10 @@ class SessionAgentRunnerMixin:
                 )
                 else config_provider or resolved_provider
             )
-            conversation = self.conversation_repo.get_conversation(conversation.id)
+            conversation = await asyncio.to_thread(self.conversation_repo.get_conversation, conversation.id)
+            pre_trace.mark("run.record_reloaded")
+            if request_snapshot.turn_settings is not None:
+                conversation = request_snapshot.turn_settings.preview(conversation)
             task_selection = request_snapshot.model_selection
             selected_provider = request_snapshot.selected_provider.strip()
             preserve_provider_override = bool(
@@ -4358,6 +4460,7 @@ class SessionAgentRunnerMixin:
                 )
                 if callable(refresh_provider_auth):
                     await refresh_provider_auth(run_provider)
+                pre_trace.mark("run.provider_auth_refreshed")
                 run_available_models = [
                     model.id for model in run_model_runtime.get_models(run_provider)
                 ]
@@ -4668,7 +4771,12 @@ class SessionAgentRunnerMixin:
         # Rebuilding the full history and its token cache is CPU-bound and
         # grows with the conversation; keep it off the event loop so other
         # sessions' deltas and this socket's acknowledgements keep flowing.
+        from backend.agent.turn_trace import turn_trace_shared
+
+        run_trace = turn_trace_shared(f"turn[{conversation.id}]")
+        run_trace.mark("run.start")
         await asyncio.to_thread(run_context_builder.load_snapshot, run_context_snapshot)
+        run_trace.mark("run.load_snapshot")
         normalized_attachments = list(attachments or [])
         # These values are host capabilities or concrete runtime owners, never
         # transport metadata. A local adapter/checkpoint resume may supply
@@ -4754,9 +4862,9 @@ class SessionAgentRunnerMixin:
         run_metadata["assistant_message_id"] = assistant_message_id
         run_metadata["run_id"] = admission_record.run_id
         run_context.execution_journal = execution_journal
-        run_workspace_context = self.session_lifecycle.workspace_context_for_conversation(
-            conversation
-        )
+        run_workspace_context = (request_snapshot.turn_settings.workspace_context
+            if request_snapshot.turn_settings is not None and request_snapshot.turn_settings.workspace_context is not None
+            else self.session_lifecycle.workspace_context_for_conversation(conversation))
         run_context.workspace_context = run_workspace_context
         run_metadata["conversation_id"] = conversation.id
         run_context.conversation_repository = self.conversation_repo
@@ -4781,15 +4889,10 @@ class SessionAgentRunnerMixin:
         run_context.connected_mcp_servers = tuple(connected_mcp_servers)
         run_permission_context = request_snapshot.permission
         if run_permission_context.mode == "plan":
-            from backend.agent.plans import bind_plan_owner, merge_plan_constraints
+            from backend.agent.plans import merge_plan_constraints
 
-            _slug, existing_plan_path = bind_plan_owner(
-                self.conversation_repo,
-                conversation.id,
-                conversation.workspace_root or run_workspace_root,
-            )
-            conversation = self.conversation_repo.get_conversation(conversation.id) or conversation
-            run_permission_context = self.permission_checker.build_context(
+            existing_plan_path = request_snapshot.turn_settings.plan_path
+            run_permission_context = replace(self.permission_checker.build_context(
                 mode=run_permission_context.mode,
                 session_overrides=run_permission_context.session_overrides,
                 command_prompt_allow_rules=run_permission_context.command_prompt_allow_rules,
@@ -4805,7 +4908,7 @@ class SessionAgentRunnerMixin:
                 granular_approval=run_permission_context.granular_approval,
                 sandbox_mode=run_permission_context.sandbox_mode,
                 requirements_source=run_permission_context.requirements_source,
-            )
+            ), conversation_id=conversation.id)
 
         if run_memory_policy["enabled"] and run_workspace_root is not None and str(conversation.conversation_type) == "main":
             from backend.memory.generation import schedule_memory_startup
@@ -4861,7 +4964,7 @@ class SessionAgentRunnerMixin:
             is_active_owner = self.active_conversation_id == owner_id
             if is_active_owner:
                 self.set_permission_context_mode(target_mode, source=source)
-                self.permission_context = self.permission_checker.build_context(
+                self.permission_context = replace(self.permission_checker.build_context(
                     mode=self.permission_context.mode,
                     session_overrides=self.permission_context.session_overrides,
                     command_prompt_allow_rules=self.permission_context.command_prompt_allow_rules,
@@ -4881,15 +4984,17 @@ class SessionAgentRunnerMixin:
                     granular_approval=self.permission_context.granular_approval,
                     sandbox_mode=self.permission_context.sandbox_mode,
                     requirements_source=self.permission_context.requirements_source,
-                )
+                ), conversation_id=owner_id)
                 await self.emit_permission_mode_updated()
                 await self.session_lifecycle.send_task_runtime_update()
 
             send_conversations = getattr(self, "send_conversation_list", None)
             if callable(send_conversations):
+                run_trace.mark("preloop.conversation_list.start")
                 result = send_conversations()
                 if asyncio.iscoroutine(result):
                     await result
+                run_trace.mark("preloop.conversation_list.done")
             # ``PermissionContext`` is an immutable turn snapshot.  EnterPlanMode
             # updates the live tool context itself; mutating this frozen snapshot
             # used to raise ``FrozenInstanceError`` after the plan-mode switch.
@@ -4917,16 +5022,7 @@ class SessionAgentRunnerMixin:
             ]
             if not normalized:
                 return
-            if self.active_conversation_id == conversation.id:
-                changed = self._add_command_prompt_allow_rules(
-                    normalized,
-                    source=source,
-                )
-                if changed:
-                    await self.emit_permission_rules_updated(
-                        conversation_id=conversation.id,
-                        source=source,
-                    )
+            await self.add_command_prompt_rules_for_conversation(conversation.id, normalized, source=source)
 
         run_context.command_prompt_allow_rules_setter = _add_run_command_prompt_allow_rules
         run_manager = getattr(self, "run_manager", None)
@@ -4943,6 +5039,7 @@ class SessionAgentRunnerMixin:
         run_context.acknowledge_consumed_turn_input = (
             _acknowledge_consumed_turn_input
         )
+        run_trace.mark("runner.setup.ready")
 
         selected_skills = run_metadata.get("selected_skills")
         selected_plugins = run_metadata.get("selected_plugins")
@@ -5055,15 +5152,18 @@ class SessionAgentRunnerMixin:
                 # Pending reasoning already occupies its canonical turn_state
                 # position; publish it before the later user item as well.
                 await _flush_pending_reasoning()
+            run_trace.mark("admission.enter")
             async with self._conversation_projection_lock(conversation.id):
                 latest = await asyncio.to_thread(
                     self.conversation_repo.get_conversation,
                     conversation.id,
                 )
+                run_trace.mark("admission.load_latest")
                 if latest is None:
                     raise RuntimeError("conversation disappeared during turn admission")
                 saved_snapshot = await asyncio.to_thread(run_context_builder.export_snapshot)
-                _merge_ui_agent_state_into_snapshot(
+                run_trace.mark("admission.export_snapshot")
+                _merge_conversation_snapshot_metadata(
                     saved_snapshot,
                     run_context_snapshot if run_metadata.get("_retry_projection") is not None
                     else getattr(latest, "context_snapshot", None),
@@ -5101,6 +5201,15 @@ class SessionAgentRunnerMixin:
                 if consumed_steer is not None:
                     steer_assistant = _partial_turn_message()
                     record_user_input_block(steer_assistant["blocks"], user_message_id)
+                prepared_settings = run_context.start_request.turn_settings if run_context.start_request is not None else None
+                if prepared_settings is not None and prepared_settings.plan_slug and consumed_steer is None:
+                    from backend.agent.plans import PLAN_SLUG_KEY, PlanFileError, plan_slug_from_snapshot
+
+                    existing_slug = plan_slug_from_snapshot(latest.context_snapshot)
+                    if existing_slug and existing_slug != prepared_settings.plan_slug:
+                        raise PlanFileError("The conversation plan owner changed while this input was being prepared")
+                    saved_snapshot[PLAN_SLUG_KEY] = prepared_settings.plan_slug
+                run_trace.mark("admission.commit_start")
                 committed = await to_thread_cancel_safe(
                     self.conversation_repo.commit_turn_admission,
                     conversation.id,
@@ -5118,7 +5227,10 @@ class SessionAgentRunnerMixin:
                         and "_agent_mode_selection_revision" in run_metadata
                         and not run_metadata.get("_turn_admission_restored")
                         and not str(run_metadata.get("agent_role") or "main").startswith("subagent:") else {}),
+                    **(prepared_settings.admission_arguments() if prepared_settings is not None
+                       and consumed_steer is None and not run_metadata.get("_turn_admission_restored") else {}),
                 )
+                run_trace.mark("admission.committed")
                 if committed is None:
                     raise RuntimeError("conversation disappeared during turn admission")
                 if consumed_steer is not None:
@@ -5171,6 +5283,10 @@ class SessionAgentRunnerMixin:
             receipt_owner = (submitting.session_id if submitting is not None else None) if manager is not None and admitted_input.get("_client_queue_key") else self.session_id
             with bind_response_origin(receipt_owner, admitted_command_id):
                 await self.send_event(receipt)
+            prepared_settings = run_context.start_request.turn_settings if run_context.start_request is not None else None
+            if (prepared_settings is not None and consumed_steer is None
+                    and not run_metadata.get("_turn_admission_restored")):
+                await self._publish_admitted_turn_settings(conversation.id, prepared_settings)
             if manager is not None:
                 await manager.publish_turn_input_admission(self, conversation.id)
 
@@ -5181,6 +5297,7 @@ class SessionAgentRunnerMixin:
             admitted_input = consumed_steer.original_command.data if consumed_steer is not None else run_metadata
             admitted_user_id = str(admitted_input.get("user_message_id") or "")
             admitted_command_id = str(admitted_input.get("client_command_id") or "")
+            run_trace.mark("admission.journal.start")
             pending_prompt = pending_admission_journal.get(admitted_user_id)
             if pending_prompt is not None:
                 event_id, prompt_payload = pending_prompt
@@ -5198,6 +5315,7 @@ class SessionAgentRunnerMixin:
                     "run_id": str(run_metadata.get("run_id") or ""),
                 }, event_id=turn_input_consumption_id(admitted_user_id, admitted_command_id),
             )
+            run_trace.mark("admission.journal.done")
             admission_future = run_metadata.get("_turn_admission_future")
             if isinstance(admission_future, asyncio.Future) and not admission_future.done():
                 admission_future.set_result(None)
@@ -5533,9 +5651,6 @@ class SessionAgentRunnerMixin:
                             previous_snapshot,
                             since_revision=partial_history_revision,
                         )
-                        # UI state has its own projection owner. ContextBuilder
-                        # does not remove fields maintained by that owner.
-                        snapshot_changes["removed"] = [key for key in snapshot_changes["removed"] if key not in {UI_AGENT_STATE_SNAPSHOT_KEY, UI_AGENT_STATE_REVISION_KEY}]
                         pending_projection = await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_pending",
                             {
@@ -5735,6 +5850,7 @@ class SessionAgentRunnerMixin:
                 conversation_id=conversation.id,
                 reason="agent_run_started",
             ))
+            run_trace.mark("runner.pre_loop.ready")
             async for event in self.query_engine.submit(
                 QuerySubmission(
                     user_message=user_message,
@@ -5768,6 +5884,19 @@ class SessionAgentRunnerMixin:
                         conversation.id,
                     )
                     break
+                if event.type == "agent.run.started" and (internal_turn or run_metadata.get("resume_from_checkpoint")):
+                    prepared_settings = request_snapshot.turn_settings
+                    if prepared_settings is not None:
+                        committed = await to_thread_cancel_safe(
+                            self.conversation_repo.commit_started_turn_settings,
+                            conversation.id,
+                            execution_cwd=prepared_settings.execution_cwd,
+                            expected_workspace_binding_revision=prepared_settings.workspace_revision,
+                            plan_slug=prepared_settings.plan_slug,
+                        )
+                        if committed is None:
+                            raise RuntimeError("The started conversation disappeared while committing its settings")
+                        await self._publish_admitted_turn_settings(conversation.id, prepared_settings)
                 if event.type == "agent.run.started" and run_metadata.get("resume_from_checkpoint"):
                     # Checkpoint recovery has no new user-message admission.
                     # Its durable run-start event is the acceptance boundary;
@@ -5910,6 +6039,7 @@ class SessionAgentRunnerMixin:
                             conversation_id=conversation.id,
                             message_id=assistant_message_id,
                             text_offset=_utf16_code_unit_length(turn_state.content()),
+                            tool_call_id=event.data.get("tool_call_id"),
                         )
                         assistant_artifacts.append(artifact)
                         assistant_image_contexts.append(
@@ -6315,7 +6445,7 @@ class SessionAgentRunnerMixin:
                             previous_snapshot, since_revision=partial_history_revision,
                         )
                         saved_snapshot = apply_context_snapshot_delta(previous_snapshot, snapshot_changes)
-                        _merge_ui_agent_state_into_snapshot(
+                        _merge_conversation_snapshot_metadata(
                             saved_snapshot,
                             previous_snapshot,
                         )
@@ -6356,11 +6486,9 @@ class SessionAgentRunnerMixin:
                         terminal_delta = {
                             **snapshot_changes,
                             "set": {**snapshot_changes["set"], **{
-                                key: saved_snapshot[key] for key in (UI_AGENT_STATE_SNAPSHOT_KEY, UI_AGENT_STATE_REVISION_KEY)
-                                if key in saved_snapshot
+                                key: value for key, value in saved_snapshot.items() if key not in MODEL_CONTEXT_SNAPSHOT_KEYS
                             }},
-                            "removed": [key for key in snapshot_changes["removed"]
-                                        if key not in {UI_AGENT_STATE_SNAPSHOT_KEY, UI_AGENT_STATE_REVISION_KEY}],
+                            "removed": snapshot_changes["removed"],
                         }
                         pending_projection = await to_thread_cancel_safe(append_lifecycle,
                             "conversation_projection_pending",

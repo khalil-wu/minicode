@@ -20,6 +20,8 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+mod desktop_pty;
+
 #[cfg(test)]
 use codex_windows_sandbox::{OwnerIdentity, sandbox_dir, sandbox_bin_dir, sandbox_secrets_dir};
 #[cfg(test)]
@@ -32,6 +34,9 @@ mod tests;
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|arg| arg == "--desktop-pty") {
+        return desktop_pty::run(&args[1..]);
+    }
     if let [flag, request] = args.as_slice()
         && flag == "--launch-restricted-windows-sandbox"
     {

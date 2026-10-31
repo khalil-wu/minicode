@@ -402,7 +402,7 @@ async def test_production_adapters_admit_before_proxy_and_do_not_turn_policy_fai
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire", ["chat", "responses", "anthropic"])
-async def test_settings_discovery_and_connection_checks_keep_policy_denial_as_a_non_retryable_permission_result(monkeypatch, wire):
+async def test_settings_discovery_keeps_policy_denial_as_a_non_retryable_permission_result(monkeypatch, wire):
     from backend.api.models import LLMSettingsUpdateRequest
     from backend.services import llm_provider_service
     controller, _policy = owner("other.test")
@@ -416,11 +416,8 @@ async def test_settings_discovery_and_connection_checks_keep_policy_denial_as_a_
     bind_application_network_owner(controller)
     try:
         discovered = await llm_provider_service.refresh_llm_models(request)
-        checked = await llm_provider_service.check_llm_connection(request)
         assert discovered["failure_kind"] == "application_network_policy" and not discovered["retryable"]
-        assert not checked["ok"] and checked["failure_kind"] == "application_network_policy" and not checked["retryable"]
-        assert checked["model_discovery_failure_kind"] == "application_network_policy" and not checked["model_discovery_retryable"]
-        assert "destination denied" in checked["message"]
+        assert "destination denied" in discovered["message"]
     finally:
         controller.invalidate()
         release_application_network_owner(controller)

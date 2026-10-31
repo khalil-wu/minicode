@@ -20,7 +20,10 @@ from backend.ws.stream_state import create_stream_state
 
 
 @pytest.fixture(autouse=True)
-def close_owned_notification_subscriptions(monkeypatch):
+def close_owned_notification_subscriptions(monkeypatch, tmp_path):
+    from backend.workspace.trust import trust_created_task_directory
+
+    trust_created_task_directory(tmp_path)
     managers = []
     initialize = SessionRunManager.__init__
     def initialized(manager, session):
@@ -49,6 +52,7 @@ async def _never_finishes():
 def _admit_fake_turn(metadata: dict) -> None:
     admission_future = metadata.get("_turn_admission_future")
     assert isinstance(admission_future, asyncio.Future)
+    metadata["_turn_admitted"] = True
     admission_future.set_result(None)
 
 
@@ -170,6 +174,7 @@ def test_scheduler_fallback_projects_existing_durable_completion(
         # fallback, so provide the narrow lifecycle seam explicitly.
         session_lifecycle=SimpleNamespace(
             schedule_task_runtime_update=lambda: None,
+            recovered_input_workspace_ready=lambda _owner: True,
         ),
     )
     session.run_manager = SessionRunManager(session)

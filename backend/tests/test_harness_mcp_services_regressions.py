@@ -7,7 +7,7 @@ import zipfile
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 import threading
 
@@ -29,7 +29,7 @@ from backend.plugins import store as plugin_store
 from backend.plugins.manager import MarketplaceRegistry
 from backend.plugins.policy import ManagedPluginPolicy
 from backend.services import conversation_worktree_handoff_service as handoff
-from backend.services import llm_provider_helpers, mcp_service, plugin_settings_service, workspace_service
+from backend.services import mcp_service, plugin_settings_service, workspace_service
 from backend.skills.marketplace import registry_server_to_marketplace_mcp
 from backend.tools.registry import ToolRegistry
 from backend.tools.tool_search import ToolSearchTool
@@ -432,12 +432,48 @@ async def test_handoff_reports_stash_restore_failure_during_rollback(tmp_path, m
     monkeypatch.setattr(handoff, "switch_main_checkout", lambda *args: (False, "switch failed"))
     monkeypatch.setattr(handoff, "restore_workspace_stash", lambda *args: (False, "restore failed"))
     monkeypatch.setattr("backend.workspace.worktree.WorktreeManager", lambda root: SimpleNamespace(
-        remove_worktree=lambda *args, **kwargs: True, create_worktree=lambda *args, **kwargs: True))
+        has_local_changes=lambda *args, **kwargs: False,
+        safe_remove_worktree=lambda *args, **kwargs: SimpleNamespace(removed=True, snapshot=None, head="", error=None),
+        create_worktree=lambda *args, **kwargs: True))
     monkeypatch.setattr(conversation_handlers, "_release_active_sessions_from_conversation_workspace", AsyncMock(return_value=[]))
     monkeypatch.setattr(conversation_handlers, "_switch_active_sessions_to_conversation_workspace", AsyncMock(return_value=[]))
     await conversation_handlers._handle_conversation_worktree_handoff_claimed(session, conversation=conversation,
-        conversation_id=conversation.id, target_kind="local", dirty_action="stash", preflight={"main_checkout": {"branch": "main", "head": "h"}})
+        conversation_id=conversation.id, target_kind="local", dirty_action="stash", preflight={"source": {"path": conversation.worktree_path}, "main_checkout": {"branch": "main", "head": "h"}})
     assert "restore_workspace_stash:restore failed" in emit.await_args.kwargs["data"]["rollback_errors"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_reports_recovery_when_recreating_the_removed_worktree_raises(tmp_path, monkeypatch):
+    conversation = SimpleNamespace(id="handoff", worktree_path=str(tmp_path / "worktree"),
+                                   workspace_root=str(tmp_path), git_branch="feature")
+    emit = AsyncMock()
+    session = SimpleNamespace(main_worktree_root=lambda path: tmp_path, emit_command_result=emit)
+    stash_ref = "b" * 40
+    monkeypatch.setattr(handoff, "stash_workspace_changes", lambda *args, **kwargs: (True, stash_ref))
+    monkeypatch.setattr(handoff, "switch_main_checkout", lambda *args: (False, "checkout locked"))
+    restore = Mock()
+    monkeypatch.setattr(handoff, "restore_workspace_stash", restore)
+    def fail_create(*args, **kwargs):
+        raise OSError("worktree creation failed")
+    monkeypatch.setattr("backend.workspace.worktree.WorktreeManager", lambda root: SimpleNamespace(
+        has_local_changes=lambda *args, **kwargs: False,
+        safe_remove_worktree=lambda *args, **kwargs: SimpleNamespace(removed=True, snapshot=None, head="", error=None),
+        create_worktree=fail_create))
+    monkeypatch.setattr(conversation_handlers, "_release_active_sessions_from_conversation_workspace", AsyncMock(return_value=[]))
+    project = AsyncMock(return_value=[])
+    monkeypatch.setattr(conversation_handlers, "_switch_active_sessions_to_conversation_workspace", project)
+
+    await conversation_handlers._handle_conversation_worktree_handoff_claimed(session, conversation=conversation,
+        conversation_id=conversation.id, target_kind="local", dirty_action="stash", preflight={"source": {"path": conversation.worktree_path}, "main_checkout": {"branch": "main", "head": "h"}})
+
+    result = emit.await_args.kwargs["data"]
+    assert result["reason"] == "checkout_switch_failed"
+    assert result["stash_ref"] == stash_ref and result["recovery_required"] is True
+    assert result["rollback_completed"] is False
+    assert "create_worktree:worktree creation failed" in result["rollback_errors"]
+    assert stash_ref in emit.await_args.args[1]
+    restore.assert_not_called()
+    project.assert_not_awaited()
 
 
 def test_mcp_cwd_removal_and_sse_registry_protocol():
@@ -448,18 +484,6 @@ def test_mcp_cwd_removal_and_sse_registry_protocol():
     assert entry["config_snippet"]["server"]["transport"] == "sse"
 
 
-@pytest.mark.asyncio
-async def test_text_provider_generation_rejects_a_proxy_html_success(monkeypatch):
-    class Client:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): pass
-        async def post(self, url, **kwargs): return httpx.Response(200, text="<html>login</html>", request=httpx.Request("POST", url))
-    monkeypatch.setattr(llm_provider_helpers.httpx, "AsyncClient", Client)
-    with pytest.raises(ValueError):
-        await llm_provider_helpers._check_openai_compatible_generation("https://server.invalid/v1", "", "model", "chat", headers={}, auth_header=False)
-    with pytest.raises(ValueError):
-        await llm_provider_helpers._check_anthropic_generation("https://server.invalid/v1", "", "model", headers={}, auth_header=False)
 
 
 @pytest.mark.asyncio

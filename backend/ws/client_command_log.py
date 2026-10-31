@@ -16,6 +16,7 @@ from filelock import FileLock
 logger = logging.getLogger(__name__)
 
 CLIENT_COMMAND_DEDUP_MAX_AGE_SECONDS = 86_400.0
+RECENT_CLIENT_COMMAND_IDS_MAX = 2_000
 _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PARTIAL_COMMAND_ID_PATTERN = re.compile(

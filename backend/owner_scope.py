@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -18,6 +20,23 @@ class OwnerScope:
             "conversation_id": self.conversation_id,
             "workspace_root": self.workspace_root,
         }
+
+
+_prepared_scope_aliases: ContextVar[tuple[tuple[OwnerScope, OwnerScope], ...]] = ContextVar(
+    "prepared_scope_aliases", default=(),
+)
+
+
+@contextmanager
+def bind_prepared_projectless_scope(conversation_id: str, execution_cwd: str):
+    """Read this thread's legacy uploads during admission without publishing grants."""
+    target = make_owner_scope(conversation_id, execution_cwd)
+    source = make_owner_scope(conversation_id, "")
+    token = _prepared_scope_aliases.set((*_prepared_scope_aliases.get(), (target, source)))
+    try:
+        yield
+    finally:
+        _prepared_scope_aliases.reset(token)
 
 
 def canonical_workspace_root(value: str | Path | None) -> str:
@@ -129,6 +148,9 @@ def owner_scope_matches(
             requested.conversation_id == scope.conversation_id
             and requested.workspace_root == scope.workspace_root
         ):
+            return True
+    for target, source in _prepared_scope_aliases.get():
+        if requested == target and source in normalized:
             return True
     return False
 

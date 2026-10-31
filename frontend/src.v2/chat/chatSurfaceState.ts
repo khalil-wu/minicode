@@ -777,6 +777,7 @@ function buildTurn(
         attachments: assistantMessage.replyAttachments,
         artifacts,
         imageProgress,
+        terminalStatus: presentedTerminalStatus,
         failureMessage: assistantMessage.failureMessage,
         failureRecoverable: assistantMessage.failureRecoverable,
         createdAt: assistantMessage.timestamp,

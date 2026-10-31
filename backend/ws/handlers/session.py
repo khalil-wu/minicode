@@ -160,52 +160,62 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     restored_conversation_id = restored_conversation.get("id") if restored_conversation else None
     active_payload = restored_conversation
     is_hydrating = False
-    if restored_conversation_id:
+    superseded = not session.session_lifecycle.foreground_navigation_is_current()
+    if restored_conversation_id and not superseded:
         target = ConversationRecord.from_dict(restored_conversation)
         if not target.archived and target.conversation_type == "main":
-            session.active_conversation_id = target.id
             workspace_activated = await session.switch_workspace_for_conversation(target, announce=False)
-            if not workspace_activated:
-                session.session_lifecycle.clear_workspace_runtime()
-                result["error"] = result.get("error") or (
-                    "The conversation was restored, but its workspace could not be activated. "
-                    "Reopen or trust the workspace before using workspace tools."
-                )
-            async def restored(owner: str) -> None:
-                if owner != session.active_conversation_id:
-                    return
-                if session.conversation_runtime.hydration_error is not None:
-                    await session._on_conversation_hydration_complete(owner)
-                    return
-                generation = session.conversation_runtime._hydration_generation
-                conversation = await session.reconcile_persisted_ui_agent_state(owner)
-                boundary = manager.conversation_stream_lock(owner) if manager is not None else nullcontext()
-                async with boundary:
-                    current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
-                    if current_view is not None:
-                        current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
-                    if owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation:
-                        return
-                    session.permission_context = session.permission_context_for_conversation(conversation, source="session.restore")
-                    session.refresh_llm_selection()
-                    await session.send_payload(
-                        build_restore_conversation_switched_payload(
-                            restored_conversation_id=owner, active_payload=current_view,
-                            is_hydrating=False, runtime_snapshot=session.runtime_snapshot(),
-                        ), log_context="conversation.switched", wait_for_delivery=False,
+            superseded = not session.session_lifecycle.foreground_navigation_is_current()
+            if not superseded:
+                session.active_conversation_id = target.id
+                session.session_lifecycle.record_workspace_activation(target.id, workspace_activated)
+                if not workspace_activated:
+                    session.session_lifecycle.clear_workspace_runtime()
+                    result["error"] = result.get("error") or (
+                        "The conversation was restored, but its workspace could not be activated. "
+                        "Reopen or trust the workspace before using workspace tools."
                     )
-                await session.reemit_pending_state(conversation_id=owner)
+                async def restored(owner: str) -> None:
+                    if owner != session.active_conversation_id or not session.session_lifecycle.foreground_navigation_is_current():
+                        return
+                    if session.conversation_runtime.hydration_error is not None:
+                        await session._on_conversation_hydration_complete(owner)
+                        return
+                    generation = session.conversation_runtime._hydration_generation
+                    conversation = await session.reconcile_persisted_ui_agent_state(owner)
+                    boundary = manager.conversation_stream_lock(owner) if manager is not None else nullcontext()
+                    async with boundary:
+                        current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)
+                        if current_view is not None:
+                            current_view = await asyncio.to_thread(restore_tool_artifact_sources, current_view, session.artifact_store)
+                        if (owner != session.active_conversation_id or generation != session.conversation_runtime._hydration_generation
+                                or not session.session_lifecycle.foreground_navigation_is_current()):
+                            return
+                        session.permission_context = session.permission_context_for_conversation(conversation, source="session.restore")
+                        session.refresh_llm_selection()
+                        await session.send_payload(
+                            build_restore_conversation_switched_payload(
+                                restored_conversation_id=owner, active_payload=current_view,
+                                is_hydrating=False, runtime_snapshot=session.runtime_snapshot(),
+                            ), log_context="conversation.switched", wait_for_delivery=False,
+                        )
+                    await session.reemit_pending_state(conversation_id=owner)
 
-            session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
-            is_hydrating = True
-            session.permission_context = session.permission_context_for_conversation(target, source="session.restore")
-            session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.session.restore")
-            session.refresh_llm_selection()
+                session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
+                is_hydrating = True
+                session.permission_context = session.permission_context_for_conversation(target, source="session.restore")
+                session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.session.restore")
+                session.refresh_llm_selection()
         else:
             restored_conversation_id = None
             active_payload = None
 
-    if not restored_conversation_id and last_conversation_id:
+    if superseded:
+        restored_conversation_id = session.active_conversation_id
+        active_payload = None
+        result["error"] = None
+        result["messages"] = []
+    elif not restored_conversation_id and last_conversation_id:
         from backend.ws.handlers.conversation import _clear_active_conversation_runtime
 
         _clear_active_conversation_runtime(session)
@@ -220,6 +230,13 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
             if workspace_root is not None
             else None
         )
+        workspace_path = session.session_lifecycle.workspace_path_for_conversation() if session.active_conversation_id else ""
+        if (workspace_path.startswith("file:")
+                and not session.session_lifecycle.workspace_activation_failed(session.active_conversation_id)):
+            from backend.workspace.executor_paths import ExecutorPath
+
+            executor_path = ExecutorPath.parse(workspace_path)
+            restored_workspace = {"root_path": executor_path.uri, "name": executor_path.name}
         if restored_conversation_id:
             active_payload = await asyncio.to_thread(session.conversation_repo.get_conversation_view, restored_conversation_id)
         if active_payload is not None:
@@ -250,42 +267,46 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         base_url = str((provider_capabilities or {}).get("base_url") or "").strip()
         wire_api = str((provider_capabilities or {}).get("wire_api") or "").strip()
 
-        await session.send_payload(
-            build_session_restored_payload(
-                result,
-                restored_conversation_id=restored_conversation_id,
-                active_payload=active_payload,
-                restored_workspace=restored_workspace,
-                runtime_snapshot=runtime_snapshot,
-                selected_model=session.selected_model,
-                provider=session.provider,
-                available_models=session.available_models,
-                models_source=session.models_source,
-                missed_events=bool(
-                    cursor_reset
-                    or event_log_gap
-                    or (
-                        session.event_outbox.events_dropped_during_disconnect
-                        and missed_by_seq
-                        and not replay_can_cover_miss
-                    )
-                ),
-                event_log_gap=event_log_gap,
-                snapshot_required=bool(cursor_reset or event_log_gap),
-                cursor_reset=cursor_reset,
-                requested_last_seq=requested_last_seq,
-                last_seq=last_seq,
-                current_seq=current_seq,
-                replayed_events=len(replay_candidates),
-                provider_id=provider_id,
-                base_url=base_url,
-                wire_api=wire_api,
+        superseded = superseded or not session.session_lifecycle.foreground_navigation_is_current()
+        restored_payload = build_session_restored_payload(
+            result,
+            restored_conversation_id=restored_conversation_id,
+            active_payload=active_payload,
+            restored_workspace=restored_workspace,
+            runtime_snapshot=runtime_snapshot,
+            selected_model=session.selected_model,
+            provider=session.provider,
+            available_models=session.available_models,
+            models_source=session.models_source,
+            missed_events=bool(
+                cursor_reset
+                or event_log_gap
+                or (
+                    session.event_outbox.events_dropped_during_disconnect
+                    and missed_by_seq
+                    and not replay_can_cover_miss
+                )
             ),
+            event_log_gap=event_log_gap,
+            snapshot_required=bool(cursor_reset or event_log_gap),
+            cursor_reset=cursor_reset,
+            requested_last_seq=requested_last_seq,
+            last_seq=last_seq,
+            current_seq=current_seq,
+            replayed_events=len(replay_candidates),
+            provider_id=provider_id,
+            base_url=base_url,
+            wire_api=wire_api,
+        )
+        if superseded:
+            restored_payload["conversation_switched_follows"] = False
+        await session.send_payload(
+            restored_payload,
             log_context="session.restored", wait_for_delivery=False,
         )
         session.event_outbox.clear_disconnect_drop_marker()
 
-        if restored_conversation_id and active_payload:
+        if restored_conversation_id and active_payload and not superseded:
             await session.send_payload(
                 build_restore_conversation_switched_payload(
                     restored_conversation_id=restored_conversation_id,
@@ -307,7 +328,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
     # Replay the frozen incremental window first, then replace it with the
     # authoritative accumulated stream snapshot. This avoids duplicated text.
     await session.reemit_pending_state()
-    if restored_conversation_id:
+    if restored_conversation_id and not superseded and session.session_lifecycle.foreground_navigation_is_current():
         # Durable follow-ups survive a process/WebSocket restart. Dispatch only
         # after the authoritative session snapshot and replay have been applied.
         session.schedule_next_queued_user_message(restored_conversation_id)
@@ -358,6 +379,8 @@ async def handle_session_sync(session: "WebSocketSession", data: dict[str, Any])
             )
             workspace_root = session.session_lifecycle.current_workspace_root() if session.active_conversation_id else None
             runtime_snapshot = result.get("session") if isinstance(result.get("session"), dict) else {}
+            if workspace_root is None and str(runtime_snapshot.get("workspace_root") or "").startswith("file:"):
+                workspace_root = runtime_snapshot["workspace_root"]
             provider_capabilities = runtime_snapshot["capabilities"]["provider_capabilities"]
             provider_id = str((provider_capabilities or {}).get("provider_id") or "").strip()
             base_url = str((provider_capabilities or {}).get("base_url") or "").strip()

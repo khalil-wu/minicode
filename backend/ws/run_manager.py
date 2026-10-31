@@ -217,6 +217,11 @@ class SessionRunManager:
         if conversation_id:
             self._delivery_complete.add((conversation_id, run_id))
             current_run = self.run_task_ids.get(conversation_id, "")
+            if current_run and current_run == run_id:
+                context = self._run_contexts.get(conversation_id)
+                status = self._terminal_statuses.get(conversation_id)
+                if context is not None and status:
+                    context.publish_turn_terminal({"status": status, "reason": status})
             if not run_id or current_run == run_id or (
                 not current_run and conversation_id not in self._last_delivery_complete
             ):
@@ -245,6 +250,8 @@ class SessionRunManager:
         )
 
     def enqueue_user_message(self, conversation_id: str, command: Any) -> int:
+        if isinstance(command, UserCommand):
+            DurableUserMessageQueue.ensure_queued_identity(command)
         queue = deque(self.queued_user_messages(conversation_id))
         queue.append(command)
         self._persist_user_queues(queues={**self._user_message_queues, conversation_id: queue})
@@ -293,18 +300,23 @@ class SessionRunManager:
         if self._durable_queue is not None:
             local_commands = list(self._user_message_queues.get(conversation_id) or ())
             claimed = self._durable_queue.claim_user_message(conversation_id)
-            remaining = self._durable_queue.pending_user_messages(conversation_id)
-            command = next(
-                (candidate for candidate in local_commands if claimed is not None and self._durable_queue.same_pending_payload(candidate, claimed)),
-                claimed,
-            )
-            remaining = [
-                next(
-                    (candidate for candidate in local_commands if self._durable_queue.same_pending_payload(candidate, persisted)),
-                    persisted,
+            try:
+                remaining = self._durable_queue.pending_user_messages(conversation_id)
+                command = next(
+                    (candidate for candidate in local_commands if claimed is not None and self._durable_queue.same_pending_payload(candidate, claimed)),
+                    claimed,
                 )
-                for persisted in remaining
-            ]
+                remaining = [
+                    next(
+                        (candidate for candidate in local_commands if self._durable_queue.same_pending_payload(candidate, persisted)),
+                        persisted,
+                    )
+                    for persisted in remaining
+                ]
+            except BaseException:
+                if claimed is not None:
+                    self._durable_queue.settle_user_message(conversation_id, claimed, succeeded=False)
+                raise
             if remaining:
                 self._user_message_queues[conversation_id] = deque(remaining)
             else:
@@ -380,8 +392,34 @@ class SessionRunManager:
         self._persist_user_queues(queues=queues)
         return removed
 
-    def pop_queued_user_message(self, conversation_id: str, message_id: str, *, expected_turn_id: str = "") -> Any | None:
+    def pop_queued_user_message(self, conversation_id: str, message_id: str, *, expected_turn_id: str = "",
+                                expected_command: UserCommand | None = None) -> Any | None:
         """Remove and return one queued prompt without disturbing FIFO order."""
+        if self._durable_queue is not None:
+            local_queue = list(self._user_message_queues.get(conversation_id, ()))
+            local_inputs = list(self._durable_turn_inputs.get(conversation_id, ()))
+            result = self._durable_queue.promote_queued_user_message(
+                conversation_id, message_id, expected_turn_id=expected_turn_id, expected_command=expected_command,
+            )
+            if result is None:
+                self.queued_user_messages(conversation_id)
+                return None
+            original, promoted, remaining, turn_inputs = result
+            selected = next((item for item in local_queue
+                             if self._durable_queue.same_pending_payload(item, original)), promoted)
+            if expected_turn_id:
+                selected.data["expected_turn_id"] = expected_turn_id
+            self._user_message_queues[conversation_id] = deque(
+                next((item for item in local_queue if self._durable_queue.same_pending_payload(item, stored)), stored)
+                for stored in remaining
+            )
+            if not self._user_message_queues[conversation_id]:
+                self._user_message_queues.pop(conversation_id)
+            self._durable_turn_inputs[conversation_id] = [
+                next((item for item in local_inputs if self._durable_queue.same_pending_payload(item, stored)), stored)
+                for stored in turn_inputs[:-1]
+            ] + [selected]
+            return selected
         queue = self.queued_user_messages(conversation_id)
         if not queue:
             return None
@@ -395,6 +433,8 @@ class SessionRunManager:
             -1,
         )
         if index < 0:
+            return None
+        if expected_command is not None and commands[index] is not expected_command:
             return None
         command = commands.pop(index)
         if expected_turn_id:
@@ -535,20 +575,6 @@ class SessionRunManager:
         self._persist_user_queues(turn_inputs=turn_inputs)
         return True
 
-    def restore_turn_input_as_follow_up(
-        self,
-        conversation_id: str,
-        command: Any,
-    ) -> list[Any]:
-        """Atomically return a failed steer promotion to the FIFO queue."""
-        queue = [command, *self.queued_user_messages(conversation_id)]
-        turn_inputs, _removed = self._without_durable_turn_input(conversation_id, command)
-        self._persist_user_queues(
-            queues={**self._user_message_queues, conversation_id: deque(queue)},
-            turn_inputs=turn_inputs,
-        )
-        return queue
-
     def turn_input_queue(self, conversation_id: str) -> TurnInputQueue:
         self.watch_conversation_notifications(conversation_id)
         queue = self._turn_input_queues.get(conversation_id)
@@ -595,7 +621,7 @@ class SessionRunManager:
             target_message_id=target_message_id,
             expected_turn_id=expected_turn_id,
             before_publish=(lambda _item: self.pop_queued_user_message(conversation_id, queued_message_id,
-                expected_turn_id=expected_turn_id)) if queued_message_id else None,
+                expected_turn_id=expected_turn_id, expected_command=command) is not None) if queued_message_id else None,
         )
 
     def enqueue_user_message_as_steer(
@@ -756,8 +782,13 @@ class SessionRunManager:
         self._last_delivery_complete.pop(owner, None)
         self._terminal_statuses.pop(owner, None)
         self.run_tasks.pop(owner, None)
+        self._run_contexts.pop(owner, None)
         self.run_task_ids.pop(owner, None)
         self.cancel_events.pop(owner, None)
+        run_id = self._queue_owned_runs.pop(owner, None)
+        release = self._queue_owned_run_releases.pop(run_id, None) if run_id else None
+        if release is not None and not release.done():
+            release.set_result(False)
         self._watched_notification_conversations.discard(owner)
         self._notification_request_generation.pop(owner, None)
         self._notification_attempt_generation.pop(owner, None)
@@ -825,7 +856,7 @@ class SessionRunManager:
         if not release.done():
             release.set_result(bool(succeeded))
 
-    async def wait_for_queue_owned_run(self, conversation_id: str) -> bool:
+    async def wait_for_queue_owned_run(self, conversation_id: str, *, resume_on_abandon: bool = False) -> bool:
         owner = str(conversation_id or "").strip()
         run_id = self._queue_owned_runs.get(owner)
         if not run_id:
@@ -835,10 +866,23 @@ class SessionRunManager:
             raise RuntimeError(
                 f"Queue-owned run {run_id} has no release signal"
             )
-        succeeded = await asyncio.shield(release)
-        if self._queue_owned_runs.get(owner) == run_id:
-            self._queue_owned_runs.pop(owner, None)
-        self._queue_owned_run_releases.pop(run_id, None)
+        def release_owner() -> None:
+            if self._queue_owned_runs.get(owner) == run_id:
+                self._queue_owned_runs.pop(owner, None)
+            if self._queue_owned_run_releases.get(run_id) is release:
+                self._queue_owned_run_releases.pop(run_id, None)
+
+        try:
+            succeeded = await asyncio.shield(release)
+        except asyncio.CancelledError:
+            def settle_abandoned(completed: asyncio.Future[bool]) -> None:
+                release_owner()
+                if resume_on_abandon and not completed.cancelled() and completed.result():
+                    self._session.schedule_next_queued_user_message(owner)
+
+            release.add_done_callback(settle_abandoned)
+            raise
+        release_owner()
         return bool(succeeded)
 
     def begin_queue_dispatch(self, conversation_id: str) -> bool:
@@ -1149,6 +1193,7 @@ class SessionRunManager:
         existing = self._notification_wake_tasks.get(conversation_id)
         if existing is not None and not existing.done():
             return
+        scheduled_generation = requested
         task = asyncio.create_task(
             self._dispatch_parent_notification_wake(conversation_id),
             name=f"parent-notification-wake:{conversation_id}",
@@ -1167,6 +1212,8 @@ class SessionRunManager:
                     "Parent notification wake failed for conversation %s",
                     conversation_id,
                 )
+            if self._notification_request_generation.get(conversation_id, 0) > scheduled_generation:
+                self._schedule_parent_notification_wake(conversation_id)
 
         task.add_done_callback(_discard)
 
@@ -1210,6 +1257,7 @@ class SessionRunManager:
                 self._notification_wakes_closed
                 or requested <= attempted
                 or conversation_id not in self._watched_notification_conversations
+                or not self._session.session_lifecycle.recovered_input_workspace_ready(conversation_id)
             ):
                 return
             # Registration is the ownership fence until cleanup.  Do not use
@@ -1256,6 +1304,14 @@ class SessionRunManager:
                 )
                 return
             try:
+                from backend.services.workspace_service import conversation_execution_path
+
+                if (conversation_execution_path(conversation).startswith("file:")
+                        and not await self._session.command_dispatcher._validate_executor_input_workspace(
+                            UserCommand("user_message", {"conversation_id": conversation_id}), already_locked=True,
+                        )):
+                    release_parent_notification_wake(conversation_id, self._notification_wake_owner_token)
+                    return
                 task_id = await self._session.start_agent_run(
                     "",
                     attachments=[],
@@ -1425,10 +1481,10 @@ class SessionRunManager:
             label="pending approval cancellation",
             owner=self._session.cleanup_tasks,
         )
-        await asyncio.gather(*(
+        tree_results = await asyncio.gather(*(
             self._cancel_run_tree(task_id, reason=reason)
             for task_id in seen_task_ids
-        ))
+        ), return_exceptions=True)
         current = asyncio.current_task()
         waitable = [task for task in tasks_to_wait if task is not current and not task.done()]
         if waitable:
@@ -1438,9 +1494,9 @@ class SessionRunManager:
                 label="agent run cancellation",
             )
         self._session.session_lifecycle.schedule_task_runtime_update()
-        persistence_errors = [result for result in persistence_results if isinstance(result, Exception)]
-        if persistence_errors:
-            raise ExceptionGroup("Stop ended execution but its durable input state could not be saved", persistence_errors)
+        errors = [result for result in (*persistence_results, *tree_results) if isinstance(result, Exception)]
+        if errors:
+            raise ExceptionGroup("Stop encountered errors while settling execution", errors)
         return cancelled_any
 
     async def cancel_mcp_startup(self, conversation_id: str) -> None:

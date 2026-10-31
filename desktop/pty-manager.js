@@ -1,7 +1,6 @@
 "use strict";
 
 const path = require("node:path");
-const { spawn } = require("node:child_process");
 const desktopPreferences = require("./preferences");
 
 // ---------------------------------------------------------------------------
@@ -162,14 +161,12 @@ function spawnSession(cwd, conversationId, windowInstanceId) {
   const shellArgs = target.args;
   const resolvedCwd = resolveTerminalCwd(cwd);
 
-  // Single authoritative execution path: a real PTY.  There is deliberately
-  // no child_process fallback — a missing/broken node-pty runtime is an
-  // explicit startup failure surfaced to the renderer, never a silently
-  // degraded pipe session with different semantics.
+  // Source owns the Windows PTY; node-pty owns Unix PTYs. A missing native
+  // owner is an actual startup failure, never a substituted pipe terminal.
   if (!pty) {
-    appendDesktopLog("[desktop] terminal spawn failed: node-pty module unavailable");
+    appendDesktopLog("[desktop] terminal spawn failed: native PTY owner unavailable");
     throw new Error(
-      "Terminal unavailable: the node-pty runtime module failed to load. Reinstall MiniCode desktop or run scripts/verify-node-pty-runtime.js.",
+      "Terminal unavailable: the native PTY owner is unavailable. Reinstall MiniCode desktop or run scripts/verify-pty-runtime.js.",
     );
   }
   let ptyProcess;
@@ -183,7 +180,7 @@ function spawnSession(cwd, conversationId, windowInstanceId) {
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    appendDesktopLog(`[desktop] node-pty spawn failed: ${err instanceof Error ? err.stack || err.message : String(err)}`);
+    appendDesktopLog(`[desktop] native PTY spawn failed: ${err instanceof Error ? err.stack || err.message : String(err)}`);
     throw new Error(`Terminal spawn failed: ${detail}`);
   }
 
@@ -209,7 +206,6 @@ function spawnSession(cwd, conversationId, windowInstanceId) {
     resolveExit,
     exitSettled: false,
     killPromise: null,
-    nativeKillRequested: false,
   };
   ptySessions.set(sessionId, session);
 
@@ -230,13 +226,6 @@ function spawnSession(cwd, conversationId, windowInstanceId) {
     session.exitSignal = hasRealExitCode ? null : (signal || "unknown");
     session.exitedAt = Date.now();
     session.exitSettled = true;
-    // A Windows shell exit closes its output socket, but node-pty releases
-    // the PseudoConsole/worker only through kill(). Settle the real result
-    // first so disposal's repeated callback cannot replace that result.
-    if (process.platform === "win32" && !session.nativeKillRequested) {
-      session.nativeKillRequested = true;
-      session.process.kill();
-    }
     session.resolveExit();
     const wc = getSendTarget(session);
     if (wc) {
@@ -271,7 +260,7 @@ function writeToSession(sessionId, data, conversationId, windowInstanceId) {
   const session = ptySessions.get(sessionId);
   if (session?.isAlive && isOwnedBy(session, conversationId, windowInstanceId)) {
     for (let offset = 0; offset < data.length; offset += PTY_WRITE_CHUNK_CHARS) {
-      session.process.write(data.slice(offset, offset + PTY_WRITE_CHUNK_CHARS));
+      if (session.process.write(data.slice(offset, offset + PTY_WRITE_CHUNK_CHARS)) === false) return false;
     }
     return true;
   }
@@ -290,29 +279,13 @@ function resizeSession(sessionId, cols, rows, conversationId, windowInstanceId) 
   }
 }
 
-function killProcessTreeAndWait(pid, fallback) {
+function killUnixProcessGroup(pid, fallback) {
   if (!Number.isFinite(pid) || pid <= 0) {
     try { fallback(); } catch {}
     return Promise.resolve();
   }
-  if (process.platform !== "win32") {
-    try { process.kill(-pid, "SIGTERM"); } catch { try { fallback(); } catch {} }
-    return Promise.resolve();
-  }
-  return new Promise((resolve) => {
-    const killer = spawn("taskkill", ["/pid", String(pid), "/t", "/f"], { windowsHide: true });
-    let settled = false;
-    const finish = (useFallback) => {
-      if (settled) return;
-      settled = true;
-      if (useFallback) {
-        try { fallback(); } catch {}
-      }
-      resolve();
-    };
-    killer.once("error", () => finish(true));
-    killer.once("close", (code) => finish(code !== 0));
-  });
+  try { process.kill(-pid, "SIGTERM"); } catch { try { fallback(); } catch {} }
+  return Promise.resolve();
 }
 
 async function waitForSessionExit(session, timeoutMs) {
@@ -333,15 +306,16 @@ async function terminateSession(sessionId, session) {
   if (session.exitSettled || session.isAlive === false) return true;
   if (!session.killPromise) {
     session.killPromise = (async () => {
-      await killProcessTreeAndWait(session.process.pid, () => {
-        session.nativeKillRequested = true;
+      if (process.platform === "win32") {
         session.process.kill();
-      });
+      } else {
+        await killUnixProcessGroup(session.process.pid, () => session.process.kill());
+      }
       if (await waitForSessionExit(session, killExitTimeoutMs)) return true;
 
       appendDesktopLog(`[desktop] pty ${sessionId} did not exit after termination; forcing kill`);
-      session.nativeKillRequested = true;
-      session.process.kill();
+      if (process.platform === "win32") session.process.forceKill();
+      else session.process.kill();
       if (!await waitForSessionExit(session, forceKillExitTimeoutMs)) {
         appendDesktopLog(`[desktop] pty ${sessionId} did not report exit after forced kill`);
         return false;

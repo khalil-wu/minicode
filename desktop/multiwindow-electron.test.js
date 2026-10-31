@@ -45,7 +45,10 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
       },
     });
     browser.init({ getWindowByInstanceId: manager.getWindowByInstanceId });
-    terminal.init({ pty: require("node-pty"), getWindowByInstanceId: manager.getWindowByInstanceId,
+    const nativePty = process.platform === "win32"
+      ? require("./windows-pty").createWindowsPty(path.join(__dirname, "windows-sandbox-runtime", "codex.exe"))
+      : require("node-pty");
+    terminal.init({ pty: nativePty, getWindowByInstanceId: manager.getWindowByInstanceId,
       sanitizedPtyEnv: require("./utils").sanitizedPtyEnv, assertTrustedPath: (value) => value });
     const dictationHotkeys = require("./dictation-hotkeys").createDictationHotkeys({ app,
       getMainWindows: manager.getMainWindows, getFocusedMainWindow: manager.getFocusedMainWindow,
@@ -146,8 +149,7 @@ if (process.env.MINICODE_MULTIWINDOW_TEST_CHILD === "1") {
       await bridge.stop();
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
       process.stdout.write("[multiwindow] bridge and HTTP server closed; requesting normal app.quit\n");
-      // app.exit tears down Node immediately, including node-pty's native
-      // exit callback. Follow Electron's normal shutdown after owner cleanup.
+      // Follow normal Electron shutdown after the actual native owners close.
       app.quit();
     } catch (error) {
       process.stderr.write(`${error.stack || error}\n`);

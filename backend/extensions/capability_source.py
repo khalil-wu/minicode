@@ -76,7 +76,7 @@ class ExtensionCapabilitySource:
         config_stack = load_config_layer_stack(cwd=self.workspace_root)
         snapshot = get_plugin_snapshot(config_stack=config_stack)
         self._config_stack = config_stack
-        self._plugin_snapshot = dict(snapshot)
+        self._plugin_snapshot = snapshot
         return "|".join(
             (
                 self._workspace_key(self.workspace_root),
@@ -91,7 +91,7 @@ class ExtensionCapabilitySource:
         plugin_snapshot = self._plugin_snapshot
         if config_stack is None or plugin_snapshot is None:
             config_stack = load_config_layer_stack(cwd=self.workspace_root)
-            plugin_snapshot = dict(get_plugin_snapshot(config_stack=config_stack))
+            plugin_snapshot = get_plugin_snapshot(config_stack=config_stack)
             self._config_stack = config_stack
             self._plugin_snapshot = plugin_snapshot
         plugin_fingerprint = str(plugin_snapshot.get("fingerprint") or "")
@@ -109,7 +109,7 @@ class ExtensionCapabilitySource:
         source_scopes: dict[str | Path, Any] = {}
         source_metadata: dict[str | Path, dict[str, Any]] = {}
         source_errors: list[dict[str, str]] = []
-        for source in load_enabled_plugin_extension_sources(config_stack=config_stack):
+        for source in load_enabled_plugin_extension_sources(config_stack=config_stack, snapshot=plugin_snapshot):
             raw_root = str(source.get("plugin_root") or "").strip()
             if raw_root:
                 roots = managed_roots if bool(source.get("managed")) else user_roots

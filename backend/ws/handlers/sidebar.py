@@ -42,7 +42,7 @@ async def handle_read_state(session, data: dict[str, Any]) -> bool:
         return True
     # The mutation is durable. A read receipt changes no navigation, ordering,
     # or transcript; do not hold the next send behind full list hydration.
-    await handoff_command_lifecycle_prefix(session.session_id)
+    await handoff_command_lifecycle_prefix()
     payload = {
         "type": "conversation.summary.updated", "conversation_id": record.id,
         "revision": record.revision, "summary": record.summary, "title": record.title,

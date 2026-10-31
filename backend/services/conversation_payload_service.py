@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -199,7 +200,7 @@ def build_blank_conversation_switched_payload(runtime_snapshot: dict[str, Any]) 
     }
 
 
-def _request_flag(data: dict[str, Any], name: str) -> bool:
+def parse_request_flag(data: dict[str, Any], name: str) -> bool:
     value = data.get(name, False)
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be a boolean")
@@ -212,17 +213,17 @@ def parse_conversation_delete_request(data: dict[str, Any]) -> ConversationDelet
         raise ValueError("storage_review must be an object")
     return ConversationDeleteRequest(
         conversation_id=str(data.get("conversation_id", "")),
-        cleanup_worktree=_request_flag(data, "cleanup_worktree"),
-        force_cleanup=_request_flag(data, "force"),
-        client_resource_cleanup=_request_flag(data, "client_resource_cleanup"),
-        storage_review=storage_review,
+        cleanup_worktree=parse_request_flag(data, "cleanup_worktree"),
+        force_cleanup=parse_request_flag(data, "force"),
+        client_resource_cleanup=parse_request_flag(data, "client_resource_cleanup"),
+        storage_review=deepcopy(storage_review),
     )
 
 
 def parse_conversation_clear_request(data: dict[str, Any], *, active_conversation_id: str = "") -> ConversationClearRequest:
     return ConversationClearRequest(
         conversation_id=str(data.get("conversation_id") or active_conversation_id or "").strip(),
-        preserve_plan=_request_flag(data, "preserve_plan"),
+        preserve_plan=parse_request_flag(data, "preserve_plan"),
         plan_content=str(data.get("plan_content") or ""),
     )
 
@@ -257,9 +258,9 @@ def build_worktree_cleanup_force_required_outcome(cleanup: dict[str, Any]) -> Co
 
 
 def parse_conversation_create_request(data: dict[str, Any]) -> ConversationCreateRequest:
-    git_isolated = _request_flag(data, "git_isolated")
+    git_isolated = parse_request_flag(data, "git_isolated")
     raw_conversation_type = data.get("conversation_type")
-    if raw_conversation_type is None and _request_flag(data, "side_chat"):
+    if raw_conversation_type is None and parse_request_flag(data, "side_chat"):
         raw_conversation_type = "side_chat"
     conversation_type = normalize_conversation_type(raw_conversation_type)
     requested_memory_mode = str(data.get("memory_mode") or "").strip().lower()

@@ -473,7 +473,7 @@ class WorkspaceService:
         root = self.workspace_root_path()
         relative = self.normalize_workspace_relative(path_value)
         lexical = root / relative
-        if follow_final_symlink or lexical == root:
+        if follow_final_symlink or lexical == root or lexical.name == "..":
             candidate = lexical.resolve()
         else:
             candidate = lexical.parent.resolve() / lexical.name

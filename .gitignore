@@ -89,6 +89,7 @@ data/metrics/
 data/active_workspace.json
 data/recent_projects.json
 data/trusted_workspaces.json
+data/local-environment-*.json
 data/ws-event-log/
 data/backend-startup.*.log
 cc/

@@ -85,6 +85,14 @@ class MCPAuthStatus(Enum):
     OAUTH = "oauth"
 
 
+class MCPManagerReloadError(RuntimeError):
+    def __init__(self, failures: list[dict[str, str]]) -> None:
+        self.failures = failures
+        super().__init__("; ".join(
+            f"MCP workspace {failure['workspace_root']}: {failure['message']}" for failure in failures
+        ))
+
+
 # Lifecycle phase classification prefers the typed attributes carried by
 # ``MCPAuthenticationError``. Some older external MCP servers only return a
 # string, so keep a deliberately narrow fallback.  A bare word such as
@@ -566,6 +574,7 @@ class MCPServerManager:
         self._optional_startup_deadline: tuple[int, float] | None = None
         self._startup_admitted_at: dict[str, float] = {}
         self._reload_lock = asyncio.Lock()
+        self._shutting_down = False
         # OAuth tokens for HTTP MCP servers, persisted alongside the MCP config.
         from backend.mcp.oauth import TokenStore
 
@@ -1575,9 +1584,14 @@ class MCPServerManager:
         snapshots = await asyncio.gather(*(wait_for_snapshot(name) for name in selected if name in self._servers))
         await asyncio.gather(*(project(snapshot) for snapshot in snapshots))
 
+    def begin_shutdown(self) -> None:
+        self._shutting_down = True
+
     async def reload_config(self) -> None:
         """Reconcile running servers with the effective config catalog."""
         async with self._reload_lock:
+            if self._shutting_down:
+                raise RuntimeError("MCP manager is shutting down")
             await self._reload_config_unlocked()
 
     async def _reload_config_unlocked(self) -> None:
@@ -1621,6 +1635,8 @@ class MCPServerManager:
         interactive_oauth: bool = False,
         force: bool = False,
     ) -> None:
+        if self._shutting_down:
+            raise RuntimeError("MCP manager is shutting down")
         from backend.mcp.cua_repl import SOURCE_PREFIX as CUA_SOURCE, is_configured_cua
 
         if is_configured_cua(config) and not config.source.startswith(CUA_SOURCE):
@@ -2221,6 +2237,8 @@ class MCPServerManager:
                     raw_tools = await client.list_tools()
                     if context is not None:
                         context.publish(ticket, raw_tools, client.instructions)
+            if self._shutting_down:
+                raise asyncio.CancelledError
             # Replay durable subscription intent after every new transport
             # session.  The old client-owned set cannot survive reconnect.
             restore_failures: list[tuple[str, BaseException]] = []

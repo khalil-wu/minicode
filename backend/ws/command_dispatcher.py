@@ -4,6 +4,7 @@ from backend.async_cleanup import to_thread_cancel_safe
 from backend.atomic_io import await_task_despite_cancellation
 
 import asyncio
+from collections import deque
 import hashlib
 import json
 import logging
@@ -17,21 +18,21 @@ from typing import Any
 from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.execution_journal import execution_journal_owner, turn_user_prompt_id, turn_input_consumption_id, turn_input_rejection_id
 from backend.services.misc_command_service import is_conversation_effort_command
-from backend.ws.client_command_log import ClientCommandDedupStore, _clean_command_id
+from backend.ws.client_command_log import ClientCommandDedupStore, RECENT_CLIENT_COMMAND_IDS_MAX, _clean_command_id
 from backend.ws.command_results import emit_command_error
 from backend.ws.command_scope import CommandScope, bind_execution_command_scope
 from backend.ws.conversation_errors import emit_conversation_not_found
-from backend.ws.event_outbox import EventOutbox
+from backend.ws.event_outbox import DurableResultDelivery, EventOutbox, capture_durable_results
 from backend.ws.conversation_stream import bind_response_origin
 from backend.ws.lifecycle_scope import bind_command_lifecycle_prefix
 from backend.ws.utils import normalize_attachment_payloads, normalize_permission_mode, normalize_user_input_metadata
+from backend.ws.turn_settings import PreparedTurnSettings
 from backend.agent.conversation_query_guard import ConversationTransition, conversation_query_guards
 
 logger = logging.getLogger(__name__)
 
 MAX_PENDING_COMMAND_TASKS = 100
 COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS = 2.0
-RECENT_CLIENT_COMMAND_IDS_MAX = 2_000
 
 
 def _admitted_input_origin(admission: dict[str, Any], projection: dict[str, Any] | None, runtime: Any) -> str:
@@ -207,6 +208,8 @@ def _command_lifecycle_conversations(session: Any, command: UserCommand) -> tupl
             "target_conversation_id", "parent_conversation_id",
         )
     }
+    if command.type == "session.restore":
+        targets.add(str(command.data.get("last_conversation_id") or "").strip())
     targets.discard("")
     active = str(session.active_conversation_id or "").strip()
     if active and (not targets or command.type in {"conversation.activate", "conversation.list", "session.restore", "session.sync"}):
@@ -250,7 +253,12 @@ class SessionCommandDispatcher:
         self._user_message_admissions: dict[asyncio.Task[Any], _UserMessageAdmission] = {}
         self._regeneration_transitions: dict[asyncio.Task[Any] | None, ConversationTransition] = {}
         self._active_client_command_ids: set[str] = set()
-        self._reported_durable_queue_load_error = ""
+        self._interrupt_groups: dict[tuple[str, str, str, str], deque[tuple[UserCommand, str, int]]] = {}
+        self._pending_client_completions: dict[str, tuple[UserCommand, list[DurableResultDelivery]]] = {}
+        self._result_replay_generation: int | None = None
+        self._result_replay_lock = asyncio.Lock()
+        self._result_replay_task: asyncio.Task[Any] | None = None
+        self._reported_durable_queue_load_errors: dict[str, tuple[str, ...]] = {}
         self._max_command_tasks = MAX_PENDING_COMMAND_TASKS
         self._last_command_backlog_error_at = 0.0
         self._recent_client_command_ids = self._load_recent_client_command_ids()
@@ -277,14 +285,6 @@ class SessionCommandDispatcher:
         return self._active_client_command_ids
 
     @property
-    def reported_durable_queue_load_error(self) -> str:
-        return self._reported_durable_queue_load_error
-
-    @reported_durable_queue_load_error.setter
-    def reported_durable_queue_load_error(self, value: str) -> None:
-        self._reported_durable_queue_load_error = value
-
-    @property
     def max_command_tasks(self) -> int:
         return self._max_command_tasks
 
@@ -308,22 +308,35 @@ class SessionCommandDispatcher:
     def recent_client_command_id_set(self) -> set[str]:
         return self._recent_client_command_id_set
 
-    async def _replay_pending_client_commands(self, connection_generation: int) -> None:
-        await self._report_durable_queue_load_error(self._client_command_store.last_load_error)
+    async def _replay_pending_client_commands(self, connection_generation: int, *, replay_results: bool = True) -> None:
+        await self._report_durable_queue_load_error(self._client_command_store.last_load_error,
+            source="client_log", connection_generation=connection_generation)
         durable_queue = self._session.run_manager.durable_client_commands
         if durable_queue is None:
             return
-        await self._report_durable_queue_load_error(durable_queue.load_error)
-        await self._report_durable_queue_load_error(self._session.run_manager.durable_queue.load_error)
+        await self._report_durable_queue_load_error(durable_queue.load_error,
+            source="client_queue", connection_generation=connection_generation)
+        await self._report_durable_queue_load_error(self._session.run_manager.durable_queue.load_error,
+            source="user_queue", connection_generation=connection_generation)
+        for command_id, (command, _deliveries) in tuple(self._pending_client_completions.items()):
+            self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command)
         for command in durable_queue.pending_client_commands():
             command_id = self._client_command_id(command)
             if not command_id:
                 continue
             if self._client_command_seen(command):
-                # The dedup log is the completion record.  Reconcile a stale
-                # pending entry left beside it so reconnect does not replay an
-                # already-applied command forever.
-                durable_queue.discard_pending_client_command(command_id)
+                # Reconcile a stale pending entry beside a completion record.
+                try:
+                    reconciled = durable_queue.reconcile_archived_client_result(command_id)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    await self._report_durable_queue_load_error(
+                        {"reason": "command_result_unreadable", "path": str(durable_queue._result_receipt_path(command_id)), "detail": str(exc)},
+                        source="client_result:" + str(durable_queue._result_receipt_path(command_id)),
+                        connection_generation=connection_generation,
+                    )
+                    continue
+                if not reconciled:
+                    durable_queue.discard_pending_client_command(command_id)
                 await self._send_client_command_ack(command, duplicate=True)
                 continue
             if not self._recovered_command_owner_ready(command):
@@ -332,12 +345,53 @@ class SessionCommandDispatcher:
                 # until restore/switch has committed that owner.
                 continue
             await self._send_client_command_ack(command, duplicate=True)
-            self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type)
+            self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command, recovered=True)
+        if not replay_results:
+            return
+        if self._session.connection_generation != connection_generation:
+            return
+        self._result_replay_generation = connection_generation
+        await self._replay_pending_client_results(connection_generation)
+
+    async def _replay_pending_client_results(self, connection_generation: int) -> None:
+        durable_queue = self._session.run_manager.durable_client_commands
+        async with self._result_replay_lock:
+            while self._session.connection_generation == connection_generation:
+                records, errors = durable_queue.pending_client_results()
+                damaged_sources = {"client_result:" + str(error["path"]) for error in errors}
+                for source in list(self._reported_durable_queue_load_errors):
+                    if source.startswith("client_result:") and source not in damaged_sources:
+                        self._reported_durable_queue_load_errors.pop(source)
+                for error in errors:
+                    await self._report_durable_queue_load_error(error, source="client_result:" + str(error["path"]),
+                                                                connection_generation=connection_generation)
+                if not records:
+                    return
+                for record in records:
+                    for payload in record["events"]:
+                        sent = await self._session.event_outbox.send_payload(payload, connection_generation=connection_generation,
+                            log_context="durable.command.result", envelope=False, wait_for_delivery=True)
+                        if not sent or self._session.connection_generation != connection_generation:
+                            return
+                        durable_queue.acknowledge_client_result(record["client_command_id"], payload["event_id"])
+
+    def _schedule_late_client_results(self, deliveries: list[DurableResultDelivery]) -> None:
+        generation = self._result_replay_generation
+        outbox = self._session.event_outbox
+        if (generation is None or not outbox.connected or self._session.connection_generation != generation
+                or not any(item.outbox is not outbox or item.generation != generation for item in deliveries)):
+            return
+        if self._result_replay_task is None or self._result_replay_task.done():
+            self._result_replay_task = asyncio.create_task(self._replay_pending_client_results(generation))
+            self.track_command_task(self._result_replay_task)
 
     def _recovered_command_owner_ready(self, command: UserCommand) -> bool:
         # These commands establish a conversation or address a target rather
         # than requiring it to be the current command scope.
-        if command.type in {"session.restore", "session.sync", "user_message", "thread/approveGuardianDeniedAction"} or command.type.startswith("conversation."):
+        if command.type == "user_message":
+            owner = str(command.data.get("conversation_id") or self._session.active_conversation_id or "").strip()
+            return not owner or self._session.session_lifecycle.recovered_input_workspace_ready(owner)
+        if command.type in {"session.restore", "session.sync", "thread/approveGuardianDeniedAction"} or command.type.startswith("conversation."):
             return True
         if command.type.startswith("scheduler.") and (
             command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
@@ -352,7 +406,29 @@ class SessionCommandDispatcher:
             return owner == active_owner
         return bool(active_owner) if _requires_selected_conversation(command.type) else True
 
-    async def _report_durable_queue_load_error(self, evidence: dict[str, Any] | None) -> None:
+    async def _resume_recovered_workspace(self, conversation_id: str, *, previously_failed: bool) -> None:
+        manager = self._session.ws_manager
+        sessions = manager.resource_sessions() if manager is not None else (self._session,)
+        blocked = [session for session in sessions if session is not self._session
+            and session.session_lifecycle.workspace_activation_failed(conversation_id)]
+        if blocked:
+            store_identity = self._session.conversation_repo.store_instance_id()
+            blocked = [session for session in blocked if session.conversation_repo.store_instance_id() == store_identity]
+        if not previously_failed and not blocked:
+            return
+        for session in blocked:
+            session.session_lifecycle.record_workspace_activation(conversation_id, True)
+            if session.is_connected:
+                await session.command_dispatcher._replay_pending_client_commands(
+                    session.connection_generation, replay_results=False,
+                )
+        owner = manager.execution_session_for_conversation(conversation_id) if manager is not None else None
+        owner = owner or self._session
+        owner.schedule_next_queued_user_message(conversation_id)
+        owner.run_manager.recheck_parent_notification_wake(conversation_id)
+
+    async def _report_durable_queue_load_error(self, evidence: dict[str, Any] | None, *, source: str = "",
+                                               connection_generation: int | None = None) -> None:
         """Surface preserved queue or completion-record read errors on reconnect.
 
         The evidence path identifies the failed read without treating a damaged
@@ -360,28 +436,32 @@ class SessionCommandDispatcher:
         """
 
         if not isinstance(evidence, dict) or not evidence:
+            self._reported_durable_queue_load_errors.pop(source, None)
             return
-        signature = str(
-            evidence.get("quarantined_to") or evidence.get("path") or evidence.get("reason") or ""
-        )
-        if signature and signature == self._reported_durable_queue_load_error:
+        signature = tuple(str(evidence.get(key) or "") for key in (
+            "reason", "detail", "path", "line", "quarantined_to", "quarantine_error",
+        ))
+        if signature == self._reported_durable_queue_load_errors.get(source):
             return
-        self._reported_durable_queue_load_error = signature
-        await self._session.emit_command_result(
-            "user_message.queue.restore",
+        result = AgentEvent.error(
             "Queued commands or completed request records could not be fully restored. "
             "The unreadable data was preserved for recovery instead of overwritten.",
-            level="error",
-            data={
+            recoverable=False, error_type="storage", error_code="user_message.queue.restore",
+        ).to_ws_message()
+        result["error_details"] = {
                 "reason": str(evidence.get("reason") or "unreadable"),
                 "detail": str(evidence.get("detail") or ""),
                 "path": str(evidence.get("path") or ""),
                 "line": str(evidence.get("line") or ""),
                 "quarantined_to": str(evidence.get("quarantined_to") or ""),
                 "quarantine_error": str(evidence.get("quarantine_error") or ""),
-                "recoverable": False,
-            },
-        )
+        }
+        if not await self._session.send_payload(result, connection_generation=connection_generation,
+                                                log_context="durable.queue.restore"):
+            raise ConnectionError("Could not deliver the durable queue recovery error")
+        if connection_generation is not None and self._session.connection_generation != connection_generation:
+            raise ConnectionError("The queue recovery notification belonged to an older connection")
+        self._reported_durable_queue_load_errors[source] = signature
 
     async def run(self, connection_generation: int) -> None:
         """Receive and admit commands for one attached websocket generation."""
@@ -421,8 +501,14 @@ class SessionCommandDispatcher:
                 continue
 
             if command.type == "user_message":
-                for field in ("_client_queue_key", "_legacy_user_message_identity", "_queued_user_message_dispatch", "_submitted_content", "_guardian_acceptance_order"):
+                for field in ("_client_queue_key", "_legacy_user_message_identity", "_queue_entry_id", "_queued_user_message_dispatch", "_submitted_content", "_guardian_acceptance_order",
+                              "_permission_mode_selection_revision", "_workspace_binding_selection_revision"):
                     command.data.pop(field, None)
+                command.data.pop("_implicit_new_conversation_id", None)
+            if command.type == "interrupt" and not (
+                command.data.get("owner_conversation_id") or command.data.get("ownerConversationId") or command.data.get("conversation_id")
+            ) and self._session.active_conversation_id:
+                command.data["conversation_id"] = self._session.active_conversation_id
             command_id = self._client_command_id(command)
             if command.type == "user_message" and command_id:
                 command.data["_client_queue_key"] = self._session.run_manager.durable_client_commands.path.stem
@@ -487,16 +573,20 @@ class SessionCommandDispatcher:
                 if durable_queue.has_client_command(command_id):
                     await self._send_client_command_ack(command, duplicate=True)
                     if self._recovered_command_owner_ready(command):
-                        self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type)
+                        self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command, recovered=True)
                     continue
-                if _requires_selected_conversation(command.type) and not (
-                    command.data.get("owner_conversation_id") or command.data.get("ownerConversationId") or command.data.get("conversation_id")
-                ) and self._session.active_conversation_id:
+                if (_requires_selected_conversation(command.type)
+                        and not (command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
+                                 or command.data.get("conversation_id"))
+                        and self._session.active_conversation_id
+                        and not getattr(self._session.session_lifecycle, "_foreground_navigation_pending", False)):
                     # Persist the selected owner with commands whose wire
                     # shape permits omission. Replay must not reinterpret a
                     # formerly owner-relative action in another conversation.
                     command.data["owner_conversation_id"] = self._session.active_conversation_id
                 try:
+                    if command.type == "user_message":
+                        self._bind_user_message_input_owner(command)
                     persisted = durable_queue.persist_client_command(command)
                 except Exception:
                     logger.exception(
@@ -521,16 +611,37 @@ class SessionCommandDispatcher:
                 # ACK means the server durably owns the command. A crash before
                 # task creation leaves it pending for replay.
                 await self._send_client_command_ack(command)
-                self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type)
+                self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command)
                 continue
 
+            if command.type == "user_message":
+                self._bind_user_message_input_owner(command)
             self._schedule_transient_client_command(command, connection_generation)
+
+    def _bind_user_message_input_owner(self, command: UserCommand) -> None:
+        explicit_owner = str(command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
+                             or command.data.get("conversation_id") or "")
+        if not explicit_owner and getattr(self._session.session_lifecycle, "_foreground_navigation_pending", False):
+            # A selection still in flight decides this input's owner at admission.
+            return
+        input_owner = explicit_owner or str(self._session.active_conversation_id or "")
+        record = self._session.conversation_repo.get_conversation_summary(input_owner) if input_owner else None
+        if record is not None:
+            command.data["conversation_id"] = input_owner
+            command.data["_permission_mode_selection_revision"] = record.permission_mode_revision
+            command.data["_workspace_binding_selection_revision"] = record.workspace_binding_revision
+        elif not input_owner:
+            new_owner = f"conv_{uuid.uuid4().hex[:12]}"
+            command.data.update(conversation_id=new_owner, _implicit_new_conversation_id=new_owner,
+                _permission_mode_selection_revision=0, _workspace_binding_selection_revision=0)
 
     def _schedule_transient_client_command(
         self,
         command: UserCommand,
         connection_generation: int,
     ) -> None:
+        if self._enqueue_scoped_interrupt(command, "", connection_generation):
+            return
         async def _guarded_handle() -> None:
             await self._dispatch_client_command(command, connection_generation)
 
@@ -546,13 +657,17 @@ class SessionCommandDispatcher:
         connection_generation: int,
         *,
         command_type: str,
+        command: UserCommand | None = None,
+        recovered: bool = False,
     ) -> None:
         command_id = _clean_command_id(client_command_id)
         if not command_id or command_id in self._active_client_command_ids:
             return
         self._active_client_command_ids.add(command_id)
+        if command is not None and self._enqueue_scoped_interrupt(command, command_id, connection_generation):
+            return
         task = asyncio.create_task(
-            self._run_durable_client_command(command_id, connection_generation)
+            self._run_durable_client_command(command_id, connection_generation, recovered=recovered)
         )
 
         def _release_active(_task: asyncio.Task[Any]) -> None:
@@ -564,13 +679,64 @@ class SessionCommandDispatcher:
         else:
             self.track_command_task(task)
 
+    def _enqueue_scoped_interrupt(self, command: UserCommand, command_id: str, generation: int) -> bool:
+        if command.type != "interrupt":
+            return False
+        data = command.data
+        target = tuple(str(data.get(key) or "").strip() for key in ("turn_id", "message_id", "task_id"))
+        if not any(target):
+            return False
+        owner = str(data.get("owner_conversation_id") or data.get("ownerConversationId")
+                    or data.get("conversation_id") or self._session.active_conversation_id or "").strip()
+        key = (owner, *target)
+        group = self._interrupt_groups.get(key)
+        if group is None:
+            group = deque()
+            self._interrupt_groups[key] = group
+            group.append((command, command_id, generation))
+            self.track_command_task(asyncio.create_task(self._drain_interrupt_group(key, group)))
+        else:
+            group.append((command, command_id, generation))
+        return True
+
+    async def _drain_interrupt_group(self, key: tuple[str, str, str, str],
+                                     group: deque[tuple[UserCommand, str, int]]) -> None:
+        try:
+            while group:
+                command, command_id, generation = group.popleft()
+                try:
+                    if command_id:
+                        await self._run_durable_client_command(command_id, generation)
+                    else:
+                        await self._dispatch_client_command(command, generation)
+                except Exception:
+                    # A failed command must not strand other accepted Stops in
+                    # the same group. Its durable completion remains available
+                    # for the existing reconnect recovery path.
+                    logger.exception("Failed to handle grouped interrupt %s", command_id)
+                finally:
+                    if command_id:
+                        self._active_client_command_ids.discard(command_id)
+        finally:
+            self._interrupt_groups.pop(key, None)
+            for _command, command_id, _generation in group:
+                if command_id:
+                    self._active_client_command_ids.discard(command_id)
+
     async def _run_durable_client_command(
         self,
         client_command_id: str,
         connection_generation: int,
+        *,
+        recovered: bool = False,
     ) -> None:
         durable_queue = self._session.run_manager.durable_client_commands
         if durable_queue is None:
+            return
+        completed_command = self._pending_client_completions.get(client_command_id)
+        if completed_command is not None:
+            command, deliveries = completed_command
+            self._commit_client_completion(durable_queue, command, client_command_id, deliveries)
             return
         cancellation = await self.cancelled_user_message(client_command_id)
         if cancellation is not None:
@@ -580,17 +746,16 @@ class SessionCommandDispatcher:
         if command is None:
             return
         try:
-            handled = await self._dispatch_client_command(command, connection_generation)
-            if handled is False:
-                # ``_handle_command`` reports the failure to the client and
-                # returns False.  It is not a successful durable completion:
-                # keep the command pending so reconnect can retry it.
+            if recovered and command.type == "user_message" and not await self._validate_executor_input_workspace(command):
                 durable_queue.release_client_command(client_command_id)
                 return
-            # Record the completed side effect before removing the durable
-            # command.  A crash between those writes must replay as a
-            # duplicate acknowledgement, never execute the command twice.
-            self._mark_client_command_seen(command, require_persistence=True)
+            with capture_durable_results(client_command_id) as capture:
+                handled = await self._dispatch_client_command(command, connection_generation)
+            if handled is False:
+                # The handler reported a failure; retain the original command
+                # until its delivery and replay semantics can be resolved.
+                durable_queue.release_client_command(client_command_id)
+                return
         except asyncio.CancelledError:
             try:
                 durable_queue.release_client_command(client_command_id)
@@ -604,10 +769,98 @@ class SessionCommandDispatcher:
                 logger.exception("Failed to release failed client command %s", client_command_id)
             raise
         else:
-            if not durable_queue.complete_client_command(client_command_id):
-                raise RuntimeError(
-                    f"Could not complete durable client command {client_command_id}"
-                )
+            deliveries = [delivery for delivery in capture.deliveries if not self._delivery_succeeded(delivery)]
+            self._pending_client_completions[client_command_id] = (command, deliveries)
+            self._commit_client_completion(durable_queue, command, client_command_id, deliveries)
+
+    async def _validate_executor_input_workspace(self, command: UserCommand, *, already_locked: bool = False) -> bool:
+        from backend.environments.errors import ExecutorError
+        from backend.services.workspace_service import conversation_execution_path
+        from backend.workspace.executor_activation import validate_executor_workspace
+
+        conversation_id = str(command.data.get("conversation_id") or self._session.active_conversation_id or "").strip()
+        if not conversation_id:
+            return True
+        conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
+        if conversation is None or not conversation_execution_path(conversation).startswith("file:"):
+            return True
+        manager = self._session.ws_manager
+        async with AsyncExitStack() as scope:
+            if not already_locked:
+                if manager is not None:
+                    await scope.enter_async_context(manager.conversation_maintenance_scope())
+                await scope.enter_async_context(self._session.conversation_lifecycle_lock())
+                if manager is not None:
+                    await scope.enter_async_context(manager.conversation_resource_scope((conversation_id,)))
+            if self._session.session_lifecycle.workspace_activation_failed(conversation_id):
+                return False
+            conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
+            if conversation is None:
+                return True
+            workspace = conversation_execution_path(conversation)
+            if not workspace.startswith("file:"):
+                return self._session.session_lifecycle.recovered_input_workspace_ready(conversation_id)
+            try:
+                await validate_executor_workspace(self._session, conversation)
+            except ExecutorError as exc:
+                self._session.session_lifecycle.record_workspace_activation(conversation_id, False)
+                with self._session.event_outbox.bind_client_command(
+                    self._client_command_id(command), command.type, owner=(conversation_id, workspace),
+                ):
+                    await emit_command_error(self._session, "workspace.activate", f"Failed to restore workspace: {exc}",
+                        data={"conversation_id": conversation_id, "workspace_root": workspace})
+                return False
+        return True
+
+    @staticmethod
+    def _delivery_succeeded(delivery: DurableResultDelivery) -> bool:
+        receipt = delivery.receipt
+        if receipt is None or not receipt.done():
+            return False
+        try:
+            return bool(receipt.result() and delivery.outbox.connected
+                        and delivery.outbox.connection_generation == delivery.generation)
+        except (asyncio.CancelledError, Exception):
+            return False
+
+    def _commit_client_completion(self, durable_queue: Any, command: UserCommand, command_id: str,
+                                  deliveries: list[DurableResultDelivery]) -> None:
+        def owner_of(delivery: DurableResultDelivery) -> str:
+            data = delivery.payload.get("data")
+            return str(delivery.payload.get("conversation_id") or (data.get("conversation_id") if isinstance(data, dict) else "") or "").strip()
+
+        owners = tuple(owner for delivery in deliveries if (owner := owner_of(delivery)))
+        publication = self._session.conversation_repo.command_result_publication(owners) if owners else nullcontext(set())
+        with publication as deleted:
+            retained = [delivery for delivery in deliveries
+                        if command.type == "conversation.delete" or owner_of(delivery) not in deleted]
+            if retained:
+                durable_queue.archive_client_results(command_id, [delivery.payload for delivery in retained])
+            if not durable_queue.complete_client_command(command_id):
+                raise RuntimeError(f"Could not complete durable client command {command_id}")
+        self._pending_client_completions.pop(command_id, None)
+        self._schedule_late_client_results(retained)
+        # The queue already committed the completion atomically; the existing
+        # recent-id log is a secondary index.
+        self._mark_client_command_seen(command)
+        for delivery in retained:
+            payload, receipt = delivery.payload, delivery.receipt
+            if receipt is None:
+                continue
+            if receipt.done():
+                if self._delivery_succeeded(delivery):
+                    durable_queue.acknowledge_client_result(command_id, payload["event_id"])
+                continue
+
+            async def settle_late_delivery(pending=receipt, event=delivery):
+                try:
+                    delivered = await asyncio.shield(pending)
+                except Exception:
+                    return
+                if delivered and event.outbox.connected and event.outbox.connection_generation == event.generation:
+                    durable_queue.acknowledge_client_result(command_id, event.payload["event_id"])
+
+            self.track_command_task(asyncio.create_task(settle_late_delivery()))
 
     async def _dispatch_client_command(self, command: UserCommand, connection_generation: int) -> bool:
         _normalize_command_owner(command)
@@ -792,13 +1045,16 @@ class SessionCommandDispatcher:
 
     def _client_command_seen(self, command: UserCommand) -> bool:
         client_command_id = self._client_command_id(command)
-        return bool(client_command_id and client_command_id in self._recent_client_command_id_set)
+        if not client_command_id:
+            return False
+        if client_command_id in self._recent_client_command_id_set:
+            return True
+        durable_queue = self._session.run_manager.durable_client_commands
+        return durable_queue is not None and durable_queue.is_client_command_completed(client_command_id)
 
     def _mark_client_command_seen(
         self,
         command: UserCommand,
-        *,
-        require_persistence: bool = False,
     ) -> bool:
         client_command_id = self._client_command_id(command)
         if not client_command_id:
@@ -810,10 +1066,6 @@ class SessionCommandDispatcher:
         try:
             self._client_command_store.append(client_command_id, command_type=command.type)
         except Exception as exc:
-            if require_persistence:
-                self._recent_client_command_id_set.discard(client_command_id)
-                self._recent_client_command_ids.remove(client_command_id)
-                raise
             logger.debug("Failed to persist client command id for %s: %s", self._session.session_id, exc)
         pruned = False
         while len(self._recent_client_command_ids) > RECENT_CLIENT_COMMAND_IDS_MAX:
@@ -865,6 +1117,7 @@ class SessionCommandDispatcher:
         )
         with self._session.event_outbox.bind_connection_generation(generation):
           try:
+            recovering_workspace = False
             if _is_conversation_lifecycle_command(command.type):
                 manager = self._session.ws_manager
                 async with AsyncExitStack() as maintenance, AsyncExitStack() as scope:
@@ -905,7 +1158,13 @@ class SessionCommandDispatcher:
                                 },
                             )
                             return True
-                    with bind_command_lifecycle_prefix(self._session.session_id, scope):
+                    with bind_command_lifecycle_prefix(scope):
+                        if command.type in {"conversation.switch", "session.restore"}:
+                            recovery_target = (command.data.get("last_conversation_id") if command.type == "session.restore"
+                                               else command.data.get("conversation_id"))
+                            recovering_workspace = self._session.session_lifecycle.workspace_activation_failed(
+                                str(recovery_target or "")
+                            )
                         await self._handle_command_inner(command)
             else:
                 await self._handle_command_inner(command)
@@ -913,7 +1172,16 @@ class SessionCommandDispatcher:
                 # Handlers return only after publishing the canonical owner
                 # and its restore/replay projection. A pending scoped command
                 # may now resume with its original idempotency key.
-                await self._replay_pending_client_commands(generation)
+                await self._replay_pending_client_commands(generation,
+                    replay_results=command.type in {"session.restore", "session.sync"})
+                if command.type in {"conversation.switch", "session.restore"}:
+                    target = (command.data.get("last_conversation_id") if command.type == "session.restore"
+                              else command.data.get("conversation_id"))
+                    owner = str(target or "")
+                    if (owner and owner == self._session.active_conversation_id
+                            and not self._session.session_lifecycle.workspace_activation_failed(owner)
+                            and self._session.session_lifecycle.foreground_navigation_is_current()):
+                        await self._resume_recovered_workspace(owner, previously_failed=recovering_workspace)
             return True
           except asyncio.CancelledError:
               raise
@@ -932,7 +1200,7 @@ class SessionCommandDispatcher:
               )
               try:
                   if command.type == "user_message":
-                      await self._reject_regeneration(command, str(command.data.get("conversation_id") or ""), str(exc))
+                      await self._reject_user_message(command, str(command.data.get("conversation_id") or ""), str(exc))
                   else:
                       await emit_command_error(self._session, command.type, exc)
               except Exception:
@@ -1016,17 +1284,33 @@ class SessionCommandDispatcher:
         requested_workspace_root: str,
         target_conversation_id: str
     ) -> tuple[bool, str]:
-        """
-        Handle workspace switching for user_message command.
-
-        Returns:
-            (success, updated_target_conversation_id)
-        """
+        """Validate the input's workspace without publishing new thread settings."""
         from backend.services.workspace_service import (
             conversation_execution_path,
             parse_user_message_workspace_request,
             workspace_path_needs_activation,
         )
+
+        target_conversation = (
+            await to_thread_cancel_safe(self._session.conversation_repo.get_conversation_summary, target_conversation_id)
+            if target_conversation_id
+            else self._session.active_conversation
+        )
+        bound_workspace = conversation_execution_path(target_conversation)
+        if requested_workspace_root.startswith("file:") or bound_workspace.startswith("file:"):
+            from backend.workspace.executor_paths import ExecutorPath
+
+            if (target_conversation is not None and requested_workspace_root.startswith("file:")
+                    and bound_workspace.startswith("file:")
+                    and ExecutorPath.parse(requested_workspace_root) == ExecutorPath.parse(bound_workspace)):
+                return True, target_conversation.id
+            event = AgentEvent.error(
+                "This message targets a different project from its conversation. Open the project in a new conversation.",
+                recoverable=True, error_type="workspace", error_code="workspace_owner_mismatch",
+            )
+            event.data["conversation_id"] = target_conversation_id
+            await self._session.send_event(event)
+            return False, target_conversation_id
 
         request = parse_user_message_workspace_request(
             requested_workspace_root,
@@ -1039,12 +1323,6 @@ class SessionCommandDispatcher:
         if requested_workspace_path is None:
             return False, target_conversation_id
 
-        target_conversation = (
-            await to_thread_cancel_safe(self._session.conversation_repo.get_conversation_summary, target_conversation_id)
-            if target_conversation_id
-            else self._session.active_conversation
-        )
-        bound_workspace = conversation_execution_path(target_conversation)
         if bound_workspace:
             if not workspace_path_needs_activation(requested_workspace_path, Path(bound_workspace)):
                 return True, target_conversation.id
@@ -1055,59 +1333,43 @@ class SessionCommandDispatcher:
             event.data["conversation_id"] = target_conversation.id
             await self._session.send_event(event)
             return False, target_conversation.id
-        current_workspace_root = self._session.session_lifecycle.workspace_root_for_conversation(
-            target_conversation
+        return True, target_conversation_id
+
+    async def _prepare_turn_settings(self, conversation_id: str, *, workspace_root: str,
+                                     permission_mode: str | None, metadata: dict[str, Any]) -> PreparedTurnSettings:
+        from backend.services.workspace_service import conversation_execution_path, create_workspace_context
+
+        conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
+        if conversation is None:
+            raise ValueError(f"Conversation '{conversation_id}' was not found")
+        binding = None
+        context = None
+        if workspace_root and not conversation_execution_path(conversation):
+            path = Path(workspace_root).expanduser().resolve()
+            context = create_workspace_context(path)
+            await context.initialize()
+            branch = await asyncio.to_thread(self._session.git_branch_for, path)
+            binding = {"workspace_root": str(path), "execution_cwd": str(path),
+                       "git_branch": branch, "worktree_path": "", "git_isolated": False}
+        return PreparedTurnSettings(
+            permission_mode=permission_mode,
+            permission_revision=metadata.get("_permission_mode_selection_revision", conversation.permission_mode_revision),
+            workspace_binding=binding,
+            workspace_revision=metadata.get("_workspace_binding_selection_revision", conversation.workspace_binding_revision),
+            execution_cwd=str(Path.cwd().resolve()) if not conversation.execution_cwd and binding is None else "",
+            workspace_context=context,
+            legacy_scope_cwd=(conversation.execution_cwd or str(Path.cwd().resolve()))
+                if binding is None and not conversation.workspace_root and not conversation.projectless_output_dir else "",
         )
-        if (
-            current_workspace_root is None
-            or workspace_path_needs_activation(
-                requested_workspace_path,
-                current_workspace_root,
-            )
-        ):
-            activated = await self._session.activate_workspace_path(
-                str(requested_workspace_path),
-                announce=False,
-                wait_for_initialize=True,
-                error_command=None,
-                project_root=str(requested_workspace_path),
-            )
-            if not activated:
-                return False, target_conversation_id
-
-        updated_target = target_conversation_id
-        if not updated_target:
-            self._session._ensure_active_conversation()
-            updated_target = self._session.active_conversation_id or ""
-
-        if updated_target:
-            git_branch = await asyncio.to_thread(self._session.git_branch_for, requested_workspace_path)
-            await to_thread_cancel_safe(
-                self._session.conversation_repo.update_workspace_binding,
-                str(updated_target),
-                workspace_root=str(requested_workspace_path),
-                git_branch=git_branch,
-                worktree_path="",
-                git_isolated=False,
-            )
-            self._session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.user_message")
-
-        return True, updated_target
 
     async def _handle_user_message_permission(
         self,
         requested_permission_mode: str | None,
         target_conversation_id: str
     ) -> bool:
-        """Apply validated prompt permissions after start/steer admission."""
+        """Project permissions which were committed with an admitted user item."""
         if requested_permission_mode is None:
             return True
-
-        if target_conversation_id:
-            self._session.conversation_repo.update_permission_mode(
-                str(target_conversation_id),
-                requested_permission_mode,
-            )
 
         if not target_conversation_id or target_conversation_id == self._session.active_conversation_id:
             changed = self._session.set_permission_context_mode(requested_permission_mode, source="user_message")
@@ -1203,19 +1465,23 @@ class SessionCommandDispatcher:
             durable_queue = self._session.run_manager.durable_client_commands
             if (durable_queue is not None and command.data.get("_client_queue_key") == durable_queue.path.stem
                     and durable_queue.has_client_command(command_id)):
-                if not durable_queue.bind_client_command_owner(command_id, conversation_id):
+                if not durable_queue.bind_client_command_owner(command_id, conversation_id,
+                        selection_revisions={key: command.data[key] for key in (
+                            "_permission_mode_selection_revision", "_workspace_binding_selection_revision",
+                        ) if key in command.data}):
                     raise RuntimeError("The current dispatcher does not own this durable input")
         command.data["conversation_id"] = conversation_id
         manager = self._session.ws_manager
         if manager is not None and conversation_id:
             manager.bind_execution_admission(self._session, asyncio.current_task(), conversation_id)
 
-    async def _reject_regeneration(self, command: UserCommand, conversation_id: str, message: str) -> None:
+    async def _reject_user_message(self, command: UserCommand, conversation_id: str, message: str, *, reason: str = "") -> None:
         await self._session.send_event(AgentEvent(type="command.result", data={
             "command": "user_message", "level": "error", "message": message,
             "client_command_id": self._client_command_id(command),
             "conversation_id": conversation_id,
             "data": {"admitted": False, "conversation_id": conversation_id,
+                     **({"reason": reason} if reason else {}),
                      "user_message_id": command.data.get("user_message_id", ""),
                      "assistant_message_id": command.data.get("assistant_message_id", ""),
                      "retry_from_message_id": command.data.get("retry_from_message_id", "")},
@@ -1289,10 +1555,11 @@ class SessionCommandDispatcher:
             "control_cancel_request",
             "interrupt",
         }:
-            await emit_command_error(self._session,
-                command.type,
-                "Session shutdown was requested by an extension; no new work is accepted.",
-            )
+            message = "Session shutdown was requested by an extension; no new work is accepted."
+            if command.type == "user_message":
+                await self._reject_user_message(command, str(command.data.get("conversation_id") or ""), message)
+            else:
+                await emit_command_error(self._session, command.type, message)
             return
 
         if command.type == "user_message":
@@ -1305,14 +1572,18 @@ class SessionCommandDispatcher:
             target_conversation_id = requested_conversation_id or self._session.active_conversation_id or ""
             if requested_conversation_id:
                 target = self._session.conversation_repo.get_conversation_summary(requested_conversation_id)
-                if target is None:
+                implicit_new = command.data.get("_implicit_new_conversation_id") == requested_conversation_id
+                if target is None and not implicit_new:
                     if command.data.get("retry_from_message_id"):
-                        await self._reject_regeneration(command, requested_conversation_id,
+                        await self._reject_user_message(command, requested_conversation_id,
                             "The conversation no longer exists; regeneration has not been admitted.")
                     else:
                         await emit_conversation_not_found(self._session, requested_conversation_id)
+                        await self._reject_user_message(command, requested_conversation_id,
+                            "The conversation no longer exists; your input was retained.")
                     return
-                target_conversation_id = target.id
+                if target is not None:
+                    target_conversation_id = target.id
 
             try:
                 attachments = normalize_attachment_payloads(command.data.get("attachments", []))
@@ -1322,6 +1593,7 @@ class SessionCommandDispatcher:
                 )
                 error_event.data["conversation_id"] = target_conversation_id
                 await self._session.send_event(error_event)
+                await self._reject_user_message(command, target_conversation_id, str(exc), reason="attachments_rejected")
                 await self._seal_unstarted_user_message(
                     target_conversation_id, reason="attachments_rejected",
                     message_id=str(command.data.get("assistant_message_id") or ""),
@@ -1331,8 +1603,7 @@ class SessionCommandDispatcher:
             try:
                 input_metadata = normalize_user_input_metadata(command.data)
             except ValueError as exc:
-                await emit_command_error(self._session, command.type, exc,
-                    data={"conversation_id": target_conversation_id, "reason": "input_metadata_rejected"})
+                await self._reject_user_message(command, target_conversation_id, str(exc), reason="input_metadata_rejected")
                 await self._seal_unstarted_user_message(target_conversation_id,
                     reason="input_metadata_rejected", message_id=str(command.data.get("assistant_message_id") or ""))
                 return
@@ -1362,6 +1633,7 @@ class SessionCommandDispatcher:
                     if target_conversation_id:
                         error_event.data["conversation_id"] = target_conversation_id
                     await self._session.send_event(error_event)
+                    await self._reject_user_message(command, target_conversation_id, error_event.data["message"], reason="permission_mode_rejected")
                     await self._seal_unstarted_user_message(
                         target_conversation_id,
                         reason="permission_mode_rejected",
@@ -1383,6 +1655,7 @@ class SessionCommandDispatcher:
                 )
                 if permission_plan.error_event is not None:
                     await self._session.send_event(permission_plan.error_event)
+                    await self._reject_user_message(command, target_conversation_id, permission_plan.error_event.data["message"], reason="permission_mode_rejected")
                     await self._seal_unstarted_user_message(
                         target_conversation_id,
                         reason="permission_mode_rejected",
@@ -1392,6 +1665,18 @@ class SessionCommandDispatcher:
             requested_workspace_root = str(
                 command.data.get("workspace_root") or ""
             ).strip()
+
+            if (command.data.get("_implicit_new_conversation_id") == target_conversation_id
+                    and (content or attachments)
+                    and self._session.conversation_repo.get_conversation_summary(target_conversation_id) is None):
+                self._session.conversation_repo.create_conversation(conversation_id=target_conversation_id,
+                    creation_command_id=(f"{self._session.run_manager.durable_client_commands.path.stem}:{self._client_command_id(command)}"
+                                         if self._client_command_id(command) else ""))
+                lifecycle = self._session.session_lifecycle
+                if (not self._session.active_conversation_id and lifecycle.foreground_navigation_is_current()
+                        and (not lifecycle._foreground_navigation_pending
+                             or lifecycle._foreground_navigation_target_id == target_conversation_id)):
+                    self._session._ensure_active_conversation(preferred_id=target_conversation_id)
 
             manager = self._session.ws_manager
             owner = manager.execution_session_for_conversation(target_conversation_id) if manager is not None else None
@@ -1407,8 +1692,8 @@ class SessionCommandDispatcher:
                     workspace_root=attachment_workspace) is None]
                 if unavailable:
                     from backend.agent.attachment_policy import AttachmentUnavailableError
-                    await emit_command_error(self._session, "user_message", AttachmentUnavailableError(unavailable),
-                        data={"conversation_id": target_conversation_id, "reason": "attachments_rejected"})
+                    await self._reject_user_message(command, target_conversation_id,
+                        str(AttachmentUnavailableError(unavailable)), reason="attachments_rejected")
                     return
                 command.data["attachments"] = attachments
                 self._bind_user_message_owner(command, target_conversation_id)
@@ -1479,7 +1764,8 @@ class SessionCommandDispatcher:
             assistant_message_id = str(command.data.get("assistant_message_id") or "").strip()
             current_for_admission = (
                 self._session.conversation_repo.get_conversation(target_conversation_id)
-                if (client_command_id or requested_agent_mode is not None) and target_conversation_id else None
+                if (client_command_id or requested_agent_mode is not None or requested_permission_mode is not None
+                    or requested_workspace_root) and target_conversation_id else None
             )
             if requested_agent_mode is not None:
                 if command.data.get("_queued_user_message_dispatch"):
@@ -1487,6 +1773,14 @@ class SessionCommandDispatcher:
                         message_metadata["_agent_mode_selection_revision"] = command.data["_agent_mode_selection_revision"]
                 elif current_for_admission is not None:
                     message_metadata["_agent_mode_selection_revision"] = current_for_admission.agent_mode_revision
+            for selection, field in (("_permission_mode_selection_revision", "permission_mode_revision"),
+                                     ("_workspace_binding_selection_revision", "workspace_binding_revision")):
+                if selection in command.data:
+                    message_metadata[selection] = command.data[selection]
+                elif current_for_admission is not None:
+                    message_metadata[selection] = getattr(current_for_admission, field)
+                if selection in message_metadata:
+                    command.data[selection] = message_metadata[selection]
             journal = None
             existing_user = None
             prompt = None
@@ -1609,12 +1903,23 @@ class SessionCommandDispatcher:
                     from backend.commands.slash_commands import build_slash_command_handler
                     from backend.services.workspace_service import parse_user_message_workspace_request
 
-                    if requested_workspace_root:
+                    if requested_workspace_root.startswith("file:"):
+                        success, _ = await self._handle_user_message_workspace(requested_workspace_root, target_conversation_id)
+                        if not success:
+                            await self._reject_user_message(command, target_conversation_id,
+                                "The workspace could not be activated; your input was retained.", reason="workspace_activation_failed")
+                            await self._seal_unstarted_user_message(target_conversation_id,
+                                reason="workspace_activation_failed", message_id=assistant_message_id)
+                            return
+                        command_root = None
+                    elif requested_workspace_root:
                         request = parse_user_message_workspace_request(
                             requested_workspace_root, conversation_id=target_conversation_id,
                         )
                         if request.error_event is not None:
                             await self._session.send_event(request.error_event)
+                            await self._reject_user_message(command, target_conversation_id,
+                                request.error_event.data["message"], reason="workspace_activation_failed")
                             await self._seal_unstarted_user_message(target_conversation_id,
                                 reason="workspace_activation_failed", message_id=assistant_message_id)
                             return
@@ -1678,8 +1983,13 @@ class SessionCommandDispatcher:
                 if not target_conversation_id:
                     self._session._ensure_active_conversation()
                     target_conversation_id = self._session.active_conversation_id or ""
+                    created = self._session.conversation_repo.get_conversation(target_conversation_id)
                     if requested_agent_mode is not None:
-                        message_metadata["_agent_mode_selection_revision"] = self._session.conversation_repo.get_conversation(target_conversation_id).agent_mode_revision
+                        message_metadata["_agent_mode_selection_revision"] = created.agent_mode_revision
+                    message_metadata["_permission_mode_selection_revision"] = created.permission_mode_revision
+                    message_metadata["_workspace_binding_selection_revision"] = created.workspace_binding_revision
+                    command.data["_permission_mode_selection_revision"] = created.permission_mode_revision
+                    command.data["_workspace_binding_selection_revision"] = created.workspace_binding_revision
                 self._bind_user_message_owner(command, target_conversation_id)
                 queued_dispatch = bool(command.data.pop("_queued_user_message_dispatch", False))
                 message_metadata["_queued_user_message_dispatch"] = queued_dispatch
@@ -1689,7 +1999,7 @@ class SessionCommandDispatcher:
                     # until the replacement input is committed.
                     current = self._session.conversation_repo.get_conversation(target_conversation_id)
                     if current is None:
-                        await self._reject_regeneration(command, target_conversation_id,
+                        await self._reject_user_message(command, target_conversation_id,
                             "The conversation no longer exists; regeneration has not been admitted.")
                         return
                     retry_exists = any(
@@ -1699,7 +2009,7 @@ class SessionCommandDispatcher:
                         if isinstance(message, dict)
                     )
                     if not retry_exists:
-                        await self._reject_regeneration(command, target_conversation_id,
+                        await self._reject_user_message(command, target_conversation_id,
                             f"Cannot regenerate from message '{retry_from_message_id}'")
                         return
                     task_id = self._session.run_manager.run_task_ids.get(target_conversation_id, "")
@@ -1710,7 +2020,7 @@ class SessionCommandDispatcher:
                         replacing_owner_id=f"ws:{self._session.session_id}:{task_id}" if task_id else "",
                     )
                     if transition is None:
-                        await self._reject_regeneration(command, target_conversation_id,
+                        await self._reject_user_message(command, target_conversation_id,
                             "Another run is active on this conversation; stop it before regenerating.")
                         return
                     self._regeneration_transitions[asyncio.current_task()] = transition
@@ -1721,11 +2031,11 @@ class SessionCommandDispatcher:
                         )
                     current = self._session.conversation_repo.get_conversation(target_conversation_id)
                     if current is None:
-                        await self._reject_regeneration(command, target_conversation_id,
+                        await self._reject_user_message(command, target_conversation_id,
                             "The conversation no longer exists; regeneration has not been admitted.")
                         return
                     if not query_guards.transition_ready(transition):
-                        await self._reject_regeneration(command, target_conversation_id,
+                        await self._reject_user_message(command, target_conversation_id,
                             "The previous run is still cleaning up; regeneration has not been admitted.")
                         return
                     prepared = self._session._prepare_retry_from_message(
@@ -1735,7 +2045,7 @@ class SessionCommandDispatcher:
                     message_metadata["_conversation_transition"] = transition
                     message_metadata["retry_from_message_id"] = retry_from_message_id
                     if prepared is None:
-                        await self._reject_regeneration(command, target_conversation_id,
+                        await self._reject_user_message(command, target_conversation_id,
                             f"Cannot regenerate from message '{retry_from_message_id}'")
                         return
                     message_metadata["_retry_projection"] = prepared
@@ -1773,6 +2083,9 @@ class SessionCommandDispatcher:
                             **command.data,
                             **({"_agent_mode_selection_revision": message_metadata["_agent_mode_selection_revision"]}
                                if "_agent_mode_selection_revision" in message_metadata else {}),
+                            **{key: message_metadata[key] for key in (
+                                "_permission_mode_selection_revision", "_workspace_binding_selection_revision",
+                            ) if key in message_metadata},
                             "content": content,
                             "conversation_id": target_conversation_id,
                             "_guardian_acceptance_order": guardian_order,
@@ -1794,13 +2107,22 @@ class SessionCommandDispatcher:
                         elif requested_workspace_root:
                             from backend.services.workspace_service import parse_user_message_workspace_request, workspace_path_needs_activation
 
-                            workspace_request = parse_user_message_workspace_request(
-                                requested_workspace_root, conversation_id=target_conversation_id,
-                            )
-                            current_workspace = self._session.session_lifecycle.workspace_root_for_conversation(accepted_conversation)
-                            if (workspace_request.error_event is not None or current_workspace is None
-                                    or workspace_path_needs_activation(workspace_request.project_path, current_workspace)):
-                                changed_setting = "workspace_root"
+                            if requested_workspace_root.startswith("file:"):
+                                from backend.services.workspace_service import conversation_execution_path
+                                from backend.workspace.executor_paths import ExecutorPath
+
+                                current_workspace = conversation_execution_path(accepted_conversation)
+                                if (not current_workspace.startswith("file:")
+                                        or ExecutorPath.parse(requested_workspace_root) != ExecutorPath.parse(current_workspace)):
+                                    changed_setting = "workspace_root"
+                            else:
+                                workspace_request = parse_user_message_workspace_request(
+                                    requested_workspace_root, conversation_id=target_conversation_id,
+                                )
+                                current_workspace = self._session.session_lifecycle.workspace_root_for_conversation(accepted_conversation)
+                                if (workspace_request.error_event is not None or current_workspace is None
+                                        or workspace_path_needs_activation(workspace_request.project_path, current_workspace)):
+                                    changed_setting = "workspace_root"
                         if changed_setting:
                             await self._reject_steer(command, {
                                 "conversation_id": target_conversation_id, "expected_turn_id": expected_turn_id,
@@ -1887,20 +2209,45 @@ class SessionCommandDispatcher:
                         requested_workspace_root, target_conversation_id,
                     )
                     if not success:
+                        await self._reject_user_message(command, target_conversation_id,
+                            "The workspace could not be activated; your input was retained.", reason="workspace_activation_failed")
                         await self._seal_unstarted_user_message(
                             target_conversation_id, reason="workspace_activation_failed", message_id=assistant_message_id,
                         )
                         return
-                await self._handle_user_message_permission(
-                    requested_permission_mode, target_conversation_id,
-                )
+                if not self._session.session_lifecycle.recovered_input_workspace_ready(target_conversation_id):
+                    await self._reject_user_message(command, target_conversation_id,
+                        "The conversation workspace is unavailable; reopen or trust it before starting work.", reason="workspace_unavailable")
+                    await self._seal_unstarted_user_message(target_conversation_id,
+                        reason="workspace_unavailable", message_id=assistant_message_id)
+                    return
+                if not await self._validate_executor_input_workspace(command, already_locked=True):
+                    if queued_dispatch:
+                        raise RuntimeError("The conversation's executor workspace is unavailable; queued input was retained.")
+                    await self._reject_user_message(command, target_conversation_id,
+                        "The conversation workspace is unavailable; reopen or trust it before starting work.", reason="workspace_unavailable")
+                    await self._seal_unstarted_user_message(target_conversation_id,
+                        reason="workspace_unavailable", message_id=assistant_message_id)
+                    return
+                try:
+                    turn_settings = await self._prepare_turn_settings(target_conversation_id,
+                        workspace_root=requested_workspace_root, permission_mode=requested_permission_mode,
+                        metadata=message_metadata)
+                except (OSError, ValueError) as exc:
+                    await self._reject_user_message(command, target_conversation_id, str(exc), reason="turn_settings_rejected")
+                    await self._seal_unstarted_user_message(target_conversation_id,
+                        reason="turn_settings_rejected", message_id=assistant_message_id)
+                    return
                 self._user_message_admissions.pop(asyncio.current_task(), None)
                 await self._session.start_agent_run(
                     content,
                     attachments=attachments,
                     conversation_id=target_conversation_id,
                     metadata=message_metadata,
+                    turn_settings=turn_settings,
                 )
+            else:
+                await self._reject_user_message(command, target_conversation_id, "The message is empty; no turn was started.")
             return
 
         if command.type == "control_response":

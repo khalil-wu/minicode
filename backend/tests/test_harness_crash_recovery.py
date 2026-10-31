@@ -143,7 +143,7 @@ async def _create_child(root: Path, identity: str) -> None:
     def crash_before_dedup(*args, **kwargs):
         (root / "created-id.txt").write_text(session.active_conversation_id, encoding="utf-8")
         os._exit(73)
-    session.command_dispatcher._mark_client_command_seen = crash_before_dedup
+    queue.complete_client_command = crash_before_dedup
     await session.command_dispatcher._run_durable_client_command("cmd-create", 1)
     raise AssertionError("creation crash boundary was not reached")
 

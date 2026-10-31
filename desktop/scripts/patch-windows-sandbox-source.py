@@ -679,6 +679,8 @@ def _copy_native_sources(native: Path, workspace: Path, identity: dict) -> None:
         native / "src" / "main.rs": workspace / "minicode-sandbox-launcher" / "src" / "main.rs",
         native / "owner_identity.rs": workspace / "windows-sandbox-rs" / "src" / "owner_identity.rs",
     }
+    for source in (native / "src").glob("*.rs"):
+        mappings[source] = workspace / "minicode-sandbox-launcher" / "src" / source.name
     test = native / "owner_identity_tests.rs"
     if test.exists():
         mappings[test] = workspace / "windows-sandbox-rs" / "src" / "owner_identity_tests.rs"

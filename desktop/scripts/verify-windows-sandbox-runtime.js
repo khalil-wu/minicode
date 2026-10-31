@@ -17,6 +17,8 @@ module.exports = async function verifyWindowsSandboxRuntime(context) {
     || manifest.patch_version !== 3
     || manifest.owner_namespace !== "windows-sid+canonical-home-v3"
     || manifest.reported_version !== "minicode-windows-sandbox 0.158.0-alpha.2.1 owner-v3"
+    || manifest.desktop_pty_protocol !== 1
+    || manifest.rust_toolchain !== "1.95.0"
     || manifest.offline_account !== undefined
     || manifest.online_account !== undefined
   ) {

@@ -22,6 +22,7 @@ from typing import Any, Callable
 from backend.agent.context import ContextBuilder
 from backend.agent.error_withholding import ErrorWithholdingController
 from backend.agent.message import AgentEvent
+from backend.agent.turn_trace import turn_trace_shared
 from backend.agent.loop_bootstrap import (
     AgentLoopBootstrap,
     AgentLoopBootstrapRequest,
@@ -249,6 +250,7 @@ async def run_agent_loop(
         # Do not start more preflight work after references or hooks consumed
         # the absolute turn allowance. The loop boundary below owns the normal
         # terminal fallback decision for that exhausted turn.
+        turn_trace_shared(f"turn[{getattr(ctx, 'conversation_id', '') or session_id}]").mark("agent.loop.enter")
         components = build_agent_loop_components(
             bootstrap=bootstrap,
             tool_registry=tool_registry,

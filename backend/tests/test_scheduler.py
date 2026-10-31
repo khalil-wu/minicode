@@ -1,6 +1,9 @@
 import asyncio
 import json
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
 
 from backend.tasks import scheduler as scheduler_module
 from backend.tasks.scheduler import (
@@ -48,6 +51,36 @@ def test_next_run_respects_project_timezone() -> None:
 
     assert next_run == datetime(2026, 6, 22, 1, 0, tzinfo=UTC)
     assert cron_matches("0 9 * * 1-5", next_run, timezone="Asia/Shanghai")
+
+
+@pytest.mark.parametrize("after, expected", [
+    (datetime(2026, 3, 8, 6, 30, tzinfo=UTC), datetime(2026, 3, 9, 6, 30, tzinfo=UTC)),
+    (datetime(2026, 11, 1, 5, 30, tzinfo=UTC), datetime(2026, 11, 1, 6, 30, tzinfo=UTC)),
+])
+def test_cron_preserves_skipped_and_repeated_local_times(after, expected) -> None:
+    expression = "30 2 * * *" if after.month == 3 else "30 1 * * *"
+    assert next_run_after(expression, after, timezone="America/New_York") == expected
+
+
+def test_sparse_cron_dates_and_timezone_day_boundaries() -> None:
+    after = datetime(2026, 12, 30, 23, 0, tzinfo=UTC)
+    assert next_run_after("0 0 1 1 *", after, timezone="Pacific/Kiritimati") == datetime(2026, 12, 31, 10, tzinfo=UTC)
+    assert next_run_after("0 0 1 1 *", after, timezone="Pacific/Pago_Pago") == datetime(2027, 1, 1, 11, tzinfo=UTC)
+    assert next_run_after("0 0 31 2 *", after, timezone="Asia/Shanghai") is None
+    assert next_run_after("0 0 2 1 *", datetime(1, 1, 1, tzinfo=UTC), timezone="UTC", max_days=2) == datetime(1, 1, 2, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("timezone", ["UTC", "America/New_York", "Australia/Lord_Howe", "Pacific/Kiritimati", "Pacific/Pago_Pago"])
+@pytest.mark.parametrize("after", [datetime(2026, 3, 8, 5, 30, tzinfo=UTC), datetime(2026, 11, 1, 4, 50, tzinfo=UTC)])
+def test_cron_date_skips_match_original_minute_scan(timezone, after) -> None:
+    zone = ZoneInfo(timezone)
+    for expression in ("*/17 * * * *", "30 1 * * *", "0 2 * * *", "0 8 13 * 1"):
+        current = after.replace(second=0, microsecond=0) + timedelta(minutes=1)
+        deadline = current + timedelta(days=3)
+        while current <= deadline and not cron_matches(expression, current.astimezone(zone), timezone=timezone):
+            current += timedelta(minutes=1)
+        expected = current if current <= deadline else None
+        assert next_run_after(expression, after, timezone=timezone, max_days=3) == expected
 
 
 def test_scheduler_list_tasks_includes_computed_next_run(monkeypatch, tmp_path) -> None:

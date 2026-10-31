@@ -5,14 +5,14 @@ use codex_execpolicy::{Policy, PolicyParser};
 use codex_network_proxy::{EnvironmentNetworkPolicy, LocalBindingPolicy, ManagedProxyRouting,
     NetworkDecision, NetworkPolicyRequest, NetworkProxy, NetworkProxyAuditMetadata,
     NetworkProxyConfig, NetworkProxyHandle, NetworkPolicyAuditObserver, NetworkPolicyDecider,
-    NetworkPolicyRequestArgs, NetworkProtocol};
+    NetworkPolicyRequestArgs, NetworkProtocol, RemoteCredentialMasking};
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::approvals::{NetworkApprovalContext, NetworkApprovalProtocol, NetworkPolicyAmendment};
 use codex_utils_path_uri::Platform;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
 use tokio::io::{AsyncWriteExt, Stdout};
 use tokio::sync::{Mutex as AsyncMutex, oneshot};
 
@@ -25,7 +25,7 @@ mod network_proxy_spec;
 mod source_network_decision;
 use network_proxy_spec::NetworkProxySpec;
 
-pub const SOURCE_COMMIT: &str = "822e58cc3d666166c7446c5b1ea2e52f5d09594c";
+pub const SOURCE_COMMIT: &str = "970111f6cb62cc02fe36a82ea7d71b37a2889c97";
 
 #[derive(Clone, Deserialize)]
 pub struct PolicySource {
@@ -85,12 +85,15 @@ impl PolicyInput {
         Ok((controller, effective))
     }
 
-    async fn proxy(&self, spec: &NetworkProxySpec, managed: bool, audit: Option<NetworkPolicyAuditObserver>) -> Result<NetworkProxy> {
+    async fn proxy(&self, spec: &NetworkProxySpec, managed: bool, audit: Option<NetworkPolicyAuditObserver>,
+            decider: Option<Arc<dyn NetworkPolicyDecider>>, routing: ManagedProxyRouting) -> Result<NetworkProxy> {
         let mut state = spec.build_state_with_audit_metadata(NetworkProxyAuditMetadata::default(),
             Platform::from_platform_os(self.platform_os.as_deref()), self.local_binding())?;
         if let Some(observer) = audit { state.set_policy_audit_observer(observer); }
-        NetworkProxy::builder().state(Arc::new(state)).managed_by_codex(managed)
-            .managed_proxy_routing(ManagedProxyRouting::SharedIngress).build().await
+        let mut builder = NetworkProxy::builder().state(Arc::new(state)).managed_by_codex(managed)
+            .managed_proxy_routing(routing);
+        if let Some(decider) = decider { builder = builder.policy_decider_arc(decider); }
+        builder.build().await
     }
 }
 
@@ -170,6 +173,26 @@ pub struct Execution {
     handle: Option<NetworkProxyHandle>,
     remote_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     audit_tasks: Arc<Mutex<Vec<tokio::task::JoinHandle<Result<()>>>>>,
+    browser_targets: Option<BrowserTargets>,
+}
+
+type BrowserTargets = Arc<RwLock<BrowserTargetState>>;
+
+#[derive(Default)]
+struct BrowserTargetState {
+    scoped_hosts: HashSet<String>,
+    approved: HashSet<(String, u16, String)>,
+}
+
+#[derive(Deserialize)]
+struct BrowserTarget { host: String, port: u16, protocol: String }
+
+fn browser_targets(params: &Value) -> Result<HashSet<(String, u16, String)>> {
+    let targets: Vec<BrowserTarget> = serde_json::from_value(params["targets"].clone())?;
+    targets.into_iter().map(|target| {
+        ensure!(matches!(target.protocol.as_str(), "http" | "https_connect"), "unsupported browser target protocol");
+        Ok((codex_network_proxy::normalize_host(&target.host), target.port, target.protocol))
+    }).collect()
 }
 
 async fn flush_audit(tasks: &Mutex<Vec<tokio::task::JoinHandle<Result<()>>>>) -> Result<()> {
@@ -250,9 +273,60 @@ pub async fn handle(method: &str, params: Value, peer: Arc<Peer>, executions: Ex
             let (_, spec) = policy.specs()?;
             let Some(spec) = spec else { return Ok(json!({"enabled":false})) };
             if !spec.enabled() { return Ok(json!({"enabled":false})) }
-            let proxy = policy.proxy(&spec, false, None).await?;
-            let launch = proxy.remote_launch_config(policy.local_binding()).await?;
+            let proxy = policy.proxy(&spec, false, None, None, ManagedProxyRouting::SharedIngress).await?;
+            let launch = proxy.remote_launch_config(policy.local_binding(), RemoteCredentialMasking::Disabled).await?;
             Ok(json!({"enabled":true,"effectivePolicy":spec.environment_policy(),"remoteLaunch":launch}))
+        }
+        "network/startBrowser" => {
+            // Browser public pages share their normal Chromium storage partition,
+            // but their transport must still use Source's resolved-address check.
+            // Source reserves the dedicated listeners before publishing their
+            // real endpoints. This does not use the sandbox/SID ingress route.
+            let id = params["executionId"].as_str().context("browser proxy has no executionId")?.to_string();
+            let policy: PolicyInput = serde_json::from_value(json!({
+                "controller": {"enabled":true,"proxy_url":"http://127.0.0.1:0",
+                    "socks_url":"socks5://127.0.0.1:0","domains":{"*":"allow"},
+                    "allow_local_binding":false,"allow_upstream_proxy":false},
+                "requirements":{"review_domains":["*"]},
+                "permissionProfile":{"type":"managed","file_system":{"type":"restricted","entries":[]},
+                    "network":"restricted"},
+                "platformOs":std::env::consts::OS,"windowsSandbox":"none"
+            }))?;
+            let mut executions = executions.lock().await;
+            ensure!(!executions.contains_key(&id), "browser proxy was already started");
+            let (_, spec) = policy.specs()?;
+            let targets: BrowserTargets = Arc::new(RwLock::new(BrowserTargetState::default()));
+            let allowed = Arc::clone(&targets);
+            let decider: Arc<dyn NetworkPolicyDecider> = Arc::new(move |request: NetworkPolicyRequest| {
+                let allowed = Arc::clone(&allowed);
+                async move {
+                    let host = codex_network_proxy::normalize_host(&request.host);
+                    let targets = allowed.read().expect("browser target lock");
+                    if targets.scoped_hosts.contains(&host) && !targets.approved.contains(
+                        &(host, request.port, request.protocol.as_policy_protocol().to_string())) {
+                        return NetworkDecision::deny("browser target has no origin grant");
+                    }
+                    NetworkDecision::Allow
+                }
+            });
+            let proxy = policy.proxy(&spec.context("browser proxy policy is missing")?, true, None,
+                Some(decider), ManagedProxyRouting::DedicatedListeners).await?;
+            let handle = proxy.run().await?;
+            let url = format!("http://{}", proxy.http_addr());
+            executions.insert(id, Execution { _proxy:proxy, handle:Some(handle), remote_decider:None,
+                audit_tasks:Arc::new(Mutex::new(Vec::new())), browser_targets:Some(targets) });
+            Ok(json!({"proxyUrl":url,"sourceCommit":SOURCE_COMMIT,"allowLocalBinding":false}))
+        }
+        "network/setBrowserTargets" => {
+            let id = params["executionId"].as_str().context("browser targets have no executionId")?;
+            let targets = browser_targets(&params)?;
+            let executions = executions.lock().await;
+            let execution = executions.get(id).context("browser proxy was not started")?;
+            let active = execution.browser_targets.as_ref().context("network execution is not a browser proxy")?;
+            active.write().expect("browser target lock").scoped_hosts.extend(targets.iter().map(|(host, _, _)| host.clone()));
+            for (host, _, _) in &targets { execution._proxy.add_allowed_domain(host).await?; }
+            active.write().expect("browser target lock").approved = targets;
+            Ok(json!({"applied":true}))
         }
         "network/prepareLocal" | "network/prepareRemote" => {
             let prepare: Prepare = serde_json::from_value(params)?;
@@ -285,7 +359,7 @@ pub async fn handle(method: &str, params: Value, peer: Arc<Peer>, executions: Ex
                 })
             };
             let carrier = controller.as_ref().unwrap_or(&spec);
-            let mut proxy = prepare.policy.proxy(carrier, local, Some(audit)).await?;
+            let mut proxy = prepare.policy.proxy(carrier, local, Some(audit), None, ManagedProxyRouting::SharedIngress).await?;
             let root_handle = if local { Some(proxy.run().await?) } else { None };
             let decider: Option<Arc<dyn codex_network_proxy::NetworkPolicyDecider>> = if prepare.enable_approval_flow
                 && !spec.environment_policy().managed_allowed_domains_only {
@@ -305,11 +379,11 @@ pub async fn handle(method: &str, params: Value, peer: Arc<Peer>, executions: Ex
                 (json!({"env":prepared.env,"sandboxContext":prepared.sandbox_context,"provisioningSettings":provisioning,
                     "restrictingSid":restricting_sid}), None)
             } else {
-                let launch = proxy.remote_launch_config(prepare.policy.local_binding()).await?;
+                let launch = proxy.remote_launch_config(prepare.policy.local_binding(), RemoteCredentialMasking::Disabled).await?;
                 let decider = proxy.remote_policy_decider(launch.proxy.allow_local_binding);
                 (json!({"remoteLaunch":launch}), decider)
             };
-            executions.insert(prepare.execution_id, Execution { _proxy:proxy, handle:root_handle, remote_decider, audit_tasks });
+            executions.insert(prepare.execution_id, Execution { _proxy:proxy, handle:root_handle, remote_decider, audit_tasks, browser_targets:None });
             Ok(result)
         }
         "network/decideRemote" => {

@@ -261,6 +261,25 @@ def test_durable_follow_up_queue_survives_manager_recreation(tmp_path: Path, mon
     assert third.dequeue_user_message("conv-a") is None
 
 
+def test_empty_owned_turn_inputs_do_not_block_queued_messages(tmp_path: Path) -> None:
+    from backend.ws.durable_user_queue import DurableUserMessageQueue
+
+    queue = DurableUserMessageQueue(session_id="empty-turn-input", root_dir=tmp_path)
+    try:
+        queue.save({"conv-a": [_command("queued", "preserve input")]}, {}, {"conv-a": []})
+        payload = json.loads(queue.path.read_text(encoding="utf-8"))
+        assert payload["turn_inputs"] == {}
+        # Existing stores can already contain an empty entry with a live lease.
+        payload["turn_inputs"] = {"conv-a": []}
+        payload["ownership"]["turn_inputs"] = {"conv-a": queue._owner_id}
+        queue.path.write_text(json.dumps(payload), encoding="utf-8")
+
+        claimed = queue.claim_user_message("conv-a")
+        assert claimed is not None and claimed.data["content"] == "preserve input"
+    finally:
+        queue.close()
+
+
 def test_session_queue_uses_session_conversation_repository_root(tmp_path: Path) -> None:
     conversation_dir = tmp_path / "conversations"
     session = SimpleNamespace(
@@ -357,7 +376,7 @@ def test_legacy_v3_inflight_state_is_recovered_and_upgraded(tmp_path: Path) -> N
         for command in queue.pending_client_commands()
     ] == ["cmd-legacy"]
     upgraded = json.loads(queue.path.read_text(encoding="utf-8"))
-    assert upgraded["version"] == 7
+    assert upgraded["version"] == 8
     assert upgraded["inflight"] == {}
     assert upgraded["turn_inputs"] == {}
     assert upgraded["client_inflight"] == {}

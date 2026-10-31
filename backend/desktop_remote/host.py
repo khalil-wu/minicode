@@ -137,9 +137,10 @@ class DesktopHost:
         finally:
             if control is not None:
                 control.close()
-                await control.wait_closed()
             if self.relay is not None:
                 await self.relay.aclose()
+            if control is not None:
+                await control.wait_closed()
             bridge.close()
             await bridge.wait_closed()
             if self.native is not None:

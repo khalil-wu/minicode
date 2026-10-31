@@ -33,8 +33,6 @@ def _env_policy(attachment):
 
 
 class NodeReplMCPClient(MCPClient):
-    notify_request_cancellation = True
-
     def __init__(self, config, attachment, network, *, on_disconnect, on_tools_changed, feature_flags=None,
             requires_read_only_tools=False):
         self.attachment = attachment

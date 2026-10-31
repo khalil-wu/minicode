@@ -5,16 +5,19 @@ from backend.async_cleanup import to_thread_cancel_safe
 import asyncio
 import base64
 import hashlib
+import shutil
+import tempfile
 import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import atomic_write_bytes, canonical_file_path_key, file_mutation_locks, run_blocking_io
+from backend.atomic_io import atomic_file_writer, canonical_file_path_key, file_mutation_locks, run_blocking_io
 from backend.checkpoint.store import (
     CheckpointFileSnapshot,
     CheckpointCorruptError,
     CheckpointRecord,
+    CheckpointScanStatus,
     CheckpointStore,
     checkpoint_owner_key,
 )
@@ -62,9 +65,8 @@ class CheckpointManager:
                 # JSON small enough to list and parse cheaply; text reads
                 # would also translate CRLF to LF and rewind would silently
                 # rewrite every Windows file's line endings.
-                raw = await asyncio.to_thread(target.read_bytes)
                 blob = hashlib.sha256(f"{record_id}:{rel_path}".encode("utf-8")).hexdigest()
-                await to_thread_cancel_safe(self._store.write_blob, blob, raw)
+                await to_thread_cancel_safe(self._snapshot_file, blob, target)
                 files.append(
                     CheckpointFileSnapshot(
                         path=rel_path,
@@ -159,9 +161,21 @@ class CheckpointManager:
                     blob = None
                     existed = value is not None and value["isFile"]
                     if existed:
-                        raw = await service.read_bytes(path, limit=value["size"])
                         blob = hashlib.sha256(f"{record_id}:{path.uri}".encode("utf-8")).hexdigest()
-                        await to_thread_cancel_safe(self._store.write_blob, blob, raw)
+                        with tempfile.TemporaryFile() as staging:
+                            offset = 0
+                            async with await service.filesystem.open(path.uri, sandbox=service.sandbox) as handle:
+                                while True:
+                                    chunk, eof = await handle.read_block(offset, min(1024 * 1024, value["size"] + 1 - offset))
+                                    offset += len(chunk)
+                                    if offset > value["size"]:
+                                        raise ValueError(f"File is too large; limit is {value['size']} bytes")
+                                    if chunk:
+                                        await to_thread_cancel_safe(staging.write, chunk)
+                                    if eof:
+                                        break
+                            staging.seek(0)
+                            await to_thread_cancel_safe(self._store.write_blob_from_file, blob, staging)
                     files.append(CheckpointFileSnapshot(path=service.display(path), existed=existed,
                         encoding="binary", blob=blob, environment_id=service.scope.environment_id, path_uri=path.uri))
             record = CheckpointRecord(id=record_id, conversation_id=conversation_id, session_id=session_id,
@@ -223,6 +237,10 @@ class CheckpointManager:
             raise CheckpointCorruptError(f"Checkpoint does not contain restorable content for: {snapshot.path}")
         return base64.b64decode(snapshot.content, validate=True) if snapshot.encoding == "base64" else snapshot.content.encode(snapshot.encoding)
 
+    def _snapshot_file(self, blob: str, path: Path) -> None:
+        with path.open("rb") as source:
+            self._store.write_blob_from_file(blob, source)
+
     def get(self, checkpoint_id: str) -> CheckpointRecord | None:
         return self._store.get(checkpoint_id)
 
@@ -233,6 +251,9 @@ class CheckpointManager:
         limit: int | None = 50,
     ) -> list[CheckpointRecord]:
         return self._store.list_for_conversation(conversation_id, limit=limit)
+
+    def list_for_conversation_with_status(self, conversation_id: str, *, limit: int | None = 50) -> tuple[list[CheckpointRecord], CheckpointScanStatus]:
+        return self._store.list_for_conversation_with_status(conversation_id, limit=limit)
 
     def delete_for_conversation(self, conversation_id: str) -> int:
         return self._store.delete_for_conversation(conversation_id)
@@ -278,37 +299,41 @@ class CheckpointManager:
         # file.  The outer async method keeps the blocking filesystem work off
         # the event loop.
         with file_mutation_locks(targets):
-            decoded: list[tuple[Path, CheckpointFileSnapshot, bytes | None]] = []
-            for target, snapshot in zip(targets, snapshots, strict=True):
-                if not snapshot.existed:
-                    decoded.append((target, snapshot, None))
-                    continue
-                if snapshot.blob:
-                    # Sidecar payload (current format): raw byte copy.
-                    decoded.append((target, snapshot, self._store.read_blob(snapshot.blob)))
-                    continue
-                if snapshot.content is None:
-                    raise CheckpointCorruptError(f"Checkpoint does not contain restorable content for: {snapshot.path}")
-                # Legacy inline payload: base64 (or plain text) inside the
-                # record JSON, written before the sidecar migration.
-                if snapshot.encoding == "base64":
-                    try:
-                        raw = base64.b64decode(snapshot.content, validate=True)
-                    except ValueError as exc:
-                        raise ValueError(f"Checkpoint content is invalid for {snapshot.path}") from exc
-                else:
-                    try:
-                        raw = snapshot.content.encode(snapshot.encoding)
-                    except (LookupError, UnicodeEncodeError) as exc:
-                        raise ValueError(f"Checkpoint encoding is invalid for {snapshot.path}") from exc
-                decoded.append((target, snapshot, raw))
+            # Stage every file before publishing any of them. Invalid later
+            # snapshots must not leave earlier targets partially rewound.
+            with tempfile.TemporaryDirectory(prefix="minicode-checkpoint-") as staging:
+                staged: list[Path | None] = []
+                for index, snapshot in enumerate(snapshots):
+                    if not snapshot.existed:
+                        staged.append(None)
+                        continue
+                    staged_path = Path(staging) / str(index)
+                    if snapshot.blob:
+                        with self._store.open_blob(snapshot.blob) as source:
+                            with staged_path.open("wb") as destination:
+                                shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    else:
+                        if snapshot.content is None:
+                            raise CheckpointCorruptError(f"Checkpoint does not contain restorable content for: {snapshot.path}")
+                        if snapshot.encoding == "base64":
+                            try:
+                                raw = base64.b64decode(snapshot.content, validate=True)
+                            except ValueError as exc:
+                                raise ValueError(f"Checkpoint content is invalid for {snapshot.path}") from exc
+                        else:
+                            try:
+                                raw = snapshot.content.encode(snapshot.encoding)
+                            except (LookupError, UnicodeEncodeError) as exc:
+                                raise ValueError(f"Checkpoint encoding is invalid for {snapshot.path}") from exc
+                        staged_path.write_bytes(raw)
+                    staged.append(staged_path)
 
-            for target, snapshot, raw in decoded:
-                if snapshot.existed:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_bytes(target, raw or b"")
-                elif target.exists() and target.is_file():
-                    target.unlink()
+                for target, snapshot, source_path in zip(targets, snapshots, staged, strict=True):
+                    if snapshot.existed:
+                        with source_path.open("rb") as source, atomic_file_writer(target) as destination:
+                            shutil.copyfileobj(source, destination, length=1024 * 1024)
+                    elif target.exists() and target.is_file():
+                        target.unlink()
         from backend.tools.file_tools_common import invalidate_workspace_file_caches
 
         invalidate_workspace_file_caches(file_tree_changed=True, clear_file_state=True)

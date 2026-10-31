@@ -1174,6 +1174,19 @@ class PermissionChecker:
             native = context.captured_exec_policy
             if native.kind == "forbidden":
                 return PermissionLevel.ALWAYS_DENY, "exec_policy", native.reason or "blocked by policy"
+            policy_name = tool.policy_identity if tool is not None else tool_name
+            aliases = tool.policy_aliases if tool is not None else ()
+            deny_aliases = (*aliases, *getattr(tool, "policy_deny_aliases", ())) if tool is not None else ()
+            content_match = self._content_rule_decision(policy_name, args, aliases, deny_aliases)
+            if content_match is not None and content_match[0] == PermissionLevel.ALWAYS_DENY:
+                return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
+            if content_match is not None and content_match[0] == PermissionLevel.CONFIRM:
+                if context.approval_policy in {"never", "granular"}:
+                    reason = rejected_approval_reason(context, "rules")
+                    if reason is not None:
+                        source = "managed_requirements" if context.requirements_source else "approval_policy"
+                        return PermissionLevel.ALWAYS_DENY, source, reason
+                return PermissionLevel.CONFIRM, "content_rule", "content_ask"
             if context.strict_auto_review:
                 return PermissionLevel.CONFIRM, "tool", "strict_auto_review"
             return (PermissionLevel.AUTO if native.kind == "skip" else PermissionLevel.CONFIRM,
@@ -1978,14 +1991,11 @@ class PermissionChecker:
                     )
 
                 if not tool_result_read:
-                    try:
-                        operation = (
-                            "write"
-                            if tool.get_side_effect_kind(args) in {"workspace", "destructive"}
-                            else "read"
-                        )
-                    except Exception:
-                        operation = "read"
+                    operation = (
+                        "write"
+                        if tool.get_side_effect_kind(args) in {"workspace", "destructive"}
+                        else "read"
+                    )
                     allowed, reason = self.validate_file_operation(
                         str(file_path),
                         operation,

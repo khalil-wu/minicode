@@ -199,6 +199,7 @@ async def test_sdk_related_request_metadata_selects_original_parallel_owner(monk
     client = MCPClient("parallel", elicitation_handler=elicit)
     monkeypatch.setattr("backend.mcp.client.feature_enabled", lambda name: name == "mcp_elicitation")
     async with _LifecycleClientSession(client_read, client_write, transport_closed=asyncio.Event(),
+        cancellation_tasks=client._active_request_tasks,
         elicitation_callback=client._sdk_elicitation_callback) as sdk:
         sdk._tool_output_schemas.update(cell_a=None, cell_b=None)
         client._session, client._connected = sdk, True
@@ -206,7 +207,7 @@ async def test_sdk_related_request_metadata_selects_original_parallel_owner(monk
         a = asyncio.create_task(client.call_tool("cell_a", request_owner={**owner, "cancel_event": cancel_a}))
         request_a = await server_read.receive()
         b = asyncio.create_task(client.call_tool("cell_b", request_owner={**owner, "cancel_event": cancel_b}))
-        await server_read.receive()
+        request_b = await server_read.receive()
         try:
             await server_write.send(SessionMessage(types.JSONRPCMessage(types.JSONRPCRequest(
                 jsonrpc="2.0", id="elicitation-A", method="elicitation/create",
@@ -215,6 +216,9 @@ async def test_sdk_related_request_metadata_selects_original_parallel_owner(monk
             await asyncio.wait_for(started.wait(), 1)
             cancel_b.set()
             await asyncio.gather(b, return_exceptions=True)
+            cancellation = await server_read.receive()
+            assert cancellation.message.root.method == "notifications/cancelled"
+            assert cancellation.message.root.params["requestId"] == request_b.message.root.id
             assert seen[0]["cancel_event"] is cancel_a
             assert not cancel_a.is_set() and not a.done()
             release.set()

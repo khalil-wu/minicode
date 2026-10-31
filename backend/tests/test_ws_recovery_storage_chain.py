@@ -37,15 +37,16 @@ async def test_invalid_utf8_completion_log_retains_ids_reports_evidence_and_supp
     raw = b'{"client_command_id":"complete","created_at":1000}\n{"client_command_id":"partial","command_type":"bad\xff"}\n'
     store.path.write_bytes(raw)
     monkeypatch.setattr("backend.ws.client_command_log.time.time", lambda: 1000)
-    session = SimpleNamespace(session_id="fixture", emit_command_result=AsyncMock(), run_manager=SimpleNamespace(durable_client_commands=None))
+    session = SimpleNamespace(session_id="fixture", connection_generation=1, send_payload=AsyncMock(return_value=True),
+                              run_manager=SimpleNamespace(durable_client_commands=None))
     dispatcher = SessionCommandDispatcher(session, root_dir=tmp_path)
     assert dispatcher.recent_client_command_ids == ["complete", "partial"]
     assert dispatcher._client_command_seen(UserCommand(type="user_message", data={"client_command_id": "complete"}))
     await dispatcher._replay_pending_client_commands(1)
-    data = session.emit_command_result.await_args.kwargs["data"]
+    data = session.send_payload.await_args.args[0]["error_details"]
     assert data["reason"] == "invalid_utf8" and data["line"] == "2" and data["path"] == str(store.path)
-    await dispatcher._replay_pending_client_commands(2)
-    assert session.emit_command_result.await_count == 1
+    await dispatcher._replay_pending_client_commands(1)
+    assert session.send_payload.await_count == 1
     dispatcher.client_command_store.rewrite_ids(["complete"])
     assert store.path.read_bytes() == raw
 

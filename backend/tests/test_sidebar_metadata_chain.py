@@ -156,7 +156,7 @@ async def test_read_receipt_releases_send_lock_before_peer_projection(tmp_path):
     session.send_payload = publish
     async with AsyncExitStack() as scope:
         await scope.enter_async_context(lock)
-        with bind_command_lifecycle_prefix(session.session_id, scope):
+        with bind_command_lifecycle_prefix(scope):
             await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True})
     assert len(session.events) == 1
     assert session.results[-1]["level"] == "success"

@@ -19,6 +19,8 @@ class HookEvent(str, Enum):
     NOTIFICATION = "notification"
     PRE_COMPACT = "pre_compact"
     POST_COMPACT = "post_compact"
+    PRE_MODEL_REQUEST = "pre_model_request"
+    POST_MODEL_REQUEST = "post_model_request"
     PERMISSION_REQUEST = "permission_request"
     PERMISSION_DENIED = "permission_denied"
     STOP_FAILURE = "stop_failure"
@@ -38,6 +40,15 @@ class HookEvent(str, Enum):
     SESSION_END = "session_end"
     STOP = "stop"
     INTERRUPT = "interrupt"
+
+
+CODEX_HOOK_EVENTS = frozenset({
+    HookEvent.SESSION_START, HookEvent.SESSION_END, HookEvent.SUBAGENT_START,
+    HookEvent.SUBAGENT_STOP, HookEvent.USER_PROMPT_SUBMIT, HookEvent.PRE_TOOL_USE,
+    HookEvent.POST_TOOL_USE, HookEvent.PERMISSION_REQUEST, HookEvent.PRE_COMPACT,
+    HookEvent.POST_COMPACT, HookEvent.STOP, HookEvent.INTERRUPT,
+    HookEvent.PRE_MODEL_REQUEST, HookEvent.POST_MODEL_REQUEST,
+})
 
 
 class HookSource(str, Enum):

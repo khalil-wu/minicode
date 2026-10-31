@@ -799,7 +799,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
           ephemeral: ev.ephemeral,
           replayed: isReplayedRuntimeEvent(e),
         });
-        return true;
+        if (ev.stage !== "image_generation") return true;
       }
       if (message) {
         const progress = {

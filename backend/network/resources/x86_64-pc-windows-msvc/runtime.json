@@ -1,14 +1,14 @@
 {
   "identity": "minicode-network",
   "protocol": 1,
-  "sourceCommit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "sourceCommit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
   "target": "x86_64-pc-windows-msvc",
   "files": {
     "LICENSE.openai-codex": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
-    "minicode-network.exe": "f544fccea426d4c5f3462a6f3236dca0146272477a93bd67c69a947d3fe06143",
+    "minicode-network.exe": "86d5b5c9177d5f64f7199887615f0e71f0fbd65741758bd060fdf4c11656c3d6",
     "NOTICE.openai-codex": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
-    "source-manifest.json": "92d36ed9b61acfc9b22b2ccfdbae883fa5d799b1a6cf5fff692e9e68efe9a222",
-    "THIRD_PARTY_NOTICES.txt": "6d0715b150b54fabd68bf615534f70d2c6fc6f6b62dde61d38dc2bf70080ce39"
+    "source-manifest.json": "538fddaf76b40228ff18fb0d49199c146f13a995a8355feb3e6a076ab61d7bc9",
+    "THIRD_PARTY_NOTICES.txt": "d13868039148a96cdee7d3dd41e2f8a49cadbd0e00d67db177f9704f78c9d393"
   },
   "managed_network_ready_protocol": 1
 }

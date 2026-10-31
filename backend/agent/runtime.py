@@ -1306,7 +1306,8 @@ class AgentRuntime:
 
     async def close_subagent_session(self, subagent_id: str, *, reason: str = "closed") -> bool:
         """Close a thread, distinct from interrupting only its current turn."""
-        await self._stop_subagent_mailbox_schedulers({subagent_id})
+        if await self._stop_subagent_mailbox_schedulers({subagent_id}):
+            return False
         task = self._subagent_tasks.get(subagent_id)
         registration = self._registry.get(subagent_id, kind="subagent")
         if task is not None and task is not asyncio.current_task() and not task.done() and not (registration is not None and registration.sealed):
@@ -2516,7 +2517,7 @@ class AgentRuntime:
         mailbox_ids = {agent_id for agent_id in set(self._subagents) | set(self._subagent_sessions)
             if (record := self.get_subagent(agent_id) or self.load_persisted_subagent(agent_id)) is not None
             and (record.session_id == session or self._subagent_session_ids.get(agent_id) == session)}
-        await self._stop_subagent_mailbox_schedulers(mailbox_ids)
+        pending_mailboxes = await self._stop_subagent_mailbox_schedulers(mailbox_ids)
         owned = [
             (subagent_id, task)
             for subagent_id, task in self._subagent_tasks.items()
@@ -2544,12 +2545,12 @@ class AgentRuntime:
             for subagent_id, task in owned:
                 if task in initially_timed_out:
                     self._retain_subagent_cleanup_owner(subagent_id, task)
-        completed = not initially_timed_out
+        completed = not initially_timed_out and not pending_mailboxes
         for subagent_id, task in owned:
-            if task not in initially_timed_out and task.done():
+            if subagent_id not in pending_mailboxes and task not in initially_timed_out and task.done():
                 completed = self._reconcile_terminal_subagent_cleanup(subagent_id) and completed
         for subagent_id in mailbox_ids:
-            if subagent_id in self._subagent_sessions and all(agent_id != subagent_id or task not in initially_timed_out for agent_id, task in owned):
+            if subagent_id not in pending_mailboxes and subagent_id in self._subagent_sessions and all(agent_id != subagent_id or task not in initially_timed_out for agent_id, task in owned):
                 completed = await self.close_subagent_session(subagent_id, reason=reason) and completed
         return completed
 
@@ -2563,16 +2564,19 @@ class AgentRuntime:
         } | {task for agent_id, (task, _) in self._subagent_mailbox_turns.items()
             if not task.done() and self._conversation_id_for_agent(agent_id) == conversation_id}
 
-    async def _stop_subagent_mailbox_schedulers(self, agent_ids: set[str]) -> None:
-        tasks = []
+    async def _stop_subagent_mailbox_schedulers(self, agent_ids: set[str]) -> set[str]:
+        tasks = {}
         for agent_id in agent_ids:
             self._subagent_mailbox_suspended.add(agent_id)
             self._subagent_mailbox_resumers.pop(agent_id, None)
             owned = self._subagent_mailbox_turns.get(agent_id)
             if owned is not None and not owned[0].done():
-                owned[0].cancel()
-                tasks.append(owned[0])
-        await asyncio.gather(*tasks, return_exceptions=True)
+                tasks[agent_id] = owned[0]
+        pending = await cancel_and_drain(
+            tasks.values(), timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            label="subagent mailbox schedulers",
+        )
+        return {agent_id for agent_id, task in tasks.items() if task in pending}
 
     async def stop_subagent_tasks_for_conversation(
         self,
@@ -2640,7 +2644,7 @@ class AgentRuntime:
                     if resource["resource_kind"] == "worktree" and resource["state"] == "continuation":
                         self.begin_subagent_worktree_retirement(subagent_id, agent_path=record.agent_path,
                             mailbox_epoch=record.mailbox_epoch, resource_id=resource["resource_id"], discard_mail=True)
-        await self._stop_subagent_mailbox_schedulers(subagent_ids)
+        pending_mailboxes = await self._stop_subagent_mailbox_schedulers(subagent_ids)
         for subagent_id in subagent_ids:
             task = self._subagent_tasks.get(subagent_id)
             if task is not None and not task.done():
@@ -2665,7 +2669,7 @@ class AgentRuntime:
             for subagent_id, task in owned_tasks:
                 if task in initially_timed_out:
                     self._retain_subagent_cleanup_owner(subagent_id, task)
-        pending_ids = {subagent_id for subagent_id, task in owned_tasks if task in initially_timed_out}
+        pending_ids = pending_mailboxes | {subagent_id for subagent_id, task in owned_tasks if task in initially_timed_out}
         completed = not pending_ids
         for subagent_id in subagent_ids:
             if subagent_id not in pending_ids:

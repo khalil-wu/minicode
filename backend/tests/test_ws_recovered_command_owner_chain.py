@@ -15,7 +15,8 @@ from backend.ws.session_lifecycle import SessionLifecycle
 
 
 def _session(tmp_path, queue):
-    conversation = SimpleNamespace(workspace_root=str(tmp_path), worktree_path="", execution_cwd=str(tmp_path))
+    conversation = SimpleNamespace(workspace_root=str(tmp_path), worktree_path="", execution_cwd=str(tmp_path),
+                                   permission_mode_revision=0, workspace_binding_revision=0)
     lock = asyncio.Lock()
     sent = []
 
@@ -39,6 +40,7 @@ def _session(tmp_path, queue):
             workspace_root_for_conversation=lambda _conversation=None: tmp_path,
         ),
         event_outbox=SimpleNamespace(
+            connected=False,
             bind_client_command=lambda *_args, **_kwargs: nullcontext(),
             bind_connection_generation=lambda _generation: nullcontext(),
         ),
@@ -184,7 +186,7 @@ async def test_owner_relative_action_persists_selected_owner_before_ack(tmp_path
             raise WebSocketDisconnect()
 
     session.ws = SimpleNamespace(receive_text=receive_text)
-    def retain_without_dispatch(command_id, generation, *, command_type):
+    def retain_without_dispatch(command_id, generation, *, command_type, command=None, recovered=False):
         assert command_id == 'cmd_relative' and generation == 1 and command_type == 'preview.refresh'
 
     dispatcher._schedule_durable_client_command = retain_without_dispatch

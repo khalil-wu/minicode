@@ -30,6 +30,7 @@ _PREFIXES_WITH_VALUE_OPTIONS: dict[str, frozenset[str]] = {
     "xargs": frozenset({"-I", "-n", "-P", "-d", "-L", "-s", "-E", "-a", "--max-args", "--max-procs", "--delimiter", "--arg-file"}),
     "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
     "doas": frozenset({"-u", "-C"}),
+    "pkexec": frozenset({"--user"}),
 }
 
 

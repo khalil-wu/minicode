@@ -115,6 +115,16 @@ describe("ws-outbox", () => {
     await pending;
   });
 
+  it("resolves the original caller with an unsequenced recovered failure", async () => {
+    registerWebSocketSender(() => true);
+    const pending = sendClientCommandAwaitResult({ type: "conversation.list", client_command_id: "recovered-command" }, "conversation.list");
+    notifyClientCommandReceived("recovered-command");
+    const event = { type: "command.result", command: "conversation.list", level: "error", message: "Actual failure",
+      client_command_id: "recovered-command", client_command_type: "conversation.list", event_id: "original-result" } as const;
+    expect(resolveClientCommandResult(event)).toBe(true);
+    await expect(pending).resolves.toMatchObject({ level: "error", message: "Actual failure", event_id: "original-result" });
+  });
+
   it("does not report local acceptance when the sender refuses the captured command", async () => {
     const submitted = vi.fn();
     registerWebSocketSender(() => false);

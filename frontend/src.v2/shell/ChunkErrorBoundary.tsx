@@ -1,4 +1,5 @@
 import React from "react";
+import { translateApp } from "../i18n";
 
 interface ChunkErrorBoundaryProps {
   children: React.ReactNode;
@@ -41,15 +42,15 @@ export class ChunkErrorBoundary extends React.Component<ChunkErrorBoundaryProps,
     return (
       <div style={fallbackStyle}>
         <div style={fallbackTitleStyle}>
-          {chunkError ? "应用资源已更新" : "面板渲染失败"}
+          {translateApp(chunkError ? "应用资源已更新" : "面板渲染失败")}
         </div>
         <div style={fallbackTextStyle}>
           {chunkError
-            ? "当前窗口仍在使用旧版前端资源，请重新加载以应用最新版本。"
-            : error.message || "界面发生意外错误。"}
+            ? translateApp("当前窗口仍在使用旧版前端资源，请重新加载以应用最新版本。")
+            : error.message || translateApp("界面发生意外错误。")}
         </div>
         <button type="button" onClick={() => window.location.reload()} style={reloadButtonStyle}>
-          重新加载
+          {translateApp("重新加载")}
         </button>
       </div>
     );

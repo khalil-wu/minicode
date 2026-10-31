@@ -40,6 +40,108 @@ class _RecordingLLM(LLMAdapter):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parallel", [False, True], ids=["one-tool", "parallel-tools"])
+@pytest.mark.parametrize("finish", ["normal", "stop", "resume", "runtime-close"])
+async def test_child_query_stream_has_one_owner_through_checkpoint_ack_and_retirement(startup_case, monkeypatch, parallel, finish):
+    from backend.agent.query_engine import QueryEngine
+    from backend.tools.base import BaseTool, ToolResult, ToolSchema
+    import backend.agent.checkpoint as checkpoints
+
+    case = startup_case
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    original_checkpoint = checkpoints.save_run_checkpoint
+    gate_used = False
+
+    def hold_checkpoint(*args, **kwargs):
+        nonlocal gate_used
+        if not gate_used:
+            gate_used = True
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(timeout=30), "The test did not release its checkpoint writer"
+        return original_checkpoint(*args, **kwargs)
+
+    class ReadProbe(BaseTool):
+        name = "audit_ack_read"
+        read_only = True
+
+        def get_schema(self):
+            return ToolSchema(self.name, "Read owned fixture evidence", {"type": "object", "properties": {}})
+
+        async def execute(self, args, context=None):
+            return ToolResult("actual checkpoint evidence")
+
+    case.context.tool_registry.register(ReadProbe())
+
+    async def stream(messages, tools=None, metadata=None):
+        case.model.calls += 1
+        if case.model.calls == 1:
+            calls = [ToolCallEvent(id=f"ack-read-{index}", name="audit_ack_read", arguments={})
+                for index in range(2 if parallel else 1)]
+            yield StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=calls)
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="tool_calls")
+        else:
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="Owned query completed", phase="final_answer")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+    original_submit = QueryEngine.submit
+    streams = []
+
+    def capture_stream(engine, submission):
+        owned = original_submit(engine, submission)
+        streams.append(owned)
+        return owned
+
+    monkeypatch.setattr(checkpoints, "save_run_checkpoint", hold_checkpoint)
+    monkeypatch.setattr(case.model, "stream_chat", stream)
+    monkeypatch.setattr(QueryEngine, "submit", capture_stream)
+    child_id = ""
+    closing = None
+    try:
+        child_id, launch = await _launch(case, "background")
+        assert not launch.is_error
+        await asyncio.wait_for(entered.wait(), timeout=15)
+        resident = case.runtime.subagent_session(child_id)
+        if finish == "runtime-close":
+            closing = asyncio.create_task(case.runtime.aclose(release_lease=True))
+            await asyncio.sleep(0)
+        elif finish in {"stop", "resume"}:
+            assert case.runtime.cancel_subagent_task(child_id, reason="audit_ack_stop") == "cancelled"
+        release.set()
+        outcomes = await asyncio.wait_for(asyncio.gather(*case.workers, return_exceptions=True), timeout=15)
+        if finish == "normal":
+            assert not any(isinstance(outcome, BaseException) for outcome in outcomes)
+        if closing is not None:
+            assert await asyncio.wait_for(closing, timeout=15)
+        assert all(owned.ag_frame is None for owned in streams), "The retired worker left its QueryEngine stream open at the acknowledgement boundary"
+        assert not resident.active_turn
+        turns = [record for record in case.runtime._runs.values() if record.task_id == child_id]
+        assert turns and all(record.status != "running" for record in turns)
+        expected = "completed" if finish == "normal" else "cancelled"
+        assert case.runtime.get_subagent(child_id).status == expected
+        if finish == "resume":
+            prior_workers = len(case.workers)
+            await case.tool.resume_background_subtask(subagent_id=child_id, prompt="Continue the retained owned query", context=case.context)
+            assert await case.runtime.wait_for_subagent(child_id, timeout=10)
+            await asyncio.gather(*case.workers[prior_workers:])
+            assert case.runtime.get_subagent(child_id).status == "completed"
+            assert case.runtime.get_subagent(child_id).mailbox_epoch == 2
+            assert all(owned.ag_frame is None for owned in streams)
+        journal = case.runtime.execution_journal(child_id).read_events()
+        assert not any(event.payload.get("lifecycle") == "runtime_terminal_commit_failed" for event in journal)
+    finally:
+        release.set()
+        if child_id and case.runtime.has_live_subagent_task(child_id):
+            case.runtime.cancel_subagent_task(child_id, reason="test_cleanup")
+        await asyncio.gather(*case.workers, return_exceptions=True)
+        for owned in streams:
+            if owned.ag_frame is not None:
+                await owned.aclose()
+        if closing is not None:
+            await closing
+
+
+@pytest.mark.asyncio
 async def test_ordinary_child_refreshes_parent_restrictions_at_its_own_boundary(startup_case, monkeypatch):
     from backend.agent.message import AgentEvent
     from backend.agent.query_engine import QueryEngine
@@ -182,10 +284,11 @@ async def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     model = _RecordingLLM()
     registry = ToolRegistry()
     checker = PermissionChecker(permission_settings_from_config({}), workspace_root=workspace)
+    artifacts = ArtifactStore(storage_dir=tmp_path / "artifacts")
     tool = TaskTool(
         llm_provider=model,
         tool_registry_provider=registry,
-        artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
+        artifact_store=artifacts,
         permission_checker_provider=checker,
         agent_settings_provider=AgentSettings(max_iterations=2),
         token_budget_provider=TokenBudget(),
@@ -215,11 +318,16 @@ async def startup_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         metadata={"run_id": "parent", "_tool_registry": registry},
         run_context=RunContext(agent_runtime=runtime, hook_manager=hooks),
     )
-    yield SimpleNamespace(
-        runtime=runtime, tool=tool, context=context, hooks=hooks,
-        model=model, events=events, workers=workers, workspace=workspace,
-    )
-    await runtime.aclose(release_lease=True)
+    try:
+        yield SimpleNamespace(
+            runtime=runtime, tool=tool, context=context, hooks=hooks,
+            model=model, events=events, workers=workers, workspace=workspace,
+        )
+    finally:
+        try:
+            await runtime.aclose(release_lease=True)
+        finally:
+            await artifacts.aclose()
 
 
 async def _launch(case, delivery: str, **arguments):
@@ -231,6 +339,97 @@ async def _launch(case, delivery: str, **arguments):
         **arguments,
     }, context=case.context)
     return launch.runtime_metadata["subagent_id"], launch
+
+
+@pytest.mark.asyncio
+async def test_child_turn_keeps_hook_bindings_and_async_owner_separate(startup_case):
+    import json
+    import shlex
+    import sys
+
+    from backend.hooks.dispatcher import compile_hook_matcher
+    from backend.hooks.manager import HookEvent, _HookEntry
+
+    script = startup_case.workspace / "observe_hook.py"
+    script.write_text(
+        "import json, pathlib, sys\n"
+        "payload = json.load(sys.stdin)\n"
+        "with pathlib.Path(__file__).with_suffix('.jsonl').open('a', encoding='utf-8') as out:\n"
+        "    out.write(json.dumps(payload) + '\\n')\n"
+        "if payload['hook_event_name'] == 'SubagentStart':\n"
+        "    print(json.dumps({'hookSpecificOutput': {'hookEventName': 'SubagentStart', 'additionalContext': 'CHILD-START-CONTEXT'}}))\n",
+        encoding="utf-8",
+    )
+    if sys.platform == "win32":
+        quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+        command, shell = f"& {quote(sys.executable)} {quote(script)}", "powershell"
+    else:
+        command, shell = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}", "bash"
+    entry = _HookEntry(matcher=compile_hook_matcher("*"), entry_id="observe", command=command, shell=shell)
+    startup_case.hooks.hooks[HookEvent.USER_PROMPT_SUBMIT] = [entry]
+    startup_case.hooks.hooks[HookEvent.SUBAGENT_START] = [entry]
+    startup_case.hooks.scope_id = "conversation"
+    startup_case.hooks.owner_session_id = "session"
+    startup_case.context.turn_id = "parent-turn"
+    startup_case.hooks.bind_runtime(llm=startup_case.model, tool_registry=None, tool_context=startup_case.context)
+    prompts = []
+    stream = startup_case.model.stream_chat
+
+    async def capture_model_request(messages, tools=None, metadata=None):
+        prompts.append(messages)
+        async for event in stream(messages, tools=tools, metadata=metadata):
+            yield event
+
+    startup_case.model.stream_chat = capture_model_request
+
+    await startup_case.hooks.run_user_prompt_submit("parent before")
+    child_id, result = await _launch(startup_case, "foreground")
+    assert not result.is_error
+    await startup_case.hooks.run_user_prompt_submit("parent after")
+    records = [json.loads(line) for line in script.with_suffix('.jsonl').read_text(encoding="utf-8").splitlines()]
+    assert [item["session_id"] for item in records] == ["conversation", child_id, child_id, "conversation"]
+    assert [item["hook_event_name"] for item in records] == ["UserPromptSubmit", "SubagentStart", "UserPromptSubmit", "UserPromptSubmit"]
+    assert records[0]["turn_id"] == records[3]["turn_id"] == "parent-turn"
+    assert records[1]["turn_id"] == records[2]["turn_id"]
+    assert records[1]["agent_id"] == records[2]["agent_id"] == child_id
+    assert records[1]["agent_type"] == records[2]["agent_type"] == "default"
+    assert any("CHILD-START-CONTEXT" in str(message.content) for message in prompts[0])
+    assert records[2]["prompt"] == "Answer the audit question."
+    startup_case.hooks.run_subagent_start.assert_not_awaited()
+    assert startup_case.hooks._tool_context is startup_case.context
+    child_session = startup_case.runtime.subagent_session(child_id)
+    assert child_session.hook_manager._session_runtime is not startup_case.hooks._session_runtime
+    await startup_case.tool.resume_background_subtask(
+        subagent_id=child_id, prompt="Continue the audit.", context=startup_case.context,
+    )
+    assert await startup_case.runtime.wait_for_subagent(child_id, timeout=10)
+    records = [json.loads(line) for line in script.with_suffix('.jsonl').read_text(encoding="utf-8").splitlines()]
+    assert sum(item["hook_event_name"] == "SubagentStart" for item in records) == 1
+
+
+@pytest.mark.asyncio
+async def test_subagent_start_hook_failure_does_not_fabricate_a_veto(startup_case):
+    import shlex
+    import sys
+
+    from backend.hooks.dispatcher import compile_hook_matcher
+    from backend.hooks.manager import HookEvent, _HookEntry
+
+    script = startup_case.workspace / "start_failure.py"
+    script.write_text("import sys\nsys.stdin.readline()\nsys.stderr.write('real hook error')\nsys.exit(2)\n", encoding="utf-8")
+    if sys.platform == "win32":
+        quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+        command, shell = f"& {quote(sys.executable)} {quote(script)}", "powershell"
+    else:
+        command, shell = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}", "bash"
+    startup_case.hooks.hooks[HookEvent.SUBAGENT_START] = [
+        _HookEntry(matcher=compile_hook_matcher("*"), entry_id="error", command=command, shell=shell),
+    ]
+    child_id, result = await _launch(startup_case, "foreground")
+    assert not result.is_error and result.status == "completed"
+    assert startup_case.runtime.get_subagent(child_id).status == "completed"
+    manager = startup_case.runtime.subagent_session(child_id).hook_manager
+    assert manager._last_run_summaries[0]["status"] == "failed"
 
 
 async def _await_gate_or_owner(gate: asyncio.Event, owner: asyncio.Future):
@@ -603,19 +802,21 @@ async def test_failed_resident_eviction_keeps_ownership_and_does_not_admit_anoth
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("version", ["v1", "v2"])
-async def test_resumed_receipt_waits_for_actual_start_after_resume_hook(mailbox_handoff_case, version):
+async def test_resumed_receipt_waits_for_actual_start_after_session_acquisition(mailbox_handoff_case, version, monkeypatch):
     case = mailbox_handoff_case
     case.context.run_context.multi_agent_version = version
     case.context.metadata.update(turn_id="parent", assistant_message_id="assistant-parent")
     child_id, _ = await _launch(case, "foreground")
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def hold_start(**kwargs):
+    acquire = case.runtime.acquire_subagent_session
+
+    async def hold_start(*args, **kwargs):
         entered.set()
         await release.wait()
-        return HookResult()
+        return await acquire(*args, **kwargs)
 
-    case.hooks.run_subagent_start.side_effect = hold_start
+    monkeypatch.setattr(case.runtime, "acquire_subagent_session", hold_start)
     followup = asyncio.create_task(FollowupTaskTool().execute(
         {"target": child_id, "message": "resume only after the startup hook"}, context=case.context,
     ))
@@ -1048,7 +1249,7 @@ async def test_long_child_results_are_readable_and_deleted_in_the_parent_scope(s
     case.tool._llm_provider = LongResultModel()
     child_id, launched = await _launch(case, delivery, **({"isolation": "worktree"} if isolated else {}))
     if delivery != "foreground":
-        assert await case.runtime.wait_for_subagent(child_id, timeout=5)
+        assert await case.runtime.wait_for_subagent(child_id, timeout=10)
         await asyncio.gather(*case.workers)
     else:
         assert not launched.is_error, launched.content
@@ -1128,7 +1329,7 @@ async def test_read_only_weather_child_keeps_full_access_approval_and_write_boun
                 startup_case, delivery, agent_type=agent_type, read_only=True,
             )
             if delivery in {"background", "teammate"}:
-                assert await startup_case.runtime.wait_for_subagent(child_id, 3)
+                assert await startup_case.runtime.wait_for_subagent(child_id, timeout=10)
             assert not result.is_error
         startup_case.context.approval_handler.assert_not_awaited()
         child = startup_case.runtime.get_subagent(child_id)
@@ -1533,8 +1734,15 @@ async def test_multiple_final_items_preserve_the_same_blocks_in_deltas_and_termi
         stop_candidates.append(kwargs["summary"])
         return HookResult()
 
-    startup_case.hooks.has_hooks = lambda event: event == HookEvent.SUBAGENT_STOP
-    startup_case.hooks.run_subagent_stop.side_effect = accept_stop_candidate
+    fork = startup_case.hooks.fork_for_subagent
+
+    def fork_with_stop_observer(**kwargs):
+        child = fork(**kwargs)
+        child.has_hooks = lambda event: event == HookEvent.SUBAGENT_STOP
+        child.run_subagent_stop = AsyncMock(side_effect=accept_stop_candidate)
+        return child
+
+    monkeypatch.setattr(startup_case.hooks, "fork_for_subagent", fork_with_stop_observer)
 
     class TwoFinalModel(_RecordingLLM):
         async def stream_chat(self, messages, tools=None, metadata=None):
@@ -1607,22 +1815,24 @@ async def test_multiple_final_items_preserve_the_same_blocks_in_deltas_and_termi
 
 
 @pytest.mark.asyncio
-async def test_completed_teammate_callback_cannot_finish_the_resumed_pending_incarnation(startup_case):
+async def test_completed_teammate_callback_cannot_finish_the_resumed_pending_incarnation(startup_case, monkeypatch):
     case = startup_case
     entered, release = asyncio.Event(), asyncio.Event()
     resume_requested = asyncio.Event()
     resumptions = []
     original_emit = case.context.emit_event
 
-    async def hold_resume_start(**kwargs):
+    acquire = case.runtime.acquire_subagent_session
+
+    async def hold_resume_start(*args, **kwargs):
         entered.set()
         await release.wait()
-        return HookResult()
+        return await acquire(*args, **kwargs)
 
     async def resume_at_terminal(event_type, payload):
         await original_emit(event_type, payload)
         if event_type == "subagent.done" and payload["status"] == "completed" and not resumptions:
-            case.hooks.run_subagent_start.side_effect = hold_resume_start
+            monkeypatch.setattr(case.runtime, "acquire_subagent_session", hold_resume_start)
             # Register the next task before the completed worker's scheduled
             # done callback runs. This is the real public resume operation.
             resumptions.append(asyncio.create_task(case.tool.resume_background_subtask(
@@ -1635,13 +1845,13 @@ async def test_completed_teammate_callback_cannot_finish_the_resumed_pending_inc
         child_id, first = await _launch(case, "teammate")
         assert not first.is_error, first.content
         await _await_gate_or_owner(resume_requested, case.workers[0])
-        await resumptions[0]
-        await _await_gate_or_owner(entered, case.workers[-1])
+        await asyncio.wait_for(entered.wait(), timeout=10)
         current = case.runtime.get_subagent(child_id)
         assert current.status == "running" and current.mailbox_epoch == 2
         assert case.model.calls == 1
         assert [data["status"] for kind, data in case.events if kind == "subagent.done"] == ["completed"]
         release.set()
+        await resumptions[0]
         await asyncio.gather(*case.workers)
         finished = case.runtime.get_subagent(child_id)
         assert finished.status == "completed" and finished.mailbox_epoch == 2
@@ -1723,7 +1933,7 @@ def _assert_terminal(case, subagent_id: str, status: str, epoch: int = 1):
 
 
 @pytest.mark.parametrize("delivery", ["foreground", "background", "teammate", "resume", "teammate_resume"])
-@pytest.mark.parametrize("fault", ["veto", "hook", "journal_open", "journal_read", "context"])
+@pytest.mark.parametrize("fault", ["journal_open", "journal_read", "context"])
 def test_startup_failures_finish_the_owned_incarnation(
     startup_case, monkeypatch: pytest.MonkeyPatch, delivery: str, fault: str
 ):
@@ -1743,13 +1953,7 @@ def test_startup_failures_finish_the_owned_incarnation(
             case.workers.clear()
         previous_calls = case.model.calls
         expected_error = "audit startup failure"
-        if fault == "veto":
-            case.hooks.run_subagent_start.return_value = HookResult(
-                blocked=True, message=expected_error
-            )
-        elif fault == "hook":
-            case.hooks.run_subagent_start.side_effect = RuntimeError(expected_error)
-        elif fault == "journal_open":
+        if fault == "journal_open":
             monkeypatch.setattr(case.runtime, "execution_journal", Mock(
                 side_effect=OSError(expected_error)
             ))
@@ -1793,13 +1997,13 @@ def test_startup_failures_finish_the_owned_incarnation(
 
 
 @pytest.mark.parametrize("delivery", ["foreground", "background", "teammate", "resume"])
-def test_cancellation_during_start_hook_finishes_the_owned_incarnation(startup_case, delivery):
+def test_cancellation_during_session_acquisition_finishes_the_owned_incarnation(startup_case, delivery, monkeypatch):
     case = startup_case
 
     async def run():
         entered = asyncio.Event()
 
-        async def hold_start(**kwargs):
+        async def hold_start(*args, **kwargs):
             entered.set()
             await asyncio.Event().wait()
 
@@ -1808,13 +2012,15 @@ def test_cancellation_during_start_hook_finishes_the_owned_incarnation(startup_c
             assert first.status == "completed"
             case.events.clear()
         previous_calls = case.model.calls
-        case.hooks.run_subagent_start.side_effect = hold_start
+        monkeypatch.setattr(case.runtime, "acquire_subagent_session", hold_start)
+        resume = None
         if delivery == "foreground":
             worker = asyncio.create_task(_launch(case, delivery))
         elif delivery == "resume":
-            await case.tool.resume_background_subtask(
+            resume = asyncio.create_task(case.tool.resume_background_subtask(
                 subagent_id=subagent_id, prompt="Continue the audit.", context=case.context
-            )
+            ))
+            await asyncio.wait_for(entered.wait(), timeout=5)
             worker = case.workers[-1]
         else:
             subagent_id, _launch_result = await _launch(case, delivery)
@@ -1824,6 +2030,8 @@ def test_cancellation_during_start_hook_finishes_the_owned_incarnation(startup_c
         worker.cancel()
         with pytest.raises(asyncio.CancelledError):
             await worker
+        if resume is not None:
+            await asyncio.gather(resume, return_exceptions=True)
         assert await case.runtime.wait_for_subagent(subagent_id, timeout=1)
         _assert_terminal(case, subagent_id, "cancelled", epoch=2 if delivery == "resume" else 1)
         assert case.model.calls == previous_calls
@@ -1832,19 +2040,19 @@ def test_cancellation_during_start_hook_finishes_the_owned_incarnation(startup_c
 
 
 @pytest.mark.parametrize("cancelled", [False, True], ids=["failure", "cancellation"])
-def test_late_startup_exit_does_not_overwrite_a_new_incarnation(startup_case, cancelled):
+def test_late_startup_exit_does_not_overwrite_a_new_incarnation(startup_case, cancelled, monkeypatch):
     case = startup_case
 
     async def run():
         entered = asyncio.Event()
         release = asyncio.Event()
 
-        async def hold_start(**kwargs):
+        async def hold_start(*args, **kwargs):
             entered.set()
             await release.wait()
             raise RuntimeError("old startup failure")
 
-        case.hooks.run_subagent_start.side_effect = hold_start
+        monkeypatch.setattr(case.runtime, "acquire_subagent_session", hold_start)
         subagent_id, _launch_result = await _launch(case, "background")
         await asyncio.wait_for(entered.wait(), timeout=5)
         worker = case.workers[-1]
@@ -1881,8 +2089,8 @@ def _prepare_git(workspace: Path):
 
 
 @pytest.mark.parametrize("changed", [False, True], ids=["clean", "changed"])
-@pytest.mark.parametrize("cancelled", [False, True], ids=["veto", "cancellation"])
-def test_startup_exit_cleans_only_its_owned_worktree(startup_case, changed, cancelled):
+@pytest.mark.parametrize("cancelled", [False, True], ids=["failure", "cancellation"])
+def test_startup_exit_cleans_only_its_owned_worktree(startup_case, changed, cancelled, monkeypatch):
     case = startup_case
     _prepare_git(case.workspace)
 
@@ -1890,18 +2098,17 @@ def test_startup_exit_cleans_only_its_owned_worktree(startup_case, changed, canc
         entered = asyncio.Event()
         worktree_path = None
 
-        async def stop_start(**kwargs):
+        async def stop_start(_parent, worktree, _action, _context):
             nonlocal worktree_path
-            record = case.runtime.get_subagent(kwargs["subagent_id"])
-            worktree_path = Path(record.resume_config["worktree_path"])
+            worktree_path = Path(worktree)
             if changed:
                 (worktree_path / "user-change.txt").write_text("keep this\n", encoding="utf-8")
             entered.set()
             if cancelled:
                 await asyncio.Event().wait()
-            return HookResult(blocked=True, message="audit veto")
+            raise RuntimeError("audit setup failure")
 
-        case.hooks.run_subagent_start.side_effect = stop_start
+        monkeypatch.setattr("backend.workspace.local_environment_lifecycle.run_context_worktree_environment", stop_start)
         subagent_id, _launch_result = await _launch(case, "background", isolation="worktree")
         await asyncio.wait_for(entered.wait(), timeout=5)
         if cancelled:

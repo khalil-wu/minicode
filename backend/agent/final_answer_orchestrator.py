@@ -125,6 +125,7 @@ async def orchestrate_final_answer(
             stream_text=stream_text,
             provider_phase=provider_phase,
             provider_items=provider_items,
+            memory_consolidation=tool_context.metadata.get("internal_session_source") == "memory_consolidation",
         ), deadline=budget_runtime.active_phase_deadline(), cancel_event=tool_context.cancel_event,
             run_context=tool_context.run_context, llm=context_builder._llm)
     except PhaseDeadlineExceeded:

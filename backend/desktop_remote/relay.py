@@ -61,6 +61,7 @@ class Relay:
         self.streams: dict[int, _Stream] = {}
         self.write_lock = asyncio.Lock()
         self.closed = False
+        self._close_task: asyncio.Task | None = None
         self.group: asyncio.TaskGroup | None = None
 
     async def send(self, value: dict) -> None:
@@ -260,12 +261,15 @@ class Relay:
                 await self.aclose()
 
     async def aclose(self) -> None:
-        if self.closed:
-            return
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._close(), name="remote-relay-close")
+        await asyncio.shield(self._close_task)
+
+    async def _close(self) -> None:
         self.closed = True
-        self.on_closed()
         try:
             await asyncio.gather(*(self._close_stream(stream_id) for stream_id in tuple(self.streams)))
         finally:
             self.writer.close()
             await self.writer.wait_closed()
+        self.on_closed()

@@ -67,6 +67,8 @@ _POLICIES: dict[str, HookEventPolicy] = {
     # stops work; stdout/exit 2 do not become instructions or a veto.
     "pre_compact": HookEventPolicy(),
     "post_compact": HookEventPolicy(),
+    "pre_model_request": HookEventPolicy(matcher_applies=False, http_allowed=False),
+    "post_model_request": HookEventPolicy(matcher_applies=False, http_allowed=False),
     "permission_request": HookEventPolicy(json_can_block=True),
     "permission_denied": HookEventPolicy(matcher_applies=True),
     "stop_failure": HookEventPolicy(

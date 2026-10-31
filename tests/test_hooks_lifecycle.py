@@ -120,7 +120,7 @@ def test_pre_tool_matcher_filters_by_tool_name(tmp_path: Path) -> None:
     assert not result.blocked
 
 
-def test_pre_tool_stdin_uses_minicode_top_level_fields(tmp_path: Path) -> None:
+def test_pre_tool_stdin_uses_codex_fields(tmp_path: Path) -> None:
     capture = tmp_path / "hook-input.json"
     script = tmp_path / "capture.py"
     script.write_text(
@@ -142,9 +142,12 @@ def test_pre_tool_stdin_uses_minicode_top_level_fields(tmp_path: Path) -> None:
     payload = json.loads(capture.read_text(encoding="utf-8"))
     assert payload == {
         "session_id": "",
-        "transcript_path": "",
+        "transcript_path": None,
         "cwd": str(tmp_path),
-        "event": "pre_tool_use",
+        "hook_event_name": "PreToolUse",
+        "turn_id": "",
+        "model": "",
+        "permission_mode": "default",
         "tool_name": "write_file",
         "tool_input": {"file_path": "README.md", "content": "hello"},
         "tool_use_id": "tool-123",
@@ -155,10 +158,10 @@ def test_pre_tool_json_output_preserves_decision_input_and_context(tmp_path: Pat
     script = tmp_path / "pre.py"
     script.write_text(
         "import json\n"
-        "print(json.dumps({'event': 'pre_tool_use', 'permission_decision': 'ask', "
-        "'permission_decision_reason': 'review it', "
-        "'updated_input': {'file_path': 'safe.txt', 'content': 'ok'}, "
-        "'additional_context': 'policy context'}))\n",
+        "print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PreToolUse', "
+        "'permissionDecision': 'allow', "
+        "'updatedInput': {'file_path': 'safe.txt', 'content': 'ok'}, "
+        "'additionalContext': 'policy context'}}))\n",
         encoding="utf-8",
     )
     mgr = HookManager.from_settings(
@@ -166,8 +169,7 @@ def test_pre_tool_json_output_preserves_decision_input_and_context(tmp_path: Pat
         workspace_root=tmp_path,
     )
     result = asyncio.run(mgr.run_pre_tool("write_file", {"file_path": "old.txt"}))
-    assert result.permission_decision == "ask"
-    assert result.permission_decision_reason == "review it"
+    assert result.permission_decision == ""
     assert result.updated_input == {"file_path": "safe.txt", "content": "ok"}
     assert result.additional_context == "policy context"
 
@@ -176,9 +178,8 @@ def test_permission_request_reads_canonical_decision(tmp_path: Path) -> None:
     script = tmp_path / "permission.py"
     script.write_text(
         "import json\n"
-        "print(json.dumps({'event': 'permission_request', "
-        "'permission_decision': 'allow', "
-        "'updated_input': {'command': 'git status'}}))\n",
+        "print(json.dumps({'hookSpecificOutput': {'hookEventName': 'PermissionRequest', "
+        "'decision': {'behavior': 'allow'}}}))\n",
         encoding="utf-8",
     )
     mgr = HookManager.from_settings(
@@ -189,11 +190,11 @@ def test_permission_request_reads_canonical_decision(tmp_path: Path) -> None:
         mgr.run_permission_request("run_command", {"command": "git clean -fd"})
     )
     assert result.permission_decision == "allow"
-    assert result.updated_input == {"command": "git status"}
+    assert result.updated_input is None
     assert not result.blocked
 
 
-def test_stop_hook_uses_minicode_fields_and_drops_tool_results(tmp_path: Path) -> None:
+def test_stop_hook_uses_codex_fields_and_drops_tool_results(tmp_path: Path) -> None:
     capture = tmp_path / "stop-input.json"
     script = tmp_path / "capture.py"
     script.write_text(
@@ -207,7 +208,7 @@ def test_stop_hook_uses_minicode_fields_and_drops_tool_results(tmp_path: Path) -
     )
     asyncio.run(mgr.run_stop("question", "final reply", tool_results=[object()]))
     payload = json.loads(capture.read_text(encoding="utf-8"))
-    assert payload["event"] == "stop"
+    assert payload["hook_event_name"] == "Stop"
     assert payload["stop_hook_active"] is False
     assert payload["last_assistant_message"] == "final reply"
     assert "TOOL_RESULTS_JSON" not in payload
@@ -303,8 +304,8 @@ def test_json_continue_false_blocks_prompt_and_preserves_system_message(tmp_path
     script = tmp_path / "prompt.py"
     script.write_text(
         "import json\n"
-        "print(json.dumps({'continue': False, 'stop_reason': 'policy stop', "
-        "'system_message': 'Visible policy notice'}))\n",
+        "print(json.dumps({'continue': False, 'stopReason': 'policy stop', "
+        "'systemMessage': 'Visible policy notice'}))\n",
         encoding="utf-8",
     )
     manager = HookManager.from_settings(

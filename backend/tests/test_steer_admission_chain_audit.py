@@ -13,6 +13,7 @@ from backend.agent.run_context import RunContext
 from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.turn_input import TurnInput
 from backend.agent.turn_state import AgentTurnState
+from backend.agent.turn_trace import turn_trace_shared
 from backend.conversations.repository import ConversationRepository
 from backend.llm.base import LLMMessage
 from backend.ws import agent_runner
@@ -26,6 +27,7 @@ from backend.ws.reasoning_batcher import ReasoningEventBatcher, ReasoningFlushDe
 @pytest.mark.asyncio
 @pytest.mark.parametrize("steered", [False, True])
 async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, steered, monkeypatch):
+    monkeypatch.chdir(tmp_path)
     repo = ConversationRepository(tmp_path / "conversations")
     conversation = repo.create_conversation()
     context = ContextBuilder(conversation_id=conversation.id)
@@ -81,7 +83,8 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
         _conversation_streams={conversation.id: stream_state},
         ws_manager=None,
         running_agent_task_for=lambda cid: None,
-        session_lifecycle=SimpleNamespace(schedule_task_runtime_update=lambda: None),
+        session_lifecycle=SimpleNamespace(schedule_task_runtime_update=lambda: None,
+                                          recovered_input_workspace_ready=lambda _owner: True),
     )
     manager = session.run_manager = SessionRunManager(session)
     manager._notification_wakes_closed = True
@@ -106,6 +109,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
             _persist_partial_turn=persist_partial_turn,
             _accepts_projection_events=lambda: True, partial_persist_lock=asyncio.Lock(),
             run_context=RunContext(execution_journal=journal, agent_runtime=runtime),
+            run_trace=turn_trace_shared("admission-audit"),
         )
         # Keep the actual partial writer's nonlocal state in a real closure.
         factory = ast.parse('def make_callbacks():\n    last_partial_persisted_at = 0.0\n    partial_history_revision = None\n').body[0]

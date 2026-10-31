@@ -20,6 +20,10 @@ from websockets.protocol import State
 
 WEBSOCKET_BETA = "responses_websockets=2026-02-06"
 TURN_STATE_HEADER = "x-codex-turn-state"
+# Codex uses tungstenite's default WebSocketConfig limits: a 64 MiB message
+# and a 16 MiB frame, including when one message is fragmented.
+RESPONSES_WEBSOCKET_MAX_MESSAGE_BYTES = 64 << 20
+RESPONSES_WEBSOCKET_MAX_FRAME_BYTES = 16 << 20
 Owner = tuple[str, str, str, str]
 
 
@@ -151,7 +155,8 @@ class ResponsesWebSocketRequest:
             socket = await application_websocket_connect(url, connect, policy=self.pool.policy,
                 proxy_resolver=proxy_resolver if proxy_resolver is not None else lambda _url: proxy,
                 additional_headers=headers,
-                max_size=None, max_queue=1, open_timeout=10, close_timeout=1,
+                max_size=(RESPONSES_WEBSOCKET_MAX_MESSAGE_BYTES, RESPONSES_WEBSOCKET_MAX_FRAME_BYTES),
+                max_queue=1, open_timeout=10, close_timeout=1,
             )
             if self.closed or self.pool.closed:
                 await socket.close()

@@ -345,6 +345,21 @@ def test_bootstrap_mcp_elicitation_rejection_and_timeout_emit_terminal_events() 
     asyncio.run(run_timeout())
 
 
+def test_invalid_provider_oauth_signal_does_not_register_a_prompt_or_task() -> None:
+    async def run() -> None:
+        session = _OAuthControlSession()
+        callbacks = _ProviderOAuthCallbacks(session, "conv_oauth_a", "github-copilot")
+        before = set(asyncio.all_tasks())
+        with pytest.raises(ValueError, match="OAuth prompt signal"):
+            await callbacks.prompt({"message": "Enter code", "signal": object()})
+        assert session.turn_wait_state.waiter_ids() == set()
+        assert session.turn_wait_state.approval_notification_claims == {}
+        assert set(asyncio.all_tasks()) == before
+        assert session.sent == []
+
+    asyncio.run(run())
+
+
 def test_provider_oauth_prompt_restores_and_rejects_wrong_owner_response() -> None:
     async def run() -> None:
         session = _OAuthControlSession()

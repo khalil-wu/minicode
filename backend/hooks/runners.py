@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 import shutil
@@ -48,7 +47,6 @@ class HookRuntimeBindings:
     allowed_http_hook_urls: tuple[str, ...] | None = None
     http_hook_allowed_env_vars: tuple[str, ...] | None = None
     mcp_executor: Any | None = None
-    register_async_command: Callable[["PendingAsyncCommand"], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -56,19 +54,7 @@ class HookExecutionResult:
     stdout: str
     stderr: str
     exit_code: int
-    backgrounded: bool = False
     semantic_stdout: str | None = None
-
-
-@dataclass(frozen=True)
-class PendingAsyncCommand:
-    process: asyncio.subprocess.Process
-    capture: HookTaskOutput
-    operation: asyncio.Task[tuple[str, str]]
-    timeout_seconds: float
-
-
-_DYNAMIC_ASYNC_DEFAULT_TIMEOUT_SECONDS = 15.0
 
 
 async def execute_hook(
@@ -165,11 +151,16 @@ async def _execute_command(
     if entry.plugin_root:
         plugin_root = _to_hook_path(Path(entry.plugin_root).resolve(), shell_type)
         env["MINICODE_PLUGIN_ROOT"] = plugin_root
-        command = command.replace("${MINICODE_PLUGIN_ROOT}", plugin_root)
+        env["PLUGIN_ROOT"] = plugin_root
+        env["CLAUDE_PLUGIN_ROOT"] = plugin_root
     if entry.plugin_data_root:
         plugin_data = _to_hook_path(Path(entry.plugin_data_root).resolve(), shell_type)
         env["MINICODE_PLUGIN_DATA"] = plugin_data
-        command = command.replace("${MINICODE_PLUGIN_DATA}", plugin_data)
+        env["PLUGIN_DATA"] = plugin_data
+        env["CLAUDE_PLUGIN_DATA"] = plugin_data
+    for name in (*entry.env.keys(), "MINICODE_PLUGIN_ROOT", "PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "MINICODE_PLUGIN_DATA", "PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
+        if name in env:
+            command = command.replace("${" + name + "}", env[name])
 
     cwd = str(runtime.workspace_root) if runtime.workspace_root else None
     stdin_bytes = (json_input + "\n").encode("utf-8")
@@ -188,14 +179,6 @@ async def _execute_command(
         task_id=str(getattr(entry, "entry_id", "") or event_name or "hook"),
     )
     try:
-        if proc.stdout is not None and runtime.register_async_command is not None:
-            return await _execute_command_with_async_handshake(
-                proc,
-                capture=capture,
-                stdin_bytes=stdin_bytes,
-                timeout=timeout,
-                runtime=runtime,
-            )
         stdout, stderr, cancelled = await _communicate_with_cancel(
             proc,
             stdin_bytes,
@@ -220,164 +203,11 @@ async def _execute_command(
     )
 
 
-async def _execute_command_with_async_handshake(
-    proc: asyncio.subprocess.Process,
-    *,
-    capture: HookTaskOutput,
-    stdin_bytes: bytes,
-    timeout: float,
-    runtime: HookRuntimeBindings,
-) -> HookExecutionResult:
-    """Race the first stdout line against normal process completion."""
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    first_line: asyncio.Future[bytes] = loop.create_future()
-    operation = asyncio.create_task(
-        _drain_started_hook_process(
-            proc,
-            stdin_bytes,
-            capture=capture,
-            first_stdout_line=first_line,
-        ),
-        name=f"hook-output:{capture.task_id}:process",
-    )
-    cancel_event = getattr(runtime.tool_context, "cancel_event", None)
-    cancellation: asyncio.Task[bool] | None = None
-    try:
-        if cancel_event is not None:
-            if cancel_event.is_set():
-                await _terminate_hook_operation(proc, operation, capture)
-                raise HookExecutionError("Hook cancelled")
-            cancellation = asyncio.create_task(cancel_event.wait())
-        waiters: set[asyncio.Future[Any] | asyncio.Task[Any]] = {operation, first_line}
-        if cancellation is not None:
-            waiters.add(cancellation)
-        done, _ = await asyncio.wait(
-            waiters,
-            timeout=max(0.0, deadline - loop.time()),
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if cancellation is not None and cancellation in done:
-            await _terminate_hook_operation(proc, operation, capture)
-            raise HookExecutionError("Hook cancelled")
-        if first_line.done() and not first_line.cancelled():
-            try:
-                payload = json.loads(
-                    first_line.result().decode("utf-8", "replace").strip()
-                )
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict) and payload.get("async") is True:
-                try:
-                    async_timeout = _dynamic_async_timeout_seconds(payload)
-                except HookExecutionError:
-                    await _terminate_hook_operation(proc, operation, capture)
-                    raise
-                command = PendingAsyncCommand(
-                    process=proc,
-                    capture=capture,
-                    operation=operation,
-                    timeout_seconds=async_timeout,
-                )
-                register = runtime.register_async_command
-                if register is None:
-                    await _terminate_hook_operation(proc, operation, capture)
-                    raise HookExecutionError("Async hook registry is not bound")
-                try:
-                    register(command)
-                except Exception:
-                    await _terminate_hook_operation(proc, operation, capture)
-                    raise
-                return HookExecutionResult("", "", 0, backgrounded=True)
-
-        if operation not in done and first_line not in done:
-            await _terminate_hook_operation(proc, operation, capture)
-            raise HookExecutionError(f"Hook timed out after {timeout:g}s")
-
-        if cancellation is not None and not cancellation.done():
-            cancellation.cancel()
-            with suppress(asyncio.CancelledError):
-                await cancellation
-            cancellation = None
-        stdout, stderr, cancelled = await _await_started_hook_operation(
-            proc,
-            operation,
-            timeout=max(0.0, deadline - loop.time()),
-            cancel_event=cancel_event,
-            capture=capture,
-        )
-        if cancelled:
-            raise HookExecutionError("Hook cancelled")
-        return HookExecutionResult(
-            stdout.strip(),
-            stderr.strip(),
-            int(proc.returncode if proc.returncode is not None else 0),
-            semantic_stdout=await capture.semantic_stdout_text(),
-        )
-    except asyncio.CancelledError:
-        await _terminate_hook_operation(proc, operation, capture)
-        raise
-    finally:
-        if cancellation is not None and not cancellation.done():
-            cancellation.cancel()
-            with suppress(asyncio.CancelledError):
-                await cancellation
-        if not first_line.done():
-            first_line.cancel()
-
-
-async def finish_async_command(command: PendingAsyncCommand) -> HookExecutionResult:
-    """Finish one dynamically backgrounded command owned by HookManager."""
-
-    try:
-        stdout, stderr, cancelled = await _await_started_hook_operation(
-            command.process,
-            command.operation,
-            timeout=command.timeout_seconds,
-            cancel_event=None,
-            capture=command.capture,
-        )
-        semantic_stdout = await command.capture.semantic_stdout_text()
-    except asyncio.TimeoutError as exc:
-        raise HookExecutionError(
-            f"Async hook timed out after {command.timeout_seconds:g}s"
-        ) from exc
-    except HookOutputCaptureError as exc:
-        raise HookExecutionError(f"Hook output capture failed: {exc}") from exc
-    if cancelled:
-        raise HookExecutionError("Async hook cancelled")
-    return HookExecutionResult(
-        stdout.strip(),
-        stderr.strip(),
-        int(
-            command.process.returncode
-            if command.process.returncode is not None
-            else 0
-        ),
-        semantic_stdout=semantic_stdout,
-    )
-
-
 def _entry_timeout_seconds(entry: Any, event: Any) -> float:
     configured = getattr(entry, "async_timeout", None)
     if configured is not None:
         return float(configured)
     return float(event_policy(event).default_timeout_seconds)
-
-
-def _dynamic_async_timeout_seconds(payload: dict[str, Any]) -> float:
-    raw_timeout = payload.get("asyncTimeout")
-    if raw_timeout is None:
-        return _DYNAMIC_ASYNC_DEFAULT_TIMEOUT_SECONDS
-    if (
-        isinstance(raw_timeout, bool)
-        or not isinstance(raw_timeout, (int, float))
-        or not math.isfinite(float(raw_timeout))
-        or float(raw_timeout) <= 0
-    ):
-        raise HookExecutionError("Async hook asyncTimeout must be a positive number")
-    return float(raw_timeout) / 1000.0
 
 
 async def _execute_http(
@@ -782,13 +612,11 @@ async def _drain_started_hook_process(
     input_data: bytes,
     *,
     capture: HookTaskOutput,
-    first_stdout_line: asyncio.Future[bytes] | None = None,
 ) -> tuple[str, str]:
     await drain_hook_process_output(
         proc,
         input_data,
         capture=capture,
-        first_stdout_line=first_stdout_line,
     )
     await capture.finish()
     return capture.stdout_text(), capture.stderr_text()

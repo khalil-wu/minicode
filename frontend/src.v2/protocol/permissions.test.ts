@@ -25,6 +25,7 @@ describe("permission mode protocol mapping", () => {
     expect(initialUiPermissionMode(null)).toBe("confirm");
     expect(initialUiPermissionMode("")).toBe("confirm");
     expect(initialUiPermissionMode("bypass")).toBe("bypass");
+    expect(initialUiPermissionMode("ask_permissions")).toBe("confirm");
   });
 
   it("sends only supported backend permission tokens from current UI modes", () => {

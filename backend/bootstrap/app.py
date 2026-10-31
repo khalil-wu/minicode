@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from backend.config import DATA_ROOT, AppConfig, load_config
-from backend.async_cleanup import to_thread_cancel_safe
+from backend.async_cleanup import (
+    CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain_receipt,
+    cancel_and_retire, retain_cleanup_task, to_thread_cancel_safe,
+)
 from backend.memory.file_memory import FileMemory
 from backend.memory.manager import MemoryManager
 from backend.mcp import MCP_MANAGER_UNSET
@@ -71,6 +74,9 @@ class AppBootstrap:
         self.mcp_apps = MCPAppRuntime()
         self._mcp_managers: dict[str, Any] = {}
         self._mcp_start_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._mcp_reload_tasks: set[asyncio.Task[Any]] = set()
+        self._mcp_reload_owners: dict[asyncio.Task[Any], Any] = {}
+        self._mcp_shutting_down = False
         self._mcp_manager_lock = asyncio.Lock()
         self.skill_manager: Any | None = None
         self.runtime_skill_roots: Any | None = None
@@ -320,6 +326,9 @@ class AppBootstrap:
 
     async def shutdown(self) -> None:
         self.begin_drain()
+        self._mcp_shutting_down = True
+        for manager in dict.fromkeys(self._mcp_managers.values()):
+            manager.begin_shutdown()
         try:
             if self.runtime_skill_roots is not None:
                 await self.runtime_skill_roots.aclose()
@@ -366,6 +375,11 @@ class AppBootstrap:
             if pending_starts:
                 await asyncio.gather(*pending_starts, return_exceptions=True)
             self._mcp_start_tasks.clear()
+            reload_receipt = await cancel_and_drain_receipt(self._mcp_reload_tasks,
+                timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS, label="MCP configuration reloads",
+                owner=self._mcp_reload_tasks)
+            if reload_receipt.pending:
+                logger.warning("MCP shutdown retains %d configuration reload(s)", reload_receipt.pending)
             managers = list(dict.fromkeys(self._mcp_managers.values()))
             if managers:
                 results = await asyncio.gather(
@@ -378,6 +392,9 @@ class AppBootstrap:
                             "MCP manager shutdown is incomplete; retaining its owner",
                             exc_info=(type(result), result, result.__traceback__),
                         )
+                        continue
+                    if any(owner is manager and not task.done() for task, owner in self._mcp_reload_owners.items()):
+                        logger.warning("MCP manager still owns a pending configuration reload; retaining its owner")
                         continue
                     for key, registered in list(self._mcp_managers.items()):
                         if registered is manager:
@@ -524,6 +541,8 @@ class AppBootstrap:
         )
         key = self._mcp_workspace_key(resolved_root)
         async with self._mcp_manager_lock:
+            if self._mcp_shutting_down:
+                raise RuntimeError("MCP manager creation is closed during shutdown")
             manager = self._mcp_managers.get(key)
             if manager is None:
                 manager = self._new_mcp_manager(resolved_root)
@@ -612,16 +631,42 @@ class AppBootstrap:
         return self._mcp_managers.get(self._mcp_workspace_key(workspace_root))
 
     async def reload_mcp_managers(self, *, exclude: Any | None = None) -> None:
-        managers = [
-            manager
-            for manager in dict.fromkeys(self._mcp_managers.values())
-            if manager is not exclude
+        from backend.mcp.manager import MCPManagerReloadError
+
+        if self._mcp_shutting_down:
+            raise RuntimeError("MCP configuration reload is closed during shutdown")
+        managers = {}
+        for workspace, manager in self._mcp_managers.items():
+            if manager is not exclude:
+                managers.setdefault(manager, workspace)
+        if not managers:
+            return
+        tasks = [asyncio.create_task(manager.reload_config(), name=f"mcp-config-reload:{workspace}")
+                 for manager, workspace in managers.items()]
+        for task, manager in zip(tasks, managers):
+            retain_cleanup_task(task, self._mcp_reload_tasks)
+            self._mcp_reload_owners[task] = manager
+            task.add_done_callback(lambda completed: self._mcp_reload_owners.pop(completed, None))
+        try:
+            await asyncio.wait(tasks)
+        except asyncio.CancelledError:
+            for task in tasks:
+                cancel_and_retire(task, owner=self._mcp_reload_tasks)
+            raise
+        results = []
+        for task in tasks:
+            try:
+                results.append(task.result())
+            except BaseException as exc:
+                results.append(exc)
+        failures = [
+            {"workspace_root": workspace, "error_type": type(result).__name__,
+             "message": str(result) or type(result).__name__}
+            for workspace, result in zip(managers.values(), results)
+            if isinstance(result, BaseException)
         ]
-        if managers:
-            await asyncio.gather(
-                *(manager.reload_config() for manager in managers),
-                return_exceptions=False,
-            )
+        if failures:
+            raise MCPManagerReloadError(failures)
 
     def create_permission_checker(
         self,

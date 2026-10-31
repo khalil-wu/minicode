@@ -79,8 +79,9 @@ def test_changed_review_is_skipped_before_stopping_or_deleting_user_work(monkeyp
     stop = AsyncMock()
     monkeypatch.setattr(conversation_handlers, "_stop_conversation_run", stop)
     session = SimpleNamespace(conversation_repo=repo, emit_command_result=AsyncMock())
-    asyncio.run(conversation_handlers._handle_conversation_delete_fenced(session,
-        {"conversation_id": chat.id, "storage_review": snapshot}))
+    from backend.services.conversation_payload_service import parse_conversation_delete_request
+    request = parse_conversation_delete_request({"conversation_id": chat.id, "storage_review": snapshot})
+    asyncio.run(conversation_handlers._handle_conversation_delete_fenced(session, request))
     stop.assert_not_awaited()
     assert session.emit_command_result.await_args.kwargs["data"]["reason"] == "storage_review_changed"
     assert repo.get_conversation(chat.id).title == "Keep this latest title"

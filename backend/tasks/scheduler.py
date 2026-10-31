@@ -14,7 +14,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Coroutine
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -210,7 +210,7 @@ def _parse_cron_expression(expression: str) -> CronFields | None:
         return None
 
 
-def _cron_parts_match(parts: CronFields, dt: datetime) -> bool:
+def _cron_date_matches(parts: CronFields, dt: date) -> bool:
     # Python weekday: Mon=0..Sun=6; cron: Sun=0, Mon=1..Sat=6
     cron_dow = (dt.weekday() + 1) % 7
     dom_wild = len(parts.doms) == 31
@@ -223,7 +223,11 @@ def _cron_parts_match(parts: CronFields, dt: datetime) -> bool:
         else dom_match if dow_wild
         else dom_match or dow_match
     )
-    return dt.minute in parts.minutes and dt.hour in parts.hours and dt.month in parts.months and day_match
+    return dt.month in parts.months and day_match
+
+
+def _cron_parts_match(parts: CronFields, dt: datetime) -> bool:
+    return dt.minute in parts.minutes and dt.hour in parts.hours and _cron_date_matches(parts, dt)
 
 
 def _schedule_timezone(name: str | None) -> ZoneInfo | None:
@@ -304,9 +308,20 @@ def next_run_after(
     deadline = current + timedelta(days=max_days)
     zone = _schedule_timezone(timezone)
     while current <= deadline:
-        if _cron_parts_match(parts, current.astimezone(zone)):
-            return current
-        current += timedelta(minutes=1)
+        tomorrow = current.replace(hour=0, minute=0) + timedelta(days=1)
+        # Python timezone offsets are strictly less than 24 hours, so a UTC
+        # day can only contain these three local calendar dates. Keep the
+        # original minute-by-minute check for days that can match; it handles
+        # skipped and repeated local times without guessing offset transitions.
+        ordinal = current.date().toordinal()
+        possible_dates = range(max(1, ordinal - 1), min(date.max.toordinal(), ordinal + 1) + 1)
+        if any(_cron_date_matches(parts, date.fromordinal(day)) for day in possible_dates):
+            while current < tomorrow and current <= deadline:
+                if _cron_parts_match(parts, current.astimezone(zone)):
+                    return current
+                current += timedelta(minutes=1)
+        else:
+            current = tomorrow
     return None
 
 

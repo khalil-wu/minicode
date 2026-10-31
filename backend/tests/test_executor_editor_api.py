@@ -481,6 +481,33 @@ async def test_real_ws_checkpoint_list_and_rewind_use_selected_environment_uri(e
     assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
 
 
+@pytest.mark.asyncio
+async def test_real_ws_checkpoint_list_keeps_healthy_record_and_reports_corruption(editor_server):
+    server = editor_server
+    manager = server.session.checkpoint_manager
+    async with capture_workspace_execution(server.session, server.params["conversation_id"], environment_id=server.params["environment_id"]) as context:
+        healthy = await manager.snapshot(tool_name="write_file", args={"file_path": "same.txt"},
+            workspace_root=server.view, conversation_id=server.params["conversation_id"], execution_context=context)
+        broken = await manager.snapshot(tool_name="write_file", args={"file_path": "same.txt"},
+            workspace_root=server.view, conversation_id=server.params["conversation_id"], execution_context=context)
+    damaged_path = manager._store._path_for(broken.id)
+    damaged_path.write_bytes(b"{broken")
+    await server.websocket.send(json.dumps({"type": "checkpoint.list", "conversation_id": server.params["conversation_id"],
+        "workspace_root": str(server.view), "environment_id": server.params["environment_id"],
+        "cwd_uri": server.host.workspace.as_uri()}))
+    received = {}
+    async with asyncio.timeout(10):
+        while "checkpoint.list" not in received or "checkpoint.list.incomplete" not in received:
+            event = json.loads(await server.websocket.recv())
+            if event.get("type") == "checkpoint.list":
+                received["checkpoint.list"] = event
+            if event.get("type") == "error" and event.get("error_code") == "checkpoint.list.incomplete":
+                received["checkpoint.list.incomplete"] = event
+    assert [item["id"] for item in received["checkpoint.list"]["checkpoints"]] == [healthy.id]
+    assert "conversation_id" not in received["checkpoint.list.incomplete"]
+    assert damaged_path.read_bytes() == b"{broken"
+
+
 @pytest.mark.parametrize("executor_host", ["source"], indirect=True)
 @pytest.mark.asyncio
 async def test_independent_executor_reports_real_target_server_start_failure_without_controller_server(editor_server, monkeypatch):

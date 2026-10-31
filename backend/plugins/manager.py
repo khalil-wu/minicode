@@ -7,11 +7,12 @@ import hashlib
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 from backend.async_cleanup import to_thread_cancel_safe
 
 from .identity import normalize_plugin_id, parse_plugin_id, plugin_id
@@ -635,6 +636,30 @@ class MarketplaceRegistry:
         lock_path = (self.path.parent / ".marketplaces.sync.lock").absolute()
         self._mutation_lock = FileLock(str(lock_path), timeout=60)
 
+    @contextmanager
+    def _registry_scope(self):
+        try:
+            self._mutation_lock.acquire()
+        except Timeout as exc:
+            raise MaterializationError("Timed out waiting for the marketplace registry") from exc
+        try:
+            yield
+        finally:
+            self._mutation_lock.release()
+
+    @contextmanager
+    def _materialization_scope(self, destination: Path):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(str(destination.parent / f".{destination.name}.materialization.lock"), timeout=60)
+        try:
+            lock.acquire()
+        except Timeout as exc:
+            raise MaterializationError(f"Timed out waiting for marketplace materialization: {destination.name}") from exc
+        try:
+            yield
+        finally:
+            lock.release()
+
     def list(self, *, policy: Any | None = None) -> list[dict[str, Any]]:
         effective_policy = _effective_marketplace_policy(policy)
         effective_policy.assert_policy_valid()
@@ -747,7 +772,7 @@ class MarketplaceRegistry:
 
     def add(self, name: str, source: Mapping[str, Any], *, policy: Any | None = None) -> dict[str, Any]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._mutation_lock:
+        with self._registry_scope():
             return self._add_locked(name, source, policy=policy)
 
     def add_source(
@@ -769,17 +794,19 @@ class MarketplaceRegistry:
         effective_policy.assert_policy_valid()
         effective_policy.assert_source_allowed(descriptor)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._mutation_lock:
-            records = self._raw_records()
-            if self._read_error:
-                raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
-            previous: dict[str, Any] | None = None
-            for record in records:
-                if _source_fingerprint(parse_marketplace_source(record["source"]).to_dict()) == _source_fingerprint(descriptor):
-                    previous = record
-                    if record.get("status") == "ready" and Path(record["materialized_path"]).is_dir():
-                        return record, True
-
+        descriptor_key = _source_fingerprint(descriptor)
+        cache_id = hashlib.sha256(descriptor_key.encode()).hexdigest()[:24]
+        destination = self.path.parent / ".marketplaces" / f"source-{cache_id}"
+        with self._materialization_scope(destination):
+            with self._registry_scope():
+                records = self._raw_records()
+                if self._read_error:
+                    raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
+                previous = next((record for record in records
+                    if _source_fingerprint(parse_marketplace_source(record["source"]).to_dict()) == descriptor_key), None)
+                if previous is not None and previous.get("status") == "ready" and Path(previous["materialized_path"]).is_dir():
+                    return previous, True
+                expected_previous = _source_fingerprint(previous) if previous is not None else None
             identity: dict[str, Any] = {}
             result: dict[str, Any] = {}
 
@@ -787,12 +814,32 @@ class MarketplaceRegistry:
                 _, manifest = _read_marketplace_manifest(root)
                 name = str(manifest["name"]).strip()
                 _read_marketplace_plugins(root, name)
-                if any(record is not previous and record["name"].casefold() == name.casefold() for record in records):
-                    raise MaterializationError(f"Marketplace '{name}' is already registered with a different source")
                 identity["name"] = name
                 identity["interface"] = dict(manifest.get("interface") or {})
 
+            def current_records() -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+                current_records = self._raw_records()
+                if self._read_error:
+                    raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
+                current = next((item for item in current_records
+                    if _source_fingerprint(parse_marketplace_source(item["source"]).to_dict()) == descriptor_key), None)
+                if expected_previous is not None and (current is None or _source_fingerprint(current) != expected_previous):
+                    raise MaterializationError("Marketplace source changed while materialization was in flight")
+                name = identity.get("name")
+                if name and any(item is not current and item["name"].casefold() == name.casefold() for item in current_records):
+                    raise MaterializationError(f"Marketplace '{name}' is already registered with a different source")
+                if previous is None and current is not None and name and current["name"].casefold() != name.casefold():
+                    raise MaterializationError("Marketplace source was registered under another name while materialization was in flight")
+                return current_records, current
+
+            @contextmanager
+            def activation_scope():
+                with self._registry_scope():
+                    current_records()
+                    yield
+
             def commit(materialized: MaterializedSource) -> None:
+                records, current = current_records()
                 name = identity["name"]
                 record = {
                     "name": name, "interface": identity["interface"], "source": descriptor, "declared_source": descriptor,
@@ -801,12 +848,11 @@ class MarketplaceRegistry:
                     "status": "ready", "error": "",
                     "provenance": {"registered_at": __import__("time").time(), "materialized": materialized.to_dict()},
                 }
-                self._write([*(item for item in records if item is not previous), record])
+                self._write([*(item for item in records if item is not current), record])
                 result.update(record)
 
-            cache_id = hashlib.sha256(_source_fingerprint(descriptor).encode()).hexdigest()[:24]
-            destination = self.path.parent / ".marketplaces" / f"source-{cache_id}"
-            materialize_source(parsed, destination, validate=validate, after_activate=commit)
+            materialize_source(parsed, destination, validate=validate, after_activate=commit,
+                               activation_scope=activation_scope)
             return result, False
 
     def _add_locked(
@@ -868,7 +914,7 @@ class MarketplaceRegistry:
         policy: Any | None = None,
     ) -> dict[str, Any] | None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._mutation_lock:
+        with self._registry_scope():
             return self._remove_locked(name, policy=policy)
 
     def _remove_locked(
@@ -895,27 +941,49 @@ class MarketplaceRegistry:
 
     def refresh(self, name: str, *, policy: Any | None = None) -> dict[str, Any]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._mutation_lock:
-            return self._refresh_locked(name, policy=policy)
-
-    def _refresh_locked(self, name: str, *, policy: Any | None = None) -> dict[str, Any]:
         effective_policy = _effective_marketplace_policy(policy)
         effective_policy.assert_policy_valid()
-        target = self._get_raw(name)
-        if self._read_error:
-            raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
-        if target is None:
-            target = self.get(name, policy=effective_policy)
+        with self._registry_scope():
+            target = self._get_raw(name)
+            if self._read_error:
+                raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
             if target is None:
-                raise KeyError(name)
-            return target
-        source = target.get("source") if isinstance(target.get("source"), Mapping) else {}
-        parsed = parse_marketplace_source(source)
-        effective_policy.assert_source_allowed(parsed.to_dict())
-        marketplace_name = str(target.get("name") or name)
-        materialized_root = self._materialized_root(marketplace_name)
-        expected_record = _source_fingerprint(target)
+                target = self.get(name, policy=effective_policy)
+                if target is None:
+                    raise KeyError(name)
+                return target
+            marketplace_name = str(target.get("name") or name)
+            materialized_root = self._materialized_root(marketplace_name)
+            expected_record = _source_fingerprint(target)
+        with self._materialization_scope(materialized_root):
+            return self._refresh_materialized(name, marketplace_name, materialized_root,
+                                              expected_record=expected_record, policy=effective_policy)
+
+    def _refresh_materialized(self, name: str, marketplace_name: str, materialized_root: Path,
+                              *, expected_record: str, policy: Any) -> dict[str, Any]:
+        effective_policy = policy
+        effective_policy.assert_policy_valid()
+        with self._registry_scope():
+            target = self._get_raw(name)
+            if self._read_error:
+                raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
+            if (target is None or str(target.get("name") or "").casefold() != marketplace_name.casefold()
+                    or _source_fingerprint(target) != expected_record):
+                raise MaterializationError(f"marketplace '{marketplace_name}' changed while refresh was in flight")
+            source = target.get("source") if isinstance(target.get("source"), Mapping) else {}
+            parsed = parse_marketplace_source(source)
+            effective_policy.assert_source_allowed(parsed.to_dict())
         committed: dict[str, dict[str, Any]] = {}
+
+        @contextmanager
+        def activation_scope():
+            with self._registry_scope():
+                current = self._get_raw(marketplace_name)
+                if self._read_error:
+                    raise ValueError(f"Marketplace registry is corrupt: {self._read_error}")
+                if current is None or _source_fingerprint(current) != expected_record:
+                    raise MaterializationError(f"marketplace '{marketplace_name}' changed while refresh was in flight")
+                yield
 
         def validate_staged(root: Path) -> None:
             # Root-level validation must finish before the active cache moves.
@@ -975,6 +1043,7 @@ class MarketplaceRegistry:
             materialized_root,
             validate=validate_staged,
             after_activate=persist_activated,
+            activation_scope=activation_scope,
         )
         if "record" not in committed:  # pragma: no cover - callback contract guard
             raise MaterializationError("marketplace activation did not commit registry metadata")
@@ -1011,45 +1080,46 @@ class MarketplaceRegistry:
         """Return a validated plugin root from a refreshed marketplace."""
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._mutation_lock:
-            return self._materialize_plugin_locked(
-                marketplace,
-                plugin_name,
-                policy=policy,
-            )
-
-    def _materialize_plugin_locked(
-        self,
-        marketplace: str,
-        plugin_name: str,
-        *,
-        policy: Any | None = None,
-    ) -> tuple[dict[str, Any], Path]:
-
         effective_policy = _effective_marketplace_policy(policy)
         effective_policy.assert_policy_valid()
-        plugin = self.resolve_plugin(marketplace, plugin_name, policy=effective_policy)
-        if plugin is None:
-            raise KeyError(f"plugin {plugin_name!r} was not found in marketplace {marketplace!r}")
-        target = self.get(marketplace, policy=effective_policy)
-        assert target is not None
-        root = Path(str(target.get("materialized_path") or ""))
-        if not root.is_dir():
-            raise MaterializationError("marketplace is not materialized; refresh it first")
-        if plugin.get("load_error"):
-            raise MaterializationError(str(plugin["load_error"]))
-        _assert_marketplace_plugin_installable(plugin, product=_current_product())
-        raw_path = str(plugin.get("path") or "").strip()
+        with self._registry_scope():
+            plugin = self.resolve_plugin(marketplace, plugin_name, policy=effective_policy)
+            if plugin is None:
+                raise KeyError(f"plugin {plugin_name!r} was not found in marketplace {marketplace!r}")
+            target = self.get(marketplace, policy=effective_policy)
+            assert target is not None
+            root = Path(str(target.get("materialized_path") or ""))
+            if not root.is_dir():
+                raise MaterializationError("marketplace is not materialized; refresh it first")
+            if plugin.get("load_error"):
+                raise MaterializationError(str(plugin["load_error"]))
+            _assert_marketplace_plugin_installable(plugin, product=_current_product())
+            raw_path = str(plugin.get("path") or "").strip()
+            if not raw_path:
+                source = plugin.get("source") if isinstance(plugin.get("source"), Mapping) else {}
+                parsed = parse_marketplace_source(source, base_dir=_marketplace_root_for_catalog(root))
+                candidate_root = self._plugin_materialized_root(marketplace, plugin_name)
+                expected_target = _source_fingerprint(target)
+                expected_plugin = _source_fingerprint(plugin)
         if raw_path:
             # Catalog paths are normalized during refresh.  Resolve again here
             # because the registry is durable and may have been edited between
             # refresh and install.
             candidate = Path(raw_path).expanduser().resolve()
         else:
-            source = plugin.get("source") if isinstance(plugin.get("source"), Mapping) else {}
-            parsed = parse_marketplace_source(source, base_dir=_marketplace_root_for_catalog(root))
-            candidate_root = self._plugin_materialized_root(marketplace, plugin_name)
-            candidate = materialize_source(parsed, candidate_root).path
+            @contextmanager
+            def activation_scope():
+                with self._registry_scope():
+                    current_target = self.get(marketplace, policy=effective_policy)
+                    current_plugin = self.resolve_plugin(marketplace, plugin_name, policy=effective_policy)
+                    if (current_target is None or current_plugin is None
+                            or _source_fingerprint(current_target) != expected_target
+                            or _source_fingerprint(current_plugin) != expected_plugin):
+                        raise MaterializationError(f"plugin '{plugin_name}' changed while materialization was in flight")
+                    yield
+
+            with self._materialization_scope(candidate_root):
+                candidate = materialize_source(parsed, candidate_root, activation_scope=activation_scope).path
         try:
             candidate.relative_to(root.resolve())
         except ValueError:
@@ -1071,7 +1141,7 @@ class MarketplaceRegistry:
         """Validate declared marketplace state without executing plugin code."""
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self._mutation_lock:
+        with self._registry_scope():
             return self._reconcile_locked(policy=policy)
 
     def _reconcile_locked(self, *, policy: Any | None = None) -> dict[str, Any]:

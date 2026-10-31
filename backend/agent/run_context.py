@@ -63,6 +63,7 @@ class RunContext:
     selected_capability_roots: tuple[dict[str, Any], ...] = ()
     environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     environment_capabilities: PreparedEnvironmentCapabilities | None = None
+    environment_prepared_turn_id: str = ""
     environment_retirement_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
     cua_repl_turn: Any | None = None
     browser_execution: Any | None = None

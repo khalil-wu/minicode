@@ -15,6 +15,7 @@ from backend.agent.tool_batch_execution import _parallel_tool_concurrency, batch
 from backend.agent.tool_batch_runner import ToolBatchRunner
 from backend.agent.tool_transition import prepare_tool_transition
 from backend.async_cleanup import to_thread_cancel_safe
+from backend.tools.base import ToolResult
 
 
 class StreamingToolExecution:
@@ -32,6 +33,8 @@ class StreamingToolExecution:
         self._events: asyncio.Queue = asyncio.Queue(maxsize=64)
         self._closing = False
         self._journal_message = None
+        self._dispatch_gate: asyncio.Event | None = None
+        self._deferred_aborted = False
         maximum = owner.settings.max_tool_calls
         self._remaining = max(0, maximum - (len(owner.agent_state.tool_calls) - owner.turn_start_tool_call_count)) if maximum > 0 else None
 
@@ -55,7 +58,8 @@ class StreamingToolExecution:
             retained.append(item)
         return retained
 
-    async def submit(self, calls: list[Any], stream_state: Any, stream_text: Any, tracker: Any) -> None:
+    async def submit(self, calls: list[Any], stream_state: Any, stream_text: Any, tracker: Any,
+                     *, defer_dispatch: bool = False) -> None:
         for call in calls:
             previous = self.calls.get(call.id)
             if previous is not None:
@@ -70,6 +74,8 @@ class StreamingToolExecution:
                 [prepared], content=stream_text.full_text, phase=stream_state.response_phase or "commentary",
                 provider_items=self._committed_provider_items(stream_state.response_items), message=self.history_message,
             )
+            if defer_dispatch and self._dispatch_gate is None:
+                self._dispatch_gate = asyncio.Event()
             await self._record_provider_item()
             owner.chain.record_tool_call()
             concurrent = batch_tool_calls([prepared], owner.tool_registry)[0][0]
@@ -84,6 +90,34 @@ class StreamingToolExecution:
             else:
                 self._write = task
                 self._reads = []
+
+    def release_deferred(self) -> None:
+        if self._dispatch_gate is not None:
+            self._dispatch_gate.set()
+
+    async def abort_deferred(self) -> None:
+        if self._dispatch_gate is None or self._dispatch_gate.is_set() or self._deferred_aborted:
+            return
+        self._deferred_aborted = True
+        journal = self.owner.tool_context.run_context.execution_journal
+        for call in self.history_message.tool_calls:
+            self.owner.context_builder.append_tool_result(
+                call.id, call.name,
+                ToolResult(content="aborted before dispatch", is_error=True, status="cancelled"),
+            )
+            if journal is not None:
+                message = next(item for item in reversed(self.owner.context_builder._history)
+                               if item.role == "tool" and item.tool_call_id == call.id)
+                await to_thread_cancel_safe(journal.append_tool_use, {
+                    "id": call.id, "name": call.name, "args": call.arguments,
+                    "native_type": call.native_type, "native_namespace": call.native_namespace,
+                    "native_name": call.native_name, "encrypted_function_args": call.encrypted_function_args,
+                    "status": "cancelled", "arguments_complete": True,
+                })
+                await to_thread_cancel_safe(journal.append_tool_result, {
+                    "id": call.id, "name": call.name, "status": "cancelled", "is_error": True,
+                    "content": "aborted before dispatch", "model_content": message.content,
+                }, tool_name=call.name)
 
     async def _publish(self, event: Any) -> None:
         if not self._closing:
@@ -105,6 +139,8 @@ class StreamingToolExecution:
 
     async def _run(self, call: Any, dependencies: list[asyncio.Task], tracker: Any, allowed: bool, ready_at: int) -> None:
         owner = self.owner
+        if self._dispatch_gate is not None:
+            await self._dispatch_gate.wait()
         span_id = f"tool-dispatch:{self.iteration_id}:{call.id}"
         await self._publish(runtime_span_from_tool_context(
             "tool.queued", span_id=span_id, tool_ctx=owner.tool_context,

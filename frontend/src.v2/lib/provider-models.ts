@@ -6,7 +6,7 @@ export const isKnownProviderModelList = (provider: string): boolean => {
 /**
  * Determine which models the composer should show as selectable.
  *
- * - Live discovery, explicit configuration, and registered extension catalogs
+ * - Live discovery, settings/models.json, explicit draft configuration, and extension catalogs
  *   are authoritative for their provider. The backend publishes these exact
  *   source values with the resolved model list.
  * - Otherwise use the explicit built-in provider contract: OpenAI and
@@ -21,7 +21,8 @@ export const selectableModelsForProvider = (
   modelsSource?: string,
 ): string[] => {
   const current = String(currentModel || "").trim();
-  const source = modelsSource === "live" || modelsSource === "configured" || modelsSource === "extension" || isKnownProviderModelList(provider)
+  const source = modelsSource === "live" || modelsSource === "settings" || modelsSource === "models_json"
+    || modelsSource === "configured" || modelsSource === "extension" || isKnownProviderModelList(provider)
     ? models
     : current
       ? [current]

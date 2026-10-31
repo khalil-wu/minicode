@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.atomic_io import atomic_write_text, file_mutation_locks
+from backend.atomic_io import atomic_file_writer, atomic_write_text, file_mutation_locks
 from backend.tools.path_resolution import (
     PathTraversalError,
     _resolve_path,
@@ -22,6 +22,17 @@ def test_atomic_write_text_preserves_existing_crlf(tmp_path: Path) -> None:
     atomic_write_text(path, "first\nchanged\n")
 
     assert path.read_bytes() == b"first\r\nchanged\r\n"
+
+
+def test_atomic_stream_failure_preserves_original_file(tmp_path: Path) -> None:
+    path = tmp_path / "file.txt"
+    path.write_bytes(b"original")
+    with pytest.raises(RuntimeError, match="interrupted"):
+        with atomic_file_writer(path) as handle:
+            handle.write(b"partial")
+            raise RuntimeError("interrupted")
+    assert path.read_bytes() == b"original"
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_atomic_write_create_only_does_not_overwrite_existing_content(tmp_path: Path) -> None:

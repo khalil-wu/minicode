@@ -35,6 +35,7 @@ class Socket:
 @pytest_asyncio.fixture
 async def native_session(tmp_path, monkeypatch):
     monkeypatch.setenv("MINICODE_ENABLE_NETWORK_MARKETPLACE", "0")
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
     session = WebSocketSession(
         "native-completion", Socket(), SimpleNamespace(), ArtifactStore(storage_dir=tmp_path / "artifacts"),
         ToolRegistry(), PermissionChecker(PermissionSettings()), AppConfig(llm=LLMSettings(api_key="")),

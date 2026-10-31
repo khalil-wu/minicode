@@ -131,7 +131,11 @@ async def test_worktree_cancellation_retains_worker_until_mutation_finishes(tmp_
         (tmp_path / "settled").write_text("done", encoding="utf-8")
         return True
 
-    manager = SimpleNamespace(repo_root=tmp_path, create_worktree=mutate, remove_worktree=mutate)
+    def safe_remove(**kwargs):
+        mutate(**kwargs)
+        return SimpleNamespace(removed=True, snapshot=None, error=None)
+
+    manager = SimpleNamespace(repo_root=tmp_path, create_worktree=mutate, remove_worktree=mutate, safe_remove_worktree=safe_remove)
 
     async def resolve(context):
         return manager

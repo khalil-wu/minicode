@@ -312,7 +312,7 @@ class TurnInputQueue:
         *,
         mode: TurnInputMode = "steer",
         target_message_id: str = "",
-        before_publish: Callable[[TurnInput], None] | None = None,
+        before_publish: Callable[[TurnInput], bool | None] | None = None,
         expected_turn_id: str | None = None,
     ) -> TurnInput | None:
         waiters: tuple[tuple[asyncio.AbstractEventLoop, asyncio.Event], ...] = ()
@@ -328,8 +328,8 @@ class TurnInputQueue:
             )
             if not item.content.strip() and not item.attachments:
                 return None
-            if before_publish is not None:
-                before_publish(item)
+            if before_publish is not None and before_publish(item) is False:
+                return None
             self._steering.append(item)
             # Source pending UserInput reopens mailbox delivery on the same
             # active Regular turn; NEXT_TURN alone only defers late mail.

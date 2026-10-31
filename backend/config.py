@@ -37,7 +37,6 @@ from backend.config_helpers import (
     SETTINGS_FILE,
     STATE_ROOT,
     SettingsError,
-    _KNOWN_MODEL_CONTEXT_WINDOWS,
     _RUNTIME_API_KEY_SCOPES,
     _RUNTIME_IMAGE_API_KEY_SCOPES,
     _SETTINGS_WRITE_LOCK,

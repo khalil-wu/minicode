@@ -117,7 +117,17 @@ def recorded_git(tmp_path, monkeypatch):
     async def communicate(process, **kwargs):
         argv = process.argv
         if "rev-parse" in argv:
-            output = str(repository / ".git") + "\n" + str(repository / ".git") if "--git-common-dir" in argv else "a" * 40
+            if "--git-common-dir" in argv:
+                output = str(repository / ".git") + "\n" + str(repository / ".git")
+            elif "--git-path" in argv and "--path-format=absolute" in argv:
+                output = str(repository / ".git" / "index")
+            elif "--git-dir" in argv and "--path-format=absolute" in argv:
+                output = str(repository / ".git")
+            else:
+                output = "a" * 40
+        elif "hash-object" in argv:
+            paths = argv[argv.index("--") + 1:] if "--" in argv else []
+            output = "\n".join("d" * 40 for _ in paths) or "d" * 40
         elif "write-tree" in argv:
             output = "b" * 40
         elif "commit-tree" in argv:

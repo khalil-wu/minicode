@@ -24,7 +24,7 @@ from backend.agent.token_budget_runtime import run_context_window_compaction, se
 from backend.artifact.store import ArtifactStore
 from backend.config import AgentSettings, AppConfig, LLMSettings, PermissionSettings, TokenBudget
 from backend.feature_flags import FeatureFlags, load_feature_flags
-from backend.hooks.manager import HookEvent, HookResult
+from backend.hooks.manager import HookEvent, HookManager, HookResult
 from backend.llm.base import LLMAdapter, LLMMessage, StreamEvent, StreamEventType, ToolCallEvent, UsageInfo
 from backend.llm.capabilities import ProviderCapabilities
 from backend.permissions.checker import PermissionChecker
@@ -174,16 +174,28 @@ def test_remaining_counts_local_items_after_last_model_and_clamps_at_hard_limit(
     assert builder.context_window_status()["token_limit_reached"]
 
 
-@pytest.mark.parametrize("fallback", [False, True])
-def test_unknown_limit_is_unknown_instead_of_application_fallback(tmp_path, fallback):
-    model = WindowModel([], window=1_000_000 if fallback else 0)
-    if fallback:
-        model.capabilities = replace(model.capabilities, context_window_source="fallback", context_window_verified=False)
+def test_missing_limit_is_unknown(tmp_path):
+    model = WindowModel([], window=0)
     builder = window_builder(model, tmp_path)
     builder.append_assistant("old response")
     builder.record_actual_usage(UsageInfo(2_000, 500))
     assert builder.context_window_status()["tokens_left"] is None
     assert not any(message.content.startswith("<context_window>") for message in builder._render_prompt_messages(AgentState(user_message="", workspace_root=tmp_path), tmp_path))
+
+
+def test_source_fallback_window_drives_context_budget_without_claiming_provider_capacity(tmp_path):
+    model = WindowModel([], window=272_000)
+    model.capabilities = replace(model.capabilities, context_window_source="fallback", context_window_verified=False)
+    builder = window_builder(model, tmp_path)
+    builder.append_assistant("old response")
+    builder.record_actual_usage(UsageInfo(2_000, 500))
+    assert builder.context_window_status()["tokens_left"] == 242_300
+
+
+def test_explicit_context_window_is_bounded_by_the_selected_model_maximum():
+    model = WindowModel([], window=272_000)
+    model.capabilities = replace(model.capabilities, max_context_window=872_000, max_context_window_verified=True)
+    assert ContextWindowConfig(model_context_window=1_000_000).limits(model) == (784_800, 828_400)
 
 
 def test_body_baseline_starts_as_estimate_then_becomes_first_real_input(tmp_path):
@@ -419,8 +431,9 @@ def test_reminder_and_fallback_are_once_per_window_and_explicit_new_skips_fallba
 
 @pytest.mark.parametrize("stop_stage", ["before", "after", "neither"])
 def test_window_hooks_use_real_stop_semantics_and_no_summary(tmp_path, stop_stage):
-    class Hooks:
+    class Hooks(HookManager):
         def __init__(self):
+            super().__init__()
             self.calls = []
         def has_hooks(self, event):
             return event in {HookEvent.PRE_COMPACT, HookEvent.POST_COMPACT}

@@ -59,6 +59,22 @@ class ArtifactPersistenceError(RuntimeError):
         super().__init__(message)
 
 
+class ArtifactScanError(ArtifactPersistenceError):
+    """A scan processed readable artifacts but could not inspect every record."""
+
+    def __init__(self, operation: str, failures: list[tuple[str, Exception]], completed: int) -> None:
+        self.failures = tuple(failures)
+        self.completed = completed
+        super().__init__(Path("<artifact-scan>"), "partial_scan",
+            f"{operation}: {completed} processed, {len(failures)} unreadable or failed")
+
+
+def _scan_error(operation: str, failures: list[tuple[str, Exception]], completed: int) -> ArtifactScanError:
+    for artifact_id, error in failures:
+        logger.error("Artifact %s failed for %s: %s", operation, artifact_id, error)
+    return ArtifactScanError(operation, failures, completed)
+
+
 @dataclass
 class ArtifactMeta:
     artifact_id: str
@@ -344,10 +360,8 @@ def _write_split_payload(
 def _read_meta_sidecar(meta_path: Path) -> MetaSidecar | None:
     """Read a metadata sidecar from disk.
 
-    Returns ``None`` when the file is missing or when any parse step fails.
-    Failures are logged at ``WARNING`` with
-    a ``reason`` field in ``{"io", "json", "missing-fields"}``. The file on disk
-    is never modified, regardless of failure path.
+    Returns ``None`` when the file is missing. Other read or parse failures
+    raise ``ArtifactPersistenceError``; the file on disk is never modified.
 
     This is a pure-function ``Disk_Worker`` helper intended to run on a worker
     thread via :func:`asyncio.to_thread`.
@@ -357,7 +371,7 @@ def _read_meta_sidecar(meta_path: Path) -> MetaSidecar | None:
         raw = meta_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ArtifactPersistenceError(meta_path, "io", str(exc)) from exc
 
     try:
@@ -405,7 +419,8 @@ def _is_expired(created_at: float, now: float, ttl_seconds: int) -> bool:
     return (now - created_at) > ttl_seconds
 
 
-def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
+def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float,
+                  read_errors: list[tuple[str, Exception]] | None = None) -> list[str]:
     """Enumerate expired artifacts under ``storage_dir`` and unlink their files.
 
     Returns the list of ``artifact_id`` strings whose files were successfully
@@ -417,14 +432,15 @@ def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
     * ``FileNotFoundError`` during stat or unlink (concurrent removal) is
       silently skipped — the artifact is excluded from the returned list and no
       log entry is emitted.
-    * Any other persistence failure aborts the cleanup transaction with
-      structured evidence; callers retain ``cleanup_pending``.
+    * Other per-artifact failures are retained while remaining artifacts are
+      processed, then reported with the completed count.
 
     This is a pure-function ``Disk_Worker`` helper intended to run on a worker
     thread via :func:`asyncio.to_thread`.
     """
 
     removed: list[str] = []
+    failures: list[tuple[str, Exception]] = []
 
     for meta_path in storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
         artifact_id = meta_path.name.removesuffix(META_SIDECAR_SUFFIX)
@@ -433,7 +449,11 @@ def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
             # Re-read and re-check under the same lock as deletion. A fresh
             # save or an owner-scope update must not be deleted based on a
             # stale pre-lock directory scan.
-            sidecar = _read_meta_sidecar(meta_path)
+            try:
+                sidecar = _read_meta_sidecar(meta_path)
+            except ArtifactPersistenceError as exc:
+                failures.append((artifact_id, exc))
+                continue
             if sidecar is None:
                 # Parse helper already logged when applicable; skip the artifact.
                 continue
@@ -447,13 +467,15 @@ def _scan_expired(storage_dir: Path, ttl_seconds: int, now: float) -> list[str]:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                raise ArtifactPersistenceError(
-                    meta_path,
-                    "cleanup_failed",
-                    f"{type(exc).__name__}: {exc}",
-                ) from exc
+                failures.append((artifact_id, ArtifactPersistenceError(
+                    meta_path, "cleanup_failed", f"{type(exc).__name__}: {exc}")))
+                continue
             removed.append(artifact_id)
 
+    if read_errors is not None:
+        read_errors.extend(failures)
+    elif failures:
+        raise _scan_error("cleanup", failures, len(removed))
     return removed
 
 
@@ -620,12 +642,17 @@ class ArtifactStore:
         if not owner:
             return 0
         artifact_ids: list[str] = []
+        failures: list[tuple[str, Exception]] = []
         for meta_path in self._storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
             content_path = self._storage_dir / f"{meta_path.name.removesuffix(META_SIDECAR_SUFFIX)}{CONTENT_UNIT_SUFFIX}"
             with file_mutation_locks([meta_path, content_path]):
                 # Re-read inside the mutation lock. A concurrent fork/share or
                 # delete may have changed ownership after the directory scan.
-                sidecar = _read_meta_sidecar(meta_path)
+                try:
+                    sidecar = _read_meta_sidecar(meta_path)
+                except ArtifactPersistenceError as exc:
+                    failures.append((meta_path.name.removesuffix(META_SIDECAR_SUFFIX), exc))
+                    continue
                 if sidecar is None:
                     continue
                 scopes = sidecar.owner_scopes
@@ -663,6 +690,8 @@ class ArtifactStore:
                     self._content_cache.pop(artifact_id)
                     self._metadata_index.pop(artifact_id, None)
                     self._preview_lines_index.pop(artifact_id, None)
+        if failures:
+            raise _scan_error("delete", failures, len(artifact_ids))
         return len(artifact_ids)
 
     def share_for_conversation(
@@ -681,13 +710,18 @@ class ArtifactStore:
         if not source or not target:
             return 0
         shared = 0
+        failures: list[tuple[str, Exception]] = []
         for meta_path in self._storage_dir.glob(f"art_*{META_SIDECAR_SUFFIX}"):
             artifact_id = meta_path.name.removesuffix(META_SIDECAR_SUFFIX)
             if artifact_ids is not None and artifact_id not in artifact_ids:
                 continue
             content_path = self._storage_dir / f"{artifact_id}{CONTENT_UNIT_SUFFIX}"
             with file_mutation_locks([meta_path, content_path]):
-                sidecar = _read_meta_sidecar(meta_path)
+                try:
+                    sidecar = _read_meta_sidecar(meta_path)
+                except ArtifactPersistenceError as exc:
+                    failures.append((artifact_id, exc))
+                    continue
                 if sidecar is None:
                     continue
                 scopes = sidecar.owner_scopes
@@ -719,6 +753,8 @@ class ArtifactStore:
                 with self._lock:
                     self._metadata_index[updated.artifact_id] = updated.to_meta()
                 shared += 1
+        if failures:
+            raise _scan_error("share", failures, shared)
         return shared
 
     # ── Save ──────────────────────────────────────────────────
@@ -929,7 +965,9 @@ class ArtifactStore:
         *,
         conversation_id: str | None = None,
         workspace_root: str | Path | None = None,
+        read_errors: list[tuple[str, Exception]] | None = None,
     ) -> list[ArtifactMeta]:
+        failures: list[tuple[str, Exception]] = []
         with self._lock:
             seen_metas = list(self._metadata_index.values())
             seen_ids = set(self._metadata_index.keys())
@@ -949,7 +987,11 @@ class ArtifactStore:
             artifact_id = path.name.removesuffix(META_SIDECAR_SUFFIX)
             if artifact_id in seen_ids or artifact_id in result_by_id:
                 continue
-            sidecar = _read_meta_sidecar(path)
+            try:
+                sidecar = _read_meta_sidecar(path)
+            except ArtifactPersistenceError as exc:
+                failures.append((artifact_id, exc))
+                continue
             if sidecar is None:
                 continue
             with self._lock:
@@ -970,14 +1012,22 @@ class ArtifactStore:
         owner_workspace = bound_workspace if workspace_root is None else str(workspace_root or "")
         visible: list[ArtifactMeta] = []
         for artifact_id, (_ts, _meta) in ordered:
-            current = self.get_meta(
-                artifact_id,
-                refresh=True,
-                conversation_id=owner_conversation,
-                workspace_root=owner_workspace,
-            )
+            try:
+                current = self.get_meta(
+                    artifact_id,
+                    refresh=True,
+                    conversation_id=owner_conversation,
+                    workspace_root=owner_workspace,
+                )
+            except ArtifactPersistenceError as exc:
+                failures.append((artifact_id, exc))
+                continue
             if current is not None:
                 visible.append(current)
+        if read_errors is not None:
+            read_errors.extend(failures)
+        elif failures:
+            raise _scan_error("list", failures, len(visible))
         return visible
 
     # ── Cleanup ──────────────────────────────────────────────
@@ -989,7 +1039,8 @@ class ArtifactStore:
         # acceptable per the design tradeoff. The recurring background task
         # uses ``asyncio.to_thread`` via ``_async_cleanup_once`` to keep the
         # loop responsive.
-        removed_ids = _scan_expired(self._storage_dir, self._ttl_seconds, current)
+        failures: list[tuple[str, Exception]] = []
+        removed_ids = _scan_expired(self._storage_dir, self._ttl_seconds, current, failures)
 
         if removed_ids:
             with self._lock:
@@ -1001,26 +1052,38 @@ class ArtifactStore:
         # Re-register the recurring task in case a prior run completed or was
         # cancelled; this is a no-op when no loop is running.
         self._ensure_cleanup_scheduled()
+        if failures:
+            error = _scan_error("cleanup", failures, len(removed_ids))
+            self._cleanup_pending = True
+            self._cleanup_error = f"{type(error).__name__}: {error}"
+            raise error
+        self._cleanup_pending = False
+        self._cleanup_error = ""
         return len(removed_ids)
 
     async def _async_cleanup_once(self) -> None:
+        failures: list[tuple[str, Exception]] = []
         try:
             removed = await asyncio.to_thread(
-                _scan_expired, self._storage_dir, self._ttl_seconds, time.time()
+                _scan_expired, self._storage_dir, self._ttl_seconds, time.time(), failures
             )
         except Exception as exc:
             self._cleanup_pending = True
             self._cleanup_error = f"{type(exc).__name__}: {exc}"
             raise
+        if removed:
+            with self._lock:
+                for artifact_id in removed:
+                    self._content_cache.pop(artifact_id)
+                    self._metadata_index.pop(artifact_id, None)
+                    self._preview_lines_index.pop(artifact_id, None)
+        if failures:
+            error = _scan_error("cleanup", failures, len(removed))
+            self._cleanup_pending = True
+            self._cleanup_error = f"{type(error).__name__}: {error}"
+            raise error
         self._cleanup_pending = False
         self._cleanup_error = ""
-        if not removed:
-            return
-        with self._lock:
-            for artifact_id in removed:
-                self._content_cache.pop(artifact_id)
-                self._metadata_index.pop(artifact_id, None)
-                self._preview_lines_index.pop(artifact_id, None)
 
     async def _cleanup_loop(self) -> None:
         try:
@@ -1033,7 +1096,12 @@ class ArtifactStore:
                     pass
                 if self._cleanup_stop.is_set():
                     return
-                await self._async_cleanup_once()
+                try:
+                    await self._async_cleanup_once()
+                except ArtifactScanError:
+                    # Other artifacts still need cleanup while the unreadable
+                    # record remains available for repair.
+                    continue
         except Exception as exc:
             logger.error("artifact cleanup pending error=%r", exc)
 

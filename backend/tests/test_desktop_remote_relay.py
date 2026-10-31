@@ -528,3 +528,33 @@ async def test_physical_relay_send_failure_is_not_reclassified_as_a_stream_socke
             assert errors[0].exceptions == (failure,)
             assert not any(frame["type"] == "error" for frame in sent)
             assert not any(record.name == "backend.desktop_remote.relay" for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_and_cancelled_close_retain_the_original_physical_close_owner(monkeypatch):
+    async with _relay(1) as (relay, _reader, _writer, ended, errors):
+        entered, release = asyncio.Event(), asyncio.Event()
+        completed = []
+        wait_closed = relay.writer.wait_closed
+
+        async def physical_close():
+            entered.set()
+            await release.wait()
+            await wait_closed()
+
+        monkeypatch.setattr(relay.writer, "wait_closed", physical_close)
+        relay.on_closed = lambda: completed.append(True)
+        first = asyncio.create_task(relay.aclose())
+        await entered.wait()
+        second = asyncio.create_task(relay.aclose())
+        await asyncio.sleep(0)
+        assert not first.done() and not second.done() and not completed
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert not relay._close_task.done() and not completed
+        release.set()
+        await second
+        async with asyncio.timeout(3):
+            await ended.wait()
+        assert completed == [True] and not errors

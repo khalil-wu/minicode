@@ -26,6 +26,9 @@ from backend.ws.manager import WebSocketManager
 
 
 def session_for(tmp_path, monkeypatch, *, manager=None):
+    from backend.workspace.trust import trust_created_task_directory
+
+    trust_created_task_directory(tmp_path)
     config = AppConfig(llm=LLMSettings(provider="custom", model="captured-model", api_key=""))
     monkeypatch.setattr("backend.ws.agent_runner.load_config", lambda **kwargs: config)
     registry = ToolRegistry()
@@ -210,8 +213,8 @@ async def test_child_task_cannot_release_an_inherited_parent_command_prefix():
     lock = asyncio.Lock()
     async with AsyncExitStack() as stack:
         await stack.enter_async_context(lock)
-        with bind_command_lifecycle_prefix("window", stack):
-            await asyncio.create_task(handoff_command_lifecycle_prefix("window"))
+        with bind_command_lifecycle_prefix(stack):
+            await asyncio.create_task(handoff_command_lifecycle_prefix())
             assert lock.locked()
-            await handoff_command_lifecycle_prefix("window")
+            await handoff_command_lifecycle_prefix()
             assert not lock.locked()

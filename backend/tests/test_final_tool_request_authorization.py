@@ -9,6 +9,7 @@ import pytest
 
 from backend.agent.context import ContextBuilder
 from backend.agent.final_tool_request import canonical_tool_request_digest
+from backend.agent.message import AgentEvent
 from backend.agent.run_context import RunContext
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_execution import execute_serial, execute_tool_batch
@@ -609,12 +610,80 @@ def test_exit_plan_mode_user_edit_is_reauthorized_and_becomes_final_request(
     assert prompt_updates == [(["run focused tests"], "exit_plan_mode.command_prompts")]
 
 
+@pytest.mark.asyncio
+async def test_failed_side_effect_classification_blocks_the_executable_request(tmp_path: Path) -> None:
+    class BrokenPathTool(_ModeTool):
+        name = "broken_path_tool"
+
+        def get_workspace_paths(self, args=None):
+            return [str(tmp_path / "file.txt")]
+
+        def get_side_effect_kind(self, args=None):
+            raise RuntimeError("side effect classification failed")
+
+    tool = BrokenPathTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    permission = PermissionContext(mode="confirm", workspace_root=tmp_path)
+    context = ToolExecutionContext(permission=permission, workspace_root=tmp_path)
+    authorization = await _authorize_final_tool_request(
+        ToolCallEvent(id="broken", name=tool.name, arguments={"mode": "write"}),
+        tool_registry=registry, permission_checker=PermissionChecker(PermissionSettings(), tmp_path),
+        permission_context=permission, tool_ctx=context, check_scope=False,
+    )
+    assert authorization.error_kind == "security_boundary"
+    assert "permission policy could not be evaluated" in authorization.error
+    assert tool.executed == []
+
+
 class _ApprovalRuntime(SessionApprovalRuntimeMixin):
     def __init__(self) -> None:
         self.session_id = "session-1"
         self.active_conversation_id = "conversation-1"
         self.turn_wait_state = TurnWaitState()
         self.approval_diff_cache: dict[str, Any] = {}
+
+
+def test_auto_approval_evaluates_original_arguments_not_the_display_projection(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from backend.permissions import checker as checker_module
+
+    runtime = _ApprovalRuntime()
+    runtime.permission_checker = object()
+    runtime.permission_context = object()
+    runtime.tool_registry = None
+    args = {"value": "x" * 40000 + "original-middle" + "y" * 40000}
+    payload = runtime.build_approval_request_payload(AgentEvent.approval_request("call", "custom", args))
+    assert payload["request"]["input"] != args
+    seen = []
+    def evaluate(_checker, _tool, supplied, **_kwargs):
+        seen.append(supplied)
+        return SimpleNamespace(permission_level=PermissionLevel.AUTO, decision="allow", capability_allowed=True)
+    monkeypatch.setattr(checker_module, "evaluate_permission_decision", evaluate)
+
+    assert runtime._pending_tool_payload_is_auto_allowed(payload)
+    assert seen == [args]
+    runtime.turn_wait_state.pending_approval_inputs.pop("call")
+    assert not runtime._pending_tool_payload_is_auto_allowed(payload)
+
+
+@pytest.mark.asyncio
+async def test_session_approval_cache_does_not_match_distinct_truncated_requests() -> None:
+    runtime = _ApprovalRuntime()
+    first = {"value": "x" * 40000 + "alpha" + "y" * 40000}
+    second = {"value": "x" * 40000 + "bravo" + "y" * 40000}
+    wire_a = runtime.build_approval_request_payload(AgentEvent.approval_request("first", "mode_tool", first))
+    assert runtime._resolve_pending_approval("first", {"action": "approve", "remember_for_session": True})
+    assert (await runtime.approval_handler("first"))["action"] == "approve"
+    assert "alpha" not in next(iter(runtime._session_approval_cache))
+    wire_b = runtime.build_approval_request_payload(AgentEvent.approval_request("second", "mode_tool", second))
+    assert wire_a["request"]["input"] == wire_b["request"]["input"]
+    waiting = asyncio.create_task(runtime.approval_handler("second"))
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert runtime._resolve_pending_approval("second", {"action": "reject"})
+    assert (await waiting)["action"] == "reject"
+    assert runtime.turn_wait_state.pending_approval_inputs == {}
 
 
 def test_session_approval_cache_is_bound_to_final_digest() -> None:

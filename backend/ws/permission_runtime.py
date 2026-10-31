@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from backend.agent.message import AgentEvent
@@ -38,6 +39,23 @@ def _managed_permission_projection(mode: str, configured_policy: ApprovalPolicy 
 
 
 class SessionPermissionRuntimeMixin:
+    def _command_prompt_rules_for_conversation(self, conversation_id: str) -> tuple[str, ...]:
+        owner = str(conversation_id or "").strip()
+        if not owner or self.ws_manager is None:
+            return self._local_command_prompt_allow_rules.get(owner, ())
+        context = self.ws_manager.execution_contexts.context_for(owner)
+        return context.thread_runtime.command_prompt_allow_rules if context is not None else ()
+
+    def _set_command_prompt_rules_for_conversation(self, conversation_id: str, rules: tuple[str, ...]) -> None:
+        owner = str(conversation_id or "").strip()
+        if not owner or self.ws_manager is None:
+            self._local_command_prompt_allow_rules[owner] = rules
+            return
+        context = self.ws_manager.execution_contexts.context_for(owner)
+        if context is None:
+            context = self.ws_manager.load_conversation_execution(owner, self)
+        context.thread_runtime.command_prompt_allow_rules = rules
+
     def permission_context_for_conversation(
         self,
         conversation: Any | None,
@@ -63,17 +81,16 @@ class SessionPermissionRuntimeMixin:
                 getattr(conversation, "context_snapshot", {}) or {},
                 getattr(conversation, "workspace_root", "") or None,
             )
-        constraints = merge_plan_constraints(
-            getattr(self.permission_context, "filesystem_constraints", {}),
-            plan_path,
-        )
+        owner = str(getattr(conversation, "id", "") or "").strip()
+        base_constraints = self._base_permission_constraints
+        if owner and self.permission_context.conversation_id == owner:
+            base_constraints = self.permission_context.filesystem_constraints
+        constraints = merge_plan_constraints(base_constraints, plan_path)
         previous_mode = str(getattr(conversation, "permission_previous_mode", "") or "").strip()
-        return self.permission_checker.build_context(
+        return replace(self.permission_checker.build_context(
             mode=requested,
             session_overrides=overrides,
-            command_prompt_allow_rules=tuple(
-                getattr(self.permission_context, "command_prompt_allow_rules", ())
-            ),
+            command_prompt_allow_rules=self._command_prompt_rules_for_conversation(owner),
             tool_deny_rules=deny_rules,
             filesystem_constraints=constraints,
             workspace_scope=scope,
@@ -82,7 +99,7 @@ class SessionPermissionRuntimeMixin:
             approval_policy=approval_policy,
             sandbox_mode=sandbox_mode,
             requirements_source=requirements_source,
-        )
+        ), conversation_id=owner)
 
     def _set_permission_context(
         self,
@@ -130,7 +147,7 @@ class SessionPermissionRuntimeMixin:
         ):
             return False
 
-        self.permission_context = self.permission_checker.build_context(
+        self.permission_context = replace(self.permission_checker.build_context(
             mode=normalized_mode,
             session_overrides=normalized_overrides,
             command_prompt_allow_rules=normalized_prompt_rules,
@@ -146,7 +163,7 @@ class SessionPermissionRuntimeMixin:
             approval_policy=approval_policy,
             sandbox_mode=sandbox_mode,
             requirements_source=requirements_source,
-        )
+        ), conversation_id=str(self.active_conversation_id or ""))
         self.session_lifecycle.schedule_runtime_capabilities(source=f"permission.{source}")
         return True
 
@@ -171,8 +188,10 @@ class SessionPermissionRuntimeMixin:
         prompts: list[str] | tuple[str, ...],
         *,
         source: str,
+        conversation_id: str | None = None,
     ) -> bool:
-        current = tuple(getattr(self.permission_context, "command_prompt_allow_rules", ()))
+        owner = str(conversation_id or self.active_conversation_id or "").strip()
+        current = self._command_prompt_rules_for_conversation(owner)
         merged = tuple(
             dict.fromkeys(
                 [
@@ -185,10 +204,27 @@ class SessionPermissionRuntimeMixin:
                 ]
             )
         )
-        return self._set_permission_context(
-            command_prompt_allow_rules=merged,
-            source=source,
-        )
+        if merged == current:
+            return False
+        self._set_command_prompt_rules_for_conversation(owner, merged)
+        if owner == str(self.active_conversation_id or ""):
+            self._set_permission_context(command_prompt_allow_rules=merged, source=source)
+        return True
+
+    async def add_command_prompt_rules_for_conversation(
+        self, conversation_id: str, prompts: list[str] | tuple[str, ...], *, source: str,
+    ) -> None:
+        if not self._add_command_prompt_allow_rules(prompts, source=source, conversation_id=conversation_id):
+            return
+        from backend.ws.conversation_activity import live_sessions
+
+        rules = self._command_prompt_rules_for_conversation(conversation_id)
+        for target in live_sessions(self):
+            if target.active_conversation_id != conversation_id:
+                continue
+            if target is not self:
+                target._set_permission_context(command_prompt_allow_rules=rules, source=source)
+            await target.emit_permission_rules_updated(conversation_id=conversation_id, source=source)
 
     def sync_permission_mode_with_active_conversation(self, *, source: str) -> str:
         active = self.active_conversation
@@ -201,7 +237,8 @@ class SessionPermissionRuntimeMixin:
         context_source = self.permission_context.source
         deny_rules = list(self.permission_context.tool_deny_rules)
         overrides = dict(self.permission_context.session_overrides)
-        prompt_rules = list(getattr(self.permission_context, "command_prompt_allow_rules", ()))
+        target_id = str(getattr(conversation, "id", "") or self.active_conversation_id or "").strip()
+        prompt_rules = list(self._command_prompt_rules_for_conversation(target_id))
 
         if conversation is not None:
             conversation_id = str(getattr(conversation, "id", "")).strip()
@@ -216,7 +253,6 @@ class SessionPermissionRuntimeMixin:
                 context_source = "conversation.record"
                 deny_rules = normalize_tool_patterns(getattr(conversation, "permission_deny_rules", []))
                 overrides = normalize_permission_overrides(getattr(conversation, "permission_overrides", {}))
-                prompt_rules = []
 
         policy_snapshot = self.permission_checker.policy_snapshot()
         system_deny = normalize_tool_patterns(policy_snapshot.get("always_deny", []))

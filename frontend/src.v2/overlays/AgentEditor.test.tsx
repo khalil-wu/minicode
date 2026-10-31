@@ -248,6 +248,27 @@ describe("AgentEditor MiniCode source contract", () => {
     expect(screen.getByRole("button", { name: "删除 Agent reviewer" }).hasAttribute("disabled")).toBe(true);
   });
 
+  it("preserves comma-separated tool text while editing and submits both lists", async () => {
+    render(<AgentEditor />);
+    fireEvent.click((await screen.findByText("user description")).closest("button")!);
+    const allowed = screen.getByLabelText("允许的工具") as HTMLInputElement;
+    const disallowed = screen.getByLabelText("禁止的工具") as HTMLInputElement;
+    fireEvent.change(allowed, { target: { value: "Read," } });
+    fireEvent.change(disallowed, { target: { value: "Write," } });
+    expect(allowed.value).toBe("Read,");
+    expect(disallowed.value).toBe("Write,");
+    fireEvent.click(screen.getByText("project description").closest("button")!);
+    fireEvent.click(screen.getByText("user description").closest("button")!);
+    expect((screen.getByLabelText("允许的工具") as HTMLInputElement).value).toBe("Read,");
+    expect((screen.getByLabelText("禁止的工具") as HTMLInputElement).value).toBe("Write,");
+    fireEvent.change(screen.getByLabelText("允许的工具"), { target: { value: "Read, Grep" } });
+    fireEvent.change(screen.getByLabelText("禁止的工具"), { target: { value: "Write, Delete" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const post = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({ tools: ["Read", "Grep"], disallowed_tools: ["Write", "Delete"] });
+  });
+
   it("deletes the exact source path selected in the duplicate list", async () => {
     agentsPayload = { agents: [userAgent], model_catalog: [] };
     render(<AgentEditor />);

@@ -1,7 +1,7 @@
 import { useI18n, type Translate, type TranslationKey } from "../i18n";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
-import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, ShieldCheck, Trash2 } from "../lib/icons";
+import { ArrowLeft, Check, ExternalLink, LoaderCircle, LogIn, LogOut, Pencil, Play, Plus, RefreshCw, Save, Trash2 } from "../lib/icons";
 import { pushToast } from "./ToastContainer";
 import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } from "../protocol/api";
 import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
@@ -20,7 +20,6 @@ import {
   type ProviderId,
   type CustomWireApi,
   type LLMSettingsPayload,
-  type LLMCheckResult,
   type LLMModelsRefreshResult,
   type ProviderHistoryEntry,
   type ProviderModelMetadata,
@@ -127,7 +126,7 @@ type ProviderCard = {
   source: "saved" | "history" | "preset";
 };
 
-type ProviderOperation = "" | "save" | "models" | "delete" | "oauth" | "check" | "bedrock";
+type ProviderOperation = "" | "save" | "models" | "delete" | "oauth" | "bedrock";
 
 export const ProviderTab = ({
   selectedProvider,
@@ -171,7 +170,6 @@ export const ProviderTab = ({
   const [discoveredModelList, setDiscoveredModelList] = useState<string[]>([]);
   const [modelMetadata, setModelMetadata] = useState<Record<string, ProviderModelMetadata>>({});
   const [modelLabels, setModelLabels] = useState<Record<string, string>>({});
-  const [modelAuthState, setModelAuthState] = useState<Record<string, "checking" | "ok" | "error">>({});
   const [configuredReasoningEffort, setConfiguredReasoningEffort] = useState("");
   const [reasoningEffortLevels, setReasoningEffortLevels] = useState<EffortLevel[]>([]);
   const [customWireApi, setCustomWireApi] = useState<CustomWireApi>("chat");
@@ -219,10 +217,6 @@ export const ProviderTab = ({
   const providerConfig = PROVIDERS.find((p) => p.id === provider)!;
   const effectiveWireApi = effectiveCustomWireApi(provider, baseUrl, customWireApi);
   const isBedrockProvider = provider === "custom" && !!providerAws && credentialEndpointIdentity(baseUrl) === awsEndpoint;
-
-  useEffect(() => {
-    setModelAuthState({});
-  }, [provider, baseUrl, apiKey, effectiveWireApi, proxyMode, providerHeaders, providerAuthHeader]);
 
   const responsesCachingEnabled = effectiveWireApi === "responses";
   const showApiFormat = !isBedrockProvider && canChooseApiFormat(provider, baseUrl);
@@ -328,7 +322,6 @@ export const ProviderTab = ({
     const models = buildModelChoices(savedModels, section?.model ?? fallback.model ?? "");
     setAvailableModelList(models);
     setDiscoveredModelList([]);
-    setModelAuthState({});
     setModelsSource(section?.models_source ?? "");
     if (backendProvider(nextProvider) === "anthropic") {
       setCustomWireApi("anthropic");
@@ -934,11 +927,6 @@ export const ProviderTab = ({
       delete next[previousId];
       return next;
     });
-    setModelAuthState((current) => {
-      const next = { ...current };
-      delete next[previousId];
-      return next;
-    });
     if (!modelName.trim() || isDraftModelId(modelName) || modelName === previousId) {
       selectModel(nextId);
     }
@@ -958,11 +946,6 @@ export const ProviderTab = ({
       delete copy[modelId];
       return copy;
     });
-    setModelAuthState((current) => {
-      const copy = { ...current };
-      delete copy[modelId];
-      return copy;
-    });
     if (modelName === modelId) {
       selectModel(next.find((item) => !isDraftModelId(item)) || "");
     }
@@ -976,31 +959,6 @@ export const ProviderTab = ({
       else delete existing.context_window;
       return { ...current, [modelId]: existing };
     });
-  };
-
-  const checkModelAuth = async (modelId: string) => {
-    if (!beginOperation("check")) return;
-    setModelAuthState((current) => ({ ...current, [modelId]: "checking" }));
-    try {
-      const draft = draftFromState();
-      const res = await fetchWithTimeout(`${apiBase()}/api/llm/check`, {
-        method: "POST",
-        headers: authHeaders({ "content-type": "application/json" }),
-        body: JSON.stringify(payload({ ...draft, modelName: modelId }, { includeProvider: true })),
-      }, { timeoutMessage: tr("模型鉴权检查超时，请重试。") });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(errorMessageFromResponseText(text, res.statusText));
-      }
-      const result = await res.json() as LLMCheckResult;
-      setModelAuthState((current) => ({ ...current, [modelId]: result.ok ? "ok" : "error" }));
-      pushToast(`${modelId}：${result.ok ? tr("鉴权通过") : (result.message || tr("鉴权失败"))}`, result.ok ? "success" : "error");
-    } catch (error) {
-      setModelAuthState((current) => ({ ...current, [modelId]: "error" }));
-      pushToast(tr("模型鉴权失败：{v0}", { v0: formatProviderError(error) }), "error");
-    } finally {
-      endOperation("check");
-    }
   };
 
   const discoverModels = async () => {
@@ -1422,7 +1380,6 @@ export const ProviderTab = ({
           )}
           {availableModelList.map((modelId) => {
             const metadata = modelMetadata[modelId] ?? {};
-            const auth = modelAuthState[modelId];
             const isDraft = isDraftModelId(modelId);
             const selectableCandidates = !isDraft && !discoveredModelList.includes(modelId)
               ? [modelId, ...discoveredModelList]
@@ -1473,9 +1430,6 @@ export const ProviderTab = ({
                   placeholder={tr("例如 128000")}
                   style={inputStyle}
                 />
-                <button type="button" onClick={() => void checkModelAuth(modelId)} disabled={busy || isDraft || auth === "checking"} title={isDraft ? tr("请先选择或填写模型") : tr("检查该模型鉴权")} style={secondaryActionStyle}>
-                  <ShieldCheck size={14} />{auth === "checking" ? tr("检查中") : auth === "ok" ? tr("已通过") : auth === "error" ? tr("重试") : tr("鉴权")}
-                </button>
                 <button type="button" onClick={() => removeModelMapping(modelId)} disabled={busy} title={tr("移除模型映射")} style={secondaryActionStyle} aria-label={tr("移除 {v0}", { v0: modelId })}><Trash2 size={14} /></button>
               </div>
             );

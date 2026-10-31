@@ -107,7 +107,18 @@ def build_handoff_preflight(
     conversation_id = str(getattr(conversation, "id", "") or "")
     isolated = bool(getattr(conversation, "git_isolated", False))
     direction = "worktree_to_local" if target == "local" else "local_to_worktree"
-    source_path = Path(str(getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "") or ".")).resolve()
+    source = str(getattr(conversation, "worktree_path", "") or getattr(conversation, "workspace_root", "")).strip()
+    if not source:
+        return {
+            "conversation_id": conversation_id, "target": target, "direction": direction,
+            "source": {"path": "", "branch": "", "head": ""},
+            "destination": {"path": "", "branch": ""},
+            "main_checkout": {"path": "", "branch": "", "head": ""},
+            "checks": [_check("source.missing", "blocking", "This conversation has no workspace to move.")],
+            "allowed": False, "fingerprint": "", "dirty_action": dirty_action,
+            "reuse_branch": False, "local_branches": [], "local_checkout_branch": "",
+        }
+    source_path = Path(source).resolve()
     base_root = main_worktree_root(source_path)
     source_policy = readonly_git_policy(source_path)
     main_policy = readonly_git_policy(base_root)
@@ -139,6 +150,8 @@ def build_handoff_preflight(
             checks.append(_check("source.dirty.stash", "warning", "Local changes will be stashed and restored in the destination workspace."))
         else:
             checks.append(_check("source.dirty", "blocking", "Commit changes, or choose 'stash' to move tracked and untracked changes safely."))
+    if source_status == "<missing>":
+        checks.append(_check("source.missing", "blocking", "The source workspace no longer exists.", path=str(source_path)))
     if source_status == "<status unavailable>":
         checks.append(_check("source.status_unavailable", "blocking", "Could not verify source Git status."))
 
@@ -264,7 +277,7 @@ def restore_workspace_stash(root: Path, stash_ref: str) -> tuple[bool, str]:
 
 
 def switch_main_checkout(base_root: Path, branch: str) -> tuple[bool, str]:
-    return _git(base_root, "switch", branch)
+    return _git(base_root, "switch", "--no-overwrite-ignore", branch)
 
 
 def restore_main_checkout(
@@ -275,10 +288,10 @@ def restore_main_checkout(
 ) -> tuple[bool, str]:
     clean_branch = str(branch or "").strip()
     if clean_branch:
-        return _git(base_root, "switch", clean_branch)
+        return _git(base_root, "switch", "--no-overwrite-ignore", clean_branch)
     clean_head = str(head or "").strip()
     if clean_head:
-        return _git(base_root, "switch", "--detach", clean_head)
+        return _git(base_root, "switch", "--no-overwrite-ignore", "--detach", clean_head)
     return False, "The previous local checkout could not be identified"
 
 

@@ -188,3 +188,14 @@ def test_plan_review_rejects_unknown_request(
         # A failed reservation must not leak the lifecycle fence.
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("value", ["false", 0, None, []])
+def test_plan_review_rejects_non_boolean_decisions(fake_runtime: _FakeRuntime, value: Any) -> None:
+    session = _FakeSession()
+    asyncio.run(handle_subagent_plan_review(session, {
+        "conversation_id": "conv-1", "subagent_id": "t1",
+        "request_id": "plan_approval:t1:abc", "approved": value,
+    }))
+    assert fake_runtime.sent == []
+    assert "approved must be a boolean" in session.errors[-1].data["message"]

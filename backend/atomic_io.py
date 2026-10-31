@@ -11,7 +11,7 @@ import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Iterator, TypeVar
+from typing import Any, BinaryIO, Iterable, Iterator, TypeVar
 
 from filelock import FileLock
 from backend.async_cleanup import to_thread_cancel_safe as run_blocking_io
@@ -169,6 +169,20 @@ def atomic_write_bytes(path: Path, content: bytes, *, overwrite: bool = True) ->
 
 
 def _atomic_write_bytes_unlocked(path: Path, content: bytes, *, overwrite: bool = True) -> None:
+    with _atomic_file_writer_unlocked(path, overwrite=overwrite) as handle:
+        handle.write(content)
+
+
+@contextmanager
+def atomic_file_writer(path: Path, *, overwrite: bool = True) -> Iterator[BinaryIO]:
+    """Stage a file under the shared mutation lock and publish it on success."""
+    with file_mutation_locks([path]):
+        with _atomic_file_writer_unlocked(path, overwrite=overwrite) as handle:
+            yield handle
+
+
+@contextmanager
+def _atomic_file_writer_unlocked(path: Path, *, overwrite: bool = True) -> Iterator[BinaryIO]:
     """Publish bytes atomically, optionally refusing an existing target.
 
     ``overwrite=False`` is the create-only primitive used by UI file creation.
@@ -206,7 +220,7 @@ def _atomic_write_bytes_unlocked(path: Path, content: bytes, *, overwrite: bool 
 
     try:
         with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
+            yield handle
             handle.flush()
             if existing_mode is not None:
                 if hasattr(os, "fchmod"):

@@ -46,6 +46,7 @@ class _TeammateLLM(LLMAdapter):
 class _IdleHooks:
     def __init__(self) -> None:
         self.idle = asyncio.Event()
+        self._session_started = False
 
     def has_hooks(self, event):
         return False
@@ -53,11 +54,23 @@ class _IdleHooks:
     def bind_runtime(self, **_):
         return None
 
+    def fork_for_subagent(self, **_):
+        return self
+
+    async def finalize_async_hooks(self):
+        return None
+
     async def run_task_created(self, **_):
         return HookResult()
 
     async def run_subagent_start(self, **_):
         return HookResult()
+
+    async def run_subagent_start_once(self, **kwargs):
+        if self._session_started:
+            return HookResult()
+        self._session_started = True
+        return await self.run_subagent_start(**kwargs)
 
     async def run_subagent_stop(self, **_):
         return HookResult()

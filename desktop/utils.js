@@ -216,8 +216,26 @@ async function findAvailablePort(startPort, host = BACKEND_HOST) {
 // Logging
 // ---------------------------------------------------------------------------
 
+const DESKTOP_LOG_MAX_BYTES = 8 * 1024 * 1024;
+
 function getDesktopLogPath() {
   return path.join(app.getPath("userData"), "desktop.log");
+}
+
+// An oversized log is renamed to `<log>.1` before the next line is appended,
+// replacing the previous rotated copy, so the two files together stay bounded.
+function rotateDesktopLogIfOversized(logPath, maxBytes = DESKTOP_LOG_MAX_BYTES) {
+  let size = 0;
+  try {
+    size = fs.statSync(logPath).size;
+  } catch {
+    return false;
+  }
+  if (size < maxBytes) return false;
+  const rotated = `${logPath}.1`;
+  fs.rmSync(rotated, { force: true });
+  fs.renameSync(logPath, rotated);
+  return true;
 }
 
 function appendDesktopLog(message) {
@@ -225,6 +243,7 @@ function appendDesktopLog(message) {
     const line = `[${new Date().toISOString()}] ${String(message)}\n`;
     const logPath = getDesktopLogPath();
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    rotateDesktopLogIfOversized(logPath);
     fs.appendFileSync(logPath, line, "utf8");
   } catch {
     // Best-effort logging only.
@@ -239,6 +258,7 @@ module.exports = {
   // Constants
   BACKEND_HOST,
   BINARY_READ_DENY_EXTENSIONS,
+  DESKTOP_LOG_MAX_BYTES,
 
   // Path / URL
   normalizeWithTrailingSeparator,
@@ -264,5 +284,6 @@ module.exports = {
 
   // Logging
   getDesktopLogPath,
+  rotateDesktopLogIfOversized,
   appendDesktopLog,
 };

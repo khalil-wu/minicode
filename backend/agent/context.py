@@ -79,6 +79,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ContextBuilder owns model history and its projection, while plan ownership,
+# UI state and task provenance belong to the enclosing conversation.
+MODEL_CONTEXT_SNAPSHOT_KEYS = frozenset({
+    "context_schema_version", "guardian_evidence", "history", "history_frozen_count", "turn_admissions",
+    "persistent_notes", "extension_state", "extension_cursor", "read_file_hashes", "compaction_count",
+    "git_status_context", "git_status_workspace", "execution_cwd", "invoked_skills",
+    "consecutive_autocompact_failures", "context_ledger", "context_window_state",
+    "inactive_context_windows", "history_notes_hint",
+})
+
 
 class CompactionNoopError(RuntimeError):
     """Raised when the current history has no safe compaction boundary."""
@@ -4473,6 +4483,7 @@ class ContextBuilder:
         start = 0 if since_revision is None else self._history_store.changed_since(since_revision)
         after = self.export_snapshot(history_from=start)
         after["history_frozen_count"] = self._history_frozen_count
+        before = {key: value for key, value in before.items() if key in MODEL_CONTEXT_SNAPSHOT_KEYS}
         if since_revision is None:
             return context_snapshot_delta(before, after), revision
         delta = context_snapshot_delta(

@@ -89,8 +89,7 @@ def test_catalog_and_image_tool_specs_do_not_read_credentials(monkeypatch):
         _model_runtime_for_conversation=lambda _identity: catalog)
     monkeypatch.setattr(routes_agents._state, "ws_manager", SimpleNamespace(iter_sessions=lambda: [session]))
     assert any(model["model"] == "selected-model" for model in routes_agents._live_agent_model_catalog())
-    tool = GenerateImageTool(settings_snapshot=settings, provider="custom")
-    assert tool.get_spec().exposure == "core"
+    tool = GenerateImageTool()
     assert tool.get_spec().exposure == "core"
 
     # A real auth boundary reads the current key, including subsequent edits.

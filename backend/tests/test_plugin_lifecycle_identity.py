@@ -99,3 +99,37 @@ def test_uninstall_failure_restores_both_storage_locations(plugin_home, monkeypa
     assert projection.is_dir()
     assert store_path.is_dir()
     assert [plugin["id"] for plugin in service.get_plugin_settings()["plugins"]] == ["review@team-a"]
+
+
+def test_uninstall_rollback_cleans_staging_only_after_restoring_legacy_projection(plugin_home, monkeypatch):
+    result = install(plugin_home, "team-a")
+    legacy = plugin_install_root() / "review-team-a"
+    shutil.copytree(Path(result["imported"]["path"]), legacy)
+
+    def fail_save(_data):
+        raise OSError("settings write failed")
+
+    monkeypatch.setattr(service, "_write_settings_json", fail_save)
+    with pytest.raises(OSError, match="settings write failed"):
+        asyncio.run(service.remove_plugin("review@team-a", settings_file=plugin_home[1], config_change_hook=allow_change))
+    assert legacy.is_dir()
+    removals = plugin_install_root() / ".removals"
+    assert not list(removals.iterdir())
+
+
+def test_uninstall_rollback_keeps_staged_projection_if_original_reappears(plugin_home, monkeypatch):
+    result = install(plugin_home, "team-a")
+    legacy = plugin_install_root() / "review-team-a"
+    shutil.copytree(Path(result["imported"]["path"]), legacy)
+
+    def fail_save(_data):
+        legacy.mkdir()
+        (legacy / "new-user-file").write_text("keep")
+        raise OSError("settings write failed")
+
+    monkeypatch.setattr(service, "_write_settings_json", fail_save)
+    with pytest.raises(OSError, match="settings write failed"):
+        asyncio.run(service.remove_plugin("review@team-a", settings_file=plugin_home[1], config_change_hook=allow_change))
+    assert (legacy / "new-user-file").read_text() == "keep"
+    staged = list((plugin_install_root() / ".removals").glob("*/0-*/.minicode-plugin/plugin.json"))
+    assert len(staged) == 1

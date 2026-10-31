@@ -4,6 +4,7 @@ import json
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -38,6 +39,7 @@ from backend.plugins.manifest import (
     _load_plugin_manifest,
     _manifest_component_counts,
     _manifest_mcp_server_names,
+    _manifest_mcp_servers,
     _manifest_source_descriptor,
     _merge_manifest_metadata,
     _plugin_marketplace_for_manifest,
@@ -264,6 +266,12 @@ def _clear_user_plugin_enablement(settings_data: dict[str, Any], plugin_id: str)
             settings_data.pop("plugins", None)
 
 
+class PluginInventory(dict[str, Any]):
+    def __init__(self, payload: dict[str, Any], runtime_manifests: Mapping[Path, Any]) -> None:
+        super().__init__(payload)
+        self.runtime_manifests = dict(runtime_manifests)
+
+
 def get_plugin_settings(
     plugin_roots: Iterable[Path] | None = None,
     *,
@@ -310,11 +318,14 @@ def get_plugin_settings(
     )
     plugins_enabled = feature_flags.enabled("plugins")
     inventory: dict[str, dict[str, Any]] = {}
+    loaded_manifests = {}
 
     for manifest_path in _iter_plugin_manifests(roots):
         plugin_dir = plugin_directory_for_manifest(manifest_path)
-        raw_manifest = _read_plugin_manifest(manifest_path)
-        name = plugin_name_from_manifest(manifest_path) or plugin_dir.name
+        loaded = _load_plugin_manifest(manifest_path)
+        loaded_manifests[manifest_path.expanduser().absolute()] = loaded
+        raw_manifest = loaded.payload if loaded is not None else None
+        name = str((raw_manifest or {}).get("name") or "").strip() or plugin_dir.name
         store_validation_error = _validate_versioned_store_path(plugin_dir, roots)
         marketplace = _plugin_marketplace_for_manifest(
             manifest_path,
@@ -388,7 +399,7 @@ def get_plugin_settings(
         else:
             entry.setdefault("store_valid", True)
         entry["manifest_paths"].append(str(manifest_path))
-        _merge_manifest_metadata(entry, manifest_path)
+        _merge_manifest_metadata(entry, manifest_path, loaded=loaded)
         if isinstance(raw_manifest, Mapping):
             dependencies = raw_manifest.get("dependencies")
             if isinstance(dependencies, str):
@@ -403,11 +414,12 @@ def get_plugin_settings(
             )
         if entry.get("manifest_format") == "agent_plugin":
             entry["runtime_support"].update(hooks=False, extensions=False)
-        counts = _manifest_component_counts(manifest_path, plugin_id=plugin_id)
+        servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id)
+        counts = _manifest_component_counts(manifest_path, plugin_id=plugin_id, loaded=loaded, servers=servers)
         entry["mcp_server_count"] += counts["mcp_server_count"]
         entry["mcp_server_names"] = sorted({
             *entry.get("mcp_server_names", []),
-            *_manifest_mcp_server_names(manifest_path, plugin_id=plugin_id),
+            *_manifest_mcp_server_names(manifest_path, plugin_id=plugin_id, loaded=loaded, servers=servers),
         }, key=str.casefold)
         entry["app_count"] += counts["app_count"]
         entry["hook_count"] += counts["hook_count"]
@@ -416,7 +428,8 @@ def get_plugin_settings(
     inventory = _prefer_active_store_entries(inventory)
     for entry in inventory.values():
         plugin_dir = Path(str(entry["path"]))
-        entry["skill_count"] = _count_plugin_skills(plugin_dir, [Path(path) for path in entry["manifest_paths"]])
+        entry["skill_count"] = _count_plugin_skills(plugin_dir, [Path(path) for path in entry["manifest_paths"]],
+                                                     loaded_manifests=loaded_manifests)
         entry["installed_version"] = str(entry.get("version") or "")
         if str((entry.get("provenance") or {}).get("store") or "") == "versioned":
             entry["active_version"] = plugin_dir.name
@@ -522,8 +535,14 @@ def get_plugin_settings(
         effective_policy,
         configured_states=configured_states,
         plugins_enabled=plugins_enabled,
+        loaded_manifests=loaded_manifests,
     )
-    return {
+    runtime_manifests = {
+        path: replace(loaded, payload={key: loaded.payload[key] for key in ("hooks", "extensions") if key in loaded.payload})
+        if loaded is not None else None
+        for path, loaded in loaded_manifests.items()
+    }
+    return PluginInventory({
         "plugins": plugins,
         "disabled": sorted(
             {
@@ -555,7 +574,7 @@ def get_plugin_settings(
         "dependency_errors": dependency_error_payload,
         "snapshot_version": 2,
         "fingerprint": fingerprint,
-    }
+    }, runtime_manifests)
 
 
 def _plugin_inventory_fingerprint(
@@ -564,12 +583,17 @@ def _plugin_inventory_fingerprint(
     *,
     configured_states: Mapping[str, Any] | None = None,
     plugins_enabled: bool = True,
+    loaded_manifests: Mapping[Path, Any] | None = None,
 ) -> str:
     material: list[dict[str, Any]] = []
     for entry in plugins:
         manifests: list[dict[str, Any]] = []
         for raw_path in entry.get("manifest_paths", ()) if isinstance(entry, Mapping) else ():
             path = Path(str(raw_path))
+            loaded = loaded_manifests.get(path.expanduser().absolute()) if loaded_manifests is not None else None
+            if loaded is not None:
+                manifests.append({"path": str(path), "sha256": loaded.content_digest})
+                continue
             try:
                 stat = path.stat()
                 manifests.append({"path": str(path), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
@@ -745,10 +769,11 @@ async def remove_plugin(
                 staged.replace(original)
         raise
     finally:
-        if removal_root.exists() and not moved:
+        if removal_root.exists() and not any(staged.exists() for _, staged in moved):
             _remove_within_root(removal_root, install_root)
 
-    _remove_within_root(removal_root, install_root)
+    if moved:
+        _remove_within_root(removal_root, install_root)
     if store_removal is not None:
         from backend.plugins.store import PluginStore
 
@@ -1079,6 +1104,7 @@ def load_enabled_plugin_hook_sources(
     sources: list[dict[str, Any]] = []
     seen_manifests: set[str] = set()
     snapshot = get_plugin_snapshot(config_stack=config_stack)
+    loaded_manifests = getattr(snapshot, "runtime_manifests", None)
     if snapshot.get("plugins_enabled") is False:
         return []
     for plugin in snapshot.get("plugins", []):
@@ -1093,7 +1119,7 @@ def load_enabled_plugin_hook_sources(
             if key in seen_manifests:
                 continue
             seen_manifests.add(key)
-            loaded = _load_plugin_manifest(manifest_path)
+            loaded = loaded_manifests.get(manifest_path.expanduser().absolute()) if loaded_manifests is not None else _load_plugin_manifest(manifest_path)
             if loaded is None or loaded.format == "agent_plugin":
                 continue
             manifest = loaded.payload
@@ -1141,6 +1167,7 @@ def load_enabled_plugin_hook_sources(
 def load_enabled_plugin_extension_sources(
     *,
     config_stack: Any | None = None,
+    snapshot: Mapping[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Resolve enabled plugin extension declarations without executing code.
 
@@ -1156,7 +1183,8 @@ def load_enabled_plugin_extension_sources(
 
     sources: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
-    snapshot = get_plugin_snapshot(config_stack=config_stack)
+    snapshot = snapshot if snapshot is not None else get_plugin_snapshot(config_stack=config_stack)
+    loaded_manifests = getattr(snapshot, "runtime_manifests", None)
     if snapshot.get("plugins_enabled") is False:
         return []
     for plugin in snapshot.get("plugins", []):
@@ -1217,7 +1245,7 @@ def load_enabled_plugin_extension_sources(
                 )
                 continue
             try:
-                loaded = _load_plugin_manifest(manifest_resolved)
+                loaded = loaded_manifests.get(manifest_path) if loaded_manifests is not None else _load_plugin_manifest(manifest_resolved)
             except ValueError as exc:
                 sources.append(
                     {

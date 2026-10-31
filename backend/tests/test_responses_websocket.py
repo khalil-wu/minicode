@@ -188,7 +188,7 @@ def test_exhausted_websocket_retries_switch_to_http_with_a_new_attempt(tmp_path,
 
 
 @asynccontextmanager
-async def endpoint(responder, *, http_client=None, process_request=None):
+async def endpoint(responder, *, http_client=None, process_request=None, compression="deflate"):
     requests, connections = [], []
     async def handler(socket):
         connections.append(socket)
@@ -196,7 +196,7 @@ async def endpoint(responder, *, http_client=None, process_request=None):
             request = json.loads(raw)
             requests.append(request)
             await responder(socket, request, len(requests))
-    async with serve(handler, "127.0.0.1", 0, max_size=None, close_timeout=1, process_request=process_request) as server:
+    async with serve(handler, "127.0.0.1", 0, max_size=None, close_timeout=1, process_request=process_request, compression=compression) as server:
         port = server.sockets[0].getsockname()[1]
         adapter = OpenAIAdapter(LLMSettings(api_key="fixture", provider="openai", model="fixture-model",
             base_url=f"http://127.0.0.1:{port}/v1", wire_api="responses", proxy_mode="direct", responses_websocket=True), http_client=http_client)
@@ -515,6 +515,39 @@ def test_large_opaque_reasoning_frames_round_trip_without_truncation():
             await collect(adapter, [*messages, LLMMessage(role="assistant", provider_items=done.provider_items), LLMMessage(role="user", content="next")])
             assert requests[1]["previous_response_id"] == "1"
             assert requests[1]["input"] == [{"role": "user", "content": "next"}]
+    asyncio.run(scenario())
+
+
+def test_source_frame_limit_rejects_oversized_message_and_discards_the_connection():
+    async def scenario():
+        async def respond(socket, _request, index):
+            if index == 1:
+                await socket.send(json.dumps({"type": "response.output_text.delta", "delta": "x" * (16 << 20)}))
+            else:
+                await socket.send(json.dumps(terminal("recovered")))
+        async with endpoint(respond, compression=None) as (adapter, requests, connections):
+            messages = [LLMMessage(role="user", content="work")]
+            events = await collect(adapter, messages)
+            assert any(event.type == StreamEventType.ERROR for event in events)
+            assert adapter._responses_websocket.idle is None
+            events = await collect(adapter, messages)
+            assert any(event.type == StreamEventType.DONE for event in events)
+            assert len(connections) == 2 and "previous_response_id" not in requests[1]
+    asyncio.run(scenario())
+
+
+def test_fragmented_message_limit_applies_across_frames(monkeypatch):
+    from backend.llm import responses_websocket
+    monkeypatch.setattr(responses_websocket, "RESPONSES_WEBSOCKET_MAX_MESSAGE_BYTES", 4096)
+    monkeypatch.setattr(responses_websocket, "RESPONSES_WEBSOCKET_MAX_FRAME_BYTES", 1024)
+    async def scenario():
+        async def respond(socket, _request, _index):
+            message = json.dumps({"type": "response.output_text.delta", "delta": "x" * 5000})
+            await socket.send([message[index:index + 900] for index in range(0, len(message), 900)])
+        async with endpoint(respond, compression=None) as (adapter, _requests, _connections):
+            events = await collect(adapter, [LLMMessage(role="user", content="work")])
+            assert any(event.type == StreamEventType.ERROR for event in events)
+            assert adapter._responses_websocket.idle is None
     asyncio.run(scenario())
 
 

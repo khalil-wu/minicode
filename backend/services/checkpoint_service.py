@@ -14,6 +14,7 @@ class CheckpointServiceError(ValueError):
 class CheckpointListResult:
     conversation_id: str
     checkpoints: list[dict[str, Any]]
+    corrupt_count: int = 0
 
 
 @dataclass
@@ -67,7 +68,7 @@ def list_checkpoints(
     bounded_limit = max(1, min(int(limit or 50), 200))
     expected_session = str(session_id or "").strip()
     expected_workspace = _checkpoint_workspace(workspace_root, execution_context)
-    records = checkpoint_manager.list_for_conversation(target_conversation_id, limit=200)
+    records, scan_status = checkpoint_manager.list_for_conversation_with_status(target_conversation_id, limit=200)
     records = [
         record
         for record in records
@@ -81,6 +82,7 @@ def list_checkpoints(
     return CheckpointListResult(
         conversation_id=target_conversation_id,
         checkpoints=[record.to_public_dict() for record in records],
+        corrupt_count=len(scan_status.corrupt_files),
     )
 
 

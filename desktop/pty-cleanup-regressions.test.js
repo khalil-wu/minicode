@@ -16,6 +16,7 @@ test("timed-out PTY termination retains its session, permits retry and blocks re
     onData() {},
     onExit(fn) { exitHandler = fn; },
     kill() { killCalls += 1; },
+    forceKill() { return this.kill(); },
   };
   const moduleBox = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "pty-manager.js"), "utf8"), {
@@ -50,7 +51,7 @@ test("timed-out PTY termination retains its session, permits retry and blocks re
   assert.notEqual(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);
   assert.equal(await manager.restartSession(session.session_id, "owned-fixture", "fixture-window"), null);
   assert.equal(spawnCalls, 1);
-  assert.equal(killCalls, 2);
+  assert.equal(killCalls, 4);
   await assert.rejects(manager.killAllSessions(), /Terminal cleanup did not finish/);
   assert.equal(manager.listActiveSessions().length, 1);
   fakePty.kill = () => { throw new Error("Native PTY stop failure"); };

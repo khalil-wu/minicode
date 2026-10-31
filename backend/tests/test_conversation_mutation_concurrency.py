@@ -173,6 +173,64 @@ def test_conversation_delete_task_survives_initiator_disconnect(monkeypatch) -> 
     asyncio.run(scenario())
 
 
+def test_detached_delete_uses_the_request_bound_to_its_fence(monkeypatch) -> None:
+    async def scenario() -> None:
+        manager = WebSocketManager()
+        session = SimpleNamespace(ws_manager=manager, is_connected=True)
+        seen = []
+
+        async def detached_delete(_session, request):
+            seen.append(request)
+            return True
+
+        monkeypatch.setattr(conversation_handlers, "_handle_conversation_delete_fenced", detached_delete)
+        data = {"conversation_id": "original", "force": False,
+                "storage_review": {"revision": {"value": 1}}}
+        await conversation_handlers.handle_conversation_delete(session, data)
+        data["conversation_id"] = "other"
+        data["force"] = True
+        data["storage_review"]["revision"]["value"] = 2
+        await asyncio.gather(*tuple(manager._conversation_delete_tasks))
+
+        assert len(seen) == 1
+        assert seen[0].conversation_id == "original"
+        assert seen[0].force_cleanup is False
+        assert seen[0].storage_review == {"revision": {"value": 1}}
+        assert manager.conversation_delete_fence("original") is None
+
+    asyncio.run(scenario())
+
+
+def test_failed_conversation_stop_retains_and_pauses_queued_input(monkeypatch) -> None:
+    from backend.agent import runtime as runtime_module
+    from backend.ws.run_manager import SessionRunManager
+
+    async def scenario() -> None:
+        session = SimpleNamespace(session_id="", is_connected=True, ws_manager=None,
+            running_agent_task_for=lambda _: None, cancel_agent_runs=AsyncMock(), send_event=AsyncMock())
+        session.run_manager = SessionRunManager(session)
+        try:
+            target = UserCommand(type="user_message", data={"assistant_message_id": "queued-a",
+                "user_message_id": "user-a", "content": "keep this", "attachments": [{"artifact_id": "image-1"}]})
+            other = UserCommand(type="user_message", data={"assistant_message_id": "queued-b", "content": "other"})
+            session.run_manager.enqueue_user_message("target", target)
+            session.run_manager.enqueue_user_message("other", other)
+            runtime = SimpleNamespace(stop_subagent_tasks_for_conversation=AsyncMock(return_value=False))
+            monkeypatch.setattr(runtime_module, "default_runtime_if_initialized", lambda: runtime)
+
+            assert not await conversation_handlers._stop_conversation_run(session, "target", reason="conversation_deleted")
+            assert session.run_manager.queued_user_messages("target") == [target]
+            assert session.run_manager.queued_user_messages("other") == [other]
+            assert session.run_manager.dequeue_user_message("target") is None
+            assert session.run_manager.queued_user_message_snapshot("target")[0]["paused"] is True
+            event = session.send_event.await_args.args[0]
+            assert event.data["message_id"] == "queued-a" and event.data["paused"] is True
+        finally:
+            await session.run_manager.shutdown_notification_wakes()
+
+    asyncio.run(scenario())
+
+
 def test_manager_shutdown_drains_detached_conversation_delete(monkeypatch) -> None:
     async def scenario() -> None:
         manager = WebSocketManager()
@@ -619,6 +677,16 @@ def test_worktree_cleanup_rejects_active_query_before_git_mutation(monkeypatch) 
     assert result.kwargs["data"]["reason"] == "run_active"
 
 
+def test_worktree_cleanup_rejects_string_force_before_touching_workspace() -> None:
+    repository = SimpleNamespace(get_conversation=Mock())
+    session = _command_result_session(conversation_id="target", repository=repository)
+    session.send_event = AsyncMock()
+    asyncio.run(conversation_handlers.handle_conversation_worktree_cleanup(
+        session, {"conversation_id": "target", "force": "false"}))
+    repository.get_conversation.assert_not_called()
+    assert "force must be a boolean" in session.send_event.await_args.args[0].data["message"]
+
+
 def test_worktree_cleanup_rebinds_and_projects_all_active_windows(monkeypatch) -> None:
     target = SimpleNamespace(
         id="conv_cleanup_success",
@@ -965,6 +1033,9 @@ def test_local_to_worktree_binding_failure_restores_source_and_removes_created_g
         def __init__(self, root):
             assert root == source
 
+        def has_local_changes(self, _path, *, include_ignored=True):
+            return False
+
         def remove_worktree(self, path, *, force: bool, run_environment: bool):
             assert path == worktree
             assert force is True
@@ -1002,7 +1073,7 @@ def test_local_to_worktree_binding_failure_restores_source_and_removes_created_g
         conversation_id=conversation.id,
         target_kind="worktree",
         dirty_action="stash",
-        preflight={"conversation_id": conversation.id},
+        preflight={"conversation_id": conversation.id, "source": {"path": str(source)}},
     ))
 
     assert order == [
@@ -1033,7 +1104,7 @@ def test_worktree_handoff_stash_failure_stops_before_workspace_mutation(
         worktree_path="",
         git_isolated=False,
     )
-    session = SimpleNamespace(emit_command_result=AsyncMock())
+    session = SimpleNamespace(emit_command_result=AsyncMock(), main_worktree_root=lambda _path: source)
     calls: list[str] = []
 
     def fail_stash(path, *, label: str):
@@ -1054,6 +1125,8 @@ def test_worktree_handoff_stash_failure_stops_before_workspace_mutation(
         "backend.services.conversation_payload_service.create_isolated_worktree_binding",
         should_not_create,
     )
+    monkeypatch.setattr("backend.workspace.worktree.WorktreeManager", lambda _root: SimpleNamespace(
+        has_local_changes=lambda *_args, **_kwargs: False))
 
     asyncio.run(
         conversation_handlers._handle_conversation_worktree_handoff_claimed(
@@ -1062,7 +1135,7 @@ def test_worktree_handoff_stash_failure_stops_before_workspace_mutation(
             conversation_id=conversation.id,
             target_kind="worktree",
             dirty_action="stash",
-            preflight={"conversation_id": conversation.id},
+            preflight={"conversation_id": conversation.id, "source": {"path": str(source)}},
         )
     )
 
@@ -1071,7 +1144,7 @@ def test_worktree_handoff_stash_failure_stops_before_workspace_mutation(
     assert result.args[0] == "conversation.worktree.handoff.execute"
     assert "index is locked" in result.args[1]
     assert result.kwargs["level"] == "error"
-    assert result.kwargs["data"] == {"conversation_id": conversation.id}
+    assert result.kwargs["data"] == {"conversation_id": conversation.id, "source": {"path": str(source)}}
 
 
 def test_worktree_to_local_binding_failure_recreates_worktree_before_restoring_stash(
@@ -1137,11 +1210,16 @@ def test_worktree_to_local_binding_failure_recreates_worktree_before_restoring_s
         def __init__(self, root):
             assert root == base_root
 
-        def remove_worktree(self, path, *, force: bool):
+        def has_local_changes(self, path, *, include_ignored=True):
+            assert path == source
+            return False
+
+        def safe_remove_worktree(self, path, *, force: bool, conversation_id: str, branch: str):
             assert path == source
             assert force is False
+            assert conversation_id == conversation.id and branch == conversation.git_branch
             order.append("remove-worktree")
-            return True
+            return SimpleNamespace(removed=True, snapshot=None, head="", error=None)
 
         def create_worktree(self, path, *, branch: str, new_branch: bool, run_environment: bool):
             assert path == source
@@ -1196,6 +1274,7 @@ def test_worktree_to_local_binding_failure_recreates_worktree_before_restoring_s
         dirty_action="stash",
         preflight={
             "conversation_id": conversation.id,
+            "source": {"path": str(source)},
             "main_checkout": {
                 "path": str(base_root),
                 "branch": "main",

@@ -29,6 +29,7 @@ class TurnWaitState:
 
     pending_approvals: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
     pending_approval_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pending_approval_inputs: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_approval_responses: dict[str, dict[str, Any]] = field(default_factory=dict)
     pending_user_input: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
     pending_elicitations: dict[str, asyncio.Future[Any]] = field(default_factory=dict)
@@ -80,6 +81,7 @@ class TurnWaitState:
 
         key = str(request_id or "").strip()
         self.approval_notification_claims.pop(key, None)
+        self.pending_approval_inputs.pop(key, None)
         future = self.pending_approvals.pop(key, None)
         for waiters in (
             self.pending_user_input,
@@ -112,6 +114,7 @@ class TurnWaitState:
                 future.cancel()
         self.pending_approvals.clear()
         self.pending_approval_payloads.clear()
+        self.pending_approval_inputs.clear()
         self.pending_approval_responses.clear()
         self.pending_user_input.clear()
         self.pending_elicitations.clear()

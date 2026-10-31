@@ -539,6 +539,8 @@ class ConversationRepository:
         *,
         title: str | None = None,
         branch_kind: str = "clone",
+        idempotency_key: str = "",
+        activate: bool = False,
     ) -> ConversationRecord | None:
         """Create an independent, replayable copy of a conversation.
 
@@ -547,16 +549,37 @@ class ConversationRepository:
         clone can therefore be resumed safely without allowing either session
         to delete the same worktree.
         """
-        with self._store_lock(conversation_id):
+        if idempotency_key:
+            identity = f"clone:{idempotency_key}"
+            clone_id = "conv_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+            request = json.dumps({"source": conversation_id, "title": title, "branch_kind": branch_kind, "activate": activate},
+                                 ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            creation_command_id = identity + ":" + hashlib.sha256(request.encode("utf-8")).hexdigest()
+            lock_ids = (conversation_id, clone_id)
+        else:
+            clone_id = f"conv_{uuid.uuid4().hex[:12]}"
+            creation_command_id = ""
+            lock_ids = (conversation_id,)
+        with self._store_lock(*lock_ids):
             source = self._load_record_for_mutation(conversation_id)
             if source is None:
                 return None
+            if idempotency_key:
+                existing = self._load_record(clone_id)
+                if existing is not None:
+                    if existing.creation_command_id != creation_command_id:
+                        raise ConversationCreationUnavailableError("The clone command id is already bound to a different request")
+                    return existing
+                if self._read_manifest(clone_id, log_errors=False) is not None:
+                    raise ConversationCreationUnavailableError("The conversation created by this clone command is unavailable")
             clone = copy.deepcopy(source)
-            clone.id = f"conv_{uuid.uuid4().hex[:12]}"
+            clone.id = clone_id
             rebind_transcript_turn_diffs(clone.transcript, clone.id)
-            clone.creation_command_id = ""
+            clone.creation_command_id = creation_command_id
             clone.revision = 0
             clone.agent_mode_revision = 0
+            clone.permission_mode_revision = 0
+            clone.workspace_binding_revision = 0
             clone.created_at = utc_now_iso()
             clone.updated_at = clone.created_at
             clone.title = (title or f"{source.title} · 副本").strip()[:120] or "New chat"
@@ -1165,6 +1188,11 @@ class ConversationRepository:
         rewind_projection: dict[str, Any] | None = None,
         agent_mode: str | None = None,
         expected_agent_mode_revision: int | None = None,
+        permission_mode: str | None = None,
+        expected_permission_mode_revision: int | None = None,
+        workspace_binding: dict[str, Any] | None = None,
+        expected_workspace_binding_revision: int | None = None,
+        execution_cwd: str = "",
     ) -> ConversationRecord | None:
         """Admit one user and, for steer, its ordered physical-turn boundary."""
 
@@ -1238,6 +1266,16 @@ class ConversationRepository:
                     and record.agent_mode_revision == expected_agent_mode_revision):
                 record.agent_mode = normalize_conversation_agent_mode(agent_mode)
                 record.agent_mode_revision += 1
+            if (permission_mode is not None and expected_permission_mode_revision is not None
+                    and record.permission_mode_revision == expected_permission_mode_revision):
+                self._apply_permission_mode(record, normalize_permission_mode(permission_mode))
+            if (expected_workspace_binding_revision is not None
+                    and record.workspace_binding_revision == expected_workspace_binding_revision):
+                if workspace_binding is not None:
+                    self._apply_workspace_binding(record, **workspace_binding, update_sidebar=False)
+                elif execution_cwd and not record.execution_cwd:
+                    record.execution_cwd = execution_cwd
+                    record.workspace_binding_revision += 1
             record.message_count = len(record.transcript)
             if record.title == "New chat":
                 record.title = _derive_title(str(next_message.get("display_content", next_message.get("content", ""))))
@@ -1465,14 +1503,16 @@ class ConversationRepository:
     ) -> ConversationRecord | None:
         next_mode = normalize_permission_mode(permission_mode)
 
-        def mutate(record: ConversationRecord) -> None:
-            if next_mode == "plan" and record.permission_mode != "plan":
-                record.permission_previous_mode = record.permission_mode
-            elif next_mode != "plan":
-                record.permission_previous_mode = ""
-            record.permission_mode = next_mode
+        return self._mutate_meta(conversation_id, lambda record: self._apply_permission_mode(record, next_mode))
 
-        return self._mutate_meta(conversation_id, mutate)
+    @staticmethod
+    def _apply_permission_mode(record: ConversationRecord, next_mode: str) -> None:
+        if next_mode == "plan" and record.permission_mode != "plan":
+            record.permission_previous_mode = record.permission_mode
+        elif next_mode != "plan":
+            record.permission_previous_mode = ""
+        record.permission_mode = next_mode
+        record.permission_mode_revision += 1
 
     def update_permission_rules(
         self,
@@ -1499,45 +1539,80 @@ class ConversationRepository:
         git_isolated: bool | None = None,
         execution_cwd: str | None = None,
     ) -> ConversationRecord | None:
-        def mutate(record: ConversationRecord) -> None:
-            from backend.conversations.sidebar_order import conversation_project_key
+        return self._mutate_meta(conversation_id, lambda record: self._apply_workspace_binding(record,
+            workspace_root=workspace_root, git_branch=git_branch, worktree_path=worktree_path,
+            git_isolated=git_isolated, execution_cwd=execution_cwd))
 
-            previous_project = conversation_project_key(record)
-            previous_directory = record.worktree_path or record.workspace_root
-            if record.worktree_path and record.worktree_path != worktree_path:
-                from backend.conversations.thread_resources import worktree_identity
-                previous_identity = worktree_identity(record.worktree_path)
-                record.resource_references = [item for item in record.resource_references
-                    if item["attachment_type"] != "worktree" or item["identity_key"] != previous_identity]
-            if execution_cwd is not None:
-                record.execution_cwd = str(Path(execution_cwd).expanduser().resolve())
-            elif not record.execution_cwd:
-                record.execution_cwd = str(Path(worktree_path or workspace_root).expanduser().resolve()) if worktree_path or workspace_root else record.execution_cwd
-            elif previous_directory and (worktree_path or workspace_root) and previous_directory != (worktree_path or workspace_root):
-                current_directory = Path(record.execution_cwd).expanduser().resolve()
-                previous_root = Path(previous_directory).expanduser().resolve()
-                if current_directory.is_relative_to(previous_root):
-                    record.execution_cwd = str(Path(worktree_path or workspace_root).expanduser().resolve() / current_directory.relative_to(previous_root))
-            record.workspace_root = workspace_root
-            record.git_branch = git_branch
-            record.worktree_path = worktree_path
-            if worktree_path:
-                from backend.conversations.thread_resources import set_worktree_reference
-                set_worktree_reference(record, worktree_path, workspace_root)
-            if git_isolated is not None:
-                record.git_isolated = bool(git_isolated)
-            if conversation_project_key(record) != previous_project:
-                self._prepend_sidebar_occurrence(record, recent=False)
+    def _apply_workspace_binding(self, record: ConversationRecord, *, workspace_root: str = "", git_branch: str = "",
+                                 worktree_path: str = "", git_isolated: bool | None = None,
+                                 execution_cwd: str | None = None, update_sidebar: bool = True) -> None:
+        from backend.conversations.sidebar_order import conversation_project_key
 
-        return self._mutate_meta(conversation_id, mutate)
+        previous_project = conversation_project_key(record)
+        previous_directory = record.worktree_path or record.workspace_root
+        if record.worktree_path and record.worktree_path != worktree_path:
+            from backend.conversations.thread_resources import worktree_identity
+            previous_identity = worktree_identity(record.worktree_path)
+            record.resource_references = [item for item in record.resource_references
+                if item["attachment_type"] != "worktree" or item["identity_key"] != previous_identity]
+        if execution_cwd is not None:
+            record.execution_cwd = str(Path(execution_cwd).expanduser().resolve())
+        elif not record.execution_cwd:
+            record.execution_cwd = str(Path(worktree_path or workspace_root).expanduser().resolve()) if worktree_path or workspace_root else record.execution_cwd
+        elif previous_directory and (worktree_path or workspace_root) and previous_directory != (worktree_path or workspace_root):
+            current_directory = Path(record.execution_cwd).expanduser().resolve()
+            previous_root = Path(previous_directory).expanduser().resolve()
+            if current_directory.is_relative_to(previous_root):
+                record.execution_cwd = str(Path(worktree_path or workspace_root).expanduser().resolve() / current_directory.relative_to(previous_root))
+        record.workspace_root = workspace_root
+        record.git_branch = git_branch
+        record.worktree_path = worktree_path
+        if worktree_path:
+            from backend.conversations.thread_resources import set_worktree_reference
+            set_worktree_reference(record, worktree_path, workspace_root)
+        if git_isolated is not None:
+            record.git_isolated = bool(git_isolated)
+        record.workspace_binding_revision += 1
+        if update_sidebar and conversation_project_key(record) != previous_project:
+            self._prepend_sidebar_occurrence(record, recent=False)
 
     def bind_execution_cwd(self, conversation_id: str, actual_cwd: str) -> ConversationRecord | None:
         """Fix an old unbound thread to the directory of its next real operation."""
         def mutate(record: ConversationRecord) -> None:
             if not record.execution_cwd:
                 record.execution_cwd = str(Path(actual_cwd).expanduser().resolve())
+                record.workspace_binding_revision += 1
 
         return self._mutate_meta(conversation_id, mutate)
+
+    def commit_started_turn_settings(self, conversation_id: str, *, execution_cwd: str = "",
+                                     expected_workspace_binding_revision: int | None = None,
+                                     plan_slug: str = "") -> ConversationRecord | None:
+        """Persist automatic/resumed turn ownership after its actual start fact."""
+        from backend.agent.plans import PLAN_SLUG_KEY, PlanFileError, plan_slug_from_snapshot
+
+        with self._store_lock(conversation_id):
+            record = self._load_record_for_mutation(conversation_id)
+            if record is None:
+                return None
+            changed = False
+            if (execution_cwd and not record.execution_cwd
+                    and record.workspace_binding_revision == expected_workspace_binding_revision):
+                record.execution_cwd = execution_cwd
+                record.workspace_binding_revision += 1
+                changed = True
+            if plan_slug:
+                current_slug = plan_slug_from_snapshot(record.context_snapshot)
+                if current_slug and current_slug != plan_slug:
+                    raise PlanFileError("The conversation plan owner changed while this turn was being prepared")
+                if not current_slug:
+                    record.context_snapshot = {**record.context_snapshot, PLAN_SLUG_KEY: plan_slug}
+                    changed = True
+            if changed:
+                record.updated_at = utc_now_iso()
+                self._commit_record(record)
+                self._cache_record(record)
+            return record
 
     def register_worktree(
         self, conversation_id: str, *, path: str, backend: str, workspace_root: str,
@@ -1802,7 +1877,26 @@ class ConversationRepository:
         return bool(root) and any(canonical_file_path_key(root) == canonical_file_path_key(folder) for folder in workspace_roots)
 
     def project_conversation_ids(self, project_path: str, workspace_roots: tuple[str, ...]) -> list[str]:
-        return [record.id for record in self.list_conversations() if self._belongs_to_project(record, project_path, workspace_roots)]
+        keys: dict[str, str] = {}
+
+        def path_key(path: str) -> str:
+            if path not in keys:
+                keys[path] = canonical_file_path_key(path)
+            return keys[path]
+
+        with self._store_lock():
+            self._ensure_summary_index_loaded()
+            selected = []
+            for record in list((self._summary_index or {}).values()):
+                if record.project_id is not None:
+                    matches = bool(record.project_id) and path_key(record.project_id) == path_key(project_path)
+                else:
+                    root = record.worktree_path or record.workspace_root
+                    matches = bool(root) and any(path_key(root) == path_key(folder) for folder in workspace_roots)
+                if matches:
+                    selected.append(record)
+            selected.sort(key=lambda record: (record.created_at, record.id), reverse=True)
+            return [record.id for record in selected]
 
     def remove_project_memberships(self, project_path: str, workspace_roots: tuple[str, ...]) -> list[str]:
         """Source removeLocal detaches membership without changing pins or execution."""
@@ -2538,6 +2632,21 @@ class ConversationRepository:
                 raise TimeoutError(
                     f"Timed out waiting for conversation store lock: {self._store_lock_path}"
                 ) from exc
+
+    @contextmanager
+    def command_result_publication(self, conversation_ids: tuple[str, ...]):
+        """Keep result archival ordered with deletion tombstones."""
+        owners = tuple(sorted({value for value in conversation_ids if _CONVERSATION_ID_PATTERN.fullmatch(value)}))
+        if not owners:
+            yield set()
+            return
+        with self._store_lock(*owners):
+            deleted = set()
+            for owner in owners:
+                manifest = self._read_manifest(owner, log_errors=False)
+                if manifest is not None and self._manifest_is_deleted(manifest):
+                    deleted.add(owner)
+            yield deleted
 
     def _safe_write_text(self, path: Path, text: str, encoding: str = "utf-8") -> None:
         for attempt in range(5):

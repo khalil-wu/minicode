@@ -83,42 +83,53 @@ def test_mcp_schema_still_rejects_unsafe_schema_identifiers():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("drain", [False, True])
-def test_dynamic_command_early_cancel_reaps_real_child(drain):
+@pytest.mark.parametrize("started", [False, True])
+def test_configured_async_command_cancel_reaps_real_child(tmp_path, started):
+    import shlex
+    import psutil
+
     from backend.hooks.manager import HookEvent, HookManager, _HookEntry
-    from backend.hooks.runners import HookRuntimeBindings, PendingAsyncCommand, _drain_started_hook_process, _terminate_hook_operation
-    from backend.hooks.task_output import HookTaskOutput
-    from backend.subprocesses import spawn_exec
+
+    script = tmp_path / "cancel_hook.py"
+    script.write_text(
+        "import os, pathlib, sys, time\n"
+        "sys.stdin.readline()\n"
+        "pathlib.Path(__file__).with_suffix('.pid').write_text(str(os.getpid()))\n"
+        "time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    if sys.platform == "win32":
+        quote = lambda value: "'" + str(value).replace("'", "''") + "'"
+        command, shell = f"& {quote(sys.executable)} {quote(script)}", "powershell"
+    else:
+        command, shell = f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}", "bash"
 
     async def run():
-        process = await spawn_exec(sys.executable, "-I", "-B", "-c", "import time; time.sleep(30)", stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        capture = HookTaskOutput(scope_id="review-early-cancel", task_id="real-child")
-        operation = asyncio.create_task(_drain_started_hook_process(process, b"", capture=capture))
-        manager = HookManager()
-        command = PendingAsyncCommand(process=process, capture=capture, operation=operation, timeout_seconds=30)
-        entry = _HookEntry(matcher=re.compile(".*"), entry_id="early-cancel", command="bounded child")
+        entry = _HookEntry(matcher=re.compile(".*"), entry_id="early-cancel", command=command, shell=shell, run_async=True)
+        manager = HookManager(hooks={HookEvent.USER_PROMPT_SUBMIT: [entry]}, workspace_root=tmp_path)
+        pid_file = script.with_suffix('.pid')
         try:
-            manager._schedule_dynamic_async_command(command, entry, HookEvent.PRE_TOOL_USE, runtime=HookRuntimeBindings())
-            if drain:
-                next(iter(manager._async_tasks)).cancel()
-                await manager.drain_async_hooks()
-            else:
-                await manager.finalize_async_hooks()
-            assert process.returncode is not None
-            assert operation.done()
-            assert capture._finished
+            await manager.run_user_prompt_submit("start")
+            if started:
+                async def wait_for_child():
+                    while not pid_file.exists():
+                        await asyncio.sleep(0.02)
+                await asyncio.wait_for(wait_for_child(), timeout=10)
+            await manager.finalize_async_hooks()
             assert manager.pending_async_hooks == 0
-            assert manager._session_runtime.async_commands == {}
+            if started:
+                assert not psutil.pid_exists(int(pid_file.read_text()))
+            else:
+                assert not pid_file.exists()
             await manager.finalize_async_hooks()
         finally:
-            if process.returncode is None or not operation.done():
-                await _terminate_hook_operation(process, operation, capture)
+            await manager.finalize_async_hooks()
 
     asyncio.run(run())
 
 
 def test_failed_http_hook_does_not_grant_or_rewrite_real_permission_result(monkeypatch):
-    from backend.hooks.manager import HookManager
+    from backend.hooks.manager import HookEvent, HookManager
 
     async def run():
         body = json.dumps({"event": "permission_request", "permission_decision": "allow", "updated_input": {"path": "changed", "content": "changed"}, "continue": False, "system_message": "not successful"}).encode()
@@ -136,9 +147,9 @@ def test_failed_http_hook_does_not_grant_or_rewrite_real_permission_result(monke
         try:
             monkeypatch.setenv("NO_PROXY", "127.0.0.1")
             url = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
-            manager = HookManager.from_settings({"hooks": {"permission_request": [{"matcher": "write_file", "hooks": [{"type": "http", "url": url}]}]}})
-            result = await manager.run_permission_request("write_file", {"path": "original", "content": "original"})
-            assert result.errors and "HTTP 500" in result.errors[0]
+            manager = HookManager.from_settings({"hooks": {"elicitation": [{"matcher": "*", "hooks": [{"type": "http", "url": url}]}]}})
+            result = await manager._run_event(HookEvent.ELICITATION, match_target="fixture")
+            assert any("HTTP 500" in error for error in result.errors)
             assert result.permission_decision == ""
             assert result.updated_input is None
             assert result.prevent_continuation is False
@@ -157,10 +168,10 @@ def test_command_hook_controls_require_success_but_exit_two_still_denies(exit_co
     from backend.hooks.reducer import reduce_hook_executions
 
     entry = _HookEntry(matcher=re.compile(".*"), entry_id="decision", command="decision")
-    body = json.dumps({"event": "pre_tool_use", "permission_decision": "allow", "updated_input": {"path": "changed"}})
+    body = json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": {"path": "changed"}}})
     execution = HookExecution(entry, body, "blocked feedback", exit_code, 0, 0, 1)
     result = reduce_hook_executions(HookEvent.PRE_TOOL_USE, [execution], expected_event_name="pre_tool_use")
-    assert result.permission_decision == {0: "allow", 1: "", 2: "deny"}[exit_code]
+    assert result.permission_decision == {0: "", 1: "", 2: "deny"}[exit_code]
     assert result.updated_input == ({"path": "changed"} if exit_code == 0 else None)
     assert result.blocked is (exit_code == 2)
 

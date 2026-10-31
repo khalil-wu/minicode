@@ -66,7 +66,7 @@ def test_interrupt_discovery_has_short_timeout_no_matcher_and_sync_mcp():
     assert entries[2].run_async is False
     assert len(manager.preview(HookEvent.INTERRUPT, match_target="anything")) == 3
     assert any("Clamping interrupt hook timeout" in warning for warning in snapshot.warnings)
-    assert any("supports command and MCP" in warning for warning in snapshot.warnings)
+    assert any("handler type is not supported by Codex" in warning for warning in snapshot.warnings)
     session_end = snapshot_from_settings(_settings(
         {"type": "mcp_tool", "server": "docs", "tool": "inspect", "input": {}}, event="session_end",
     ), workspace_root=None)

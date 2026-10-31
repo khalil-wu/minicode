@@ -1,6 +1,7 @@
 param([string]$OutputDirectory = "", [string]$TargetDirectory = "")
 $ErrorActionPreference = "Stop"
 $version = "0.158.0-alpha.2.1"
+$toolchain = "1.95.0"
 $archiveHash = "e0a5e3ba9421f3f3f46836974d0396bbd8782721b4913b614ff0267911e0a3ee"
 $desktopRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $desktopRoot ".."))
@@ -30,7 +31,7 @@ function FileSha256([string]$file) {
 
 if (Test-Path -LiteralPath $manifestPath) {
     $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
-    $ready = $manifest.identity -eq "minicode" -and $manifest.upstream_version -eq $version -and $manifest.patch_version -eq 3 -and $manifest.input_sha256 -eq $sourceFingerprint -and $manifest.source_sha256 -eq $archiveHash -and $manifest.owner_namespace -eq "windows-sid+canonical-home-v3" -and $manifest.reported_version -eq "minicode-windows-sandbox $version owner-v3" -and $null -eq $manifest.offline_account -and $null -eq $manifest.online_account
+    $ready = $manifest.identity -eq "minicode" -and $manifest.upstream_version -eq $version -and $manifest.rust_toolchain -eq $toolchain -and $manifest.patch_version -eq 3 -and $manifest.input_sha256 -eq $sourceFingerprint -and $manifest.source_sha256 -eq $archiveHash -and $manifest.owner_namespace -eq "windows-sid+canonical-home-v3" -and $manifest.reported_version -eq "minicode-windows-sandbox $version owner-v3" -and $manifest.desktop_pty_protocol -eq 1 -and $null -eq $manifest.offline_account -and $null -eq $manifest.online_account
     foreach ($name in @("LICENSE.openai-codex", "NOTICE.openai-codex")) {
         $ready = $ready -and (Test-Path -LiteralPath (Join-Path $destinationRoot $name) -PathType Leaf)
     }
@@ -81,6 +82,10 @@ $env:CARGO_TARGET_DIR = if ($TargetDirectory) { [IO.Path]::GetFullPath($TargetDi
 $releaseDir = Join-Path $env:CARGO_TARGET_DIR "release"
 Push-Location (Join-Path $sourceRoot "codex-rs")
 try {
+    $compiler = (& rustc.exe -V | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or -not $compiler.StartsWith("rustc $toolchain ")) {
+        throw "The pinned Windows sandbox Source requires Rust $toolchain"
+    }
     & $cargo.Source build --offline --release -p minicode-sandbox-launcher -p codex-windows-sandbox --bin minicode-sandbox-launcher --bin codex-command-runner --bin codex-windows-sandbox-setup
     if ($LASTEXITCODE -ne 0) { throw "MiniCode Windows sandbox Rust build failed" }
 } finally {
@@ -112,6 +117,10 @@ $reported = (& (Join-Path $destinationRoot "codex.exe") --version | Out-String).
 if ($LASTEXITCODE -ne 0 -or $reported -ne "minicode-windows-sandbox $version owner-v3") {
     throw "Bundled runtime reported an unexpected identity: $reported"
 }
+$desktopPty = (& (Join-Path $destinationRoot "codex.exe") --desktop-pty --identity | ConvertFrom-Json)
+if ($LASTEXITCODE -ne 0 -or $desktopPty.identity -ne "minicode-desktop-pty" -or $desktopPty.protocol -ne 1 -or $desktopPty.sourceVersion -ne $version) {
+    throw "Bundled runtime reported an unexpected desktop PTY contract"
+}
 $hashes = @{}
 foreach ($name in $runtimeFiles) {
     $hashes[$name] = FileSha256 (Join-Path $destinationRoot $name)
@@ -119,6 +128,7 @@ foreach ($name in $runtimeFiles) {
 $manifest = @{
     identity = "minicode"
     upstream_version = $version
+    rust_toolchain = $toolchain
     source_sha256 = $archiveHash
     patch_version = 3
     owner_namespace = "windows-sid+canonical-home-v3"
@@ -126,6 +136,7 @@ $manifest = @{
     files = $hashes
     reported_version = $reported
     managed_network_ready_protocol = 1
+    desktop_pty_protocol = 1
 } | ConvertTo-Json
 [IO.File]::WriteAllText($manifestPath, $manifest + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
 Write-Output "Prepared $reported at $destinationRoot"

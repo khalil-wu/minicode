@@ -23,7 +23,7 @@ function trace(next, details = {}) {
   console.log(JSON.stringify({ phase, elapsedMs: Date.now() - auditStartedAt, ...details }));
 }
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const evidence = path.join(root, "output/playwright/ui-alignment-current");
+const evidence = path.resolve(root, process.env.MINICODE_UI_AUDIT_OUTPUT || "output/playwright/ui-alignment-current");
 const profile = await mkdtemp(path.join(tmpdir(), "minicode-ui-profile-"));
 const workspace = await mkdtemp(path.join(tmpdir(), "minicode-ui-work-"));
 const sourceHome = path.join(profile, "source-home");
@@ -47,6 +47,10 @@ for (let index = 0; index < 30; index++) await writeFile(path.join(sourceHome, "
 
 const model = "ui-audit-loopback";
 const requests = [], wire = [], pageErrors = [], logs = [], captures = [], checks = [];
+// Restore can deliver the same durable server event inside its real replay
+// envelope. Keep the raw wire evidence and inspect its business events too.
+const receivedServerEvents = () => wire.flatMap(({ direction, message }) => direction !== "server" ? []
+  : message.type === "session.replay" ? message.events : [message]);
 let attempts = 0, terminalAttempts = 0, heldResponse, acceptThirdRequest, releaseSecondFailure;
 const thirdRequest = new Promise(resolve => { acceptThirdRequest = resolve; });
 const secondFailure = new Promise(resolve => { releaseSecondFailure = resolve; });
@@ -86,7 +90,7 @@ await new Promise(resolve => portServer.listen(0, "127.0.0.1", resolve));
 const backendPort = portServer.address().port;
 await new Promise(resolve => portServer.close(resolve));
 const { ELECTRON_RUN_AS_NODE: _nodeMode, ...environment } = process.env;
-let app, page, success = false, auditFailure = null;
+let app, page, success = false;
 const deadline = setTimeout(async () => {
   const error = "Current UI audit exceeded its 180-second execution window";
   console.error(JSON.stringify({ phase, elapsedMs: Date.now() - auditStartedAt, error }));
@@ -466,6 +470,7 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
   assert((await stat(file)).isFile() && (await stat(folder)).isDirectory(), "Composer file references must use the existing audit workspace");
   const editor = page.locator('.composer-input-region [data-rich-composer]').first();
   await editor.waitFor({ state: "visible" });
+  const originalViewport = page.viewportSize();
   const requestCount = requests.length, wireStart = wire.length;
   try {
     const fixture = await page.evaluate(({ nativeCua, skill, workspace, file, folder }) => {
@@ -524,38 +529,63 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
       const images = [...document.querySelectorAll('.composer-input-region [data-rich-composer] .composer-inline-reference img')];
       return images.length >= 1 && images.every(image => image.complete && image.naturalWidth > 0 && !image.hidden);
     });
-    const geometry = await editor.evaluate(async input => {
+    for (const width of [...new Set([originalViewport.width, 600])]) {
+      await page.setViewportSize({ width, height: originalViewport.height });
+      const geometry = await editor.evaluate(async input => {
       await document.fonts.ready;
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const images = [...input.querySelectorAll('.composer-inline-reference img')];
       await Promise.all(images.map(image => image.decode()));
-      const rect = element => { const r = element.getBoundingClientRect(); return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom }; };
+      const box = r => ({ x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom });
+      const rect = element => box(element.getBoundingClientRect());
+      const canvas = document.createElement("canvas").getContext("2d");
+      const textGeometry = (element, range, value) => {
+        const style = getComputedStyle(element);
+        canvas.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        const font = canvas.measureText(value), cap = canvas.measureText("H");
+        const fragments = [...range.getClientRects()].filter(rect => rect.width > 0 && rect.height > 0).map(rect => {
+          const baseline = rect.y + (rect.height - font.fontBoundingBoxAscent - font.fontBoundingBoxDescent) / 2 + font.fontBoundingBoxAscent;
+          return { ...box(rect), baseline, capCenter: baseline - cap.actualBoundingBoxAscent / 2 };
+        });
+        return { fragments, font: { family: style.fontFamily, size: style.fontSize, weight: style.fontWeight,
+          lineHeight: Number.parseFloat(style.lineHeight), ascent: font.fontBoundingBoxAscent,
+          descent: font.fontBoundingBoxDescent, capHeight: cap.actualBoundingBoxAscent } };
+      };
       const paragraph = input.querySelector(":scope > p");
       const refs = [...input.querySelectorAll("[data-composer-reference]")];
       const text = [...paragraph.childNodes].find(node => node.nodeType === Node.TEXT_NODE && node.textContent.endsWith("123"));
       const range = document.createRange();
       range.setStart(text, text.textContent.length - 3); range.setEnd(text, text.textContent.length);
-      const ordinary = range.getBoundingClientRect();
       return {
+        viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio }, paragraph: rect(paragraph),
         paragraphs: input.querySelectorAll(":scope > p").length, text: paragraph.textContent, ordinaryColor: getComputedStyle(paragraph).color,
-        ordinary: { x: ordinary.x, y: ordinary.y, width: ordinary.width, height: ordinary.height, bottom: ordinary.bottom },
+        ordinary: textGeometry(paragraph, range, "123"),
         separateChipRows: document.querySelectorAll(".composer-context-prefix-row, .composer-skill-tokens").length,
         references: refs.map(element => {
           const icon = element.querySelector(".composer-inline-reference-icon"), label = element.querySelector(".composer-inline-reference-label");
-          const glyph = icon.querySelector("img:not([hidden]), svg"), i = rect(icon), l = rect(label);
+          const glyph = icon.querySelector("img:not([hidden]), svg"), i = rect(icon), l = rect(label), g = rect(glyph);
           const labelRange = document.createRange(); labelRange.selectNodeContents(label);
-          const labelFragments = [...labelRange.getClientRects()].map(r => ({ x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom }));
-          const glyphSize = glyph ? rect(glyph) : null;
+          const firstCharacter = document.createRange();
+          firstCharacter.setStart(label.firstChild, 0);
+          firstCharacter.setEnd(label.firstChild, [...label.firstChild.textContent][0].length);
+          const firstText = textGeometry(label, firstCharacter, firstCharacter.toString());
+          const labelText = textGeometry(label, labelRange, label.textContent);
+          const iconStyle = getComputedStyle(icon);
           return { reference: JSON.parse(element.dataset.composerReference), sameParagraph: element.parentElement === paragraph,
             display: getComputedStyle(element).display, color: getComputedStyle(label).color, label: label.textContent,
-            gap: glyphSize ? labelFragments[0].x - glyphSize.right : null,
-            centerOffset: Math.abs(i.y + i.height / 2 - l.y - l.height / 2), icon: i, labelRect: l,
-            labelText: labelFragments.at(-1), labelFragments,
-            glyph: glyph?.tagName.toLowerCase(), glyphClass: glyph?.getAttribute("class"), glyphSize };
+            gap: firstText.fragments[0].x - g.right, capCenterOffset: Math.abs(g.y + g.height / 2 - firstText.fragments[0].capCenter),
+            icon: i, labelRect: l, firstText, labelText, referenceFragments: [...element.getClientRects()].map(box),
+            iconStyle: { verticalAlign: iconStyle.verticalAlign, transform: iconStyle.transform, paddingRight: iconStyle.paddingRight },
+            glyph: glyph.tagName.toLowerCase(), glyphClass: glyph.getAttribute("class"), glyphSize: g };
         }),
         images: images.map(image => ({ src: image.currentSrc, decoded: image.complete && image.naturalWidth > 0,
           visible: !image.hidden && getComputedStyle(image).visibility !== "hidden" && image.getClientRects().length > 0 })),
       };
-    });
+      });
+    const captureName = width === originalViewport.width ? "composer-inline-references" : `composer-inline-references-${width}`;
+    await writeFile(path.join(evidence, `${captureName}.geometry.json`), JSON.stringify({ fixture, geometry }, null, 2));
+    await capture(captureName, { fixture, geometry,
+      referenceBoundary: "Actual catalog descriptor quoted for visual reference only; not installed, enabled or executed. Real current Skill/conversation/workspace identities; wrapping is allowed within the same paragraph." });
     assert.equal(geometry.paragraphs, 1);
     assert.equal(geometry.separateChipRows, 0);
     assert.deepEqual(geometry.references.map(item => item.reference.kind), ["plugin", "skill", "url", "file", "folder"]);
@@ -565,20 +595,24 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
       assert(reference.sameParagraph && reference.display === "inline", "Every reference must stay in the actual paragraph's inline flow");
       assert(reference.glyphSize?.width > 0 && reference.glyphSize.height > 0, `Missing rendered ${reference.reference.kind} icon`);
       assert(reference.labelRect.width > 0 && reference.labelRect.height > 0, `Reference label is not visibly laid out: ${reference.label}`);
-      // Source pads the icon slot and aligns its center to the font's cap
-      // height. The first text fragment defines spacing; a wrapped label's
-      // union box does not define spacing or the icon's optical center.
-      assert(reference.gap >= 3 && reference.gap <= 5, `Icon/label spacing drift: ${reference.label}`);
+      assert(reference.gap >= 3 && reference.gap <= 5, `Icon/first-text gap drift: ${reference.label}`);
+      // Inline text can occupy several line fragments. CSS aligns the glyph
+      // with the first line's cap height, not the union of all label boxes.
+      assert(Number.isFinite(reference.capCenterOffset) && reference.capCenterOffset <= 1, `Icon/first-line cap alignment drift: ${reference.label}`);
+      const baseline = reference.firstText.fragments[0].baseline, lineHeight = reference.firstText.font.lineHeight;
+      assert(reference.labelText.fragments.every(fragment => {
+        const lines = (fragment.baseline - baseline) / lineHeight;
+        return lines >= -0.01 && Math.abs(lines - Math.round(lines)) * lineHeight <= 1;
+      }), `Wrapped label text left the paragraph baseline grid: ${reference.label}`);
       assert.notEqual(reference.color, geometry.ordinaryColor, "Reference labels and ordinary text retain their distinct Source colors");
     }
-    assert(geometry.ordinary.width > 0 && geometry.ordinary.height > 0);
+    assert(geometry.ordinary.fragments.length === 1 && geometry.ordinary.fragments[0].width > 0);
     const lastReference = geometry.references.at(-1);
-    // If 123 wraps onto the next line it is still valid inline flow. When it
-    // follows the final atom on the same line, their text baselines must agree.
-    if (geometry.ordinary.y < lastReference.labelText.bottom && geometry.ordinary.bottom > lastReference.labelText.y
-      && geometry.ordinary.x >= lastReference.labelText.right - 1) {
-      assert(Math.abs(lastReference.labelText.bottom - geometry.ordinary.bottom) <= 2, "Reference and ordinary text baselines diverged");
-    }
+    const lastText = lastReference.labelText.fragments.at(-1), ordinary = geometry.ordinary.fragments[0];
+    const baselineAdvance = ordinary.baseline - lastText.baseline;
+    assert(Math.abs(baselineAdvance) <= 1 || Math.abs(baselineAdvance - geometry.ordinary.font.lineHeight) <= 1,
+      "Reference and ordinary text must share a baseline or continue on the next actual line");
+    if (width === 600) assert(geometry.references.some(reference => reference.labelText.fragments.length > 1), "The narrow audit must exercise a wrapped reference label");
     assert(geometry.images.length >= 1 && geometry.images.every(image => image.decoded && image.visible));
     const assetIdentity = value => { const url = new URL(value); url.searchParams.delete("asset_token"); return url.href; };
     assert.equal(assetIdentity(geometry.images[0].src), assetIdentity(nativeCuaIcon), "The composer must reuse the real decoded catalog icon and workspace scope");
@@ -586,10 +620,10 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
     assert.match(geometry.references[2].glyphClass, /message-circle/);
     assert.match(geometry.references[3].glyphClass, /mc-file-icon/);
     assert.match(geometry.references[4].glyphClass, /folder/);
-    await capture("composer-inline-references", { fixture, geometry,
-      referenceBoundary: "Actual catalog descriptor quoted for visual reference only; not installed, enabled or executed. Real current Skill/conversation/workspace identities; wrapping is allowed within the same paragraph." });
     checks.push({ scenario: "Production context_mention renders five real inline reference kinds with decoded images and ordinary keyboard text", fixture, geometry });
+    }
   } finally {
+    await page.setViewportSize(originalViewport);
     const restored = await page.evaluate(async () => {
       const saved = window.__uiAlignmentComposerAudit;
       if (!saved) return null;
@@ -623,7 +657,7 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
 }
 async function persistEvidence(extra = {}) {
   const draftDiagnostics = page && !page.isClosed() ? await page.evaluate(() => window.__uiAlignmentDraftTrace ?? null) : null;
-  await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase, auditFailure,
+  await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
     scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, production AudioWorklet module loading under packaged CSP, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", draftDiagnostics, ...extra }, null, 2));
   await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
   await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
@@ -643,18 +677,16 @@ try {
   await composer.press("Enter");
   await page.locator('.stream-error-cell[data-retry-attempt="1"]').waitFor({ timeout: 45000 });
   assert.match(await page.locator(".stream-error-summary").innerText(), /服务器繁忙，正在重连\s*1\s*\/5/u);
-  const busyRetryRow = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
-    && row.message.retry_attempt === 1 && row.message.visibility === "timeline");
-  assert(busyRetryRow, "Expected a timeline agent.progress event for retry attempt 1 (429) on the wire");
-  const busyRetryReceipt = busyRetryRow.message;
+  const busyRetryReceipt = receivedServerEvents().findLast(event => event.type === "agent.progress"
+    && event.retry_attempt === 1 && event.visibility === "timeline");
+  assert(busyRetryReceipt, "Expected a timeline agent.progress event for retry attempt 1 (429) on the wire");
   assert.equal(busyRetryReceipt.status_code, 429);
   assert.equal(busyRetryReceipt.provider_error_code, "controlled_retry");
   await page.waitForFunction(id => window.__zustandStore.getState().inspectorEntries.some(entry =>
     entry.targetKind === "provider" && entry.payload?.event === "rate_limit" && entry.payload.conversation_id === id), owner);
-  const ownedRateLimitRow = wire.findLast(row => row.direction === "server" && row.message.type === "rate_limit"
-    && row.message.conversation_id === owner);
-  assert(ownedRateLimitRow, "Expected an owned rate_limit event on the wire");
-  const ownedRateLimit = ownedRateLimitRow.message;
+  const ownedRateLimit = receivedServerEvents().findLast(event => event.type === "rate_limit"
+    && event.conversation_id === owner);
+  assert(ownedRateLimit, "Expected an owned rate_limit event on the wire");
   assert.equal(ownedRateLimit.message_id, busyRetryReceipt.message_id);
   assert.equal(ownedRateLimit.turn_id, busyRetryReceipt.turn_id);
   assert.equal(await page.locator('.toast-container [role="alert"]').count(), 0, "The owned retry has one transcript row without a duplicate provider toast");
@@ -681,10 +713,9 @@ try {
   await page.locator(".stream-error-summary").click();
   const retryDetails = page.locator('.stream-error-cell[data-retry-attempt="2"] .stream-error-details');
   await retryDetails.first().waitFor();
-  const retryRow = wire.findLast(row => row.direction === "server" && row.message.type === "agent.progress"
-    && row.message.retry_attempt === 2 && row.message.visibility === "timeline");
-  assert(retryRow, "Expected a timeline agent.progress event for retry attempt 2 (503) on the wire");
-  const retryReceipt = retryRow.message;
+  const retryReceipt = receivedServerEvents().findLast(event => event.type === "agent.progress"
+    && event.retry_attempt === 2 && event.visibility === "timeline");
+  assert(retryReceipt, "Expected a timeline agent.progress event for retry attempt 2 (503) on the wire");
   assert.equal(retryReceipt.status_code, 503);
   const retainedRetryDetails = await retryDetails.allTextContents();
   assert.equal(retainedRetryDetails.length, 2);
@@ -760,9 +791,9 @@ try {
   await page.locator(".error-cell-notice").waitFor({ timeout: 60000 });
   await page.waitForFunction(() => !window.__zustandStore.getState().isStreaming);
   assert.equal(await page.locator(".error-cell-notice").count(), 1);
-  const terminalError = wire.findLast(row => row.direction === "server" && row.message.type === "error" && row.message.provider_error_type).message;
-  const terminalRateLimit = wire.findLast(row => row.direction === "server" && row.message.type === "rate_limit"
-    && row.message.conversation_id === terminalError.conversation_id && row.message.message === terminalError.message).message;
+  const terminalError = receivedServerEvents().findLast(event => event.type === "error" && event.provider_error_type);
+  const terminalRateLimit = receivedServerEvents().findLast(event => event.type === "rate_limit"
+    && event.conversation_id === terminalError.conversation_id && event.message === terminalError.message);
   assert.equal(terminalRateLimit.message_id, terminalError.message_id);
   assert.equal(terminalRateLimit.turn_id, terminalError.turn_id);
   // The failure notice paints its summary first and appends the provider
@@ -1050,7 +1081,6 @@ try {
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
   success = true;
 } catch (error) {
-  auditFailure = { phase, message: String(error), stack: error?.stack };
   trace("failure", { error: String(error) });
   if (page) await capture("failure-current-state");
   throw error;

@@ -33,7 +33,7 @@ class UserMessageWorkspaceRequest:
     error_event: AgentEvent | None = None
 
 
-def parse_workspace_activation_request(path_str: str) -> WorkspaceActivationRequest:
+def parse_workspace_activation_request(path_str: str, *, projectless: bool = False) -> WorkspaceActivationRequest:
     from backend.workspace.path_utils import normalize_project_import_path
     from backend.workspace.trust import is_workspace_trusted
 
@@ -50,7 +50,7 @@ def parse_workspace_activation_request(path_str: str) -> WorkspaceActivationRequ
                 error_code="workspace_missing",
             ),
         )
-    if not is_workspace_trusted(project_path):
+    if not projectless and not is_workspace_trusted(project_path):
         return WorkspaceActivationRequest(
             clean_path,
             project_path,
@@ -459,9 +459,9 @@ def validate_git_relative_path(path: str) -> str:
     return value
 
 
-def worktree_has_local_changes(path: Path, *, timeout: float = 5) -> bool:
+def worktree_has_local_changes(path: Path, *, timeout: float = 5, include_ignored: bool = True) -> bool:
     result = run_readonly_git(
-        path, "status", "--porcelain=v1", "--ignored", "--untracked-files=all",
+        path, "status", "--porcelain=v1", *(["--ignored"] if include_ignored else []), "--untracked-files=all",
         timeout=timeout,
     )
     result.check_returncode()

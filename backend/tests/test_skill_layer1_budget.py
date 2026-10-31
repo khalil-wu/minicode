@@ -27,6 +27,7 @@ def _write_skill(
     skill_file.write_text(
         f"---\nname: {name}\ndescription: {description}\n---\n{body}\n",
         encoding="utf-8",
+        newline="\n",
     )
     if openai_yaml:
         agents_dir = skill_dir / "agents"

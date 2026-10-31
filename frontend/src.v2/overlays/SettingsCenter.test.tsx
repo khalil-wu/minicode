@@ -1644,7 +1644,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     const modelIdInput = screen.getByPlaceholderText("实际请求模型 ID");
     fireEvent.change(modelIdInput, { target: { value: "gpt-5" } });
     fireEvent.blur(modelIdInput);
-    expect((screen.getByRole("button", { name: "鉴权" }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.queryByRole("button", { name: "鉴权" })).toBeNull();
     expect(saveButton.disabled).toBe(false);
     fireEvent.change(screen.getByLabelText("API 格式"), { target: { value: "responses" } });
     expect(screen.queryByLabelText("推理强度")).toBeNull();
@@ -2028,28 +2028,6 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["接口地址", "API 密钥"])("serializes model checks and clears their result when %s changes", async (field) => {
-    const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
-    let completeCheck!: (response: Response) => void;
-    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { completeCheck = resolve; }));
-    vi.stubGlobal("fetch", fetchMock);
-    render(<ProviderTab selectedProvider="custom" settingsPayload={initialPayload} settingsPayloadRef={{ current: initialPayload }} onProviderChange={vi.fn()} />);
-    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
-    fireEvent.click(screen.getByRole("button", { name: "鉴权" }));
-
-    expect((screen.getByRole("button", { name: "保存" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("button", { name: "返回提供商列表" }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole("textbox", { name: field }) as HTMLInputElement).disabled).toBe(true);
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    await act(async () => { completeCheck(new Response(JSON.stringify({ ok: true }))); });
-    expect(await screen.findByRole("button", { name: "已通过" })).toBeTruthy();
-
-    fireEvent.change(screen.getByRole("textbox", { name: field }), { target: { value: field === "接口地址" ? "https://new.example/v1" : "changed-test-key" } });
-    expect(screen.queryByRole("button", { name: "已通过" })).toBeNull();
-    expect(screen.getByRole("button", { name: "鉴权" })).toBeTruthy();
-  });
-
   it("drops old model capabilities when the actual model ID changes", async () => {
     const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
     initialPayload.provider_history![0].model_metadata = { "deepseek-v4-flash": { context_window: 128000 } };
@@ -2135,68 +2113,15 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(mappingValue("gpt-5.4")).toBe("gpt-5.4");
   });
 
-  it("keeps connection checks scoped to each configured model", async () => {
-    const tokenRhythmSection = {
-      display_name: "TokenRhythm",
-      has_api_key: true,
-      api_key: "",
-      base_url: "https://tokenrhythm.studio/v1",
-      model: "glm-5.2",
-      available_models: ["glm-5.2"],
-      wire_api: "chat" as const,
-      updated_at: 10,
-    };
-    const payload: LLMSettingsPayload = {
-      provider: "custom",
-      active_model: "glm-5.2",
-      custom: tokenRhythmSection,
-      provider_history: [{
-        provider: "custom",
-        provider_id: "tokenrhythm",
-        ...tokenRhythmSection,
-      }],
-    };
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("/api/llm/check")) {
-        return new Response(JSON.stringify({
-          ok: false,
-          provider: "custom",
-          provider_id: "custom",
-          base_url: "https://tokenrhythm.studio/v1",
-          model: "glm-5.2",
-          wire_api: "chat",
-          has_api_key: true,
-          status_code: 503,
-          model_discovery_ok: true,
-          generation_ok: false,
-          failure_kind: "provider_unavailable",
-          retryable: true,
-          message: "SERVICE_BUSY",
-          hint: "The model list endpoint accepted the current credentials.",
-          models: ["glm-5.2"],
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
-      throw new Error(`Unexpected fetch: ${url}`);
-    });
+  it("does not probe a model when opening its provider settings", async () => {
+    const initialPayload = await fetchLLMSettingsMock() as LLMSettingsPayload;
+    const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
-
-    render(
-      <ProviderTab
-        selectedProvider="custom"
-        settingsPayload={payload}
-        settingsPayloadRef={{ current: payload }}
-        onProviderChange={vi.fn()}
-      />,
-    );
-
-    fireEvent.click(screen.getByRole("button", { name: "编辑 TokenRhythm" }));
+    render(<ProviderTab selectedProvider="custom" settingsPayload={initialPayload} settingsPayloadRef={{ current: initialPayload }} onProviderChange={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "编辑 DeepSeek" }));
+    expect(screen.queryByRole("button", { name: "鉴权" })).toBeNull();
     expect(screen.queryByRole("button", { name: "检查连接" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "鉴权" }));
-
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/api/llm/check");
-    expect(screen.getByRole("button", { name: "重试" })).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("uses and persists an explicit direct network path for one provider profile", async () => {
@@ -2228,22 +2153,6 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fetchLLMSettingsMock.mockResolvedValueOnce(initialPayload);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      if (url.includes("/api/llm/check")) {
-        return new Response(JSON.stringify({
-          ok: true,
-          provider: "custom",
-          provider_id: "custom",
-          base_url: savedSection.base_url,
-          model: savedSection.model,
-          wire_api: savedSection.wire_api,
-          proxy_mode: "direct",
-          has_api_key: true,
-          model_discovery_ok: true,
-          generation_ok: true,
-          message: "Provider connection and a small generation check succeeded.",
-          models: [savedSection.model],
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
       if (url.includes("/api/llm/settings") && init?.method === "PUT") {
         return new Response(JSON.stringify({
           provider: "custom",
@@ -2272,12 +2181,7 @@ describe("SettingsCenter reasoning effort visibility", () => {
     fireEvent.change(networkSelect, { target: { value: "direct" } });
     expect(screen.getByText(/忽略 MiniCode 与系统进程代理/)).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "鉴权" }));
-    await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/llm/check"))).toBe(true));
-    const checkCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/api/llm/check"));
-    expect(JSON.parse(String(checkCall?.[1]?.body)).custom.proxy_mode).toBe("direct");
-    expect((screen.getByLabelText("网络连接") as HTMLSelectElement).value).toBe("direct");
-    expect(await screen.findByRole("button", { name: "已通过" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "鉴权" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes("/api/llm/settings"))).toBe(true));

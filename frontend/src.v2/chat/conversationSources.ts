@@ -10,8 +10,25 @@ export interface ConversationSource {
   messageId: string;
 }
 
-export const markdownSourceLabelKey = (content: string): string => {
-  const references = extractMarkdownReferences(content);
+const messageReferenceCache = new WeakMap<ChatMessage, ReturnType<typeof extractMarkdownReferences>>();
+
+/**
+ * Store updates replace a message object whenever one of its fields changes,
+ * so caching per message object is exact: a settled message is parsed once for
+ * both source views and the thread-summary key instead of on every store
+ * notification.
+ */
+const messageReferences = (message: ChatMessage): ReturnType<typeof extractMarkdownReferences> => {
+  let references = messageReferenceCache.get(message);
+  if (!references) {
+    references = extractMarkdownReferences(message.content);
+    messageReferenceCache.set(message, references);
+  }
+  return references;
+};
+
+const markdownSourceLabelKey = (message: ChatMessage): string => {
+  const references = messageReferences(message);
   return `${JSON.stringify(references.links)}\u0000${[...references.citationIndexes].join(",")}`;
 };
 
@@ -21,7 +38,7 @@ export function collectConversationSources(messages: ChatMessage[]): Conversatio
   const articleTitles = new Map<string, string>();
   for (const message of messages) {
     if (message.role !== "assistant") continue;
-    const references = extractMarkdownReferences(message.content);
+    const references = messageReferences(message);
     const markdownTitles = new Map<string, string>();
     for (const link of references.links) {
       markdownTitles.set(link.url, link.label);
@@ -75,17 +92,16 @@ const identityOf = (value: object | null | undefined): number => {
 };
 
 /**
- * Change-detection key for the thread summary. Store updates replace a message
- * object whenever one of its fields changes, so caching per message object is
- * exact, and the Markdown parse behind `markdownSourceLabelKey` runs once per
- * settled message instead of on every store notification.
+ * Change-detection key for the thread summary; per-object caching is exact,
+ * so each settled message parses its Markdown once instead of on every
+ * store notification.
  */
 export const chatContextInputKey = (message: ChatMessage): string => {
   const cached = contextInputKeyCache.get(message);
   if (cached !== undefined) return cached;
   const key = JSON.stringify([
     message.id,
-    message.isStreaming ? "" : markdownSourceLabelKey(message.content),
+    message.isStreaming ? "" : markdownSourceLabelKey(message),
     identityOf(message.citations), identityOf(message.attachmentRefs), identityOf(message.replyAttachments), identityOf(message.artifacts),
     getToolCallsFromMessage(message).map(identityOf),
   ]);

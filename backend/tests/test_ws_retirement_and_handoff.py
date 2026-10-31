@@ -148,7 +148,7 @@ async def test_live_callback_done_gate_then_true_claim_release_dispatches_once(m
     async def run_locked(content, *, metadata, run_context, query_claim, **kwargs):
         nonlocal old_claim
         assert conversation_query_guards().owns(query_claim)
-        registry = session._conversation_tool_registry(cid)
+        registry = session._conversation_tool_registry(cid, workspace_root=run_context.start_request.workspace_root)
         assert run_context.start_request.tool_registry is not registry
         assert run_context.start_request.tool_registry.schema_source is registry.schema_source
         admitted.append(content)

@@ -1,7 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { collectConversationSources } from "./conversationSources";
+import { describe, expect, it, vi } from "vitest";
+import { chatContextInputsKey, collectConversationSources } from "./conversationSources";
 import { buildActivitySidebarState } from "../shell/activitySidebarState";
+import { extractMarkdownReferences } from "../lib/markdown";
 import type { ChatMessage } from "../stores/types";
+
+vi.mock("../lib/markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/markdown")>();
+  return { ...actual, extractMarkdownReferences: vi.fn(actual.extractMarkdownReferences) };
+});
 
 describe("shared conversation sources", () => {
   it.each([
@@ -61,5 +67,18 @@ describe("shared conversation sources", () => {
     expect(sources.find((source) => source.url?.endsWith("/8"))?.label).toBe("文章 8");
     const sidebar = buildActivitySidebarState({ conversationId: "owner", isStreaming: false, messages, todos: [], plan: null, agentProgress: [], livePreviewUrl: null, previewArtifact: null, previewVerification: null, previewServers: [], previewLaunchProcesses: [] });
     expect(sidebar.sources.map((source) => source.label)).toEqual(sources.map((source) => source.label));
+  });
+  it("parses each settled message once across both source views and stream deltas", () => {
+    const parse = vi.mocked(extractMarkdownReferences);
+    const settled: ChatMessage = { id: "settled", role: "assistant", timestamp: 1, artifacts: [], content: "See [docs](https://example.test/docs) and `items[0]`." };
+    const live = (content: string): ChatMessage => ({ id: "live", role: "assistant", timestamp: 2, artifacts: [], content, isStreaming: true });
+    parse.mockClear();
+    const first = collectConversationSources([settled, live("Draft [1]")]);
+    chatContextInputsKey([settled, live("Draft [1]")]);
+    const second = collectConversationSources([settled, live("Draft [1] continues")]);
+    expect(second).toEqual(first);
+    expect(first.map((source) => source.url)).toEqual(["https://example.test/docs"]);
+    expect(parse.mock.calls.filter(([content]) => content === settled.content)).toHaveLength(1);
+    expect(parse.mock.calls.filter(([content]) => content.startsWith("Draft"))).toHaveLength(2);
   });
 });

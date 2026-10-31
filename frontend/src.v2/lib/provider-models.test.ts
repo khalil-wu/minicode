@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { selectableModelsForProvider } from "./provider-models";
 
 describe("selectableModelsForProvider", () => {
-  it.each(["configured", "extension"])("keeps the backend's actual %s catalog selectable", (source) => {
+  it.each(["settings", "models_json", "configured", "extension"])("keeps the backend's actual %s catalog selectable", (source) => {
     expect(selectableModelsForProvider(["audit-model-a", "audit-model-b"], "audit-model-a", "custom", source))
       .toEqual(["audit-model-a", "audit-model-b"]);
   });
@@ -26,5 +26,10 @@ describe("selectableModelsForProvider", () => {
 
   it("deduplicates a live list and preserves the current model", () => {
     expect(selectableModelsForProvider(["a", "a", "b"], "missing", "custom", "live")).toEqual(["missing", "a", "b"]);
+  });
+
+  it.each(["settings", "models_json"])("retains the explicitly selected model after a %s catalog refresh removes it", source => {
+    expect(selectableModelsForProvider(["new-a", "new-b", "new-a"], "selected-before-refresh", "custom", source))
+      .toEqual(["selected-before-refresh", "new-a", "new-b"]);
   });
 });

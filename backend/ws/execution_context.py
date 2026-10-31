@@ -99,6 +99,7 @@ class ConversationThreadRuntime:
 
     store_identity: str
     conversation_id: str
+    command_prompt_allow_rules: tuple[str, ...] = ()
     thread_environments: ThreadEnvironments | None = None
     network_approval_service: Any | None = None
     environment_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)

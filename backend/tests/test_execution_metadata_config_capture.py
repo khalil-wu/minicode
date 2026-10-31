@@ -136,7 +136,9 @@ async def test_real_turn_uses_metadata_binding_but_keeps_history_compaction_and_
         await asyncio.gather(*tuple(session.execution_cleanup_tasks))
         await session.event_outbox.drain_delivery()
         await session.event_outbox.drain_persistence()
-        assert calls == [(conversation.id, False), (conversation.id, True)]
+        # A prepared input uses a detached settings preview until admission;
+        # startup must not eagerly bind or publish a different execution cwd.
+        assert calls == []
         assert len(adapter.requests) == 1
         fresh = ConversationRepository(repo._base_dir).get_conversation(conversation.id)
         assert fresh.compaction_summary == "Keep the original compaction summary"

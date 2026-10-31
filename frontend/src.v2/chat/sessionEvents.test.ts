@@ -83,6 +83,29 @@ describe("handleSessionEvent", () => {
     });
   });
 
+  it("shows a refreshed queued input without changing the current composer draft", () => {
+    useAppStore.setState({
+      draft: "unsent composer draft",
+      messages: [
+        { id: "queued-user", role: "user", content: "old queued text", artifacts: [], timestamp: 1,
+          queueState: "queued", queueMessageId: "queued-answer", queuePosition: 1 },
+        { id: "queued-answer", role: "assistant", content: "", artifacts: [], timestamp: 1,
+          queueState: "queued", queueMessageId: "queued-answer", queuePosition: 1 },
+      ],
+    });
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    handleSessionEvent({
+      type: "user_message.queue.updated", conversation_id: "conv-active", message_id: "queued-answer",
+      user_message_id: "queued-user", status: "queued", position: 1, reason: "queue_updated",
+      input: { content: "edited in another window", attachments: [] },
+    } as ServerEvent, buffers);
+    const state = useAppStore.getState();
+    expect(state.messages.find(message => message.id === "queued-user")).toMatchObject({
+      content: "edited in another window", backendContent: "edited in another window", queueState: "queued",
+    });
+    expect(state.draft).toBe("unsent composer draft");
+  });
+
   it.each(["queued", "dequeued", "cancelled"])("ignores %s queue events for confirmed deleted owners without rebuilding even an empty cache", async status => {
     const owner = `deleted-queue-${status}`;
     await deleteConversationComposerDrafts(owner);

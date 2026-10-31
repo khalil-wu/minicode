@@ -152,6 +152,41 @@ def test_workspace_path_traversal_is_rejected(monkeypatch, tmp_path) -> None:
     assert "outside workspace" in response.json()["detail"].lower()
 
 
+@pytest.mark.parametrize("path", ["..", "nested/../..", "nested/.."])
+def test_workspace_delete_normalizes_final_parent_before_mutation(monkeypatch, tmp_path, path) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "nested").mkdir(parents=True)
+    marker = tmp_path / "outside.txt"
+    marker.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr("backend.main.PROJECT_ROOT", workspace)
+    mutations = []
+    monkeypatch.setattr("backend.workspace.service.shutil.rmtree", lambda target: mutations.append(target))
+
+    with TestClient(app) as client:
+        response = client.delete("/api/workspace/path", params=_workspace_params(workspace, path=path, recursive=True))
+
+    assert response.status_code == 400
+    assert mutations == []
+    assert marker.read_text(encoding="utf-8") == "keep"
+
+
+def test_workspace_rename_rejects_parent_target_before_mutation(monkeypatch, tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "file.txt").write_text("keep", encoding="utf-8")
+    monkeypatch.setattr("backend.main.PROJECT_ROOT", workspace)
+    mutations = []
+    monkeypatch.setattr(Path, "rename", lambda source, target: mutations.append((source, target)))
+
+    with TestClient(app) as client:
+        response = client.post("/api/workspace/rename", params=_workspace_params(workspace),
+                               json={"path": "file.txt", "new_path": ".."})
+
+    assert response.status_code == 400
+    assert mutations == []
+    assert (workspace / "file.txt").read_text(encoding="utf-8") == "keep"
+
+
 def test_workspace_git_path_outside_active_workspace_is_rejected(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("backend.main.PROJECT_ROOT", tmp_path)
     outside = tmp_path.parent / f"{tmp_path.name}-outside-git"

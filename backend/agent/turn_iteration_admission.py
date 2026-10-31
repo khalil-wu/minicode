@@ -97,6 +97,11 @@ class TurnIterationAdmission:
         pending_turn_context: list[str],
     ) -> AsyncIterator[AgentEvent | TurnTerminalProjection | IterationAdmissionResult]:
         """Keep every admission await inside the existing turn lifetime."""
+        from backend.agent.turn_trace import turn_trace_shared
+
+        turn_trace_shared(
+            f"turn[{getattr(self.tool_context, 'conversation_id', '') or ''}]",
+        ).mark("iteration.admit.enter")
         updates = self._admit(
             previous_tool_schema_state=previous_tool_schema_state,
             initial_turn_pending=initial_turn_pending,

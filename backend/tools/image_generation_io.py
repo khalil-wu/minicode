@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections import Counter
 from io import BytesIO
 from pathlib import Path
 
 from PIL import Image
 
 from backend.atomic_io import atomic_write_bytes
+from backend.mcp.result_projection import mcp_output_images
 from backend.permissions.context import ToolExecutionContext
 from backend.sandbox.policy import sandbox_policy_for_permission_context
 from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
@@ -41,6 +43,62 @@ async def read_reference_images(paths: list[str], context: ToolExecutionContext)
             image.verify()
         images.append((name, raw, media_type))
     return images
+
+
+async def read_recent_images(context: ToolExecutionContext, count: int) -> list[tuple[str, bytes, str]]:
+    """Resolve recent conversation images under their existing attachment owner."""
+    if context.run_context is None or context.run_context.context_builder is None:
+        raise ValueError("Conversation images are unavailable in this execution context")
+    builder = context.run_context.context_builder
+    history = tuple(builder._history)
+
+    def collect() -> list[tuple[str, bytes, str]]:
+        found: list[tuple[str, bytes, str]] = []
+        generated_aliases: Counter[str] = Counter()
+        for message in reversed(history):
+            images_by_id = {item["artifact_id"]: item for item in message.images if item.get("artifact_id")}
+            candidates = []
+            for ref in message.attachment_refs:
+                if ref.get("kind") != "image":
+                    continue
+                candidates.append({"reference": ref, "image": images_by_id.pop(ref["artifact_id"], None)})
+            candidates.extend(item for item in message.images
+                if not item.get("artifact_id") or item["artifact_id"] in images_by_id)
+            for output in (message.mcp_output, message.code_mode_output, message.history_notes_output, message.native_tool_output):
+                if output is not None:
+                    candidates.extend(mcp_output_images(output))
+            for item in message.provider_items:
+                if item.get("type") == "image_generation_call" and item.get("result"):
+                    candidates.append({"data": item["result"], "media_type": "image/png", "generated_result": True})
+            for candidate in reversed(candidates):
+                ref = candidate.get("reference")
+                image = candidate.get("image") if ref else candidate
+                if ref and (image is None or not image.get("data")):
+                    payload = builder._attachment_store.get_payload(
+                        ref["artifact_id"], conversation_id=context.conversation_id,
+                        workspace_root=str(context.workspace_root or ""),
+                    )
+                    if payload is None or not payload.get("native_data"):
+                        raise ValueError(f"Conversation image is unavailable: {ref['artifact_id']}")
+                    image = {"data": payload["native_data"], "media_type": ref.get("media_type") or "image/png"}
+                if not image.get("data"):
+                    continue
+                encoded = image["data"]
+                if ref and ref.get("input_source") == "assistant_generated":
+                    generated_aliases[encoded] += 1
+                elif (message.name == "generate_image" or image.get("generated_result")) and generated_aliases[encoded]:
+                    generated_aliases[encoded] -= 1
+                    continue
+                raw = base64.b64decode(encoded, validate=True)
+                with Image.open(BytesIO(raw)) as decoded:
+                    media_type = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}[decoded.format]
+                    decoded.verify()
+                found.append((f"image-{len(found) + 1}.{media_type.split('/')[1]}", raw, media_type))
+                if len(found) == count:
+                    return list(reversed(found))
+        raise ValueError(f"Requested the last {count} conversation images, but only {len(found)} were available")
+
+    return await asyncio.to_thread(collect)
 
 
 async def prepare_image_output(value: str, context: ToolExecutionContext) -> None:

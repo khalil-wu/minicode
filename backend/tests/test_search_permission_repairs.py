@@ -232,6 +232,29 @@ def test_ast_search_uses_context_directory_and_never_reads_denied_sources(tmp_pa
     assert "noisy.py" not in result.content
 
 
+@pytest.mark.parametrize("tool", [GoToDefinitionTool, FindReferencesTool])
+def test_ast_search_reports_a_real_read_failure_through_the_registry(tmp_path: Path, monkeypatch, tool):
+    from backend.tools.registry import ToolRegistry
+
+    source = tmp_path / "unreadable.py"
+    source.write_text("def target_symbol(): pass\n", encoding="utf-8")
+    read_text = Path.read_text
+
+    def fail_read(path, *args, **kwargs):
+        if path == source:
+            raise PermissionError(f"Cannot read {path}")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_read)
+    registry = ToolRegistry()
+    instance = tool()
+    registry.register(instance)
+    result = asyncio.run(registry.execute(instance.name, {"name": "target_symbol"}, context=context(tmp_path, deny=[])))
+    assert result.is_error
+    assert "PermissionError" in result.content
+    assert "unreadable.py" in result.developer_detail
+
+
 def test_fuzzy_search_filters_before_top_k_and_does_not_cache_permission_decisions(tmp_path: Path):
     for name in ("private/item.py", "public/LongItemHelper.py"):
         file = tmp_path / name

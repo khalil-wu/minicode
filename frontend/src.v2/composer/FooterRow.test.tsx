@@ -1140,13 +1140,13 @@ describe("FooterRow permission picker", () => {
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
-  it("restores the authoritative project model and effort pair and clears the explicit selection", async () => {
+  it.each(["settings", "models_json", "configured", "extension"])("restores the authoritative %s project model and effort pair and keeps its catalog", async (modelsSource) => {
     const buffers = { textStreamBuffer: { destroy: vi.fn() }, thinkingStreamBuffer: { destroy: vi.fn() } } as Parameters<typeof handleSessionEvent>[1];
     const receive = (model: string, effort: string, mode: "default" | "model") => handleSessionEvent({
       type: "llm.model.updated", conversation_id: "conv-footer", current_model: model, effective_reasoning_effort: effort,
       model_selection_mode: mode, default_model_selection: { provider: "custom", model: "model-a", reasoning_effort: "low", conversation_id: "conv-footer", working_directory: useAppStore.getState().workingDirectory },
       available_model_options: [{ model: "model-a", reasoning_effort_levels: ["low", "high"], default_reasoning_effort: "low" }],
-      available_models: ["model-a", "model-b"], provider: "custom", models_source: "configured",
+      available_models: ["model-a", "model-b"], provider: "custom", models_source: modelsSource,
     }, buffers);
     act(() => receive("model-b", "high", "model"));
     useAppStore.setState({ runtimeCapabilities: { permission: { available_modes: ["confirm", "bypass"] },
@@ -1163,6 +1163,7 @@ describe("FooterRow permission picker", () => {
     expect(screen.queryByRole("button", { name: "重置为默认" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "选择模型" }));
     expect(screen.getByRole("option", { name: /默认/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("option", { name: "model-b", exact: true })).toBeTruthy();
     expect(screen.queryByText("推荐模型集")).toBeNull();
   });
 

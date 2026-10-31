@@ -16,7 +16,7 @@ from backend.environments.transport import open_transport
 from backend.permissions.native_execpolicy import packaged_execpolicy_directory
 
 
-SOURCE_COMMIT = "822e58cc3d666166c7446c5b1ea2e52f5d09594c"
+SOURCE_COMMIT = "970111f6cb62cc02fe36a82ea7d71b37a2889c97"
 NetworkDecider = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
 

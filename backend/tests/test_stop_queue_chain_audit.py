@@ -116,11 +116,12 @@ def _command(content="work", message_id="assistant_input", **data):
 async def test_stop_during_workspace_admission_is_durable(session, tmp_path, monkeypatch):
     entered = asyncio.Event()
 
-    async def activate(*args, **kwargs):
-        entered.set()
-        await asyncio.Event().wait()
+    class BlockingWorkspace:
+        async def initialize(self):
+            entered.set()
+            await asyncio.Event().wait()
 
-    session.activate_workspace_path = activate
+    monkeypatch.setattr("backend.services.workspace_service.create_workspace_context", lambda path: BlockingWorkspace())
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda path: True)
     command = _command(workspace_root=str(tmp_path))
     durable = session.run_manager.durable_client_commands
@@ -142,9 +143,10 @@ async def test_repeated_pending_stop_does_not_cancel_terminal_delivery(session, 
     terminal_entered = asyncio.Event()
     terminal_release = asyncio.Event()
 
-    async def activate(*args, **kwargs):
-        entered.set()
-        await asyncio.Event().wait()
+    class BlockingWorkspace:
+        async def initialize(self):
+            entered.set()
+            await asyncio.Event().wait()
 
     original_send = session.send_event
 
@@ -154,7 +156,7 @@ async def test_repeated_pending_stop_does_not_cancel_terminal_delivery(session, 
             await terminal_release.wait()
         await original_send(event)
 
-    session.activate_workspace_path = activate
+    monkeypatch.setattr("backend.services.workspace_service.create_workspace_context", lambda path: BlockingWorkspace())
     session.send_event = send
     monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda path: True)
     command = _command(workspace_root=str(tmp_path))
@@ -200,7 +202,8 @@ async def test_stop_before_runner_first_step_delivers_terminal_and_consumes_comm
     assert durable.persist_client_command(command)
     await session.command_dispatcher._run_durable_client_command("client_assistant_input", 1)
     await asyncio.gather(*stops)
-    session.capture_agent_run_request.assert_called_once_with("conv_stop_owner")
+    session.capture_agent_run_request.assert_called_once()
+    assert session.capture_agent_run_request.call_args.args == ("conv_stop_owner",)
     await asyncio.gather(*session.execution_cleanup_tasks)
     assert conversation_query_guards().active_claim("conv_stop_owner") is None
     assert runner_entered == []

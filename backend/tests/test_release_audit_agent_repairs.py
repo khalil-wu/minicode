@@ -169,6 +169,11 @@ def test_interrupted_child_state_maps_to_stopped_tool_outcome():
     assert status_for_result(ToolResult(content="Queued for the worker.", status="pending")) == "success"
 
 
+def _public(data):
+    """Payload identity minus the durable queue's own entry id."""
+    return {key: value for key, value in data.items() if key != "_queue_entry_id"}
+
+
 def command(index=0):
     return UserCommand(type='user_message', data={'client_command_id': f'cancelled-input-{index}',
         'conversation_id': 'owned-conversation', 'content': f'未准入的原始输入 {index}\nwith attachment'})
@@ -252,7 +257,7 @@ def test_cancel_archive_failure_retains_the_original_pending_input(tmp_path, mon
         with pytest.raises(OSError, match='archive write failed'):
             queue.cancel_client_command(original, reason='user_interrupted')
         assert queue.path.read_bytes() == before
-        assert queue.pending_client_commands()[0].data == original.data
+        assert _public(queue.pending_client_commands()[0].data) == _public(original.data)
     finally:
         queue.close()
 
@@ -290,9 +295,9 @@ def test_shared_stop_intent_suppresses_all_lanes_before_cold_owner_recovery(tmp_
         assert cold.cancelled_client_command("cancelled-input-0") == receipt
         assert cold._cancelled_receipt_path("cancelled-input-0").read_bytes() == archived
         if lane in {"queues", "turn_inputs"}:
-            assert cold.claim_user_message("owned-conversation").data == fresh.data
+            assert _public(cold.claim_user_message("owned-conversation").data) == _public(fresh.data)
         elif lane.startswith("client_"):
-            assert cold.claim_client_command("cancelled-input-1").data == fresh.data
+            assert _public(cold.claim_client_command("cancelled-input-1").data) == _public(fresh.data)
         else:
             assert cold.claim_user_message("owned-conversation") is None
     finally:
@@ -305,12 +310,12 @@ def test_stale_save_cannot_reinsert_input_after_stop_and_retains_new_content(tmp
     snapshot = {"owned-conversation": [original, fresh]}
     try:
         queue.save(snapshot, {})
-        assert queue.claim_user_message("owned-conversation").data == original.data
+        assert _public(queue.claim_user_message("owned-conversation").data) == _public(original.data)
         queue.cancel_client_command(original, reason="user_interrupted")
         assert queue.settle_user_message("owned-conversation", original, succeeded=False)
         queue.save(snapshot, {})
-        assert [item.data for item in queue.pending_user_messages("owned-conversation")] == [fresh.data]
-        assert queue.claim_user_message("owned-conversation").data == fresh.data
+        assert [_public(item.data) for item in queue.pending_user_messages("owned-conversation")] == [_public(fresh.data)]
+        assert _public(queue.claim_user_message("owned-conversation").data) == _public(fresh.data)
     finally:
         queue.close()
 
@@ -322,7 +327,7 @@ async def test_shared_commit_window_mirror_failure_reuses_first_stop_and_prevent
     client, shared = session.run_manager.durable_client_commands, session.run_manager.durable_queue
     client.persist_client_command(original)
     shared.save({"conv_stop_owner": [original]}, {})
-    assert shared.claim_user_message("conv_stop_owner").data == original.data
+    assert _public(shared.claim_user_message("conv_stop_owner").data) == _public(original.data)
     mirror = client.cancel_client_command
     def fail_mirror(*args, **kwargs):
         raise OSError("isolated window mirror publish failure")
@@ -372,7 +377,7 @@ def test_legacy_window_stop_migrates_before_shared_stale_dispatch_recovery(tmp_p
     try:
         assert cold_client.migrate_user_messages_to(cold_shared) == 0
         assert cold_shared.cancelled_client_command("cancelled-input-0", client_queue_key="legacy-window") == receipt
-        assert cold_shared.claim_user_message("owned-conversation").data == fresh.data
+        assert _public(cold_shared.claim_user_message("owned-conversation").data) == _public(fresh.data)
         assert cold_client._cancelled_receipt_path("cancelled-input-0").read_bytes() == receipt_bytes
         assert cold_shared.settle_user_message("owned-conversation", fresh, succeeded=True)
         assert cold_shared.claim_user_message("owned-conversation") is None
@@ -403,7 +408,7 @@ def test_manager_upgrade_discovers_legacy_receipt_after_missing_first_queue_publ
         session_lifecycle=SimpleNamespace(schedule_task_runtime_update=lambda: None)))
     try:
         assert manager.durable_queue.cancelled_client_command("cancelled-input-0", client_queue_key="legacy-window") == receipt
-        assert manager.dequeue_user_message("owned-conversation").data == fresh.data
+        assert _public(manager.dequeue_user_message("owned-conversation").data) == _public(fresh.data)
     finally:
         manager._unsubscribe_parent_notifications()
         manager.close_durable_queue()
@@ -432,7 +437,7 @@ async def test_two_producers_same_local_id_keep_independent_stop_originals(tmp_p
             "owned-conversation": [first_input], "another-conversation": [second_input]}, {})
         first_dispatcher.record_cancelled_user_message(first_input, reason="user_interrupted")
         remaining = [item for items in shared.pending_user_message_snapshot().values() for item in items]
-        assert [item.data for item in remaining] == [second_input.data]
+        assert [_public(item.data) for item in remaining] == [_public(second_input.data)]
         first_record = await first_dispatcher.cancelled_user_message("cancelled-input-0")
         assert first_record["client_queue_key"] == first.path.stem
         assert first_record["command"]["data"] == {key: value for key, value in first_input.data.items() if not key.startswith("_")}
@@ -471,7 +476,7 @@ async def test_foreign_origin_queued_stop_does_not_capture_current_window_same_i
     record = shared.cancelled_client_command("cancelled-input-0", client_queue_key="closed-old-window")
     assert record["command"]["data"]["content"] == older.data["content"]
     assert client.cancelled_client_command("cancelled-input-0") is None
-    assert client.pending_client_commands()[0].data == current.data
+    assert _public(client.pending_client_commands()[0].data) == _public(current.data)
     assert await session.command_dispatcher.cancelled_user_message("cancelled-input-0") is None
     await session.command_dispatcher.emit_cancelled_user_message(older)
     assert session.events[-1].data["data"]["cancelled"] is True
@@ -524,7 +529,7 @@ async def test_ws_forged_producer_scope_is_overwritten_and_cold_client_claim_reb
     session.ws = SimpleNamespace(receive_text=receive)
     session.send_payload = send
     monkeypatch.setattr(session.command_dispatcher, "_schedule_durable_client_command",
-        lambda command_id, generation, *, command_type: scheduled.append((command_id, command_type)))
+        lambda command_id, generation, *, command_type, **_kwargs: scheduled.append((command_id, command_type)))
     monkeypatch.setattr(session.command_dispatcher, "_handle_command", dispatch)
     await session.command_dispatcher.run(1)
     assert scheduled == [("cancelled-input-0", "user_message")]
@@ -555,7 +560,9 @@ async def test_raw_transient_input_cannot_claim_internal_queue_dispatch_identity
     monkeypatch.setattr(session.command_dispatcher, "_schedule_transient_client_command",
         lambda command, generation: captured.append(dict(command.data)))
     await session.command_dispatcher.run(1)
-    assert captured == [{key: value for key, value in raw.items() if key != "type" and not key.startswith("_")}]
+    # Forged internal fields are dropped; the dispatcher stamps its own selection revisions.
+    assert captured == [{**{key: value for key, value in raw.items() if key != "type" and not key.startswith("_")},
+                         "_permission_mode_selection_revision": 0, "_workspace_binding_selection_revision": 0}]
     assert session.started == []
 
 
@@ -599,7 +606,7 @@ def test_schema6_missing_message_identity_marker_survives_cold_queue_rewrites(tm
         assert loaded.data["content"] == original.data["content"]
         assert cold.release_client_command("cancelled-input-0")
         rewritten = json.loads(cold.path.read_text(encoding="utf-8"))
-        assert rewritten["version"] == 7
+        assert rewritten["version"] == 8
         assert rewritten["client_pending"][0]["data"]["_legacy_user_message_identity"] is True
     finally:
         cold.close()
@@ -639,7 +646,7 @@ def test_one_stop_receipt_does_not_guess_between_two_legacy_accepted_producers(t
             first.migrate_user_messages_to(shared)
         assert shared.path.read_bytes() == before
         assert not shared._cancelled_receipt_path("cancelled-input-0", first.path.stem).exists()
-        assert second.pending_client_commands()[0].data == original.data
+        assert _public(second.pending_client_commands()[0].data) == _public(original.data)
     finally:
         first.close()
         second.close()
@@ -792,7 +799,7 @@ async def test_stop_write_error_is_visible_after_execution_has_actually_stopped(
     session.run_manager.register(conversation_id='conv_stop_owner', task=worker, task_id='write-failed-run',
         cancel_event=cancel_event, active_conversation_id='conv_stop_owner', run_context=run_context)
     session._conversation_streams['conv_stop_owner'] = {'message_id': 'assistant_input'}
-    with pytest.raises(ExceptionGroup, match='durable input state') as caught:
+    with pytest.raises(ExceptionGroup, match='settling execution') as caught:
         await session.run_manager.cancel(conversation_id='conv_stop_owner', reason='user_interrupted')
     assert worker.cancelled()
     assert 'isolated Stop disk failure' in str(caught.value.exceptions[0])

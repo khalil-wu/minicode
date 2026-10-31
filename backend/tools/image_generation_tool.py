@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from backend.config import LLMSettings, get_image_generation_settings
@@ -23,14 +24,15 @@ from backend.tools.contracts import ToolSpec
 
 
 class GenerateImageTool(BaseTool):
-    """Generate one validated image through the active profile's image channel."""
+    """Generate an image through an OpenAI-compatible Images API."""
 
     name = "generate_image"
     description = (
-        "Generate an image from a textual prompt using the image channel explicitly "
-        "configured for the active provider profile. Use only when the user asks to "
-        "create or render an image. Attach input_images to preserve visual identity "
-        "or edit reference images. Set output_path to save a new image file for subsequent tools."
+        "Generate or edit an image with an OpenAI-compatible Images API. Use the "
+        "imagegen skill for image tasks. If the user provides an external API, use "
+        "its base URL, model and credentials from the conversation; otherwise use "
+        "an available image channel. Direct calls display the result; in tool_exec, "
+        "use generatedImage(result.images[0]) to display the selected image."
     )
     permission = PermissionLevel.AUTO
     read_only = False
@@ -46,10 +48,6 @@ class GenerateImageTool(BaseTool):
     result_kind = "image_generation"
     activity_kind = "imageGeneration"
     display_label = "Generate image"
-
-    def __init__(self, *, settings_snapshot: dict[str, Any] | None = None, provider: str | None = None) -> None:
-        self._settings_snapshot = settings_snapshot
-        self._provider = provider
 
     @staticmethod
     def _provider_for_context(context: ToolExecutionContext | None) -> str | None:
@@ -73,6 +71,9 @@ class GenerateImageTool(BaseTool):
     def _settings_for_context(
         self,
         context: ToolExecutionContext | None = None,
+        *,
+        model_override: str | None = None,
+        api_key_override: str | None = None,
     ) -> dict[str, Any]:
         provider = self._provider_for_context(context)
         if context is not None and provider is None:
@@ -86,7 +87,7 @@ class GenerateImageTool(BaseTool):
             }
         snapshot = context.model_execution if context is not None else None
         if snapshot is None:
-            return get_image_generation_settings(provider)
+            return get_image_generation_settings(provider, model_override=model_override, api_key_override=api_key_override)
         stack = snapshot.config.config_layer_stack
         settings_data = (
             stack.effective_config() if stack is not None
@@ -95,17 +96,15 @@ class GenerateImageTool(BaseTool):
                 "default_headers": dict(snapshot.config.llm.default_headers),
             }}}
         )
-        return get_image_generation_settings(provider, settings_data=settings_data)
+        return get_image_generation_settings(provider, settings_data=settings_data,
+            model_override=model_override, api_key_override=api_key_override)
 
     def get_spec(self) -> ToolSpec:
-        settings = get_image_generation_settings(
-            self._provider, self._settings_snapshot, resolve_credentials=False,
-        )
         return ToolSpec(
             name=self.name,
             capability="image.generate",
             toolset="core",
-            exposure="core" if settings.get("enabled") else "hidden",
+            exposure="core",
             always_load=True,
             required_args=("prompt",),
         )
@@ -125,19 +124,37 @@ class GenerateImageTool(BaseTool):
                     },
                     "size": {
                         "type": "string",
-                        "enum": ["auto", "1024x1024", "1536x1024", "1024x1536"],
-                        "description": "Optional output dimensions; omit to use the profile default.",
+                        "description": "Optional output dimensions supported by the selected image API.",
                     },
                     "quality": {
                         "type": "string",
-                        "enum": ["auto", "low", "medium", "high", "standard", "hd"],
-                        "description": "Optional provider-supported quality; omit to use the profile default.",
+                        "description": "Optional quality supported by the selected image API.",
+                    },
+                    "api_base_url": {
+                        "type": "string",
+                        "description": "User-provided OpenAI-compatible API base URL, such as https://example.com/v1. Omit to use an available image channel.",
+                    },
+                    "api_key": {
+                        "type": "string",
+                        "description": "Credential supplied by the user for this API, if required.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Image model supported by the API. For an explicit API, defaults to gpt-image-2.",
+                    },
+                    "transparent_background": {
+                        "type": "boolean",
+                        "description": "Request a transparent background when the selected API supports it.",
                     },
                     "input_images": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},
-                        "maxItems": 16,
+                        "maxItems": 5,
                         "description": "Reference PNG, JPEG or WebP paths in the accepted execution environment. All images are attached to one edit request in this order.",
+                    },
+                    "num_last_images_to_include": {
+                        "type": "integer", "minimum": 1, "maximum": 5,
+                        "description": "Use this many most recent conversation images as edit references, instead of input_images.",
                     },
                     "output_path": {
                         "type": "string",
@@ -191,7 +208,31 @@ class GenerateImageTool(BaseTool):
         context: ToolExecutionContext | None = None,
     ) -> ToolResult:
         prompt = str(args.get("prompt") or "").strip()
-        settings = self._settings_for_context(context)
+        explicit_base_url = str(args.get("api_base_url") or "").strip()
+        if explicit_base_url:
+            parsed_url = urlsplit(explicit_base_url)
+            for endpoint in ("/images/generations", "/images/edits"):
+                if parsed_url.path.rstrip("/").endswith(endpoint):
+                    base_path = parsed_url.path.rstrip("/").removesuffix(endpoint) or "/"
+                    explicit_base_url = urlunsplit(parsed_url._replace(path=base_path))
+                    break
+            active_settings = context.model_execution.config.llm if context is not None and context.model_execution is not None else None
+            settings = {
+                "enabled": True,
+                "provider": "custom",
+                "base_url": explicit_base_url,
+                "api_key": str(args.get("api_key") or ""),
+                "model": str(args.get("model") or "gpt-image-2"),
+                "proxy_mode": active_settings.proxy_mode if active_settings is not None else "inherit",
+                "default_headers": (),
+                "auth_header": bool(args.get("api_key")),
+                "size": "auto",
+                "quality": "auto",
+            }
+        else:
+            settings = self._settings_for_context(context,
+                model_override=str(args["model"]) if args.get("model") else None,
+                api_key_override=str(args["api_key"]) if args.get("api_key") else None)
         metadata = context.metadata if context is not None else {}
         turn_context = (
             context.run_context.llm_turn_context
@@ -218,13 +259,13 @@ class GenerateImageTool(BaseTool):
                 provider=str(settings.get("provider") or "image"),
                 provider_error_type="configuration",
                 error_kind="configuration_error",
-                user_summary="图像生成通道尚未正确配置。",
+                user_summary="当前没有可用的图像生成接口。",
                 developer_detail=reason,
                 recoverable=False,
                 projection="error",
                 model_observation=(
-                    "The configured image channel is unavailable. Explain the configuration "
-                    "problem without claiming that an image was generated."
+                    "No usable image API was available for this request. Use a suitable "
+                    "user-provided API or another available workflow; do not claim an image was generated."
                 ),
             )
 
@@ -243,15 +284,19 @@ class GenerateImageTool(BaseTool):
             )
         )
         try:
-            from backend.tools.image_generation_io import prepare_image_output, read_reference_images, save_image_output
+            from backend.tools.image_generation_io import prepare_image_output, read_recent_images, read_reference_images, save_image_output
 
             reference_paths = args.get("input_images", [])
+            recent_count = args.get("num_last_images_to_include")
             output_path = args.get("output_path")
-            if (reference_paths or output_path) and context is None:
+            if reference_paths and recent_count is not None:
+                raise ValueError("Use either input_images or num_last_images_to_include, not both.")
+            if (reference_paths or recent_count is not None or output_path) and context is None:
                 raise ValueError("Image file inputs and outputs require an accepted execution context.")
             if output_path:
                 await prepare_image_output(output_path, context)
-            input_images = await read_reference_images(reference_paths, context) if reference_paths else None
+            input_images = (await read_reference_images(reference_paths, context) if reference_paths
+                else await read_recent_images(context, recent_count) if recent_count is not None else None)
             await self._emit_progress(context, progress_id=progress_id, status="running",
                 message="正在生成图像", detail="正在发送图像请求")
             images = await adapter.generate_images(
@@ -259,6 +304,7 @@ class GenerateImageTool(BaseTool):
                 size=str(args.get("size") or settings.get("size") or "1024x1024"),
                 quality=str(args.get("quality") or settings.get("quality") or ""),
                 input_images=input_images,
+                background="transparent" if args.get("transparent_background") is True else None,
                 metadata=metadata,
                 turn_context=turn_context,
             )
@@ -304,8 +350,11 @@ class GenerateImageTool(BaseTool):
         )
         return ToolResult(
             content=(
-                f"Generated {len(images)} validated image(s). The host attached the image "
-                "artifact to this assistant turn." + (f" Saved image to {output_path}." if output_path else "")
+                f"Generated {len(images)} validated image(s). "
+                + ("Use generatedImage(result.images[0]) to display the selected image."
+                   if context is not None and context.result_sink is not None
+                   else "The host attached the image artifact to this assistant turn.")
+                + (f" Saved image to {output_path}." if output_path else "")
             ),
             images=[
                 {"data": image_data, "media_type": media_type}

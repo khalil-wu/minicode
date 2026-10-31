@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 codex-windows-sandbox = { path = "../windows-sandbox-rs" }
 codex-protocol = { path = "../protocol" }
 codex-utils-absolute-path = { path = "../utils/absolute-path" }

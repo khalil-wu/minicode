@@ -10,6 +10,7 @@ import {
   projectRecentMessagesToTurns,
 } from "./chatSurfaceState";
 import { ChatTurn } from "./components/ChatTurn";
+import { SafeBoundary } from "../shell/ChunkErrorBoundary";
 import { loadEarlierConversationMessages } from "./historyPagination";
 import { hasVisibleActiveConversation } from "./activeConversation";
 import { applyAuthoritativeTurnDiff } from "../lib/turn-diff";
@@ -21,6 +22,18 @@ import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-d
 import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
 import { useShallow } from "zustand/react/shallow";
 import { visibleRetainedComposerInputs } from "../composer/retainedComposerInputs";
+
+// A turn that throws while rendering must not take the rest of the transcript
+// down with it: the row keeps its place and offers the same recovery as the pane.
+const TurnRenderFallback = () => {
+  const { t: tr } = useI18n();
+  return (
+    <div role="alert" style={{ padding: "8px 12px", color: "var(--text-muted)", fontSize: "var(--text-sm)" }}>
+      {tr("此回复渲染失败")}
+      <button type="button" onClick={() => window.location.reload()} style={{ marginLeft: 8 }}>{tr("重新加载")}</button>
+    </div>
+  );
+};
 
 const RECENT_TURN_WINDOW = 40;
 const MAX_TURNS_WITHOUT_VIRTUALIZATION = 8;
@@ -561,7 +574,9 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
                         width: "100%",
                       }}
                     >
-                      <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
+                      <SafeBoundary fallback={<TurnRenderFallback />}>
+                        <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
+                      </SafeBoundary>
                     </div>
                   );
                 })}
@@ -581,7 +596,9 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
                     minHeight: isTail && reserveLatestReply ? "var(--reply-viewport-height)" : undefined,
                   }}
                 >
-                <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
+                <SafeBoundary fallback={<TurnRenderFallback />}>
+                  <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
+                </SafeBoundary>
                 </div>
               );
             })}

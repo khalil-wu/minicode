@@ -33,6 +33,11 @@ interface AgentRecord {
   active: boolean;
 }
 
+interface AgentDraft extends Omit<AgentRecord, "tools" | "disallowed_tools"> {
+  tools: string;
+  disallowed_tools: string;
+}
+
 interface LlmSettingsSection {
   display_name?: string;
   model?: string;
@@ -79,14 +84,14 @@ const MINICODE_AGENT_MODEL_OPTIONS = [
   { value: "inherit", label: "继承父会话" },
 ] as const;
 
-const EMPTY_DRAFT: AgentRecord = {
+const EMPTY_DRAFT: AgentDraft = {
   name: "",
   description: "",
   prompt: "",
   model: "",
   effort: "",
-  tools: [],
-  disallowed_tools: [],
+  tools: "",
+  disallowed_tools: "",
   source_path: null,
   filename: "",
   source: "project",
@@ -102,6 +107,13 @@ const parseList = (value: string): string[] =>
     .map((s) => s.trim())
     .filter(Boolean);
 
+const agentDraft = (agent: AgentRecord): AgentDraft => ({
+  ...agent,
+  location: agent.source,
+  tools: agent.tools.join(", "),
+  disallowed_tools: agent.disallowed_tools.join(", "),
+});
+
 const agentSourceLabel = (source: AgentRecord["source"]): string => {
   if (source === "user") return "用户";
   if (source === "policy") return "托管";
@@ -109,7 +121,7 @@ const agentSourceLabel = (source: AgentRecord["source"]): string => {
   return "未知";
 };
 
-const agentSelectionKey = (agent: AgentRecord): string =>
+const agentSelectionKey = (agent: Pick<AgentRecord, "source" | "source_path" | "filename" | "name">): string =>
   `${agent.source}:${agent.source_path || agent.filename || agent.name}`;
 
 export const AgentEditor = () => {
@@ -128,13 +140,13 @@ export const AgentEditor = () => {
     const active = s.conversations.find((conversation) => conversation.id === s.conversationId);
     return String(active ? active.executionCwd || active.worktreePath || active.workspaceRoot || "" : s.workingDirectory).trim();
   });
-  const newAgentDraft = useMemo<AgentRecord>(() => ({ ...EMPTY_DRAFT,
+  const newAgentDraft = useMemo<AgentDraft>(() => ({ ...EMPTY_DRAFT,
     source: ownerWorkspaceRoot ? "project" : "user", location: ownerWorkspaceRoot ? "project" : "user",
   }), [ownerWorkspaceRoot]);
   const [agents, setAgents] = useState<AgentRecord[]>([]);
   const [runtimeModelCatalog, setRuntimeModelCatalog] = useState<AgentModelCatalogEntry[]>([]);
   const [llmSettings, setLlmSettings] = useState<LlmSettingsPayload>({});
-  const [draft, setDraft] = useState<AgentRecord>(newAgentDraft);
+  const [draft, setDraft] = useState<AgentDraft>(newAgentDraft);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -158,9 +170,9 @@ export const AgentEditor = () => {
   const currentDraft = useRef(draft);
   currentDraft.current = draft;
   const draftOwner = useRef(ownerWorkspaceRoot);
-  const draftsByWorkspace = useRef(new Map<string, { selected: string; drafts: Map<string, AgentRecord> }>());
+  const draftsByWorkspace = useRef(new Map<string, { selected: string; drafts: Map<string, AgentDraft> }>());
   if (draftOwner.current === ownerWorkspaceRoot) {
-    const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot) || { selected: "new", drafts: new Map<string, AgentRecord>() };
+    const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot) || { selected: "new", drafts: new Map<string, AgentDraft>() };
     scope.selected = draftKey;
     scope.drafts.set(draftKey, draft);
     draftsByWorkspace.current.set(ownerWorkspaceRoot, scope);
@@ -306,7 +318,7 @@ export const AgentEditor = () => {
   const editExisting = (a: AgentRecord) => {
     const key = agentSelectionKey(a);
     setDraftKey(key);
-    setDraft(draftsByWorkspace.current.get(ownerWorkspaceRoot)?.drafts.get(key) || { ...a, location: a.source });
+    setDraft(draftsByWorkspace.current.get(ownerWorkspaceRoot)?.drafts.get(key) || agentDraft(a));
   };
   const newDraft = () => {
     setDraftKey("new");
@@ -314,7 +326,8 @@ export const AgentEditor = () => {
   };
   const readOnlyDraft = Boolean(draft.source_path && !draft.editable);
   const selectedDraftKey = draftKey;
-  const originalDraft = agents.find((agent) => agentSelectionKey(agent) === draftKey) || newAgentDraft;
+  const originalAgent = agents.find((agent) => agentSelectionKey(agent) === draftKey);
+  const originalDraft = originalAgent ? agentDraft(originalAgent) : newAgentDraft;
   const dirty = JSON.stringify(draft) !== JSON.stringify(originalDraft);
 
   const save = async () => {
@@ -340,8 +353,8 @@ export const AgentEditor = () => {
           prompt: draft.prompt,
           model: draft.model,
           effort: draft.effort,
-          tools: draft.tools,
-          disallowed_tools: draft.disallowed_tools,
+          tools: parseList(draft.tools),
+          disallowed_tools: parseList(draft.disallowed_tools),
           source: draft.source_path ? draft.source : "",
           location: draft.source_path ? "" : draft.location,
           source_path: draft.source_path || "",
@@ -357,14 +370,15 @@ export const AgentEditor = () => {
       await load();
       {
         const saved = data.agent;
+        const savedDraft = agentDraft(saved);
         const scope = draftsByWorkspace.current.get(ownerWorkspaceRoot)!;
         if (scope.drafts.get(submittedKey) === submittedDraft) {
           scope.drafts.delete(submittedKey);
-          scope.drafts.set(agentSelectionKey(saved), saved);
+          scope.drafts.set(agentSelectionKey(saved), savedDraft);
           if (scope.selected === submittedKey) scope.selected = agentSelectionKey(saved);
         }
         if (currentOwner.current === ownerWorkspaceRoot && currentDraft.current === submittedDraft) {
-          setDraftKey(agentSelectionKey(saved)); setDraft(saved);
+          setDraftKey(agentSelectionKey(saved)); setDraft(savedDraft);
         }
       }
     } catch (err) {
@@ -753,9 +767,9 @@ export const AgentEditor = () => {
               <input
                 id="agent-editor-tools"
                 style={inputStyle}
-                value={draft.tools.join(", ")}
+                value={draft.tools}
                 disabled={readOnlyDraft}
-                onChange={(e) => setDraft((d) => ({ ...d, tools: parseList(e.target.value) }))}
+                onChange={(e) => setDraft((d) => ({ ...d, tools: e.target.value }))}
                 placeholder="read_file, grep_files, run_command"
               />
             </div>
@@ -764,9 +778,9 @@ export const AgentEditor = () => {
               <input
                 id="agent-editor-disallowed-tools"
                 style={inputStyle}
-                value={draft.disallowed_tools.join(", ")}
+                value={draft.disallowed_tools}
                 disabled={readOnlyDraft}
-                onChange={(e) => setDraft((d) => ({ ...d, disallowed_tools: parseList(e.target.value) }))}
+                onChange={(e) => setDraft((d) => ({ ...d, disallowed_tools: e.target.value }))}
                 placeholder="write_file"
               />
             </div>

@@ -112,7 +112,12 @@ const connectorAuthStatusLabel = (tr: Translate, status?: string): string | null
 };
 
 const commandFeedback = (tr: Translate, result: CommandResultEvent, message: string): string =>
-  result.data?.tool_availability === "next_turn" ? tr("{v0}，下条消息可用", { v0: message }) : message;
+  result.level === "warning" && result.message ? result.message
+    : result.data?.tool_availability === "next_turn" ? tr("{v0}，下条消息可用", { v0: message }) : message;
+
+const showCommandFeedback = (tr: Translate, result: CommandResultEvent, message: string): void => {
+  pushToast(commandFeedback(tr, result, message), result.level === "warning" ? "warning" : "success");
+};
 
 const operationError = (tr: Translate, error: unknown): string =>
   error instanceof Error ? error.message : String(error || tr("未知错误"));
@@ -442,10 +447,10 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
       if (reportCommandFailure(result, editingServerName ? tr("保存 MCP 服务") : tr("添加 MCP 服务"), tr("服务未返回具体原因"))) return;
-      pushToast(commandFeedback(tr,
+      showCommandFeedback(tr,
         result,
         editingServerName ? tr("已保存 MCP 服务：{v0}", { v0: name }) : tr("已添加 MCP 服务：{v0}", { v0: name }),
-      ), "success");
+      );
       if (draftScope.current === inventoryScope && JSON.stringify(currentDraftRef.current) === submittedDraft) {
         resetEditor();
         setEditorOpen(false);
@@ -467,7 +472,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
       if (!reportCommandFailure(result, enabled ? tr("启用 MCP 服务") : tr("停用 MCP 服务"), tr("服务未返回具体原因"))) {
-        pushToast(tr("{v0} MCP 服务：{v1}", { v0: enabled ? tr("已启用") : tr("已停用"), v1: name }), "success");
+        showCommandFeedback(tr, result, tr("{v0} MCP 服务：{v1}", { v0: enabled ? tr("已启用") : tr("已停用"), v1: name }));
       }
     } catch (error) {
       pushToast(tr("{v0} MCP 服务失败：{v1}", { v0: enabled ? tr("启用") : tr("停用"), v1: operationError(tr, error) }), "error");
@@ -494,7 +499,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
       if (!reportCommandFailure(result, successMessage.replace(/^已/, ""), tr("服务未返回具体原因"))) {
-        pushToast(successMessage, "success");
+        showCommandFeedback(tr, result, successMessage);
         if (action === "mcp.remove") {
           scopedDrafts.current.get(inventoryScope)?.drafts.delete(name);
           if (draftScope.current === inventoryScope && currentDraftRef.current.editingServerName === name) {
@@ -548,7 +553,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
         { timeoutMs: LONG_COMMAND_RESULT_TIMEOUT_MS },
       );
       if (!reportCommandFailure(result, successMessage, tr("服务未返回具体原因"))) {
-        pushToast(commandFeedback(tr, result, successMessage), "success");
+        showCommandFeedback(tr, result, successMessage);
       }
     } catch (error) {
       pushToast(tr("{v0}失败：{v1}", { v0: successMessage, v1: operationError(tr, error) }), "error");

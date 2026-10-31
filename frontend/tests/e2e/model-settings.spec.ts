@@ -74,21 +74,6 @@ async function mockRuntime(page: Page) {
           }],
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url.includes("/api/llm/check")) {
-        return new Response(JSON.stringify({
-          ok: false,
-          provider: "custom",
-          provider_id: "deepseek",
-          base_url: "https://api.deepseek.com/v1",
-          model: "deepseek-v4-flash",
-          wire_api: "chat",
-          has_api_key: false,
-          status_code: null,
-          message: "Missing API key for current provider.",
-          hint: "没有可用的 API key。请为当前 provider 保存 key，或切回已配置 key 的 provider。",
-          models: [],
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      }
       return originalFetch(input, init);
     };
 
@@ -110,17 +95,16 @@ test.describe("Model settings diagnostics", () => {
     await openApp(page);
   });
 
-  test("shows provider/base URL/key diagnostics when auth check fails", async ({ page }) => {
+  test("shows provider settings without a generation check", async ({ page }) => {
+    const checks: string[] = [];
+    page.on("request", (request) => { if (request.url().includes("/api/llm/check")) checks.push(request.url()); });
     await page.keyboard.press("Control+,");
     await expect(page.getByRole("heading", { name: "常规" })).toBeVisible();
     await page.getByRole("button", { name: "模型", exact: true }).click();
     await page.getByRole("button", { name: "编辑 DeepSeek" }).click();
-    await page.getByRole("button", { name: "鉴权" }).click();
-
-    const settings = page.getByRole("main", { name: "设置" });
-    await expect(page.getByText(/deepseek-v4-flash：Missing API key/)).toBeVisible();
     await expect(page.getByRole("textbox", { name: "接口地址" })).toHaveValue("https://api.deepseek.com/v1");
     await expect(page.getByPlaceholder("API 密钥")).toBeVisible();
-    await expect(page.getByRole("button", { name: "重试" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "鉴权" })).toHaveCount(0);
+    expect(checks).toEqual([]);
   });
 });

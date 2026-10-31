@@ -181,7 +181,7 @@ def build_git_doctor_payload(workspace_root: Any) -> dict[str, Any]:
             "available": branch_result.returncode == 0 or status_result.returncode == 0,
             "branch": branch_result.stdout.strip(),
             "changed": len(changes),
-            "clean": len(changes) == 0,
+            "clean": status_result.returncode == 0 and len(changes) == 0,
             "error": branch_result.stderr.strip() or status_result.stderr.strip(),
         }
     except Exception as exc:

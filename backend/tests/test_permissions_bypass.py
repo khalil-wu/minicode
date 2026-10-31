@@ -19,6 +19,7 @@ from backend.tools.read_file import ReadFileTool
 from backend.tools.registry import CapabilityRegistry
 from backend.tools.write_file import WriteFileTool
 from backend.ws.approval_runtime import SessionApprovalRuntimeMixin
+from backend.ws.turn_wait_state import TurnWaitState
 
 
 def _checker(td: str) -> PermissionChecker:
@@ -105,9 +106,11 @@ def test_auto_approval_rechecks_capability_boundary_for_outside_path(tmp_path: P
     runtime.permission_checker = checker
     runtime.permission_context = context
     runtime.tool_registry = registry
+    runtime.turn_wait_state = TurnWaitState()
 
     outside_payload = {
         "type": "control_request",
+        "request_id": "outside",
         "request": {
             "subtype": "can_use_tool",
             "tool_name": "read_file",
@@ -117,6 +120,7 @@ def test_auto_approval_rechecks_capability_boundary_for_outside_path(tmp_path: P
     }
     inside_payload = {
         "type": "control_request",
+        "request_id": "inside",
         "request": {
             "subtype": "can_use_tool",
             "tool_name": "read_file",
@@ -125,6 +129,10 @@ def test_auto_approval_rechecks_capability_boundary_for_outside_path(tmp_path: P
         "conversation_id": "conversation-1",
     }
 
+    runtime.turn_wait_state.pending_approval_inputs = {
+        "outside": outside_payload["request"]["input"],
+        "inside": inside_payload["request"]["input"],
+    }
     assert runtime._pending_tool_payload_is_auto_allowed(outside_payload) is False
     assert runtime._pending_tool_payload_is_auto_allowed(inside_payload) is True
 

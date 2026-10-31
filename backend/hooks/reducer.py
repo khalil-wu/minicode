@@ -11,6 +11,11 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_CONTEXT_TOKEN_LIMIT = 2_500
 _CHARS_PER_APPROX_TOKEN = 4
+_CODEX_EVENTS = {
+    "session_start", "session_end", "subagent_start", "subagent_stop",
+    "user_prompt_submit", "pre_tool_use", "post_tool_use", "permission_request", "stop",
+    "pre_model_request", "post_model_request",
+}
 
 
 @dataclass
@@ -24,6 +29,7 @@ class HookReduction:
     permission_decision: str = ""
     permission_decision_reason: str = ""
     additional_context: str = ""
+    additional_context_items: tuple[tuple[str, Any], ...] = ()
     custom_instructions: str = ""
     updated_input: Any = None
     updated_mcp_tool_output: Any = None
@@ -47,6 +53,10 @@ def reduce_hook_executions(
     blocking_allowed: bool = True,
 ) -> HookReduction:
     event_key = str(getattr(event, "value", event) or "")
+    if event_key in {"pre_model_request", "post_model_request"}:
+        return _reduce_model_observers(executions)
+    if event_key in _CODEX_EVENTS:
+        return _reduce_codex_executions(event_key, executions, blocking_allowed=blocking_allowed)
     policy = event_policy(event_key)
     if policy.fire_and_forget:
         return HookReduction()
@@ -107,20 +117,11 @@ def reduce_hook_executions(
                 "completion_order": execution.completion_order,
                 "duration_ms": execution.duration_ms,
                 "exit_code": exit_code,
-                "status": (
-                    "backgrounded"
-                    if execution.backgrounded
-                    else "succeeded"
-                    if exit_code == 0
-                    else "failed"
-                ),
+                "status": "succeeded" if exit_code == 0 else "failed",
                 "status_message": execution.entry.status_message,
                 **({"runtime_error": True} if execution.execution_failed else {}),
             }
         )
-
-        if execution.backgrounded:
-            continue
 
         if event_key == "interrupt":
             summaries[-1].update(stdout=stdout, stderr=stderr)
@@ -349,11 +350,9 @@ def execution_succeeded_for_once(
     expected_event_name: str,
 ) -> bool:
     """Consume a once hook only after a semantically valid success."""
-    if execution.backgrounded:
-        return False
     if execution.exit_code != 0:
         return False
-    if str(getattr(event, "value", event) or "") == "interrupt":
+    if str(getattr(event, "value", event) or "") in _CODEX_EVENTS | {"interrupt", "pre_compact", "post_compact"}:
         return not reduce_hook_executions(
             event, [execution], expected_event_name=expected_event_name,
         ).failed
@@ -367,6 +366,281 @@ def execution_succeeded_for_once(
         path = payload.get("worktree_path")
         return bool(str(path or "").strip())
     return True
+
+
+def _parse_codex_output(event: str, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Apply the command output shapes in codex-rs/hooks/src/schema.rs."""
+    if payload is None:
+        return None
+    universal = {"continue", "stopReason", "suppressOutput", "systemMessage"}
+    fields = {
+        "session_start": {"hookSpecificOutput"},
+        "subagent_start": {"hookSpecificOutput"},
+        "user_prompt_submit": {"decision", "reason", "hookSpecificOutput"},
+        "pre_tool_use": {"decision", "reason", "hookSpecificOutput"},
+        "post_tool_use": {"decision", "reason", "hookSpecificOutput"},
+        "permission_request": {"hookSpecificOutput"},
+        "stop": {"decision", "reason"},
+        "subagent_stop": {"decision", "reason"},
+    }
+    if set(payload) - universal - fields[event]:
+        return None
+    if any(key in payload and not isinstance(payload[key], bool) for key in ("continue", "suppressOutput")):
+        return None
+    if any(payload.get(key) is not None and not isinstance(payload[key], str)
+           for key in ("stopReason", "systemMessage", "reason")):
+        return None
+    decision = payload.get("decision")
+    if decision is not None and (not isinstance(decision, str) or decision not in ({"approve", "block"} if event == "pre_tool_use" else {"block"})):
+        return None
+    specific = payload.get("hookSpecificOutput")
+    if specific is None:
+        return payload
+    if not isinstance(specific, dict):
+        return None
+    allowed = {
+        "session_start": {"hookEventName", "additionalContext"},
+        "subagent_start": {"hookEventName", "additionalContext"},
+        "user_prompt_submit": {"hookEventName", "additionalContext"},
+        "pre_tool_use": {"hookEventName", "permissionDecision", "permissionDecisionReason", "updatedInput", "additionalContext"},
+        "post_tool_use": {"hookEventName", "additionalContext", "updatedMCPToolOutput"},
+        "permission_request": {"hookEventName", "decision"},
+    }
+    event_names = {"PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "SessionStart", "UserPromptSubmit", "SubagentStart", "SubagentStop", "Stop", "Interrupt"}
+    event_name = specific.get("hookEventName")
+    if set(specific) - allowed[event] or not isinstance(event_name, str) or event_name not in event_names:
+        return None
+    if any(specific.get(key) is not None and not isinstance(specific[key], str)
+           for key in ("additionalContext", "permissionDecisionReason")):
+        return None
+    permission = specific.get("permissionDecision")
+    if permission is not None and (not isinstance(permission, str) or permission not in {"allow", "deny", "ask"}):
+        return None
+    if event == "permission_request" and specific.get("decision") is not None:
+        permission_result = specific["decision"]
+        if not isinstance(permission_result, dict) or set(permission_result) - {"behavior", "updatedInput", "updatedPermissions", "message", "interrupt"}:
+            return None
+        behavior = permission_result.get("behavior")
+        if not isinstance(behavior, str) or behavior not in {"allow", "deny"}:
+            return None
+        if permission_result.get("message") is not None and not isinstance(permission_result["message"], str):
+            return None
+        if "interrupt" in permission_result and not isinstance(permission_result["interrupt"], bool):
+            return None
+    return payload
+
+
+def _codex_semantic_error(event: str, payload: dict[str, Any]) -> str:
+    specific = payload.get("hookSpecificOutput") or {}
+    if event in {"pre_tool_use", "permission_request"}:
+        label = "PreToolUse" if event == "pre_tool_use" else "PermissionRequest"
+        if payload.get("continue") is False:
+            return f"{label} hook returned unsupported continue:false"
+        if payload.get("stopReason") is not None:
+            return f"{label} hook returned unsupported stopReason"
+        if payload.get("suppressOutput") is True:
+            return f"{label} hook returned unsupported suppressOutput"
+    if event == "pre_tool_use":
+        permission = specific.get("permissionDecision")
+        reason = specific.get("permissionDecisionReason")
+        updated = specific.get("updatedInput")
+        if any(value is not None for value in (permission, reason, updated)):
+            if updated is not None and permission != "allow":
+                return "PreToolUse hook returned updatedInput without permissionDecision:allow"
+            if permission == "allow" and updated is None:
+                return "PreToolUse hook returned unsupported permissionDecision:allow"
+            if permission == "ask":
+                return "PreToolUse hook returned unsupported permissionDecision:ask"
+            if permission == "deny" and not (reason or "").strip():
+                return "PreToolUse hook returned permissionDecision:deny without a non-empty permissionDecisionReason"
+            if permission is None and reason is not None:
+                return "PreToolUse hook returned permissionDecisionReason without permissionDecision"
+        elif payload.get("decision") == "approve":
+            return "PreToolUse hook returned unsupported decision:approve"
+        elif payload.get("decision") is None and payload.get("reason") is not None:
+            return "PreToolUse hook returned reason without decision"
+    elif event == "permission_request":
+        decision = specific.get("decision") or {}
+        if decision.get("updatedInput") is not None:
+            return "PermissionRequest hook returned unsupported updatedInput"
+        if decision.get("updatedPermissions") is not None:
+            return "PermissionRequest hook returned unsupported updatedPermissions"
+        if decision.get("interrupt") is True:
+            return "PermissionRequest hook returned unsupported interrupt:true"
+    elif event == "post_tool_use":
+        if payload.get("suppressOutput") is True:
+            return "PostToolUse hook returned unsupported suppressOutput"
+        if specific.get("updatedMCPToolOutput") is not None:
+            return "PostToolUse hook returned unsupported updatedMCPToolOutput"
+        if payload.get("decision") is None and payload.get("continue", True) and payload.get("reason") is not None:
+            return "PostToolUse hook returned reason without decision"
+    if payload.get("decision") == "block" and not (payload.get("reason") or "").strip():
+        if event != "pre_tool_use" or not any(specific.get(key) is not None for key in ("permissionDecision", "permissionDecisionReason", "updatedInput")):
+            label = "".join(part.title() for part in event.split("_"))
+            return f"{label} hook returned decision:block without a non-empty reason"
+    return ""
+
+
+def _reduce_model_observers(executions: Iterable[HookExecution]) -> HookReduction:
+    """Model request hooks observe the request; stdout never controls it."""
+    summaries = []
+    errors = []
+    failed = False
+    for execution in executions:
+        is_failed = execution.execution_failed or execution.exit_code != 0
+        failed |= is_failed
+        stderr = execution.stderr.strip()
+        if stderr:
+            errors.append(stderr)
+        elif is_failed:
+            errors.append(f"hook exited with code {execution.exit_code}")
+        summaries.append({
+            "key": execution.entry.entry_id, "source": execution.entry.source,
+            "source_path": execution.entry.source_path, "display_order": execution.entry.display_order,
+            "configured_order": execution.configured_order, "completion_order": execution.completion_order,
+            "duration_ms": execution.duration_ms, "exit_code": execution.exit_code,
+            "status": "failed" if is_failed else "succeeded",
+            "status_message": execution.entry.status_message,
+            **({"runtime_error": True} if execution.execution_failed else {}),
+        })
+    return HookReduction(failed=failed, errors=tuple(errors), run_summaries=tuple(summaries))
+
+
+def _reduce_codex_executions(event: str, executions: Iterable[HookExecution], *, blocking_allowed: bool) -> HookReduction:
+    outputs: list[str] = []
+    contexts: list[tuple[str, Any]] = []
+    feedback: list[str] = []
+    errors: list[str] = []
+    warnings: list[str] = []
+    summaries: list[dict[str, Any]] = []
+    blocked = False
+    stopped = False
+    stop_reason = ""
+    block_reason = ""
+    permission_decision = ""
+    permission_reason = ""
+    latest_input: tuple[int, Any] | None = None
+    for execution in executions:
+        stdout = execution.stdout.strip()
+        semantic_stdout = (execution.semantic_stdout if execution.semantic_stdout is not None else stdout).strip()
+        stderr = execution.stderr.strip()
+        summary = {
+            "key": execution.entry.entry_id, "source": execution.entry.source,
+            "source_path": execution.entry.source_path, "display_order": execution.entry.display_order,
+            "configured_order": execution.configured_order, "completion_order": execution.completion_order,
+            "duration_ms": execution.duration_ms, "exit_code": execution.exit_code,
+            "status": "succeeded", "status_message": execution.entry.status_message,
+            **({"runtime_error": True} if execution.execution_failed else {}),
+        }
+        summaries.append(summary)
+        if stdout:
+            outputs.append(stdout)
+        if execution.execution_failed:
+            summary["status"] = "failed"
+            errors.append(stderr or "Hook execution failed")
+            continue
+        if execution.exit_code != 0:
+            if execution.exit_code == 2 and event in {"pre_tool_use", "post_tool_use", "permission_request", "user_prompt_submit", "stop", "subagent_stop"} and blocking_allowed:
+                if stderr:
+                    summary["status"] = "blocked"
+                    blocked = True
+                    if not block_reason:
+                        block_reason = stderr
+                    if event == "permission_request":
+                        if permission_decision != "deny":
+                            permission_decision, permission_reason = "deny", stderr
+                    else:
+                        feedback.append(stderr)
+                else:
+                    summary["status"] = "failed"
+                    label = "".join(part.title() for part in event.split("_"))
+                    detail = "denial reason" if event == "permission_request" else "continuation prompt" if event in {"stop", "subagent_stop"} else "feedback" if event == "post_tool_use" else "blocking reason"
+                    errors.append(f"{label} hook exited with code 2 but did not write a {detail} to stderr")
+            else:
+                summary["status"] = "failed"
+                errors.append(stderr or f"hook exited with code {execution.exit_code}")
+            continue
+        if event == "session_end" or not semantic_stdout:
+            continue
+        payload = _parse_codex_output(event, execution.json_output)
+        if payload is None:
+            if semantic_stdout.startswith(("{", "[")) or event in {"stop", "subagent_stop"}:
+                summary["status"] = "failed"
+                errors.append(f"hook returned invalid {event.replace('_', ' ')} JSON output")
+            elif event in {"session_start", "subagent_start", "user_prompt_submit"}:
+                contexts.append((semantic_stdout, execution.entry))
+            continue
+        if payload.get("suppressOutput") is True and stdout:
+            outputs.pop()
+        if payload.get("systemMessage"):
+            warnings.append(payload["systemMessage"])
+        semantic_error = _codex_semantic_error(event, payload)
+        # PostToolUse, prompt and stop honor continue:false before their
+        # semantic decision errors; PreToolUse and PermissionRequest reject it.
+        stops = payload.get("continue") is False and event in {"session_start", "user_prompt_submit", "post_tool_use", "stop", "subagent_stop"} and blocking_allowed
+        if semantic_error and not stops:
+            summary["status"] = "failed"
+            errors.append(semantic_error)
+            continue
+        specific = payload.get("hookSpecificOutput") or {}
+        additional = specific.get("additionalContext")
+        if additional and not semantic_error:
+            contexts.append((additional, execution.entry))
+        if stops:
+            summary["status"] = "stopped"
+            if event == "post_tool_use":
+                feedback.append((payload.get("reason") or payload.get("stopReason") or "PostToolUse hook stopped execution").strip())
+            else:
+                stopped = True
+                if not stop_reason:
+                    stop_reason = payload.get("stopReason") or ""
+            continue
+        if not blocking_allowed:
+            continue
+        decision = payload.get("decision")
+        reason = payload.get("reason") or ""
+        if event == "pre_tool_use":
+            permission = specific.get("permissionDecision")
+            if permission == "deny":
+                decision, reason = "block", specific["permissionDecisionReason"]
+            elif permission == "allow" and specific.get("updatedInput") is not None:
+                candidate = (execution.completion_order, specific["updatedInput"])
+                if latest_input is None or candidate[0] > latest_input[0]:
+                    latest_input = candidate
+                decision = None
+        elif event == "permission_request":
+            request_decision = specific.get("decision") or {}
+            behavior = request_decision.get("behavior")
+            if behavior == "deny":
+                message = (request_decision.get("message") or "").strip() or "PermissionRequest hook denied approval"
+                if permission_decision != "deny":
+                    permission_decision, permission_reason = "deny", message
+                decision, reason = "block", message
+            elif behavior == "allow" and permission_decision != "deny" and execution.permission_grant_allowed:
+                permission_decision = "allow"
+        if decision == "block":
+            summary["status"] = "blocked"
+            blocked = True
+            if not block_reason:
+                block_reason = reason.strip()
+            if event != "permission_request":
+                feedback.append(reason.strip())
+    if event in {"session_start", "user_prompt_submit"} and stopped:
+        blocked = True
+        block_reason = stop_reason or "Hook stopped execution"
+    if event == "pre_tool_use" and blocked:
+        latest_input = None
+        permission_decision, permission_reason = "deny", block_reason
+    return HookReduction(
+        blocked=blocked, failed=any(item["status"] == "failed" for item in summaries),
+        message=block_reason, feedback="\n".join(feedback), stdout="\n".join(outputs),
+        errors=tuple(errors), permission_decision=permission_decision,
+        permission_decision_reason=permission_reason, additional_context="\n\n".join(text for text, _ in contexts),
+        additional_context_items=tuple(contexts),
+        updated_input=latest_input[1] if latest_input is not None else None,
+        prevent_continuation=stopped, stop_reason=stop_reason,
+        system_message="\n".join(warnings), run_summaries=tuple(summaries),
+    )
 
 
 def _permission_fields(

@@ -48,6 +48,8 @@ class Answer(LLMAdapter):
 
 
 def session_for(tmp_path, monkeypatch):
+    # Dispatch only admits inputs whose bound workspace is trusted; fixtures bind raw temp dirs.
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
     adapter = Answer()
     workspace = tmp_path / "workspace"
     workspace.mkdir()

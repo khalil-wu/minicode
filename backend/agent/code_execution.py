@@ -19,11 +19,11 @@ from backend.agent.nested_tool_events import publish_tool_event
 from backend.agent.state import AgentState
 from backend.agent.tool_batch_runner import ToolBatchRunner
 from backend.agent.turn_kernel import TurnKernel
-from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain_receipt
+from backend.async_cleanup import CANCELLATION_DRAIN_TIMEOUT_SECONDS, cancel_and_drain_receipt, to_thread_cancel_safe
 from backend.llm.base import ToolCallEvent
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolCallSource, ToolExecutionContext
-from backend.tools.base import ToolResult
+from backend.tools.base import ToolResult, artifact_owner_workspace_root
 from backend.tools.registry import ToolRegistry
 from backend.tools.schema import code_mode_tool_name
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
@@ -223,6 +223,10 @@ class CodeExecutionRuntime:
                             value["images"] = []
                             for image in result.images:
                                 artifact_id = image.get("artifact_id") or (result.artifact_id if len(result.images) == 1 else None)
+                                if not artifact_id and result.result_kind == "image_generation":
+                                    artifact_id = await to_thread_cancel_safe(nested.artifact_store.save, image["data"],
+                                        source=operation, type="image", media_type=image["media_type"],
+                                        conversation_id=nested.conversation_id, workspace_root=artifact_owner_workspace_root(nested))
                                 value["images"].append({**image, "image_url": f"data:{image['media_type']};base64,{image['data']}", **({"artifact_id": artifact_id} if artifact_id else {})})
                                 if artifact_id:
                                     cell.image_artifacts[(artifact_id, image["media_type"], image["data"])] = {
@@ -259,7 +263,10 @@ class CodeExecutionRuntime:
                         if ownership is None:
                             item.pop("artifact_id")
                         else:
+                            selected_as_generated = item.get("source") == "image_generation"
                             item.update(ownership)
+                            if selected_as_generated:
+                                item["source"] = "image_generation"
                 cell.output.extend(packet["output"])
                 if packet["yielded"]:
                     cell.changed.set()

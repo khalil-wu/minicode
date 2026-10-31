@@ -316,6 +316,7 @@ async def test_fast_approval_paths_clear_replay_state(cached):
     session = ApprovalSession()
     payload = approval_payload()
     session.turn_wait_state.pending_approval_payloads["tool1"] = payload
+    session.turn_wait_state.pending_approval_inputs["tool1"] = copy.deepcopy(payload["request"]["input"])
     if cached:
         session._mark_session_approved("run_command", payload["request"]["input"], payload=payload)
     else:
@@ -335,6 +336,7 @@ async def test_conversation_approval_scope_from_control_response(action, remembe
     session = ApprovalSession()
     payload = approval_payload()
     session.turn_wait_state.pending_approval_payloads["tool1"] = payload
+    session.turn_wait_state.pending_approval_inputs["tool1"] = copy.deepcopy(payload["request"]["input"])
     request_id, response = session._normalize_control_response({
         "request_id": "tool1", "conversation_id": "conv_probe", "turn_id": "r1", "message_id": "a1",
         "response": {"subtype": "success", "response": {"action": action, "remember_for_session": remember}},
@@ -414,6 +416,7 @@ async def test_start_boundary_assigns_identity_for_non_transport_prompts():
     def create(name, coroutine):
         return SimpleNamespace(id="task1", task=asyncio.create_task(coroutine))
     host = SimpleNamespace(session_id="non-transport-fixture", ws_manager=None,
+        session_lifecycle=SimpleNamespace(recovered_input_workspace_ready=lambda owner: True),
         run_manager=SimpleNamespace(turn_input_queue=lambda owner: TurnInputQueue(), is_delivery_complete=lambda *args: True,
             release_query_claim=conversation_query_guards().end),
         capture_agent_run_request=capture_request,

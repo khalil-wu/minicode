@@ -280,8 +280,11 @@ def provider_run(monkeypatch, batches):
         yield ProviderStreamExceptionResult(cancelled=True)
     monkeypatch.setattr(module, "safe_stream_chat_with_request_metadata", stream)
     monkeypatch.setattr(module, "wait_for_next_provider_event", wait)
-    monkeypatch.setattr(module, "handle_provider_error_event", retry)
-    monkeypatch.setattr(module, "handle_provider_stream_exception", exception)
+    # The runtime delegates error/exception settlement to these modules; patch them there.
+    import backend.agent.provider_stream_error_event as error_event_module
+    import backend.agent.provider_stream_failures as failures_module
+    monkeypatch.setattr(error_event_module, "handle_provider_error_event", retry)
+    monkeypatch.setattr(failures_module, "handle_provider_stream_exception", exception)
     class Kernel:
         run_record = AgentRunRecord(run_id="r1")
         metadata = {}

@@ -60,6 +60,9 @@ def _session(tmp_path: Path, monkeypatch, conversation_id: str | None = None) ->
     # Runtime capability notifications are unrelated to these lifecycle tests.
     session.task_manager = TaskManager()
     if conversation_id is not None:
+        from backend.workspace.trust import trust_created_task_directory
+
+        trust_created_task_directory(tmp_path)
         session.conversation_repo.create_conversation(conversation_id=conversation_id,
             workspace_root=str(tmp_path), memory_mode="none", permission_mode="bypass")
     return session

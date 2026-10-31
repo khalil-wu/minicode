@@ -521,6 +521,7 @@ class ImageChunkLiveData(TypedDict):
     message_id: str
     image_data: str
     media_type: str
+    tool_call_id: NotRequired[str]
 
 
 class ImageChunkReplayData(TypedDict):
@@ -529,6 +530,7 @@ class ImageChunkReplayData(TypedDict):
     media_type: str
     image_data_omitted: Literal[True]
     image_data_size: int
+    tool_call_id: NotRequired[str]
 
 
 ImageChunkData = ImageChunkLiveData | ImageChunkReplayData

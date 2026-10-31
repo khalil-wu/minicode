@@ -287,7 +287,7 @@ def test_stdio_resources_and_prompts_work_without_tools_capability(tmp_path: Pat
             assert client.server_capabilities.resources
             assert client.server_capabilities.prompts
 
-            inventory = await list_mcp_inventory(manager, config.name)
+            inventory = await list_mcp_inventory(manager, config.name, cleanup_tasks=set())
             assert [resource["uri"] for resource in inventory["resources"]] == ["fixture://guide"]
             assert [prompt["name"] for prompt in inventory["prompts"]] == ["review"]
             assert await client.read_resource("fixture://guide") == [

@@ -56,7 +56,8 @@ const Fixture = () => {
 describe('workspace Problems native diagnostics and edits', () => {
   it('starts from no open code tab, diagnoses an unopened source, applies a real worker fix and preserves native Undo', async () => {
     render(<Fixture />)
-    const message = await screen.findByText(/Cannot find name 'mesage'/)
+    // This first diagnostic includes the real cold Monaco/TypeScript initialization.
+    const message = await screen.findByText(/Cannot find name 'mesage'/, {}, { timeout: 5000 })
     expect(useAppStore.getState().editorTabs).toHaveLength(0)
     expect(monaco.editor.getModels()).toEqual([])
     expect(screen.getByText('/project/src/unopened.ts')).toBeTruthy()

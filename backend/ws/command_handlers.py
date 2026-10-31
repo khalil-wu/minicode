@@ -524,12 +524,15 @@ class SessionCommandHandlersMixin:
         wait_for_initialize: bool = False,
         error_command: str | None = "workspace.activate",
     ) -> bool:
-        return await self.session_lifecycle.switch_workspace_for_conversation(
+        activated = await self.session_lifecycle.switch_workspace_for_conversation(
             conversation,
             announce=announce,
             wait_for_initialize=wait_for_initialize,
             error_command=error_command,
         )
+        if activated and self.session_lifecycle.foreground_navigation_is_current():
+            self.session_lifecycle.record_workspace_activation(str(conversation.id), True)
+        return activated
 
     async def activate_workspace_path(
         self,

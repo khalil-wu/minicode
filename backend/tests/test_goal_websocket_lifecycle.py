@@ -157,7 +157,8 @@ def test_disabled_goal_queue_preserves_pending_saved_state_and_does_not_start_a_
     monkeypatch.setattr("backend.config.load_config", lambda **kwargs: off)
     owner = SimpleNamespace(ws_manager=None, run_manager=session.run_manager, conversation_repo=session.conversation_repo,
         running_agent_task_for=lambda _: None, start_agent_run=AsyncMock(),
-        session_lifecycle=SimpleNamespace(is_shutting_down=False, workspace_root_for_conversation=lambda record: Path(record.workspace_root)))
+        session_lifecycle=SimpleNamespace(is_shutting_down=False, workspace_root_for_conversation=lambda record: Path(record.workspace_root),
+                                          recovered_input_workspace_ready=lambda conversation_id: True))
     WebSocketSession.schedule_next_queued_user_message(owner, conversation_id)
     assert not session.run_manager.is_queue_dispatching(conversation_id)
     owner.start_agent_run.assert_not_called()

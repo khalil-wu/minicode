@@ -174,10 +174,8 @@ class SessionApprovalRuntimeMixin:
             or request_payload.get("request", {}).get("request_digest")
             or ""
         ).strip()
-        try:
-            args_str = json.dumps(args, sort_keys=True, ensure_ascii=False)
-        except (TypeError, ValueError):
-            args_str = str(sorted(args.items())) if isinstance(args, dict) else ""
+        args_str = json.dumps(args, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        args_digest = hashlib.sha256(args_str.encode("utf-8")).hexdigest()
         session_id = str(getattr(self, "session_id", "") or "").strip()
         if not request_digest:
             canonical = json.dumps(
@@ -209,7 +207,7 @@ class SessionApprovalRuntimeMixin:
         capability = "escalated" if escalation_requested else "ordinary"
         return (
             f"{session_id}::{conversation_id}::{workspace_root}::{permission_mode}::"
-            f"{workspace_scope}::{capability}::{captured_identity}::{request_digest}::{args_str}"
+            f"{workspace_scope}::{capability}::{captured_identity}::{request_digest}::{args_digest}"
         )
 
     def _is_session_approved(self, tool_name: str, args: dict[str, Any], *, payload: dict[str, Any] | None = None) -> bool:
@@ -468,11 +466,11 @@ class SessionApprovalRuntimeMixin:
         if "available_decisions" in request or "mcp_approval" in request:
             return False
         tool_name = str(request.get("tool_name") or "").strip()
-        args = request.get("input") or {}
+        args = self.turn_wait_state.pending_approval_inputs.get(str(payload.get("request_id") or ""))
         if not tool_name:
             return False
         if not isinstance(args, dict):
-            args = {}
+            return False
         checker = getattr(self, "permission_checker", None)
         context = getattr(self, "permission_context", None)
         if checker is None:
@@ -569,11 +567,11 @@ class SessionApprovalRuntimeMixin:
         request = payload.get("request")
         request = request if isinstance(request, dict) else {}
         tool_name = str(request.get("tool_name") or "").strip()
-        args = request.get("input") or {}
+        args = self.turn_wait_state.pending_approval_inputs.get(tool_call_id)
         try:
             # Native MCP approvals are remembered by the thread's issuing
             # execution owner, not this generic request/argument cache.
-            cacheable = request.get("subtype") == "can_use_tool" and tool_name != "exit_plan_mode" and not request.get("strict_auto_review") and "mcp_approval" not in request and "available_decisions" not in request
+            cacheable = args is not None and request.get("subtype") == "can_use_tool" and tool_name != "exit_plan_mode" and not request.get("strict_auto_review") and "mcp_approval" not in request and "available_decisions" not in request
             if cacheable and tool_name and self._is_session_approved(tool_name, args, payload=payload):
                 logger.debug("Session-approved: %s %s", tool_name, tool_call_id)
                 return {
@@ -980,13 +978,12 @@ class SessionApprovalRuntimeMixin:
     def build_approval_request_payload(self, event: AgentEvent) -> dict[str, Any]:
         request_id = str(event.data.get("tool_call_id", "")).strip()
         conversation_id = str(event.data.get("conversation_id") or "").strip()
+        original_args = self._clone_json_dict(dict(event.data.get("args") or {}))
         # Scratch space for the fields the control request is assembled from;
         # the wire payload is the ``control_request`` built at the end.
         payload: dict[str, Any] = {
             "tool_name": str(event.data.get("tool_name", "")).strip(),
-            "args": self._sanitize_approval_args_for_client(
-                dict(event.data.get("args") or {})
-            ),
+            "args": self._sanitize_approval_args_for_client(original_args),
         }
         request_digest = str(event.data.get("request_digest") or "").strip()
         policy_identity = str(event.data.get("policy_identity") or "").strip()
@@ -1091,5 +1088,6 @@ class SessionApprovalRuntimeMixin:
         for key in ("turn_id", "message_id", "workspace_root", "permission_mode", "workspace_scope"):
             if key in payload:
                 control_payload[key] = payload[key]
+        self.turn_wait_state.pending_approval_inputs[request_id] = original_args
         self.turn_wait_state.pending_approval_payloads[request_id] = control_payload
         return control_payload

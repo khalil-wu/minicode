@@ -267,7 +267,14 @@ describe("SidebarRight activity", () => {
     expect(useAppStore.getState().messages[0].blocks?.some(block => block.type === "text" && block.content.includes("word 24"))).toBe(true);
     commit.mockClear();
     act(() => useAppStore.getState().appendAgentMessageDelta("reply", "visible update", owner, "streamed-answer", "reply"));
+    // Answer text feeds no Activity section, so a text delta must not re-render it; the other panels project every message.
+    if (_name === "Activity") expect(commit).not.toHaveBeenCalled(); else expect(commit).toHaveBeenCalled();
+    commit.mockClear();
+    act(() => useAppStore.setState(state => ({ messages: state.messages.map(message => ({ ...message,
+      artifacts: [...message.artifacts, { artifactId: "visible-artifact", kind: "file", summary: "visible-update.txt" }],
+    })) })));
     expect(commit).toHaveBeenCalled();
+    if (_name !== "Inspector") expect(screen.getByText("visible-update.txt")).toBeTruthy();
   });
 
   it("keeps separate heartbeat drafts across owner switches and closing a right-panel tab", async () => {

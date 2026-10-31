@@ -32,6 +32,23 @@ def test_deny_strips_env_and_wrapper_prefixes() -> None:
     assert not _deny("rm:*", "echo rm")
 
 
+@pytest.mark.parametrize("command", [
+    "sudo -u root curl example.test",
+    "doas -u root curl example.test",
+    "pkexec --user root curl example.test",
+    "xargs -I {} curl example.test",
+    "env -u NAME curl example.test",
+    "env --unset=NAME curl example.test",
+    "env -C /tmp NAME=value curl example.test",
+    "env -S 'curl example.test'",
+    "env --split-string='curl example.test'",
+])
+def test_restrictions_follow_literal_wrapped_commands_without_authorizing_them(command):
+    assert _deny("curl:*", command)
+    assert not _allow("curl:*", command)
+    assert not _deny("curl:*", "echo 'curl example.test'")
+
+
 def test_allow_rules_still_refuse_compound_commands() -> None:
     assert _allow("git status:*", "git status")
     assert not _allow("git status:*", "git status && rm -rf /")

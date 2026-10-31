@@ -296,18 +296,20 @@ class MemoryGenerationCoordinator:
         scoped = await _to_thread_cancel_safe(self._scoped_conversations)
         await self._reconcile_ineligible_outputs(scoped)
 
-        candidates = [
-            conversation
-            for conversation in scoped
-            if str(getattr(conversation, "id", "")) != current_conversation_id
-            and self._eligible_for_stage1(conversation, now=now)
-        ]
-        candidates.sort(
-            key=lambda item: self._source_updated_at(item),
-            reverse=True,
-        )
+        candidates: list[tuple[int, Any]] = []
+        for conversation in scoped:
+            if str(getattr(conversation, "id", "")) == current_conversation_id:
+                continue
+            try:
+                if self._eligible_for_stage1(conversation, now=now):
+                    self._source_revision(conversation)
+                    candidates.append((self._source_updated_at(conversation), conversation))
+            except MemoryGenerationError as exc:
+                logger.warning("Memory Phase 1 skipped conversation %s: %s", conversation.id, exc)
+        candidates.sort(key=lambda item: item[0], reverse=True)
         await asyncio.gather(
-            *(self._run_phase1(conversation, startup_source=startup_source) for conversation in candidates[:MAX_STAGE1_ROLLOUTS])
+            *(self._run_phase1(conversation, startup_source=startup_source)
+              for _, conversation in candidates[:MAX_STAGE1_ROLLOUTS])
         )
         await self._run_phase2()
 
@@ -384,7 +386,10 @@ class MemoryGenerationCoordinator:
         raw = getattr(conversation, "content_revision", getattr(conversation, "revision", None))
         if isinstance(raw, bool) or raw is None:
             raise MemoryGenerationError("Conversation has no durable revision")
-        revision = int(raw)
+        try:
+            revision = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise MemoryGenerationError("Conversation revision is invalid") from exc
         if revision < 0:
             raise MemoryGenerationError("Conversation revision must be non-negative")
         return revision

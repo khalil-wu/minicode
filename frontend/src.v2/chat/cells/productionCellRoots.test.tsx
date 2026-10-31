@@ -7,12 +7,14 @@ import type { ToolCallEvent, ToolResultEvent } from "../../protocol/events";
 import type { ArtifactPreview, ChatMessage, ContentBlock, ProgressContentBlock } from "../../stores/types";
 import { useAppStore } from "../../stores";
 import { handleChatStreamEvent } from "../chatStreamEvents";
+import { handleRuntimeEvent } from "../runtimeEvents";
 import { projectMessagesToTurns } from "../chatSurfaceState";
 import { getToolCallsFromMessage } from "../../lib/content-blocks";
 import { createStreamBuffer } from "../../lib/stream-buffer";
 import { canonicalArtifactKind, recordHasImageArtifact } from "../../lib/artifact-projection";
 import { reduceToolCallResult, reduceToolCallStart, type ToolCallRecord } from "../../lib/tool-call-reducer";
 import { AssistantMarkdownCell } from "./AssistantMarkdownCell";
+import { ActivityCell } from "./ActivityCell";
 
 // Unmodified frames emitted by the real PresentFileTool/store_result replay.
 const capture = JSON.parse(readFileSync(resolve(process.cwd(), "src.v2/chat/cells/fixtures/present-file-large-result.json"), "utf8")) as {
@@ -128,6 +130,51 @@ describe("primary artifact identity is not the output file identity", () => {
 });
 
 describe("image progress uses the actual terminal status", () => {
+  it.each([
+    "Client error '401 Unauthorized' for url 'http://fixture.invalid/v1/images/generations'",
+    "Client error '404 Not Found' for url 'http://fixture.invalid/v1/images/generations'",
+    "Image API returned bytes that do not match the declared PNG media type",
+  ])("keeps the actual image API error in its owned tool disclosure without a duplicate result card: %s", detail => {
+    seedMessage([], true);
+    useAppStore.setState({ reducedMotion: true });
+    const buffer = createStreamBuffer(() => {});
+    const callId = "real-external-image-call";
+    const envelope = { conversation_id: owner, message_id: "owned-message" };
+    handleChatStreamEvent({ type: "tool_call", ...envelope, id: callId, name: "generate_image", args: { prompt: "fixture" },
+      status: "running", started_at: 1, display_hint: "Generate image", result_kind: "image_generation", activity_kind: "imageGeneration" } as ToolCallEvent,
+    owner, { textStreamBuffer: buffer });
+    handleRuntimeEvent({ type: "agent.progress", ...envelope, id: `image-generation:${callId}`, stage: "image_generation",
+      status: "failed", message: "图像生成失败", detail, tool_call_id: callId, tool_name: "generate_image" }, owner);
+    handleChatStreamEvent({ type: "tool_result", ...envelope, id: callId, status: "failed", summary: `Image generation failed: ${detail}`,
+      result_kind: "image_generation", activity_kind: "imageGeneration", display_summary: "Generate image" } as ToolResultEvent,
+    owner, { textStreamBuffer: buffer });
+    useAppStore.getState().finishStreaming(owner, undefined, "completed", "owned-message");
+    const turn = projectMessagesToTurns(useAppStore.getState().messages, false)[0];
+    const original = turn.committedCells.find(cell => cell.kind === "activity" && cell.toolCallRecords?.some(record => record.id === callId));
+    expect(original?.kind).toBe("activity");
+    if (original?.kind !== "activity") throw new Error("Original image tool record is missing");
+    expect(turn.finalAnswerCell?.imageProgress?.[0]).toMatchObject({ status: "failed", toolCallId: callId, detail });
+    const view = render(<><AssistantMarkdownCell cell={turn.finalAnswerCell!} conversationId={owner} /><ActivityCell cell={original} conversationId={owner} /></>);
+    expect(view.container.querySelector(".assistant-cell-image-placeholder")).toBeNull();
+    expect(view.container.querySelector(".assistant-cell-image-card")).toBeNull();
+    expect(view.container.textContent).not.toContain(detail);
+    fireEvent.click(screen.getByRole("button", { name: "展开活动详情" }));
+    expect(view.container.textContent).toContain(detail);
+    expect(getToolCallsFromMessage(useAppStore.getState().messages[0]).find(record => record.id === callId)).toMatchObject({ status: "failed", summary: `Image generation failed: ${detail}` });
+    buffer.destroy();
+  });
+  it("settles an inspected code-mode image only after finishStreaming publishes the whole turn terminal", () => {
+    seedMessage([{ ...imageProgress("completed"), toolCallId: "inspected-image" }], true);
+    const live = projectMessagesToTurns(useAppStore.getState().messages, true)[0];
+    const view = render(<AssistantMarkdownCell cell={live.finalAnswerCell!} conversationId={owner} />);
+    expect(document.querySelector('.assistant-cell-image-placeholder')).toBeTruthy();
+    useAppStore.getState().finishStreaming(owner, undefined, "completed", "owned-message");
+    const final = projectMessagesToTurns(useAppStore.getState().messages, false)[0];
+    expect(final.finalAnswerCell!.terminalStatus).toBe("completed");
+    view.rerender(<AssistantMarkdownCell cell={final.finalAnswerCell!} conversationId={owner} />);
+    expect(document.querySelector('.assistant-cell-image-placeholder')).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+  });
   it.each(["interrupted", "partial"] as const)("settles %s through the real store and projection", (terminalStatus) => {
     seedMessage([imageProgress("running")], true);
     useAppStore.getState().finishStreaming(owner, undefined, terminalStatus, "owned-message");

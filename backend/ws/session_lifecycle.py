@@ -45,6 +45,7 @@ class SessionLifecycle:
         self._retired_workspace_tasks: set[asyncio.Task[Any]] = set()
         self._workspace_generation = 0
         self._workspace_root: Path | None = None
+        self._failed_workspace_activations: set[str] = set()
         self._foreground_navigation_receipt: ForegroundNavigationReceipt | None = None
         self._navigation_receipt: ContextVar[ForegroundNavigationReceipt | None] = ContextVar("foreground_navigation_receipt", default=None)
         self._foreground_navigation_target_id: str | None = None
@@ -65,15 +66,18 @@ class SessionLifecycle:
         """Bind selection intent before this command's first async preparation."""
         kind = command.type
         data = command.data
-        target = str(data.get("conversation_id") or "")
+        target = str((data.get("last_conversation_id") if kind == "session.restore" else data.get("conversation_id")) or "")
         activating = (
             kind == "conversation.switch"
+            or kind == "session.restore"
             or kind in {"workspace.set", "workspace.switch", "workspace.import"}
             or (kind == "conversation.create" and data.get("activate", True)
                 and data.get("conversation_type", "main") == "main")
             or (kind == "context.fork" and data.get("create_branch", True) and data.get("activate", False))
             or (kind == "conversation.archive" and data.get("archive_navigation") == "home")
             or (kind == "user_message" and not target and not self._session.active_conversation_id)
+            or (kind == "user_message" and data.get("_implicit_new_conversation_id") == target
+                and not self._session.active_conversation_id and not self._foreground_navigation_pending)
             or (kind == "conversation.delete" and target == (
                 self._foreground_navigation_target_id if self._foreground_navigation_pending
                 else self._session.active_conversation_id
@@ -85,6 +89,8 @@ class SessionLifecycle:
                 # later, while Header archive navigates to an empty home.
                 target = ""
             receipt = ForegroundNavigationReceipt(str(data.get("client_command_id") or ""), target or None)
+            if kind == "session.restore" and self._foreground_navigation_pending:
+                return receipt
             self._foreground_navigation_receipt = receipt
             self._foreground_navigation_target_id = target or None
             self._foreground_navigation_pending = True
@@ -102,6 +108,35 @@ class SessionLifecycle:
     def foreground_navigation_is_current(self) -> bool:
         receipt = self._navigation_receipt.get()
         return receipt is None or receipt is self._foreground_navigation_receipt
+
+    def record_workspace_activation(self, conversation_id: str, activated: bool) -> None:
+        if activated:
+            self._failed_workspace_activations.discard(conversation_id)
+        else:
+            self._failed_workspace_activations.add(conversation_id)
+
+    def workspace_activation_failed(self, conversation_id: str) -> bool:
+        return conversation_id in self._failed_workspace_activations
+
+    def recovered_input_workspace_ready(self, conversation_id: str) -> bool:
+        """Check a recovered input's bound local workspace before consuming it."""
+        if self.workspace_activation_failed(conversation_id):
+            return False
+        conversation = self._session.conversation_repo.get_conversation_summary(conversation_id)
+        if conversation is None:
+            return True
+        from backend.services.workspace_service import conversation_execution_path, parse_workspace_activation_request
+
+        workspace = conversation_execution_path(conversation)
+        if not workspace or workspace.startswith("file:"):
+            return True
+        projectless = not conversation.workspace_root and not conversation.worktree_path
+        request = (parse_workspace_activation_request(workspace, projectless=True) if projectless
+                   else parse_workspace_activation_request(workspace))
+        if request.error_event is not None:
+            self.record_workspace_activation(conversation_id, False)
+            return False
+        return True
 
     def finish_foreground_navigation(self) -> None:
         if self._navigation_receipt.get() is not None and self.foreground_navigation_is_current():
@@ -610,6 +645,16 @@ class SessionLifecycle:
             await self._session.send_event(result.notice_event)
         return updated or conversation
 
+    async def _report_workspace_activation_error(self, event: AgentEvent, *, error_command: str | None,
+                                                 conversation_id: str, workspace_root: str) -> None:
+        if error_command:
+            from backend.ws.command_results import emit_command_error
+            await emit_command_error(self._session, error_command, event,
+                data={"conversation_id": conversation_id, "workspace_root": workspace_root})
+        else:
+            event.data.update(conversation_id=conversation_id, workspace_root=workspace_root)
+            await self._session.send_event(event)
+
     async def switch_workspace_for_conversation(
         self,
         conversation: Any,
@@ -618,7 +663,9 @@ class SessionLifecycle:
         wait_for_initialize: bool = False,
         error_command: str | None = "workspace.activate",
     ) -> bool:
-        from backend.services.workspace_service import conversation_execution_path, workspace_matches_context
+        from backend.services.workspace_service import (
+            conversation_execution_path, parse_workspace_activation_request, workspace_matches_context,
+        )
 
         if not self.foreground_navigation_is_current():
             return False
@@ -628,9 +675,24 @@ class SessionLifecycle:
             self.clear_workspace_runtime()
             return True
         if workspace_path.startswith("file:"):
+            from backend.environments.errors import ExecutorError
             from backend.workspace.executor_activation import validate_executor_workspace
 
-            await validate_executor_workspace(self._session, conversation)
+            try:
+                await validate_executor_workspace(self._session, conversation)
+            except ExecutorError as exc:
+                if not self.foreground_navigation_is_current():
+                    return False
+                message = f"Failed to switch session workspace: {exc}"
+                if error_command:
+                    from backend.ws.command_results import emit_command_error
+                    await emit_command_error(self._session, error_command, message,
+                        data={"conversation_id": str(conversation.id), "workspace_root": workspace_path})
+                else:
+                    event = AgentEvent.error(message, recoverable=True)
+                    event.data.update(conversation_id=str(conversation.id), workspace_root=workspace_path)
+                    await self._session.send_event(event)
+                return False
             if not self.foreground_navigation_is_current():
                 return False
             self.clear_workspace_runtime()
@@ -638,6 +700,12 @@ class SessionLifecycle:
 
         project_root = str(conversation.workspace_root or conversation.worktree_path or "").strip()
         if workspace_matches_context(workspace_path, self._workspace_context):
+            request = (parse_workspace_activation_request(workspace_path) if project_root
+                       else parse_workspace_activation_request(workspace_path, projectless=True))
+            if request.error_event is not None:
+                await self._report_workspace_activation_error(request.error_event, error_command=error_command,
+                    conversation_id=str(conversation.id or ""), workspace_root=workspace_path)
+                return False
             if project_root:
                 from backend.services.workspace_service import record_recent_workspace_project, list_workspace_recent_payload
 
@@ -657,6 +725,7 @@ class SessionLifecycle:
             error_command=error_command,
             conversation_id=str(conversation.id or "").strip(),
             project_root=project_root,
+            projectless=not project_root,
         )
 
     async def activate_workspace_path(
@@ -668,6 +737,8 @@ class SessionLifecycle:
         error_command: str | None = "workspace.activate",
         conversation_id: str | None = None,
         project_root: str = "",
+        projectless: bool = False,
+        prepared_context: Any | None = None,
     ) -> bool:
         from backend.services.workspace_service import (
             create_workspace_context,
@@ -681,16 +752,11 @@ class SessionLifecycle:
         owner_conversation_id = str(
             conversation_id or self._session.active_conversation_id or ""
         ).strip()
-        request = parse_workspace_activation_request(path_str)
+        request = (parse_workspace_activation_request(path_str, projectless=True) if projectless
+                   else parse_workspace_activation_request(path_str))
         if request.error_event is not None:
-            if error_command:
-                from backend.ws.command_results import emit_command_error
-                await emit_command_error(self._session, error_command, request.error_event,
-                    data={"conversation_id": owner_conversation_id, "workspace_root": str(path_str)})
-            else:
-                request.error_event.data["conversation_id"] = owner_conversation_id
-                request.error_event.data["workspace_root"] = str(path_str)
-                await self._session.send_event(request.error_event)
+            await self._report_workspace_activation_error(request.error_event, error_command=error_command,
+                conversation_id=owner_conversation_id, workspace_root=str(path_str))
             return False
         project_path = request.project_path
         if project_path is None:
@@ -838,13 +904,14 @@ class SessionLifecycle:
             await self.send_runtime_capabilities(source="workspace.activate.rollback")
 
         try:
-            ctx = create_workspace_context(project_path)
-            prepared_metadata = None
+            ctx = prepared_context if prepared_context is not None else create_workspace_context(project_path)
+            prepared_metadata = ctx.metadata if prepared_context is not None else None
             if wait_for_initialize:
                 # Blocking creation prepares the index off to the side. Its
                 # old receipt must never publish a root while a newer selected
                 # conversation is already opening.
-                prepared_metadata = await ctx.initialize()
+                if prepared_metadata is None:
+                    prepared_metadata = await ctx.initialize()
                 if self._workspace_generation != activation_generation or not self.foreground_navigation_is_current():
                     return False
                 self._workspace_generation = int(self._workspace_generation) + 1
@@ -940,7 +1007,7 @@ class SessionLifecycle:
                         projection_task = asyncio.create_task(
                             prepare_workspace_projection_background()
                         )
-                    metadata = prepared_metadata if wait_for_initialize else await ctx.initialize()
+                    metadata = prepared_metadata if prepared_metadata is not None else await ctx.initialize()
                     if projection_task is not None:
                         await projection_task
                     if not activation_is_current():
@@ -1282,12 +1349,15 @@ class SessionLifecycle:
             record = self._session.conversation_repo.bind_execution_cwd(record.id, str(actual_directory))
             if record.id == self._session.active_conversation_id:
                 self._workspace_root = actual_directory
+        self.share_execution_attachments(record)
+        return record
+
+    def share_execution_attachments(self, record: Any) -> None:
         if not record.workspace_root and not record.projectless_output_dir:
             # Old projectless uploads used the empty owner scope. Grant only
             # this same conversation's fixed cwd, keeping the original scope.
             self._session.attachment_store.share_for_conversation(record.id, record.id, record.execution_cwd, source_workspace_root="")
             self._session.artifact_store.share_for_conversation(record.id, record.id, record.execution_cwd, source_workspace_root="")
-        return record
 
     def workspace_root_for_conversation(self, conversation: Any | None = None) -> Path | None:
         workspace_path = self.workspace_path_for_conversation(conversation)
@@ -1423,7 +1493,7 @@ class SessionLifecycle:
             await send_mcp_projection(self._session, manager, {"type": "mcp_status", "servers": mcp_status})
             await self._session.send_llm_state(force=True)
             await self._session.command_dispatcher._replay_pending_client_commands(
-                active_generation
+                active_generation, replay_results=False
             )
 
             await self._session.command_dispatcher.run(active_generation)

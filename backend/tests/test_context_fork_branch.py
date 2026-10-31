@@ -2,6 +2,8 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from backend.agent.context import ContextBuilder
 from backend.agent.message import AgentEvent, UserCommand
 from backend.agent.diagnostic_store import DiagnosticPayloadStore
@@ -469,12 +471,15 @@ def test_context_side_query_keeps_owner_captured_before_async_wait() -> None:
         release = asyncio.Event()
         events: list[AgentEvent] = []
         session = _ready_session(active_conversation_id="conv-source", agent_state=None)
+        session.session_lifecycle.workspace_root_for_conversation = lambda: None
 
         class Context:
+            _workspace_root = None
+
             async def side_query(self, query: str, *, focus: str, state: object) -> str:
                 assert query == "What remains?"
                 assert focus == "verification"
-                assert state is None
+                assert state.conversation_id == "conv-source"
                 started.set()
                 await release.wait()
                 return "Browser verification remains."
@@ -503,6 +508,62 @@ def test_context_side_query_keeps_owner_captured_before_async_wait() -> None:
         "focus": "verification",
         "conversation_id": "conv-source",
     }
+
+
+@pytest.mark.parametrize("matching", [True, False])
+def test_side_query_uses_only_its_own_copied_agent_state(matching, tmp_path) -> None:
+    from backend.agent.state import AgentState
+
+    async def scenario() -> None:
+        events = []
+        owner = "conv-source"
+        original = AgentState(user_message="original", conversation_id=owner if matching else "other", workspace_root=tmp_path)
+        original.prompt_context["private_fixture"] = "owner state"
+        original.retrieved_chunks.append("original chunk")
+        session = _ready_session(active_conversation_id=owner, last_agent_state=original)
+        current_root = tmp_path / "current"
+        session.session_lifecycle.workspace_root_for_conversation = lambda: current_root
+        session.session_lifecycle.workspace_context_for_conversation = lambda: None
+
+        class Context:
+            _workspace_root = tmp_path
+
+            async def side_query(self, query, *, focus, state):
+                assert state is not original and state.conversation_id == owner
+                assert state.workspace_root == current_root
+                assert ("private_fixture" in state.prompt_context) is matching
+                state.prompt_context["private_fixture"] = "changed"
+                state.retrieved_chunks.append("changed")
+                return "answer"
+
+        async def send_event(event):
+            events.append(event)
+
+        session.context_builder = Context()
+        session.send_event = send_event
+        await handle_context_side_query(session, {"query": "ask"})
+        assert events[0].data["result"] == "answer"
+        assert original.prompt_context == {"private_fixture": "owner state"}
+        assert original.retrieved_chunks == ["original chunk"]
+
+    asyncio.run(scenario())
+
+
+def test_empty_side_query_returns_a_real_rejection() -> None:
+    async def scenario():
+        events = []
+        session = _ready_session(active_conversation_id="conv-source")
+
+        async def send_event(event):
+            events.append(event)
+
+        session.send_event = send_event
+        await handle_context_side_query(session, {"query": " "})
+        return events
+
+    events = asyncio.run(scenario())
+    assert [event.type for event in events] == ["error", "command.result"]
+    assert events[-1].data["command"] == "context.side_query" and events[-1].data["level"] == "error"
 
 
 def test_context_ledger_keeps_original_owner_when_builder_mutates_session() -> None:

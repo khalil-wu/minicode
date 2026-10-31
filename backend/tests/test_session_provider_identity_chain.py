@@ -68,7 +68,8 @@ class MetadataSession:
         self.fork_registry = SimpleNamespace(list=lambda **_kwargs: [])
         self.run_manager = SimpleNamespace(queued_user_message_snapshot=lambda: [], pending_turn_input_snapshot=lambda: [],
             run_tasks={}, active_task_id=None)
-        self.session_lifecycle = SimpleNamespace(current_workspace_root=lambda: None, workspace_root=None)
+        self.session_lifecycle = SimpleNamespace(current_workspace_root=lambda: None, workspace_root=None,
+                                                 foreground_navigation_is_current=lambda: True)
 
     def _pending_approval_runtime_items(self):
         return []

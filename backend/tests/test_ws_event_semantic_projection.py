@@ -414,7 +414,8 @@ def test_validated_generated_image_enforces_artifact_limit(monkeypatch: pytest.M
         _validated_generated_image(_encoded(PNG_BYTES), "image/png")
 
 
-def test_generated_image_projection_keeps_wire_and_transcript_values_aligned() -> None:
+@pytest.mark.parametrize("tool_call_id", [None, "actual-image-call"])
+def test_generated_image_projection_keeps_wire_and_transcript_values_aligned(tool_call_id) -> None:
     transcript, wire = _generated_image_projection(
         artifact_id="artifact-image-1",
         media_type="image/png",
@@ -422,6 +423,7 @@ def test_generated_image_projection_keeps_wire_and_transcript_values_aligned() -
         conversation_id="conversation-1",
         message_id="assistant-1",
         text_offset=14,
+        tool_call_id=tool_call_id,
     )
 
     assert transcript == {
@@ -432,6 +434,7 @@ def test_generated_image_projection_keeps_wire_and_transcript_values_aligned() -
         "source": "image_generation",
         "mediaType": "image/png",
         "textOffset": 14,
+        **({"toolCallId": tool_call_id} if tool_call_id else {}),
     }
     assert wire == {
         "type": "artifact.preview",
@@ -444,6 +447,7 @@ def test_generated_image_projection_keeps_wire_and_transcript_values_aligned() -
         "source": "image_generation",
         "media_type": "image/png",
         "text_offset": 14,
+        **({"tool_call_id": tool_call_id} if tool_call_id else {}),
     }
 
 
@@ -673,7 +677,8 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage(m
             }
 
         def get_budget_snapshot(self, *, state: Any, tool_schemas: Any) -> dict[str, Any]:
-            assert state is agent_state
+            assert state is not agent_state and state.conversation_id == agent_state.conversation_id
+            assert state.user_message == agent_state.user_message
             assert tool_schemas == []
             used = 900 if not self.compacted else 240
             return {
@@ -685,7 +690,7 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage(m
         async def compact(self, *, focus: str, restore_state: Any, manual: bool) -> str:
             assert focus == "retain release evidence"
             assert manual is True
-            assert restore_state is agent_state
+            assert restore_state is not agent_state and restore_state.conversation_id == agent_state.conversation_id
             self.compacted = True
             return "Retained release goal and latest verification evidence."
 
@@ -726,12 +731,14 @@ def test_manual_context_compact_emits_owned_lifecycle_then_authoritative_usage(m
             )
             return SimpleNamespace(id=conversation_id)
 
-    agent_state = SimpleNamespace(user_message="current")
+    from backend.agent.state import AgentState
+    agent_state = AgentState(user_message="current", conversation_id="conversation-1")
     builder = _ContextBuilder()
     repo = _ConversationRepo()
     projection_lock = asyncio.Lock()
     session = SimpleNamespace(
         active_conversation_id="conversation-1",
+        session_lifecycle=SimpleNamespace(workspace_context_for_conversation=lambda *_args: None),
         conversation_runtime=SimpleNamespace(wait_for_hydration=AsyncMock()),
         context_builder=builder,
         last_agent_state=agent_state,

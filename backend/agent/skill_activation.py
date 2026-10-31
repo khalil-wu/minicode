@@ -108,7 +108,7 @@ async def activate_turn_skills(
             ]
             first_party = originator in {"minicode-desktop", "codex_cli_rs", "codex-tui", "codex_vscode"} or originator.startswith("Codex ")
             if missing_dependencies and mcp_manager is not None and first_party and (feature_flags or FeatureFlags()).enabled("skill_mcp_dependency_install"):
-                from backend.services.mcp_service import MCPServiceError, _manual_config_from_payload, install_skill_mcp_servers
+                from backend.services.mcp_service import MCPConfigApplyError, MCPServiceError, _manual_config_from_payload, install_skill_mcp_servers
 
                 specs = {
                     str(spec.get("value") or "").strip(): spec
@@ -180,6 +180,12 @@ async def activate_turn_skills(
                     if install:
                         try:
                             await install_skill_mcp_servers(mcp_manager, candidates)
+                        except MCPConfigApplyError as exc:
+                            yield AgentEvent(
+                                type="system_notice",
+                                data={"content": f"MCP dependencies for Skill '{name}' were saved, but runtime refresh is incomplete: {exc}",
+                                      "level": "warning"},
+                            )
                         except MCPServiceError as exc:
                             yield AgentEvent(
                                 type="system_notice",

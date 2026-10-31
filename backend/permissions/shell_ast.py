@@ -228,12 +228,97 @@ def _strip_env(args: list[str]) -> list[str]:
         if argument in {"-i", "--ignore-environment"}:
             index += 1
             continue
+        if argument in {"-u", "--unset", "-C", "--chdir"}:
+            index += 2
+            continue
+        if argument in {"-S", "--split-string"} or argument.startswith("--split-string=") or (argument.startswith("-S") and len(argument) > 2):
+            if argument in {"-S", "--split-string"}:
+                if index + 1 >= len(args):
+                    return []
+                value, tail = args[index + 1], args[index + 2:]
+            else:
+                value = argument.split("=", 1)[1] if argument.startswith("--split-string=") else argument[2:]
+                tail = args[index + 1:]
+            try:
+                args = _split_env_string(value) + tail
+            except ValueError:
+                return []
+            index = 0
+            continue
+        if argument.startswith(("--unset=", "--chdir=")) or (argument.startswith(("-u", "-C")) and len(argument) > 2):
+            index += 1
+            continue
         name, sep, _ = argument.partition("=")
         if sep and name and not name.startswith("-"):
             index += 1
             continue
         break
     return args[index:]
+
+
+def _split_env_string(value: str) -> list[str]:
+    """Parse GNU env -S syntax; environment expansions remain unknown words."""
+    words: list[str] = []
+    word: list[str] = []
+    quote = ""
+    started = False
+    dynamic = False
+    index = 0
+
+    def finish() -> None:
+        nonlocal started, dynamic
+        if started:
+            words.append(DYNAMIC_WORD if dynamic else "".join(word))
+            word.clear()
+            started = dynamic = False
+
+    while index < len(value):
+        char = value[index]
+        if char in "'\"" and (not quote or quote == char):
+            quote = "" if quote else char
+            started = True
+            index += 1
+            continue
+        if char in " \t\n\v\f\r" and not quote:
+            finish()
+            index += 1
+            continue
+        if char == "#" and not started:
+            break
+        if char == "\\" and (quote != "'" or value[index + 1:index + 2] in {"\\", "'"}):
+            index += 1
+            if index == len(value):
+                raise ValueError("Invalid trailing backslash in env -S")
+            char = value[index]
+            if char == "_":
+                if not quote:
+                    finish()
+                    index += 1
+                    continue
+                char = " "
+            elif char == "c":
+                if quote == '"':
+                    raise ValueError("Invalid env -S escape in double quotes")
+                break
+            elif char in "fnrtv":
+                char = {"f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}[char]
+            elif char not in "\"#$'\\":
+                raise ValueError("Invalid env -S escape")
+        elif char == "$" and quote != "'":
+            match = re.match(r"\$\{[A-Za-z_][A-Za-z_0-9]*\}", value[index:])
+            if match is None:
+                raise ValueError("Invalid env -S variable expansion")
+            dynamic = started = True
+            index += len(match.group())
+            continue
+        word.append(char)
+        started = True
+        index += 1
+    else:
+        if quote:
+            raise ValueError("Unterminated quote in env -S")
+    finish()
+    return words
 
 
 def _literal_command(node: Any, source: bytes) -> list[str] | None:

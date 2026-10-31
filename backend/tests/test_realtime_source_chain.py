@@ -346,6 +346,7 @@ class FinalModel(LLMAdapter):
 
 @pytest.mark.asyncio
 async def test_actual_thread_owner_query_timeline_cold_read_and_stop_after_switch(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
     from backend.realtime import session as module
     from backend.ws import agent_runner
     from backend.conversations.repository import ConversationRepository

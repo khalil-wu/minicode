@@ -16,6 +16,8 @@ from backend.agent.loop_runtime_helpers import (
     terminal_reason_from_error_type,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.provider_text_projection import finish_provider_text_item
+from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.progress import provider_failure_detail_progress
 from backend.agent.provider_attempt import provider_progress_id
 from backend.agent.recovery_controller import RecoveryProfile
@@ -298,3 +300,69 @@ async def fail_provider_runtime(
     )
     _set_terminal_reason(state, "runtime_error", status="failed")
     yield error
+
+
+@dataclass(frozen=True)
+class ProviderExceptionBranchResult:
+    """Retry-boundary state after one provider attempt settled through its exception path."""
+
+    retry_budget_boundary: Any
+
+
+async def run_stream_exception_branch(
+    exc: BaseException,
+    *,
+    request_completed: bool,
+    model_hooks: Any,
+    tool_stream: Any | None,
+    settle_attempt_usage: Any,
+    stream_state: Any,
+    stream_text: Any,
+    visible_text_sanitizer: Any,
+    settings: Any,
+    awaiting_trailing_tool_done: bool,
+    close_stream: Any,
+    tool_tracker: Any,
+    iteration_id_value: str,
+    turn_kernel: Any,
+    provider_attempt: Any,
+    budget_runtime: Any,
+    state: Any,
+    context_builder: Any,
+    turn_usage: Any,
+    usage: Any,
+    pending_tool_calls: Any,
+    degrade_and_finish: Any,
+) -> AsyncIterator[Any]:
+    """Settle a cancelled or failed attempt and report how the caller continues."""
+    await model_hooks.settle_exception(exc, completed=request_completed, usage=usage,
+                                       reported=provider_attempt is not None and provider_attempt.usage_reported)
+    if isinstance(exc, asyncio.CancelledError):
+        if tool_stream is not None:
+            await tool_stream.abort_deferred()
+        async for projected in finish_provider_text_item(
+            stream_state=stream_state, stream_text=stream_text,
+            visible_text_sanitizer=visible_text_sanitizer,
+            live_text_streaming=settings.live_text_streaming,
+            awaiting_trailing_done=awaiting_trailing_tool_done,
+            process_event_factory=model_process_text_event,
+        ):
+            yield projected
+    settle_attempt_usage()
+    exception_result = None
+    async for exception_update in handle_provider_stream_exception(
+        exc, close_stream=close_stream, tool_tracker=tool_tracker, stream_state=stream_state,
+        iteration_id_value=iteration_id_value, turn_kernel=turn_kernel, provider_attempt=provider_attempt,
+        budget_runtime=budget_runtime, settings=settings, state=state, context_builder=context_builder,
+        turn_usage=turn_usage, usage=usage, stream_text=stream_text, pending_tool_calls=pending_tool_calls,
+        degrade_and_finish=degrade_and_finish,
+    ):
+        if isinstance(exception_update, ProviderStreamExceptionResult):
+            exception_result = exception_update
+        else:
+            yield exception_update
+    if exception_result is None:
+        raise RuntimeError("provider exception handler returned without a result")
+    if isinstance(exc, asyncio.CancelledError):
+        raise
+    yield ProviderExceptionBranchResult(retry_budget_boundary=exception_result.retry_budget_boundary)

@@ -39,9 +39,12 @@ class WorktreeSnapshotRecord:
     original_path: str = ""
     main_repo_path: str = ""
     head: str | None = None
+    index_sha: str = ""
     snapshot_sha: str = ""
     snapshot_ref: str = ""
     label: str = ""
+    raw_worktree: bool = False
+    symbolic_links: tuple[str, ...] = ()
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
@@ -58,9 +61,12 @@ class WorktreeSnapshotRecord:
             original_path=str(payload.get("original_path", "")),
             main_repo_path=str(payload.get("main_repo_path", "")),
             head=payload.get("head") or None,
+            index_sha=str(payload.get("index_sha", "")),
             snapshot_sha=str(payload.get("snapshot_sha", "")),
             snapshot_ref=str(payload.get("snapshot_ref", "")),
             label=str(payload.get("label", "")),
+            raw_worktree=bool(payload.get("raw_worktree", False)),
+            symbolic_links=tuple(payload.get("symbolic_links", ())),
             created_at=str(payload.get("created_at", "")),
         )
 

@@ -61,9 +61,27 @@ async def prepare_turn_input(
     watch_paths: tuple[str, ...] = ()
 
     try:
+        if input_restored and run_context is not None and run_context.is_subagent and hook_manager:
+            hook_manager._session_started = True
+        if (
+            not input_restored
+            and run_context is not None and run_context.is_subagent
+            and hook_manager and session_id
+        ):
+            session_hook_result = await await_preflight(
+                hook_manager.run_subagent_start_once(
+                    subagent_id=session_id,
+                    agent_type=str(state.prompt_context.get("subagent") or ""),
+                ),
+                deadline=deadline,
+                cancel_event=cancel_event,
+                run_context=run_context,
+                llm=llm,
+            )
         if (
             not deadline_reached
             and not input_restored
+            and not (run_context is not None and run_context.is_subagent)
             and hook_manager
             and session_id
             and hook_manager.has_hooks(HookEvent.SESSION_START)
@@ -75,6 +93,9 @@ async def prepare_turn_input(
                 run_context=run_context,
                 llm=llm,
             )
+            if session_hook_result.prevent_continuation:
+                blocked = True
+                block_message = session_hook_result.stop_reason or "SessionStart hook stopped execution"
             initial_user_message = str(
                 getattr(session_hook_result, "initial_user_message", "") or ""
             ).strip()
@@ -100,6 +121,7 @@ async def prepare_turn_input(
                 state.prompt_context["hook_watch_paths"] = list(watch_paths)
         if (
             not deadline_reached
+            and not blocked
             and not input_restored
             and hook_manager
             and hook_manager.has_hooks(HookEvent.USER_PROMPT_SUBMIT)

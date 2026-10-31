@@ -11,6 +11,8 @@ Git Worktree 管理器（MiniCode 实现）。
 from __future__ import annotations
 
 import logging
+import os
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -20,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from backend.runtime_env import sanitized_git_env
+from backend.workspace.worktree_snapshot_git import IN_PROGRESS_GIT_STATE, RAW_ATTRIBUTES, index_entries, object_alternate, recovery_mode
 
 if TYPE_CHECKING:
     from backend.workspace.worktree_snapshots import (
@@ -97,7 +100,7 @@ class WorktreeManager:
     适用于并行开发、测试、代码审查等场景。
     """
 
-    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None, git_runner: Callable[..., Any] | None = None, environment_runner=None):
+    def __init__(self, repo_root: Path, *, snapshot_store: "WorktreeSnapshotStore | None" = None, git_runner: Callable[..., Any] | None = None, environment_runner=None, git_path_mapper=None, git_path_unmapper=None, worktree_access=None):
         """
         初始化 Worktree 管理器。
 
@@ -109,6 +112,9 @@ class WorktreeManager:
         self._snapshot_store = snapshot_store
         self._git_runner = git_runner
         self._environment_runner = environment_runner
+        self._git_path_mapper = git_path_mapper or str
+        self._git_path_unmapper = git_path_unmapper or str
+        self._worktree_access = worktree_access
 
 
         if not self._is_git_repo():
@@ -178,6 +184,7 @@ class WorktreeManager:
         new_branch: bool = False,
         commit: Optional[str] = None,
         run_environment: bool = True,
+        checkout: bool = True,
     ) -> bool:
         """
         创建新的 worktree。
@@ -208,6 +215,8 @@ class WorktreeManager:
             cmd.append(branch)
         elif commit:
             cmd.append(commit)
+        if not checkout:
+            cmd.append("--no-checkout")
 
         try:
             from backend.services.worktree_settings_service import refresh_worktree_upstream
@@ -312,7 +321,7 @@ class WorktreeManager:
 
     # ── 快照 / 恢复 ──────────────────────────────────────────────
 
-    def has_local_changes(self, path: Path) -> bool:
+    def has_local_changes(self, path: Path, *, include_ignored: bool = True) -> bool:
         """Read worktree changes, including untracked and ignored files."""
         if self._git_runner is None:
             # Cleanup still needs its readonly execution authority. Model
@@ -320,9 +329,9 @@ class WorktreeManager:
             # host authority must not become a worktree-removal grant.
             from backend.services.workspace_service import worktree_has_local_changes
 
-            return worktree_has_local_changes(Path(path), timeout=WORKTREE_GIT_TIMEOUT_SECONDS)
+            return worktree_has_local_changes(Path(path), timeout=WORKTREE_GIT_TIMEOUT_SECONDS, include_ignored=include_ignored)
         result = self._run_git(
-            ["git", "--no-optional-locks", "status", "--porcelain=v1", "--ignored", "--untracked-files=all"],
+            ["git", "--no-optional-locks", "status", "--porcelain=v1", *(["--ignored"] if include_ignored else []), "--untracked-files=all"],
             cwd=Path(path).resolve(), env=sanitized_git_env(), capture_output=True,
             text=True, encoding="utf-8", check=True, timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
         )
@@ -335,17 +344,30 @@ class WorktreeManager:
         conversation_id: str = "",
         branch: str = "",
         label: str = "",
+        include_ignored: bool = True,
+        _inventory_checked: bool = False,
     ) -> "WorktreeSnapshotRecord | None":
         """删除前抓一份持久、完整(tracked + untracked + ignored)的 worktree 快照。
 
-        用 ``git add -A --force`` + ``write-tree`` + ``commit-tree`` 把整个工作状态
-        固化成一个 commit,再用 ``update-ref`` 锚到 ``refs/minicode/wt-snapshots/<id>``。
+        通过临时索引和未经 Git 过滤器处理的 blob 固化工作状态，再将提交
+        锚到 ``refs/minicode/wt-snapshots/<id>``。
         该 ref 存于 common git dir,worktree 删除后仍在、且不会被 GC。失败返回 None。
         """
         wt = Path(path).resolve()
         if not wt.exists():
             logger.warning("Cannot snapshot missing worktree: %s", wt)
             return None
+        if not _inventory_checked:
+            try:
+                if self._has_in_progress_git_operation(wt):
+                    logger.error("Cannot snapshot a worktree with an in-progress Git operation: %s", wt)
+                    return None
+                if include_ignored and self._has_embedded_git(wt, write=False):
+                    logger.error("Cannot snapshot a worktree containing an embedded Git repository: %s", wt)
+                    return None
+            except OSError:
+                logger.exception("Cannot inspect the complete worktree: %s", wt)
+                return None
 
         snapshot_id = f"wtsnap_{uuid.uuid4().hex[:12]}"
         head = self._rev_parse(wt, "HEAD")
@@ -357,13 +379,13 @@ class WorktreeManager:
             env = sanitized_git_env()
             env["GIT_INDEX_FILE"] = str(index_path)
 
-            def _snapshot_git(*args: str) -> subprocess.CompletedProcess[str] | None:
+            def _snapshot_git(*args: str, original_index: bool = False) -> subprocess.CompletedProcess[str] | None:
                 try:
                     return self._run_git(
                         ["git", *args],
-                        index_file=index_path,
+                        index_file=None if original_index else index_path,
                         cwd=wt,
-                        env=env,
+                        env=sanitized_git_env() if original_index else env,
                         capture_output=True,
                         text=True,
                         encoding="utf-8",
@@ -373,19 +395,94 @@ class WorktreeManager:
                 except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
                     return None
 
-            seeded = _snapshot_git("read-tree", head) if head else _snapshot_git("read-tree", "--empty")
-            if seeded is None or _snapshot_git("add", "-A", "--force") is None:
+            original = _snapshot_git("ls-files", "--stage", "-z", original_index=True)
+            filemode = _snapshot_git("config", "--bool", "--default=true", "--get", "core.filemode", original_index=True)
+            symlinks = _snapshot_git("config", "--bool", "--default=true", "--get", "core.symlinks", original_index=True)
+            if original is None or filemode is None or symlinks is None:
+                logger.error("Snapshot failed while inspecting the index for %s", wt)
+                return None
+            previous = {name: mode for mode, _sha, name in index_entries(original.stdout)}
+            if "160000" in previous.values():
+                logger.error("Cannot snapshot a worktree containing submodules: %s", wt)
+                return None
+            index_location = _snapshot_git("rev-parse", "--path-format=absolute", "--git-path", "index", "--shared-index-path", original_index=True)
+            if index_location is None:
+                return None
+            index_paths = [path for path in index_location.stdout.splitlines() if path.strip()]
+            index_blob = _snapshot_git("hash-object", "-w", "--no-filters", "--", *index_paths)
+            if index_blob is None or _snapshot_git("read-tree", "--empty") is None:
+                return None
+            index_entries_to_save = [("index" if position == 0 else name.replace("\\", "/").rsplit("/", 1)[-1], sha)
+                                     for position, (name, sha) in enumerate(zip(index_paths, index_blob.stdout.splitlines(), strict=True))]
+            if _snapshot_git("update-index", "--add", *(value for name, sha in index_entries_to_save
+                              for value in ("--cacheinfo", f"100644,{sha},{name}"))) is None:
+                return None
+            original_tree = _snapshot_git("write-tree")
+            if original_tree is None:
+                logger.error("Cannot save the worktree index: %s", wt)
+                return None
+            if _snapshot_git("read-tree", "--empty") is None or _snapshot_git("add", "-N", "-A", *(["--force"] if include_ignored else [])) is None:
                 logger.error("Snapshot failed while building temporary index for %s", wt)
                 return None
+            staged = _snapshot_git("ls-files", "--stage", "-z")
+            if staged is None:
+                return None
+            entries = index_entries(staged.stdout)
+            if not include_ignored:
+                deleted = _snapshot_git("ls-files", "--deleted", "-z", original_index=True)
+                if deleted is None:
+                    return None
+                present = {name for _mode, _sha, name in entries}
+                deleted_names = set(deleted.stdout.split("\0"))
+                missing = [name for name in previous if name not in present and name not in deleted_names]
+                for start in range(0, len(missing), 64):
+                    if _snapshot_git("--literal-pathspecs", "add", "-N", "--force", "--", *missing[start:start + 64]) is None:
+                        return None
+                if missing:
+                    staged = _snapshot_git("ls-files", "--stage", "-z")
+                    if staged is None:
+                        return None
+                    entries = index_entries(staged.stdout)
+            if any(mode == "160000" for mode, _sha, _name in entries):
+                logger.error("Cannot snapshot a worktree containing an embedded Git repository: %s", wt)
+                return None
+            symbolic_links = [name for mode, _sha, name in entries if mode == "120000"]
+            for start in range(0, len(symbolic_links), 64):
+                if _snapshot_git("--literal-pathspecs", "add", "--force", "--", *symbolic_links[start:start + 64]) is None:
+                    return None
+            regular = [(mode, name) for mode, _sha, name in entries if mode in {"100644", "100755"}]
+            for start in range(0, len(regular), 64):
+                group = regular[start:start + 64]
+                hashes = _snapshot_git("hash-object", "-w", "--no-filters", "--", *(name for _mode, name in group))
+                if hashes is None:
+                    return None
+                entries_with_hash = [
+                    (recovery_mode(mode, previous.get(name), filemode=filemode.stdout.strip() == "true",
+                                   symlinks=symlinks.stdout.strip() == "true"), sha, name)
+                    for (mode, name), sha in zip(group, hashes.stdout.splitlines(), strict=True)
+                ]
+                if _snapshot_git("update-index", "--add", *(value for mode, sha, name in entries_with_hash
+                                  for value in ("--cacheinfo", f"{mode},{sha},{name}"))) is None:
+                    return None
             tree_result = _snapshot_git("write-tree")
             tree = (tree_result.stdout or "").strip() if tree_result is not None else ""
             if not tree:
                 logger.error("Snapshot failed at 'git write-tree' for %s", wt)
                 return None
 
+        index_args = ["commit-tree", original_tree.stdout.strip()]
+        if head:
+            index_args += ["-p", head]
+        index_args += ["-m", f"minicode worktree index: {snapshot_id}"]
+        index_sha = self._capture_output(wt, *index_args)
+        if not index_sha:
+            logger.error("Snapshot failed while saving the original index for %s", wt)
+            return None
+
         commit_args = ["commit-tree", tree]
         if head:
             commit_args += ["-p", head]
+        commit_args += ["-p", index_sha]
         commit_args += ["-m", f"minicode worktree snapshot: {snapshot_id}"]
         snapshot_sha = self._capture_output(wt, *commit_args)
         if not snapshot_sha:
@@ -406,14 +503,92 @@ class WorktreeManager:
             original_path=str(wt),
             main_repo_path=str(self.repo_root),
             head=head,
+            index_sha=index_sha,
             snapshot_sha=snapshot_sha,
             snapshot_ref=ref,
             label=label,
+            raw_worktree=True,
+            symbolic_links=tuple(symbolic_links),
         )
         logger.info("Captured worktree snapshot %s (%s) for %s", snapshot_id, snapshot_sha[:8], wt)
         saved = self._snapshots().save(record)
         self.prune_snapshots(exclude_ids={saved.id})
         return saved
+
+    def _materialize_raw_snapshot(self, dest: Path, snapshot: "WorktreeSnapshotRecord", *, restore_index: bool,
+                                  selected_paths: tuple[str, ...] | None = None) -> bool:
+        """Populate a new checkout without running repository content filters."""
+        common = self._capture_output(self.repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if not common:
+            return False
+        try:
+            with tempfile.TemporaryDirectory(prefix=".mcr-", dir=dest) as scratch_name:
+                scratch = Path(scratch_name)
+                if not self._git_ok(dest, "-c", "core.longpaths=true", "init", "--bare", "--template=", str(scratch)):
+                    return False
+                (scratch / "info").mkdir()
+                (scratch / "info" / "attributes").write_bytes(RAW_ATTRIBUTES)
+                (scratch / "objects" / "info" / "alternates").write_bytes(
+                    object_alternate(self._git_path_mapper(Path(common) / "objects"))
+                )
+                git_dir = f"--git-dir={self._git_path_mapper(scratch)}"
+                work_tree = f"--work-tree={self._git_path_mapper(dest)}"
+                command = ("-c", "core.symlinks=false", git_dir, work_tree)
+                if not self._git_ok(dest, *command, "read-tree", snapshot.snapshot_sha):
+                    return False
+                if selected_paths is None:
+                    if not self._git_ok(dest, *command, "checkout-index", "--all", "--force"):
+                        return False
+                    links = snapshot.symbolic_links
+                else:
+                    for start in range(0, len(selected_paths), 64):
+                        if not self._git_ok(dest, *command, "checkout-index", "--force", "--", *selected_paths[start:start + 64]):
+                            return False
+                    selected = set(selected_paths)
+                    links = tuple(name for name in snapshot.symbolic_links if name in selected)
+                for start in range(0, len(links), 64):
+                    if not self._git_ok(dest, "-c", "core.symlinks=true", git_dir, work_tree,
+                                        "checkout-index", "--force", "--", *links[start:start + 64]):
+                        return False
+                if restore_index and snapshot.index_sha:
+                    index_path = self._capture_output(dest, "rev-parse", "--path-format=absolute", "--git-path", "index")
+                    if not index_path or not self._git_ok(dest, *command, "read-tree", snapshot.index_sha):
+                        return False
+                    prefix = index_path[:-len("index")]
+                    return self._git_ok(dest, *command, "checkout-index", "--all", "--force", "--prefix=" + prefix)
+                return self._git_ok(dest, "read-tree", "HEAD" if restore_index else snapshot.snapshot_sha)
+        except (OSError, subprocess.SubprocessError):
+            logger.exception("Could not materialize snapshot %s at %s", snapshot.id, dest)
+            return False
+
+    def ignored_worktree_files(self, path: Path) -> tuple[str, ...]:
+        result = self._run_git(
+            ["git", "--no-optional-locks", "ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+            cwd=path, env=sanitized_git_env(), capture_output=True, text=True, encoding="utf-8",
+            check=True, timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+        )
+        return tuple(name for name in result.stdout.split("\0") if name)
+
+    def worktree_root(self, path: Path) -> Path:
+        root = self._capture_output(path, "rev-parse", "--path-format=absolute", "--show-toplevel")
+        if not root:
+            raise OSError(f"Could not locate the worktree for {path}")
+        return Path(self._git_path_unmapper(root)).resolve()
+
+    def restore_handoff_bytes(self, dest: Path, snapshot: "WorktreeSnapshotRecord", ignored: tuple[str, ...]) -> bool:
+        """Restore source working bytes and index after Git moves its changes."""
+        try:
+            tree = self._run_git(
+                ["git", "--no-optional-locks", "ls-tree", "-r", "--name-only", "-z", snapshot.snapshot_sha],
+                cwd=dest, env=sanitized_git_env(), capture_output=True, text=True, encoding="utf-8",
+                check=True, timeout=WORKTREE_GIT_TIMEOUT_SECONDS,
+            )
+            excluded = set(ignored)
+            selected = tuple(name for name in tree.stdout.split("\0") if name and name not in excluded)
+            return self._materialize_raw_snapshot(dest, snapshot, restore_index=True, selected_paths=selected)
+        except (OSError, subprocess.SubprocessError):
+            logger.exception("Could not restore handoff bytes from %s at %s", snapshot.id, dest)
+            return False
 
     def restore_snapshot(
         self,
@@ -456,11 +631,17 @@ class WorktreeManager:
                 candidate = dest_path.parent / f"{dest_path.name}-restored-{record.id[-6:]}"
             dest_path = candidate
 
-        if not self._git_ok(
-            self.repo_root, "worktree", "add", "--detach", str(dest_path), record.snapshot_sha
-        ):
+        raw = getattr(record, "raw_worktree", False)
+        args = ("worktree", "add", "--detach", str(dest_path), record.snapshot_sha)
+        if raw:
+            args += ("--no-checkout",)
+        if not self._git_ok(self.repo_root, *args):
             logger.error("Failed to restore snapshot %s to %s", snapshot_id, dest_path)
             return WorktreeRestore(restored=False, snapshot=record, error="git worktree add failed")
+
+        if raw and not self._materialize_raw_snapshot(dest_path, record, restore_index=False):
+            return WorktreeRestore(restored=False, path=dest_path, snapshot=record,
+                                   error=f"Could not materialize the recovery snapshot; partial worktree retained at {dest_path}")
 
         logger.info("Restored worktree snapshot %s to %s", snapshot_id, dest_path)
         return WorktreeRestore(restored=True, path=dest_path, snapshot=record)
@@ -561,6 +742,7 @@ class WorktreeManager:
             branch=clean_branch,
             new_branch=False,
             run_environment=False,
+            checkout=not (snapshot is not None and snapshot.raw_worktree),
         ):
             return WorktreeRestore(
                 restored=False,
@@ -569,26 +751,18 @@ class WorktreeManager:
             )
 
         if snapshot is not None:
-            materialized = self._git_ok(
-                dest_path,
-                "read-tree",
-                "--reset",
-                "-u",
-                snapshot.snapshot_sha,
-            )
-            unstaged = materialized and self._git_ok(
-                dest_path,
-                "reset",
-                "--mixed",
-                "HEAD",
-            )
+            if snapshot.raw_worktree:
+                materialized = self._materialize_raw_snapshot(dest_path, snapshot, restore_index=True)
+                unstaged = materialized
+            else:
+                materialized = self._git_ok(dest_path, "read-tree", "--reset", "-u", snapshot.snapshot_sha)
+                unstaged = materialized and self._git_ok(dest_path, "reset", "--mixed", "HEAD")
             if not materialized or not unstaged:
-                removed_partial = self.remove_worktree(dest_path, force=True, run_environment=False)
-                suffix = "" if removed_partial else "; partial worktree cleanup also failed"
                 return WorktreeRestore(
                     restored=False,
+                    path=dest_path,
                     snapshot=snapshot,
-                    error=f"Could not materialize the recovery snapshot{suffix}",
+                    error=f"Could not materialize the recovery snapshot; partial worktree retained at {dest_path}",
                 )
 
         logger.info("Recreated removed worktree at %s", dest_path)
@@ -670,9 +844,19 @@ class WorktreeManager:
                 error="Worktree has local changes; confirm force cleanup to remove it",
             )
 
+        try:
+            if self._has_in_progress_git_operation(wt):
+                return WorktreeRemoval(removed=False, head=head,
+                    error="Worktrees with an in-progress Git operation cannot be removed")
+            if self._has_embedded_git(wt, write=True):
+                return WorktreeRemoval(removed=False, head=head,
+                    error="Worktrees containing initialized submodules or embedded Git repositories cannot be removed")
+        except OSError as exc:
+            return WorktreeRemoval(removed=False, head=head, error=f"Could not inspect the complete worktree: {exc}")
+
         snap = None
         if dirty and snapshot:
-            snap = self.snapshot_worktree(wt, conversation_id=conversation_id, branch=branch)
+            snap = self.snapshot_worktree(wt, conversation_id=conversation_id, branch=branch, _inventory_checked=True)
             if snap is None:
                 return WorktreeRemoval(
                     removed=False,
@@ -693,6 +877,37 @@ class WorktreeManager:
                 error="git worktree remove failed",
             )
         return WorktreeRemoval(removed=True, snapshot=snap, head=head)
+
+    def _has_in_progress_git_operation(self, root: Path) -> bool:
+        git_dir = self._capture_output(root, "rev-parse", "--path-format=absolute", "--git-dir")
+        if not git_dir:
+            raise OSError("Could not locate worktree Git metadata")
+        metadata = Path(self._git_path_unmapper(git_dir))
+        if self._worktree_access is not None:
+            self._worktree_access(metadata, False)
+        with os.scandir(metadata) as entries:
+            return any(entry.name in IN_PROGRESS_GIT_STATE for entry in entries)
+
+    def _has_embedded_git(self, root: Path, *, write: bool) -> bool:
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            if self._worktree_access is not None:
+                self._worktree_access(directory, write)
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if entry.name.lower() == ".git":
+                        if directory != root:
+                            return True
+                        continue
+                    path = Path(entry.path)
+                    if self._worktree_access is not None:
+                        self._worktree_access(path, write)
+                    if entry.is_dir(follow_symlinks=False):
+                        junction = (os.name == "nt" and entry.stat(follow_symlinks=False).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+                        if not junction:
+                            pending.append(path)
+        return False
 
     def _snapshots(self) -> "WorktreeSnapshotStore":
         if self._snapshot_store is None:

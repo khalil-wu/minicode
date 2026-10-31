@@ -29,3 +29,7 @@ codex-windows-sandbox = { path = "../windows-sandbox-rs" }
 [[test]]
 name = "media_meter"
 path = "src/media.rs"
+
+[[test]]
+name = "browser_network"
+path = "src/browser_network_test.rs"

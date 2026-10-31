@@ -30,6 +30,8 @@ function fixture(overrides = {}, badHash = false) {
     identity: "minicode", upstream_version: "0.158.0-alpha.2.1", patch_version: 3,
     reported_version: "minicode-windows-sandbox 0.158.0-alpha.2.1 owner-v3",
     owner_namespace: "windows-sid+canonical-home-v3", input_sha256: inputHash.digest("hex"),
+    desktop_pty_protocol: 1,
+    rust_toolchain: "1.95.0",
     files, ...overrides,
   };
   const fakeFs = {
@@ -53,6 +55,10 @@ test("rejects legacy global-account runtime", async () => {
 });
 test("rejects stale source inputs", async () => {
   await assert.rejects(fixture({ input_sha256: "stale" })({ electronPlatformName: "win32" }), /different native source inputs/);
+});
+
+test("rejects a network-runtime toolchain mixed into the fixed Windows sandbox bundle", async () => {
+  await assert.rejects(fixture({ rust_toolchain: "1.99.1" })({ electronPlatformName: "win32" }), /MiniCode-owned/);
 });
 test("rejects a swapped executable even with valid owner manifest", async () => {
   await assert.rejects(fixture({}, true)({ electronPlatformName: "win32" }), /hash mismatch/);

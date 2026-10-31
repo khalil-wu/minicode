@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -59,6 +60,12 @@ async def handle_checkpoint_list(session: "WebSocketSession", data: dict[str, An
         scope.apply({"type": "checkpoint.list", "checkpoints": result.checkpoints}),
         log_context="checkpoint.list",
     )
+    if result.corrupt_count:
+        await session.send_event(AgentEvent.error(
+            f"{result.corrupt_count} checkpoint record(s) could not be read; the list is incomplete. "
+            "The original records were preserved.",
+            recoverable=False, error_type="storage", error_code="checkpoint.list.incomplete",
+        ))
     return True
 
 
@@ -603,6 +610,9 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
         return True
     if stream_state.get("terminal_fenced"):
         return True
+    run_task = session.run_manager.run_tasks.get(target_conversation_id)
+    run_context = session.run_manager.context_for(target_conversation_id)
+    terminal_receipt = run_context.turn_terminal_receipt if run_context is not None else None
     # ``_cancel_agent_runs`` is the one cancellation entry: it stops the run
     # task, its child subagents and its pending approvals, then drains them and
     # retains ownership of whatever refused to stop.
@@ -610,6 +620,10 @@ async def handle_interrupt_command(session: "WebSocketSession", data: dict[str, 
         conversation_id=target_conversation_id or None,
         reason="user_interrupted",
     )
+    if run_task is not None:
+        await asyncio.wait({run_task})
+    if terminal_receipt is not None:
+        await asyncio.shield(terminal_receipt)
     await _emit_user_queue_state(session, target_conversation_id)
     # The run owner emits the terminal DONE from its finally block after tool,
     # subprocess, subagent, persistence, and approval cleanup has settled.
@@ -835,10 +849,20 @@ async def handle_user_message_queue_steer(session: "WebSocketSession", data: dic
         steered = session.run_manager.enqueue_turn_steer(conversation_id, selected_command,
             expected_turn_id=expected_turn_id, target_message_id=str(stream_state["message_id"]), queued_message_id=message_id)
         if steered is None:
-            rejection = session.run_manager.steer_target_rejection(conversation_id, expected_turn_id) or {
-                "conversation_id": conversation_id, "expected_turn_id": expected_turn_id,
-                "active_turn_id": str(stream_state.get("turn_id") or ""), "reason": "steer_target_unavailable",
-                "error_code": "steer_target_unavailable", "admitted": False, "queued": False}
+            rejection = session.run_manager.steer_target_rejection(conversation_id, expected_turn_id)
+            if rejection is None:
+                still_queued = any(str(item.data.get("assistant_message_id") or "").strip() == message_id
+                                   for item in session.run_manager.queued_user_messages(conversation_id))
+                if still_queued:
+                    from backend.ws.handlers.catalog_queue import _publish_queue
+
+                    await _publish_queue(session, conversation_id, updated_message_id=message_id)
+                await emit_command_error(session, "user_message.queue.steer",
+                    "The queued message changed or is no longer available; it was not steered.",
+                    data={"conversation_id": conversation_id, "message_id": message_id,
+                          "expected_turn_id": expected_turn_id, "reason": "queue_message_changed",
+                          "error_code": "queue_message_changed", "admitted": False, "queued": still_queued})
+                return True
             await emit_command_error(session, "user_message.queue.steer",
                 "The requested turn is not available for steering; the queued message was retained.",
                 data={**rejection, "message_id": message_id})
@@ -933,7 +957,10 @@ async def handle_subagent_plan_review(session: "WebSocketSession", data: dict[st
 
     subagent_id = str(data.get("subagent_id", "")).strip()
     request_id = str(data.get("request_id", "")).strip()
-    approved = bool(data.get("approved"))
+    approved = data.get("approved")
+    if not isinstance(approved, bool):
+        await emit_command_error(session, "subagent.plan_review", "approved must be a boolean")
+        return True
     if not subagent_id or not request_id:
         await emit_command_error(
             session, "subagent.plan_review", "subagent_id and request_id are required"
@@ -1268,66 +1295,80 @@ async def handle_llm_config_set(session: "WebSocketSession", data: dict[str, Any
         await emit_command_error(session, error_command, exc)
         return True
 
-    session.config = update.config
+    config = update.config
     saved_payload = update.saved_payload
     reasoning_effort = update.reasoning_effort
-    if update.notice is not None:
-        await session.emit_command_result(
-            update.notice.command,
-            update.notice.message,
-            level=update.notice.level,
-            data=update.notice.data,
-        )
-
-    session.provider = update.provider
-    section = saved_payload.get(session.provider)
+    provider = update.provider
+    section = saved_payload.get(provider)
     if not isinstance(section, dict):
         section = {}
-    session.available_models = list(section.get("available_models") or get_available_models(session.provider))
-    session.models_source = str(section.get("models_source") or get_models_source(session.provider)).strip()
-    session.selected_model = str(saved_payload.get("active_model") or section.get("model") or "").strip()
-    session.reset_model_selection_overrides()
+    available_models = list(section.get("available_models") or get_available_models(provider))
+    models_source = str(section.get("models_source") or get_models_source(provider)).strip()
+    selected_model = str(saved_payload.get("active_model") or section.get("model") or "").strip()
     model_runtime_resolver = getattr(session, "_model_runtime_for_conversation", None)
     model_runtime = (
-        model_runtime_resolver(getattr(session, "active_conversation_id", None))
+        model_runtime_resolver(conversation_id or None)
         if callable(model_runtime_resolver)
         else None
     )
     if model_runtime is not None:
         model_runtime.refresh(
             settings_snapshot=(
-                session.config.config_layer_stack.effective_config()
-                if session.config.config_layer_stack is not None
+                config.config_layer_stack.effective_config()
+                if config.config_layer_stack is not None
                 else None
             )
         )
         composed_models = [
-            model.id for model in model_runtime.get_models(session.provider)
+            model.id for model in model_runtime.get_models(provider)
         ]
         if composed_models:
-            session.available_models = composed_models
+            available_models = composed_models
     # Discovery is informational. It must never invent a selected model when
     # the persisted configuration has none; run admission owns the explicit
     # capability failure for that state.
 
     from backend.ws.agent_runner import _config_with_runtime_model_budget
 
-    session.config = _config_with_runtime_model_budget(
-        session.config,
+    config = _config_with_runtime_model_budget(
+        config,
         model_runtime=model_runtime,
-        provider=session.provider,
-        model=session.selected_model,
+        provider=provider,
+        model=selected_model,
     )
 
-    if conversation_id and session.selected_model:
-        await owner._set_selected_provider_model(session.provider, session.selected_model,
-            manual_override=True, conversation_id=conversation_id, config_override=session.config,
-            reasoning_effort=reasoning_effort or None)
+    if conversation_id and selected_model:
+        try:
+            changed = await owner._set_selected_provider_model(provider, selected_model,
+                manual_override=True, conversation_id=conversation_id, config_override=config,
+                reasoning_effort=reasoning_effort or None, emit_unavailable=False)
+            if not changed:
+                raise ValueError("The saved provider model is unavailable for this conversation")
+        except ValueError as exc:
+            await emit_command_error(session, "llm.config.set", exc)
+            return True
     elif conversation_id:
         session.conversation_repo.update_model_selection(
-            conversation_id, provider=session.provider,
-            model=session.selected_model,
-            reasoning_effort=str(session.config.llm.reasoning_effort or ""),
+            conversation_id, provider=provider, model=selected_model,
+            reasoning_effort=str(config.llm.reasoning_effort or ""),
+        )
+    # The target can change while the settings hook or model selection awaits.
+    # Publish only to the session that still displays the captured owner.
+    if conversation_id == str(session.active_conversation_id or "") and not (
+        conversation_id and selected_model and owner is session
+    ):
+        session.config = config
+        session.provider = provider
+        session.available_models = available_models
+        session.models_source = models_source
+        session.selected_model = selected_model
+        session.reset_model_selection_overrides()
+    if update.notice is not None:
+        await session.emit_command_result(
+            update.notice.command,
+            update.notice.message,
+            level=update.notice.level,
+            data=update.notice.data,
         )
     if reasoning_effort and not from_slash_command:
         await session.emit_command_result(

@@ -1733,7 +1733,6 @@ class AnthropicAdapter(LLMAdapter):
             )
             return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-        message_anchors = [message_anchor(message) for message in api_messages]
         messages = [dict(msg) for msg in api_messages]
         marker_index = len(messages) - 2 if skip_cache_write else len(messages) - 1
         if 0 <= marker_index < len(messages):
@@ -1785,6 +1784,7 @@ class AnthropicAdapter(LLMAdapter):
 
         new_pin: tuple[int, str, dict[str, Any]] | None = None
         if cache_editing:
+            message_anchors = [message_anchor(message) for message in api_messages]
             seen_references: set[str] = set()
 
             def insert_edits(message_index: int, block: dict[str, Any]) -> None:

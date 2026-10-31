@@ -162,6 +162,7 @@ def get_plan_file_path(
     *,
     agent_id: str | None = None,
     settings: Mapping[str, Any] | None = None,
+    create_directory: bool = True,
 ) -> Path:
     normalized_slug = validate_plan_slug(slug)
     suffix = ""
@@ -170,7 +171,7 @@ def get_plan_file_path(
         if not _AGENT_ID_PATTERN.fullmatch(normalized_agent):
             raise PlanFileError("Invalid plan agent owner")
         suffix = f"-agent-{normalized_agent}"
-    plans_dir = get_plans_directory(workspace_root, settings=settings)
+    plans_dir = get_plans_directory(workspace_root, settings=settings, create=create_directory)
     candidate = _resolved_without_following_leaf(
         plans_dir / f"{normalized_slug}{suffix}.md"
     )
@@ -188,7 +189,7 @@ def plan_path_for_snapshot(
     agent_id: str | None = None,
 ) -> Path | None:
     slug = plan_slug_from_snapshot(snapshot)
-    return get_plan_file_path(slug, workspace_root, agent_id=agent_id) if slug else None
+    return get_plan_file_path(slug, workspace_root, agent_id=agent_id, create_directory=False) if slug else None
 
 
 def plan_file_reference(path: Path | str, content: str | None = None) -> dict[str, str]:

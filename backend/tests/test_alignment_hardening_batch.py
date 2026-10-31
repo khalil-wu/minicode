@@ -33,7 +33,7 @@ def _anthropic_request(*, base_url: str, model: str = "claude-test") -> SimpleNa
     return SimpleNamespace(provider="anthropic", anthropic=section)
 
 
-def test_anthropic_refresh_and_check_resolve_key_for_incoming_base_url(monkeypatch) -> None:
+def test_anthropic_refresh_resolves_key_for_incoming_base_url(monkeypatch) -> None:
     current = {
         "api_key": "old-endpoint-key",
         "base_url": "https://old.example/v1",
@@ -60,45 +60,15 @@ def test_anthropic_refresh_and_check_resolve_key_for_incoming_base_url(monkeypat
         calls.append(("models", base_url, api_key))
         return []
 
-    async def check_generation(
-        base_url: str,
-        api_key: str,
-        model: str,
-        *,
-        proxy_mode: str = "direct",
-        headers: dict[str, str] | None = None,
-        auth_header: bool = True,
-    ) -> None:
-        calls.append(("generation", base_url, api_key, model))
-
     refresh = asyncio.run(
         llm_provider_service.refresh_llm_models(
             _anthropic_request(base_url="https://new.example/v1"),
             fetch_anthropic_models=fetch_models,
         )
     )
-    check = asyncio.run(
-        llm_provider_service.check_llm_connection(
-            _anthropic_request(base_url="https://new.example/v1"),
-            fetch_anthropic_models=fetch_models,
-            check_anthropic_generation=check_generation,
-        )
-    )
-
     assert refresh["source"] == "manual"
-    assert check["ok"] is True
-    assert resolved == [
-        ("anthropic", "https://new.example/v1"),
-        ("anthropic", "https://new.example/v1"),
-    ]
+    assert resolved == [("anthropic", "https://new.example/v1")]
     assert calls[0] == ("models", "https://new.example/v1", "scoped-new-key")
-    assert calls[1] == ("models", "https://new.example/v1", "scoped-new-key")
-    assert calls[2] == (
-        "generation",
-        "https://new.example/v1",
-        "scoped-new-key",
-        "claude-test",
-    )
 
 
 def test_provider_error_messages_use_codex_secret_redaction() -> None:

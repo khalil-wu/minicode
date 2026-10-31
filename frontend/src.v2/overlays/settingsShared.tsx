@@ -87,33 +87,6 @@ export type LLMSettingsPayload = {
   provider_history?: ProviderHistoryEntry[];
 };
 
-export type LLMCheckResult = {
-  ok: boolean;
-  provider: string;
-  provider_id: string;
-  base_url: string;
-  model: string;
-  wire_api: string;
-  proxy_mode?: ProviderProxyMode;
-  generation_kind?: "text" | "image";
-  has_api_key: boolean;
-  status_code?: number | null;
-  model_discovery_ok?: boolean | null;
-  generation_ok?: boolean | null;
-  failure_kind?: string;
-  retryable?: boolean;
-  message: string;
-  hint?: string;
-  image_generation_ok?: boolean | null;
-  image_status_code?: number | null;
-  image_failure_kind?: string;
-  image_retryable?: boolean;
-  image_message?: string;
-  image_hint?: string;
-  image_model?: string;
-  models?: string[];
-};
-
 export type LLMModelsRefreshResult = {
   provider: string;
   provider_id: string;

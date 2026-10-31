@@ -20,7 +20,6 @@ from backend.services.chat_api_service import (
     ChatApiServiceError,
     generated_artifact_native_payload,
 )
-from backend.services import llm_provider_service
 from backend.tools.toolsets import ToolsetPolicy
 from backend.workspace import recent_projects
 from backend.ws.handlers import conversation as conversation_handlers
@@ -28,32 +27,8 @@ from backend.ws.handlers import session as session_handlers
 from backend.ws.handlers import workspace as workspace_handlers
 
 
-def _custom_chat_request(
-    *,
-    base_url: str = "https://tokenrhythm.studio/v1",
-    api_key: str = "test-key",
-    model: str = "glm-5.2",
-) -> SimpleNamespace:
-    section = SimpleNamespace(
-        api_key=api_key,
-        base_url=base_url,
-        model=model,
-        wire_api="chat",
-        available_models=[model] if model else [],
-        model_metadata={},
-    )
-    return SimpleNamespace(
-        provider="custom",
-        custom=section,
-        openai=section,
-        anthropic=section,
-    )
 
 
-def _http_status_error(status_code: int, message: str) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "https://provider.example/v1/chat/completions")
-    response = httpx.Response(status_code, request=request, text=message)
-    return httpx.HTTPStatusError(message, request=request, response=response)
 
 
 def test_recent_workspace_store_clear_reloads_under_lock_and_preserves_directories(
@@ -446,81 +421,12 @@ def test_conversation_create_emits_authoritative_switch_for_the_new_task(
     assert ordering == ["switched", "list", "result"]
 
 
-def test_provider_connection_preserves_discovery_success_when_generation_is_busy() -> None:
-    async def fetch_models(_base_url: str, _api_key: str, **_kwargs: object) -> list[str]:
-        return ["glm-5.2", "glm-4.7"]
-
-    async def busy_generation(_base_url: str, _api_key: str, _model: str, _wire_api: str, **_kwargs: object) -> None:
-        raise _http_status_error(503, "SERVICE_BUSY")
-
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        _custom_chat_request(),
-        fetch_openai_models=fetch_models,
-        check_openai_generation=busy_generation,
-    ))
-
-    assert result["ok"] is False
-    assert result["model_discovery_ok"] is True
-    assert result["generation_ok"] is False
-    assert result["failure_kind"] == "provider_unavailable"
-    assert result["retryable"] is True
-    assert result["status_code"] == 503
-    assert result["models"] == ["glm-5.2", "glm-4.7"]
-    assert "does not mean the API key was rejected" in result["hint"]
 
 
-@pytest.mark.parametrize("status_code", [401, 403])
-def test_provider_connection_calls_only_real_credential_rejections_authentication_failures(
-    status_code: int,
-) -> None:
-    async def fetch_models(_base_url: str, _api_key: str, **_kwargs: object) -> list[str]:
-        return []
-
-    async def reject_generation(_base_url: str, _api_key: str, _model: str, _wire_api: str, **_kwargs: object) -> None:
-        raise _http_status_error(status_code, "credential rejected")
-
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        _custom_chat_request(),
-        fetch_openai_models=fetch_models,
-        check_openai_generation=reject_generation,
-    ))
-
-    assert result["model_discovery_ok"] is False
-    assert result["generation_ok"] is False
-    assert result["failure_kind"] == "authentication_failed"
-    assert result["retryable"] is False
-    assert result["status_code"] == status_code
 
 
-def test_provider_generation_success_remains_authoritative_when_discovery_is_unavailable() -> None:
-    async def fail_discovery(_base_url: str, _api_key: str) -> list[str]:
-        raise RuntimeError("models endpoint unavailable")
-
-    async def generation_ok(_base_url: str, _api_key: str, _model: str, _wire_api: str, **_kwargs: object) -> None:
-        return None
-
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        _custom_chat_request(),
-        fetch_openai_models=fail_discovery,
-        check_openai_generation=generation_ok,
-    ))
-
-    assert result["ok"] is True
-    assert result["model_discovery_ok"] is False
-    assert result["generation_ok"] is True
-    assert result["models"] == ["glm-5.2"]
 
 
-def test_provider_connection_missing_fields_are_configuration_errors() -> None:
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        _custom_chat_request(base_url="", api_key="", model=""),
-    ))
-
-    assert result["ok"] is False
-    assert result["model_discovery_ok"] is None
-    assert result["generation_ok"] is None
-    assert result["failure_kind"] == "configuration_error"
-    assert result["retryable"] is False
 
 
 async def _finish_or_cancel(awaitable, *, succeed: bool) -> bool:

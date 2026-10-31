@@ -101,6 +101,28 @@ async def test_patch_checkpoint_roundtrip_is_durable_and_uses_current_accepted_s
 
 
 @pytest.mark.asyncio
+async def test_executor_checkpoint_reads_large_file_in_blocks(accepted, tmp_path, monkeypatch):
+    host, context = accepted
+    target = host.workspace / "large.bin"
+    chunk = bytes(range(256)) * 4096
+    with target.open("wb") as handle:
+        for _ in range(4):
+            handle.write(chunk)
+    manager = CheckpointManager(CheckpointStore(tmp_path / "streamed-checkpoints"))
+
+    async def reject_whole_file_reads(*_args, **_kwargs):
+        raise AssertionError("executor checkpoint must read blocks")
+
+    monkeypatch.setattr(ExecutorWorkspaceService, "read_bytes", reject_whole_file_reads)
+    checkpoint = await manager.snapshot(tool_name="write_file", args={"file_path": target.name},
+        workspace_root=host.workspace, conversation_id="streamed", execution_context=context)
+    with manager._store.open_blob(checkpoint.files[0].blob) as handle:
+        for _ in range(4):
+            assert handle.read(len(chunk)) == chunk
+        assert handle.read(1) == b""
+
+
+@pytest.mark.asyncio
 async def test_patch_partial_move_keeps_real_written_destination_and_reports_it(accepted, monkeypatch):
     host, context = accepted
     original = host.workspace / "source.txt"

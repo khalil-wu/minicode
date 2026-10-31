@@ -21,9 +21,7 @@ from backend.hooks.manager import (
 )
 from backend.hooks.reducer import reduce_hook_executions
 from backend.hooks.runners import (
-    HookExecutionError,
     HookExecutionResult,
-    _dynamic_async_timeout_seconds,
     _entry_timeout_seconds,
 )
 
@@ -217,7 +215,7 @@ def test_condition_matcher_is_prepared_once_for_preview_and_execution(monkeypatc
     ) -> HookExecutionResult:
         del self, event, env_extras
         executed.append(entry.entry_id)
-        return HookExecutionResult('{"additional_context":"matched"}', "", 0)
+        return HookExecutionResult('{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"matched"}}', "", 0)
 
     monkeypatch.setattr("backend.tools.base.validate_tool_input", validate)
     monkeypatch.setattr(HookManager, "_execute_entry", execute_entry)
@@ -246,16 +244,17 @@ def test_condition_matcher_is_prepared_once_for_preview_and_execution(monkeypatc
     ]
 
 
-def test_dynamic_async_handshake_is_session_owned_and_suppressed(tmp_path) -> None:
+def test_stdout_async_claim_does_not_background_a_sync_hook(tmp_path) -> None:
     script = tmp_path / "dynamic_hook.py"
     script.write_text(
         "\n".join(
             (
                 "import json, sys, time",
                 "sys.stdin.readline()",
-                'print(json.dumps({"async": True, "asyncTimeout": 1000}), flush=True)',
+                'print(json.dumps({"async": True, "asyncTimeout": 1}), flush=True)',
                 "time.sleep(0.15)",
-                'print(json.dumps({"additional_context": "async context", "suppress_output": True}), flush=True)',
+                "from pathlib import Path",
+                "Path(__file__).with_suffix('.finished').write_text('done')",
             )
         ),
         encoding="utf-8",
@@ -275,21 +274,15 @@ def test_dynamic_async_handshake_is_session_owned_and_suppressed(tmp_path) -> No
 
     async def scenario() -> None:
         result = await manager.run_user_prompt_submit("hello")
-        assert result.run_summaries[0]["status"] == "backgrounded"
-        assert manager.pending_async_hooks == 1
-        await manager.drain_async_hooks()
+        assert script.with_suffix('.finished').exists()
+        assert 'asyncTimeout' in result.stdout
+        assert manager.pending_async_hooks == 0
 
     asyncio.run(scenario())
 
     assert manager.pending_async_hooks == 0
-    assert manager.take_async_context() == ("async context",)
-    assert len(events) == 1
-    event_type, payload = events[0]
-    assert event_type == "agent.item"
-    assert payload["kind"] == "hook_response"
-    assert payload["status"] == "completed"
-    assert "asyncTimeout" not in str(payload.get("content", ""))
-    assert "async context" not in str(payload.get("content", ""))
+    assert manager.take_async_context() == ()
+    assert events == []
 
 
 def test_config_async_hook_is_session_owned_and_drained(tmp_path) -> None:
@@ -300,7 +293,7 @@ def test_config_async_hook_is_session_owned_and_drained(tmp_path) -> None:
                 "import json, sys, time",
                 "sys.stdin.readline()",
                 "time.sleep(0.15)",
-                'print(json.dumps({"additional_context": "configured context"}), flush=True)',
+                'print(json.dumps({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "configured context"}}), flush=True)',
             )
         ),
         encoding="utf-8",
@@ -309,8 +302,7 @@ def test_config_async_hook_is_session_owned_and_drained(tmp_path) -> None:
     # Generous timeout: under full-suite load Windows process spawn plus the
     # scripted 0.15s sleep can approach a tighter budget, which would flake
     # the drain assertion below. The contract under test is session ownership
-    # and context capture, not timeout enforcement (see
-    # test_dynamic_async_timeout_terminates_owned_process).
+    # and context capture, not timeout enforcement.
     entry = _runtime_entry(command=command, shell=shell, run_async=True, async_timeout=10.0)
     manager = HookManager(
         hooks={HookEvent.USER_PROMPT_SUBMIT: [entry]},
@@ -334,7 +326,31 @@ def test_config_async_hook_is_session_owned_and_drained(tmp_path) -> None:
     assert manager.take_async_context() == ("configured context",)
 
 
-def test_dynamic_async_timeout_terminates_owned_process(tmp_path) -> None:
+def test_config_async_hook_parses_all_stdout_as_one_response(tmp_path) -> None:
+    script = tmp_path / "multi_object_hook.py"
+    script.write_text(
+        "import json, sys\n"
+        "sys.stdin.readline()\n"
+        "print(json.dumps({'async': True}))\n"
+        "print(json.dumps({'additional_context': 'not a standalone response'}))\n",
+        encoding="utf-8",
+    )
+    command, shell = _python_hook_command(script)
+    entry = _runtime_entry(command=command, shell=shell, run_async=True, async_timeout=10.0)
+    events: list[tuple[str, dict[str, object]]] = []
+    manager = HookManager(hooks={HookEvent.USER_PROMPT_SUBMIT: [entry]}, workspace_root=tmp_path)
+    manager.bind_runtime(llm=None, tool_registry=SimpleNamespace(), tool_context=_hook_tool_context(events))
+
+    async def scenario() -> None:
+        await manager.run_user_prompt_submit("hello")
+        await manager.drain_async_hooks()
+
+    asyncio.run(scenario())
+    assert manager.take_async_context() == ()
+    assert "not a standalone response" in str(events[0][1]["content"])
+
+
+def test_configured_async_timeout_terminates_owned_process(tmp_path) -> None:
     import psutil
 
     script = tmp_path / "timed_async_hook.py"
@@ -345,15 +361,15 @@ def test_dynamic_async_timeout_terminates_owned_process(tmp_path) -> None:
                 "from pathlib import Path",
                 "sys.stdin.readline()",
                 "Path(__file__).with_suffix('.pid').write_text(str(os.getpid()))",
-                'print(json.dumps({"async": True, "asyncTimeout": 50}), flush=True)',
-                "time.sleep(2)",
+                'print(json.dumps({"async": True, "asyncTimeout": 100000}), flush=True)',
+                "time.sleep(10)",
                 "Path(__file__).with_suffix('.finished').write_text('natural completion')",
             )
         ),
         encoding="utf-8",
     )
     command, shell = _python_hook_command(script)
-    entry = _runtime_entry(command=command, shell=shell, async_timeout=2.0)
+    entry = _runtime_entry(command=command, shell=shell, run_async=True, async_timeout=1.5)
     events: list[tuple[str, dict[str, object]]] = []
     manager = HookManager(
         hooks={HookEvent.USER_PROMPT_SUBMIT: [entry]},
@@ -376,7 +392,7 @@ def test_dynamic_async_timeout_terminates_owned_process(tmp_path) -> None:
     assert manager.pending_async_hooks == 0
     assert len(events) == 1
     assert events[0][1]["status"] == "failed"
-    assert "timed out after 0.05s" in str(events[0][1].get("content", ""))
+    assert "timed out after 1.5s" in str(events[0][1].get("content", ""))
 
 
 def test_hook_timeout_sources_remain_distinct() -> None:
@@ -401,21 +417,16 @@ def test_hook_timeout_sources_remain_distinct() -> None:
     assert _entry_timeout_seconds(defaulted, HookEvent.SESSION_END) == 1.0
     assert explicit.async_timeout == 3.0
     assert _entry_timeout_seconds(explicit, HookEvent.SESSION_END) == 3.0
-    assert _dynamic_async_timeout_seconds({"async": True}) == 15.0
-    assert _dynamic_async_timeout_seconds({"async": True, "asyncTimeout": 250}) == 0.25
-    with pytest.raises(HookExecutionError, match="asyncTimeout must be a positive number"):
-        _dynamic_async_timeout_seconds({"async": True, "asyncTimeout": 0})
 
 
-def test_suppress_output_keeps_structured_decision_and_context() -> None:
+def test_suppress_output_keeps_prompt_context_and_warning() -> None:
     execution = HookExecution(
         entry=_runtime_entry(),
         stdout=json.dumps(
             {
-                "permission_decision": "deny",
-                "permission_decision_reason": "blocked",
-                "additional_context": "keep this context",
-                "suppress_output": True,
+                "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "keep this context"},
+                "systemMessage": "warning",
+                "suppressOutput": True,
             }
         ),
         stderr="",
@@ -426,13 +437,12 @@ def test_suppress_output_keeps_structured_decision_and_context() -> None:
     )
 
     reduction = reduce_hook_executions(
-        HookEvent.PRE_TOOL_USE,
+        HookEvent.USER_PROMPT_SUBMIT,
         [execution],
-        expected_event_name="pre_tool_use",
+        expected_event_name="user_prompt_submit",
     )
 
     assert reduction.stdout == ""
-    assert reduction.blocked is True
-    assert reduction.permission_decision == "deny"
-    assert reduction.permission_decision_reason == "blocked"
+    assert reduction.blocked is False
+    assert reduction.system_message == "warning"
     assert reduction.additional_context == "keep this context"

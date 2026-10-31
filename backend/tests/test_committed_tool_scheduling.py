@@ -55,7 +55,7 @@ def committed(name, call_id):
     return StreamEvent(type=StreamEventType.TOOL_CALL, tool_calls=[ToolCallEvent(id=call_id, name=name, arguments={})], tool_calls_final=False, tool_calls_committed=True)
 
 
-async def run_case(tmp_path, llm, tools, observe=None, cancel_event=None, approval=None, stream_max_attempts=1):
+async def run_case(tmp_path, llm, tools, observe=None, cancel_event=None, approval=None, stream_max_attempts=1, hooks=None, metadata=None):
     artifacts = ArtifactStore(storage_dir=str(tmp_path / "artifacts"))
     registry = ToolRegistry()
     for tool in tools:
@@ -71,7 +71,7 @@ async def run_case(tmp_path, llm, tools, observe=None, cancel_event=None, approv
     events = []
     try:
         async with asyncio.timeout(10):
-            async for event in QueryEngine().submit(QuerySubmission(user_message=state.user_message, session=session, state=state, runtime=AgentLoopSessionContext(workspace_root=tmp_path, session_id="schedule-test", permission_context=checker.build_context(mode="confirm" if approval else "bypass"), cancel_event=cancel_event, run_context=RunContext(agent_runtime=runtime, execution_journal=ExecutionJournal("schedule-test", base_dir=tmp_path / "journals"))))):
+            async for event in QueryEngine().submit(QuerySubmission(user_message=state.user_message, session=session, state=state, runtime=AgentLoopSessionContext(workspace_root=tmp_path, session_id="schedule-test", permission_context=checker.build_context(mode="confirm" if approval else "bypass"), cancel_event=cancel_event, metadata=metadata or {}, run_context=RunContext(agent_runtime=runtime, hook_manager=hooks, execution_journal=ExecutionJournal("schedule-test", base_dir=tmp_path / "journals"))))):
                 events.append(event)
                 if observe:
                     observe(event)

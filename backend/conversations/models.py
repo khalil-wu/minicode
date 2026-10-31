@@ -164,6 +164,8 @@ class ConversationSummary:
     memory_polluted: bool = False
     memory_pollution_sources: list[str] = field(default_factory=list)
     permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
+    permission_mode_revision: int = 0
+    permission_previous_mode: ConversationPermissionMode | str = ""
     summary: str = ""
     compaction_state: ConversationCompactionState = "clean"
     message_count: int = 0
@@ -176,6 +178,7 @@ class ConversationSummary:
     resource_references: list[dict[str, Any]] = field(default_factory=list)
     workspace_root: str = ""
     execution_cwd: str = ""
+    workspace_binding_revision: int = 0
     projectless_output_dir: str = ""
     projectless_browser_root: str = ""
     git_branch: str = ""
@@ -225,6 +228,8 @@ class ConversationSummary:
             permission_mode=normalize_permission_mode(
                 payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
             ),
+            permission_mode_revision=_normalize_revision(payload.get("permission_mode_revision")),
+            permission_previous_mode=_normalize_previous_permission_mode(payload.get("permission_previous_mode")),
             summary=str(payload.get("summary") or ""),
             compaction_state=payload.get("compaction_state", "clean"),
             message_count=int(payload.get("message_count") or 0),
@@ -237,6 +242,7 @@ class ConversationSummary:
             resource_references=deepcopy(payload.get("resource_references", [])),
             workspace_root=str(payload.get("workspace_root") or ""),
             execution_cwd=inherited_execution_cwd(payload),
+            workspace_binding_revision=_normalize_revision(payload.get("workspace_binding_revision")),
             projectless_output_dir=str(payload.get("projectless_output_dir") or ""),
             projectless_browser_root=str(payload.get("projectless_browser_root") or ""),
             git_branch=str(payload.get("git_branch") or ""),
@@ -275,6 +281,7 @@ class ConversationRecord:
     memory_polluted: bool = False
     memory_pollution_sources: list[str] = field(default_factory=list)
     permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
+    permission_mode_revision: int = 0
     permission_previous_mode: ConversationPermissionMode | str = ""
     permission_deny_rules: list[str] = field(default_factory=list)
     permission_overrides: dict[str, ConversationPermissionRuleLevel] = field(default_factory=dict)
@@ -294,6 +301,7 @@ class ConversationRecord:
     project_id: str | None = None
     workspace_root: str = ""
     execution_cwd: str = ""
+    workspace_binding_revision: int = 0
     projectless_output_dir: str = ""
     projectless_browser_root: str = ""
     git_branch: str = ""
@@ -325,6 +333,8 @@ class ConversationRecord:
             memory_polluted=self.memory_polluted,
             memory_pollution_sources=list(self.memory_pollution_sources),
             permission_mode=self.permission_mode,
+            permission_mode_revision=self.permission_mode_revision,
+            permission_previous_mode=self.permission_previous_mode,
             summary=self.summary,
             compaction_state=self.compaction_state,
             message_count=self.message_count or len(self.transcript),
@@ -337,6 +347,7 @@ class ConversationRecord:
             resource_references=deepcopy(self.resource_references),
             workspace_root=self.workspace_root,
             execution_cwd=self.execution_cwd,
+            workspace_binding_revision=self.workspace_binding_revision,
             projectless_output_dir=self.projectless_output_dir,
             projectless_browser_root=self.projectless_browser_root,
             git_branch=self.git_branch,
@@ -404,6 +415,7 @@ class ConversationRecord:
             permission_mode=normalize_permission_mode(
                 payload.get("permission_mode", DEFAULT_CONVERSATION_PERMISSION_MODE)
             ),
+            permission_mode_revision=_normalize_revision(payload.get("permission_mode_revision")),
             permission_previous_mode=_normalize_previous_permission_mode(payload.get("permission_previous_mode", "")),
             permission_deny_rules=normalize_permission_deny_rules(payload.get("permission_deny_rules", [])),
             permission_overrides=normalize_permission_overrides(payload.get("permission_overrides", {})),
@@ -423,6 +435,7 @@ class ConversationRecord:
             project_id=payload.get("project_id"),
             workspace_root=str(payload.get("workspace_root") or ""),
             execution_cwd=inherited_execution_cwd(payload),
+            workspace_binding_revision=_normalize_revision(payload.get("workspace_binding_revision")),
             projectless_output_dir=str(payload.get("projectless_output_dir") or ""),
             projectless_browser_root=str(payload.get("projectless_browser_root") or ""),
             git_branch=str(payload.get("git_branch") or ""),

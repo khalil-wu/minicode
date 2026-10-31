@@ -5,7 +5,7 @@
 
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 import type { TurnActivityKind } from "../../lib/turn-projection";
-import type { ArtifactPreview, ChatMessageSource, Citation, ComposerQuote, MessageContextRef, MessageUsage, ProgressContentBlock, SubagentState, ToolHistoryPage } from "../../stores/types";
+import type { ArtifactPreview, ChatMessage, ChatMessageSource, Citation, ComposerQuote, MessageContextRef, MessageUsage, ProgressContentBlock, SubagentState, ToolHistoryPage } from "../../stores/types";
 
 // ── Diff File Change ────────────────────────────────────────────────
 
@@ -204,6 +204,7 @@ export interface AssistantMarkdownCellState {
   artifacts?: ArtifactPreview[];
   /** Dedicated image-generation lifecycle rendered in the answer position. */
   imageProgress?: ProgressContentBlock[];
+  terminalStatus?: ChatMessage["terminalStatus"];
   /** When image generation is interleaved with answer text, preserve the
    * provider's before/after ordering around the generated artifact. */
   markdownBeforeArtifacts?: string;

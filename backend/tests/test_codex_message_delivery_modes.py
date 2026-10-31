@@ -71,6 +71,7 @@ async def test_child_result_stays_queued_across_idle_parent_replay(tmp_path, mon
     start = AsyncMock(return_value="unexpected-new-turn")
     session = SimpleNamespace(session_id="session", ws_manager=None,
         conversation_repo=SimpleNamespace(_base_dir=tmp_path / "conversations"),
+        session_lifecycle=SimpleNamespace(recovered_input_workspace_ready=lambda _owner: True),
         conversation_lifecycle_lock=lambda: lock, start_agent_run=start)
     manager = SessionRunManager(session)
     try:

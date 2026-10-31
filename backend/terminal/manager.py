@@ -226,6 +226,7 @@ class BackgroundCommandManager:
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._stdin_locks: dict[str, asyncio.Lock] = {}
         self._completion_notified: set[str] = set()
+        self._shutdown_requested = False
         self._on_completed = on_completed
         self._on_started = on_started
         self._on_stalled = None
@@ -402,6 +403,17 @@ class BackgroundCommandManager:
 
         logger.info("Background command started: %s (id: %s)", display_command[:60], command_id)
         return bg_cmd
+
+    def _release_settled_after_shutdown(self, bg_cmd: BackgroundCommand) -> None:
+        if bg_cmd.output_path:
+            try:
+                delete_task_output(bg_cmd.output_path)
+            except OSError as exc:
+                logger.debug("Late output cleanup failed for %s: %s", bg_cmd.command_id, exc)
+                return
+        self._tasks.pop(bg_cmd.command_id, None)
+        self._commands.pop(bg_cmd.command_id, None)
+        self._completion_notified.discard(bg_cmd.command_id)
 
     async def _notify_completed_once(self, bg_cmd: BackgroundCommand) -> None:
         """Deliver exactly one terminal callback, even across cancel races."""
@@ -704,6 +716,10 @@ class BackgroundCommandManager:
                 bg_cmd.cleanup_pending = False
                 bg_cmd.cleanup_completed_at = time.time()
             bg_cmd.close_task_output()
+            if getattr(self, "_shutdown_requested", False) and not bg_cmd.cleanup_pending:
+                # The owner already shut down; a record that settles afterwards
+                # has nobody left to reap it, so release it the way shutdown does.
+                self._release_settled_after_shutdown(bg_cmd)
             if bg_cmd.output_write_error and bg_cmd.status != "cancelled":
                 bg_cmd.status = "failed"
                 bg_cmd.command_completed = False
@@ -1294,6 +1310,7 @@ class BackgroundCommandManager:
 
     async def shutdown(self) -> None:
         """Request cancellation while retaining every unsettled resource owner."""
+        self._shutdown_requested = True
         await asyncio.gather(
             *(self._cancel_unscoped(command_id) for command_id in list(self._tasks)),
             return_exceptions=True,

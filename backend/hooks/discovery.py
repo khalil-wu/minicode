@@ -9,6 +9,7 @@ from typing import Any, Iterable, Mapping
 
 from backend.atomic_io import canonical_file_path_key
 from backend.hooks.models import (
+    CODEX_HOOK_EVENTS,
     HookDefinition,
     HookEvent,
     HookSnapshot,
@@ -22,6 +23,8 @@ from backend.hooks.value_utils import coerce_bool as _coerce_bool
 logger = logging.getLogger(__name__)
 
 _EVENT_KEYS = frozenset(event.value for event in HookEvent)
+_CODEX_EVENT_KEYS = {"".join(part.title() for part in event.value.split("_")): event.value for event in CODEX_HOOK_EVENTS}
+_CODEX_EVENT_VALUES = frozenset(_CODEX_EVENT_KEYS.values())
 
 
 def discover_hook_snapshot(
@@ -193,11 +196,6 @@ def discover_hook_snapshot(
             env=env,
         )
 
-    # Only identical declarations share an entry. Matchers and execution
-    # options are part of the existing normalized hash; managed declarations
-    # cannot be replaced by a lower-trust settings scope.
-    entries = _deduplicate_entries(entries)
-
     return HookSnapshot(
         entries=tuple(entries),
         warnings=tuple(dict.fromkeys(warnings)),
@@ -260,7 +258,7 @@ def _append_source(
     env: Mapping[str, str] | None = None,
 ) -> int:
     for raw_event_name, raw_groups in hook_map.items():
-        event = str(raw_event_name)
+        event = _CODEX_EVENT_KEYS.get(str(raw_event_name), str(raw_event_name))
         if event not in _EVENT_KEYS or not isinstance(raw_groups, list):
             continue
         for group_index, raw_group in enumerate(raw_groups):
@@ -320,12 +318,14 @@ def _definition_from_handler(
     if handler_type not in {"command", "prompt", "agent", "http", "mcp_tool"}:
         warnings.append(f"Skipping unsupported {handler_type!r} hook in {source_path}")
         return None
+    if event in _CODEX_EVENT_VALUES and handler_type in {"prompt", "agent", "http"}:
+        warnings.append(f"Skipping {handler_type} {event} hook in {source_path}: handler type is not supported by Codex")
+        return None
     command = str(raw_handler.get("command") or "").strip()
     if sys.platform == "win32":
-        command = str(
-            raw_handler.get("command_windows")
-            or command
-        ).strip()
+        windows_command = raw_handler.get("commandWindows", raw_handler.get("command_windows"))
+        if windows_command is not None:
+            command = str(windows_command).strip()
     prompt = str(raw_handler.get("prompt") or "").strip()
     url = str(raw_handler.get("url") or "").strip()
     server = str(raw_handler.get("server") or "").strip()
@@ -364,7 +364,7 @@ def _definition_from_handler(
             f"Clamping {event} hook timeout to {policy.max_timeout_seconds:g}s in {source_path}"
         )
         timeout = policy.max_timeout_seconds
-    async_rewake = handler_type != "mcp_tool" and _coerce_bool(raw_handler.get("async_rewake"), False)
+    async_rewake = event not in _CODEX_EVENT_VALUES and handler_type != "mcp_tool" and _coerce_bool(raw_handler.get("async_rewake"), False)
     run_async = handler_type == "command" and (
         _coerce_bool(raw_handler.get("async"), False) or async_rewake
     )
@@ -376,6 +376,7 @@ def _definition_from_handler(
     normalized["type"] = handler_type
     if handler_type == "command":
         normalized["command"] = command
+        normalized.pop("commandWindows", None)
         normalized.pop("command_windows", None)
     current_hash = normalized_hook_hash(event=event, matcher=matcher, handler=normalized)
     key = f"{source_path}:{event}:{group_index}:{handler_index}"
@@ -403,7 +404,7 @@ def _definition_from_handler(
     )
     allowed_env = _string_tuple(raw_handler.get("allowed_env_vars"))
     additional_limit = _nonnegative_int(
-        raw_handler.get("additional_context_limit")
+        raw_handler.get("additionalContextLimit")
     )
     if additional_limit is not None and not policy.additional_context:
         warnings.append(
@@ -458,25 +459,6 @@ def _hook_states(config_stack: Any) -> dict[str, Mapping[str, Any]]:
             if isinstance(value, Mapping):
                 states[str(key)] = dict(value)
     return states
-
-
-def _deduplicate_entries(entries: list[HookDefinition]) -> list[HookDefinition]:
-    last_by_key: dict[tuple[str, str, str, str], HookDefinition] = {}
-    passthrough: list[HookDefinition] = []
-    for entry in entries:
-        if entry.handler_type not in {"command", "prompt", "agent", "http", "mcp_tool"}:
-            passthrough.append(entry)
-            continue
-        namespace = (
-            f"plugin:{entry.plugin_id or entry.plugin_root}"
-            if entry.source == HookSource.PLUGIN
-            else "managed_settings" if entry.is_managed else "settings"
-        )
-        key = (namespace, entry.event, entry.handler_type, entry.current_hash)
-        last_by_key[key] = entry
-    selected = [*passthrough, *last_by_key.values()]
-    selected.sort(key=lambda entry: entry.display_order)
-    return selected
 
 
 def _layer_source(source: Any) -> tuple[HookSource, bool]:

@@ -89,7 +89,6 @@ class HookExecution:
     completion_order: int
     duration_ms: int
     execution_failed: bool = False
-    backgrounded: bool = False
     semantic_stdout: str | None = None
     permission_grant_allowed: bool = True
 
@@ -150,17 +149,15 @@ async def execute_handlers(
     async def run_one(
         configured_order: int,
         entry: Any,
-    ) -> tuple[int, Any, str, str, int, int, bool, bool, str | None]:
+    ) -> tuple[int, Any, str, str, int, int, bool, str | None]:
         started = time.monotonic()
         execution_failed = False
-        backgrounded = False
         semantic_stdout = None
         try:
             result = await execute(entry)
             stdout = result.stdout
             stderr = result.stderr
             exit_code = result.exit_code
-            backgrounded = result.backgrounded
             semantic_stdout = result.semantic_stdout
         except asyncio.CancelledError:
             raise
@@ -178,7 +175,6 @@ async def execute_handlers(
             exit_code,
             duration_ms,
             execution_failed,
-            backgrounded,
             semantic_stdout,
         )
 
@@ -200,7 +196,6 @@ async def execute_handlers(
                 exit_code,
                 duration_ms,
                 execution_failed,
-                backgrounded,
                 semantic_stdout,
             ) = await future
             completed.append(
@@ -213,7 +208,6 @@ async def execute_handlers(
                     completion_order=completion_order,
                     duration_ms=duration_ms,
                     execution_failed=execution_failed,
-                    backgrounded=backgrounded,
                     semantic_stdout=semantic_stdout,
                     permission_grant_allowed=permission_grant_allowed(entry),
                 )

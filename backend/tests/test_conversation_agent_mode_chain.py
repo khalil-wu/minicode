@@ -137,6 +137,8 @@ def test_turn_and_recovery_use_owned_durable_mode_while_explicit_child_modes_do_
 
 
 def _owned_admission_session(tmp_path, monkeypatch):
+    # Dispatch only admits inputs whose bound workspace is trusted; this fixture binds a raw temp dir.
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
     memory_state = Path(os.environ["MINICODE_STATE_ROOT"]) / "mode-admission-memory"
     monkeypatch.setattr("backend.memory.file_memory.DATA_ROOT", memory_state)
     monkeypatch.setattr("backend.memory.file_memory.MEMORY_DIR", memory_state / "memory")
@@ -146,7 +148,7 @@ def _owned_admission_session(tmp_path, monkeypatch):
     session.running_agent_task_for = session.run_manager.running_task_for
     session.run_manager.stop_notification_wake_intake()
 
-    async def start(content, *, attachments, conversation_id, metadata):
+    async def start(content, *, attachments, conversation_id, metadata, turn_settings=None):
         await session._run_agent_locked(content, attachments=attachments, conversation_id=conversation_id, metadata=metadata)
 
     session.start_agent_run = start

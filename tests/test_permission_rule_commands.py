@@ -92,6 +92,8 @@ def _make_session():
     )
     session.session_lifecycle = SimpleNamespace(is_shutting_down=False)
     session.ws_manager = None
+    session._base_permission_constraints = {}
+    session._local_command_prompt_allow_rules = {}
     session.command_dispatcher = object.__new__(SessionCommandDispatcher)
     session.command_dispatcher._session = session
 
@@ -421,6 +423,10 @@ def test_auto_approve_pending_tool_approvals_filters_auto_mode_permissions() -> 
                 "input": {"command": "npm run build"},
             },
         },
+    }
+    session.turn_wait_state.pending_approval_inputs = {
+        "read-1": {"file_path": "README.md"},
+        "command-1": {"command": "npm run build"},
     }
     sent_events: list[dict[str, object]] = []
 

@@ -15,6 +15,7 @@ export const normalizeUiPermissionMode = (mode: unknown): PermissionMode => {
 export const initialUiPermissionMode = (stored: unknown): PermissionMode => {
   const raw = String(stored ?? "").trim();
   if (!raw) return DEFAULT_UI_PERMISSION_MODE;
+  if (raw.toLowerCase() === "ask_permissions") return "confirm";
   return normalizeUiPermissionMode(raw);
 };
 

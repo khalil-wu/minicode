@@ -100,12 +100,10 @@ class ContextWindowConfig:
     def limits(self, llm: Any) -> tuple[int | None, int | None]:
         capabilities = capabilities_for_adapter(llm)
         model_window = self.model_context_window
+        if model_window is not None and capabilities.max_context_window_verified and capabilities.max_context_window:
+            model_window = min(model_window, int(capabilities.max_context_window))
         if model_window is None:
-            # An application fallback is not a provider-declared model limit.
-            if capabilities.context_window_source == "fallback" and not capabilities.context_window_verified:
-                model_window = None
-            else:
-                model_window = int(capabilities.context_window or capabilities.max_context_window) or None
+            model_window = int(capabilities.context_window or capabilities.max_context_window) or None
         default_limit = model_window * 9 // 10 if model_window is not None else None
         if self.model_auto_compact_token_limit_scope == "body_after_prefix":
             auto_limit = self.model_auto_compact_token_limit if self.model_auto_compact_token_limit is not None else default_limit

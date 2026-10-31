@@ -100,10 +100,7 @@ def _iter_source_files(root: Path, context: ToolExecutionContext | None = None) 
 def _read_safe(path: Path) -> str | None:
     if path.is_symlink():
         return None
-    try:
-        return path.read_text(encoding="utf-8", errors="ignore")
-    except OSError:
-        return None
+    return path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _line_of_pos(content: str, pos: int) -> int:

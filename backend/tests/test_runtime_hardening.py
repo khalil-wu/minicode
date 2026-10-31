@@ -543,6 +543,7 @@ def test_interrupt_does_not_emit_done_before_run_cleanup_finishes() -> None:
         def __init__(self) -> None:
             self.delivered: set[str] = set()
             self.run_task_ids: dict[str, str] = {}
+            self.run_tasks: dict[str, asyncio.Task] = {}
             self.set_user_queue_paused = Mock()
             self.queued_user_message_snapshot = Mock(return_value=[])
 
@@ -551,6 +552,9 @@ def test_interrupt_does_not_emit_done_before_run_cleanup_finishes() -> None:
 
         def mark_delivery_complete(self, conversation_id: str) -> None:
             self.delivered.add(conversation_id)
+
+        def context_for(self, conversation_id: str):
+            return None
 
     class Session:
         def __init__(self) -> None:
@@ -646,8 +650,8 @@ def test_matching_turn_interrupt_cancels_the_current_run() -> None:
                 }
             }
             self.run_manager = SimpleNamespace(
-                run_task_ids={"conv-cancel": "task-current"}, set_user_queue_paused=Mock(),
-                queued_user_message_snapshot=Mock(return_value=[]),
+                run_task_ids={"conv-cancel": "task-current"}, run_tasks={}, set_user_queue_paused=Mock(),
+                queued_user_message_snapshot=Mock(return_value=[]), context_for=lambda conversation_id: None,
             )
             self.cancel_calls: list[dict] = []
 
@@ -839,8 +843,9 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
             self.run_manager = SimpleNamespace(
                 run_task_ids={"conv-stop": "task-live"}, set_user_queue_paused=Mock(),
                 queued_user_message_snapshot=Mock(return_value=[]),
-                cancel_mcp_startup=AsyncMock(),
+                cancel_mcp_startup=AsyncMock(), context_for=lambda conversation_id: None,
             )
+            self.session_lifecycle = SimpleNamespace(foreground_navigation_is_current=lambda: True)
             self.cancel_calls: list[dict] = []
 
         def running_agent_task_for(self, conversation_id):
@@ -848,6 +853,9 @@ def test_interrupt_requires_current_identity_for_live_and_idle_sessions() -> Non
 
         async def cancel_agent_runs(self, **kwargs) -> bool:
             self.cancel_calls.append(kwargs)
+            # The real owner cancels the run task; the handler then waits for it to settle.
+            for task in self.run_manager.run_tasks.values():
+                task.cancel()
             return True
 
     async def live() -> list[dict]:

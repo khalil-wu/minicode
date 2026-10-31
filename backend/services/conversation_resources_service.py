@@ -23,7 +23,10 @@ def conversation_resource_page(
     if expected_workspace_root is not None and canonical_workspace_root(expected_workspace_root) != canonical_workspace_root(workspace_root):
         raise ChatApiServiceError(409, "The conversation workspace changed. Refresh its resources.")
     items: dict[str, dict[str, Any]] = {}
-    for meta in session.artifact_store.list_artifacts(conversation_id=conversation_id, workspace_root=workspace_root):
+    artifact_failures: list[tuple[str, Exception]] = []
+    for meta in session.artifact_store.list_artifacts(
+        conversation_id=conversation_id, workspace_root=workspace_root, read_errors=artifact_failures,
+    ):
         items[f"artifact:{meta.artifact_id}"] = {
             "id": f"artifact:{meta.artifact_id}", "artifact_id": meta.artifact_id,
             "source": "artifact", "kind": meta.type, "name": meta.source or meta.artifact_id,
@@ -105,6 +108,10 @@ def conversation_resource_page(
         "artifact_id": "", "error_type": type(error).__name__,
         "message": f"附件记录无法读取（{type(error).__name__}）；部分资源可能未列出。",
     } for _, error in attachment_failures]
+    read_errors.extend({
+        "artifact_id": "", "error_type": type(error).__name__,
+        "message": f"产物记录无法读取（{type(error).__name__}）；部分资源可能未列出。",
+    } for _, error in artifact_failures)
     return {"conversation_id": conversation_id, "workspace_root": workspace_root, "items": page,
             "total": len(visible), "has_more": start + len(page) < len(visible), "after": page[-1]["id"] if page else "",
             "read_errors": read_errors}

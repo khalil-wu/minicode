@@ -15,7 +15,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 BRIDGE = ROOT / "desktop/native-network"
-SOURCE_COMMIT = "822e58cc3d666166c7446c5b1ea2e52f5d09594c"
+SOURCE_COMMIT = "970111f6cb62cc02fe36a82ea7d71b37a2889c97"
 
 
 def original_image_source(history: bytes) -> bytes:
@@ -132,8 +132,8 @@ def main():
     environment = {**os.environ, "PATH": str(cargo.parent) + os.pathsep + os.environ["PATH"]}
     compiler = run([str(cargo.parent / ("rustc.exe" if sys.platform == "win32" else "rustc")), "-Vv"],
         cwd=ROOT, environment=environment, capture=True).stdout.decode("utf-8")
-    if not compiler.startswith("rustc 1.95.0 "):
-        raise RuntimeError("The Source network runtime requires Rust 1.95.0")
+    if not compiler.startswith("rustc 1.99.1 "):
+        raise RuntimeError("The Source network runtime requires Rust 1.99.1")
     source = prepare_source_tree(checkout, build, environment)
     workspace = source / "codex-rs"
     project = workspace / "minicode-network"
@@ -215,7 +215,7 @@ def main():
     shutil.copyfile(source / "NOTICE", output / "NOTICE.openai-codex")
     (output / "THIRD_PARTY_NOTICES.txt").write_text("\n\n".join(notices) + "\n", encoding="utf-8", newline="\n")
     source_manifest = {"source": "https://github.com/openai/codex", "source_commit": SOURCE_COMMIT,
-        "rust_toolchain": "1.95.0", "target": target,
+        "rust_toolchain": "1.99.1", "target": target,
         "source_files": {relative: digest(workspace / relative) for relative in pinned_files},
         "source_adaptations": source_adaptations,
         "source_derivations": {"src/source_original_image.rs": {

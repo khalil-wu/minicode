@@ -88,7 +88,7 @@ def test_inventory_lists_standard_mcp_content_concurrently_on_explicit_call() ->
     async def scenario():
         client = _ConcurrentInventoryClient()
         manager = _Manager(client)
-        task = asyncio.create_task(list_mcp_inventory(manager, " docs "))
+        task = asyncio.create_task(list_mcp_inventory(manager, " docs ", cleanup_tasks=set()))
 
         await asyncio.wait_for(client.all_started.wait(), timeout=1)
         assert not task.done()
@@ -151,7 +151,7 @@ def test_inventory_round_trips_through_a_real_official_sdk_stdio_server() -> Non
         )
         try:
             await client.connect()
-            return await list_mcp_inventory(_Manager(client), "inventory-stdio-integration")
+            return await list_mcp_inventory(_Manager(client), "inventory-stdio-integration", cleanup_tasks=set())
         finally:
             await client.close()
 
@@ -195,7 +195,7 @@ def test_inventory_skips_unadvertised_methods_and_reports_empty() -> None:
         async def list_prompts(self):  # pragma: no cover - must never run
             raise AssertionError("prompts/list must respect negotiated capabilities")
 
-    inventory = asyncio.run(list_mcp_inventory(_Manager(Client()), "empty"))
+    inventory = asyncio.run(list_mcp_inventory(_Manager(Client()), "empty", cleanup_tasks=set()))
 
     assert inventory["resources"] == []
     assert inventory["resource_templates"] == []
@@ -214,7 +214,7 @@ def test_inventory_skips_unadvertised_methods_and_reports_empty() -> None:
 )
 def test_inventory_projects_server_lifecycle_failures(lifecycle, expected_code: str, recoverable: bool) -> None:
     with pytest.raises(MCPInventoryServiceError) as raised:
-        asyncio.run(list_mcp_inventory(_Manager(None, lifecycle), "missing"))
+        asyncio.run(list_mcp_inventory(_Manager(None, lifecycle), "missing", cleanup_tasks=set()))
 
     assert raised.value.code == expected_code
     assert raised.value.recoverable is recoverable
@@ -224,7 +224,7 @@ def test_inventory_requires_completed_capability_negotiation() -> None:
     client = SimpleNamespace(server_capabilities=None)
 
     with pytest.raises(MCPInventoryServiceError) as raised:
-        asyncio.run(list_mcp_inventory(_Manager(client), "pending"))
+        asyncio.run(list_mcp_inventory(_Manager(client), "pending", cleanup_tasks=set()))
 
     assert raised.value.code == "capabilities_unavailable"
     assert raised.value.recoverable is True
@@ -264,7 +264,7 @@ def test_inventory_projects_auth_protocol_timeout_and_transport_failures(
             raise failure
 
     with pytest.raises(MCPInventoryServiceError) as raised:
-        asyncio.run(list_mcp_inventory(_Manager(Client()), "remote"))
+        asyncio.run(list_mcp_inventory(_Manager(Client()), "remote", cleanup_tasks=set()))
 
     assert raised.value.code == expected_code
     assert raised.value.recoverable is recoverable
@@ -282,7 +282,7 @@ def test_inventory_applies_the_existing_mcp_request_timeout(monkeypatch) -> None
     monkeypatch.setattr(mcp_service, "MCP_REQUEST_TIMEOUT_SECONDS", 0.01)
 
     with pytest.raises(MCPInventoryServiceError) as raised:
-        asyncio.run(list_mcp_inventory(_Manager(Client()), "slow"))
+        asyncio.run(list_mcp_inventory(_Manager(Client()), "slow", cleanup_tasks=set()))
 
     assert raised.value.code == "timeout"
     assert raised.value.recoverable is True
@@ -299,7 +299,7 @@ def test_inventory_propagates_external_task_cancellation() -> None:
                 started.set()
                 await asyncio.Event().wait()
 
-        task = asyncio.create_task(list_mcp_inventory(_Manager(Client()), "cancel-me"))
+        task = asyncio.create_task(list_mcp_inventory(_Manager(Client()), "cancel-me", cleanup_tasks=set()))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -312,6 +312,7 @@ class _Session:
     def __init__(self, manager=None) -> None:
         self.mcp_manager = manager or object()
         self.events = []
+        self.cleanup_tasks = set()
 
     async def send_event(self, event) -> None:
         self.events.append(event)
@@ -324,7 +325,7 @@ def _command_event(session: _Session, command: str):
 def test_inventory_handler_returns_inventory_in_the_correlated_command_result(monkeypatch) -> None:
     inventory = {"server_name": "docs", "resources": [], "resource_templates": [], "prompts": [], "empty": True}
 
-    async def list_inventory(manager, name: str):
+    async def list_inventory(manager, name: str, *, cleanup_tasks):
         assert manager is manager_token
         assert name == "docs"
         return inventory
@@ -381,7 +382,7 @@ def test_inventory_handler_rejects_duplicate_operation_ids(monkeypatch) -> None:
 
 
 def test_inventory_handler_preserves_typed_service_error_details(monkeypatch) -> None:
-    async def fail(*_args):
+    async def fail(*_args, **_kwargs):
         raise MCPInventoryServiceError(
             "MCP protocol error: bad request",
             code="protocol_error",
@@ -413,7 +414,7 @@ def test_inventory_cancel_stops_the_live_request_and_cleans_session_state(monkey
     async def scenario() -> _Session:
         started = asyncio.Event()
 
-        async def wait_for_cancel(*_args):
+        async def wait_for_cancel(*_args, **_kwargs):
             started.set()
             await asyncio.Event().wait()
 
@@ -444,7 +445,7 @@ def test_inventory_cancel_stops_the_live_request_and_cleans_session_state(monkey
         "cancelled": True,
     }
     assert session._mcp_inventory_tasks == {}
-    assert session._mcp_inventory_cancelled == set()
+    assert session.cleanup_tasks == set()
 
 
 def test_inventory_cancel_reports_when_operation_is_already_absent() -> None:
@@ -463,7 +464,7 @@ def test_inventory_handler_does_not_convert_connection_shutdown_into_user_cancel
     async def scenario() -> _Session:
         started = asyncio.Event()
 
-        async def block(*_args):
+        async def block(*_args, **_kwargs):
             started.set()
             await asyncio.Event().wait()
 
@@ -477,13 +478,15 @@ def test_inventory_handler_does_not_convert_connection_shutdown_into_user_cancel
         handler_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await handler_task
+        await asyncio.gather(*session.cleanup_tasks, return_exceptions=True)
+        await asyncio.sleep(0)
         return session
 
     session = asyncio.run(scenario())
 
     assert session.events == []
     assert session._mcp_inventory_tasks == {}
-    assert session._mcp_inventory_cancelled == set()
+    assert session.cleanup_tasks == set()
 
 
 def test_inventory_cancel_can_bypass_the_websocket_command_backlog() -> None:

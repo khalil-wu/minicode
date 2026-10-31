@@ -11,10 +11,14 @@ def parse_json_object(value: str) -> dict[str, Any] | None:
     if not stripped or not stripped.startswith("{"):
         return None
     try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
+        parsed = json.loads(stripped, parse_constant=_reject_json_constant)
+    except ValueError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Invalid JSON constant: {value}")
 
 
 def coerce_bool(value: Any, default: bool = False) -> bool:

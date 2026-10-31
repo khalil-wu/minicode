@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from mcp.shared.exceptions import McpError
 
+from backend.async_cleanup import cancel_and_retire
 from backend.hooks.runtime import (
     ConfigChangeHookBlocked,
     raise_if_config_change_blocked,
@@ -38,6 +39,14 @@ _MCP_CONFIG_MUTATION_LOCK = asyncio.Lock()
 
 class MCPServiceError(ValueError):
     """User-recoverable MCP operation failure."""
+
+
+class MCPConfigApplyError(MCPServiceError):
+    """The requested config is saved, but its runtime publication failed."""
+
+    def __init__(self, phase: str, error: Exception) -> None:
+        super().__init__(str(error) or type(error).__name__)
+        self.phase = phase
 
 
 class MCPInventoryServiceError(MCPServiceError):
@@ -135,11 +144,13 @@ def _inventory_failure(exc: BaseException) -> MCPInventoryServiceError:
     )
 
 
-async def list_mcp_inventory(manager: Any | None, name: str) -> dict[str, Any]:
+async def list_mcp_inventory(
+    manager: Any | None, name: str, *, cleanup_tasks: set[asyncio.Task[Any]],
+) -> dict[str, Any]:
     """List standard MCP resources, templates and prompts on explicit demand.
 
     This deliberately does no work during startup, ordinary status refreshes,
-    or Agent turns. The three independent MCP list methods run concurrently
+    or Agent turns. The independent MCP list methods run concurrently
     only after the user expands one connected server in the connector UI.
     """
 
@@ -180,20 +191,27 @@ async def list_mcp_inventory(manager: Any | None, name: str) -> dict[str, Any]:
     async def _empty() -> list[Any]:
         return []
 
+    requests = [asyncio.create_task(operation) for operation in (
+        client.list_resources() if bool(getattr(capabilities, "resources", False)) else _empty(),
+        client.list_resource_templates() if bool(getattr(capabilities, "resources", False)) else _empty(),
+        client.list_prompts() if bool(getattr(capabilities, "prompts", False)) else _empty(),
+        client.list_tools() if bool(getattr(capabilities, "tools", False)) else _empty(),
+    )]
     try:
-        resources, templates, prompts, tools = await asyncio.wait_for(
-            asyncio.gather(
-                client.list_resources() if bool(getattr(capabilities, "resources", False)) else _empty(),
-                client.list_resource_templates() if bool(getattr(capabilities, "resources", False)) else _empty(),
-                client.list_prompts() if bool(getattr(capabilities, "prompts", False)) else _empty(),
-                client.list_tools() if bool(getattr(capabilities, "tools", False)) else _empty(),
-            ),
-            timeout=MCP_REQUEST_TIMEOUT_SECONDS,
-        )
+        done, pending = await asyncio.wait(requests, timeout=MCP_REQUEST_TIMEOUT_SECONDS,
+                                           return_when=asyncio.FIRST_EXCEPTION)
+        for completed in done:
+            completed.result()
+        if pending:
+            raise TimeoutError("MCP inventory request timed out")
+        resources, templates, prompts, tools = [request.result() for request in requests]
     except asyncio.CancelledError:
         raise
     except BaseException as exc:
         raise _inventory_failure(exc) from exc
+    finally:
+        for request in requests:
+            cancel_and_retire(request, owner=cleanup_tasks)
 
     resource_payload = [
         {
@@ -278,6 +296,31 @@ def get_mcp_status(manager: Any | None) -> list[dict[str, Any]]:
     return statuses
 
 
+async def _reload_saved_mcp_configuration(manager: Any, *, previous_name: str = "") -> None:
+    if previous_name:
+        try:
+            await manager.remove_server(previous_name)
+        except asyncio.CancelledError as exc:
+            raise MCPConfigApplyError("retire_previous_server",
+                RuntimeError("MCP configuration was saved; previous connection retirement was cancelled")) from exc
+        except Exception as exc:
+            raise MCPConfigApplyError("retire_previous_server", exc) from exc
+    try:
+        await manager.reload_config()
+    except asyncio.CancelledError as exc:
+        raise MCPConfigApplyError("reload", RuntimeError("MCP configuration was saved; runtime reload was cancelled")) from exc
+    except Exception as exc:
+        raise MCPConfigApplyError("reload", exc) from exc
+
+
+async def _apply_saved_mcp_configuration(manager: Any, *, previous_name: str = "") -> list[dict[str, Any]]:
+    await _reload_saved_mcp_configuration(manager, previous_name=previous_name)
+    try:
+        return get_mcp_status(manager)
+    except Exception as exc:
+        raise MCPConfigApplyError("status_projection", exc) from exc
+
+
 async def add_mcp_server(
     manager: Any | None,
     data: dict[str, Any],
@@ -295,8 +338,7 @@ async def add_mcp_server(
         )
     # Reconcile the complete scope stack so a user edit cannot bypass a
     # higher-precedence project/dynamic declaration with the same name.
-    await manager.reload_config()
-    return get_mcp_status(manager)
+    return await _apply_saved_mcp_configuration(manager)
 
 
 async def install_skill_mcp_servers(
@@ -324,7 +366,7 @@ async def install_skill_mcp_servers(
                 raise MCPServiceError(f"MCP server '{config.name}' is already configured")
             servers[config.name] = _server_entry_from_config(config)
         await _write_config_data(current_data, config_change_hook=config_change_hook)
-    await manager.reload_config()
+    await _reload_saved_mcp_configuration(manager)
     return [config.name for config in configs]
 
 
@@ -350,8 +392,7 @@ async def update_mcp_server(
                 entry["enabled_tools"] = enabled
             entry["disabled_tools"] = []
             await _write_config_data(current_data, config_change_hook=config_change_hook)
-        await manager.reload_config()
-        return get_mcp_status(manager)
+        return await _apply_saved_mcp_configuration(manager)
     config = _manual_config_from_payload(data)
     _validate_config_for_service(config)
     async with _MCP_CONFIG_MUTATION_LOCK:
@@ -369,10 +410,8 @@ async def update_mcp_server(
             servers_data.pop(original_name, None)
         servers_data[config.name] = next_entry
         await _write_config_data(current_data, config_change_hook=config_change_hook)
-    if original_name != config.name:
-        await manager.remove_server(original_name)
-    await manager.reload_config()
-    return get_mcp_status(manager)
+    return await _apply_saved_mcp_configuration(manager,
+        previous_name=original_name if original_name != config.name else "")
 
 
 async def toggle_mcp_server(
@@ -394,8 +433,7 @@ async def toggle_mcp_server(
             raise MCPServiceError(f"MCP server '{server_name}' is not editable")
         entry["auto_start"] = enabled
         await _write_config_data(current_data, config_change_hook=config_change_hook)
-    await manager.reload_config()
-    return get_mcp_status(manager)
+    return await _apply_saved_mcp_configuration(manager)
 
 
 async def remove_mcp_server(
@@ -413,8 +451,7 @@ async def remove_mcp_server(
             raise MCPServiceError(f"MCP server '{server_name}' is not editable")
         servers_data.pop(server_name)
         await _write_config_data(current_data, config_change_hook=config_change_hook)
-    await manager.reload_config()
-    return get_mcp_status(manager)
+    return await _apply_saved_mcp_configuration(manager)
 
 
 async def restart_mcp_server(manager: Any | None, name: str) -> list[dict[str, Any]]:
@@ -465,8 +502,7 @@ async def approve_project_mcp(
             project_workspace,
             approve_all=approve_all,
         )
-        await manager.reload_config()
-    return get_mcp_status(manager)
+    return await _apply_saved_mcp_configuration(manager)
 
 
 async def reject_project_mcp(
@@ -488,8 +524,7 @@ async def reject_project_mcp(
             file_path=str(settings_path),
         )
         settings_path = reject_project_mcp_server(server_name, project_workspace)
-        await manager.reload_config()
-    return get_mcp_status(manager)
+    return await _apply_saved_mcp_configuration(manager)
 
 
 def _manual_config_from_payload(data: dict[str, Any]) -> MCPServerConfig:

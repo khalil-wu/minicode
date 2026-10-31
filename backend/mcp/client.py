@@ -116,13 +116,15 @@ class _LifecycleClientSession(ClientSession):
         self,
         *args: Any,
         transport_closed: asyncio.Event,
-        notify_cancellation: bool = False,
+        cancellation_tasks: set[asyncio.Task[Any]],
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self._transport_closed = transport_closed
-        self._notify_cancellation = notify_cancellation
+        self._cancellation_tasks = cancellation_tasks
         self._request_owners: dict[Any, dict[str, Any]] = {}
+        self._tool_request_tasks: dict[Any, asyncio.Task[Any]] = {}
+        self._cancelled_tool_request_ids: set[Any] = set()
 
     async def send_request(self, request: Any, result_type: Any, *args: Any, **kwargs: Any) -> Any:
         if isinstance(request.root, types.InitializeRequest):
@@ -131,20 +133,48 @@ class _LifecycleClientSession(ClientSession):
             request.root.params.capabilities = request.root.params.capabilities.model_copy(update={
                 "extensions": {MCP_APP_EXTENSION: {"mimeTypes": list(MCP_APP_MIME_TYPES)}}})
         request_id = self._request_id
+        tool_request = isinstance(request.root, types.CallToolRequest)
+        if tool_request:
+            self._tool_request_tasks[request_id] = asyncio.current_task()
         owner = _request_owner.get()
         if owner is not None:
             self._request_owners[request_id] = owner
         try:
             return await super().send_request(request, result_type, *args, **kwargs)
         except asyncio.CancelledError:
-            if self._notify_cancellation and isinstance(request.root, types.CallToolRequest):
-                with anyio.CancelScope(shield=True):
-                    await self.send_notification(types.ClientNotification(types.CancelledNotification(
-                        params=types.CancelledNotificationParams(requestId=request_id,
-                            reason="The owning Node tool execution was cancelled"))))
+            if tool_request:
+                if request_id in self._tool_request_tasks:
+                    self._cancelled_tool_request_ids.add(request_id)
+                notification = asyncio.create_task(self.send_notification(types.ClientNotification(types.CancelledNotification(
+                    params=types.CancelledNotificationParams(requestId=request_id,
+                        reason="The owning MCP tool invocation was cancelled")))))
+                self._cancellation_tasks.add(notification)
+
+                def settled(completed: asyncio.Task[Any]) -> None:
+                    self._cancellation_tasks.discard(completed)
+                    try:
+                        completed.result()
+                    except asyncio.CancelledError:
+                        pass
+                    except Exception:
+                        logger.warning("MCP cancellation notification failed for request %s", request_id, exc_info=True)
+
+                notification.add_done_callback(settled)
             raise
         finally:
             self._request_owners.pop(request_id, None)
+            self._tool_request_tasks.pop(request_id, None)
+
+    async def _handle_response(self, message: SessionMessage) -> None:
+        request_id = self._normalize_request_id(message.message.root.id)
+        owner = self._tool_request_tasks.get(request_id)
+        if request_id in self._cancelled_tool_request_ids or owner is not None and owner.cancelling():
+            # A server may acknowledge cancellation or finish the original
+            # request after its local SDK response stream has been retired.
+            self._cancelled_tool_request_ids.discard(request_id)
+            self._tool_request_tasks.pop(request_id, None)
+            return
+        await super()._handle_response(message)
 
     async def _received_request(self, responder: Any) -> None:
         metadata = responder.message_metadata
@@ -456,7 +486,6 @@ class MCPClient:
 
     CLIENT_INFO = {"name": "MiniCode", "version": "0.2.0"}
     PROTOCOL_VERSION = types.LATEST_PROTOCOL_VERSION
-    notify_request_cancellation = False
 
     def __init__(
         self,
@@ -653,7 +682,7 @@ class MCPClient:
                     read_stream,
                     write_stream,
                     transport_closed=transport_closed,
-                    notify_cancellation=self.notify_request_cancellation,
+                    cancellation_tasks=self._active_request_tasks,
                     read_timeout_seconds=timedelta(seconds=self._request_timeout),
                     elicitation_callback=elicitation_callback,
                     list_roots_callback=roots_callback,
@@ -737,14 +766,11 @@ class MCPClient:
                 auth=await self._http_oauth_auth(), httpx_client_factory=executor_mcp_http_client_factory(
                     binding.lease, bearer_token_env_var=binding.bearer_token_env_var))
         if self._transport == MCPTransport.STDIO:
-            from backend.config import PROJECT_ROOT
-
             command = sys.executable if self._command == "python" else self._command
             # Local MCP processes receive the platform core plus variables and
             # values explicitly selected by the MiniCode server config.
             server_env = {**vault_subprocess_env(f"mcp:{self.server_name}"), **self._env}
             env = mcp_subprocess_env(server_env)
-            env = self._fix_stdio_pythonpath(env)
             return stdio_client(
                 StdioServerParameters(
                     command=command,
@@ -779,24 +805,6 @@ class MCPClient:
                 raise ConnectionError("MCP WebSocket transport is disabled by feature flag")
             return _websocket_client_with_headers(self._url, headers)
         raise ConnectionError(f"Unsupported MCP transport: {self._transport.value}")
-
-    @staticmethod
-    def _fix_stdio_pythonpath(env: dict[str, str]) -> dict[str, str]:
-        """Prevent MiniCode's ``backend/mcp`` package shadowing the SDK."""
-        from backend.config import PROJECT_ROOT
-
-        backend_dir = os.path.normcase(os.path.abspath(PROJECT_ROOT / "backend"))
-        parts = []
-        for entry in env.get("PYTHONPATH", "").split(os.pathsep):
-            if not entry:
-                continue
-            if os.path.normcase(os.path.abspath(entry)) != backend_dir:
-                parts.append(entry)
-        project_root = str(PROJECT_ROOT)
-        if project_root not in parts:
-            parts.append(project_root)
-        env["PYTHONPATH"] = os.pathsep.join(parts)
-        return env
 
     async def _http_oauth_auth(self) -> Any:
         if self._token_store is None or not self._url:
@@ -905,6 +913,14 @@ class MCPClient:
         self._set_server_instructions(getattr(result, "instructions", raw.get("instructions", "")))
 
     async def _request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        task = asyncio.current_task()
+        self._active_request_tasks.add(task)
+        try:
+            return await self._send_request(method, params)
+        finally:
+            self._active_request_tasks.discard(task)
+
+    async def _send_request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         session = self._session
         if session is None:
             raise ConnectionError(f"MCP server '{self.server_name}' is not connected")
@@ -916,14 +932,16 @@ class MCPClient:
             # unknown block kinds. Use the SDK framing/lifecycle with that
             # native result shape instead of narrowing it to the SDK's union.
             meta = params.get("_meta")
-            result = await session.send_request(
-                types.ClientRequest(types.CallToolRequest(params=types.CallToolRequestParams(
-                    name=params["name"], arguments=params.get("arguments"),
-                    _meta=types.RequestParams.Meta(**meta) if meta else None,
-                ))),
-                _NativeCallToolResult,
-                request_read_timeout_seconds=timedelta(seconds=self._tool_request_timeout_seconds(params)),
-            )
+            timeout = self._tool_request_timeout_seconds(params)
+            async with asyncio.timeout(timeout):
+                result = await session.send_request(
+                    types.ClientRequest(types.CallToolRequest(params=types.CallToolRequestParams(
+                        name=params["name"], arguments=params.get("arguments"),
+                        _meta=types.RequestParams.Meta(**meta) if meta else None,
+                    ))),
+                    _NativeCallToolResult,
+                    request_read_timeout_seconds=timedelta(seconds=timeout),
+                )
         elif method == "resources/list":
             result = await session.list_resources(cursor=params.get("cursor"))
         elif method == "resources/templates/list":

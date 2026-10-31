@@ -210,6 +210,7 @@ export interface ImageChunkLiveEvent {
   media_type: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
   image_data_omitted?: never;
   image_data_size?: number;
+  tool_call_id?: string;
 }
 
 export interface ImageChunkReplayEvent {
@@ -220,6 +221,7 @@ export interface ImageChunkReplayEvent {
   image_data?: never;
   image_data_omitted: true;
   image_data_size: number;
+  tool_call_id?: string;
 }
 
 export type ImageChunkEvent = ImageChunkLiveEvent | ImageChunkReplayEvent;

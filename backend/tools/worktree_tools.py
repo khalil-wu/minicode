@@ -390,6 +390,11 @@ class RemoveWorktreeTool(BaseTool):
         if registered_hook:
             return self._error_result("该 worktree 由 hook 创建；请配置 WorktreeRemove hook 后再删除。")
 
+        from backend.workspace.executor_service import uses_executor_io
+        if uses_executor_io(context):
+            from backend.workspace.executor_worktree import executor_worktree_tool
+            return await executor_worktree_tool(self, args, context)
+
         manager = await _resolve_worktree_manager(context)
 
         if manager is None:
@@ -400,18 +405,17 @@ class RemoveWorktreeTool(BaseTool):
         except ValueError as exc:
             return self._error_result(str(exc))
 
-        success = await to_thread_cancel_safe(manager.remove_worktree, path=path, force=force)
+        removal = await to_thread_cancel_safe(manager.safe_remove_worktree, path=path, force=force,
+                                              conversation_id=context.conversation_id if context is not None else "")
 
-        if success:
+        if removal.removed:
             repository = _worktree_repository(context)
             if repository is not None and context.conversation_id:
                 await to_thread_cancel_safe(repository.unregister_worktree, context.conversation_id, path=str(path))
-            return self._success_result(f"已删除 worktree: {path}")
+            saved = f"\n  快照 ID: {removal.snapshot.id}" if removal.snapshot else ""
+            return self._success_result(f"已删除 worktree: {path}{saved}")
         else:
-            return self._error_result(
-                f"删除 worktree 失败: {path}\n"
-                "提示: 如果有未提交的更改，请使用 force=true"
-            )
+            return self._error_result(f"删除 worktree 失败: {path}\n{removal.error}")
 
 
 async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
@@ -430,7 +434,13 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
 
         workspace = Path(root).resolve()
         captured_policy = context.sandbox_policy or sandbox_policy_for_permission_context(workspace, context.permission)
+        resolved_policy = captured_policy.resolve(cwd=workspace)
         loop = asyncio.get_running_loop()
+
+        def worktree_access(path, write):
+            access = resolved_policy.resolve_access(path)
+            if not access.can_read or (write and not access.can_write):
+                raise PermissionError("Complete worktree access is required for snapshot or removal")
 
         def git_runner(argv, *, cwd, env, check, index_file=None, text=False, encoding="utf-8", **options):
             policy = captured_policy
@@ -486,7 +496,10 @@ async def _resolve_worktree_manager(context: "ToolExecutionContext | None"):
         try:
             from backend.workspace.local_environment_lifecycle import context_environment_runner
             return await to_thread_cancel_safe(WorktreeManager, workspace, git_runner=git_runner,
-                environment_runner=context_environment_runner(context, loop))
+                environment_runner=context_environment_runner(context, loop),
+                git_path_mapper=SandboxRunner(captured_policy).map_path_to_sandbox,
+                git_path_unmapper=SandboxRunner(captured_policy).map_path_from_sandbox,
+                worktree_access=worktree_access)
         except NotGitRepositoryError:
             return None
     return None

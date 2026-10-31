@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { normalizeInboundServerEvent } from "./server-event-validation";
 
+it.each(["", "conversation-1"])("accepts an unsequenced recovered command result for owner %s", (owner) => {
+  const result = { type: "command.result", command: "fixture", level: "error", message: "Actual failure",
+    client_command_id: "cmd-1", client_command_type: "fixture", event_id: "original-result", conversation_id: owner,
+    workspace_root: "", data: { client_command_id: "cmd-1", conversation_id: owner, workspace_root: "" } };
+  expect(normalizeInboundServerEvent(result)).toMatchObject(result);
+});
+
 it("distinguishes an unavailable turn diff from an exact empty diff", () => {
   const event = { type: "turn.diff.updated", thread_id: "c", conversation_id: "c", turn_id: "t" };
   expect(normalizeInboundServerEvent({ ...event, diff: null })).toMatchObject({ diff: null });
@@ -156,7 +163,8 @@ describe("normalizeInboundServerEvent", () => {
         media_type: mediaType,
         image_data: imageData,
         image_data_size: imageData.length,
-      })).toMatchObject({ media_type: mediaType, image_data: imageData });
+        tool_call_id: "image-call-1",
+      })).toMatchObject({ media_type: mediaType, image_data: imageData, tool_call_id: "image-call-1" });
     }
     expect(normalizeInboundServerEvent({
       type: "image_chunk",
@@ -165,7 +173,8 @@ describe("normalizeInboundServerEvent", () => {
       media_type: "image/png",
       image_data_omitted: true,
       image_data_size: 4_096,
-    })).toMatchObject({ image_data_omitted: true, image_data_size: 4_096 });
+      tool_call_id: "image-call-1",
+    })).toMatchObject({ image_data_omitted: true, image_data_size: 4_096, tool_call_id: "image-call-1" });
     expect(warn).not.toHaveBeenCalled();
 
     const invalidEvents = [

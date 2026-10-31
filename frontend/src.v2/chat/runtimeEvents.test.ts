@@ -11,6 +11,7 @@ import { sendClientCommand } from "../protocol/ws-outbox";
 import { pushToast } from "../overlays/ToastContainer";
 import { buildInterruptCommand } from "../lib/interrupt-command";
 import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
+import { projectMessagesToTurns } from "./chatSurfaceState";
 
 vi.mock("../protocol/ws-outbox", () => ({
   sendClientCommand: vi.fn(() => true),
@@ -903,6 +904,23 @@ describe("runtime agent progress events", () => {
         isStreaming: true,
       }],
     });
+  });
+
+  it.each(["completed", "failed"] as const)("projects tool-owned image progress once and preserves its %s terminal across later running events", terminal => {
+    const owner = "image-progress-owner";
+    const assistant = { id: "image-progress-answer", role: "assistant" as const, content: "", blocks: [], artifacts: [], timestamp: 1, isStreaming: true };
+    useAppStore.setState({ conversationId: "other-reader", messages: [], draft: "keep reader draft", isStreaming: false,
+      conversationMessages: { [owner]: [assistant] }, conversationStreaming: { [owner]: true } });
+    const project = () => projectMessagesToTurns(useAppStore.getState().conversationMessages[owner], true)[0].finalAnswerCell;
+    for (const status of ["running", "running", terminal, "running"] as const) {
+      handleRuntimeEvent({ type: "agent.progress", conversation_id: owner, message_id: assistant.id,
+        id: "image-generation:actual-call", stage: "image_generation", phase: "image_generation", status,
+        message: status === "failed" ? "图像生成失败" : "正在生成图像", detail: status === "failed" ? "actual image API error" : status,
+        tool_call_id: "actual-call", tool_name: "generate_image", visibility: "timeline" } as ServerEvent, owner);
+      expect(project()?.imageProgress).toHaveLength(1);
+    }
+    expect(project()?.imageProgress?.[0]).toMatchObject({ id: "image-generation:actual-call", toolCallId: "actual-call", status: terminal });
+    expect(useAppStore.getState()).toMatchObject({ conversationId: "other-reader", draft: "keep reader draft", messages: [], isStreaming: false });
   });
 
   it("keeps tool-owned progress out of the transcript but projects it to Inspector", () => {

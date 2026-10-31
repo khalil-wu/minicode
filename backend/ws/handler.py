@@ -424,6 +424,8 @@ class WebSocketSession(
             workspace_scope="computer",
             source="websocket",
         )
+        self._base_permission_constraints = dict(self.permission_context.filesystem_constraints)
+        self._local_command_prompt_allow_rules: dict[str, tuple[str, ...]] = {}
         self.command_registry = CommandRegistry()
         self.conversation_runtime = ConversationRuntime(
             conversation_repo=self.conversation_repo,
@@ -604,7 +606,8 @@ class WebSocketSession(
             active = None
             self.active_conversation_id = None
         workspace_root = self.session_lifecycle.current_workspace_root() if active is not None else None
-        if active is not None and active.execution_cwd.startswith("file:"):
+        if (active is not None and active.execution_cwd.startswith("file:")
+                and not self.session_lifecycle.workspace_activation_failed(active.id)):
             workspace_root = active.execution_cwd
         workspace_scope = workspace_scope_for(
             workspace_root=getattr(active, "workspace_root", "") if active is not None else "",
@@ -1048,6 +1051,7 @@ class WebSocketSession(
         attachments: list[dict[str, Any]] | None = None,
         conversation_id: str,
         metadata: dict[str, Any] | None = None,
+        turn_settings: Any | None = None,
     ) -> str:
         """Schedule one agent run through the session's canonical run manager.
 
@@ -1065,13 +1069,22 @@ class WebSocketSession(
         target_conversation_id = str(conversation_id or "").strip()
         if not target_conversation_id:
             raise ValueError("conversation_id is required")
+        if not self.session_lifecycle.recovered_input_workspace_ready(target_conversation_id):
+            raise RuntimeError("The conversation workspace is unavailable; reopen or trust it before starting work.")
         if self.ws_manager is not None:
             self.ws_manager.load_conversation_execution(target_conversation_id, self)
 
+        from backend.agent.turn_trace import turn_trace_reset
+
+        capture_trace = turn_trace_reset(f"turn[{target_conversation_id}]")
+        capture_trace.mark("request.capture.start")
+        start_request = (self.capture_agent_run_request(target_conversation_id, turn_settings=turn_settings)
+                         if turn_settings is not None else self.capture_agent_run_request(target_conversation_id))
+        capture_trace.mark("request.capture.done")
         run_context = RunContext(
             turn_input_queue=self.run_manager.turn_input_queue(target_conversation_id),
             window_binding_token=self._window_binding_token,
-            start_request=self.capture_agent_run_request(target_conversation_id),
+            start_request=start_request,
         )
         run_cancel_event = asyncio.Event()
         run_metadata = dict(metadata or {})
@@ -1366,6 +1379,7 @@ class WebSocketSession(
                 if run_context.reserved_query_claim is not None:
                     self.run_manager.release_query_claim(run_context.reserved_query_claim)
                     run_context.reserved_query_claim = None
+                if not delivery_complete:
                     run_context.publish_turn_terminal({"status": terminal_status, "reason": terminal_reason})
                 self._cleanup_agent_run(
                     conversation_id=target_conversation_id,
@@ -1383,7 +1397,7 @@ class WebSocketSession(
         # The concrete run, frozen request and cleanup owner now exist. Its slow
         # admission continues in this command's suffix, outside the window/task
         # mutation prefix. The maintenance participation and durable ACK stay owned.
-        await handoff_command_lifecycle_prefix(self.session_id)
+        await handoff_command_lifecycle_prefix()
         if admission_future is not None:
             done, _pending = await asyncio.wait(
                 {admission_future, managed_run.task},
@@ -1426,6 +1440,7 @@ class WebSocketSession(
         if (
             not conversation_id
             or self.session_lifecycle.is_shutting_down
+            or not self.session_lifecycle.recovered_input_workspace_ready(conversation_id)
             or self.running_agent_task_for(conversation_id)
             or self.run_manager.is_queue_steering(conversation_id)
             or self.run_manager.has_pending_lifecycle_cleanup(conversation_id)
@@ -1433,97 +1448,112 @@ class WebSocketSession(
             return
         if not self.run_manager.begin_queue_dispatch(conversation_id):
             return
-        command = self.run_manager.dequeue_user_message(conversation_id)
-        if command is None:
-            from backend.services.goal_runtime import continuation_prompt
-            from backend.config import load_config
-            record = self.conversation_repo.get_conversation(conversation_id)
-            goal = record.goal if record is not None else {}
-            goals_enabled = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(record),
-                resolve_credentials=False).feature_flags.enabled("goals")
-            if goals_enabled and goal.get("status") == "active" and goal.get("_continuation_pending"):
-                async def continue_goal():
+        command = None
+        task = None
+        adopted = False
+        try:
+            command = self.run_manager.dequeue_user_message(conversation_id)
+            if command is None:
+                from backend.services.goal_runtime import continuation_prompt
+                from backend.config import load_config
+                record = self.conversation_repo.get_conversation(conversation_id)
+                goal = record.goal if record is not None else {}
+                goals_enabled = load_config(cwd=self.session_lifecycle.workspace_root_for_conversation(record),
+                    resolve_credentials=False).feature_flags.enabled("goals")
+                if goals_enabled and goal.get("status") == "active" and goal.get("_continuation_pending"):
+                    async def continue_goal():
+                        try:
+                            # The same dispatch owner handles user and automatic input.
+                            # Recheck new user arrivals before admitting automatic work.
+                            current = self.conversation_repo.get_conversation(conversation_id)
+                            if self.run_manager.queued_user_messages(conversation_id) or current.goal.get("id") != goal["id"] or current.goal.get("status") != "active":
+                                return
+                            await self.start_agent_run(continuation_prompt(current.goal), conversation_id=conversation_id,
+                                metadata={"_goal_continuation": goal["id"]})
+                        finally:
+                            self.run_manager.finish_queue_dispatch(conversation_id)
+                            if not self.running_agent_task_for(conversation_id):
+                                self.schedule_next_queued_user_message(conversation_id)
+                    task = asyncio.create_task(continue_goal())
+                    self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
+                    adopted = True
+                return
+            command.data["_queued_user_message_dispatch"] = True
+
+            async def _dispatch() -> None:
+                settled = False
+                dispatch_succeeded = False
+
+                def settle(*, succeeded: bool) -> None:
+                    nonlocal settled
+                    if settled:
+                        return
+                    settled = True
+                    self.run_manager.finish_user_message_dispatch(
+                        conversation_id,
+                        command,
+                        succeeded=succeeded,
+                    )
+
+                try:
+                    if not await self.command_dispatcher._validate_executor_input_workspace(command):
+                        return
+                    await self.send_event(
+                        AgentEvent.user_message_queue_updated(
+                            status="dequeued",
+                            conversation_id=conversation_id,
+                            message_id=str(command.data.get("assistant_message_id") or ""),
+                            user_message_id=str(command.data.get("user_message_id") or ""),
+                            target_message_id=str(command.data.get("assistant_message_id") or ""),
+                            turn_mode="follow_up",
+                        )
+                    )
+                    dispatch_succeeded = await self.command_dispatcher._handle_command(command)
+                    settle(succeeded=dispatch_succeeded)
+                finally:
                     try:
-                        # The same dispatch owner handles user and automatic input.
-                        # Recheck new user arrivals before admitting automatic work.
-                        current = self.conversation_repo.get_conversation(conversation_id)
-                        if self.run_manager.queued_user_messages(conversation_id) or current.goal.get("id") != goal["id"] or current.goal.get("status") != "active":
-                            return
-                        await self.start_agent_run(continuation_prompt(current.goal), conversation_id=conversation_id,
-                            metadata={"_goal_continuation": goal["id"]})
+                        if not settled:
+                            settle(succeeded=False)
+                        run_released = await self.run_manager.wait_for_queue_owned_run(
+                            conversation_id, resume_on_abandon=dispatch_succeeded,
+                        )
                     finally:
                         self.run_manager.finish_queue_dispatch(conversation_id)
-                        if not self.running_agent_task_for(conversation_id):
-                            self.schedule_next_queued_user_message(conversation_id)
-                task = asyncio.create_task(continue_goal())
-                self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
-                return
-            self.run_manager.finish_queue_dispatch(conversation_id)
-            return
-        command.data["_queued_user_message_dispatch"] = True
+                        self.run_manager.recheck_parent_notification_wake(conversation_id)
+                    if (
+                        dispatch_succeeded
+                        and run_released
+                        and not self.running_agent_task_for(conversation_id)
+                    ):
+                        self.schedule_next_queued_user_message(conversation_id)
 
-        async def _dispatch() -> None:
-            settled = False
-            dispatch_succeeded = False
-
-            def settle(*, succeeded: bool) -> None:
-                nonlocal settled
-                if settled:
-                    return
-                settled = True
-                self.run_manager.finish_user_message_dispatch(
-                    conversation_id,
-                    command,
-                    succeeded=succeeded,
-                )
-
-            try:
-                await self.send_event(
-                    AgentEvent.user_message_queue_updated(
-                        status="dequeued",
-                        conversation_id=conversation_id,
-                        message_id=str(command.data.get("assistant_message_id") or ""),
-                        user_message_id=str(command.data.get("user_message_id") or ""),
-                        target_message_id=str(command.data.get("assistant_message_id") or ""),
-                        turn_mode="follow_up",
-                    )
-                )
-                dispatch_succeeded = await self.command_dispatcher._handle_command(command)
-                settle(succeeded=dispatch_succeeded)
-            finally:
-                if not settled:
-                    settle(succeeded=False)
-                run_released = await self.run_manager.wait_for_queue_owned_run(
-                    conversation_id
-                )
-                self.run_manager.finish_queue_dispatch(conversation_id)
-                if (
-                    dispatch_succeeded
-                    and run_released
-                    and not self.running_agent_task_for(conversation_id)
-                ):
-                    self.schedule_next_queued_user_message(conversation_id)
-                self.run_manager.recheck_parent_notification_wake(
-                    conversation_id
-                )
-
-        command_id = str(command.data.get("client_command_id") or "")
-        origin = (self.ws_manager.session_for_input_origin(str(command.data["_client_queue_key"]))
-            if self.ws_manager is not None and command.data.get("_client_queue_key") else self)
-        origin_id = origin.session_id if origin is not None else None
-        conversation = self.conversation_repo.get_conversation_summary(conversation_id)
-        workspace = (self.session_lifecycle.workspace_root_for_conversation(conversation)
-            if conversation is not None else "")
-        # This task is born during the previous turn's cleanup. Its entire
-        # execution, including pre-admission errors, belongs to the queued input.
-        with (bind_response_origin(origin_id, command_id),
-              bind_execution_command_scope(self.session_id,
-                  CommandScope(conversation_id, str(workspace or ""), command_id)),
-              self.event_outbox.bind_connection_generation(None),
-              self.event_outbox.bind_client_command(command_id, command.type,
-                  owner=(conversation_id, str(workspace or "")))):
-            task = asyncio.create_task(_dispatch())
-        self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
+            command_id = str(command.data.get("client_command_id") or "")
+            origin = (self.ws_manager.session_for_input_origin(str(command.data["_client_queue_key"]))
+                if self.ws_manager is not None and command.data.get("_client_queue_key") else self)
+            origin_id = origin.session_id if origin is not None else None
+            conversation = self.conversation_repo.get_conversation_summary(conversation_id)
+            workspace = (self.session_lifecycle.workspace_root_for_conversation(conversation)
+                if conversation is not None else "")
+            # This task is born during the previous turn's cleanup. Its entire
+            # execution, including pre-admission errors, belongs to the queued input.
+            with (bind_response_origin(origin_id, command_id),
+                  bind_execution_command_scope(self.session_id,
+                      CommandScope(conversation_id, str(workspace or ""), command_id)),
+                  self.event_outbox.bind_connection_generation(None),
+                  self.event_outbox.bind_client_command(command_id, command.type,
+                      owner=(conversation_id, str(workspace or "")))):
+                task = asyncio.create_task(_dispatch())
+            self.command_dispatcher.track_execution_command_task(task, conversation_id=conversation_id)
+            adopted = True
+        finally:
+            if not adopted:
+                if task is not None:
+                    task.cancel()
+                try:
+                    if command is not None:
+                        self.run_manager.finish_user_message_dispatch(conversation_id, command, succeeded=False)
+                finally:
+                    self.run_manager.finish_queue_dispatch(conversation_id)
 
     async def cancel_agent_runs(
         self,
@@ -1669,6 +1699,7 @@ class WebSocketSession(
                     {**payload, "client_command_id": command_id}, connection_generation=recipient.connection_generation,
                     log_context=log_context, envelope=envelope, wait_for_delivery=wait_for_delivery,
                 )
+            self.event_outbox.capture_undelivered_result({**payload, "client_command_id": command_id})
             return False
         command_scope = (self.event_outbox.bind_client_command("", "")
             if origin != "" and origin != self.session_id else nullcontext())

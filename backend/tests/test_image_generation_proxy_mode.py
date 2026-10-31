@@ -23,7 +23,7 @@ def test_generate_image_tool_preserves_the_active_profile_proxy_mode(monkeypatch
     monkeypatch.setattr(
         tool,
         "_settings_for_context",
-        lambda _context=None: {
+        lambda _context=None, **_overrides: {
             "enabled": True,
             "provider": "custom",
             "api_key": "test-key",

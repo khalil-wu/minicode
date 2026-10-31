@@ -1,30 +1,20 @@
-"""Helper functions for LLM model discovery and connection checks."""
+"""Helper functions for LLM model discovery."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
-from backend.application_network import application_http_client, ApplicationNetworkDenied
+from backend.application_network import application_http_client
 
 from backend.secret_redaction import redact_secrets
-from backend.llm.capabilities import is_gpt_image_model
 from backend.llm.errors import llm_error_status_code as _http_error_status
 from backend.llm.provider_contracts import normalize_model_limit
 
 logger = logging.getLogger(__name__)
-
-_GENERATION_CHECK_MAX_TOKENS = 64
-# The Chat probe below bounds itself through httpx's ``timeout=15.0``. The
-# Responses probe drives a full adapter whose client has ``timeout=None``, so it
-# needs the same ceiling explicitly or the settings dialog spins forever against
-# a half-open endpoint.
-_GENERATION_CHECK_TIMEOUT_SECONDS = 15.0
-
 
 # ── Normalization / resolution helpers ──
 
@@ -281,25 +271,6 @@ def _build_openai_models_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, next_path, "", ""))
 
 
-def _build_openai_endpoint_url(base_url: str, endpoint: str) -> str:
-    root = base_url.strip().rstrip("/")
-    suffix = endpoint.strip("/")
-    if not root or not suffix:
-        return ""
-
-    parsed = urlsplit(root)
-    if not parsed.scheme or not parsed.netloc:
-        return f"{root}/{suffix}"
-
-    path = parsed.path.rstrip("/")
-    if path.endswith(f"/{suffix}"):
-        next_path = path
-    elif not path:
-        next_path = f"/v1/{suffix}"
-    else:
-        next_path = f"{path}/{suffix}"
-
-    return urlunsplit((parsed.scheme, parsed.netloc, next_path, "", ""))
 
 
 def _merge_models(models: list[str], current_model: str) -> list[str]:
@@ -389,272 +360,12 @@ async def _fetch_openai_compatible_models(
         return _extract_model_discovery(response.json())
 
 
-async def _check_openai_compatible_generation(
-    base_url: str,
-    api_key: str,
-    model: str,
-    wire_api: str,
-    *,
-    headers: Mapping[str, str],
-    auth_header: bool,
-    proxy_mode: str = "inherit",
-) -> None:
-    if not base_url.strip() or not model.strip():
-        raise ValueError("Provider base URL and model are required")
-    normalized_wire = wire_api.strip().lower() or "chat"
-    if is_gpt_image_model(model):
-        await _check_openai_compatible_image_generation(
-            base_url,
-            api_key,
-            model,
-            "1024x1024",
-            "",
-            proxy_mode=proxy_mode,
-            headers=headers,
-            auth_header=auth_header,
-        )
-        return
-    endpoint = "responses" if normalized_wire == "responses" else "chat/completions"
-    url = _build_openai_endpoint_url(base_url, endpoint)
-    if not url:
-        return
-    if normalized_wire == "responses":
-        # Exercise the same MiniCode-aligned Responses transport used by a real
-        # MiniCode turn. A bare non-streaming probe can pass model discovery yet
-        # be rejected by MiniCode gateways that require prompt_cache_key and
-        # client_metadata on generation requests.
-        from backend.config import LLMSettings
-        from backend.llm.base import LLMMessage, StreamEventType
-        from backend.llm.openai_adapter import OpenAIAdapter
-
-        adapter = OpenAIAdapter(
-            settings=LLMSettings(
-                api_key=api_key.strip(),
-                provider="custom",
-                base_url=base_url.strip(),
-                model=model.strip(),
-                wire_api="responses",
-                proxy_mode=proxy_mode,
-                default_headers=tuple(
-                    (str(name), str(value)) for name, value in headers.items()
-                ),
-                auth_header=auth_header,
-            )
-        )
-        saw_done = False
-
-        async def _drain_responses_probe() -> None:
-            nonlocal saw_done
-            async for event in adapter.stream_chat(
-                [
-                    LLMMessage(
-                        role="system",
-                        content="You are a coding agent. Follow the user request.",
-                    ),
-                    LLMMessage(role="user", content="Reply with pong."),
-                ],
-                tools=[],
-                metadata={
-                    "minicode_source": "provider_check",
-                    "minicode_session_id": "minicode-provider-check",
-                    "minicode_app_session_id": "minicode-provider-check",
-                    "minicode_task_id": "minicode-provider-check",
-                    "run_id": "minicode-provider-check",
-                },
-            ):
-                if event.type == StreamEventType.ERROR:
-                    if event.raw.get("provider_error_type") == "application_network":
-                        raise ApplicationNetworkDenied(event.raw["provider_error_code"].removeprefix("application_network_"))
-                    raise RuntimeError(event.content or "Responses generation check failed")
-                if event.type == StreamEventType.DONE:
-                    saw_done = True
-
-        try:
-            try:
-                await asyncio.wait_for(
-                    _drain_responses_probe(),
-                    timeout=_GENERATION_CHECK_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError as exc:
-                raise RuntimeError(
-                    "Responses generation check timed out after "
-                    f"{int(_GENERATION_CHECK_TIMEOUT_SECONDS)}s"
-                ) from exc
-            if not saw_done:
-                raise RuntimeError("Responses generation check ended without a terminal event")
-        finally:
-            await adapter.aclose()
-        return
-
-    body: dict[str, Any] = {
-        "model": model.strip(),
-        "messages": [{"role": "user", "content": "ping"}],
-        "stream": False,
-        # A one-token probe can be consumed entirely by reasoning and some
-        # compatible gateways reject such tiny limits. Keep the check cheap
-        # while still exercising a usable generation request.
-        "max_tokens": _GENERATION_CHECK_MAX_TOKENS,
-    }
-    async with application_http_client(url, proxy_mode=proxy_mode,
-        timeout=15.0, follow_redirects=False) as client:
-        response = await client.post(
-            url,
-            headers=_provider_request_headers(
-                api_key=api_key,
-                headers=headers,
-                auth_header=auth_header,
-                wire_api="openai",
-                include_content_type=True,
-            ),
-            json=body,
-        )
-        response.raise_for_status()
-        choices = response.json().get("choices", [])
-        if not any(
-            message.get("content") or message.get("tool_calls") or message.get("refusal")
-            for choice in choices
-            if isinstance(message := choice.get("message"), dict)
-        ):
-            raise ValueError("Chat Completions returned no generation result.")
 
 
-async def _check_openai_compatible_image_generation(
-    base_url: str,
-    api_key: str,
-    model: str,
-    size: str = "1024x1024",
-    quality: str = "",
-    *,
-    headers: Mapping[str, str],
-    auth_header: bool,
-    proxy_mode: str = "inherit",
-) -> None:
-    """Exercise an OpenAI-compatible Images API with a bounded real request.
-
-    This probe is intentionally independent of model-name heuristics: relay
-    providers may expose image models under names such as ``flux-*`` or
-    ``image-2``.  Connection checks therefore route explicitly to
-    ``/images/generations`` whenever the profile declares an image channel.
-    """
-
-    if not base_url.strip() or not model.strip():
-        raise ValueError("Image provider base URL and model are required")
-    url = _build_openai_endpoint_url(base_url, "images/generations")
-    if not url:
-        return
-    body: dict[str, Any] = {
-        "model": model.strip(),
-        "prompt": "Generate a simple solid blue square for a provider connection check.",
-        "n": 1,
-        "size": str(size or "1024x1024").strip() or "1024x1024",
-        "response_format": "b64_json",
-    }
-    clean_quality = str(quality or "").strip()
-    if clean_quality:
-        body["quality"] = clean_quality
-    async with application_http_client(url, proxy_mode=proxy_mode,
-        timeout=60.0, follow_redirects=False) as client:
-        for attempt in range(2):
-            response = await client.post(
-                url,
-                headers=_provider_request_headers(
-                    api_key=api_key,
-                    headers=headers,
-                    auth_header=auth_header,
-                    wire_api="openai",
-                    include_content_type=True,
-                ),
-                json=body,
-            )
-            if (
-                attempt == 0
-                and response.status_code in {400, 422}
-                and "response_format" in response.text.lower()
-            ):
-                body.pop("response_format", None)
-                continue
-            response.raise_for_status()
-            try:
-                response_payload = response.json()
-            except ValueError as exc:
-                raise ValueError(
-                    "Images API returned a successful status with invalid JSON."
-                ) from exc
-            if not _images_response_contains_result(response_payload):
-                raise ValueError(
-                    "Images API returned a successful status without image data."
-                )
-            return
 
 
-def _images_response_contains_result(payload: Any, *, depth: int = 0) -> bool:
-    """Return whether a successful Images response contains a usable result.
-
-    OpenAI-compatible relays vary between ``data``, ``images``, ``output``, and
-    nested ``image_data`` wrappers.  The connection probe does not decode or
-    download the image, but it must not report success for an empty/HTML-shaped
-    200 response either.
-    """
-
-    if depth > 6:
-        return False
-    if isinstance(payload, str):
-        return bool(payload.strip())
-    if isinstance(payload, list):
-        return any(
-            _images_response_contains_result(item, depth=depth + 1)
-            for item in payload
-        )
-    if not isinstance(payload, dict):
-        return False
-
-    for key in ("b64_json", "url"):
-        value = payload.get(key)
-        if isinstance(value, str) and value.strip():
-            return True
-    for key in ("image_data", "data", "images", "output", "result"):
-        if key in payload and _images_response_contains_result(
-            payload.get(key),
-            depth=depth + 1,
-        ):
-            return True
-    return False
 
 
-async def _check_anthropic_generation(
-    base_url: str,
-    api_key: str,
-    model: str,
-    *,
-    headers: Mapping[str, str],
-    auth_header: bool,
-    proxy_mode: str = "inherit",
-) -> None:
-    if not model.strip():
-        raise ValueError("Provider model is required")
-    endpoint = base_url.rstrip("/") if base_url.strip() else "https://api.anthropic.com/v1"
-    if not endpoint.endswith("/v1"):
-        endpoint = f"{endpoint}/v1"
-    async with application_http_client(f"{endpoint}/messages", proxy_mode=proxy_mode,
-        timeout=15.0, follow_redirects=False) as client:
-        response = await client.post(
-            f"{endpoint}/messages",
-            headers=_provider_request_headers(
-                api_key=api_key,
-                headers=headers,
-                auth_header=auth_header,
-                wire_api="anthropic",
-                include_content_type=True,
-            ),
-            json={
-                "model": model.strip(),
-                "max_tokens": _GENERATION_CHECK_MAX_TOKENS,
-                "messages": [{"role": "user", "content": "ping"}],
-            },
-        )
-        response.raise_for_status()
-        if not response.json().get("content"):
-            raise ValueError("Anthropic Messages returned no generation result.")
 
 
 async def _fetch_anthropic_models(

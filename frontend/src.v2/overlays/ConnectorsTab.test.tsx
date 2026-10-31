@@ -260,6 +260,48 @@ describe("ConnectorsTab MCP lifecycle states", () => {
     expect(screen.getByRole("button", { name: "添加服务" })).toBeTruthy();
   });
 
+  it("completes the saved MCP form while surfacing a runtime reload warning", async () => {
+    awaitCommandResult.mockResolvedValueOnce({ type: "command.result", command: "mcp.add", level: "warning",
+      message: "配置已保存，但运行时重载失败：actual reload error", data: { configuration_saved: true, runtime_applied: false, tool_availability: "next_turn" } });
+    useAppStore.setState({ mcpServers: [] }); render(<ConnectorsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "saved-server" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "启动命令" }), { target: { value: "node" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(pushToastMock).toHaveBeenCalledWith("配置已保存，但运行时重载失败：actual reload error", "warning"));
+    expect(screen.queryByRole("textbox", { name: "服务名称" })).toBeNull();
+    expect(pushToastMock.mock.calls.some(([, tone]) => tone === "success")).toBe(false);
+  });
+
+  it("preserves a newer edit when the previously submitted MCP configuration is saved with a warning", async () => {
+    let finish!: (value: unknown) => void;
+    awaitCommandResult.mockReturnValueOnce(new Promise(resolve => { finish = resolve; }));
+    useAppStore.setState({ mcpServers: [] }); render(<ConnectorsTab />);
+    fireEvent.click(screen.getByRole("button", { name: "添加服务" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "服务名称" }), { target: { value: "submitted-server" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "启动命令" }), { target: { value: "node" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "启动命令" }), { target: { value: "new-unsaved-command" } });
+    await act(async () => finish({ type: "command.result", command: "mcp.add", level: "warning",
+      message: "saved; runtime unavailable", data: { configuration_saved: true, runtime_applied: false } }));
+    expect(screen.getByRole("textbox", { name: "启动命令" })).toHaveProperty("value", "new-unsaved-command");
+    expect(pushToastMock).toHaveBeenCalledWith("saved; runtime unavailable", "warning");
+  });
+
+  it.each(["toggle", "restart", "remove"] as const)("shows the actual warning for MCP %s instead of a success toast", async action => {
+    useAppStore.setState({ mcpServers: [{ name: "warning-server", status: "connected", phase: "connected", editable: true, autoStart: true }] });
+    awaitCommandResult.mockResolvedValueOnce({ type: "command.result", command: `mcp.${action}`, level: "warning",
+      message: `actual ${action} runtime warning`, data: { configuration_saved: true, runtime_applied: false } });
+    render(<ConnectorsTab />);
+    if (action === "toggle") fireEvent.click(screen.getByRole("switch", { name: "停用 warning-server" }));
+    else {
+      fireEvent.click(screen.getByRole("button", { name: "编辑 warning-server" }));
+      fireEvent.click(screen.getByRole("button", { name: action === "restart" ? "重启 warning-server" : "卸载" }));
+    }
+    await waitFor(() => expect(pushToastMock).toHaveBeenCalledWith(`actual ${action} runtime warning`, "warning"));
+    expect(pushToastMock.mock.calls.some(([, tone]) => tone === "success")).toBe(false);
+  });
+
   it("does not reopen or notify on unrelated parent renders and preserves the hidden editor draft", () => {
     useAppStore.setState({ mcpServers: [] });
     const changes = vi.fn();

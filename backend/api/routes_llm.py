@@ -14,10 +14,7 @@ from backend.atomic_io import atomic_write_text, file_mutation_locks
 from backend.config import SETTINGS_FILE, SettingsError, load_config_layer_stack
 from backend.hooks.runtime import run_config_change_hook
 from backend.mcp.config_file import MCP_CONFIG_FILE
-from backend.services.llm_provider_service import (
-    check_llm_connection,
-    refresh_llm_models,
-)
+from backend.services.llm_provider_service import refresh_llm_models
 from backend.services.feature_flag_settings_service import (
     FeatureFlagSettingsError,
     get_feature_flag_settings,
@@ -38,12 +35,10 @@ from . import _state
 from .routes_health import get_mcp_status
 from backend.services.llm_provider_helpers import (
     _fetch_anthropic_models,
-    _check_openai_compatible_generation,
     _fetch_openai_compatible_models,
 )
 from .models import (
     FeatureFlagsUpdateRequest,
-    LLMCheckResponse,
     LLMModelsRefreshResponse,
     LLMProviderHistoryDeleteRequest,
     LLMSettingsUpdateRequest,
@@ -405,20 +400,6 @@ async def refresh_llm_models_api(request: LLMSettingsUpdateRequest) -> LLMModels
     except (SettingsError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return LLMModelsRefreshResponse(**result)
-
-
-@router.post("/api/llm/check", response_model=LLMCheckResponse)
-async def check_llm_connection_api(request: LLMSettingsUpdateRequest) -> LLMCheckResponse:
-    try:
-        result = await check_llm_connection(
-            request,
-            fetch_anthropic_models=_fetch_anthropic_models,
-            fetch_openai_models=_fetch_openai_compatible_models,
-            check_openai_generation=_check_openai_compatible_generation,
-        )
-    except (SettingsError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return LLMCheckResponse(**result)
 
 
 # ── MCP configuration ──

@@ -15,6 +15,29 @@ from backend.workspace.trust import trust_created_task_directory
 from backend.workspace.worktree import WorktreeManager
 
 
+def test_handoff_without_a_workspace_does_not_use_the_process_directory():
+    conversation = SimpleNamespace(id="projectless", workspace_root="", worktree_path="", git_isolated=False)
+    root = Mock(side_effect=AssertionError("a repository must not be inferred"))
+    preflight = handoff.build_handoff_preflight(conversation, target="worktree",
+        conversation_repo=SimpleNamespace(list_conversations=lambda: []), main_worktree_root=root, has_running_turn=False)
+    assert preflight["allowed"] is False
+    assert preflight["source"]["path"] == ""
+    assert preflight["checks"][0]["code"] == "source.missing"
+    root.assert_not_called()
+
+
+def test_handoff_rejects_a_missing_source_even_if_the_main_checkout_exists(tmp_path, monkeypatch):
+    source = tmp_path / "missing"
+    conversation = SimpleNamespace(id="missing-source", workspace_root=str(source), worktree_path="", git_isolated=False)
+    monkeypatch.setattr(handoff, "readonly_git_policy", lambda _root: object())
+    monkeypatch.setattr(handoff, "_workspace_snapshot", lambda *_args, **_kwargs: handoff.HandoffGitSnapshot("", "head", "main", []))
+    monkeypatch.setattr(handoff, "_git_snapshot", lambda *_args, **_kwargs: (False, ""))
+    preflight = handoff.build_handoff_preflight(conversation, target="worktree",
+        conversation_repo=SimpleNamespace(list_conversations=lambda: []), main_worktree_root=lambda _: tmp_path, has_running_turn=False)
+    assert preflight["allowed"] is False
+    assert any(check["code"] == "source.missing" for check in preflight["checks"])
+
+
 def git(root: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=root, check=check, capture_output=True, text=True, encoding="utf-8")
 

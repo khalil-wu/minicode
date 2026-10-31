@@ -1,7 +1,10 @@
 "use strict";
 
 const process = require("node:process");
-const pty = require("node-pty");
+const path = require("node:path");
+const pty = process.platform === "win32"
+  ? require("../windows-pty").createWindowsPty(path.join(__dirname, "..", "windows-sandbox-runtime", "codex.exe"))
+  : require("node-pty");
 
 const marker = "MINICODE_NODE_PTY_RUNTIME_OK";
 const isWindows = process.platform === "win32";
@@ -28,7 +31,7 @@ const timeout = setTimeout(() => {
   } catch {
     // The process may already have exited while the timeout callback was queued.
   }
-  console.error("node-pty runtime verification timed out");
+  console.error("Native PTY runtime verification timed out");
   process.exit(1);
 }, 10_000);
 
@@ -43,13 +46,13 @@ terminal.onExit(({ exitCode }) => {
 
   if (exitCode !== 0 || !output.includes(marker)) {
     console.error(
-      `node-pty runtime verification failed (exit=${exitCode}, marker=${output.includes(marker)})`,
+      `Native PTY runtime verification failed (exit=${exitCode}, marker=${output.includes(marker)})`,
     );
     process.exit(1);
   }
 
   console.log(
-    `node-pty runtime verified with Electron ${process.versions.electron} / Node ${process.versions.node}`,
+    `Native PTY runtime verified with Electron ${process.versions.electron} / Node ${process.versions.node}`,
   );
-  process.exit(0);
+  // Success must release the actual owner so this process exits naturally.
 });

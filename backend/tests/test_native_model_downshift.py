@@ -135,11 +135,12 @@ async def test_native_replacement_media_is_validated_before_installation(item_ty
         builder = ContextBuilder(llm=previous)
         await builder.start_turn("Preserve A17", AgentState(user_message="Preserve A17"))
         before = builder.export_snapshot()
+        original_total = builder._budget.total
         with pytest.raises(NativeContextCompatibilityError, match="retains image inputs"):
             await builder.compact(replacement_llm=target, replacement_budget=TokenBudget(total=20000))
         assert builder.export_snapshot() == before
         assert builder._compaction_count == 0
-        assert builder._budget.total == 1000000
+        assert builder._budget.total == original_total
 
 
 @pytest.mark.asyncio

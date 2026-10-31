@@ -84,6 +84,7 @@ class AgentSession:
     guardian_host: GuardianHostState | None = None
     mcp_tool_approvals: MCPApprovalStore = field(default_factory=MCPApprovalStore)
     network_approval_service: Any | None = None
+    hook_manager: Any | None = None
     owns_artifact_store: bool = False
     owns_guardian_host: bool = True
     thread_environments: ThreadEnvironments | None = None
@@ -118,9 +119,12 @@ class AgentSession:
             return
         if (self._owned_commands is not None or self.close_thread_resources is not None or self.close_model is not None
                 or self.guardian_host is not None and self.owns_guardian_host or self.owns_thread_environments or self.owns_artifact_store
-                or self.node_repl_companions is not None or self.cua_repl_companions is not None or self.mcp_connections is not None):
+                or self.node_repl_companions is not None or self.cua_repl_companions is not None or self.mcp_connections is not None
+                or self.hook_manager is not None):
             async def close_resources() -> None:
                 try:
+                    if self.hook_manager is not None:
+                        await self.hook_manager.finalize_async_hooks()
                     if self._owned_commands is not None:
                         await self._owned_commands.shutdown()
                         if any(command.cleanup_pending for command in self._owned_commands._commands.values()):

@@ -161,7 +161,7 @@ def test_pre_tool_runtime_failure_is_visible_non_blocking_failure() -> None:
         expected_event_name="pre_tool_use",
     )
 
-    assert reduction.failed is False
+    assert reduction.failed is True
     assert reduction.blocked is False
     assert reduction.permission_decision == ""
     assert reduction.errors == ("Hook execution failed: failed to spawn bash",)

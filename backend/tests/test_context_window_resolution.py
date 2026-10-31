@@ -91,9 +91,9 @@ def test_unknown_image_named_gateway_model_remains_capability_unknown() -> None:
 
 
 def test_known_family_uses_application_default() -> None:
-    assert resolve_context_window("claude-3-5-sonnet") == 1_000_000
-    assert resolve_context_window("gpt-4o") == 1_000_000
-    assert resolve_context_window("deepseek-r1") == 1_000_000
+    assert resolve_context_window("claude-3-5-sonnet") == 272_000
+    assert resolve_context_window("gpt-4o") == 272_000
+    assert resolve_context_window("deepseek-r1") == 272_000
 
     details = resolve_context_window_details("gpt-4o")
     assert details.source == "fallback"
@@ -165,11 +165,49 @@ def test_selected_model_metadata_does_not_leak_across_model_override() -> None:
     assert "context_window_fallback_unverified" in capabilities.limitations
 
 
-def test_current_openai_models_use_common_default_window() -> None:
-    assert resolve_context_window("gpt-5.6-sol") == 1_000_000
-    assert resolve_context_window("gpt-5.6-terra") == 1_000_000
-    assert resolve_context_window("gpt-5.5") == 1_000_000
-    assert resolve_context_window("gpt-5.4-mini") == 1_000_000
+def test_current_openai_models_use_the_source_catalog_window() -> None:
+    assert resolve_context_window("gpt-5.6-sol") == 272_000
+    assert resolve_context_window("gpt-5.6-terra") == 272_000
+    assert resolve_context_window("gpt-5.5") == 272_000
+    assert resolve_context_window("gpt-5.4-mini") == 272_000
+
+
+@pytest.mark.parametrize("model,maximum", [
+    ("gpt-6.1-sol", 872_000), ("gpt-6-sol", 872_000), ("gpt-6-astra", 872_000),
+    ("gpt-6-luna", 872_000), ("gpt-5.6-sol", 872_000), ("gpt-5.6-terra", 872_000),
+    ("gpt-5.6-luna", 872_000), ("gpt-5.5", 272_000),
+])
+def test_source_model_windows_and_overrides_respect_the_catalog_maximum(monkeypatch, model, maximum):
+    metadata = get_provider_model_metadata({}, model)
+    assert metadata["context_window"] == 272_000
+    assert metadata["context_window_source"] == "known_model"
+    assert metadata["context_window_verified"] is True
+    assert metadata["max_context_window"] == maximum
+    monkeypatch.setenv("MINICODE_MAX_CONTEXT_TOKENS", "1000000")
+    assert resolve_context_window(model) == maximum
+
+
+def test_provider_context_override_cannot_exceed_its_declared_maximum():
+    details = resolve_context_window_details("gateway-model", provider_context_window=100_000,
+                                             provider_max_context_window=64_000)
+    assert details.tokens == 64_000 and details.source == "provider"
+
+
+@pytest.mark.parametrize("model", ["gateway-model", "gpt-6-sol"])
+def test_declared_provider_maximum_also_bounds_model_default(model):
+    details = resolve_context_window_details(model, provider_max_context_window=64_000)
+    assert details.tokens == 64_000
+
+
+@pytest.mark.parametrize("model,window,maximum", [
+    ("gpt-daybreak-blue-latest", 272_000, 872_000),
+    ("gpt-daybreak-red-latest", 372_000, 372_000),
+    ("codex-auto-review", 272_000, 872_000),
+    ("gpt-6-sol-snapshot", 272_000, 872_000),
+])
+def test_source_catalog_windows_and_prefix_lookup(model, window, maximum):
+    metadata = get_provider_model_metadata({}, model)
+    assert (metadata["context_window"], metadata["max_context_window"]) == (window, maximum)
 
 
 def test_custom_responses_settings_use_exact_known_gpt56_reasoning_levels(
@@ -210,8 +248,8 @@ def test_custom_responses_settings_use_exact_known_gpt56_reasoning_levels(
 
 
 def test_provider_namespaced_model_resolves_terminal_model_id() -> None:
-    assert resolve_context_window("openai/gpt-5.6-sol") == 1_000_000
-    assert resolve_context_window("openrouter/openai/gpt-5.4-mini") == 1_000_000
+    assert resolve_context_window("openai/gpt-5.6-sol") == 272_000
+    assert resolve_context_window("openrouter/openai/gpt-5.4-mini") == 272_000
 
 
 @pytest.mark.parametrize("model", ["gpt-6-astra", "openai/gpt-6-astra"])
@@ -222,14 +260,13 @@ def test_astra_reasoning_controls_resolve_without_gateway_capability_metadata(mo
     assert capabilities.reasoning_effort_supported is True
     assert capabilities.reasoning_effort_levels == ("low", "medium", "high", "xhigh", "max", "ultra")
     assert capabilities.effective_reasoning_effort == "low"
-    assert capabilities.max_context_window == 1_050_000
+    assert capabilities.max_context_window == 872_000
 
 
 def test_small_local_models_follow_requested_default() -> None:
-    # The product default is explicitly 1M, even for known small-window models.
-    assert resolve_context_window("llama-3-8b") == 1_000_000
-    assert resolve_context_window("gemma-7b") == 1_000_000
-    assert resolve_context_window("phi-4") == 1_000_000
+    assert resolve_context_window("llama-3-8b") == 272_000
+    assert resolve_context_window("gemma-7b") == 272_000
+    assert resolve_context_window("phi-4") == 272_000
 
 
 @pytest.mark.parametrize("model", ["gpt-6-luna", "openai/gpt-6-luna"])
@@ -240,18 +277,17 @@ def test_luna_explicit_reasoning_reaches_responses_request(model):
         provider="custom", model_override=model)
     capabilities = capabilities_from_openai_settings(settings, provider="custom")
     assert capabilities.effective_reasoning_effort == "high"
-    assert capabilities.max_context_window == 1_050_000
+    assert capabilities.max_context_window == 872_000
     assert _responses_reasoning_request(settings)["effort"] == "high"
 
 
 def test_family_variants_share_the_same_default() -> None:
-    # Published family limits are projected separately as max_context_window.
-    assert resolve_context_window("llama-3.1-70b") == 1_000_000
+    assert resolve_context_window("llama-3.1-70b") == 272_000
 
 
-def test_1m_suffix_opts_in() -> None:
-    assert resolve_context_window("claude-opus-4-1m") == 1_000_000
-    assert resolve_context_window("claude-3-5-sonnet-1m") == 1_000_000
+def test_1m_suffix_does_not_declare_provider_capacity() -> None:
+    assert resolve_context_window("claude-opus-4-1m") == 272_000
+    assert resolve_context_window("claude-3-5-sonnet-1m") == 272_000
 
 
 def test_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1070,19 +1070,6 @@ def _is_team_subagent(metadata: dict[str, Any] | None) -> bool:
     ) or bool(raw.get("team_mode") or raw.get("is_teammate"))
 
 
-async def _run_subagent_start_hook(
-    hook_manager: Any | None,
-    subagent_id: str,
-    agent_type: str,
-) -> Any | None:
-    if hook_manager is None:
-        return None
-    return await hook_manager.run_subagent_start(
-        subagent_id=subagent_id,
-        agent_type=agent_type,
-    )
-
-
 async def _run_task_created_hook(
     hook_manager: Any | None,
     *,

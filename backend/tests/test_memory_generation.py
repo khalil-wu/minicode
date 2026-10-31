@@ -315,6 +315,50 @@ def test_coordinator_runs_two_phases_and_commits_valid_workspace(
     assert selected[0].selected_for_phase2 is True
 
 
+def test_corrupt_conversation_timestamp_does_not_block_other_memories(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr("backend.memory.file_memory.MEMORY_DIR", tmp_path / "memory")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    repository = ConversationRepository(tmp_path / "conversations")
+    healthy_time = _iso(int(time.time()) - 7 * 60 * 60)
+    for conversation_id, timestamp in (
+        ("conv_healthy1", healthy_time),
+        ("conv_corrupt1", "invalid timestamp"),
+    ):
+        record = repository.create_conversation(conversation_id=conversation_id, workspace_root=str(workspace))
+        record.transcript = [{"role": "user", "content": "Remember the verified behavior."}]
+        repository.save_conversation(record)
+        path = repository._manifest_path_for(conversation_id)
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["metadata"]["updated_at"] = timestamp
+        manifest["metadata"]["content_updated_at"] = timestamp
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    damaged_path = repository._manifest_path_for("conv_corrupt1")
+    damaged_bytes = damaged_path.read_bytes()
+    repository = ConversationRepository(tmp_path / "conversations")
+    llm = _FakeLLM()
+
+    async def consolidate(**kwargs: Any) -> None:
+        root = Path(kwargs["memory_root"])
+        (root / "MEMORY.md").write_text("# Verified memory\n", encoding="utf-8")
+        (root / "memory_summary.md").write_text("v1\n\nVerified memory\n", encoding="utf-8")
+
+    monkeypatch.setattr("backend.memory.generation.run_memory_consolidation_agent", consolidate)
+    coordinator = MemoryGenerationCoordinator(repository=repository, llm=llm, workspace_root=workspace)
+    asyncio.run(coordinator.run_startup(current_conversation_id="conv_active1"))
+
+    assert len(llm.calls) == 1
+    outputs = coordinator.store.list_stage1_outputs(limit=10, max_unused_days=36500)
+    assert [item.thread_id for item in outputs] == ["conv_healthy1"]
+    assert outputs[0].selected_for_phase2
+    assert (coordinator.memory_root / "MEMORY.md").read_text(encoding="utf-8") == "# Verified memory\n"
+    assert damaged_path.read_bytes() == damaged_bytes
+    assert "conv_corrupt1" in caplog.text and "updated_at is invalid" in caplog.text
+
+
 def test_memory_mode_is_single_eligibility_state_with_legacy_migration(tmp_path: Path) -> None:
     repository = ConversationRepository(tmp_path / "conversations")
     main = repository.create_conversation(

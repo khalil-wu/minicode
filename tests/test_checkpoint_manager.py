@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +34,61 @@ def test_checkpoint_rewind_restores_existing_file(tmp_path) -> None:
 
     assert rewound.id == record.id
     assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_large_checkpoint_and_rewind_stream_file_contents(tmp_path, monkeypatch) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "large.bin"
+    chunk = bytes(range(256)) * 4096
+    with target.open("wb") as handle:
+        for _ in range(8):
+            handle.write(chunk)
+    store = CheckpointStore(tmp_path / "checkpoints")
+    manager = CheckpointManager(store)
+    real_read_bytes = Path.read_bytes
+
+    def reject_whole_file_reads(path):
+        if path == target or path.parent == store._blobs:
+            raise AssertionError("checkpoint payload must be streamed")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_reads)
+    record = asyncio.run(manager.snapshot(
+        tool_name="write_file", args={"file_path": target.name}, workspace_root=workspace,
+        conversation_id="large-checkpoint",
+    ))
+    target.write_bytes(b"changed")
+    asyncio.run(manager.rewind(record.id))
+    with target.open("rb") as handle:
+        for _ in range(8):
+            assert handle.read(len(chunk)) == chunk
+        assert handle.read(1) == b""
+
+
+def test_missing_later_blob_does_not_publish_earlier_restores(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = CheckpointStore(tmp_path / "checkpoints")
+    manager = CheckpointManager(store)
+    first, second = workspace / "first.txt", workspace / "second.txt"
+    first.write_bytes(b"first before")
+    second.write_bytes(b"second before")
+    chosen = asyncio.run(manager.snapshot(
+        tool_name="write_file", args={"file_path": first.name}, workspace_root=workspace,
+        conversation_id="missing-later-blob",
+    ))
+    later = asyncio.run(manager.snapshot(
+        tool_name="write_file", args={"file_path": second.name}, workspace_root=workspace,
+        conversation_id="missing-later-blob",
+    ))
+    first.write_bytes(b"first current")
+    second.write_bytes(b"second current")
+    store._blob_path(later.files[0].blob).unlink()
+    with pytest.raises(CheckpointCorruptError, match="blob"):
+        asyncio.run(manager.rewind(chosen.id))
+    assert first.read_bytes() == b"first current"
+    assert second.read_bytes() == b"second current"
 
 
 def test_checkpoint_rewind_removes_file_created_after_snapshot(tmp_path) -> None:
@@ -215,6 +271,22 @@ def test_corrupt_checkpoint_isolated_to_its_owner(tmp_path) -> None:
 
     assert manager.delete_for_conversation("conversation-broken") == 1
     assert manager.get(healthy.id) is not None
+
+
+def test_checkpoint_scan_status_belongs_to_its_own_result(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.txt").write_bytes(b"before")
+    store = CheckpointStore(tmp_path / "checkpoints")
+    manager = CheckpointManager(store)
+    broken = asyncio.run(manager.snapshot(tool_name="write_file", args={"file_path": "a.txt"},
+        workspace_root=workspace, conversation_id="owner-broken"))
+    store._path_for(broken.id).write_bytes(b"{broken")
+
+    records, status = manager.list_for_conversation_with_status("owner-broken")
+    assert records == [] and len(status.corrupt_files) == 1
+    manager.list_for_conversation_with_status("owner-healthy")
+    assert status.degraded and not store.scan_status.degraded
 
 
 def test_file_checkpoints_are_pruned_per_conversation(tmp_path) -> None:

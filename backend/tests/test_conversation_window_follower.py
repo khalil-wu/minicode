@@ -42,10 +42,11 @@ class Socket:
 
 
 @pytest_asyncio.fixture
-async def windows(tmp_path):
+async def windows(tmp_path, monkeypatch):
     manager = WebSocketManager()
     sessions = []
     held = []
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda path: Path(path).is_relative_to(tmp_path))
 
     def new(name):
         session = WebSocketSession(name, Socket(), None,
@@ -294,13 +295,24 @@ async def test_stale_stop_targets_cannot_cancel_the_actual_new_turn(windows):
     manager, owner, follower, conversation, _, start, drain = windows
     task = start()
     await follower.reemit_pending_state(conversation.id)
-    owner.cancel_agent_runs = AsyncMock()
-    for turn_id in ["older-turn", "actual-turn"]:
-        await follower.command_dispatcher._dispatch_client_command(UserCommand("interrupt", {
-            "conversation_id": conversation.id, "turn_id": turn_id, "message_id": "actual-assistant",
-        }), follower.connection_generation)
+    requested = asyncio.Event()
+    async def request_cancel(**_kwargs):
+        requested.set()
+    owner.cancel_agent_runs = AsyncMock(side_effect=request_cancel)
+    await follower.command_dispatcher._dispatch_client_command(UserCommand("interrupt", {
+        "conversation_id": conversation.id, "turn_id": "older-turn", "message_id": "actual-assistant",
+    }), follower.connection_generation)
+    owner.cancel_agent_runs.assert_not_awaited()
+    stop = asyncio.create_task(follower.command_dispatcher._dispatch_client_command(UserCommand("interrupt", {
+        "conversation_id": conversation.id, "turn_id": "actual-turn", "message_id": "actual-assistant",
+    }), follower.connection_generation))
+    await asyncio.wait_for(requested.wait(), 5)
     owner.cancel_agent_runs.assert_awaited_once_with(conversation_id=conversation.id, reason="user_interrupted")
     assert owner.run_manager.running_task_for(conversation.id) is task
+    assert not stop.done()
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.wait_for(stop, 5)
     assert follower.run_manager.run_tasks == {}
 
 

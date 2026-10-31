@@ -26,7 +26,7 @@ from dataclasses import replace
 from contextlib import aclosing, asynccontextmanager
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 from uuid import uuid4
 
 import httpx
@@ -2760,9 +2760,10 @@ class OpenAIAdapter(LLMAdapter):
         base_url = _normalized_openai_base_url(self._settings.base_url)
         return f"{base_url}/responses"
 
-    def _images_generations_url(self) -> str:
-        base_url = _normalized_openai_base_url(self._settings.base_url)
-        return f"{base_url}/images/generations"
+    def _images_url(self, operation: str) -> str:
+        base_url = urlsplit(str(self._settings.base_url or "https://api.openai.com/v1").strip())
+        base_path = base_url.path if base_url.path else "/v1"
+        return urlunsplit(base_url._replace(path=f"{base_path.rstrip('/')}/images/{operation}"))
 
     def _responses_headers(self) -> dict[str, str]:
         headers = self._openai_transport_headers()
@@ -2862,7 +2863,7 @@ class OpenAIAdapter(LLMAdapter):
         async with _openai_http_stream(
             self._http_client,
             "POST",
-            self._images_generations_url(),
+            self._images_url("generations"),
             headers=headers,
             json_payload=sent_payload,
         ) as response:
@@ -2881,6 +2882,7 @@ class OpenAIAdapter(LLMAdapter):
         *,
         size: str | None = None,
         quality: str | None = None,
+        background: str | None = None,
         input_images: list[tuple[str, bytes, str]] | None = None,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
@@ -2913,6 +2915,8 @@ class OpenAIAdapter(LLMAdapter):
         ).strip()
         if requested_quality:
             payload["quality"] = requested_quality
+        if background:
+            payload["background"] = background
         if input_images:
             payload.pop("response_format")
             sent_payload, headers = await self._prepare_http_request(
@@ -2927,7 +2931,7 @@ class OpenAIAdapter(LLMAdapter):
             files = [("image[]", (name, content, media_type)) for name, content, media_type in input_images]
             data = {key: str(value) for key, value in sent_payload.items()}
             async with self._http_client.stream(
-                "POST", f"{_normalized_openai_base_url(self._settings.base_url)}/images/edits",
+                "POST", self._images_url("edits"),
                 headers=headers, data=data, files=files, timeout=None,
             ) as response:
                 await emit_provider_lifecycle_response(metadata, response.status_code, response.headers)
@@ -2951,6 +2955,7 @@ class OpenAIAdapter(LLMAdapter):
     async def generate_images(
         self, prompt: str, *, size: str | None = None, quality: str | None = None,
         input_images: list[tuple[str, bytes, str]] | None = None,
+        background: str | None = None,
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
         turn_context: LLMTurnContext | None = None,
@@ -2963,7 +2968,7 @@ class OpenAIAdapter(LLMAdapter):
         async def complete(_messages: list[LLMMessage], *, context: LLMSideCallContext) -> list[tuple[str, str]]:
             self.annotate_side_call(context, provider=provider, model_id=image_model)
             response = await self._generate_images_response(
-                prompt, size=size, quality=quality, input_images=input_images,
+                prompt, size=size, quality=quality, input_images=input_images, background=background,
                 metadata={**(metadata or {}), **context.request_metadata()},
                 wire_payload_sink=sent_payload,
             )

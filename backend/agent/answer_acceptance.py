@@ -31,8 +31,11 @@ async def apply_stop_hook_policy(
     stream_text: Any,
     provider_phase: str,
     provider_items: list[dict[str, Any]],
+    memory_consolidation: bool = False,
 ) -> AcceptanceResult:
     hook_manager = context_builder.hook_manager
+    if memory_consolidation and hook_manager is not None:
+        hook_manager = hook_manager.for_memory_consolidation()
     prompt_context = (
         state.prompt_context if isinstance(state.prompt_context, dict) else {}
     )
@@ -48,6 +51,7 @@ async def apply_stop_hook_policy(
             agent_type=agent_type,
             status="completed",
             summary=candidate_text,
+            stop_hook_active=state.stop_hook_feedback_count > 0,
         )
     else:
         hook_result = await hook_manager.run_stop(
@@ -61,6 +65,14 @@ async def apply_stop_hook_policy(
         if hook_result.system_message
         else ()
     )
+    if memory_consolidation and (hook_result.blocked or hook_result.prevent_continuation):
+        from backend.agent.turn_kernel import _set_terminal_reason
+
+        _set_terminal_reason(state, "blocked", status="failed")
+        return AcceptanceResult("terminate", notice_events + (AgentEvent.error(
+            "Memory consolidation was rejected by a Stop hook.", recoverable=False,
+            error_type="hook", error_code="memory_consolidation.stop_hook_rejected",
+        ),))
     # CC's common `continue:false` means the Stop hook explicitly prevents
     # another model continuation. The candidate answer is accepted as the
     # terminal response; it is not fed back as another retry prompt.

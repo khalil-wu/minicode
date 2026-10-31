@@ -5,16 +5,20 @@ import logging
 import math
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from collections.abc import Mapping, Sequence
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
 
 from backend.agent.message import AgentEvent
+from backend.async_cleanup import cancel_and_retire
+from backend.atomic_io import await_task_despite_cancellation
 from backend.cancellation_signal import CancellationSignal
+from backend.mcp.manager import MCPManagerReloadError
 from backend.secret_redaction import redact_secrets
 from backend.services.mcp_service import (
     MCPServiceError,
+    MCPConfigApplyError,
     MCPInventoryServiceError,
     add_mcp_server,
     approve_project_mcp,
@@ -339,6 +343,9 @@ class _ProviderOAuthCallbacks:
         if self._closed:
             raise RuntimeError("OAuth callback interaction is closed")
         prompt = self._normalize_prompt(payload)
+        signal = prompt["signal"]
+        if signal is not None and not isinstance(signal, CancellationSignal):
+            raise ValueError("OAuth prompt signal must be a MiniCode CancellationSignal")
         request_id = f"llm-oauth-{uuid.uuid4().hex}"
         future = asyncio.get_running_loop().create_future()
         self._assert_owner()
@@ -378,13 +385,9 @@ class _ProviderOAuthCallbacks:
                 name=f"provider-oauth-login-abort:{request_id}",
             ),
         ]
-        if prompt.get("signal") is not None:
-            if not isinstance(prompt["signal"], CancellationSignal):
-                raise ValueError(
-                    "OAuth prompt signal must be a MiniCode CancellationSignal"
-                )
+        if signal is not None:
             abort_waiters.append(asyncio.create_task(
-                self._wait_for_abort_signal(prompt["signal"]),
+                self._wait_for_abort_signal(signal),
                 name=f"provider-oauth-prompt-abort:{request_id}",
             ))
         try:
@@ -516,20 +519,19 @@ class _ProviderOAuthCallbacks:
         await self._drain_notifications(raise_errors=False)
 
 
-def _mcp_inventory_tasks(session: "WebSocketSession") -> dict[str, asyncio.Task[dict[str, Any]]]:
+@dataclass
+class _MCPInventoryOperation:
+    server_name: str
+    task: asyncio.Task[dict[str, Any]]
+    cancelled: asyncio.Event
+
+
+def _mcp_inventory_tasks(session: "WebSocketSession") -> dict[str, _MCPInventoryOperation]:
     tasks = getattr(session, "_mcp_inventory_tasks", None)
     if not isinstance(tasks, dict):
         tasks = {}
         setattr(session, "_mcp_inventory_tasks", tasks)
     return tasks
-
-
-def _mcp_inventory_cancelled(session: "WebSocketSession") -> set[str]:
-    cancelled = getattr(session, "_mcp_inventory_cancelled", None)
-    if not isinstance(cancelled, set):
-        cancelled = set()
-        setattr(session, "_mcp_inventory_cancelled", cancelled)
-    return cancelled
 
 
 def _server_status_entry(servers: Any, name: str) -> dict[str, Any] | None:
@@ -631,27 +633,31 @@ async def handle_mcp_inventory_list(session: "WebSocketSession", data: dict[str,
         await emit_command_error(session, "mcp.inventory.list", exc)
         return True
     task = asyncio.create_task(
-        list_mcp_inventory(manager, server_name),
+        list_mcp_inventory(manager, server_name, cleanup_tasks=session.cleanup_tasks),
         name=f"mcp-inventory:{server_name}:{operation_id}",
     )
-    tasks[operation_id] = task
+    operation = _MCPInventoryOperation(server_name, task, asyncio.Event())
+    tasks[operation_id] = operation
+
+    def settled(completed: asyncio.Task[dict[str, Any]]) -> None:
+        if tasks.get(operation_id) is operation:
+            tasks.pop(operation_id)
+
+    task.add_done_callback(settled)
+    cancellation = asyncio.create_task(operation.cancelled.wait())
     try:
-        inventory = await task
-    except asyncio.CancelledError:
-        cancelled = _mcp_inventory_cancelled(session)
-        if operation_id not in cancelled:
-            raise
-        await emit_command_error(
-            session,
-            "mcp.inventory.list",
-            "MCP inventory request was cancelled",
-            data={
-                "operation_id": operation_id,
-                "name": server_name,
-                "error_code": "cancelled",
-                "recoverable": True,
-            },
-        )
+        await asyncio.wait({task, cancellation}, return_when=asyncio.FIRST_COMPLETED)
+        if operation.cancelled.is_set():
+            await emit_command_error(
+                session, "mcp.inventory.list", "MCP inventory request was cancelled",
+                data={"operation_id": operation_id, "name": server_name,
+                      "error_code": "cancelled", "recoverable": True},
+            )
+        else:
+            inventory = task.result()
+            await session.send_event(AgentEvent.command_result(
+                "mcp.inventory.list", "", data={"operation_id": operation_id, "inventory": inventory},
+            ))
     except MCPInventoryServiceError as exc:
         await emit_command_error(
             session,
@@ -678,18 +684,10 @@ async def handle_mcp_inventory_list(session: "WebSocketSession", data: dict[str,
                 "recoverable": True,
             },
         )
-    else:
-        await session.send_event(
-            AgentEvent.command_result(
-                "mcp.inventory.list",
-                "",
-                data={"operation_id": operation_id, "inventory": inventory},
-            )
-        )
     finally:
-        if tasks.get(operation_id) is task:
-            tasks.pop(operation_id, None)
-        _mcp_inventory_cancelled(session).discard(operation_id)
+        cancellation.cancel()
+        await asyncio.gather(cancellation, return_exceptions=True)
+        cancel_and_retire(task, owner=session.cleanup_tasks)
     return True
 
 
@@ -705,12 +703,17 @@ async def handle_mcp_inventory_cancel(session: "WebSocketSession", data: dict[st
         )
         return True
 
-    task = _mcp_inventory_tasks(session).get(operation_id)
-    cancelled = bool(task and not task.done())
-    if cancelled and task is not None:
-        _mcp_inventory_cancelled(session).add(operation_id)
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    operation = _mcp_inventory_tasks(session).get(operation_id)
+    if operation is not None and server_name and operation.server_name != server_name:
+        await emit_command_error(session, "mcp.inventory.cancel", "MCP inventory operation belongs to another server",
+            data={"operation_id": operation_id, "name": server_name,
+                  "error_code": "operation_owner_mismatch", "recoverable": False})
+        return True
+    cancelled = bool(operation is not None and not operation.task.done())
+    if cancelled:
+        operation.cancelled.set()
+        cancel_and_retire(operation.task, owner=session.cleanup_tasks)
+        await asyncio.sleep(0)
     await session.send_event(
         AgentEvent.command_result(
             "mcp.inventory.cancel",
@@ -719,6 +722,7 @@ async def handle_mcp_inventory_cancel(session: "WebSocketSession", data: dict[st
                 "operation_id": operation_id,
                 "name": server_name,
                 "cancelled": cancelled,
+                **({"cleanup_pending": True} if cancelled and not operation.task.done() else {}),
             },
         )
     )
@@ -732,46 +736,78 @@ async def _run_mcp_server_command(
     command: str,
     invoke: Any,
     reload_other_managers: bool = False,
-    catch: tuple[type[BaseException], ...] = (MCPServiceError,),
     error_template: str | None = None,
+    notice: str = "",
 ) -> bool:
     """Shared body for the mcp.{add,remove,restart,update,toggle} commands.
 
-    Every one of them mutates server config, optionally reloads the other
-    in-process MCP managers, refreshes the tool registry, then answers with
-    an ``mcp_status`` payload plus a per-server command result. Only the
-    service call, reload scope, exception surface, and error wording differ;
-    keep those differences explicit per command instead of duplicating the
-    thirty-line response shape five times.
+    Persisted configuration and runtime application are distinct outcomes.
+    Reconcile all affected owners before reporting partial runtime failures,
+    and publish only the manager's actual status snapshot.
     """
+    configuration_command = command in {"mcp.add", "mcp.update", "mcp.remove", "mcp.toggle",
+        "mcp.project.approve", "mcp.project.approve_all", "mcp.project.reject"}
+    runtime_errors: list[dict[str, str]] = []
+    servers = None
     try:
         manager = _command_mcp_manager(session, data)
         servers = await invoke(manager, data)
-        if reload_other_managers:
-            await _reload_other_mcp_managers(manager)
-        refreshed = session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
-    except catch as exc:
+    except MCPConfigApplyError as exc:
+        runtime_errors.append({"phase": exc.phase, "message": str(exc)})
+    except Exception as exc:
         error: BaseException | str = exc
         if error_template is not None:
             error = error_template.format(exc=exc)
-        await emit_command_error(session, command, error)
+        await emit_command_error(session, command, error,
+            data={"configuration_saved": False} if configuration_command else {"runtime_applied": False})
         return True
-    await send_mcp_projection(session, manager,
-        {"type": "mcp_status", "servers": servers},
-    )
+    if reload_other_managers:
+        try:
+            await _reload_other_mcp_managers(manager)
+        except asyncio.CancelledError:
+            if not configuration_command:
+                raise
+            runtime_errors.append({"phase": "reload_other_workspaces", "message": "Configuration was saved; workspace refresh was cancelled"})
+        except MCPManagerReloadError as exc:
+            runtime_errors.extend({"phase": "reload_other_workspaces", **failure} for failure in exc.failures)
+        except Exception as exc:
+            runtime_errors.append({"phase": "reload_other_workspaces", "message": str(exc)})
+    refreshed = False
+    try:
+        refreshed = session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
+    except Exception as exc:
+        runtime_errors.append({"phase": "tool_projection", "message": str(exc)})
+    if servers is None:
+        try:
+            servers = get_mcp_status(manager)
+        except Exception as exc:
+            runtime_errors.append({"phase": "status_projection", "message": str(exc)})
+    if servers is not None:
+        try:
+            await send_mcp_projection(session, manager, {"type": "mcp_status", "servers": servers})
+        except asyncio.CancelledError:
+            if not configuration_command:
+                raise
+            runtime_errors.append({"phase": "status_delivery", "message": "Configuration was saved; status projection was cancelled"})
+        except Exception as exc:
+            runtime_errors.append({"phase": "status_delivery", "message": str(exc)})
     name = str(data.get("name") or data.get("original_name") or "").strip()
-    await session.send_event(
-        AgentEvent.command_result(
-            command,
-            "",
-            data=_mcp_command_result_data(
-                session,
-                refreshed,
-                name=name,
-                status=_server_status_entry(servers, name),
-            ),
-        )
-    )
+    result_data = _mcp_command_result_data(session, refreshed, name=name, notice=notice,
+        status=_server_status_entry(servers, name))
+    if configuration_command:
+        result_data.update(configuration_saved=True, runtime_applied=not runtime_errors)
+    message = ""
+    level = "info"
+    if runtime_errors:
+        result_data["runtime_errors"] = runtime_errors
+        level = "warning" if configuration_command else "error"
+        prefix = "MCP configuration was saved, but its runtime update is incomplete" if configuration_command else "MCP runtime update failed"
+        message = prefix + ": " + "; ".join(error["message"] for error in runtime_errors)
+    result = AgentEvent.command_result(command, message, level=level, data=result_data)
+    if configuration_command:
+        await await_task_despite_cancellation(asyncio.create_task(session.send_event(result)))
+    else:
+        await session.send_event(result)
     return True
 
 
@@ -782,7 +818,6 @@ async def handle_mcp_add(session: "WebSocketSession", data: dict[str, Any]) -> b
         command="mcp.add",
         invoke=add_mcp_server,
         reload_other_managers=True,
-        catch=(Exception,),
         error_template="Failed to add MCP server: {exc}",
     )
 
@@ -817,43 +852,23 @@ async def _handle_project_mcp_decision(
     from backend.ws.command_scope import resolve_command_scope
 
     try:
-        manager = _session_mcp_manager(session)
         scope = resolve_command_scope(session, data)
+    except ValueError as exc:
+        await emit_command_error(session, command, exc, data={"configuration_saved": False})
+        return True
+
+    async def invoke(manager: Any, payload: dict[str, Any]) -> Any:
         if approved:
-            servers = await approve_project_mcp(
+            return await approve_project_mcp(
                 manager,
-                str(data.get("name") or ""),
+                str(payload.get("name") or ""),
                 workspace_root=scope.workspace_root,
                 approve_all=approve_all,
             )
-        else:
-            servers = await reject_project_mcp(
-                manager,
-                str(data.get("name") or ""),
-                workspace_root=scope.workspace_root,
-            )
-        refreshed = session.refresh_tool_registry_if_mcp_changed(allow_when_busy=False)
-    except Exception as exc:
-        await emit_command_error(session, command, exc)
-        return True
-    await send_mcp_projection(session, manager,
-        {"type": "mcp_status", "servers": servers},
-    )
-    name = str(data.get("name") or "").strip()
-    await session.send_event(
-        AgentEvent.command_result(
-            command,
-            "",
-            data=_mcp_command_result_data(
-                session,
-                refreshed,
-                name=name,
-                notice=f"Project MCP decision applied to {scope.workspace_root}",
-                status=_server_status_entry(servers, name),
-            ),
-        )
-    )
-    return True
+        return await reject_project_mcp(manager, str(payload.get("name") or ""), workspace_root=scope.workspace_root)
+
+    return await _run_mcp_server_command(session, data, command=command, invoke=invoke,
+        notice=f"Project MCP decision saved to {scope.workspace_root}")
 
 
 async def handle_mcp_project_approve(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -1053,7 +1068,6 @@ async def handle_mcp_update(session: "WebSocketSession", data: dict[str, Any]) -
         command="mcp.update",
         invoke=lambda manager, payload: update_mcp_server(manager, payload),
         reload_other_managers=True,
-        catch=(Exception,),
         error_template="Failed to update MCP server: {exc}",
     )
 
@@ -1075,7 +1089,6 @@ async def handle_mcp_toggle(session: "WebSocketSession", data: dict[str, Any]) -
         command="mcp.toggle",
         invoke=invoke,
         reload_other_managers=True,
-        catch=(Exception,),
         error_template="Failed to toggle MCP server: {exc}",
     )
 

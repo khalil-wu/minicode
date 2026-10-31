@@ -171,6 +171,29 @@ def test_ordinary_scripts_keep_workspace_classification(command: str) -> None:
 def test_literal_external_commands_are_classified_external() -> None:
     assert _command_side_effect_kind({"command": "{ git push origin HEAD; }"}) == "external"
     assert _command_side_effect_kind({"command": "git -C sub fetch"}) == "external"
+    assert _command_side_effect_kind({"command": "env -u NAME curl example.test"}) == "external"
+    assert _command_side_effect_kind({"command": "env -S 'curl example.test'"}) == "external"
+
+
+@pytest.mark.parametrize("command", [
+    r"env -S 'curl\_example.test'",
+    r"env -S 'curl\c ignored'",
+])
+def test_env_split_string_matches_gnu_escapes_for_command_restrictions(command: str) -> None:
+    from backend.permissions.content_rules import parse_content_rule, rule_matches_call
+
+    rule = parse_content_rule("run_command(curl:*)")
+    assert rule_matches_call(rule, "run_command", {"command": command}, effect="deny")
+    assert _command_side_effect_kind({"command": command}) == "external"
+
+
+def test_env_split_string_preserves_quotes_and_marks_expansions_unknown() -> None:
+    from backend.permissions.shell_ast import DYNAMIC_WORD, _split_env_string
+
+    assert _split_env_string(r'curl\_"a\_b" # ignored') == ["curl", "a b"]
+    assert _split_env_string("curl '${LITERAL}' ${RUNTIME}") == ["curl", "${LITERAL}", DYNAMIC_WORD]
+    with pytest.raises(ValueError):
+        _split_env_string(r"curl\,invalid")
 
 
 @pytest.mark.asyncio

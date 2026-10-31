@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from contextlib import suppress
+from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -153,7 +153,6 @@ from backend.tools.subagent_support import (
     _primary_llm_adapter,
     _prompt_scope_summary,
     _resolve_subagent_llm,
-    _run_subagent_start_hook,
     _run_task_created_hook,
     _sanitize_teammate_name,
     _scope_is_within_any,
@@ -2776,15 +2775,6 @@ class TaskTool(BaseTool):
                     )
                 subagent_record = updated_record
 
-            start_hook_result = await _run_subagent_start_hook(
-                parent_run_context.hook_manager,
-                subagent_id,
-                agent_type,
-            )
-            start_hook_blocked, start_hook_message = _hook_veto(start_hook_result)
-            if start_hook_blocked:
-                raise RuntimeError(start_hook_message)
-
             source_agent_role = llm_resolution.source_role_name is not None or execution_agent_type in {"default", "explorer", "worker"}
             agent_input_messages = (subagent_metadata or {}).get("_agent_input_messages")
             delegated_prompt = prompt if source_agent_role or agent_input_messages else self._build_subagent_prompt(
@@ -2795,15 +2785,6 @@ class TaskTool(BaseTool):
                     or (context.workspace_root if context is not None else None)
                 ),
             )
-            hook_context = str(
-                getattr(start_hook_result, "additional_context", "") or ""
-            ).strip()
-            if hook_context:
-                hook_text = "Additional context from the SubagentStart hook:\n" + hook_context
-                if agent_input_messages:
-                    agent_input_messages = [{"content": hook_text, "provider_items": []}, *agent_input_messages]
-                else:
-                    delegated_prompt = f"{delegated_prompt}\n\n{hook_text}"
             effective_user_prompt = prompt if resume_snapshot else delegated_prompt
             if team_mode and not resume_snapshot:
                 effective_user_prompt = _format_teammate_message(
@@ -2933,6 +2914,8 @@ class TaskTool(BaseTool):
                 "query_source": "background" if background else "subagent",
                 "run_id": subagent_id,
                 "agent_id": subagent_id,
+                "agent_type": agent_type,
+                "_subagent_hook_start_source": "resume" if resume_snapshot else "fork" if fork_turns != "none" else "startup",
                 "artifact_owner_workspace_root": artifact_owner_workspace,
                 **subagent_fence,
                 "cancel_event": subagent_cancel_event,
@@ -3641,10 +3624,15 @@ class TaskTool(BaseTool):
 
                 async def _pump_query_events() -> None:
                     try:
-                        async for event in query_stream:
-                            consumed = asyncio.Event()
-                            await event_queue.put((event, consumed))
-                            await consumed.wait()
+                        # Cancellation can land while an event awaits its
+                        # consumer acknowledgement. The query is suspended at
+                        # yield then, so this producer must close it before its
+                        # worker publishes a terminal or releases the runtime.
+                        async with aclosing(query_stream):
+                            async for event in query_stream:
+                                consumed = asyncio.Event()
+                                await event_queue.put((event, consumed))
+                                await consumed.wait()
                         await event_queue.put(None)
                     except asyncio.CancelledError as exc:
                         await event_queue.put(exc)

@@ -1962,6 +1962,7 @@ const hasValidSemanticPayload = (
     const hasLiveImage = "image_data" in value;
     const hasOmittedImage = value.image_data_omitted === true;
     valid = RASTER_IMAGE_MEDIA_TYPES.has(mediaType)
+      && (!("tool_call_id" in value) || isBoundedString(value.tool_call_id, 1_024))
       && (hasLiveImage !== hasOmittedImage)
       && (
         hasLiveImage

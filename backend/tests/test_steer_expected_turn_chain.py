@@ -53,7 +53,7 @@ async def test_delayed_direct_steer_cannot_target_the_newer_turn(windows, expect
 
 
 @pytest.mark.asyncio
-async def test_valid_direct_steer_replays_a_failed_completion_record_without_enqueueing_twice(windows, monkeypatch):
+async def test_valid_direct_steer_keeps_atomic_completion_when_secondary_log_fails(windows, monkeypatch):
     _, owner, _, conversation, _, start, drain = windows
     start()
     data = {"client_command_id": "valid-steer", "conversation_id": conversation.id, "content": "One redirect",
@@ -71,7 +71,7 @@ async def test_valid_direct_steer_replays_a_failed_completion_record_without_enq
         patch.setattr(dispatcher, "_mark_client_command_seen", fail_completion_record)
         with pytest.raises(OSError, match="completion record write failed"):
             await dispatcher._run_durable_client_command("valid-steer", owner.connection_generation)
-    assert not dispatcher._client_command_seen(UserCommand("user_message", dict(data)))
+    assert dispatcher._client_command_seen(UserCommand("user_message", dict(data)))
     assert len(owner.run_manager.turn_input_queue(conversation.id).snapshot()) == 1
     await dispatcher._run_durable_client_command("valid-steer", owner.connection_generation)
     await drain()

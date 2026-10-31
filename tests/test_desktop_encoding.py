@@ -52,7 +52,8 @@ def test_desktop_pty_has_no_child_process_fallback_needing_manual_decoding() -> 
     assert "pty.spawn(" in pty_manager
     assert "ptyProcess.onData(" in pty_manager
     # Fail closed rather than degrade to a pipe session.
-    assert "node-pty module unavailable" in pty_manager
+    assert "native PTY owner unavailable" in pty_manager
+    assert 'require("node:child_process")' not in pty_manager
     # A raw Buffer -> string conversion would split multi-byte UTF-8 sequences
     # at chunk boundaries; neither it nor a hand-rolled decoder may come back.
     assert '.toString("utf8")' not in pty_manager

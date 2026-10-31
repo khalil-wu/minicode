@@ -152,6 +152,8 @@ async def test_interrupt_replay_cannot_stop_a_different_turn():
         _conversation_streams={'conversation': {'turn_id': 'new-turn', 'message_id': 'new-message'}},
         run_manager=SimpleNamespace(
             run_task_ids={'conversation': 'new-task'},
+            run_tasks={},
+            context_for=lambda conversation_id: None,
             set_user_queue_paused=lambda *args: None,
             queued_user_message_snapshot=lambda conversation_id: [],
         ),

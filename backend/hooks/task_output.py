@@ -24,7 +24,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from contextlib import ExitStack, suppress
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 
 from backend.agent.tool_result_persistence import TOOL_RESULT_DATA_DIR
 from backend.subprocesses import write_process_stdin
@@ -42,7 +42,6 @@ _RECENT_LINE_COUNT = 1_000
 _INLINE_TAIL_LINE_COUNT = 5
 _MAX_PARTIAL_LINE_CHARS = 4_096
 _STREAM_CHUNK_BYTES = 64 * 1024
-_MAX_PROTOCOL_FIRST_LINE_BYTES = 64 * 1024
 _DISK_CAP_NOTICE = (
     f"\n[output truncated: exceeded {MAX_HOOK_OUTPUT_BYTES_DISPLAY} disk cap]\n"
 ).encode("utf-8")
@@ -50,6 +49,38 @@ _DISK_CAP_NOTICE = (
 
 class HookOutputCaptureError(RuntimeError):
     """The host could not preserve a hook's streamed output safely."""
+
+
+async def spill_hook_context(
+    text: str,
+    entry: Any,
+    *,
+    conversation_id: str,
+    workspace_root: Path | None,
+) -> str:
+    """Keep oversized model context readable through the owned output cache."""
+    from uuid import uuid4
+
+    from backend.agent.tool_result_persistence import persist_tool_result
+    from backend.mcp.result_projection import _truncate_text
+
+    configured_limit = entry.additional_context_limit
+    limit = 2_500 if configured_limit is None else configured_limit
+    byte_count = len(text.encode("utf-8"))
+    if limit == 0 or (byte_count + 3) // 4 <= limit:
+        return text
+    saved = await asyncio.to_thread(
+        persist_tool_result, text, f"hook-{uuid4().hex}", "hook", force=True,
+        conversation_id=conversation_id, workspace_root=workspace_root,
+    )
+    footer = f"\n\nFull hook output saved to: {saved.filepath}" if saved is not None else ""
+    preview_limit = max(0, limit - (len(footer.encode("utf-8")) + 3) // 4)
+    preview = _truncate_text(text, "tokens", preview_limit)
+    lines = len(text.split("\n")) - int(text.endswith("\n"))
+    return (
+        f"Warning: truncated output (original token count: {(byte_count + 3) // 4})\n"
+        f"Total output lines: {lines}\n\n{preview}{footer}"
+    )
 
 
 class HookTaskOutput:
@@ -74,7 +105,6 @@ class HookTaskOutput:
         self._file: BinaryIO | None = None
         self._semantic_stdout_path: Path | None = None
         self._semantic_stdout_file: BinaryIO | None = None
-        self._stdout_is_structured: bool | None = None
         self._disk_bytes = 0
         self._disk_capped = False
         self._finished = False
@@ -100,8 +130,6 @@ class HookTaskOutput:
         return self._disk_capped
 
     async def write_stdout(self, data: bytes) -> None:
-        if self._stdout_is_structured is None and (prefix := data.lstrip()):
-            self._stdout_is_structured = prefix.startswith(b"{")
         await self._write(data, is_stderr=False)
 
     async def write_stderr(self, data: bytes) -> None:
@@ -205,7 +233,7 @@ class HookTaskOutput:
             await self._append_semantic_stdout(data)
 
     async def _append_semantic_stdout(self, data: bytes) -> None:
-        if not data or self._stdout_is_structured is not True:
+        if not data:
             return
         if self._semantic_stdout_file is None:
             self._semantic_stdout_path, self._semantic_stdout_file = await _open_hook_output_file(
@@ -223,18 +251,18 @@ class HookTaskOutput:
             await _discard_unpublished_output(handle, path)
 
     async def semantic_stdout_text(self) -> str | None:
-        """Return complete structured stdout only when its display spilled."""
-        if self._disk_capped and self._stdout_is_structured:
+        """Return complete stdout separately when the display output spilled."""
+        if self._disk_capped:
             raise HookOutputCaptureError(
-                f"structured hook stdout exceeded the {MAX_HOOK_OUTPUT_BYTES_DISPLAY} disk cap"
+                f"hook output exceeded the {MAX_HOOK_OUTPUT_BYTES_DISPLAY} disk cap"
             )
         if self._semantic_stdout_path is None:
-            return None
+            return "" if self._path is not None else None
         try:
             return await _run_blocking(self._semantic_stdout_path.read_text, encoding="utf-8", errors="replace")
         except OSError as exc:
             raise HookOutputCaptureError(
-                f"failed to read structured hook stdout at {self._semantic_stdout_path}: {exc}"
+                f"failed to read hook stdout at {self._semantic_stdout_path}: {exc}"
             ) from exc
 
     async def _append_raw_disk(self, payload: bytes) -> None:
@@ -315,16 +343,11 @@ async def drain_hook_process_output(
     input_data: bytes,
     *,
     capture: HookTaskOutput,
-    first_stdout_line: asyncio.Future[bytes] | None = None,
 ) -> None:
     """Drain stdin/stdout/stderr concurrently with backpressure."""
 
     stdout_task = asyncio.create_task(
-        _drain_stream(
-            proc.stdout,
-            capture.write_stdout,
-            first_line=first_stdout_line,
-        ),
+        _drain_stream(proc.stdout, capture.write_stdout),
         name=f"hook-output:{capture.task_id}:stdout",
     )
     stderr_task = asyncio.create_task(
@@ -352,29 +375,13 @@ async def drain_hook_process_output(
 async def _drain_stream(
     stream: asyncio.StreamReader | None,
     sink: Callable[[bytes], Awaitable[None]],
-    *,
-    first_line: asyncio.Future[bytes] | None = None,
 ) -> None:
     if stream is None:
-        if first_line is not None and not first_line.done():
-            first_line.set_result(b"")
         return
-    line_prefix = bytearray()
     while True:
         chunk = await stream.read(_STREAM_CHUNK_BYTES)
         if not chunk:
-            if first_line is not None and not first_line.done():
-                first_line.set_result(bytes(line_prefix))
             return
-        if first_line is not None and not first_line.done():
-            newline = chunk.find(b"\n")
-            if newline >= 0:
-                line_prefix.extend(chunk[: newline + 1])
-                first_line.set_result(bytes(line_prefix))
-            elif len(line_prefix) + len(chunk) > _MAX_PROTOCOL_FIRST_LINE_BYTES:
-                first_line.set_result(b"")
-            else:
-                line_prefix.extend(chunk)
         await sink(chunk)
 
 

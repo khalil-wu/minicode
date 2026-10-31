@@ -178,6 +178,37 @@ def test_content_deny_rule_overrides_bypass():
     assert level == PermissionLevel.ALWAYS_DENY
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [
+    "curl https://example.invalid",
+    "sudo curl https://example.invalid",
+    "doas curl https://example.invalid",
+    "xargs -I {} curl https://example.invalid",
+    "env -u NAME curl https://example.invalid",
+    "env -S 'curl https://example.invalid'",
+    r"env -S 'curl\_https://example.invalid'",
+    r"env -S 'curl\c ignored'",
+])
+async def test_native_command_admission_preserves_configured_content_deny(tmp_path, command):
+    checker = _checker(str(tmp_path), content_deny_rules=["run_command(curl:*)"])
+    context = checker.build_context(mode="bypass")
+    result = await _authorize_command(tmp_path, {"command": command}, checker, context, SandboxPolicy.bypass())
+    assert result.request.exec_policy.kind == "skip"
+    assert result.permission_decision.permission_level == PermissionLevel.ALWAYS_DENY
+    assert result.permission_decision.matched_rule_source == "content_rule"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy,expected", [("on-request", PermissionLevel.CONFIRM), ("never", PermissionLevel.ALWAYS_DENY)])
+async def test_native_command_admission_keeps_content_ask_and_approval_policy(tmp_path, policy, expected):
+    checker = _checker(str(tmp_path), content_ask_rules=["run_command(curl:*)"])
+    context = checker.build_context(mode="bypass", approval_policy=policy)
+    result = await _authorize_command(tmp_path, {"command": "sudo curl https://example.invalid"},
+        checker, context, SandboxPolicy.bypass())
+    assert result.request.exec_policy.kind == "skip"
+    assert result.permission_decision.permission_level == expected
+
+
 @pytest.mark.parametrize("allow_rule", ["run_command", "run_command(Write-Output:*)"])
 @pytest.mark.parametrize("with_tool", [False, True])
 def test_remembered_allow_cannot_lower_command_substitution_boundary(tmp_path, allow_rule, with_tool):

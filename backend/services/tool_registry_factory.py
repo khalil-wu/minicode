@@ -211,11 +211,7 @@ def build_tool_registry(
     from backend.tools.image_generation_tool import GenerateImageTool
     from backend.tools.hatch_pet_tool import HatchPetTool
     registry.register(HatchPetTool())
-    registry.register(GenerateImageTool(
-        settings_snapshot=(config_snapshot.config_layer_stack.effective_config()
-                           if config_snapshot.config_layer_stack is not None else None),
-        provider=config_snapshot.llm.provider,
-    ))
+    registry.register(GenerateImageTool())
     registry.register(WebSearchTool(llm_provider))
     registry.register(BrowserControlTool())
 

@@ -141,7 +141,7 @@ def _read_queue(queue: Path) -> dict[str, Any]:
     else:
         payload = {"version": 6, "queues": {}, "inflight": {}, "turn_inputs": {}, "client_pending": [], "client_inflight": {}, "ownership": {}}
     version = payload.get("version", 1)
-    if not isinstance(version, int) or isinstance(version, bool) or version > 7:
+    if not isinstance(version, int) or isinstance(version, bool) or version > 8:
         raise RollbackPreparationError("This queue format has no supported R6 rollback projection")
     return payload
 
@@ -338,7 +338,7 @@ def _project(
     ownership["inflight"] = {owner: value for owner, value in owners.items() if owner not in removed}
     payload["ownership"] = ownership
     payload["client_cancelled"] = inline
-    if payload.get("version") == 7 or inline:
+    if payload.get("version") in (7, 8) or inline:
         payload["version"] = 6
     changed = not queue.exists() or json.dumps(payload, sort_keys=True, ensure_ascii=False, allow_nan=False) != original
     return payload, changed

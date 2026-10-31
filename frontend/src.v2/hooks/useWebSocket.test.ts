@@ -478,6 +478,28 @@ describe("useWebSocket server sequence tracking", () => {
     expect(getLastReceivedServerSeqForTests()).toBe(8);
   });
 
+  it("deduplicates a recovered command result without creating a replay cursor gap", () => {
+    const original = {
+      type: "command.result", command: "fixture", level: "error", message: "actual failure",
+      conversation_id: "conv-1", client_command_id: "cmd-1", event_id: "original-result",
+      seq: 5, previous_replay_seq: 0, replayed: true,
+    } as ServerEvent;
+    const recovered = {
+      type: "command.result", command: "fixture", level: "error", message: "actual failure",
+      conversation_id: "conv-1", client_command_id: "cmd-1", event_id: "original-result",
+    } as ServerEvent;
+    const next = { type: "done", conversation_id: "conv-1", event_id: "next-result",
+      seq: 8, previous_replay_seq: 5 } as ServerEvent;
+
+    expect(shouldProcessInboundEvent(original)).toBe(true);
+    commitProcessedInboundEvent(original);
+    expect(shouldAdvanceReplayCursor(recovered)).toBe(false);
+    expect(shouldProcessInboundEvent(recovered)).toBe(false);
+    expect(() => assertInboundReplayCursorContinuity(next)).not.toThrow();
+    commitProcessedInboundEvent(next);
+    expect(getLastReceivedServerSeqForTests()).toBe(8);
+  });
+
   it.each(["artifact_content", "stream_event"])(
     "does not advance the durable cursor for transient %s events",
     (type) => {

@@ -12,11 +12,13 @@ import json
 import hashlib
 import math
 import logging
+import os
 import re
+import stat
 import threading
 import time
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import wraps
 from pathlib import Path
 from typing import Any, Iterable
@@ -27,11 +29,11 @@ from filelock import FileLock, Timeout
 from backend.agent.message import UserCommand
 from backend.agent.turn_input import ScheduledInputCommand
 from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_mutation_locks
-from backend.ws.client_command_log import _clean_command_id
+from backend.ws.client_command_log import CLIENT_COMMAND_DEDUP_MAX_AGE_SECONDS, RECENT_CLIENT_COMMAND_IDS_MAX, _clean_command_id
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _OWNER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 
 
@@ -63,10 +65,11 @@ class _DurableQueueState:
     migrated_sources: set[str]
     paused_conversations: dict[str, str]
     client_cancelled: dict[str, dict[str, Any]]
+    client_completed: dict[str, float]
 
     @classmethod
     def empty(cls) -> "_DurableQueueState":
-        return cls({}, {}, {}, [], {}, {}, {}, {}, set(), {}, {})
+        return cls({}, {}, {}, [], {}, {}, {}, {}, set(), {}, {}, {})
 
 
 class DurableUserMessageQueue:
@@ -79,6 +82,7 @@ class DurableUserMessageQueue:
         self._shared_inputs = shared_inputs
         self.path = Path(root_dir) / f"{self._session_key}.json"
         self._cancelled_receipt_dir = Path(root_dir) / "cancelled-inputs" / self._session_key
+        self._result_receipt_dir = Path(root_dir) / "command-results" / self._session_key
         self._lock = threading.RLock()
         self._owner_id = uuid4().hex
         self._lease_dir = self.path.parent / ".owner-leases" / self._session_key
@@ -96,6 +100,7 @@ class DurableUserMessageQueue:
         self._client_pending: list[UserCommand] = []
         self._client_inflight: dict[str, UserCommand] = {}
         self._client_cancelled: dict[str, dict[str, Any]] = {}
+        self._client_completed: dict[str, float] = {}
         self._inflight_owners: dict[str, str] = {}
         self._turn_input_owners: dict[str, str] = {}
         self._client_inflight_owners: dict[str, str] = {}
@@ -230,6 +235,10 @@ class DurableUserMessageQueue:
         }
         if command.type == "user_message" and command.data.get("_legacy_user_message_identity") is True:
             data["_legacy_user_message_identity"] = True
+        if command.type == "user_message":
+            for field in ("_permission_mode_selection_revision", "_workspace_binding_selection_revision", "_implicit_new_conversation_id"):
+                if field in command.data:
+                    data[field] = command.data[field]
         if command.type == "interrupt" and "_user_stop_target" in command.data:
             data["_user_stop_target"] = command.data["_user_stop_target"]
         command_id = _clean_command_id(data.get("client_command_id"))
@@ -379,6 +388,113 @@ class DurableUserMessageQueue:
             json.dumps(record, ensure_ascii=False, separators=(",", ":")),
         )
 
+    def _result_receipt_path(self, command_id: str) -> Path:
+        return self._result_receipt_dir / f"{hashlib.sha256(command_id.encode('utf-8')).hexdigest()}.json"
+
+    @staticmethod
+    def _read_result_receipt(path: Path) -> dict[str, Any]:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        command_id = record["client_command_id"]
+        events = record["events"]
+        if (_clean_command_id(command_id) != command_id
+                or path.name != f"{hashlib.sha256(command_id.encode('utf-8')).hexdigest()}.json"
+                or not isinstance(record.get("created_at"), (int, float)) or isinstance(record["created_at"], bool)
+                or not math.isfinite(record["created_at"])
+                or not isinstance(events, list) or any(not isinstance(event, dict)
+                    or event.get("type") != "command.result" or not isinstance(event.get("event_id"), str) or not event["event_id"]
+                    or event.get("client_command_id") != command_id for event in events)):
+            raise ValueError("Invalid durable command result")
+        return record
+
+    @_queue_locked
+    def archive_client_results(self, client_command_id: str, events: list[dict[str, Any]]) -> None:
+        self._refresh_from_disk_unlocked()
+        command_id = _clean_command_id(client_command_id)
+        if self._client_inflight_owners.get(command_id) != self._owner_id:
+            raise RuntimeError(f"Cannot save results without command ownership: {command_id}")
+        path = self._result_receipt_path(command_id)
+        try:
+            existing = self._read_result_receipt(path)
+        except FileNotFoundError:
+            existing = {"client_command_id": command_id, "created_at": time.time(), "events": []}
+        known = {event["event_id"]: event for event in existing["events"]}
+        for event in events:
+            prior = known.get(event["event_id"])
+            if prior is not None and prior != event:
+                raise ValueError("Conflicting durable command result")
+            known[event["event_id"]] = event
+        existing["events"] = list(known.values())
+        atomic_write_text(path, json.dumps(existing, ensure_ascii=False, separators=(",", ":")))
+
+    @_queue_locked
+    def pending_client_results(self) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+        self._refresh_from_disk_unlocked()
+        records, errors = [], []
+        for path in self._result_receipt_dir.glob("*.json"):
+            try:
+                record = self._read_result_receipt(path)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                errors.append({"reason": "command_result_unreadable", "path": str(path), "detail": str(exc)})
+                continue
+            if record["events"]:
+                records.append(record)
+            elif record["client_command_id"] in self._client_completed:
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    errors.append({"reason": "command_result_cleanup_failed", "path": str(path), "detail": str(exc)})
+        return sorted(records, key=lambda item: item["created_at"]), errors
+
+    @_queue_locked
+    def acknowledge_client_result(self, client_command_id: str, event_id: str) -> bool:
+        self._refresh_from_disk_unlocked()
+        command_id = _clean_command_id(client_command_id)
+        path = self._result_receipt_path(command_id)
+        try:
+            record = self._read_result_receipt(path)
+        except FileNotFoundError:
+            return False
+        remaining = [event for event in record["events"] if event["event_id"] != event_id]
+        if len(remaining) == len(record["events"]):
+            return False
+        if not remaining and command_id in self._client_completed:
+            path.unlink()
+        else:
+            record["events"] = remaining
+            atomic_write_text(path, json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+        return True
+
+    @_queue_locked
+    def reconcile_archived_client_result(self, client_command_id: str) -> bool:
+        self._refresh_from_disk_unlocked()
+        command_id = _clean_command_id(client_command_id)
+        path = self._result_receipt_path(command_id)
+        try:
+            record = self._read_result_receipt(path)
+        except FileNotFoundError:
+            return False
+        if command_id in self._client_inflight:
+            return False
+        if command_id in self._client_completed:
+            if not record["events"]:
+                path.unlink()
+            return True
+        previous_pending = self._client_pending
+        previous_completed = dict(self._client_completed)
+        self._client_pending = [command for command in self._client_pending if self._command_id(command) != command_id]
+        self._client_completed[command_id] = time.time()
+        while len(self._client_completed) > RECENT_CLIENT_COMMAND_IDS_MAX:
+            del self._client_completed[next(iter(self._client_completed))]
+        try:
+            self._write_current_unlocked()
+        except Exception:
+            self._client_pending = previous_pending
+            self._client_completed = previous_completed
+            raise
+        if not record["events"]:
+            path.unlink()
+        return True
+
     def _read_state_unlocked(self) -> _DurableQueueState:
         if not self.path.exists():
             return _DurableQueueState.empty()
@@ -412,6 +528,20 @@ class DurableUserMessageQueue:
         ):
             self._quarantine_corrupt_file_unlocked("unexpected_payload", "invalid client_cancelled")
             return _DurableQueueState.empty()
+        completed = payload.get("client_completed", {})
+        if not isinstance(completed, dict) or any(
+            not isinstance(command_id, str) or _clean_command_id(command_id) != command_id
+            or not isinstance(completed_at, (int, float)) or isinstance(completed_at, bool)
+            or not math.isfinite(completed_at)
+            for command_id, completed_at in completed.items()
+        ):
+            self._quarantine_corrupt_file_unlocked("unexpected_payload", "invalid client_completed")
+            return _DurableQueueState.empty()
+        cutoff = time.time() - CLIENT_COMMAND_DEDUP_MAX_AGE_SECONDS
+        completed = dict(sorted(
+            ((command_id, completed_at) for command_id, completed_at in completed.items() if completed_at >= cutoff),
+            key=lambda item: item[1],
+        )[-RECENT_CLIENT_COMMAND_IDS_MAX:])
         queues: dict[str, list[UserCommand]] = {}
         raw_queues = payload.get("queues")
         if not isinstance(raw_queues, dict):
@@ -437,7 +567,9 @@ class DurableUserMessageQueue:
             if not isinstance(conversation_id, str) or not isinstance(entries, list):
                 continue
             commands = [self._dict_to_command(item) for item in entries]
-            turn_inputs[conversation_id] = [item for item in commands if item is not None]
+            commands = [item for item in commands if item is not None]
+            if commands:
+                turn_inputs[conversation_id] = commands
 
         raw_client_pending = payload.get("client_pending")
         if not isinstance(raw_client_pending, list):
@@ -495,6 +627,7 @@ class DurableUserMessageQueue:
             migrated_sources=set(migrated),
             paused_conversations=paused,
             client_cancelled=cancelled,
+            client_completed=completed,
         )
 
     def _adopt_state_unlocked(self, state: _DurableQueueState) -> None:
@@ -504,6 +637,7 @@ class DurableUserMessageQueue:
         self._client_pending = state.client_pending
         self._client_inflight = state.client_inflight
         self._client_cancelled = state.client_cancelled
+        self._client_completed = state.client_completed
         self._inflight_owners = state.inflight_owners
         self._turn_input_owners = state.turn_input_owners
         self._client_inflight_owners = state.client_inflight_owners
@@ -567,6 +701,7 @@ class DurableUserMessageQueue:
                     pending = destination._queues.setdefault(conversation_id, [])
                     for command in commands:
                         command.data["_client_queue_key"] = self.path.stem
+                        self.ensure_queued_identity(command)
                         identity = self._user_command_identity(command)
                         if identity not in known:
                             pending.append(command)
@@ -866,22 +1001,46 @@ class DurableUserMessageQueue:
     def _current_state(self) -> _DurableQueueState:
         return _DurableQueueState(self._queues, self._inflight, self._turn_inputs, self._client_pending,
             self._client_inflight, self._inflight_owners, self._turn_input_owners,
-            self._client_inflight_owners, self._migrated_sources, self._paused_conversations, self._client_cancelled)
+            self._client_inflight_owners, self._migrated_sources, self._paused_conversations,
+            self._client_cancelled, self._client_completed)
 
     @classmethod
     def _user_command_identity(cls, command: UserCommand) -> str:
         data = dict(command.data or {})
+        entry_id = str(data.get("_queue_entry_id") or "")
+        if entry_id:
+            return entry_id
         assistant_message_id = str(data.get("assistant_message_id") or "").strip()
         user_message_id = str(data.get("user_message_id") or "").strip()
         if assistant_message_id or user_message_id:
             return f"message:{data.get('_client_queue_key', '')}\0{assistant_message_id}\0{user_message_id}"
         payload = cls._command_to_dict(command) or {"type": command.type, "data": {}}
-        return "payload:" + json.dumps(
+        encoded = json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
-        )
+        ).encode("utf-8")
+        return "payload:" + hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def ensure_queued_identity(cls, command: UserCommand) -> None:
+        """Give older queued inputs a stable identity before they are dispatched."""
+        data = command.data
+        user_id = str(data.get("user_message_id") or "").strip()
+        assistant_id = str(data.get("assistant_message_id") or "").strip()
+        if user_id and assistant_id:
+            return
+        client_id = _clean_command_id(data.get("client_command_id"))
+        if not data.get("_queue_entry_id"):
+            data["_queue_entry_id"] = (cls._user_command_identity(command) if user_id or assistant_id or client_id
+                                       else "entry:" + uuid4().hex)
+        if not client_id:
+            suffix = uuid4().hex
+            if not user_id:
+                data["user_message_id"] = "user_" + suffix
+            if not assistant_id:
+                data["assistant_message_id"] = "assistant_" + suffix
 
     @classmethod
     def _indexed_commands(
@@ -976,10 +1135,11 @@ class DurableUserMessageQueue:
             for conversation_id, command in inflight.items()
             if isinstance(command, UserCommand)
         }
-        desired_turn_inputs = {
-            str(conversation_id): [command for command in commands if isinstance(command, UserCommand)]
-            for conversation_id, commands in (turn_inputs or {}).items()
-        }
+        desired_turn_inputs = {}
+        for conversation_id, commands in (turn_inputs or {}).items():
+            pending = [command for command in commands if isinstance(command, UserCommand)]
+            if pending:
+                desired_turn_inputs[str(conversation_id)] = pending
         self._refresh_from_disk_unlocked()
 
         merged_queues = dict(self._queues)
@@ -1098,6 +1258,7 @@ class DurableUserMessageQueue:
                         if (item := self._client_command_to_dict(command)) is not None
                     ],
                     "client_cancelled": self._client_cancelled,
+                    "client_completed": self._client_completed,
                     "client_inflight": {
                         command_id: item
                         for command_id, command in self._client_inflight.items()
@@ -1174,6 +1335,51 @@ class DurableUserMessageQueue:
         self._write_current_unlocked()
         self._update_owner_queue_baseline_unlocked(conversation_id)
         return len(self._queues[conversation_id])
+
+    @_queue_locked
+    def promote_queued_user_message(
+        self, conversation_id: str, message_id: str, *, expected_turn_id: str = "",
+        expected_command: UserCommand | None = None,
+    ) -> tuple[UserCommand, UserCommand, list[UserCommand], list[UserCommand]] | None:
+        """Move the selected queued input to the current turn in one durable write."""
+        self._refresh_from_disk_unlocked()
+        queue = self._queues.get(conversation_id, [])
+        index = next((index for index, item in enumerate(queue)
+                      if str(item.data.get("assistant_message_id") or "").strip() == message_id), -1)
+        if index < 0:
+            return None
+        original = queue[index]
+        if expected_command is not None and not self.same_pending_payload(original, expected_command):
+            return None
+        previous_inputs = self._turn_inputs.get(conversation_id)
+        previous_owner = self._turn_input_owners.get(conversation_id)
+        if previous_inputs is not None and previous_owner != self._owner_id:
+            raise RuntimeError(f"Turn inputs for {conversation_id} are owned by another live runtime")
+        promoted = replace(original, data={**original.data,
+            **({"expected_turn_id": expected_turn_id} if expected_turn_id else {})})
+        previous_queue = list(queue)
+        queue.pop(index)
+        if not queue:
+            self._queues.pop(conversation_id, None)
+        self._turn_inputs[conversation_id] = [*(previous_inputs or []), promoted]
+        self._turn_input_owners[conversation_id] = self._owner_id
+        try:
+            self._write_current_unlocked()
+        except Exception:
+            self._queues[conversation_id] = previous_queue
+            if previous_inputs is None:
+                self._turn_inputs.pop(conversation_id, None)
+            else:
+                self._turn_inputs[conversation_id] = previous_inputs
+            if previous_owner is None:
+                self._turn_input_owners.pop(conversation_id, None)
+            else:
+                self._turn_input_owners[conversation_id] = previous_owner
+            raise
+        self._update_owner_queue_baseline_unlocked(conversation_id)
+        turn_inputs = list(self._turn_inputs[conversation_id])
+        self._owner_turn_inputs[conversation_id] = turn_inputs
+        return original, promoted, list(self._queues.get(conversation_id, ())), turn_inputs
 
     @_queue_locked
     def update_queued_user_message(self, conversation_id: str, message_id: str, payload: dict[str, Any]) -> UserCommand | None:
@@ -1256,6 +1462,7 @@ class DurableUserMessageQueue:
             if index < 0:
                 return None
         command = queue.pop(index)
+        self.ensure_queued_identity(command)
         if not queue:
             self._queues.pop(owner, None)
         self._inflight[owner] = command
@@ -1326,6 +1533,12 @@ class DurableUserMessageQueue:
         return any(self._command_id(command) == command_id for command in self._client_pending)
 
     @_queue_locked
+    def is_client_command_completed(self, client_command_id: str) -> bool:
+        self._refresh_from_disk_unlocked()
+        command_id = _clean_command_id(client_command_id)
+        return bool(command_id and (command_id in self._client_completed or self._result_receipt_path(command_id).exists()))
+
+    @_queue_locked
     def persist_client_command(self, command: UserCommand) -> bool:
         """Durably accept a command before its websocket ACK is emitted."""
         self._refresh_from_disk_unlocked()
@@ -1333,6 +1546,8 @@ class DurableUserMessageQueue:
         if payload is None:
             return False
         command_id = _clean_command_id(command.data.get("client_command_id"))
+        if command_id in self._client_completed or self._result_receipt_path(command_id).exists():
+            return True
         if self._cancelled_receipt_unlocked(command_id) is not None:
             return True
         if command_id in self._client_inflight or any(
@@ -1439,7 +1654,8 @@ class DurableUserMessageQueue:
         return record
 
     @_queue_locked
-    def bind_client_command_owner(self, client_command_id: str, conversation_id: str) -> bool:
+    def bind_client_command_owner(self, client_command_id: str, conversation_id: str,
+                                  *, selection_revisions: dict[str, int] | None = None) -> bool:
         """Bind the claimed input before its conversation admission begins."""
         self._refresh_from_disk_unlocked()
         command_id = _clean_command_id(client_command_id)
@@ -1449,16 +1665,17 @@ class DurableUserMessageQueue:
         previous_owner = command.data.get("conversation_id")
         if previous_owner and previous_owner != conversation_id:
             raise ValueError("A durable input cannot change conversation owner")
-        if previous_owner == conversation_id:
-            return True
+        previous_data = dict(command.data)
         command.data["conversation_id"] = conversation_id
+        for field, revision in (selection_revisions or {}).items():
+            command.data.setdefault(field, revision)
+        if command.data == previous_data:
+            return True
         try:
             self._write_current_unlocked()
         except Exception:
-            if previous_owner is None:
-                command.data.pop("conversation_id", None)
-            else:
-                command.data["conversation_id"] = previous_owner
+            command.data.clear()
+            command.data.update(previous_data)
             raise
         return True
 
@@ -1501,6 +1718,8 @@ class DurableUserMessageQueue:
         command_id = _clean_command_id(client_command_id)
         if not command_id:
             return None
+        if self._result_receipt_path(command_id).exists():
+            return None
         existing = self._client_inflight.get(command_id)
         if existing is not None:
             return None
@@ -1528,7 +1747,7 @@ class DurableUserMessageQueue:
 
     @_queue_locked
     def complete_client_command(self, client_command_id: str) -> bool:
-        """Commit completion; only after this may the id enter the dedup log."""
+        """Remove the inflight command and persist its completion in one write."""
         self._refresh_from_disk_unlocked()
         command_id = _clean_command_id(client_command_id)
         if self._cancelled_receipt_unlocked(command_id) is not None:
@@ -1539,11 +1758,16 @@ class DurableUserMessageQueue:
         if command is None:
             return False
         self._client_inflight_owners.pop(command_id, None)
+        previous_completed = dict(self._client_completed)
+        self._client_completed[command_id] = time.time()
+        while len(self._client_completed) > RECENT_CLIENT_COMMAND_IDS_MAX:
+            del self._client_completed[next(iter(self._client_completed))]
         try:
             self._write_current_unlocked()
         except Exception:
             self._client_inflight[command_id] = command
             self._client_inflight_owners[command_id] = self._owner_id
+            self._client_completed = previous_completed
             raise
         return True
 
@@ -1567,4 +1791,47 @@ class DurableUserMessageQueue:
             self._client_inflight_owners[command_id] = self._owner_id
             raise
         return True
+
+
+def delete_client_results_for_conversation(root_dir: Path, conversation_id: str) -> int:
+    """Erase a deleted conversation's result payloads across window queues."""
+    root = Path(root_dir)
+    receipts = root / "command-results"
+    if not receipts.exists():
+        return 0
+    removed = 0
+    failures: list[str] = []
+    with os.scandir(receipts) as sessions:
+        for session in sessions:
+            if session.is_symlink():
+                failures.append(f"{session.path}: command result directory is a symbolic link")
+                continue
+            if not session.is_dir(follow_symlinks=False):
+                continue
+            if os.name == "nt" and session.stat(follow_symlinks=False).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+                failures.append(f"{session.path}: command result directory is a reparse point")
+                continue
+            with file_mutation_locks([root / f"{session.name}.json"]), os.scandir(session.path) as files:
+                for item in files:
+                    if not item.is_file(follow_symlinks=False) or not item.name.endswith(".json"):
+                        continue
+                    path = Path(item.path)
+                    try:
+                        record = DurableUserMessageQueue._read_result_receipt(path)
+                        retained = []
+                        for event in record["events"]:
+                            data = event.get("data")
+                            owner = event.get("conversation_id") or (data.get("conversation_id") if isinstance(data, dict) else "")
+                            if owner == conversation_id:
+                                removed += 1
+                            else:
+                                retained.append(event)
+                        if len(retained) != len(record["events"]):
+                            record["events"] = retained
+                            atomic_write_text(path, json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+                    except (OSError, ValueError, KeyError, TypeError) as exc:
+                        failures.append(f"{path}: {exc}")
+    if failures:
+        raise RuntimeError("Some command results could not be inspected: " + "; ".join(failures))
+    return removed
 

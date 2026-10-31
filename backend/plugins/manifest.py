@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from collections.abc import Iterable, Mapping
@@ -50,6 +51,10 @@ def plugin_directory_for_manifest(manifest_path: Path) -> Path:
 class LoadedPluginManifest:
     payload: Mapping[str, Any]
     format: str
+    content_digest: str = ""
+
+
+_UNSET = object()
 
 
 def _resolve_plugin_manifest(payload: Mapping[str, Any], manifest_path: Path) -> LoadedPluginManifest:
@@ -68,10 +73,12 @@ def _resolve_plugin_manifest(payload: Mapping[str, Any], manifest_path: Path) ->
 
 def _load_plugin_manifest(manifest_path: Path) -> LoadedPluginManifest | None:
     try:
-        payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        contents = Path(manifest_path).read_text(encoding="utf-8")
+        payload = json.loads(contents)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    return _resolve_plugin_manifest(payload, manifest_path) if isinstance(payload, Mapping) else None
+    return replace(_resolve_plugin_manifest(payload, manifest_path),
+                   content_digest=hashlib.sha256(contents.encode("utf-8")).hexdigest()) if isinstance(payload, Mapping) else None
 
 
 def _read_plugin_manifest(manifest_path: Path) -> Mapping[str, Any] | None:
@@ -257,8 +264,9 @@ def _iter_hook_maps(payload: Any) -> Iterable[Mapping[str, Any]]:
     hooks = payload.get("hooks")
     yield hooks if isinstance(hooks, Mapping) else payload
 
-def _merge_manifest_metadata(entry: dict[str, Any], manifest_path: Path) -> None:
-    loaded = _load_plugin_manifest(manifest_path)
+def _merge_manifest_metadata(entry: dict[str, Any], manifest_path: Path, *, loaded: Any = _UNSET) -> None:
+    if loaded is _UNSET:
+        loaded = _load_plugin_manifest(manifest_path)
     if loaded is None:
         return
     raw = loaded.payload
@@ -322,7 +330,8 @@ def _resolve_manifest_asset(manifest_path: Path, value: Any) -> Path | None:
         return None
     return candidate if candidate.is_file() else None
 
-def plugin_skill_sources(plugin_dir: Path, manifest_paths: Iterable[Path] | None = None) -> tuple[list[Path], bool]:
+def plugin_skill_sources(plugin_dir: Path, manifest_paths: Iterable[Path] | None = None, *,
+                         loaded_manifests: Mapping[Path, LoadedPluginManifest | None] | None = None) -> tuple[list[Path], bool]:
     """Resolve the same manifest roots and format for inventory and runtime discovery."""
     skills_dirs: list[Path] = []
     direct_children = False
@@ -331,7 +340,7 @@ def plugin_skill_sources(plugin_dir: Path, manifest_paths: Iterable[Path] | None
         manifest_path = Path(manifest_path)
         direct_children = direct_children or manifest_path == plugin_dir / "plugin.json"
         try:
-            loaded = _load_plugin_manifest(manifest_path)
+            loaded = loaded_manifests.get(manifest_path.expanduser().absolute()) if loaded_manifests is not None else _load_plugin_manifest(manifest_path)
         except ValueError:
             return [], direct_children
         if loaded is None:
@@ -356,11 +365,12 @@ def plugin_skill_sources(plugin_dir: Path, manifest_paths: Iterable[Path] | None
     return list(dict.fromkeys(skills_dirs)), direct_children
 
 
-def _count_plugin_skills(plugin_dir: Path, manifest_paths: Iterable[Path] | None = None) -> int:
+def _count_plugin_skills(plugin_dir: Path, manifest_paths: Iterable[Path] | None = None, *,
+                         loaded_manifests: Mapping[Path, LoadedPluginManifest | None] | None = None) -> int:
     from backend.skills.loader import SkillLoader
 
     loader = SkillLoader()
-    skills_dirs, direct_children = plugin_skill_sources(plugin_dir, manifest_paths)
+    skills_dirs, direct_children = plugin_skill_sources(plugin_dir, manifest_paths, loaded_manifests=loaded_manifests)
     paths: set[str] = set()
     for skills_dir in skills_dirs:
         if not skills_dir.is_dir():
@@ -519,11 +529,13 @@ def _validate_plugin_manifest(manifest_path: Path) -> dict[str, Any]:
         "errors": errors,
     }
 
-def _manifest_component_counts(manifest_path: Path, *, plugin_id: str | None = None) -> dict[str, int]:
-    loaded = _load_plugin_manifest(manifest_path)
+def _manifest_component_counts(manifest_path: Path, *, plugin_id: str | None = None,
+                               loaded: Any = _UNSET, servers: Any = _UNSET) -> dict[str, int]:
+    if loaded is _UNSET:
+        loaded = _load_plugin_manifest(manifest_path)
     raw = loaded.payload if loaded is not None else {}
     plugin_dir = plugin_directory_for_manifest(Path(manifest_path))
-    mcp_servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id)
+    mcp_servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id) if servers is _UNSET else servers
     apps = _declared_component_payload(plugin_dir, raw.get("apps"), ".app.json", "apps")
     hooks = [] if loaded is not None and loaded.format == "agent_plugin" else _declared_component_payload(
         plugin_dir, raw.get("hooks"), "hooks/hooks.json", "hooks",
@@ -547,9 +559,12 @@ def _manifest_component_counts(manifest_path: Path, *, plugin_id: str | None = N
         "extension_count": len(extension_paths),
     }
 
-def _manifest_mcp_server_names(manifest_path: Path, *, plugin_id: str | None = None) -> list[str]:
-    loaded = _load_plugin_manifest(manifest_path)
-    servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id)
+def _manifest_mcp_server_names(manifest_path: Path, *, plugin_id: str | None = None,
+                               loaded: Any = _UNSET, servers: Any = _UNSET) -> list[str]:
+    if loaded is _UNSET:
+        loaded = _load_plugin_manifest(manifest_path)
+    if servers is _UNSET:
+        servers = _manifest_mcp_servers(manifest_path, loaded, plugin_id=plugin_id)
     if not isinstance(servers, Mapping):
         return []
     if loaded is not None and loaded.format == "agent_plugin":

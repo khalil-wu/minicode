@@ -124,14 +124,48 @@ export function AssistantMarkdownCell({
   );
   const visibleImageProgress = useMemo(() => {
     const progress = cell.imageProgress ?? [];
-    if (allImageArtifacts.length === 0) return progress;
-    // The validated Artifact is the completed state. Keep only a genuine
-    // failure or incomplete result alongside it; live/completed placeholders must be replaced
-    // rather than rendered as a second image-generation row.
-    return progress.filter((item) => item.status === "failed" || item.status === "partial");
-  }, [cell.imageProgress, allImageArtifacts.length]);
-  const hasPendingImage = allImageArtifacts.length === 0
-    && (cell.imageProgress ?? []).some((progress) => progress.status !== "failed" && progress.status !== "partial");
+    const selectedCalls = new Set(allImageArtifacts.flatMap((artifact) => artifact.toolCallId ? [artifact.toolCallId] : []));
+    return progress.filter((item) => {
+      // Tool failures remain in their original process disclosure. Only a
+      // provider-native lifecycle needs a separate answer-position failure.
+      if (item.status === "failed" || item.status === "partial") return !item.toolCallId;
+      if (item.toolCallId) {
+        if (selectedCalls.has(item.toolCallId)) return false;
+        // Code-mode tools may generate images for inspection and select no
+        // display output. A finished turn cannot still be loading that output.
+        return !(item.status === "completed" && cell.terminalStatus === "completed");
+      }
+      // Provider-native image events have no tool call. Their artifact remains
+      // in the same provider lifecycle; another tool's image cannot settle it.
+      return !allImageArtifacts.some((artifact) => !artifact.toolCallId);
+    });
+  }, [cell.imageProgress, cell.terminalStatus, allImageArtifacts]);
+  const imageRows = useMemo(() => {
+    const rows: ({ type: "progress"; progress: ProgressContentBlock } | { type: "artifact"; artifact: ArtifactPreview })[] = [];
+    const artifactsByCall = new Map<string, ArtifactPreview[]>();
+    for (const artifact of imageArtifacts) {
+      if (!artifact.toolCallId) continue;
+      const owned = artifactsByCall.get(artifact.toolCallId) ?? [];
+      owned.push(artifact);
+      artifactsByCall.set(artifact.toolCallId, owned);
+    }
+    const placed = new Set<string>();
+    const visible = new Set(visibleImageProgress.map((progress) => progress.id));
+    for (const progress of cell.imageProgress ?? []) {
+      for (const artifact of progress.toolCallId ? artifactsByCall.get(progress.toolCallId) ?? [] : []) {
+        if (placed.has(artifact.artifactId)) continue;
+        rows.push({ type: "artifact", artifact });
+        placed.add(artifact.artifactId);
+      }
+      if (visible.has(progress.id)) rows.push({ type: "progress", progress });
+    }
+    for (const artifact of imageArtifacts) {
+      if (!placed.has(artifact.artifactId)) rows.push({ type: "artifact", artifact });
+    }
+    return rows;
+  }, [cell.imageProgress, imageArtifacts, visibleImageProgress]);
+  const hasPendingImage = visibleImageProgress.some((progress) => progress.status !== "failed" && progress.status !== "partial"
+    && !(progress.status === "completed" && progress.toolCallId && cell.terminalStatus));
   const isSettled = !cell.isStreaming && !hasPendingImage;
 
   const copy = useCallback(async () => {
@@ -259,6 +293,10 @@ export function AssistantMarkdownCell({
     }
   }, [cell.messageId, conversationId, workspaceRoot, forking]);
 
+  if (!cell.isStreaming && !(cell.markdownBeforeArtifacts ?? rawMarkdown).trim()
+    && !cell.markdownAfterArtifacts?.trim() && imageRows.length === 0 && otherArtifacts.length === 0
+    && visibleGeneratedFiles.length === 0 && sources.length === 0 && !afterContent) return null;
+
   return (
     <div
       className="assistant-cell-wrap"
@@ -283,18 +321,18 @@ export function AssistantMarkdownCell({
         )}
         {(visibleImageProgress.length > 0 || imageArtifacts.length > 0 || otherArtifacts.length > 0) && (
           <div className="assistant-cell-generated" aria-label={tr("生成结果")} data-markdown-copy="exclude">
-            {visibleImageProgress.map((progress) => (
+            {imageRows.map((row) => row.type === "progress" ? (
               <ImageGenerationProgress
-                key={progress.id}
-                progress={progress}
+                key={`progress:${row.progress.id}`}
+                progress={row.progress}
                 fallbackFailureMessage={cell.failureMessage}
                 recoverable={cell.failureRecoverable}
+                settledWithoutOutput={Boolean(row.progress.toolCallId && cell.terminalStatus && row.progress.status === "completed")}
               />
-            ))}
-            {imageArtifacts.map((artifact) => (
+            ) : (
               <GeneratedArtifactCard
-                key={artifact.artifactId}
-                artifact={artifact}
+                key={row.artifact.artifactId}
+                artifact={row.artifact}
                 conversationId={conversationId || undefined}
               />
             ))}
@@ -454,16 +492,18 @@ function ImageGenerationProgress({
   progress,
   fallbackFailureMessage,
   recoverable,
+  settledWithoutOutput,
 }: {
   progress: ProgressContentBlock;
   fallbackFailureMessage?: string;
   recoverable?: boolean;
+  settledWithoutOutput?: boolean;
 }) {
   const { t: tr } = useI18n();
   const failed = progress.status === "failed";
   const incomplete = progress.status === "partial";
   const completed = progress.status === "completed";
-  const awaitingImage = !failed && !incomplete;
+  const awaitingImage = !failed && !incomplete && !settledWithoutOutput;
   const detail = String(
     progress.detail
       || (failed || incomplete ? fallbackFailureMessage : "")
@@ -492,13 +532,11 @@ function ImageGenerationProgress({
             : incomplete
               ? tr("图像生成未完整结束")
               : completed
-                ? tr("正在载入生成结果")
+                ? settledWithoutOutput ? tr("图像生成完成") : tr("正在载入生成结果")
                 : progress.message || tr("正在生成图像")}
         </strong>
         {detail && detail !== progress.message && <small>{detail}</small>}
-        {failed && (
-          <small>{recoverable ? tr("服务暂时不可用，可以重试。") : tr("请检查图像模型与 Provider 配置后重试。")}</small>
-        )}
+        {failed && recoverable && <small>{tr("服务暂时不可用，可以重试。")}</small>}
       </span>
     </div>
   );
@@ -513,12 +551,9 @@ function GeneratedArtifactCard({
 }) {
   const { t: tr } = useI18n();
   const [lightboxOpen, setLightboxOpen] = useState(false);
-  const [lightboxUrl, setLightboxUrl] = useState("");
   const [loadedImageUrl, setLoadedImageUrl] = useState("");
   const [failedImageUrl, setFailedImageUrl] = useState("");
   const [imageReloadNonce, setImageReloadNonce] = useState(0);
-  const lightboxRef = useFocusTrap(lightboxOpen);
-  useEscapeKey(() => setLightboxOpen(false), lightboxOpen, lightboxRef);
   const isConnected = useAppStore((state) => state.isConnected);
   const kind = canonicalArtifactKind(artifact.kind, artifact.mediaType);
   const mediaType = artifactMediaTypeForProjection(artifact.mediaType, kind) || "";
@@ -536,18 +571,21 @@ function GeneratedArtifactCard({
     }), imageReloadNonce);
   }, [artifact.artifactId, conversationId, imageReloadNonce, inlineUrl, isConnected, kind, mediaType, sessionId]);
   const imageUrl = persistedImageUrl;
+  const lightboxUrl = lightboxOpen ? imageUrl : "";
+  const lightboxRef = useFocusTrap(Boolean(lightboxUrl));
+  useEscapeKey(() => setLightboxOpen(false), Boolean(lightboxUrl), lightboxRef);
   const imageLoaded = Boolean(imageUrl && loadedImageUrl === imageUrl);
   const imageFailed = Boolean(imageUrl && failedImageUrl === imageUrl);
 
   const freshImageUrl = () => {
-    return artifactResourceUrl({
+    return withPreviewCacheBust(artifactResourceUrl({
       artifactId: artifact.artifactId,
       conversationId,
       sessionId,
       source: "artifact",
       originalUrl: inlineUrl,
       isConnected,
-    }) || imageUrl;
+    }), imageReloadNonce) || imageUrl;
   };
 
   const openImageLightbox = () => {
@@ -556,7 +594,6 @@ function GeneratedArtifactCard({
       pushToast(tr("图片内容尚未载入。"), "warning", 2400);
       return;
     }
-    setLightboxUrl(nextUrl);
     setLightboxOpen(true);
   };
 

@@ -188,6 +188,7 @@ def test_bypass_switch_keeps_ordinary_local_prompt_behavior(tmp_path: Path) -> N
             "request": {"subtype": "can_use_tool", "tool_name": "write_file",
                 "input": {"file_path": str(tmp_path / "local.txt"), "content": "original"}}}
         session.turn_wait_state.pending_approval_payloads["local-write"] = payload
+        session.turn_wait_state.pending_approval_inputs["local-write"] = copy.deepcopy(payload["request"]["input"])
         waiter = asyncio.get_running_loop().create_future()
         session.turn_wait_state.register_waiter("local-write", waiter)
         session.permission_context = session.permission_checker.build_context(mode="bypass")

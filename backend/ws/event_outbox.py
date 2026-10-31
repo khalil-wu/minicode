@@ -53,6 +53,35 @@ class CommandResultScope:
     include_data: bool = False
 
 
+@dataclass
+class DurableResultDelivery:
+    payload: dict[str, Any]
+    receipt: asyncio.Future[bool] | None
+    outbox: "EventOutbox"
+    generation: int
+
+
+@dataclass
+class DurableResultScope:
+    client_command_id: str
+    deliveries: list[DurableResultDelivery] = field(default_factory=list)
+    active: bool = True
+
+
+_durable_result_scope: ContextVar[DurableResultScope | None] = ContextVar("durable_command_results", default=None)
+
+
+@contextmanager
+def capture_durable_results(command_id: str) -> Iterator[DurableResultScope]:
+    scope = DurableResultScope(command_id)
+    token = _durable_result_scope.set(scope)
+    try:
+        yield scope
+    finally:
+        scope.active = False
+        _durable_result_scope.reset(token)
+
+
 class EventOutbox:
     """Own ordered WebSocket delivery and the durable reconnect window."""
 
@@ -313,7 +342,7 @@ class EventOutbox:
             return False
         async with self._send_lock:
             enveloped = self._envelope(payload) if envelope else dict(payload)
-            if self._is_replayable(enveloped):
+            if envelope and self._is_replayable(enveloped):
                 replay_payload, rewrite_events = self._stage(enveloped)
                 if rewrite_events is not None:
                     self._pending_persistence.clear()
@@ -321,7 +350,16 @@ class EventOutbox:
                 if self._persist_tail is None or self._persist_tail.done():
                     self._persist_tail = asyncio.create_task(self._persist_pending())
             self.record_command_result(payload)
+            durable_scope = _durable_result_scope.get()
+            capture = (durable_scope is not None and durable_scope.active and event_type == "command.result"
+                       and str(payload.get("client_command_id") or command_id) == durable_scope.client_command_id)
+            saved_result = None
+            if capture:
+                saved_result = {key: value for key, value in enveloped.items() if key not in {"seq", "previous_replay_seq"}}
+                saved_result.setdefault("event_id", f"{self.session_id}:{uuid.uuid4().hex}")
             if not self._can_send(generation):
+                if capture:
+                    durable_scope.deliveries.append(DurableResultDelivery(saved_result, None, self, generation))
                 if self._has_active_run():
                     self.events_dropped_during_disconnect = True
                 logger.debug(
@@ -330,18 +368,31 @@ class EventOutbox:
                     self.session_id,
                 )
                 return False
-            receipt = asyncio.get_running_loop().create_future() if wait_for_delivery else None
+            receipt = asyncio.get_running_loop().create_future() if wait_for_delivery or capture else None
             if receipt is not None:
                 receipt.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
             await self._delivery_queue.put((generation, enveloped, receipt))
+            if capture:
+                durable_scope.deliveries.append(DurableResultDelivery(saved_result, receipt, self, generation))
             if self._delivery_task is None or self._delivery_task.done():
                 self._delivery_task = asyncio.create_task(self._deliver_pending())
-        if receipt is not None:
+        if wait_for_delivery and receipt is not None:
             return await asyncio.shield(receipt)
         # Let an available transport make progress without tying execution to
         # socket completion. The bounded queue owns backpressure for slow peers.
         await asyncio.sleep(0)
         return True
+
+    def capture_undelivered_result(self, payload: dict[str, Any]) -> None:
+        scope = _durable_result_scope.get()
+        if (scope is None or not scope.active or payload.get("type") != "command.result"
+                or str(payload.get("client_command_id") or "") != scope.client_command_id):
+            return
+        saved = sanitize_ws_live_payload(payload)
+        saved.setdefault("event_id", f"{self.session_id}:{uuid.uuid4().hex}")
+        saved.setdefault("client_command_type", self._client_command_type.get())
+        saved.setdefault("timestamp", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+        scope.deliveries.append(DurableResultDelivery(saved, None, self, self.connection_generation))
 
     def record_command_result(self, payload: dict[str, Any]) -> None:
         scope = self._command_result_scope.get()

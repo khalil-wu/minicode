@@ -27,9 +27,10 @@ import time
 import urllib.parse
 import urllib.request
 import zipfile
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, ContextManager, Mapping
 from uuid import uuid4
 
 from backend.atomic_io import atomic_write_text
@@ -246,12 +247,15 @@ def materialize_source(
     copy_local_directory: bool = False,
     validate: Callable[[Path], None] | None = None,
     after_activate: Callable[[MaterializedSource], None] | None = None,
+    activation_scope: Callable[[], ContextManager[None]] | None = None,
 ) -> MaterializedSource:
     """Stage, validate, activate, and commit one source transactionally.
 
     ``validate`` runs against the isolated staged root before ``destination``
     changes. ``after_activate`` runs while the previous destination is still
     recoverable; an exception from it rolls the filesystem activation back.
+    ``activation_scope`` surrounds recovery and publication, not the fetch or
+    validation, so a registry can recheck its owner without locking network IO.
     Local directory sources are caller-owned, so they are validated and
     committed in place without copying them into the materialization cache.
     """
@@ -260,7 +264,20 @@ def materialize_source(
     destination = Path(destination).expanduser().absolute()
     destination.parent.mkdir(parents=True, exist_ok=True)
     _assert_safe_destination(destination)
-    recover_materialization_artifacts(destination)
+    def scope():
+        return activation_scope() if activation_scope is not None else nullcontext()
+
+    with scope():
+        recover_materialization_artifacts(destination)
+
+    def publish(root: Path) -> MaterializedSource:
+        with scope():
+            if parsed.kind == "directory" and not copy_local_directory:
+                result = MaterializedSource(root, parsed, reused_local=True)
+                if after_activate is not None:
+                    after_activate(result)
+                return result
+            return _activate(root, destination, parsed, overwrite=overwrite, after_activate=after_activate)
 
     if parsed.kind == "directory":
         path = Path(parsed.locator).expanduser().resolve()
@@ -270,15 +287,7 @@ def materialize_source(
             path = _assert_materialized_root(path)
         if validate is not None:
             validate(path)
-        if copy_local_directory:
-            return _activate(
-                path, destination, parsed,
-                overwrite=overwrite, after_activate=after_activate,
-            )
-        result = MaterializedSource(path, parsed, reused_local=True)
-        if after_activate is not None:
-            after_activate(result)
-        return result
+        return publish(path)
     if parsed.kind == "file":
         path = Path(parsed.locator).expanduser().resolve()
         if not path.is_file():
@@ -290,13 +299,7 @@ def materialize_source(
             root = _assert_materialized_root(_normalize_extracted_root(staged))
             if validate is not None:
                 validate(root)
-            return _activate(
-                root,
-                destination,
-                parsed,
-                overwrite=overwrite,
-                after_activate=after_activate,
-            )
+            return publish(root)
         finally:
             if staged.exists():
                 shutil.rmtree(staged, ignore_errors=True)
@@ -335,13 +338,7 @@ def materialize_source(
         root = _assert_materialized_root(root)
         if validate is not None:
             validate(root)
-        return _activate(
-            root,
-            destination,
-            parsed,
-            overwrite=overwrite,
-            after_activate=after_activate,
-        )
+        return publish(root)
     finally:
         if staged.exists():
             shutil.rmtree(staged, ignore_errors=True)

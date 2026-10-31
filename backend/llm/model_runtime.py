@@ -2181,7 +2181,7 @@ class ModelRuntime:
                 if override.get("max_context_window") is not None
                 else model.max_context_window or context_window
             )
-            if override.get("max_context_window") is not None:
+            if override.get("max_context_window") is not None or model.max_context_window_verified:
                 context_window = min(context_window, max_context_window)
             max_tokens = (
                 int(override["max_tokens"])
@@ -2427,6 +2427,8 @@ class ModelRuntime:
                 max_context_window = defaults.max_context_window
                 max_context_window_source = defaults.max_context_window_source
                 max_context_window_verified = defaults.max_context_window_verified
+                if max_context_window_verified:
+                    context_window = min(context_window, max_context_window)
             else:
                 max_context_window = context_window
                 max_context_window_source = context_window_source

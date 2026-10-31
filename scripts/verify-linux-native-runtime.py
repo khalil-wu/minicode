@@ -11,7 +11,10 @@ import subprocess
 import sys
 
 
-SOURCE_COMMIT = "822e58cc3d666166c7446c5b1ea2e52f5d09594c"
+SOURCE_COMMITS = {
+    "minicode-execpolicy": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+    "minicode-network": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
+}
 MAX_GLIBC = (2, 31)
 
 
@@ -19,7 +22,8 @@ def verify(runtime: Path, reports: Path) -> dict:
     reports.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((runtime / "runtime.json").read_text(encoding="utf-8"))
     engine = manifest["identity"]
-    assert engine in {"minicode-execpolicy", "minicode-network"}, engine
+    assert engine in SOURCE_COMMITS, engine
+    source_commit = SOURCE_COMMITS[engine]
     assert manifest["target"] == "x86_64-unknown-linux-gnu", manifest["target"]
     for name, expected in manifest["files"].items():
         assert hashlib.sha256((runtime / name).read_bytes()).hexdigest() == expected, name
@@ -50,15 +54,15 @@ def verify(runtime: Path, reports: Path) -> dict:
     libraries = command("ldd", ["ldd", str(binary)])
     if engine == "minicode-execpolicy":
         identity = json.loads(command("identity", [str(binary)], '{"operation":"identity"}'))
-        expected = {"ok": True, "identity": engine, "source_commit": SOURCE_COMMIT, "starlark": "0.14.2", "protocol": 1}
-        assert manifest["source_commit"] == SOURCE_COMMIT
+        expected = {"ok": True, "identity": engine, "source_commit": source_commit, "starlark": "0.14.2", "protocol": 1}
+        assert manifest["source_commit"] == source_commit
     else:
         identity = json.loads(command("identity", [str(binary)], '{"id":1,"method":"identity","params":{}}\n'))
-        expected = {"id": 1, "result": {"identity": engine, "protocol": 1, "sourceCommit": SOURCE_COMMIT}}
-        assert manifest["sourceCommit"] == SOURCE_COMMIT and manifest["linux_sandbox_routing_protocol"] == 1
+        expected = {"id": 1, "result": {"identity": engine, "protocol": 1, "sourceCommit": source_commit}}
+        assert manifest["sourceCommit"] == source_commit and manifest["linux_sandbox_routing_protocol"] == 1
         command("linux-helper", [str(binary), "--sandbox-policy-cwd", "/", "--help"])
     assert identity == expected, identity
-    result = {"runtime": str(runtime), "source_commit": SOURCE_COMMIT, "target": manifest["target"],
+    result = {"runtime": str(runtime), "source_commit": source_commit, "target": manifest["target"],
               "binary_sha256": manifest["files"][engine], "identity": identity,
               "maximum_required_glibc": max(required, key=lambda item: tuple(map(int, item[6:].split(".")))),
               "baseline_glibc": "2.31", "interpreter": re.search(r"Requesting program interpreter: ([^\]]+)", headers).group(1),

@@ -78,7 +78,7 @@ class SessionRestoreManager:
         # client-supplied workspace can be stale after deleting/switching into
         # a global chat, and must not turn an unbound conversation back into a
         # project workspace.
-        if bound_workspace_root:
+        if bound_workspace_root and not bound_workspace_root.startswith("file:"):
             try:
                 workspace_root = normalize_project_import_path(bound_workspace_root)
                 if not workspace_root.is_dir():

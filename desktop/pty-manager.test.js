@@ -408,7 +408,7 @@ test("cold saved shell choices feed exact executable and Source args to the owne
   assert.equal(calls.length, 7);
 });
 
-test("Windows natural exit disposes native resources once and retains the real exit tombstone", async () => {
+test("Windows natural exit retains its native owner's real tombstone without killing an exited PID", async () => {
   const { directory, manager: isolated } = isolatedShellModules();
   const exits = [];
   let nativeKills = 0;
@@ -422,15 +422,15 @@ test("Windows natural exit disposes native resources once and retains the real e
   getWindowByInstanceId: () => ({ isDestroyed: () => false, webContents: { send(channel, value) { sent.push({ channel, value }); } } }) });
   const natural = isolated.spawnSession(directory, "natural-owner", "window");
   exits[0]({ exitCode: 7 });
-  assert.equal(nativeKills, 1);
+  assert.equal(nativeKills, 0);
   assert.equal(isolated.snapshotSession(natural.session_id, undefined, "natural-owner", "window").exit_code, 7);
   assert.equal(sent.filter(event => event.channel === "minicode:pty:exit").length, 1);
   assert.equal(sent.find(event => event.channel === "minicode:pty:exit").value.exitCode, 7);
   await isolated.killSession(natural.session_id, "natural-owner", "window");
-  assert.equal(nativeKills, 1);
+  assert.equal(nativeKills, 0);
   const requested = isolated.spawnSession(directory, "requested-owner", "window");
   await isolated.killSession(requested.session_id, "requested-owner", "window");
-  assert.equal(nativeKills, 2);
+  assert.equal(nativeKills, 1);
   assert.equal(isolated.snapshotSession(requested.session_id, undefined, "requested-owner", "window"), null);
 });
 
@@ -445,7 +445,9 @@ async function realShellRoundtrip(t, choice) {
   }
   preferences.setPreferences({ terminalShell: choice });
   preferences.init(file);
-  const nativePty = require("node-pty");
+  const nativePty = process.platform === "win32"
+    ? require("./windows-pty").createWindowsPty(path.join(__dirname, "windows-sandbox-runtime", "codex.exe"))
+    : require("node-pty");
   let spawned;
   let settleExit;
   let acceptOutput;

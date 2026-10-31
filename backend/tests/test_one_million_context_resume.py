@@ -18,19 +18,19 @@ from backend.llm.model_selection import config_with_model_budget
 from backend.services.llm_adapter_factory import build_wire_adapter
 
 
-@pytest.mark.parametrize("model, capacity", [
-    ("gpt-6-luna", 1_050_000), ("openai/gpt-5.5", 272_000),
-    ("gpt-4o", 128_000), ("claude-sonnet-4-6", 200_000),
-    ("llama-3-8b", 8_000), ("llama-3.1-70b", 128_000),
-    ("claude-sonnet-4-6[1m]", 1_000_000), ("gateway-model", 1_000_000),
+@pytest.mark.parametrize("model, capacity, window, verified", [
+    ("gpt-6-luna", 872_000, 272_000, True), ("openai/gpt-5.5", 272_000, 272_000, True),
+    ("gpt-4o", 272_000, 272_000, False), ("claude-sonnet-4-6", 272_000, 272_000, False),
+    ("llama-3-8b", 272_000, 272_000, False), ("llama-3.1-70b", 272_000, 272_000, False),
+    ("claude-sonnet-4-6[1m]", 272_000, 272_000, False), ("gateway-model", 272_000, 272_000, False),
 ])
-def test_application_default_does_not_relabel_published_capacity(monkeypatch, model, capacity):
+def test_model_window_keeps_its_capacity_provenance(monkeypatch, model, capacity, window, verified):
     monkeypatch.delenv("MINICODE_MAX_CONTEXT_TOKENS", raising=False)
     metadata = get_provider_model_metadata({}, model)
-    assert metadata["context_window"] == 1_000_000
-    assert metadata["context_window_verified"] is False
+    assert metadata["context_window"] == window
+    assert metadata["context_window_verified"] is verified
     assert metadata["max_context_window"] == capacity
-    assert metadata["max_context_window_verified"] is (model != "gateway-model")
+    assert metadata["max_context_window_verified"] is verified
 
 
 @pytest.mark.parametrize("wire_api", ["chat", "responses", "anthropic"])
@@ -43,9 +43,10 @@ def test_wire_adapters_preserve_default_window_provenance(wire_api, monkeypatch)
             "max_context_window", "max_context_window_source", "max_context_window_verified",
         )})
     adapter = build_wire_adapter(settings)
-    assert adapter.capabilities.context_window == 1_000_000
+    assert adapter.capabilities.context_window == 272_000
     assert adapter.capabilities.context_window_verified is False
-    assert adapter.capabilities.max_context_window == 200_000
+    assert adapter.capabilities.max_context_window == 272_000
+    assert adapter.capabilities.max_context_window_verified is False
 
 
 def test_models_json_and_extension_defaults_reach_selected_turn_budget(tmp_path, monkeypatch):
@@ -58,10 +59,10 @@ def test_models_json_and_extension_defaults_reach_selected_turn_budget(tmp_path,
     config = AppConfig(llm=LLMSettings(api_key="test-only"), token_budget=TokenBudget(total=32_000))
     for provider in ("file-provider", "extension-provider"):
         model = runtime.get_model(provider, "test-model")
-        assert model.context_window == 1_000_000
+        assert model.context_window == 272_000
         assert model.context_window_verified is False
         selected = config_with_model_budget(config, model_runtime=runtime, provider=provider, model="test-model")
-        assert selected.token_budget.total == 1_000_000
+        assert selected.token_budget.total == 272_000
         assert selected.token_budget.reserved_response_tokens == 16_384
         assert config.token_budget.total == 32_000
 
@@ -87,7 +88,7 @@ def test_extension_capacity_survives_model_override_and_ui_projection():
         "context_window": 32_000, "max_context_window": 64_000,
     }]})
     selected = runtime.get_model("capacity-provider", "limited-model")
-    assert selected.context_window == 1_000_000
+    assert selected.context_window == 64_000
     assert selected.max_context_window == 64_000
     payload = llm_model_updated_payload(provider="capacity-provider", selected_model="limited-model",
         available_models=["limited-model"], workspace_root="", provider_metadata={
@@ -95,7 +96,7 @@ def test_extension_capacity_survives_model_override_and_ui_projection():
             "max_context_window": selected.max_context_window,
             "max_context_window_verified": selected.max_context_window_verified,
         })
-    assert payload["context_window"] == 1_000_000
+    assert payload["context_window"] == 64_000
     assert payload["max_context_window"] == 64_000
     assert payload["max_context_window_verified"] is True
 

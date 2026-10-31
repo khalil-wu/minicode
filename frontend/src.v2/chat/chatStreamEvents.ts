@@ -874,6 +874,8 @@ const applyChatStreamEvent = (
         artifact_id: artifactId,
         kind: "image",
         summary: `Generated ${imageFormat} image (legacy stream)`,
+        source: "image_generation",
+        tool_call_id: ev.tool_call_id,
         bytes: decodedBase64ByteLength(imageData),
         media_type: ev.media_type,
         url: `data:${ev.media_type};base64,${imageData}`,

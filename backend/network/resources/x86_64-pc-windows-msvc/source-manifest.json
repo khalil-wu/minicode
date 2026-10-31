@@ -1,20 +1,21 @@
 {
   "source": "https://github.com/openai/codex",
-  "source_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
-  "rust_toolchain": "1.95.0",
+  "source_commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
+  "rust_toolchain": "1.99.1",
   "target": "x86_64-pc-windows-msvc",
   "source_files": {
-    "core/src/config/network_proxy_spec.rs": "c2dedc8e7bdd4b69baae56553a725f7cf3941c8d848bb6951ebcb732154b0fd5",
+    "core/src/config/network_proxy_spec.rs": "393948b5774bc2d346c7f77ce29a233bb7b6c2a7113a638612693a506172d438",
     "core/src/network_policy_decision.rs": "ab5087590206b88f58cb071d22fa04db431b495a36393ff4dc6b75507ccb7582",
-    "file-system/src/lib.rs": "9b7fe888858c41554318ba039f468266aa067ceccc781131cd022ef87ca6b16c",
+    "file-system/src/lib.rs": "a993aeb0a31859d50256444a70092f7582bb9ae60fcb44ed4fb5ef2e6fc9c603",
     "file-system/src/exec_permission_profile_serde.rs": "b75ce10bf45776937d36cbabb75e48fb0a2b44eafc170d6ed76e55eff0e1519b",
     "utils/audio/src/lib.rs": "e7e1472c4c6a643f31217039181f1c87a9f5ef3f04294f6959eee09a2c81fc28",
     "utils/audio/Cargo.toml": "a8bd5661a23ac093df6f9a307dc9e440201e7bf7995044dbfc632869f62914c0",
     "utils/image/Cargo.toml": "2f84e8c60810db1ec6ae392715d130117b27f6e3b94be089790a1a85221be9bd",
-    "utils/cache/src/lib.rs": "92c767c89cabd8b76fbea47daf81ce81d848c48340a58bb6cadc53438ae8f202",
-    "utils/string/src/truncate.rs": "2f00b33069af787f3d208ba8b9b5a8431309ea7b499a7a2d437ce93890c99333",
-    "core/src/context_manager/history.rs": "1d7deb94a5270f7b8457a7a009858a0882b3fb8f03d7325c2b91449bced864c4"
+    "utils/cache/src/lib.rs": "0e0ea62654abb6cb0318fbd9e4911167fd6374e1cdcdcfb2ade169fc72e9c56a",
+    "utils/string/src/truncate.rs": "30d2a86c0208867b81c45b214de92ced18adfbe2722caed5a3efb3424431bc8b",
+    "core/src/context_manager/history.rs": "efa4559b18671e775181360a988073dd8427cf91ff3c591046e81896289ce570"
   },
+  "source_adaptations": {},
   "source_derivations": {
     "src/source_original_image.rs": {
       "upstream": "core/src/context_manager/history.rs",
@@ -31,11 +32,12 @@
       ]
     }
   },
-  "cargo_lock_sha256": "00847feef333214e232b35e7d9deb10d962c8dcaa5e31006a27520585dce46cb",
-  "build_script_sha256": "a504f84f0d6b6d900c43f863bf26cd6115f3c796e68b5b9836630145283db937",
+  "cargo_lock_sha256": "a021be90d9d3179422e7cc99abf571dca9723f25c0c050e53fd3fd4e935c7548",
+  "build_script_sha256": "34d16455d118a3a499d59418a0c933aed620b781035898eef092664b9a8eda48",
   "bridge_files": {
-    "Cargo.toml": "c0bdc1da7fd36aed66fad32c708e2978d40b762c6a120f1aea580e09f6ae3660",
-    "src/lib.rs": "ef230e8f3822aff2ee9bc2030fa0244225b14b767a71bbdb1fc90f358ded2149",
+    "Cargo.toml": "f2b40c87b6f81a5b3ed6ba893e8132a274d7eb7b105d4c6436cf4290136ed81d",
+    "src/browser_network_test.rs": "469b6bd3061afc5aa66a03a46531ac6c2fa10b332cdd15bfdbc0d449009ecb5b",
+    "src/lib.rs": "2fe03ea54ac762e3445509a6f06ab1d0a221233a2bb23144d11f821f641445b4",
     "src/main.rs": "8553d199ec5c91e2d8e493dcc45a3caac5eb82e276fb5338b530879a05482ae5",
     "src/media.rs": "7a896a5f99abe0be861b06b0f02e04414dbce700e397d92afd7b488ceea44310",
     "src/source_original_image.rs": "5f008052320efa2fecc1f6d4d70c6ad970bed344c225e900abd15b1fb09278d2"

@@ -1,0 +1,7 @@
+This skill is adapted from OpenAI Codex, revision
+970111f6cb62cc02fe36a82ea7d71b37a2889c97,
+codex-rs/skills/src/assets/samples/imagegen.
+
+The upstream material is licensed under Apache-2.0; see LICENSE.txt.
+SKILL.md and selected references are adapted for MiniCode's image tool and
+user-provided external APIs. The bundled scripts and assets retain their upstream form.

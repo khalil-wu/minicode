@@ -1352,17 +1352,7 @@ async def _run_authorized_tool(
             )
             _remember_hook_model_context(tc, post)
             await _emit_hook_system_message(tool_ctx, post)
-            if tc.name.startswith("mcp__") and post.updated_mcp_tool_output is not None:
-                replacement = post.updated_mcp_tool_output
-                if not isinstance(replacement, str):
-                    replacement = json.dumps(
-                        replacement, ensure_ascii=False, default=str
-                    )
-                result = replace(result, content=replacement)
-            # Post-tool hooks carry only attachments/progress
-            # and updatedMCPToolOutput — there is no block concept after a
-            # tool already ran, so a "blocked" flag must not overwrite the
-            # successful result.
+            # Feedback is delivered to the model; the completed tool result is unchanged.
         except Exception as exc:
             logger.warning("post_tool hook failed: %s", exc)
     elif hook_mgr and hook_ready and not hook_success:
@@ -2504,14 +2494,20 @@ def store_result_events(
         append_context_result=append_context_result,
     )
     image_events: list[AgentEvent] = []
-    if result.result_kind == "image_generation" and not result.is_error:
+    # A nested code-mode call returns its image to the cell.  Only the cell's
+    # selected output may publish it; otherwise generatedImage() publishes the
+    # same image a second time (or an unselected image appears on its own).
+    if (result.result_kind == "image_generation" and not result.is_error
+            and (tool_ctx is None or tool_ctx.result_sink is None)):
         for image in result.images:
             if not isinstance(image, dict):
                 continue
             image_data = str(image.get("data") or "").strip()
             media_type = str(image.get("media_type") or "image/png").strip()
             if image_data:
-                image_events.append(AgentEvent.image_chunk(image_data, media_type))
+                image_event = AgentEvent.image_chunk(image_data, media_type)
+                image_event.data["tool_call_id"] = tc.id
+                image_events.append(image_event)
     # Keep the terminal tool_result last because runtime-span settlement reads
     # the final emitted event as the authoritative tool completion record.
     return [*image_artifact_events, *audio_events, *resource_events, *image_events, event]

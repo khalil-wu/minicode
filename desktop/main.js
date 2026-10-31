@@ -59,10 +59,17 @@ app.on("browser-window-focus", (_event, window) => {
 // ---------------------------------------------------------------------------
 
 let pty;
-try {
-  pty = require("node-pty");
-} catch (e) {
-  // node-pty might fail to load if not built properly
+if (process.platform === "win32") {
+  const { createWindowsPty } = require("./windows-pty");
+  pty = createWindowsPty(app.isPackaged
+    ? path.join(process.resourcesPath, "windows-sandbox", "codex.exe")
+    : path.join(__dirname, "windows-sandbox-runtime", "codex.exe"));
+} else {
+  try {
+    pty = require("node-pty");
+  } catch (e) {
+    // A missing native Unix PTY is reported when its actual owner starts it.
+  }
 }
 
 // ---------------------------------------------------------------------------

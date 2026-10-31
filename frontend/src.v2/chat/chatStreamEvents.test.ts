@@ -10,6 +10,7 @@ import { pushToast } from "../overlays/ToastContainer";
 import { rejectClientCommandResult, sendClientCommand } from "../protocol/ws-outbox";
 import { resetPendingUserMessagesForTests } from "./sendChatMessage";
 import { deleteConversationComposerDrafts } from "../stores/composer-drafts";
+import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 
 vi.mock("../overlays/ToastContainer", () => ({ pushToast: vi.fn() }));
 vi.mock("../protocol/ws-outbox", () => ({ sendClientCommand: vi.fn(() => true), rejectClientCommandResult: vi.fn(() => false) }));
@@ -738,6 +739,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
       media_type: "image/png",
       image_data: "iVBORw0KGgo=",
       event_id: "session-1:image-1",
+      tool_call_id: "image-call-1",
     } as unknown as ServerEvent;
 
     expect(handle(event)).toBe(true);
@@ -750,6 +752,8 @@ describe("handleChatStreamEvent typed lifecycle", () => {
       expect.objectContaining({
         artifactId: expect.stringMatching(/^legacy-image-/),
         kind: "image",
+        source: "image_generation",
+        toolCallId: "image-call-1",
         summary: "Generated PNG image (legacy stream)",
         bytes: 8,
         mediaType: "image/png",
@@ -1228,6 +1232,19 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(state.messages[0]).toMatchObject({ id: "assistant-stream", isStreaming: true });
     expect(state.isStreaming).toBe(true);
     expect(resetPendingUserMessagesForTests).not.toHaveBeenCalled();
+  });
+
+  it("shows a queue recovery error without changing the active turn or draft", () => {
+    const message = "Queued commands could not be fully restored.";
+    useAppStore.setState({ draft: "unsent draft" });
+    const event = normalizeInboundServerEvent({ type: "error", message, recoverable: false,
+      error_type: "storage", error_code: "user_message.queue.restore",
+      error_details: { reason: "malformed_json", path: "queue.json" } });
+    expect(event).not.toBeNull();
+    expect(handle(event!)).toBe(true);
+    expect(pushToast).toHaveBeenCalledWith(message, "error", 6000);
+    expect(useAppStore.getState().messages[0]).toMatchObject({ id: "assistant-stream", isStreaming: true });
+    expect(useAppStore.getState()).toMatchObject({ draft: "unsent draft", isStreaming: true, conversationId: "conv-stream" });
   });
 
   it("hydrates replayed owned errors without replaying destructive recovery or toasts", () => {

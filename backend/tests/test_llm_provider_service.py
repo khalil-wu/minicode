@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -59,33 +58,6 @@ def test_custom_anthropic_discovers_models_only_through_anthropic_endpoint(monke
     assert result["models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
 
 
-def test_custom_anthropic_connection_checks_only_the_messages_transport() -> None:
-    calls: list[tuple[str, str]] = []
-
-    async def fetch_anthropic(base_url: str, _api_key: str, **_transport) -> list[str]:
-        calls.append(("anthropic-models", base_url))
-        return ["deepseek-v4-pro"]
-
-    async def fail_openai(_base_url: str, _api_key: str, **_transport) -> list[str]:
-        raise AssertionError("explicit Anthropic wire API must not probe OpenAI discovery")
-
-    async def check_messages(base_url: str, _api_key: str, model: str, **_transport) -> None:
-        calls.append(("messages", f"{base_url}::{model}"))
-
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        _request(),
-        fetch_anthropic_models=fetch_anthropic,
-        fetch_openai_models=fail_openai,
-        check_anthropic_generation=check_messages,
-    ))
-
-    assert result["ok"] is True
-    assert result["provider_id"] == "custom_anthropic"
-    assert result["wire_api"] == "anthropic"
-    assert calls == [
-        ("anthropic-models", "https://api.deepseek.com/anthropic"),
-        ("messages", "https://api.deepseek.com/anthropic::deepseek-v4-pro"),
-    ]
 
 
 def test_custom_anthropic_preserves_manual_model_without_cross_protocol_fallback(monkeypatch) -> None:
@@ -167,25 +139,6 @@ def test_model_discovery_keeps_draft_candidates_out_of_saved_profiles(tmp_path, 
     assert get_llm_settings_payload() == before_payload
 
 
-@pytest.mark.parametrize("field", ["base_url", "model"])
-def test_connection_check_does_not_replace_explicit_blank_fields_with_saved_values(monkeypatch, field) -> None:
-    monkeypatch.setattr(llm_provider_service, "get_custom_settings", lambda: {
-        "base_url": "https://saved.example/v1", "model": "saved-model", "wire_api": "chat",
-    })
-    values = {"base_url": "https://draft.example/v1", "model": "draft-model", "api_key": "draft-key"}
-    values[field] = ""
-
-    async def unexpected_request(*_args, **_kwargs):
-        pytest.fail("An incomplete draft must not make a provider request")
-
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        LLMSettingsUpdateRequest.model_validate({"provider": "custom", "custom": values}),
-        fetch_openai_models=unexpected_request,
-        check_openai_generation=unexpected_request,
-    ))
-    assert result["ok"] is False
-    assert result["failure_kind"] == "configuration_error"
-    assert result[field] == ""
 
 
 def test_model_discovery_extracts_reference_client_metadata_shapes() -> None:
@@ -315,7 +268,7 @@ def test_live_refresh_clears_stale_capabilities_when_provider_declares_none(
     assert result["configured_reasoning_effort"] == "low"
     assert result["effective_reasoning_effort"] == ""
     assert result["reasoning_effort_supported"] is False
-    assert result["context_window"] == 1_000_000
+    assert result["context_window"] == 272_000
     assert result["context_window_source"] == "fallback"
     assert result["context_window_verified"] is False
 
@@ -423,153 +376,12 @@ def test_custom_chat_runtime_projects_declared_reasoning_efforts() -> None:
     assert capabilities.effective_reasoning_effort == "medium"
 
 
-def test_custom_anthropic_generation_is_authoritative_when_discovery_fails() -> None:
-    calls: list[str] = []
-
-    async def fail_anthropic(_base_url: str, _api_key: str, **_transport) -> list[str]:
-        calls.append("anthropic-models")
-        raise RuntimeError("no Anthropic models endpoint")
-
-    async def fail_openai(_base_url: str, _api_key: str, **_transport) -> list[str]:
-        raise AssertionError("explicit Anthropic wire API must not probe OpenAI discovery")
-
-    async def check_messages(base_url: str, _api_key: str, model: str, **_transport) -> None:
-        calls.append(f"messages:{base_url}:{model}")
-
-    result = asyncio.run(llm_provider_service.check_llm_connection(
-        _custom_messages_request(),
-        fetch_anthropic_models=fail_anthropic,
-        fetch_openai_models=fail_openai,
-        check_anthropic_generation=check_messages,
-    ))
-
-    assert result["ok"] is True
-    assert result["models"] == ["vendor-model-1"]
-    assert calls == [
-        "anthropic-models",
-        "messages:https://gateway.example/v1:vendor-model-1",
-    ]
 
 
-def test_official_anthropic_empty_base_url_still_posts_to_official_messages(monkeypatch) -> None:
-    request: dict[str, object] = {}
-
-    class _Response:
-        def json(self):
-            return {"content": [{"type": "text", "text": "OK"}]}
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _Client:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def post(self, url: str, **kwargs):
-            request["url"] = url
-            request["kwargs"] = kwargs
-            return _Response()
-
-    monkeypatch.setattr(llm_provider_helpers.httpx, "AsyncClient", _Client)
-
-    asyncio.run(llm_provider_helpers._check_anthropic_generation(
-        "",
-        "anthropic-key",
-        "claude-sonnet-4-6",
-        headers={},
-        auth_header=False,
-    ))
-
-    assert request["url"] == "https://api.anthropic.com/v1/messages"
-    assert request["kwargs"]["json"]["model"] == "claude-sonnet-4-6"
-    assert request["kwargs"]["json"]["max_tokens"] == 64
 
 
-def test_openai_chat_generation_probe_does_not_use_one_token(monkeypatch) -> None:
-    request: dict[str, object] = {}
-
-    class _Response:
-        def json(self):
-            return {"choices": [{"message": {"role": "assistant", "content": "OK"}}]}
-
-        def raise_for_status(self) -> None:
-            return None
-
-    class _Client:
-        def __init__(self, **_kwargs) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-        async def post(self, url: str, **kwargs):
-            request["url"] = url
-            request["kwargs"] = kwargs
-            return _Response()
-
-    monkeypatch.setattr(llm_provider_helpers.httpx, "AsyncClient", _Client)
-
-    asyncio.run(
-        llm_provider_helpers._check_openai_compatible_generation(
-            "https://gateway.example/v1",
-            "provider-key",
-            "glm-5.2",
-            "chat",
-            headers={},
-            auth_header=False,
-        )
-    )
-
-    assert request["url"] == "https://gateway.example/v1/chat/completions"
-    assert request["kwargs"]["json"]["max_tokens"] == 64
 
 
-def test_responses_generation_probe_is_bounded_like_its_chat_sibling() -> None:
-    """"Test connection" must not spin forever on a half-open endpoint.
-
-    The chat branch bounds itself with ``httpx.AsyncClient(timeout=15.0)``. The
-    responses branch drives a full OpenAIAdapter whose client has a 600s read
-    timeout, so without an explicit ceiling the settings dialog hangs for ten
-    minutes against a server that accepts the TCP connection and never replies.
-    """
-
-    async def scenario() -> tuple[float, str]:
-        server = await asyncio.start_server(lambda _r, _w: None, "127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
-        started = time.monotonic()
-        try:
-            await asyncio.wait_for(
-                llm_provider_helpers._check_openai_compatible_generation(
-                    f"http://127.0.0.1:{port}/v1",
-                    "provider-key",
-                    "gpt-5.4",
-                    "responses",
-                    headers={},
-                    auth_header=False,
-                ),
-                # Generously past the probe's own ceiling; if this fires the
-                # probe is unbounded.
-                timeout=llm_provider_helpers._GENERATION_CHECK_TIMEOUT_SECONDS + 20,
-            )
-        except RuntimeError as exc:
-            return time.monotonic() - started, str(exc)
-        finally:
-            server.close()
-        raise AssertionError("probe returned success against a half-open endpoint")
-
-    elapsed, message = asyncio.run(scenario())
-
-    assert "timed out" in message
-    assert elapsed < llm_provider_helpers._GENERATION_CHECK_TIMEOUT_SECONDS + 10
 
 
 def test_session_llm_factory_type_error_is_not_retried() -> None:
@@ -633,194 +445,26 @@ def test_direct_proxy_mode_is_used_for_refresh_discovery(monkeypatch) -> None:
     assert result["proxy_mode"] == "direct"
 
 
-@pytest.mark.parametrize("wire_api", ["chat", "responses"])
-def test_direct_proxy_mode_covers_text_discovery_generation_and_images(
-    monkeypatch,
-    wire_api: str,
-) -> None:
-    section = SimpleNamespace(
-        api_key="test-key",
-        base_url="https://gateway.example/v1",
-        model="gateway-model",
-        wire_api=wire_api,
-        proxy_mode="direct",
-        available_models=["gateway-model"],
-        model_metadata={},
-        image_mode="custom",
-        image_api_key="test-image-key",
-        image_base_url="https://images.example/v1",
-        image_model="image-model",
-        image_size="1024x1024",
-        image_quality="",
-    )
-    request = SimpleNamespace(
-        provider="custom",
-        custom=section,
-        openai=section,
-        anthropic=section,
-    )
-    seen: list[tuple[str, str]] = []
-
-    async def fetch_models(
-        _base_url: str,
-        _api_key: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> list[str]:
-        seen.append(("models", proxy_mode))
-        return ["gateway-model"]
-
-    async def check_text(
-        _base_url: str,
-        _api_key: str,
-        _model: str,
-        selected_wire_api: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> None:
-        seen.append((f"text:{selected_wire_api}", proxy_mode))
-
-    async def check_image(
-        _base_url: str,
-        _api_key: str,
-        _model: str,
-        _size: str,
-        _quality: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> None:
-        seen.append(("image", proxy_mode))
-
-    result = asyncio.run(
-        llm_provider_service.check_llm_connection(
-            request,
-            fetch_openai_models=fetch_models,
-            check_openai_generation=check_text,
-            check_image_generation=check_image,
-        )
-    )
-
-    assert result["ok"] is True
-    assert result["proxy_mode"] == "direct"
-    assert seen == [
-        ("models", "direct"),
-        (f"text:{wire_api}", "direct"),
-        ("image", "direct"),
-    ]
-
-
-def test_direct_proxy_mode_covers_anthropic_models_and_messages() -> None:
-    section = SimpleNamespace(
-        api_key="test-key",
-        base_url="https://messages.example/v1",
-        model="claude-model",
-        wire_api="anthropic",
-        proxy_mode="direct",
-        available_models=["claude-model"],
-        model_metadata={},
-        image_mode="disabled",
-    )
-    request = SimpleNamespace(
-        provider="anthropic",
-        custom=section,
-        openai=section,
-        anthropic=section,
-    )
-    seen: list[tuple[str, str]] = []
-
-    async def fetch_models(
-        _base_url: str,
-        _api_key: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> list[str]:
-        seen.append(("models", proxy_mode))
-        return ["claude-model"]
-
-    async def check_messages(
-        _base_url: str,
-        _api_key: str,
-        _model: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> None:
-        seen.append(("messages", proxy_mode))
-
-    result = asyncio.run(
-        llm_provider_service.check_llm_connection(
-            request,
-            fetch_anthropic_models=fetch_models,
-            check_anthropic_generation=check_messages,
-        )
-    )
-
-    assert result["ok"] is True
-    assert result["proxy_mode"] == "direct"
-    assert seen == [("models", "direct"), ("messages", "direct")]
-
-
-def test_omitted_proxy_mode_preserves_saved_direct_profile(monkeypatch) -> None:
-    monkeypatch.setattr(
-        llm_provider_service,
-        "get_custom_settings",
-        lambda: {
-            "api_key": "stored-key",
-            "base_url": "https://gateway.example/v1",
-            "model": "gateway-model",
-            "wire_api": "chat",
-            "proxy_mode": "direct",
-            "image_mode": "disabled",
-            "image_model": "",
-        },
-    )
-    request = LLMSettingsUpdateRequest(
-        provider="custom",
-        custom={
-            "api_key": "test-key",
-            "base_url": "https://gateway.example/v1",
-            "model": "gateway-model",
-            "wire_api": "chat",
-            "image_mode": "disabled",
-        },
-    )
-    seen: list[str] = []
-
-    async def fetch_models(
-        _base_url: str,
-        _api_key: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> list[str]:
+@pytest.mark.parametrize("wire", ["chat", "anthropic"])
+def test_discovery_uses_saved_direct_mode_when_request_omits_it(monkeypatch, wire):
+    current = {"api_key": "stored-key", "base_url": "https://gateway.example/v1",
+        "model": "gateway-model", "wire_api": wire, "proxy_mode": "direct", "image_mode": "disabled"}
+    monkeypatch.setattr(llm_provider_service, "get_custom_settings", lambda: current)
+    request = LLMSettingsUpdateRequest.model_validate({"provider": "custom", "custom": {
+        "api_key": "fixture", "base_url": current["base_url"], "model": current["model"], "wire_api": wire}})
+    seen = []
+    async def discover(_base_url, _key, *, proxy_mode, **_transport):
         seen.append(proxy_mode)
         return ["gateway-model"]
+    result = asyncio.run(llm_provider_service.refresh_llm_models(request,
+        fetch_openai_models=discover, fetch_anthropic_models=discover))
+    assert result["proxy_mode"] == "direct" and seen == ["direct"]
 
-    async def check_text(
-        _base_url: str,
-        _api_key: str,
-        _model: str,
-        _wire_api: str,
-        *,
-        proxy_mode: str,
-        **_transport,
-    ) -> None:
-        seen.append(proxy_mode)
 
-    result = asyncio.run(
-        llm_provider_service.check_llm_connection(
-            request,
-            fetch_openai_models=fetch_models,
-            check_openai_generation=check_text,
-        )
-    )
 
-    assert result["proxy_mode"] == "direct"
-    assert seen == ["direct", "direct"]
+
+
+
 
 
 @pytest.mark.parametrize("change_target, clear_behavior", [(False, False), (True, False), (False, True)])

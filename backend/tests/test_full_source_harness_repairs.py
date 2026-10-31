@@ -301,7 +301,7 @@ def test_ambiguous_hook_alias_observes_but_cannot_grant_the_mcp_request(tmp_path
                            condition_matches=condition, match_aliases=aliases) == [entry]
     assert not grant(entry)
     result = reduce_hook_executions(HookEvent.PRE_TOOL_USE, [HookExecution(entry=entry,
-        stdout=json.dumps({"event": "pre_tool_use", "permission_decision": "allow", "updated_input": {"x": 1}, "additional_context": "observed"}),
+        stdout=json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": {"x": 1}, "additionalContext": "observed"}}),
         stderr="", exit_code=0, configured_order=0, completion_order=0, duration_ms=1, permission_grant_allowed=False)],
         expected_event_name="pre_tool_use")
     assert result.permission_decision == "" and not result.blocked

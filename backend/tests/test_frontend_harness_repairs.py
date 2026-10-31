@@ -210,6 +210,24 @@ def test_delete_cleanup_uses_existing_control_response_waiter() -> None:
     assert session.turn_wait_state.waiter_ids() == set()
 
 
+def test_resource_cleanup_timeout_reports_rejection_and_releases_waiter(monkeypatch) -> None:
+    class Session(SessionApprovalRuntimeMixin):
+        approval_diff_cache = {}
+
+        async def send_payload(self, payload, **kwargs):
+            return True
+
+    session = Session()
+    session.emit_approval_cancelled_once = AsyncMock()
+    target = SimpleNamespace(id="owner", workspace_root="C:/workspace", worktree_path="", execution_cwd="C:/workspace")
+    monkeypatch.setattr(conversation_handlers, "CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
+    result = asyncio.run(conversation_handlers._request_conversation_resource_cleanup(session, target))
+    assert result["action"] == "reject"
+    assert result["reason"] == "client_resource_timeout"
+    assert session.turn_wait_state.waiter_ids() == set()
+    session.emit_approval_cancelled_once.assert_awaited_once()
+
+
 @pytest.mark.parametrize("failure", ["preflight", "renderer", "physical", None])
 def test_delete_checks_then_cleans_local_resources_then_removes_worktree(tmp_path: Path, monkeypatch, failure: str | None) -> None:
     from backend.tasks import scheduler

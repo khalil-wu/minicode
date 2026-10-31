@@ -117,7 +117,7 @@ def test_image_tool_reads_references_and_saves_new_bytes_without_replacing_user_
         async def aclose(self): pass
     monkeypatch.setattr(image_generation_tool, "OpenAIAdapter", Adapter)
     tool = image_generation_tool.GenerateImageTool()
-    monkeypatch.setattr(tool, "_settings_for_context", lambda _context: {"enabled": True, "api_key": "test", "base_url": "https://images.example/v1", "model": "image-model", "provider": "custom"})
+    monkeypatch.setattr(tool, "_settings_for_context", lambda _context, **_overrides: {"enabled": True, "api_key": "test", "base_url": "https://images.example/v1", "model": "image-model", "provider": "custom"})
     context = ToolExecutionContext(permission=PermissionContext(workspace_root=tmp_path), workspace_root=tmp_path,
         sandbox_policy=SandboxPolicy(workspace_root=tmp_path, writable_roots=(tmp_path,)))
     output = tmp_path / "generated.png"

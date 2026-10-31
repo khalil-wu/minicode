@@ -158,7 +158,7 @@ def test_handoff_mutations_keep_explicit_control_plane(monkeypatch, tmp_path):
     assert handoff.restore_main_checkout(tmp_path, branch="main")[0]
     assert handoff.delete_local_branch(tmp_path, "next")[0]
     assert reads == []
-    assert [args[:2] for args in writes] == [("stash", "push"), ("stash", "list"), ("stash", "apply"), ("switch", "next"), ("switch", "main"), ("branch", "-D")]
+    assert [args[:3] if args[0] == "switch" else args[:2] for args in writes] == [("stash", "push"), ("stash", "list"), ("stash", "apply"), ("switch", "--no-overwrite-ignore", "next"), ("switch", "--no-overwrite-ignore", "main"), ("branch", "-D")]
 
 
 def test_host_git_and_model_namespace_failures_remain_distinct(monkeypatch, tmp_path):
@@ -175,6 +175,19 @@ def test_host_git_and_model_namespace_failures_remain_distinct(monkeypatch, tmp_
     doctor = health_service.build_git_doctor_payload(tmp_path)
     assert doctor["available"] is False and doctor["clean"] is False
     assert handoff._workspace_snapshot(tmp_path).status == "<status unavailable>"
+
+
+def test_doctor_does_not_report_a_failed_git_status_as_clean(monkeypatch, tmp_path):
+    def git_metadata(_root, *args, **_kwargs):
+        if args[0] == "branch":
+            return subprocess.CompletedProcess(["git", *args], 0, "main\n", "")
+        return subprocess.CompletedProcess(["git", *args], 1, "", "status unavailable")
+
+    monkeypatch.setattr(health_service, "run_ui_git_metadata", git_metadata)
+    result = health_service.build_git_doctor_payload(tmp_path)
+    assert result["available"] is True
+    assert result["clean"] is False
+    assert result["error"] == "status unavailable"
 
 
 @pytest.mark.parametrize("absolute", [False, True])

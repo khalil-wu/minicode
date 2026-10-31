@@ -57,6 +57,7 @@ class _OrdinaryChildHooks:
         self.runtime = runtime
         self.stop_calls: list[tuple[str, str]] = []
         self.subagent_id = ""
+        self._session_started = False
 
     def has_hooks(self, event: HookEvent) -> bool:
         return event == HookEvent.SUBAGENT_STOP
@@ -64,11 +65,25 @@ class _OrdinaryChildHooks:
     def bind_runtime(self, **_: Any) -> None:
         return None
 
+    def fork_for_subagent(self, **_: Any) -> "_OrdinaryChildHooks":
+        # This recording fake has no mutable runtime binding; its shared call
+        # log lets the parent test inspect the child's lifecycle decisions.
+        return self
+
+    async def finalize_async_hooks(self) -> None:
+        return None
+
     async def run_task_created(self, **_: Any) -> HookResult:
         return HookResult()
 
     async def run_subagent_start(self, **_: Any) -> HookResult:
         return HookResult()
+
+    async def run_subagent_start_once(self, **kwargs: Any) -> HookResult:
+        if self._session_started:
+            return HookResult()
+        self._session_started = True
+        return await self.run_subagent_start(**kwargs)
 
     async def run_subagent_stop(
         self,

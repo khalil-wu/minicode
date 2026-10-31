@@ -5,7 +5,7 @@ import asyncio
 from copy import copy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import json
 import re
 from uuid import uuid4
@@ -17,6 +17,7 @@ from backend.workspace.executor_git import executor_git_environment, executor_gi
 from backend.workspace.executor_paths import ExecutorPath
 from backend.terminal.executor_runner import ExecutorCommandRunner
 from backend.environments.errors import ExecutorError, ExecutorProtocolError
+from backend.workspace.worktree_snapshot_git import IN_PROGRESS_GIT_STATE, RAW_ATTRIBUTES, index_entries, object_alternate, recovery_mode
 
 
 _REFS = "refs/minicode/wt-snapshots/"
@@ -40,9 +41,10 @@ async def _canonical(service, path, *, write=False):
     return actual
 
 
-async def _git(service, programs, *args, cwd=None, write=False, index=None, env=None, allowed=(0,), runners=None, write_paths=()):
+async def _git(service, programs, *args, cwd=None, write=False, index=None, env=None, allowed=(0,), runners=None, write_paths=(), scope=None):
     policy, overrides = executor_git_environment(service, index_file=index)
-    scope = await executor_git_write_scope(service, cwd=cwd, write_paths=write_paths) if write else executor_git_action_scope(service.scope)
+    if scope is None:
+        scope = await executor_git_write_scope(service, cwd=cwd, write_paths=write_paths) if write else executor_git_action_scope(service.scope)
     command_service = copy(service)
     command_service.cwd = cwd or service.cwd
     stdout = []
@@ -98,9 +100,9 @@ async def _registered(service, programs, inventory, target, *, write=False):
     entry = inventory.entry(target)
     if entry is None:
         raise HTTPException(409, "Worktree not found in this repository")
-    top, _, _ = await _git(service, programs, "rev-parse", "--show-toplevel", cwd=target)
-    common, _, _ = await _git(service, programs, "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=target)
-    if await _canonical(service, top.strip()) != target or await _canonical(service, common.strip()) != inventory.common:
+    paths, _, _ = await _git(service, programs, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--git-dir", cwd=target)
+    top, common, gitdir = paths.splitlines()
+    if await _canonical(service, top) != target or await _canonical(service, common) != inventory.common:
         raise HTTPException(409, "Worktree repository identity changed")
     primary_git = inventory.main.joinpath(".git")
     primary_info = await service.filesystem.get_metadata(primary_git.uri, sandbox=service.sandbox, follow_symlinks=False)
@@ -108,10 +110,15 @@ async def _registered(service, programs, inventory, target, *, write=False):
             or await _canonical(service, primary_git) != inventory.common or inventory.common.parent != inventory.main):
         raise HTTPException(409, "The primary checkout does not own this worktree repository")
     if target != inventory.main:
-        gitdir, _, _ = await _git(service, programs, "rev-parse", "--path-format=absolute", "--git-dir", cwd=target)
-        gitdir = await _canonical(service, gitdir.strip())
+        gitdir = await _canonical(service, gitdir)
         await registered_worktree_metadata(service, target, gitdir, inventory.common)
+        entry = {**entry, "gitdir": gitdir}
     return target, entry
+
+
+async def _require_finished_git_operation(service, entry):
+    if any(item["fileName"] in IN_PROGRESS_GIT_STATE for item in await service.list_directory(entry["gitdir"])):
+        raise HTTPException(409, "Worktrees with an in-progress Git operation cannot be removed or snapshotted")
 
 
 async def _isolated(service, inventory, target):
@@ -159,11 +166,14 @@ async def _complete_files(service, target, *, write=False):
     return walked["entries"]
 
 
-async def _snapshot_records(service, programs, inventory):
+async def _snapshot_records(service, programs, inventory, *, known=None):
     output, _, _ = await _git(service, programs, "for-each-ref", "--format=%(refname)%00%(objectname)", _REFS)
     records = []
     for line in output.splitlines():
         ref, sha = line.split("\0")
+        if known is not None and ref == known["snapshot_ref"] and sha == known["snapshot_sha"]:
+            records.append(known)
+            continue
         body, _, _ = await _git(service, programs, "show", "-s", "--format=%B", ref)
         if not body.startswith(_MESSAGE):
             raise HTTPException(409, f"Snapshot metadata is unavailable on this executor: {ref}")
@@ -187,8 +197,10 @@ async def _snapshot_records(service, programs, inventory):
 async def _snapshot(service, programs, inventory, target, entry, *, label="Before worktree removal"):
     identity = "wtsnap_" + uuid4().hex
     ref = _REFS + identity
-    head, code, _ = await _git(service, programs, "rev-parse", "--verify", "--quiet", "HEAD", cwd=target, allowed=(0, 1))
-    head = head.strip() if code == 0 else None
+    paths, code, _ = await _git(service, programs, "rev-parse", "--path-format=absolute", "--git-path", "index",
+        "--shared-index-path", "--verify", "--quiet", "HEAD", cwd=target, allowed=(0, 1))
+    index_paths = paths.splitlines()
+    head = index_paths.pop() if code == 0 else None
     record = {"id": identity, "conversation_id": service.context.conversation_id,
         "branch": entry.get("branch", "").removeprefix("refs/heads/"), "original_path": target.uri,
         "main_repo_path": inventory.main.uri, "common_git_dir": inventory.common.uri, "head": head,
@@ -205,40 +217,64 @@ async def _snapshot(service, programs, inventory, target, entry, *, label="Befor
                 await runner.cleanup()
                 if not runner.closed:
                     raise ExecutorProtocolError(f"Snapshot index cleanup awaits its original Git process: {index.uri}")
-        for suffix in ("", ".lock"):
+        for suffix in ("", ".lock", ".tree"):
             path = service.resolve(index.native + suffix)
             if await service.metadata(path) is not None:
                 await service.filesystem.remove(path.uri, sandbox=index_sandbox)
 
     await index_owner.add_cleanup_callback(remove_index)
     try:
-        await _git(service, programs, "read-tree", *([head] if head else ["--empty"]),
-            cwd=target, write=True, index=index.uri, runners=runners)
-        await _git(service, programs, "add", "-A", "--force", cwd=target, write=True, index=index.uri, runners=runners)
+        original, _, _ = await _git(service, programs, "ls-files", "--stage", "-z", cwd=target, runners=runners)
+        previous = {name: mode for mode, _sha, name in index_entries(original)}
+        if "160000" in previous.values():
+            raise HTTPException(409, "Worktrees containing submodules cannot be snapshotted")
+        config, _, _ = await _git(service, programs, "config", "--bool", "--get-regexp", r"^core\.(filemode|symlinks)$", cwd=target, allowed=(0, 1), runners=runners)
+        flags = dict(line.split(" ", 1) for line in config.splitlines())
+        await _git(service, programs, "read-tree", "--empty", cwd=target, write=True, index=index.uri, runners=runners, scope=index_scope)
+        await _git(service, programs, "add", "-N", "-A", "--force", cwd=target, write=True, index=index.uri, runners=runners, scope=index_scope)
         staged, _, _ = await _git(service, programs, "ls-files", "--stage", "-z", cwd=target, index=index.uri, runners=runners)
-        regular = []
-        for item in staged.split("\0"):
-            if item:
-                header, name = item.split("\t", 1)
-                mode, _sha, _stage = header.split(" ")
-                if mode in {"100644", "100755"}:
-                    regular.append((mode, name))
-        # Git add and checkout apply repository clean/smudge and newline
-        # attributes. Recovery commits must retain the actual working bytes.
-        for start in range(0, len(regular), 64):
-            group = regular[start:start + 64]
+        entries = index_entries(staged)
+        if any(mode == "160000" for mode, _sha, _name in entries):
+            raise HTTPException(409, "Worktrees containing embedded Git repositories cannot be snapshotted")
+        symbolic_links = [name for mode, _sha, name in entries if mode == "120000"]
+        for start in range(0, len(symbolic_links), 64):
+            await _git(service, programs, "--literal-pathspecs", "add", "--force", "--", *symbolic_links[start:start + 64],
+                cwd=target, write=True, index=index.uri, runners=runners, scope=index_scope)
+        regular = [(mode, name) for mode, _sha, name in entries if mode in {"100644", "100755"}]
+        sources = [(None, name) for name in index_paths] + regular
+        index_blobs = []
+        for start in range(0, len(sources), 64):
+            group = sources[start:start + 64]
             hashes, _, _ = await _git(service, programs, "hash-object", "-w", "--no-filters", "--",
-                *(target.joinpath(name).native for _mode, name in group), cwd=target, write=True, runners=runners)
-            entries = [(mode, name, sha) for (mode, name), sha in zip(group, hashes.splitlines(), strict=True)]
-            await _git(service, programs, "update-index", "--add",
-                *(value for mode, name, sha in entries for value in ("--cacheinfo", f"{mode},{sha},{name}")),
-                cwd=target, write=True, index=index.uri, runners=runners)
-        tree, _, _ = await _git(service, programs, "write-tree", cwd=target, write=True, index=index.uri, runners=runners)
+                *(name for _mode, name in group), cwd=target, write=True, runners=runners, scope=index_scope)
+            entries = []
+            for (mode, name), sha in zip(group, hashes.splitlines(), strict=True):
+                if mode is None:
+                    filename = "index" if not index_blobs else name.replace("\\", "/").rsplit("/", 1)[-1]
+                    index_blobs.append((filename, sha))
+                else:
+                    entries.append((recovery_mode(mode, previous.get(name), filemode=flags.get("core.filemode", "true") == "true",
+                                                  symlinks=flags.get("core.symlinks", "true") == "true"), name, sha))
+            if entries:
+                await _git(service, programs, "update-index", "--add",
+                    *(value for mode, name, sha in entries for value in ("--cacheinfo", f"{mode},{sha},{name}")),
+                    cwd=target, write=True, index=index.uri, runners=runners, scope=index_scope)
+        record.update(raw_worktree=True, symbolic_links=symbolic_links)
+        tree, _, _ = await _git(service, programs, "write-tree", cwd=target, write=True, index=index.uri, runners=runners, scope=index_scope)
+        index_tree = service.resolve(index.native + ".tree")
+        tree_bytes = b"".join(b"100644 " + name.encode("utf-8") + b"\0" + bytes.fromhex(sha) for name, sha in index_blobs)
+        await service.filesystem.write_file(index_tree.uri, tree_bytes, sandbox=index_sandbox)
+        original_tree, _, _ = await _git(service, programs, "hash-object", "-w", "-t", "tree", "--", index_tree.native,
+            cwd=target, write=True, runners=runners, scope=index_scope)
+        author = {"GIT_AUTHOR_NAME": "MiniCode", "GIT_AUTHOR_EMAIL": "snapshot@minicode.local",
+                  "GIT_COMMITTER_NAME": "MiniCode", "GIT_COMMITTER_EMAIL": "snapshot@minicode.local"}
+        index_sha, _, _ = await _git(service, programs, "commit-tree", original_tree.strip(), *(["-p", head] if head else []),
+            "-m", "minicode worktree index: " + identity, cwd=target, write=True, env=author, runners=runners, scope=index_scope)
+        record["index_sha"] = index_sha.strip()
         sha, _, _ = await _git(service, programs, "commit-tree", tree.strip(), *(["-p", head] if head else []),
-            "-m", _MESSAGE + json.dumps(record, ensure_ascii=False), cwd=target, write=True,
-            env={"GIT_AUTHOR_NAME": "MiniCode", "GIT_AUTHOR_EMAIL": "snapshot@minicode.local",
-                 "GIT_COMMITTER_NAME": "MiniCode", "GIT_COMMITTER_EMAIL": "snapshot@minicode.local"}, runners=runners)
-        await _git(service, programs, "update-ref", ref, sha.strip(), "", cwd=target, write=True, runners=runners)
+            "-p", record["index_sha"], "-m", _MESSAGE + json.dumps(record, ensure_ascii=False),
+            cwd=target, write=True, env=author, runners=runners, scope=index_scope)
+        await _git(service, programs, "update-ref", ref, sha.strip(), "", cwd=target, write=True, runners=runners, scope=index_scope)
         return {**record, "snapshot_sha": sha.strip(), "snapshot_ref": ref}
     finally:
         try:
@@ -251,10 +287,10 @@ async def _snapshot(service, programs, inventory, target, entry, *, label="Befor
                     reason="worktree_snapshot_index_cleanup_pending")
 
 
-async def _prune(service, programs, inventory, keep_id):
+async def _prune(service, programs, inventory, keep_record):
     cutoff = datetime.now(UTC) - timedelta(days=30)
-    for index, record in enumerate(await _snapshot_records(service, programs, inventory)):
-        if record["id"] != keep_id and (index >= 50 or datetime.fromisoformat(record["created_at"]) < cutoff):
+    for index, record in enumerate(await _snapshot_records(service, programs, inventory, known=keep_record)):
+        if record["id"] != keep_record["id"] and (index >= 50 or datetime.fromisoformat(record["created_at"]) < cutoff):
             await _git(service, programs, "update-ref", "-d", record["snapshot_ref"], record["snapshot_sha"], write=True)
 
 
@@ -263,34 +299,47 @@ async def _snapshot_action(service, programs, path, label):
     target, entry = await _registered(service, programs, inventory, service.resolve(path or service.cwd.uri))
     await _isolated(service, inventory, target)
     async with service.mutate([inventory.common, target]):
+        await _require_finished_git_operation(service, entry)
         entries = await _complete_files(service, target)
         if any((candidate := service.resolve(item["path"])).name == ".git" and candidate.parent != target for item in entries):
             raise HTTPException(409, "Worktrees containing initialized submodules or embedded Git repositories cannot be snapshotted")
         record = await _snapshot(service, programs, inventory, target, entry, label=label)
-        await _prune(service, programs, inventory, record["id"])
+        await _prune(service, programs, inventory, record)
         return record
 
 
-async def _remove(service, programs, path, force):
+async def _remove(service, programs, path, force, *, model_relative=False):
     inventory = await _inventory(service, programs)
+    if model_relative:
+        raw = str(path)
+        pure = PureWindowsPath(raw) if service.cwd.convention == "windows" else PurePosixPath(raw)
+        if not raw.startswith("file:") and not pure.is_absolute() and tuple(pure.parts[:2]) != (".minicode", "worktrees"):
+            if service.context.turn_environment.is_remote:
+                path = inventory.main.joinpath(".minicode/worktrees").joinpath(raw)
+            else:
+                from backend.services.worktree_settings_service import managed_worktree_root
+                path = service.resolve(str(managed_worktree_root() / raw))
+        else:
+            path = service.resolve(raw)
     target, entry = await _registered(service, programs, inventory, path)
     if target == inventory.current:
         raise HTTPException(409, "Cannot remove current worktree")
     await _isolated(service, inventory, target)
     service = await _action_parent(service, inventory, target.parent)
     async with service.mutate([inventory.common, target]):
+        await _require_finished_git_operation(service, entry)
         await _complete_files(service, target, write=True)
         dirty, _, _ = await _git(service, programs, "status", "--porcelain=v1", "-z", "--ignored", "--untracked-files=all", cwd=target)
         result = {"removed": False, "path": _display(service, target), "branch": entry.get("branch", "").removeprefix("refs/heads/")}
         if dirty and not force:
             return {**result, "error": "Worktree has local changes; force is required"}
-        if not service.context.turn_environment.is_remote:
-            from backend.workspace.local_environment_lifecycle import run_context_worktree_environment
-            await run_context_worktree_environment(Path(inventory.main.native), Path(target.native), "cleanup", service.context, application_config=service.application_config)
         if dirty:
             snapshot = await _snapshot(service, programs, inventory, target, entry)
             result.update(snapshot_id=snapshot["id"], snapshot_ref=snapshot["snapshot_ref"])
-            await _prune(service, programs, inventory, snapshot["id"])
+            await _prune(service, programs, inventory, snapshot)
+        if not service.context.turn_environment.is_remote:
+            from backend.workspace.local_environment_lifecycle import run_context_worktree_environment
+            await run_context_worktree_environment(Path(inventory.main.native), Path(target.native), "cleanup", service.context, application_config=service.application_config)
         _, code, error = await _git(service, programs, "worktree", "remove", *(["--force"] if force else []),
             "--", target.native, write=True, write_paths=(target.parent,), allowed=(0, 1, 128))
         if code == 0 and not service.context.turn_environment.is_remote:
@@ -326,23 +375,58 @@ async def _restore(service, programs, snapshot_id, dest):
     async with service.mutate([inventory.common, target]):
         if await service.metadata(target) is not None and await service.list_directory(target):
             raise HTTPException(409, "Restore destination is not empty")
-        _, code, error = await _git(service, programs, "-c", "core.symlinks=true", "worktree", "add", "--detach", "--", target.native,
+        _, code, error = await _git(service, programs, "worktree", "add", "--detach", "--no-checkout", "--", target.native,
             record["snapshot_sha"], write=True, write_paths=(parent,), allowed=(0, 1, 128))
         if code == 0:
-            tree, _, _ = await _git(service, programs, "ls-tree", "-r", "-z", record["snapshot_sha"])
-            for item in tree.split("\0"):
-                if not item:
-                    continue
-                header, name = item.split("\t", 1)
-                mode, _kind, sha = header.split(" ")
-                if mode in {"100644", "100755"}:
-                    blob = await run_executor_git(service, [programs["git"], "cat-file", "blob", sha])
-                    if blob.returncode:
-                        raise HTTPException(409, blob.stderr.decode("utf-8", errors="replace").strip())
-                    file = await _canonical(service, target.joinpath(name), write=True)
-                    if not file.is_relative_to(target):
-                        raise HTTPException(409, "Restored file resolves outside the target worktree")
-                    await service.filesystem.write_file(file.uri, blob.stdout, sandbox=service.sandbox, follow_symlinks=False)
+            scratch = inventory.common.joinpath("minicode-restore-" + uuid4().hex[:12])
+            restore_scope = await executor_git_write_scope(service, cwd=target, write_paths=(parent,))
+            restore_sandbox = restore_scope.sandbox_context()
+            restore_owner = ExecutorCommandRunner(await workbench_policy(service, timeout=120, permission_scope=restore_scope))
+            runners = []
+
+            async def remove_scratch():
+                for runner in runners:
+                    if not runner.closed:
+                        await runner.cleanup()
+                        if not runner.closed:
+                            raise ExecutorProtocolError(f"Snapshot restore cleanup awaits its original Git process: {scratch.uri}")
+                if await service.metadata(scratch) is not None:
+                    await service.filesystem.remove(scratch.uri, sandbox=restore_sandbox, recursive=True)
+
+            await restore_owner.add_cleanup_callback(remove_scratch)
+            try:
+                await _git(service, programs, "-c", "core.longpaths=true", "init", "--bare", "--template=", scratch.native,
+                    cwd=target, write=True, scope=restore_scope, runners=runners)
+                await service.filesystem.create_directory(scratch.joinpath("info").uri, sandbox=restore_sandbox)
+                await service.filesystem.write_file(scratch.joinpath("info/attributes").uri, RAW_ATTRIBUTES, sandbox=restore_sandbox)
+                await service.filesystem.write_file(scratch.joinpath("objects/info/alternates").uri,
+                    object_alternate(inventory.common.joinpath("objects").native), sandbox=restore_sandbox)
+                git_dir, work_tree = "--git-dir=" + scratch.native, "--work-tree=" + target.native
+                command = ("-c", "core.symlinks=false", git_dir, work_tree)
+                await _git(service, programs, *command, "read-tree", record["snapshot_sha"],
+                    cwd=target, write=True, scope=restore_scope, runners=runners)
+                await _git(service, programs, *command, "checkout-index", "--all", "--force",
+                    cwd=target, write=True, scope=restore_scope, runners=runners)
+                links = record.get("symbolic_links")
+                if links is None:
+                    tree, _, _ = await _git(service, programs, "ls-tree", "-r", "-z", record["snapshot_sha"])
+                    links = [item.split("\t", 1)[1] for item in tree.split("\0") if item.startswith("120000 ")]
+                for start in range(0, len(links), 64):
+                    await _git(service, programs, "-c", "core.symlinks=true", git_dir, work_tree,
+                        "checkout-index", "--force", "--", *links[start:start + 64],
+                        cwd=target, write=True, scope=restore_scope, runners=runners)
+                await _git(service, programs, "read-tree", record["snapshot_sha"], cwd=target, write=True, scope=restore_scope, runners=runners)
+            except (HTTPException, ExecutorError, OSError) as exc:
+                raise HTTPException(409, f"Could not materialize the recovery snapshot; partial worktree retained at {_display(service, target)}: {exc}") from exc
+            finally:
+                try:
+                    await restore_owner.cleanup()
+                finally:
+                    if not restore_owner.closed:
+                        await service.context.background_manager.retain_foreground_cleanup(runner=restore_owner,
+                            command="worktree snapshot restore cleanup", cwd=target.uri,
+                            conversation_id=service.context.conversation_id, task_id="", parent_run_id="",
+                            reason="worktree_snapshot_restore_cleanup_pending")
             if not service.context.turn_environment.is_remote:
                 from backend.services.worktree_settings_service import register_managed_worktree
                 register_managed_worktree(Path(target.native), Path(inventory.main.native))
@@ -407,6 +491,15 @@ async def executor_worktree_tool(tool, args, context):
 
     try:
         async with ExecutorEditorService(context, application_config=context.model_execution.config) as service:
+            if tool.name == "remove_worktree":
+                result = await executor_worktree_action(service, "remove", path=args["path"], force=bool(args.get("force")), model_relative=True)
+                if not result["removed"]:
+                    return tool._error_result(f"删除 worktree 失败: {result['error']}")
+                repository = context.run_context.conversation_repository
+                if repository is not None and context.conversation_id:
+                    repository.unregister_worktree(context.conversation_id, path=result["path"])
+                saved = f"\n  快照 ID: {result['snapshot_id']}" if result.get("snapshot_id") else ""
+                return tool._success_result(f"已删除 worktree: {result['path']}{saved}")
             if tool.name == "worktree_snapshot":
                 record = await executor_worktree_action(service, "snapshot", path=args.get("path"), label=str(args.get("label", "")))
                 repository = context.run_context.conversation_repository

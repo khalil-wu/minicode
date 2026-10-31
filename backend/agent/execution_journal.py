@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
 
+from backend.agent.journal_compaction import compact_journal_file
 from backend.agent.checkpoint import validate_storage_id
 from backend.agent.runtime_records import epoch_ms
 from backend.atomic_io import canonical_file_path_key
@@ -71,6 +72,34 @@ class ExecutionJournalError(RuntimeError):
 
 class ExecutionJournalCorruptionError(ExecutionJournalError):
     """Raised when append-only journal evidence is incomplete or invalid."""
+
+
+def _extension_state_delta(payload: dict[str, Any]) -> tuple[str, int, int, list[dict[str, Any]]]:
+    """Decode the one durable delta format shared by history and state replay."""
+    run_id = payload.get("run_id")
+    base = payload.get("base_revision")
+    revision = payload.get("revision")
+    changes = payload.get("extension_changes")
+    if (not isinstance(run_id, str) or not run_id.strip()
+            or isinstance(base, bool) or not isinstance(base, int) or base < 0
+            or isinstance(revision, bool) or not isinstance(revision, int)
+            or not isinstance(changes, list) or any(not isinstance(change, dict) for change in changes)
+            or revision - base != len(changes)):
+        raise ExecutionJournalCorruptionError("Invalid extension state delta")
+    return run_id, base, revision, changes
+
+
+def _extension_state_snapshot(snapshot: Any) -> dict[str, Any]:
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("extension_state"), dict):
+        raise ExecutionJournalCorruptionError("Invalid extension state snapshot")
+    return snapshot["extension_state"]
+
+
+def _extension_snapshot_cursor(snapshot: dict[str, Any]) -> dict[str, Any]:
+    cursor = snapshot.get("extension_cursor", {})
+    if not isinstance(cursor, dict):
+        raise ExecutionJournalCorruptionError("Invalid extension snapshot cursor")
+    return cursor
 
 
 _TOOL_USE_OPTIONAL_FIELDS = (
@@ -382,6 +411,7 @@ class ExecutionJournal:
         key = canonical_file_path_key(self.path)
         with self._locked():
             self._isolate_incomplete_tail_unlocked()
+            compact_journal_file(self.path)
             current = _WRITE_SEQUENCES.get(key)
             if current is None:
                 current = self._load_last_seq()
@@ -956,7 +986,7 @@ class ExecutionJournal:
                     if call_id:
                         pending_tool_call_ids.discard(call_id)
             start_index = index + 1
-            extension_cursor = dict(snapshot.get("extension_cursor", {}))
+            extension_cursor = dict(_extension_snapshot_cursor(snapshot))
             break
         else:
             pending_tool_call_ids = set()
@@ -964,10 +994,11 @@ class ExecutionJournal:
         for event in events[start_index:]:
             payload = event.payload
             if payload.get("lifecycle") == "extension_state_delta":
-                current = extension_cursor.get("revision", 0) if extension_cursor.get("run_id") == payload["run_id"] else 0
-                for change in payload["extension_changes"][max(0, current - payload["base_revision"]):]:
+                delta_run_id, base, revision, changes = _extension_state_delta(payload)
+                current = extension_cursor.get("revision", 0) if extension_cursor.get("run_id") == delta_run_id else 0
+                for change in changes[max(0, current - base):]:
                     history.extend(deepcopy(change.get("context_messages", [])))
-                extension_cursor = {"run_id": payload["run_id"], "revision": max(current, payload["revision"])}
+                extension_cursor = {"run_id": delta_run_id, "revision": max(current, revision)}
                 continue
             if payload.get("lifecycle") == "provider_item_committed":
                 message = payload.get("message")
@@ -1044,6 +1075,7 @@ class ExecutionJournal:
                         **({"private_model_only": True} if payload.get("private_model_only") is True else {}),
                         "name": str(payload.get("tool_name") or payload.get("name") or "tool"),
                         "tool_call_id": call_id,
+                        **({"is_error": payload["is_error"]} if "is_error" in payload else {}),
                         **{field: deepcopy(payload[field]) for field in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output", "native_tool_output") if field in payload},
                     }
                 )
@@ -1082,36 +1114,39 @@ class ExecutionJournal:
         applied = 0
         for event in events:
             payload = event.payload
-            snapshot = payload.get("context_snapshot")
-            captured = snapshot.get("extension_cursor", {}) if isinstance(snapshot, dict) else {}
-            event_run_id = payload.get("run_id") or captured.get("run_id")
-            if event.seq <= after_seq or (run_id is not None and event_run_id != run_id):
+            if event.seq <= after_seq:
                 continue
+            if run_id is not None and payload.get("run_id") and payload["run_id"] != run_id:
+                continue
+            snapshot = payload.get("context_snapshot")
+            captured = _extension_snapshot_cursor(snapshot) if isinstance(snapshot, dict) else {}
             kind = payload.get("lifecycle")
+            event_run_id = payload.get("run_id") or captured.get("run_id")
+            if run_id is not None and event_run_id is not None and event_run_id != run_id:
+                continue
+            delta = _extension_state_delta(payload) if kind == "extension_state_delta" else None
+            if run_id is not None and event_run_id != run_id:
+                continue
             if captured and captured.get("run_id") == event_run_id:
                 current = position.get("revision", 0) if position.get("run_id") == event_run_id else 0
                 revision = captured.get("revision")
                 if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
                     raise ExecutionJournalCorruptionError("Invalid extension snapshot cursor")
                 if revision > current:
-                    result = deepcopy(snapshot["extension_state"])
+                    result = deepcopy(_extension_state_snapshot(snapshot))
                     position = dict(captured)
                     applied += 1
             elif kind == "extension_state_committed" and run_id is None:
-                result = deepcopy(payload["context_snapshot"]["extension_state"])
-                position = dict(payload["context_snapshot"].get("extension_cursor", {}))
+                result = deepcopy(_extension_state_snapshot(snapshot))
+                position = dict(captured)
                 applied += 1
             elif kind == "extension_state_delta":
-                base, revision, changes = payload["base_revision"], payload["revision"], payload["extension_changes"]
-                if (not isinstance(changes, list) or isinstance(base, bool) or not isinstance(base, int) or base < 0
-                        or isinstance(revision, bool) or not isinstance(revision, int)
-                        or revision - base != len(changes)):
-                    raise ExecutionJournalCorruptionError("Invalid extension delta revision")
-                message_revision = message_position.get("revision", 0) if message_position.get("run_id") == payload["run_id"] else 0
+                delta_run_id, base, revision, changes = delta
+                message_revision = message_position.get("revision", 0) if message_position.get("run_id") == delta_run_id else 0
                 for change in changes[max(0, message_revision - base):]:
                     context_messages.extend(deepcopy(change.get("context_messages", [])))
-                message_position = {"run_id": payload["run_id"], "revision": max(message_revision, revision)}
-                current = position.get("revision", 0) if position.get("run_id") == payload["run_id"] else 0
+                message_position = {"run_id": delta_run_id, "revision": max(message_revision, revision)}
+                current = position.get("revision", 0) if position.get("run_id") == delta_run_id else 0
                 if current >= revision:
                     continue
                 if current < base:
@@ -1120,7 +1155,7 @@ class ExecutionJournal:
                     result = deepcopy(state)
                 for change in changes[current - base:]:
                     result = apply_value_change(result, change, in_place=True)
-                position = {"run_id": payload["run_id"], "revision": revision}
+                position = {"run_id": delta_run_id, "revision": revision}
                 applied += 1
         return result, position, applied, context_messages
 

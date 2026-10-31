@@ -9,7 +9,6 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class _CommandLifecyclePrefix:
-    session_id: str
     task: asyncio.Task
     stack: AsyncExitStack
 
@@ -18,15 +17,15 @@ _prefix: ContextVar[_CommandLifecyclePrefix | None] = ContextVar("command_lifecy
 
 
 @contextmanager
-def bind_command_lifecycle_prefix(session_id: str, stack: AsyncExitStack):
-    token = _prefix.set(_CommandLifecyclePrefix(session_id, asyncio.current_task(), stack))
+def bind_command_lifecycle_prefix(stack: AsyncExitStack):
+    token = _prefix.set(_CommandLifecyclePrefix(asyncio.current_task(), stack))
     try:
         yield
     finally:
         _prefix.reset(token)
 
 
-async def handoff_command_lifecycle_prefix(session_id: str) -> None:
+async def handoff_command_lifecycle_prefix() -> None:
     owned = _prefix.get()
-    if owned is not None and owned.session_id == session_id and owned.task is asyncio.current_task():
+    if owned is not None and owned.task is asyncio.current_task():
         await owned.stack.aclose()

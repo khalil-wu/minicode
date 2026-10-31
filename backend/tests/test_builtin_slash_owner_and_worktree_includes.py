@@ -115,8 +115,10 @@ async def test_targeted_builtin_keeps_a_context_approval_and_active_owner(sessio
 async def test_plan_remainder_admission_uses_original_b_permission_context(session):
     admissions = []
 
-    async def capture_admission(content, *, conversation_id, metadata, attachments):
+    async def capture_admission(content, *, conversation_id, metadata, attachments, turn_settings=None):
         record = session.conversation_repo.get_conversation(conversation_id)
+        if turn_settings is not None:
+            record = turn_settings.preview(record)
         admissions.append((content, conversation_id, record.permission_mode))
         # This is the scheduling boundary, not a claim of provider/tool execution.
         return 'captured-b-admission'

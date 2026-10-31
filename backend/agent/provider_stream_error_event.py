@@ -19,6 +19,10 @@ from backend.agent.progress import provider_failure_detail_progress, provider_st
 from backend.agent.first_byte_waiter import ProviderStreamFailure
 from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
 from backend.agent.provider_attempt import provider_progress_id
+from backend.agent.provider_stream_control import (
+    ProviderRetryReset,
+    reset_for_provider_retry,
+)
 from backend.agent.recovery_controller import RecoveryProfile
 from backend.agent.stream_sanitizer import scrub_thinking_tags
 from backend.agent.terminal_projection import TurnTerminalProjection
@@ -497,3 +501,110 @@ async def handle_provider_error_event(
         retry_budget_boundary=None,
         stream_recovery_attempted=stream_recovery_attempted,
     )
+
+
+@dataclass(frozen=True)
+class ProviderErrorBranchResult:
+    """How the caller continues after an error-action provider dispatch."""
+
+    action: str
+    stream_attempt: int
+    retry_budget_boundary: Any
+    stream_recovery_attempted: bool
+    usage: Any
+    llm: Any = None
+
+
+async def run_provider_error_branch(
+    event: Any,
+    *,
+    llm: Any,
+    tool_context: Any,
+    state: Any,
+    context_builder: Any,
+    turn_kernel: Any,
+    provider_attempt: Any,
+    stream_state: Any,
+    stream_text: Any,
+    pending_tool_calls: Any,
+    usage: Any,
+    turn_usage: Any,
+    stream_retry_policy: Any,
+    stream_attempt: int,
+    stream_recovery_attempted: bool,
+    budget_runtime: Any,
+    error_controller: Any,
+    iteration_id_value: str,
+    max_retries: int,
+    cancel_event: Any,
+    degrade_and_finish: Any,
+    recover_withheld_error: Any,
+    query_source: str,
+    retry_state: Any,
+    progress_id: str,
+    close_stream: Any,
+    tool_tracker: Any,
+    switch_transport: Any,
+    refresh_auth: Any,
+    connection_retries_enabled: bool,
+) -> AsyncIterator[Any]:
+    """Run the error-action retry ladder and report how the caller continues."""
+    if stream_state.committed_tool_ids:
+        async for update in committed_provider_error(event, state=state,
+            turn_kernel=turn_kernel, provider_attempt=provider_attempt,
+            progress_id=progress_id):
+            yield update
+        yield ProviderErrorBranchResult(action="terminal", stream_attempt=stream_attempt,
+            retry_budget_boundary=None,
+            stream_recovery_attempted=stream_recovery_attempted, usage=usage, llm=llm)
+        return
+    error_result = None
+    async for error_update in handle_provider_error_event(
+        event, state=state, context_builder=context_builder, turn_kernel=turn_kernel,
+        provider_attempt=provider_attempt, stream_state=stream_state, stream_text=stream_text,
+        pending_tool_calls=pending_tool_calls, usage=usage, turn_usage=turn_usage,
+        stream_retry_policy=stream_retry_policy, stream_attempt=stream_attempt,
+        stream_recovery_attempted=stream_recovery_attempted, budget_runtime=budget_runtime,
+        error_controller=error_controller, iteration_id_value=iteration_id_value, max_retries=max_retries,
+        cancel_event=tool_context.cancel_event, degrade_and_finish=degrade_and_finish,
+        recover_withheld_error=recover_withheld_error, query_source=query_source, retry_state=retry_state,
+        progress_id=progress_id, close_stream=close_stream,
+        switch_transport=getattr(llm, "try_fallback_transport", lambda: False),
+        refresh_auth=refresh_auth,
+        connection_retries_enabled=connection_retries_enabled,
+    ):
+        if isinstance(error_update, ProviderErrorEventResult):
+            error_result = error_update
+        else:
+            yield error_update
+    if error_result is None:
+        raise RuntimeError("provider error handler returned without a result")
+    stream_attempt = error_result.stream_attempt
+    retry_budget_boundary = error_result.retry_budget_boundary
+    stream_recovery_attempted = error_result.stream_recovery_attempted
+    if error_result.action == "retry":
+        llm = getattr(tool_context, "llm", llm)
+        retry_reset = None
+        async for reset_update in reset_for_provider_retry(
+            stream_text=stream_text,
+            stream_state=stream_state,
+            tool_tracker=tool_tracker,
+        ):
+            if isinstance(reset_update, ProviderRetryReset):
+                retry_reset = reset_update
+            else:
+                yield reset_update
+        if retry_reset is None:
+            raise RuntimeError("provider retry reset returned without a result")
+        usage = retry_reset.usage
+        finish_reason = ""
+        provider_response_phase = ""
+        awaiting_trailing_tool_done = False
+        should_retry = True
+    elif error_result.action == "rebuild_context":
+        rebuild_context_and_retry = True
+    yield ProviderErrorBranchResult(action=error_result.action, stream_attempt=stream_attempt,
+        retry_budget_boundary=retry_budget_boundary,
+        stream_recovery_attempted=stream_recovery_attempted, usage=usage, llm=llm)
+    return
+

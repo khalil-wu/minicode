@@ -1,12 +1,12 @@
 /* @vitest-environment jsdom */
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssistantMarkdownCell } from "./AssistantMarkdownCell";
 import type { AssistantMarkdownCellState } from "./cellTypes";
 import { useAppStore } from "../../stores";
 
-const { sendMock, openPathMock, revealPathMock, openArtifactPreviewMock, openWorkspaceFilePreviewMock } = vi.hoisted(() => {
+const { sendMock, openPathMock, revealPathMock, openArtifactPreviewMock, openWorkspaceFilePreviewMock, transport } = vi.hoisted(() => {
   Object.defineProperty(globalThis, "matchMedia", {
     configurable: true,
     writable: true,
@@ -27,11 +27,12 @@ const { sendMock, openPathMock, revealPathMock, openArtifactPreviewMock, openWor
     revealPathMock: vi.fn(),
     openArtifactPreviewMock: vi.fn(() => true),
     openWorkspaceFilePreviewMock: vi.fn(() => true),
+    transport: { sessionId: "session-image-test" },
   };
 });
 
 vi.mock("../../hooks/useWebSocket", () => ({
-  getWebSocket: () => ({ send: sendMock, sessionId: "session-image-test" }),
+  getWebSocket: () => ({ send: sendMock, sessionId: transport.sessionId }),
 }));
 
 vi.mock("../../protocol/ws-outbox", () => ({
@@ -61,7 +62,7 @@ vi.mock("../../overlays/DialogService", () => ({
 
 const originalOpenEditorFile = useAppStore.getState().openEditorFile;
 const originalSetRightStackTab = useAppStore.getState().setRightStackTab;
-beforeEach(() => useAppStore.setState({ appMode: "chat" }));
+beforeEach(() => { transport.sessionId = "session-image-test"; useAppStore.setState({ appMode: "chat" }); });
 
 afterEach(() => {
   cleanup();
@@ -325,6 +326,96 @@ describe("AssistantMarkdownCell image generation", () => {
     expect(screen.getByRole("status").getAttribute("data-running")).toBe("true");
     expect(screen.getByText("正在载入生成结果")).toBeTruthy();
     expect(container.querySelector(".assistant-cell-image-spinner")).toBeNull();
+  });
+
+  it("reports a nonrecoverable image API error without requiring provider settings", () => {
+    render(<AssistantMarkdownCell cell={cell({ imageProgress: [{ ...imageProgress,
+      status: "failed", detail: "The supplied API returned unsupported_model" }], failureRecoverable: false })} />);
+    expect(screen.getByRole("alert").textContent).toContain("The supplied API returned unsupported_model");
+    expect(document.body.textContent).not.toContain("Provider 配置");
+    expect(document.body.textContent).not.toContain("可以重试");
+  });
+
+  it("settles only the selected call while another image is running, including late and repeated updates", () => {
+    const first = { ...imageProgress, id: "first", toolCallId: "call-first", status: "completed" as const };
+    const next = { ...imageProgress, id: "next", toolCallId: "call-next" };
+    const artifacts = [{ artifactId: "selected-first", kind: "image" as const, mediaType: "image/png", summary: "First", toolCallId: "call-first" }];
+    const view = render(<AssistantMarkdownCell cell={cell({ isStreaming: true, imageProgress: [first, next], artifacts })} />);
+    expect(document.querySelectorAll('.assistant-cell-image-placeholder[data-status="running"]')).toHaveLength(1);
+    expect(document.querySelectorAll('.assistant-cell-image-placeholder')).toHaveLength(1);
+    expect(document.querySelector('[data-artifact-id="selected-first"]')).toBeTruthy();
+    expect(document.querySelector('[data-artifact-id="selected-first"]')!.compareDocumentPosition(
+      document.querySelector('.assistant-cell-image-placeholder')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    view.rerender(<AssistantMarkdownCell cell={cell({ isStreaming: true,
+      imageProgress: [first, { ...next, status: "completed" }], artifacts })} />);
+    expect(screen.getByText("正在载入生成结果")).toBeTruthy();
+    artifacts.push({ ...artifacts[0], artifactId: "selected-next", toolCallId: "call-next" });
+    for (const status of ["completed", "running", "completed"] as const) {
+      view.rerender(<AssistantMarkdownCell cell={cell({ imageProgress: [first, { ...next, status }], artifacts: [...artifacts] })} />);
+      expect(document.querySelectorAll(".assistant-cell-image-card")).toHaveLength(2);
+      expect(document.querySelectorAll(".assistant-cell-image-placeholder")).toHaveLength(0);
+    }
+  });
+
+  it.each(["failed", "partial"] as const)("does not duplicate a tool-owned %s image call as an answer-position result", status => {
+    render(<AssistantMarkdownCell cell={cell({ imageProgress: [
+      { ...imageProgress, id: "first", toolCallId: "first" },
+      { ...imageProgress, id: "second", toolCallId: "second", status, detail: "actual second call evidence" },
+    ], artifacts: [{ artifactId: "first-image", kind: "image", mediaType: "image/png", summary: "First", toolCallId: "first" }] })} />);
+    expect(document.querySelectorAll(".assistant-cell-image-card")).toHaveLength(1);
+    expect(document.querySelectorAll(".assistant-cell-image-placeholder")).toHaveLength(0);
+    expect(screen.queryByText("actual second call evidence")).toBeNull();
+    expect(document.querySelector(".assistant-cell-image-error")).toBeNull();
+  });
+
+  it("removes unselected completed tool output only after the real turn completes and accepts late output", () => {
+    const progress = { ...imageProgress, status: "completed" as const, toolCallId: "inspected-call" };
+    const view = render(<AssistantMarkdownCell cell={cell({ isStreaming: false, imageProgress: [progress] })} />);
+    expect(screen.getByText("正在载入生成结果")).toBeTruthy();
+    view.rerender(<AssistantMarkdownCell cell={cell({ copyable: true, terminalStatus: "completed", imageProgress: [progress] })} />);
+    expect(document.querySelector(".assistant-cell-image-placeholder")).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+    view.rerender(<AssistantMarkdownCell cell={cell({ terminalStatus: "completed", imageProgress: [progress],
+      artifacts: [{ artifactId: "late-image", kind: "image", mediaType: "image/png", summary: "Late", toolCallId: "inspected-call" }] })} />);
+    expect(document.querySelectorAll(".assistant-cell-image-card")).toHaveLength(1);
+    expect(document.querySelector(".assistant-cell-image-placeholder")).toBeNull();
+  });
+
+  it("does not let a tool-selected image settle a provider-native image lifecycle", () => {
+    render(<AssistantMarkdownCell cell={cell({ imageProgress: [imageProgress],
+      artifacts: [{ artifactId: "tool-image", kind: "image", mediaType: "image/png", summary: "Tool", toolCallId: "tool-call" }] })} />);
+    expect(document.querySelectorAll(".assistant-cell-image-placeholder")).toHaveLength(1);
+  });
+
+  it.each(["failed", "partial", "interrupted"] as const)("retains inspected image evidence without a loader after a %s turn", terminalStatus => {
+    render(<AssistantMarkdownCell cell={cell({ copyable: true, terminalStatus, imageProgress: [{ ...imageProgress,
+      status: "completed", toolCallId: "inspected-before-failure", detail: "real completed image call" }] })} />);
+    expect(screen.getByText("图像生成完成")).toBeTruthy();
+    expect(screen.getByText("real completed image call")).toBeTruthy();
+    expect(document.querySelector(".assistant-cell-image-placeholder")?.getAttribute("data-running")).toBe("false");
+    expect(screen.queryByText("正在载入生成结果")).toBeNull();
+    expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
+  });
+
+  it("keeps the retried image URL in the lightbox and renews it after reconnect", () => {
+    useAppStore.setState({ conversationId: "image-retry-owner", isConnected: true });
+    render(<AssistantMarkdownCell conversationId="image-retry-owner" cell={cell({ artifacts: [{
+      artifactId: "image-retry", kind: "image", mediaType: "image/png", summary: "Image" }], })} />);
+    fireEvent.error(screen.getByRole("img", { name: "图片" }));
+    fireEvent.click(screen.getByRole("button", { name: /图片载入失败，点击重试/ }));
+    const image = screen.getByRole("img", { name: "图片" });
+    expect(image.getAttribute("src")).toContain("preview_retry=1");
+    fireEvent.load(image); fireEvent.click(screen.getByRole("button", { name: "查看图片大图" }));
+    expect(screen.getByRole("dialog", { name: "图片大图" }).querySelector("img")?.getAttribute("src")).toBe(image.getAttribute("src"));
+    act(() => useAppStore.setState({ isConnected: false }));
+    expect(screen.queryByRole("dialog", { name: "图片大图" })).toBeNull();
+    transport.sessionId = "session-image-restored";
+    act(() => useAppStore.setState({ isConnected: true }));
+    const restored = screen.getByRole("dialog", { name: "图片大图" }).querySelector("img")?.getAttribute("src");
+    expect(restored).toContain("preview_retry=1");
+    expect(restored).toContain("session_id=session-image-restored");
+    expect(restored).not.toContain("session_id=session-image-test");
+    fireEvent.click(screen.getByRole("button", { name: "关闭大图" }));
   });
 
   it("renders an embedded artifact once while preserving another unreferenced image", () => {

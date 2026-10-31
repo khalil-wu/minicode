@@ -18,11 +18,14 @@ from backend.agent.loop_runtime_helpers import (
     is_max_output_finish_reason,
 )
 from backend.agent.message import AgentEvent
+from backend.agent.model_request_hooks import ModelRequestHooks
 from backend.agent.provider_stream_event_dispatch import (
     ProviderDispatchResult,
     dispatch_provider_event,
 )
 from backend.agent.provider_stream_error_event import (
+    ProviderErrorBranchResult,
+    run_provider_error_branch,
     ProviderErrorEventResult,
     handle_provider_error_event,
     committed_provider_error,
@@ -42,6 +45,8 @@ from backend.agent.provider_stream_settlement import (
     complete_provider_response,
 )
 from backend.agent.provider_stream_failures import (
+    ProviderExceptionBranchResult,
+    run_stream_exception_branch,
     ProviderStreamExceptionResult,
     close_provider_stream,
     finish_provider_stream,
@@ -59,6 +64,7 @@ from backend.agent.stream_sanitizer import ThinkingStreamSanitizer
 from backend.agent.provider_text_projection import finish_provider_text_item
 from backend.agent.loop_process_events import model_process_text_event
 from backend.agent.terminal_projection import TurnTerminalProjection
+from backend.agent.turn_trace import turn_trace_shared
 from backend.agent.tool_stream_tracker import StreamingToolTracker
 from backend.llm.base import (
     StreamEventType,
@@ -129,6 +135,9 @@ async def stream_provider_response(
     provider_attempt = None
     stream_iter: Any | None = None
     stream_read_context = None
+    request_completed = False
+    model_hooks = ModelRequestHooks.for_turn(context_builder, tool_context)
+    trace = turn_trace_shared(f"turn[{getattr(tool_context, 'conversation_id', '') or ''}]")
 
     def settle_attempt_usage(raw: dict[str, Any] | None = None) -> None:
         record_provider_attempt_usage(llm=llm, provider_attempt=provider_attempt, stream_state=stream_state,
@@ -143,9 +152,11 @@ async def stream_provider_response(
     try:
         while True:
             should_retry = False
+            request_completed = False
             thinking_chars = 0
             visible_text_sanitizer = ThinkingStreamSanitizer()
             budget_runtime.ensure_started()
+            trace.mark("attempt.dispatch")
             provider_attempt = await turn_kernel.start_provider_attempt(
                 iteration_id=iteration_id_value,
                 retry_index=stream_attempt,
@@ -153,10 +164,14 @@ async def stream_provider_response(
                 max_retries=max_retries,
                 progress_id=provider_progress_key,
             )
+            trace.mark("attempt.ready")
+            await model_hooks.begin()
+            trace.mark("hooks.begin")
             request_metadata = build_provider_attempt_metadata(
-                llm_request_metadata, context_builder=context_builder,
-                run_context=tool_context.run_context, run_record=turn_kernel.run_record,
+                llm_request_metadata, context_builder=context_builder, run_context=tool_context.run_context,
+                run_record=turn_kernel.run_record,
             )
+            trace.mark("request.dispatch")
             stream_iter = safe_stream_chat_with_request_metadata(
                 llm,
                 messages,
@@ -165,28 +180,29 @@ async def stream_provider_response(
             ).__aiter__()
             stream_read_context = copy_context()
             first_event = True
+            stream_first_event_seen = False
             while True:
                 wait_result = None
                 try:
                     async for wait_update in wait_for_next_provider_event(
-                        stream_iter=stream_iter,
-                        first_event=first_event,
-                        settings=settings,
-                        budget_runtime=budget_runtime,
-                        tool_context=tool_context,
-                        stream_state=stream_state,
-                        pending_tool_calls=pending_tool_calls,
-                        awaiting_trailing_tool_done=awaiting_trailing_tool_done,
-                        read_context=stream_read_context,
+                        stream_iter=stream_iter, first_event=first_event, settings=settings, budget_runtime=budget_runtime,
+                        tool_context=tool_context, stream_state=stream_state, pending_tool_calls=pending_tool_calls,
+                        awaiting_trailing_tool_done=awaiting_trailing_tool_done, read_context=stream_read_context,
                     ):
                         if isinstance(wait_update, ProviderWaitResult):
                             wait_result = wait_update
                         else:
+                            if not stream_first_event_seen:
+                                stream_first_event_seen = True
+                                trace.mark("provider.first_event")
                             yield wait_update
                 except PhaseDeadlineExceeded:
                     raise
                 except (asyncio.TimeoutError, ProviderStreamFailure) as failure:
                     settle_attempt_usage()
+                    cause = failure.cause if isinstance(failure, ProviderStreamFailure) else failure
+                    await model_hooks.settle("failed", error=str(cause) or "Provider request timed out",
+                                             usage=usage, reported=provider_attempt.usage_reported, tool_stream=tool_stream)
                     if stream_state.committed_tool_ids:
                         async for update in committed_provider_error(failure, state=state,
                             turn_kernel=turn_kernel, provider_attempt=provider_attempt,
@@ -195,30 +211,13 @@ async def stream_provider_response(
                         break
                     transport_result = None
                     async for transport_update in handle_provider_transport_failure(
-                        failure,
-                        settings=settings,
-                        stream_text=stream_text,
-                        pending_tool_calls=pending_tool_calls,
-                        stream_state=stream_state,
-                        stream_retry_policy=stream_retry_policy,
-                        stream_attempt=stream_attempt,
-                        turn_kernel=turn_kernel,
-                        provider_attempt=provider_attempt,
-                        budget_runtime=budget_runtime,
-                        iteration_id_value=iteration_id_value,
-                        stream_iter=stream_iter,
-                        cancel_event=tool_context.cancel_event,
-                        tool_tracker=tool_tracker,
-                        state=state,
-                        context_builder=context_builder,
-                        turn_usage=turn_usage,
-                        usage=usage,
-                        degrade_and_finish=degrade_and_finish,
-                        query_source=query_source,
-                        retry_state=retry_state,
-                        progress_id=provider_progress_key,
-                        max_retries=max_retries,
-                        close_stream=_close_stream,
+                        failure, settings=settings, stream_text=stream_text, pending_tool_calls=pending_tool_calls,
+                        stream_state=stream_state, stream_retry_policy=stream_retry_policy, stream_attempt=stream_attempt,
+                        turn_kernel=turn_kernel, provider_attempt=provider_attempt, budget_runtime=budget_runtime,
+                        iteration_id_value=iteration_id_value, stream_iter=stream_iter, cancel_event=tool_context.cancel_event,
+                        tool_tracker=tool_tracker, state=state, context_builder=context_builder, turn_usage=turn_usage,
+                        usage=usage, degrade_and_finish=degrade_and_finish, query_source=query_source, retry_state=retry_state,
+                        progress_id=provider_progress_key, max_retries=max_retries, close_stream=_close_stream,
                         switch_transport=getattr(llm, "try_fallback_transport", lambda: False),
                     ):
                         if isinstance(transport_update, ProviderTransportFailureResult):
@@ -249,11 +248,11 @@ async def stream_provider_response(
                 if wait_result.response_phase:
                     provider_response_phase = wait_result.response_phase
                 if wait_result.action == "finish":
+                    await model_hooks.settle("failed", error="Provider stream ended before its terminal event",
+                                             usage=usage, reported=provider_attempt.usage_reported, tool_stream=tool_stream)
                     async for projected in finish_provider_text_item(
-                        stream_state=stream_state, stream_text=stream_text,
-                        visible_text_sanitizer=visible_text_sanitizer,
-                        live_text_streaming=settings.live_text_streaming,
-                        awaiting_trailing_done=awaiting_trailing_tool_done,
+                        stream_state=stream_state, stream_text=stream_text, visible_text_sanitizer=visible_text_sanitizer,
+                        live_text_streaming=settings.live_text_streaming, awaiting_trailing_done=awaiting_trailing_tool_done,
                         process_event_factory=model_process_text_event,
                     ):
                         yield projected
@@ -269,35 +268,19 @@ async def stream_provider_response(
                     provider_raw_done.update(event.raw)
                 if event.type in {StreamEventType.DONE, StreamEventType.ERROR}:
                     settle_attempt_usage(event.raw)
+                if event.type == StreamEventType.DONE:
+                    request_completed = True
                 auth_retry = provider_auth_refresh_allowed(tool_context, stream_state)
                 first_event = False
                 dispatch_result = None
                 async for dispatch_update in dispatch_provider_event(
-                    event,
-                    llm=llm,
-                    provider_attempt=provider_attempt,
-                    iteration_id_value=iteration_id_value,
-                    state=state,
-                    context_builder=context_builder,
-                    turn_kernel=turn_kernel,
-                    tool_context=tool_context,
-                    stream_iter=stream_iter,
-                    stream_state=stream_state,
-                    stream_text=stream_text,
-                    tool_tracker=tool_tracker,
-                    tool_registry=tool_registry,
-                    settings=settings,
-                    provider_completion=provider_completion,
-                    prompt_cache_safe_params=prompt_cache_safe_params,
-                    tool_batch_count=tool_batch_count,
-                    iteration_limit=iteration_limit,
-                    usage=usage,
-                    finish_reason=finish_reason,
-                    response_phase=provider_response_phase,
-                    awaiting_trailing_tool_done=awaiting_trailing_tool_done,
-                    visible_text_sanitizer=visible_text_sanitizer,
-                    thinking_chars=thinking_chars,
-                    close_stream=_close_stream,
+                    event, llm=llm, provider_attempt=provider_attempt, iteration_id_value=iteration_id_value, state=state,
+                    context_builder=context_builder, turn_kernel=turn_kernel, tool_context=tool_context, stream_iter=stream_iter,
+                    stream_state=stream_state, stream_text=stream_text, tool_tracker=tool_tracker, tool_registry=tool_registry,
+                    settings=settings, provider_completion=provider_completion, prompt_cache_safe_params=prompt_cache_safe_params,
+                    tool_batch_count=tool_batch_count, iteration_limit=iteration_limit, usage=usage, finish_reason=finish_reason,
+                    response_phase=provider_response_phase, awaiting_trailing_tool_done=awaiting_trailing_tool_done,
+                    visible_text_sanitizer=visible_text_sanitizer, thinking_chars=thinking_chars, close_stream=_close_stream,
                 ):
                     if isinstance(dispatch_update, ProviderDispatchResult):
                         dispatch_result = dispatch_update
@@ -305,9 +288,14 @@ async def stream_provider_response(
                         yield dispatch_update
                 if dispatch_result is None:
                     raise RuntimeError("provider event dispatcher returned without a result")
+                if event.type in {StreamEventType.DONE, StreamEventType.ERROR}:
+                    await model_hooks.settle("completed" if event.type == StreamEventType.DONE else "failed",
+                                             error=None if event.type == StreamEventType.DONE else str(event.content or "Provider request failed"),
+                                             usage=usage, reported=provider_attempt.usage_reported, tool_stream=tool_stream)
                 if tool_stream is not None:
                     if event.type == StreamEventType.TOOL_CALL and event.tool_calls_committed:
-                        await tool_stream.submit(event.tool_calls, stream_state, stream_text, tool_tracker)
+                        await tool_stream.submit(event.tool_calls, stream_state, stream_text, tool_tracker,
+                                                 defer_dispatch=model_hooks.defer_tool_dispatch)
                     elif event.type == StreamEventType.DONE and tool_stream.started and not is_max_output_finish_reason(event.finish_reason) and event.finish_reason not in {"pause_turn", "compaction"}:
                         await tool_stream.submit(stream_state.tool_calls, stream_state, stream_text, tool_tracker)
                 usage = dispatch_result.usage
@@ -319,73 +307,46 @@ async def stream_provider_response(
                 if dispatch_result.provider_stream_steered:
                     provider_stream_steered = True
                 if dispatch_result.action == "break":
+                    if provider_stream_steered:
+                        await model_hooks.settle("cancelled", usage=usage, reported=provider_attempt.usage_reported)
                     break
                 if dispatch_result.action == "error":
-                    if stream_state.committed_tool_ids:
-                        async for update in committed_provider_error(event, state=state,
-                            turn_kernel=turn_kernel, provider_attempt=provider_attempt,
-                            progress_id=provider_progress_key):
-                            yield update
-                        break
-                    error_result = None
-                    async for error_update in handle_provider_error_event(
-                        event,
-                        state=state,
-                        context_builder=context_builder,
-                        turn_kernel=turn_kernel,
-                        provider_attempt=provider_attempt,
-                        stream_state=stream_state,
-                        stream_text=stream_text,
-                        pending_tool_calls=pending_tool_calls,
-                        usage=usage,
-                        turn_usage=turn_usage,
-                        stream_retry_policy=stream_retry_policy,
-                        stream_attempt=stream_attempt,
-                        stream_recovery_attempted=stream_recovery_attempted,
-                        budget_runtime=budget_runtime,
-                        error_controller=error_controller,
-                        iteration_id_value=iteration_id_value,
-                        max_retries=max_retries,
-                        cancel_event=tool_context.cancel_event,
-                        degrade_and_finish=degrade_and_finish,
-                        recover_withheld_error=recover_withheld_error,
-                        query_source=query_source,
-                        retry_state=retry_state,
-                        progress_id=provider_progress_key,
+                    error_branch = None
+                    async for error_update in run_provider_error_branch(
+                        event, llm=llm, tool_context=tool_context, state=state, context_builder=context_builder,
+                        turn_kernel=turn_kernel, provider_attempt=provider_attempt, stream_state=stream_state,
+                        stream_text=stream_text, pending_tool_calls=pending_tool_calls, usage=usage,
+                        turn_usage=turn_usage, stream_retry_policy=stream_retry_policy, stream_attempt=stream_attempt,
+                        stream_recovery_attempted=stream_recovery_attempted, budget_runtime=budget_runtime,
+                        error_controller=error_controller, iteration_id_value=iteration_id_value,
+                        max_retries=max_retries, cancel_event=tool_context.cancel_event,
+                        degrade_and_finish=degrade_and_finish, recover_withheld_error=recover_withheld_error,
+                        query_source=query_source, retry_state=retry_state, progress_id=provider_progress_key, tool_tracker=tool_tracker,
                         close_stream=_close_stream,
                         switch_transport=getattr(llm, "try_fallback_transport", lambda: False),
                         refresh_auth=partial(refresh_request_auth, tool_context, context_builder, budget_runtime) if auth_retry else None,
                         connection_retries_enabled=bool(getattr(settings, "stream_connection_retries_enabled", True)),
                     ):
-                        if isinstance(error_update, ProviderErrorEventResult):
-                            error_result = error_update
+                        if isinstance(error_update, ProviderErrorBranchResult):
+                            error_branch = error_update
                         else:
                             yield error_update
-                    if error_result is None:
-                        raise RuntimeError("provider error handler returned without a result")
-                    stream_attempt = error_result.stream_attempt
-                    retry_budget_boundary = error_result.retry_budget_boundary
-                    stream_recovery_attempted = error_result.stream_recovery_attempted
-                    if error_result.action == "retry":
-                        llm = getattr(tool_context, "llm", llm)
-                        retry_reset = None
-                        async for reset_update in reset_for_provider_retry(
-                            stream_text=stream_text,
-                            stream_state=stream_state,
-                            tool_tracker=tool_tracker,
-                        ):
-                            if isinstance(reset_update, ProviderRetryReset):
-                                retry_reset = reset_update
-                            else:
-                                yield reset_update
-                        if retry_reset is None:
-                            raise RuntimeError("provider retry reset returned without a result")
-                        usage = retry_reset.usage
+                    if error_branch is None:
+                        raise RuntimeError("provider error branch returned without a result")
+                    if error_branch.action == "terminal":
+                        break
+                    usage = error_branch.usage
+                    if error_branch.llm is not None:
+                        llm = error_branch.llm
+                    stream_attempt = error_branch.stream_attempt
+                    retry_budget_boundary = error_branch.retry_budget_boundary
+                    stream_recovery_attempted = error_branch.stream_recovery_attempted
+                    if error_branch.action == "retry":
                         finish_reason = ""
                         provider_response_phase = ""
                         awaiting_trailing_tool_done = False
                         should_retry = True
-                    elif error_result.action == "rebuild_context":
+                    elif error_branch.action == "rebuild_context":
                         rebuild_context_and_retry = True
                     break
 
@@ -399,41 +360,23 @@ async def stream_provider_response(
             break
 
     except (asyncio.CancelledError, Exception) as exc:
-        if isinstance(exc, asyncio.CancelledError):
-            async for projected in finish_provider_text_item(
-                stream_state=stream_state, stream_text=stream_text,
-                visible_text_sanitizer=visible_text_sanitizer,
-                live_text_streaming=settings.live_text_streaming,
-                awaiting_trailing_done=awaiting_trailing_tool_done,
-                process_event_factory=model_process_text_event,
-            ):
-                yield projected
-        settle_attempt_usage()
         exception_result = None
-        async for exception_update in handle_provider_stream_exception(
-            exc,
-            close_stream=_close_stream,
-            tool_tracker=tool_tracker,
-            stream_state=stream_state,
-            iteration_id_value=iteration_id_value,
-            turn_kernel=turn_kernel,
-            provider_attempt=provider_attempt,
-            budget_runtime=budget_runtime,
-            settings=settings,
-            state=state,
-            context_builder=context_builder,
-            turn_usage=turn_usage,
-            usage=usage,
-            stream_text=stream_text,
-            pending_tool_calls=pending_tool_calls,
-            degrade_and_finish=degrade_and_finish,
+        async for exception_update in run_stream_exception_branch(
+            exc, request_completed=request_completed, model_hooks=model_hooks, tool_stream=tool_stream,
+            settle_attempt_usage=settle_attempt_usage, stream_state=stream_state, stream_text=stream_text,
+            visible_text_sanitizer=visible_text_sanitizer, settings=settings,
+            awaiting_trailing_tool_done=awaiting_trailing_tool_done, close_stream=_close_stream,
+            tool_tracker=tool_tracker, iteration_id_value=iteration_id_value, turn_kernel=turn_kernel,
+            provider_attempt=provider_attempt, budget_runtime=budget_runtime, state=state,
+            context_builder=context_builder, turn_usage=turn_usage, usage=usage,
+            pending_tool_calls=pending_tool_calls, degrade_and_finish=degrade_and_finish,
         ):
-            if isinstance(exception_update, ProviderStreamExceptionResult):
+            if isinstance(exception_update, ProviderExceptionBranchResult):
                 exception_result = exception_update
             else:
                 yield exception_update
         if exception_result is None:
-            raise RuntimeError("provider exception handler returned without a result")
+            raise RuntimeError("provider exception branch returned without a result")
         if isinstance(exc, asyncio.CancelledError):
             raise
         retry_budget_boundary = exception_result.retry_budget_boundary
@@ -445,28 +388,19 @@ async def stream_provider_response(
             iteration_id=iteration_id_value):
             yield event
     finally:
+        model_hooks.abandon(completed=request_completed, usage=usage,
+                            reported=provider_attempt is not None and provider_attempt.usage_reported)
+        if tool_stream is not None:
+            await tool_stream.abort_deferred()
         settle_attempt_usage()
         await finish_provider_stream(_close_stream, turn_kernel, provider_attempt)
 
     async for update in complete_provider_response(
-        retry_budget_boundary=retry_budget_boundary,
-        budget_runtime=budget_runtime,
-        turn_kernel=turn_kernel,
-        provider_attempt=provider_attempt,
-        finish_reason=finish_reason,
-        provider_stream_steered=provider_stream_steered,
-        rebuild_context_and_retry=rebuild_context_and_retry,
-        state=state,
-        pending_tool_calls=pending_tool_calls,
-        provider_raw_done=provider_raw_done,
-        visible_text_sanitizer=visible_text_sanitizer,
-        stream_state=stream_state,
-        stream_text=stream_text,
-        context_builder=context_builder,
-        usage=usage,
-        turn_usage=turn_usage,
-        tool_tracker=tool_tracker,
-        response_phase=provider_response_phase,
-        thinking_chars=thinking_chars,
+        retry_budget_boundary=retry_budget_boundary, budget_runtime=budget_runtime, turn_kernel=turn_kernel,
+        provider_attempt=provider_attempt, finish_reason=finish_reason, provider_stream_steered=provider_stream_steered,
+        rebuild_context_and_retry=rebuild_context_and_retry, state=state, pending_tool_calls=pending_tool_calls,
+        provider_raw_done=provider_raw_done, visible_text_sanitizer=visible_text_sanitizer, stream_state=stream_state,
+        stream_text=stream_text, context_builder=context_builder, usage=usage, turn_usage=turn_usage,
+        tool_tracker=tool_tracker, response_phase=provider_response_phase, thinking_chars=thinking_chars,
     ):
         yield update

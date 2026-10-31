@@ -14,6 +14,7 @@ The parser and matcher are the only authority for content-rule evaluation.
 from __future__ import annotations
 
 import re
+import shlex
 import sys
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -303,6 +304,21 @@ def _deny_match_candidates(subcommand: str) -> list[str]:
     return candidates
 
 
+def _literal_restriction_candidates(command: str) -> list[str]:
+    from backend.permissions.argv_rules import strip_transparent_prefixes
+    from backend.permissions.shell_ast import DYNAMIC_WORD, parse_literal_commands
+
+    parsed = parse_literal_commands(command)
+    if parsed is None:
+        return []
+    candidates = []
+    for argv in parsed.commands:
+        unwrapped = strip_transparent_prefixes(argv)
+        if unwrapped and unwrapped[0] != DYNAMIC_WORD:
+            candidates.append(shlex.join(unwrapped))
+    return candidates
+
+
 def _safe_wrapper_candidates(command: str) -> list[str]:
     """cc's allow-side stripSafeWrappers fixed point (wrappers only)."""
     candidates = [command]
@@ -351,7 +367,8 @@ def rule_matches_call(
             for reading in command_readings(value)
             for subcommand in _split_unquoted_subcommands(reading)
             for candidate in _deny_match_candidates(subcommand)
-        )
+        ) or any(_content_pattern_matches(rule.content, candidate, is_command=True)
+                 for candidate in _literal_restriction_candidates(value))
     # Strip only the SAFE wrapper list for allow rules. Bare env prefixes stay
     # literal, so run_command(npm install:*) matches
     # "timeout 10 npm install" but never "FOO=1 npm install".

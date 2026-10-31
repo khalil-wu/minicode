@@ -3,14 +3,16 @@ from __future__ import annotations
 import json
 import hashlib
 import logging
+import shutil
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Iterator
 
 from backend.config import DATA_ROOT
-from backend.atomic_io import atomic_write_bytes, atomic_write_text
+from backend.atomic_io import atomic_file_writer, atomic_write_bytes, atomic_write_text
 from filelock import FileLock
 
 logger = logging.getLogger(__name__)
@@ -176,8 +178,18 @@ class CheckpointStore:
         limit: int | None = 50,
         strict: bool = False,
     ) -> list[CheckpointRecord]:
+        records, _ = self.list_for_conversation_with_status(conversation_id, limit=limit, strict=strict)
+        return records
+
+    def list_for_conversation_with_status(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = 50,
+        strict: bool = False,
+    ) -> tuple[list[CheckpointRecord], CheckpointScanStatus]:
         if limit is not None and int(limit) <= 0:
-            return []
+            return [], CheckpointScanStatus()
         owner = str(conversation_id or "").strip()
         records: list[CheckpointRecord] = []
         with self._locked():
@@ -205,8 +217,9 @@ class CheckpointStore:
                     records.append(record)
                     if limit is not None and len(records) >= int(limit):
                         break
-            self.scan_status = CheckpointScanStatus(tuple(corrupt_files))
-        return records
+            status = CheckpointScanStatus(tuple(corrupt_files))
+            self.scan_status = status
+        return records, status
 
     def delete_for_conversation(self, conversation_id: str) -> int:
         """Remove every file-rewind checkpoint owned by one conversation."""
@@ -251,6 +264,21 @@ class CheckpointStore:
     def write_blob(self, name: str, data: bytes) -> None:
         """Store a byte-exact snapshot payload (cc createBackup copyFile)."""
         atomic_write_bytes(self._blob_path(name), data)
+
+    def write_blob_from_file(self, name: str, source: BinaryIO) -> None:
+        with atomic_file_writer(self._blob_path(name)) as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+    @contextmanager
+    def open_blob(self, name: str) -> Iterator[BinaryIO]:
+        try:
+            handle = self._blob_path(name).open("rb")
+        except OSError as exc:
+            raise CheckpointCorruptError(
+                f"Checkpoint blob '{name}' exists in metadata but cannot be read: {exc}"
+            ) from exc
+        with handle:
+            yield handle
 
     def read_blob(self, name: str) -> bytes:
         try:

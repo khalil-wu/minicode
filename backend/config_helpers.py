@@ -11,7 +11,7 @@ from backend.atomic_io import (
     file_mutation_locks,
 )
 from backend.feature_flags import coerce_feature_bool
-from backend.llm.model_catalog import MODEL_CONTEXT_WINDOW_DEFAULT, responses_model_catalog_entry
+from backend.llm.model_catalog import MODEL_CONTEXT_WINDOW_DEFAULT, responses_model_catalog_entry, responses_model_catalog_exact
 from backend.llm.proxy_policy import normalize_provider_proxy_mode
 from backend.llm.provider_contracts import normalize_model_limit, normalize_tool_mode
 from collections.abc import Callable
@@ -46,44 +46,6 @@ _SETTINGS_WRITE_LOCK = threading.RLock()
 # MiniCode's Messages API requires max_tokens and uses this capped default;
 # OpenAI Responses/Chat APIs leave the field out when the user did not set it.
 MINICODE_CAPPED_DEFAULT_MAX_TOKENS = 8_000
-
-# Published family capacities; these describe limits, not application defaults.
-_KNOWN_MODEL_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
-    # Anthropic Claude 4 / 3.x families
-    ("claude-opus-4", 200_000),
-    ("claude-sonnet-4", 200_000),
-    ("claude-3-7", 200_000),
-    ("claude-3-5", 200_000),
-    ("claude-3-", 200_000),
-    ("claude-instant-", 100_000),
-    # OpenAI GPT-4 / o-series families
-    ("gpt-4o", 128_000),
-    ("gpt-4-turbo", 128_000),
-    ("gpt-4-", 128_000),
-    ("o1-", 200_000),
-    ("o3-", 200_000),
-    ("o4-", 200_000),
-    # Small local / open models. A specific variant beats the family.
-    ("qwen3-32b", 128_000),
-    ("qwen-32b", 128_000),
-    ("qwen2.5-", 128_000),
-    ("deepseek-v3", 128_000),
-    ("deepseek-r1", 128_000),
-    ("llama-3.3", 128_000),
-    ("llama-3.1", 128_000),
-    ("llama-3", 8_000),
-    ("mistral-", 32_000),
-    ("gemma-", 8_000),
-    ("phi-3", 128_000),
-    ("phi-4", 16_000),
-    ("grok-", 131_000),
-    # SuperToken's v4flash advertises a one-million-token window. Keep this
-    # model-specific record ahead of the conservative unknown-model fallback;
-    # a provider response can still override it when the gateway publishes a
-    # different limit for a particular deployment.
-    ("v4flash", 1_000_000),
-)
-
 
 class SettingsError(RuntimeError):
     """配置加载失败时抛出。"""
@@ -167,8 +129,8 @@ def resolve_context_window_details(
 ) -> ContextWindowResolution:
     """Resolve context size with MiniCode-style model-metadata precedence.
 
-    Explicit host and provider settings take precedence over the common 1M
-    application default. The default is not a verified provider capacity.
+    Explicit host and provider settings take precedence over model defaults,
+    bounded by the known maximum. Unknown models retain the application default.
     """
 
     model_id = str(model or "").strip()
@@ -201,10 +163,18 @@ def resolve_context_window_details(
     except (TypeError, ValueError):
         provider_value = 0
     if provider_value > 0:
+        if published_max > 0:
+            provider_value = min(provider_value, published_max)
         return ContextWindowResolution(provider_value, "provider", True)
 
+    if catalog_entry is not None:
+        window = catalog_entry.context_window
+        if published_max > 0:
+            window = min(window, published_max)
+        return ContextWindowResolution(window, "known_model", True)
+
     return ContextWindowResolution(
-        MODEL_CONTEXT_WINDOW_DEFAULT,
+        min(MODEL_CONTEXT_WINDOW_DEFAULT, published_max) if published_max > 0 else MODEL_CONTEXT_WINDOW_DEFAULT,
         "fallback",
         False,
     )
@@ -688,7 +658,7 @@ def get_provider_model_metadata(
     levels = _coerce_model_list(declared.get("reasoning_effort_levels"))
     if not levels and model_id == str(data.get("model") or "").strip():
         levels = _coerce_model_list(data.get("reasoning_effort_levels"))
-    if not levels and known is not None:
+    if not levels and known is not None and responses_model_catalog_exact(model_id):
         levels = list(known.reasoning_effort_levels)
     declared_max_context = _coerce_int(declared.get("max_context_window"), 0)
     resolution = resolve_context_window_details(
@@ -696,25 +666,12 @@ def get_provider_model_metadata(
         provider_context_window=declared.get("context_window", 0),
         provider_max_context_window=declared_max_context,
     )
-    terminal_id = model_id.lower().rsplit("/", 1)[-1]
-    family_capacity = next(
-        (window for prefix, window in sorted(
-            _KNOWN_MODEL_CONTEXT_WINDOWS, key=lambda item: len(item[0]), reverse=True
-        ) if terminal_id.startswith(prefix)),
-        0,
-    )
-    if "[1m]" in terminal_id or terminal_id.endswith("-1m") or "-1m-" in terminal_id:
-        family_capacity = 1_000_000
     if declared_max_context > 0:
         max_context_window = declared_max_context
         max_context_window_source = "provider"
         max_context_window_verified = True
     elif known is not None:
         max_context_window = known.max_context_window
-        max_context_window_source = "known_model"
-        max_context_window_verified = True
-    elif family_capacity:
-        max_context_window = family_capacity
         max_context_window_source = "known_model"
         max_context_window_verified = True
     else:
@@ -1504,6 +1461,8 @@ def get_image_generation_settings(
     settings_data: dict[str, Any] | None = None,
     *,
     resolve_credentials: bool = True,
+    model_override: str | None = None,
+    api_key_override: str | None = None,
 ) -> dict[str, Any]:
     """Resolve image capability from the active Provider profile.
 
@@ -1526,7 +1485,10 @@ def get_image_generation_settings(
         inherited_wire_api = str(section.get("wire_api") or "responses").strip().lower()
 
     mode = _normalize_image_mode(section.get("image_mode"))
-    configured_model = str(section.get("image_model") or "").strip()
+    if api_key_override is not None:
+        section = {**section, "api_key" if mode != "custom" else "image_api_key": api_key_override,
+                   "auth_header": True, "default_headers": ()}
+    configured_model = str(model_override if model_override is not None else section.get("image_model") or "").strip()
     primary_model = str(section.get("model") or "").strip()
     if not configured_model:
         from backend.llm.capabilities import is_gpt_image_model

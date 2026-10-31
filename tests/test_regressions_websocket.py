@@ -721,7 +721,9 @@ def test_user_message_for_missing_conversation_reconciles_list(monkeypatch, tmp_
 
         await session.command_dispatcher._handle_command(UserCommand(
             type="user_message",
-            data={"conversation_id": "conv_missing123", "content": "hello missing"},
+            data={"conversation_id": "conv_missing123", "content": "hello missing",
+                  "client_command_id": "missing-command", "user_message_id": "missing-user",
+                  "assistant_message_id": "missing-assistant"},
         ))
         return session
 
@@ -736,6 +738,10 @@ def test_user_message_for_missing_conversation_reconciles_list(monkeypatch, tmp_
     listing = session.ws.sent[1]
     assert listing["type"] == "conversation.list"
     assert listing["active_conversation_id"] == "conv_main123"
+    rejection = next(event for event in session.ws.sent if event["type"] == "command.result" and event["command"] == "user_message")
+    assert rejection["client_command_id"] == "missing-command"
+    assert rejection["data"]["admitted"] is False
+    assert rejection["data"]["user_message_id"] == "missing-user"
 
 
 def test_agent_run_for_deleted_active_conversation_reports_and_reconciles(monkeypatch, tmp_path) -> None:
@@ -1045,6 +1051,7 @@ def test_websocket_session_interrupt_cancels_active_run(monkeypatch, tmp_path) -
                     "message_id": message_id,
                 })
                 await session.send_event(done)
+                session.run_manager.mark_terminal_status(conversation_id, "cancelled")
                 session.run_manager.mark_delivery_complete(
                     conversation_id, str((metadata or {}).get("_run_task_id") or ""),
                 )
@@ -2064,7 +2071,7 @@ def test_two_live_owners_cannot_claim_same_durable_client_command(tmp_path) -> N
     assert second.claim_client_command("cmd-owner-once") is None
 
 
-def test_durable_client_command_records_recent_id_before_completion(monkeypatch, tmp_path) -> None:
+def test_durable_client_command_commits_queue_completion_before_secondary_log(monkeypatch, tmp_path) -> None:
     conversation_dir = tmp_path / "conversations"
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversation_dir)
     monkeypatch.setattr("backend.ws.run_manager.CONVERSATION_DATA_DIR", conversation_dir)
@@ -2092,7 +2099,10 @@ def test_durable_client_command_records_recent_id_before_completion(monkeypatch,
             completion_log.extend(
                 session.command_dispatcher.client_command_store.load_ids(limit=10)
             )
-            return original_complete(command_id)
+            completed = original_complete(command_id)
+            assert durable_queue.is_client_command_completed(command_id)
+            assert not durable_queue.has_client_command(command_id)
+            return completed
 
         durable_queue.complete_client_command = observe_completion  # type: ignore[method-assign]
         started = asyncio.Event()
@@ -2122,11 +2132,11 @@ def test_durable_client_command_records_recent_id_before_completion(monkeypatch,
     inflight_before_completion, completion_log, recent_ids = asyncio.run(scenario())
 
     assert inflight_before_completion is True
-    assert completion_log == ["cmd-completion"]
+    assert completion_log == []
     assert recent_ids == ["cmd-completion"]
 
 
-def test_durable_client_command_stays_pending_when_dedup_persistence_fails(monkeypatch, tmp_path) -> None:
+def test_durable_client_completion_survives_dedup_log_failure(monkeypatch, tmp_path) -> None:
     conversation_dir = tmp_path / "conversations"
     monkeypatch.setattr("backend.ws.handler.CONVERSATION_DATA_DIR", conversation_dir)
     monkeypatch.setattr("backend.ws.run_manager.CONVERSATION_DATA_DIR", conversation_dir)
@@ -2158,19 +2168,18 @@ def test_durable_client_command_stays_pending_when_dedup_persistence_fails(monke
             raise OSError("dedup log unavailable")
 
         monkeypatch.setattr(session.command_dispatcher.client_command_store, "append", fail_append)
-        with pytest.raises(OSError, match="dedup log unavailable"):
-            await session.command_dispatcher._run_durable_client_command(
-                command_id,
-                session.connection_generation,
-            )
+        await session.command_dispatcher._run_durable_client_command(
+            command_id,
+            session.connection_generation,
+        )
         return (
             [str(item.data.get("client_command_id") or "") for item in durable_queue.pending_client_commands()],
             command_id in session.command_dispatcher.recent_client_command_id_set,
         )
 
     pending_ids, marked_seen = asyncio.run(scenario())
-    assert pending_ids == ["cmd-dedup-failure"]
-    assert marked_seen is False
+    assert pending_ids == []
+    assert marked_seen is True
 
 
 def test_durable_client_handler_failure_keeps_command_pending(monkeypatch, tmp_path) -> None:

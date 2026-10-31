@@ -6,6 +6,7 @@ from dataclasses import replace
 import json
 import os
 import re
+from pathlib import Path
 
 import pytest
 
@@ -50,7 +51,8 @@ async def test_real_dirty_worktree_snapshot_restore_and_controller_shadow(editor
     assert next(item for item in inventory.json()["worktrees"] if item["path_uri"] == linked.uri)["can_remove"]
     denied = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri})
     assert denied.status_code == 200 and not denied.json()["removed"] and "force" in denied.json()["error"], denied.text
-    removed = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri, "force": True})
+    # Worktree recovery uses the desktop's 60-second HTTP budget, not httpx's 5-second default.
+    removed = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri, "force": True}, timeout=60)
     assert removed.status_code == 200 and removed.json()["removed"], removed.text
     snapshot = removed.json()["snapshot_id"]
     async with capture_workspace_execution(server.session, server.params["conversation_id"]) as context:
@@ -61,7 +63,7 @@ async def test_real_dirty_worktree_snapshot_restore_and_controller_shadow(editor
     assert listing.status_code == 200, listing.text
     record = next(item for item in listing.json()["snapshots"] if item["id"] == snapshot)
     assert record["original_path"] == linked.uri and record["snapshot_ref"] == removed.json()["snapshot_ref"]
-    restored = await server.client.post("/api/workspace/git/worktree/restore", params=server.params, json={"snapshot_id": snapshot})
+    restored = await server.client.post("/api/workspace/git/worktree/restore", params=server.params, json={"snapshot_id": snapshot}, timeout=60)
     assert restored.status_code == 200 and restored.json()["restored"], restored.text
     async with capture_workspace_execution(server.session, server.params["conversation_id"]) as context:
         async with ExecutorEditorService(context, application_config=server.session.config) as service:
@@ -69,13 +71,121 @@ async def test_real_dirty_worktree_snapshot_restore_and_controller_shadow(editor
             assert await service.read_bytes(linked.joinpath("untracked.txt")) == b"untracked bytes\x00\xff"
             assert await service.read_bytes(linked.joinpath("ignored.txt")) == b"ignored bytes\n"
             assert await _git(service, "rev-parse", "HEAD", cwd=linked) == record["snapshot_sha"]
-    again = await server.client.post("/api/workspace/git/worktree/restore", params=server.params, json={"snapshot_id": snapshot})
+    again = await server.client.post("/api/workspace/git/worktree/restore", params=server.params, json={"snapshot_id": snapshot}, timeout=60)
     assert again.status_code == 200 and again.json()["restored"] and "owned-restored" in again.json()["path"], again.text
     outside = await server.client.post("/api/workspace/git/worktree/restore", params=server.params,
         json={"snapshot_id": snapshot, "dest": server.view.as_uri()})
     assert outside.status_code == 409, outside.text
     assert (server.view / "same.txt").read_text() == "controller must remain untouched\n"
     assert not (server.view / ".git").exists()
+
+
+@pytest.mark.parametrize("executor_host", ["source"], indirect=True)
+@pytest.mark.asyncio
+async def test_source_executor_restores_raw_large_file_without_content_filters(editor_server):
+    server = editor_server
+    async with capture_workspace_execution(server.session, server.params["conversation_id"]) as context:
+        async with ExecutorEditorService(context, application_config=server.session.config) as service:
+            linked = await _prepare(server, service)
+            await service.write_bytes(linked.joinpath("tracked.txt"), b"staged before snapshot\n")
+            await _git(service, "add", "tracked.txt", cwd=linked)
+            await _git(service, "update-index", "--split-index", cwd=linked)
+            index = service.resolve(await _git(service, "rev-parse", "--path-format=absolute", "--git-path", "index", cwd=linked))
+            original_index = await service.read_bytes(index)
+            shared = await _git(service, "rev-parse", "--shared-index-path", cwd=linked)
+            assert shared
+            await service.write_bytes(linked.joinpath(".gitattributes"), b"*.txt text eol=lf filter=recovery\n")
+            await service.write_bytes(linked.joinpath("tracked.txt"), b"raw\r\nworking\r\n")
+            large = (b"large\r\n" * (25 * 1024 * 1024 // 7 + 1))
+            local_large = server.host.workspace / ".minicode/worktrees/owned/ignored.txt"
+            local_large.write_bytes(large)
+            await _git(service, "config", "filter.recovery.clean", "git --version")
+            await _git(service, "config", "filter.recovery.smudge", "git --version")
+            await _git(service, "config", "filter.recovery.required", "true")
+
+            removed = await executor_worktree_action(service, "remove", path=linked.uri, force=True)
+            assert removed["removed"], removed
+            records = await executor_worktree_action(service, "snapshots")
+            record = next(item for item in records["snapshots"] if item["id"] == removed["snapshot_id"])
+            saved_index = await service.run(["git", "show", record["index_sha"] + ":index"])
+            assert saved_index.returncode == 0 and saved_index.stdout == original_index
+            tree = await _git(service, "ls-tree", "-r", record["index_sha"])
+            assert "sharedindex." in tree
+            restored = await executor_worktree_action(service, "restore", snapshot_id=removed["snapshot_id"], dest=None)
+            assert restored["restored"], restored
+            assert await service.read_bytes(linked.joinpath("tracked.txt")) == b"raw\r\nworking\r\n"
+            assert local_large.read_bytes() == large
+            assert not [item for item in await service.list_directory(service.cwd.joinpath(".git")) if item["fileName"].startswith("minicode-restore-")]
+
+
+@pytest.mark.parametrize("executor_host", ["source"], indirect=True)
+@pytest.mark.asyncio
+async def test_model_force_removal_captures_ignored_files_on_source_executor(executor_host):
+    from backend.agent.environment_selection import bind_tool_execution_environment, close_tool_execution_environment
+    from backend.tools.worktree_tools import RemoveWorktreeTool, RestoreWorktreeTool
+
+    host = executor_host
+    context = bind_tool_execution_environment(host.context, host.environments.primary())
+    try:
+        async with ExecutorEditorService(context, application_config=host.context.model_execution.config) as service:
+            linked = await _prepare(None, service)
+            await service.write_bytes(linked.joinpath("ignored.txt"), b"model ignored\r\n")
+            refused = await RemoveWorktreeTool().execute({"path": linked.native}, context)
+            assert refused.is_error and await service.metadata(linked) is not None
+            removed = await RemoveWorktreeTool().execute({"path": linked.native, "force": True}, context)
+            assert not removed.is_error, removed.content
+            snapshot = re.search(r"wtsnap_[0-9a-f]{32}", removed.content)
+            assert snapshot is not None
+            restored = await RestoreWorktreeTool().execute({"snapshot_id": snapshot.group()}, context)
+            assert not restored.is_error, restored.content
+            assert await service.read_bytes(linked.joinpath("ignored.txt")) == b"model ignored\r\n"
+    finally:
+        await close_tool_execution_environment(context)
+
+
+@pytest.mark.parametrize("executor_host", ["source"], indirect=True)
+@pytest.mark.asyncio
+async def test_source_executor_retains_in_progress_merge(editor_server):
+    from fastapi import HTTPException
+
+    server = editor_server
+    async with capture_workspace_execution(server.session, server.params["conversation_id"]) as context:
+        async with ExecutorEditorService(context, application_config=server.session.config) as service:
+            linked = await _prepare(server, service)
+            await _git(service, "checkout", "-b", "other-side")
+            await service.write_bytes("tracked.txt", b"other side\n")
+            await _git(service, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-am", "other")
+            await service.write_bytes(linked.joinpath("tracked.txt"), b"our side\n")
+            await _git(service, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-am", "ours", cwd=linked)
+            merge = await service.run(["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "merge", "other-side"], cwd=linked)
+            assert merge.returncode != 0
+            before = await service.read_bytes(linked.joinpath("tracked.txt"))
+            assert b"<<<<<<<" in before
+            with pytest.raises(HTTPException, match="in-progress Git operation"):
+                await executor_worktree_action(service, "remove", path=linked.uri, force=True)
+            assert await service.read_bytes(linked.joinpath("tracked.txt")) == before
+
+
+@pytest.mark.parametrize("executor_host", ["local"], indirect=True)
+@pytest.mark.asyncio
+async def test_local_executor_saves_user_files_before_cleanup_script(editor_server, monkeypatch):
+    server = editor_server
+    async with capture_workspace_execution(server.session, server.params["conversation_id"]) as context:
+        async with ExecutorEditorService(context, application_config=server.session.config) as service:
+            linked = await _prepare(server, service)
+            await service.write_bytes(linked.joinpath("ignored.txt"), b"before cleanup\r\n")
+
+            async def cleanup(_root, target, phase, _context, **_kwargs):
+                assert phase == "cleanup" and target == Path(linked.native)
+                (target / "ignored.txt").unlink()
+                return ""
+
+            monkeypatch.setattr("backend.workspace.local_environment_lifecycle.run_context_worktree_environment", cleanup)
+            removed = await executor_worktree_action(service, "remove", path=linked.uri, force=True)
+            assert removed["removed"] and removed["snapshot_id"], removed
+            restored = await executor_worktree_action(service, "restore", snapshot_id=removed["snapshot_id"], dest=None)
+            assert restored["restored"], restored
+            assert await service.read_bytes(linked.joinpath("ignored.txt")) == b"before cleanup\r\n"
 
 
 @pytest.mark.parametrize("executor_host", ["source"], indirect=True)
@@ -126,7 +236,7 @@ async def test_failed_snapshot_or_remove_preserves_original_index_and_snapshot(e
                 return await original_git(captured, programs, *args, **kwargs)
 
             monkeypatch.setattr(lifecycle, "_git", fail_snapshot)
-            response = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri, "force": True})
+            response = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri, "force": True}, timeout=60)
             assert response.status_code == 409, response.text
             assert await service.read_bytes(gitdir.joinpath("index")) == index
             assert await service.read_bytes(linked.joinpath("tracked.txt")) == b"working\n"
@@ -139,7 +249,7 @@ async def test_failed_snapshot_or_remove_preserves_original_index_and_snapshot(e
                 return await original_git(captured, programs, *args, **kwargs)
 
             monkeypatch.setattr(lifecycle, "_git", fail_remove)
-            response = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri, "force": True})
+            response = await server.client.delete("/api/workspace/git/worktree", params={**server.params, "path": linked.uri, "force": True}, timeout=60)
             assert response.status_code == 200 and not response.json()["removed"] and response.json()["snapshot_id"], response.text
             assert await service.read_bytes(gitdir.joinpath("index")) == index
             assert await _git(service, "rev-parse", response.json()["snapshot_ref"])

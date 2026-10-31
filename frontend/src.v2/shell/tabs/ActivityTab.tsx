@@ -3,7 +3,7 @@
  */
 import { ChevronRight, FileCode2, FileText, FileType, Folder, GitBranch, Image, MessageSquare, MonitorPlay, Layers, Paperclip, SquareTerminal, CalendarClock, Activity } from 'lucide-react'
 import { useMemo, useState } from 'react'
-import { usePanelMessages } from '../usePanelMessages'
+import { usePanelVisible } from '../panelVisibility'
 import { BackgroundCommandDetails } from './BackgroundCommandDetails'
 import { EmptyState } from '../../components/EmptyState'
 import { useAppStore } from '../../stores'
@@ -11,6 +11,7 @@ import { openWebTarget } from '../../chat/openWebTarget'
 import { revealConversationMessage } from '../../chat/revealConversationMessage'
 import { openArtifactPreview, openAttachmentPreview, openWorkspaceFilePreview } from '../../chat/openAttachmentPreview'
 import { hasVisibleActiveConversation } from '../../chat/activeConversation'
+import { chatContextInputsKey } from '../../chat/conversationSources'
 import { openAutomations } from '../../lib/automations-navigation'
 import { BrandIcon } from '../../components/BrandIcon'
 import { selectActiveConversationPreview } from '../../lib/preview-projection'
@@ -41,7 +42,11 @@ export const ActivityTab = () => {
   const conversationId = useAppStore((s) => s.conversationId)
   const [backgroundDetail, setBackgroundDetail] = useState<{ conversationId: string; commandId: string } | null>(null)
   const hasActiveConversation = useAppStore((s) => hasVisibleActiveConversation(s.conversationId, s.conversations))
-  const messages = usePanelMessages()
+  const visible = usePanelVisible()
+  // Text deltas leave this key unchanged, so the tab re-derives only when the
+  // artifacts, attachments, tool records or references it reads change. A
+  // hidden tab reads an empty transcript until it is shown again.
+  const messagesKey = useAppStore((s) => (visible ? chatContextInputsKey(s.messages) : ''))
   const isStreaming = useAppStore((s) => s.isStreaming)
   const todos = useAppStore((s) => s.todos)
   const plan = useAppStore((s) => s.plan)
@@ -67,7 +72,7 @@ export const ActivityTab = () => {
   const browserAnnotations = useAppStore((s) => s.browserAnnotations)
   const state = useMemo(() => buildActivitySidebarState({
     conversationId: hasActiveConversation ? conversationId : null,
-    messages,
+    messages: visible ? useAppStore.getState().messages : [],
     isStreaming,
     todos,
     plan,
@@ -94,7 +99,8 @@ export const ActivityTab = () => {
   }), [
     conversationId,
     hasActiveConversation,
-    messages,
+    messagesKey,
+    visible,
     isStreaming,
     todos,
     plan,

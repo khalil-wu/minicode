@@ -20,7 +20,9 @@ from backend.ws.payload_contracts import validate_session_projection_payload
 
 
 @pytest.mark.asyncio
-async def test_first_input_owner_survives_admission_without_command_completion(tmp_path):
+async def test_first_input_owner_survives_admission_without_command_completion(tmp_path, monkeypatch):
+    # Dispatch only admits inputs whose bound workspace is trusted; this fixture binds a raw temp dir.
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
     queue_root = tmp_path / "queue"
     queue = DurableUserMessageQueue(session_id="recovered-session", root_dir=queue_root)
     repository = ConversationRepository(tmp_path / "conversations")
@@ -43,7 +45,7 @@ async def test_first_input_owner_survives_admission_without_command_completion(t
 
     first.ws = SimpleNamespace(receive_text=receive)
     dispatcher = SessionCommandDispatcher(first, root_dir=tmp_path / "receipts")
-    def retain_without_dispatch(command_id, generation, *, command_type):
+    def retain_without_dispatch(command_id, generation, *, command_type, command=None, recovered=False):
         assert command_id == 'cmd_first' and generation == 1 and command_type == 'user_message'
 
     dispatcher._schedule_durable_client_command = retain_without_dispatch
@@ -52,14 +54,15 @@ async def test_first_input_owner_survives_admission_without_command_completion(t
             await dispatcher.run(1)
         pending = queue.pending_client_commands()
         assert first.active_conversation_id is None
-        assert "conversation_id" not in pending[0].data
+        # The dispatcher mints the owner identity together with the durable input.
+        owner = pending[0].data["conversation_id"]
+        assert owner == pending[0].data["_implicit_new_conversation_id"]
         claimed = queue.claim_client_command("cmd_first")
         claimed.data["_client_queue_key"] = queue.path.stem
         async with first.conversation_lifecycle_lock():
-            first._ensure_active_conversation()
+            first.active_conversation_id = repository.create_conversation(conversation_id=owner, workspace_root=str(tmp_path)).id
             dispatcher._bind_user_message_owner(claimed, first.active_conversation_id)
-        owner = claimed.data["conversation_id"]
-        assert owner == first.active_conversation_id
+        assert claimed.data["conversation_id"] == owner == first.active_conversation_id
         assert sent[0]["type"] == "client.command.ack"
         repository.commit_turn_admission(owner,
             user_message={"id": "u-first", "role": "user", "content": "inspect project", "timestamp": 1},
@@ -94,7 +97,8 @@ async def test_first_input_owner_survives_admission_without_command_completion(t
 
 
 @pytest.mark.asyncio
-async def test_first_input_owner_waits_for_prior_selection_without_blocking_interrupt(tmp_path):
+async def test_first_input_owner_waits_for_prior_selection_without_blocking_interrupt(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.workspace.trust.is_workspace_trusted", lambda _root: True)
     queue = DurableUserMessageQueue(session_id="recovered-session", root_dir=tmp_path / "queue")
     session, _ = _session(tmp_path, queue)
     session.active_conversation_id = "conversation-a"
@@ -117,8 +121,9 @@ async def test_first_input_owner_waits_for_prior_selection_without_blocking_inte
 
     dispatcher._handle_command_inner = handle
     from backend.agent.message import UserCommand
-    switch = asyncio.create_task(dispatcher._handle_command(
-        UserCommand(type="conversation.switch", data={"conversation_id": "conversation-b"})))
+    # Drive the switch through the real dispatcher entry so selection intent is admitted.
+    switch = asyncio.create_task(dispatcher._dispatch_client_command(
+        UserCommand(type="conversation.switch", data={"conversation_id": "conversation-b"}), session.connection_generation))
     await switched.wait()
     incoming = iter([
         json.dumps({"type": "user_message", "content": "inspect", "client_command_id": "cmd_unscoped"}),

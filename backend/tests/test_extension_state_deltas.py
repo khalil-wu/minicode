@@ -101,6 +101,54 @@ def test_delta_gaps_and_missing_list_bases_are_rejected(tmp_path):
         apply_value_change([], {"items": {"2": {"value": "entry"}}, "length": 3}, in_place=True)
 
 
+@pytest.mark.parametrize("missing", ["run_id", "base_revision", "revision", "extension_changes"])
+def test_incomplete_delta_is_reported_as_corrupt_in_both_replay_paths(tmp_path, missing):
+    journal = ExecutionJournal("incomplete", base_dir=tmp_path)
+    payload = {"run_id": "run", "base_revision": 0, "revision": 1,
+        "extension_changes": [{"value": {"name": "change"}}]}
+    del payload[missing]
+    journal.append_lifecycle("extension_state_delta", payload)
+    original = journal.path.read_bytes()
+    cold = ExecutionJournal("incomplete", base_dir=tmp_path)
+    with pytest.raises(ExecutionJournalCorruptionError, match="Invalid extension state delta"):
+        cold.reconstruct_history()
+    with pytest.raises(ExecutionJournalCorruptionError, match="Invalid extension state delta"):
+        cold.replay_extension_state({}, run_id="run")
+    assert journal.path.read_bytes() == original
+
+
+def test_replay_does_not_validate_a_different_run_delta(tmp_path):
+    journal = ExecutionJournal("other-run", base_dir=tmp_path)
+    journal.append_lifecycle("extension_state_delta", {"run_id": "other", "revision": 1})
+    state, cursor, applied, messages = journal.replay_extension_state({}, run_id="run")
+    assert (state, cursor, applied, messages) == ({}, {}, 0, [])
+
+
+@pytest.mark.parametrize("payload", [
+    {"lifecycle": "extension_state_committed", "context_snapshot": {}},
+    {"run_id": "run", "context_snapshot": {"extension_cursor": {"run_id": "run", "revision": 1}}},
+])
+def test_missing_extension_snapshot_is_corruption_and_does_not_modify_evidence(tmp_path, payload):
+    journal = ExecutionJournal("missing-snapshot", base_dir=tmp_path)
+    journal.append("system", payload)
+    original = journal.path.read_bytes()
+    with pytest.raises(ExecutionJournalCorruptionError, match="Invalid extension state snapshot"):
+        journal.replay_extension_state({})
+    assert journal.path.read_bytes() == original
+
+
+def test_malformed_snapshot_cursor_is_reported_consistently(tmp_path):
+    journal = ExecutionJournal("bad-cursor", base_dir=tmp_path)
+    journal.append_lifecycle("snapshot", {"context_snapshot": {
+        "history": [], "extension_state": {}, "extension_cursor": "invalid"}})
+    original = journal.path.read_bytes()
+    with pytest.raises(ExecutionJournalCorruptionError, match="Invalid extension snapshot cursor"):
+        journal.reconstruct_history()
+    with pytest.raises(ExecutionJournalCorruptionError, match="Invalid extension snapshot cursor"):
+        journal.replay_extension_state({})
+    assert journal.path.read_bytes() == original
+
+
 @pytest.mark.parametrize("before,after", [
     ({}, {"entries": [{"data": [1, 2]}]}),
     ({"labels": {"a": "old", "b": "remove"}}, {"labels": {"a": "new"}}),
