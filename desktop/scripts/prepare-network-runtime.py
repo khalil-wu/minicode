@@ -161,14 +161,16 @@ def main():
         "utils/audio/src/lib.rs", "utils/audio/Cargo.toml", "utils/image/Cargo.toml",
         "utils/cache/src/lib.rs", "utils/string/src/truncate.rs",
         "core/src/context_manager/history.rs")
-    if sys.platform == "linux":
-        pinned_files += ("linux-sandbox/src/linux_run_main.rs", "linux-sandbox/src/proxy_routing.rs",
-            "linux-sandbox/src/proxy_lifecycle.rs", "linux-sandbox/src/landlock.rs", "protocol/src/permissions.rs")
-    for relative in pinned_files:
+    linux_files = ("linux-sandbox/src/linux_run_main.rs", "linux-sandbox/src/proxy_routing.rs",
+        "linux-sandbox/src/proxy_lifecycle.rs", "linux-sandbox/src/seccomp.rs", "protocol/src/permissions.rs")
+    # Every host verifies the whole pinned set, so a Windows build also catches Linux-only drift.
+    for relative in pinned_files + linux_files:
         original = run(["git", "show", f"{SOURCE_COMMIT}:codex-rs/{relative}"],
             cwd=checkout, environment=environment, capture=True).stdout
         if (workspace / relative).read_bytes() != original:
             raise RuntimeError(f"{relative} differs from the pinned Source object")
+    if sys.platform == "linux":
+        pinned_files += linux_files
     original_image = original_image_source((workspace / "core/src/context_manager/history.rs").read_bytes())
     if (project / "src/source_original_image.rs").read_bytes() != original_image:
         raise RuntimeError("The original-image estimator differs from its exact pinned Source ranges")
