@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleCommandResultEvent as applyCommandResultEvent } from "./commandResultEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
+import type { TurnDiffState } from "../stores/types";
 import { pushToast } from "../overlays/ToastContainer";
 
 vi.mock("../protocol/ws-outbox", () => ({
@@ -376,5 +377,26 @@ describe("handleCommandResultEvent", () => {
     events.dispatchEvent(new Event("pagehide"));
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:minicode-export");
     vi.unstubAllGlobals();
+  });
+});
+
+describe("conversation.delete result", () => {
+  it("drops the deleted conversation's turn diff and pending provider progress", () => {
+    const sep = String.fromCharCode(0);
+    const turnDiff = { threadId: "conv-gone", turnId: "turn-gone", updatedAt: 1, diff: "--- a\n+++ b" } as unknown as TurnDiffState;
+    useAppStore.setState({
+      conversationId: "conv-command",
+      turnDiffs: { "conv-gone": turnDiff, "conv-command": { ...turnDiff, threadId: "conv-command" } },
+      pendingProviderProgress: { [`conv-gone${sep}m1`]: [], [`conv-command${sep}m2`]: [] },
+      conversationWorkbenchStates: {},
+      sideChats: {},
+      retainedComposerInputs: {},
+    });
+
+    handleCommandResultEvent({ type: "command.result", command: "conversation.delete", level: "success", message: "deleted",
+      data: { deleted: true, conversation_id: "conv-gone" } } as unknown as ServerEvent);
+
+    expect(Object.keys(useAppStore.getState().turnDiffs)).toEqual(["conv-command"]);
+    expect(Object.keys(useAppStore.getState().pendingProviderProgress)).toEqual([`conv-command${sep}m2`]);
   });
 });

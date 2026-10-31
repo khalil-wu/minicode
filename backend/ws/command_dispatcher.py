@@ -587,7 +587,9 @@ class SessionCommandDispatcher:
                 try:
                     if command.type == "user_message":
                         self._bind_user_message_input_owner(command)
-                    persisted = durable_queue.persist_client_command(command)
+                    # The durable write fsyncs; keep it off the event loop so
+                    # other sessions' streams are not paused behind the disk.
+                    persisted = await asyncio.to_thread(durable_queue.persist_client_command, command)
                 except Exception:
                     logger.exception(
                         "Failed to persist client command %s in session %s",

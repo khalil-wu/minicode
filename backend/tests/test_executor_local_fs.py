@@ -196,10 +196,16 @@ async def test_local_walk_skips_file_and_broken_links_and_does_not_revisit_direc
     make_symlink(root / "missing", root / "broken")
     options = {"maxDepth": 64, "maxDirectories": 100, "maxEntries": 100, "followDirectorySymlinks": True}
     result = await fs.walk(root.as_uri(), options, sandbox=None)
-    assert result == {"entries": [{"path": (root / "a.txt").as_uri(), "kind": "file"},
-                                  {"path": (root / "cycle").as_uri(), "kind": "directory"}], "errors": [], "truncated": False}
+
+    def walked(path):
+        value = path.stat()
+        return {"size": value.st_size, "modifiedAtMs": value.st_mtime_ns // 1_000_000}
+
+    assert result == {"entries": [{"path": (root / "a.txt").as_uri(), "kind": "file", **walked(root / "a.txt")},
+                                  {"path": (root / "cycle").as_uri(), "kind": "directory", **walked(root / "cycle")}],
+                      "errors": [], "truncated": False}
     result = await fs.walk(root.as_uri(), {**options, "followDirectorySymlinks": False}, sandbox=None)
-    assert result["entries"] == [{"path": (root / "a.txt").as_uri(), "kind": "file"}]
+    assert result["entries"] == [{"path": (root / "a.txt").as_uri(), "kind": "file", **walked(root / "a.txt")}]
     await fs.close()
 
 
@@ -306,7 +312,8 @@ async def test_local_native_non_utf8_bytes_keep_source_uri_through_read_canonica
     root_uri = ExecutorPath.from_native(native_root, convention="posix").uri
     result = await fs.walk(root_uri, {"maxDepth": 1, "maxDirectories": 10, "maxEntries": 10,
         "followDirectorySymlinks": False}, sandbox=None)
-    assert result == {"entries": [{"path": uri, "kind": "file"}], "errors": [], "truncated": False}
+    assert result == {"entries": [{"path": uri, "kind": "file", "size": 11, "modifiedAtMs": os.stat(native).st_mtime_ns // 1_000_000}],
+                      "errors": [], "truncated": False}
     await fs.close()
 
 

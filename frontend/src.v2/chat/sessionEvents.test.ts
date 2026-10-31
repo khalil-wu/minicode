@@ -4,7 +4,7 @@ import { handleSessionEvent } from "./sessionEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
-import type { ChatMessage, SubagentState } from "../stores/types";
+import type { ChatMessage, SubagentState, TurnDiffState } from "../stores/types";
 import { getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 import { projectMessagesToTurns } from "./chatSurfaceState";
 import { sendClientCommand } from "../protocol/ws-outbox";
@@ -583,6 +583,25 @@ describe("handleSessionEvent", () => {
       summary: "User: audit all agents | Assistant: event contracts aligned",
       compactionState: "compacted",
     });
+  });
+
+  it("conversation list reconciliation drops turn diffs and pending provider progress of removed conversations", () => {
+    const sep = String.fromCharCode(0);
+    const turnDiff = { threadId: "conv-gone", turnId: "turn-gone", updatedAt: 1, diff: "--- a\n+++ b" } as unknown as TurnDiffState;
+    useAppStore.setState({
+      turnDiffs: { "conv-gone": turnDiff, "conv-active": { ...turnDiff, threadId: "conv-active" } },
+      pendingProviderProgress: { [`conv-gone${sep}m1`]: [], [`conv-active${sep}m2`]: [] },
+    });
+
+    handleSessionEvent({
+      type: "conversation.list",
+      active_conversation_id: "conv-active",
+      conversations: [{ id: "conv-active", title: "Active", updated_at: "2026-08-15T10:00:00Z" }],
+      active_conversation: { id: "conv-active", title: "Active", updated_at: "2026-08-15T10:00:00Z", messages: [] },
+    } as unknown as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+
+    expect(Object.keys(useAppStore.getState().turnDiffs)).toEqual(["conv-active"]);
+    expect(Object.keys(useAppStore.getState().pendingProviderProgress)).toEqual([`conv-active${sep}m2`]);
   });
 
   it("rehydrates durable queued follow-ups from the runtime snapshot", () => {

@@ -33,19 +33,18 @@ export MINICODE_EDITOR_NODE=/absolute/path/to/node
 
 ## 从源码准备 Linux native resources
 
-使用该 Linux 主机上的 Rust 1.95.0、Python >=3.11，以及 C/C++ compiler、pkg-config、libssl-dev、cmake 等构建依赖；网络构建还在 CI 中配有 clang。以下命令在 MiniCode checkout 根目录执行：
+使用该 Linux 主机上的 Rust 1.95.0（execpolicy）与 1.99.1（network）、Python >=3.11，以及 C/C++ compiler、pkg-config、libssl-dev、cmake 等构建依赖；网络构建还在 CI 中配有 clang。两个运行时固定在不同的 Source 提交：execpolicy 为 822e58cc，network 为 970111f6（network 脚本自行从 checkout 取该提交，不依赖工作树所在的提交）。以下命令在 MiniCode checkout 根目录执行：
 
 ```sh
 git clone https://github.com/openai/codex .tmp/codex-src
-git -C .tmp/codex-src checkout 822e58cc3d666166c7446c5b1ea2e52f5d09594c
-rustup toolchain install 1.95.0 --profile minimal
-cargo_bin="$(rustup which --toolchain 1.95.0 cargo)"
-export PATH="$(dirname "$cargo_bin"):$PATH"
-"$cargo_bin" fetch --locked --manifest-path desktop/native-execpolicy/Cargo.toml
+rustup toolchain install 1.95.0 1.99.1 --profile minimal
+execpolicy_cargo="$(rustup which --toolchain 1.95.0 cargo)"
+network_cargo="$(rustup which --toolchain 1.99.1 cargo)"
+"$execpolicy_cargo" fetch --locked --manifest-path desktop/native-execpolicy/Cargo.toml
 python3.11 desktop/scripts/prepare-execpolicy-runtime.py \
-  --cargo "$cargo_bin" --output-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
+  --cargo "$execpolicy_cargo" --output-directory backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu
 python3.11 desktop/scripts/prepare-network-runtime.py \
-  --cargo "$cargo_bin" --source-checkout .tmp/codex-src --build-directory .tmp/native-network-build \
+  --cargo "$network_cargo" --source-checkout .tmp/codex-src --build-directory .tmp/native-network-build \
   --output-directory backend/network/resources/x86_64-unknown-linux-gnu
 python3.11 -m pip install -e .
 ```

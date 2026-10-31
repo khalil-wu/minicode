@@ -27,7 +27,7 @@ const PROVIDER_PROGRESS_STATUS_RANK: Record<string, number> = {
   failed: 4,
 };
 
-const PROVIDER_PROGRESS_TERMINAL_STATUSES = new Set(["partial", "completed", "failed"]);
+export const PROVIDER_PROGRESS_TERMINAL_STATUSES = new Set(["partial", "completed", "failed"]);
 
 const PROVIDER_PROGRESS_STATE_RANK: Record<string, number> = {
   "": 0,

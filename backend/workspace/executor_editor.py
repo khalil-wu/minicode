@@ -92,17 +92,36 @@ class ExecutorEditorService(ExecutorWorkspaceService):
             raise HTTPException(404, f"Path not found: {value}")
         if not metadata["isDirectory"]:
             raise HTTPException(400, "Path must point to a directory.")
+        # One depth-1 walk answers the listing and every child's has_children in a
+        # single executor round trip; a tree past the walk budget keeps the per-child probes.
+        outcome = await self.walk(path, max_depth=1)
+        if outcome["errors"]:
+            raise OSError(f"Executor directory read failed: {outcome['errors']}")
         entries = []
-        for child in await self.directory_entries(path):
-            if not self.scope.resolve_access(child.uri).can_read:
-                continue
-            info = await self.metadata(child)
-            is_dir = info["isDirectory"]
-            entries.append(WorkspaceTreeEntry(name=child.name, path=self.display(child), is_dir=is_dir,
-                size_bytes=None if is_dir else info["size"], modified_at=WorkspaceService.iso_timestamp(info["modifiedAtMs"] / 1000),
-                has_children=is_dir and bool(await self.directory_entries(child)), **self.identity(child)))
+        if outcome["truncated"]:
+            for child in await self.directory_entries(path):
+                if not self.scope.resolve_access(child.uri).can_read:
+                    continue
+                info = await self.metadata(child)
+                entries.append(self._tree_entry(child, is_dir=info["isDirectory"], size=info["size"], modified_ms=info["modifiedAtMs"],
+                    has_children=info["isDirectory"] and bool(await self.directory_entries(child))))
+        else:
+            walked = {self.resolve(item["path"]): item for item in outcome["entries"]}
+            visible = {entry: item for entry, item in walked.items() if self.visible(entry)}
+            populated = {entry.parent for entry in visible if entry.parent in walked}
+            for child, item in visible.items():
+                if child.parent in walked or not self.scope.resolve_access(child.uri).can_read:
+                    continue
+                is_dir = item["kind"] == "directory"
+                entries.append(self._tree_entry(child, is_dir=is_dir, size=item["size"], modified_ms=item["modifiedAtMs"],
+                    has_children=is_dir and child in populated))
         entries.sort(key=lambda item: (not item.is_dir, item.name.casefold()))
         return WorkspaceTreeResponse(workspace_root=self.workspace_root_value, requested_path=self.display(path), entries=entries, **self.identity())
+
+    def _tree_entry(self, child, *, is_dir, size, modified_ms, has_children):
+        return WorkspaceTreeEntry(name=child.name, path=self.display(child), is_dir=is_dir,
+            size_bytes=None if is_dir else size, modified_at=WorkspaceService.iso_timestamp(modified_ms / 1000),
+            has_children=has_children, **self.identity(child))
 
     async def read_file(self, value):
         path = await self.allowed(value)

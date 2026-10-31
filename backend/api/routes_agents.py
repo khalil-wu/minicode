@@ -14,6 +14,7 @@ from backend.llm.model_selection import (
 )
 from backend.owner_scope import canonical_workspace_root
 from backend.async_cleanup import to_thread_cancel_safe
+from backend.workspace import trust
 
 from . import _state
 
@@ -107,6 +108,12 @@ def _no_store(response: Response) -> None:
     response.headers["Cache-Control"] = "no-store"
 
 
+def _require_trusted_workspace(workspace_root: str) -> None:
+    root = str(workspace_root or "").strip()
+    if root and not trust.is_workspace_trusted(Path(root)):
+        raise HTTPException(status_code=403, detail="Project folder is not trusted.")
+
+
 @router.get("/api/agents")
 async def list_agents_api(
     response: Response,
@@ -114,6 +121,7 @@ async def list_agents_api(
 ) -> dict[str, Any]:
     """List all discovered custom agents."""
     _no_store(response)
+    _require_trusted_workspace(workspace_root)
     try:
         payload = await to_thread_cancel_safe(list_agents, workspace_root=workspace_root)
         payload["model_catalog"] = _live_agent_model_catalog(workspace_root)
@@ -126,6 +134,7 @@ async def list_agents_api(
 async def upsert_agent_api(request: AgentUpsertRequest, response: Response) -> dict[str, Any]:
     """Create or overwrite a custom agent."""
     _no_store(response)
+    _require_trusted_workspace(request.workspace_root)
     try:
         return await to_thread_cancel_safe(upsert_agent,
             AgentUpsertPayload(
@@ -156,6 +165,7 @@ async def delete_agent_api(
 ) -> dict[str, Any]:
     """Delete a user-defined custom agent."""
     _no_store(response)
+    _require_trusted_workspace(workspace_root)
     try:
         return await to_thread_cancel_safe(delete_agent,
             name,

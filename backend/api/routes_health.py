@@ -12,10 +12,11 @@ from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from backend.agent.instruction_discovery import load_project_guideline_bundle
 from backend.config import PROJECT_ROOT, STATE_ROOT, DATA_ROOT
+from backend.workspace import trust
 from backend.workspace.state import get_active_workspace_root
 from backend.services.health_service import (
     build_capability_unavailable_payload,
@@ -160,6 +161,8 @@ async def project_guidelines_status(
     workspace_dir: str | None = Query(default=None),
 ) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
+    if workspace_dir and not trust.is_workspace_trusted(Path(workspace_dir)):
+        raise HTTPException(status_code=403, detail="Project folder is not trusted.")
     bundle = load_project_guideline_bundle(workspace_dir=workspace_dir)
     return bundle.to_dict()
 

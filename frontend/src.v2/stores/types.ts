@@ -1981,7 +1981,6 @@ export interface AgentSlice {
   clearAgentProgress: (conversationId?: string) => void;
   snapshotAgentState: (conversationId?: string) => void;
   restoreAgentState: (conversationId?: string) => void;
-  clearConversationAgentState: (conversationId: string) => void;
   setBudget: (buckets: BudgetBucket[], total: number) => void;
 }
 

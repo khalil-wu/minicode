@@ -170,7 +170,8 @@ def _walk(root: Path, options: dict, cancelled) -> dict:
                 continue
             if not is_directory and not stat.S_ISREG(value.st_mode):
                 continue
-            if not append("entries", path, kind="directory" if is_directory else "file"):
+            if not append("entries", path, kind="directory" if is_directory else "file",
+                    size=value.st_size, modifiedAtMs=max(0, value.st_mtime_ns // 1_000_000)):
                 return outcome
             if is_directory and depth < depth_limit and not (hidden and name.startswith(".")):
                 try:

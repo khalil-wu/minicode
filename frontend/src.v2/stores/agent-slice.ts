@@ -4,7 +4,7 @@ import { progressConversationKey, updateMessagesForConversation } from "./shared
 import { inheritMessageTopology } from "../lib/message-changes";
 import type { AgentProgressEntry, AppStore, ConversationAgentState, ProgressContentBlock } from "./types";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
-import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
+import { PROVIDER_PROGRESS_TERMINAL_STATUSES, providerProgressLifecycleRegressed } from "../lib/provider-progress";
 import { modelSelectionPatch } from "../lib/model-selection";
 
 const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
@@ -12,8 +12,6 @@ const SERIAL_MAIN_PROGRESS_STAGES = new Set<ProgressContentBlock["stage"]>([
   "final",
   "status",
 ]);
-
-const PROVIDER_PROGRESS_TERMINAL_STATUSES = new Set(["partial", "completed", "failed"]);
 
 function mergeProgressDetail(previous?: string, incoming?: string): string | undefined {
   const parts: string[] = [];
@@ -619,22 +617,6 @@ export const createAgentSlice: StateCreator<AppStore, [], [], AgentSlice> = (set
       return {
         ...stored,
         conversationAgentStates: storeConversationAgentState(s, targetId, stored),
-      };
-    }),
-  clearConversationAgentState: (conversationId) =>
-    set((s) => {
-      const next = { ...(s.conversationAgentStates ?? {}) };
-      const nextTurnDiffs = { ...s.turnDiffs };
-      delete next[conversationId];
-      delete nextTurnDiffs[conversationId];
-      if (s.conversationId !== conversationId) return { conversationAgentStates: next, turnDiffs: nextTurnDiffs };
-      return {
-        plan: null,
-        todos: [],
-        subagents: [],
-        agentProgress: [],
-        conversationAgentStates: next,
-        turnDiffs: nextTurnDiffs,
       };
     }),
   setBudget: (buckets, total) =>

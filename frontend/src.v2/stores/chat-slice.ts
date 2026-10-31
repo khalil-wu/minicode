@@ -61,7 +61,7 @@ import {
   mergeToolCallResultRecord,
   type ToolCallRecord,
 } from "../lib/tool-call-reducer";
-import { providerProgressLifecycleRegressed } from "../lib/provider-progress";
+import { PROVIDER_PROGRESS_TERMINAL_STATUSES, providerProgressLifecycleRegressed } from "../lib/provider-progress";
 import { isTransientProviderReasoning } from "../lib/provider-reasoning";
 import { activeDraftStorageKey, materializeConversationDraft, refreshConversationDraftSelection,
   savedActiveConversationDraftId, selectConversationDraft, startConversationDraft } from "./conversation-drafts";
@@ -134,8 +134,6 @@ function completeRunWorkState(state: AppStore, terminalStatus: "completed" | "pa
   };
 }
 
-const PROVIDER_PROGRESS_TERMINAL_STATUSES = new Set(["partial", "completed", "failed"]);
-
 const maxProgressNumber = (left: number | undefined, right: number | undefined): number | undefined => {
   if (left === undefined) return right;
   if (right === undefined) return left;
@@ -197,6 +195,7 @@ const mergeProviderMessageProgress = (
 
 const pendingProviderProgressKey = (conversationId: string, messageId: string): string =>
   `${conversationId}\u0000${messageId}`;
+export const pendingProviderProgressOwner = (key: string): string => key.split("\u0000", 1)[0];
 
 const assistantIsTerminal = (message: AppStore["messages"][number]): boolean =>
   Boolean(message.terminalStatus)

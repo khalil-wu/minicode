@@ -16,6 +16,9 @@ SKILL_ASSET_TOKEN_TTL_SECONDS = 300
 PLUGIN_ASSET_TOKEN_TTL_SECONDS = 300
 ATTACHMENT_ASSET_TOKEN_TTL_SECONDS = 300
 ARTIFACT_ASSET_TOKEN_TTL_SECONDS = 300
+# The renderer mints these tokens with its own clock; allow that much drift
+# past the TTL before a token's lifetime counts as forged.
+TOKEN_CLOCK_SKEW_SECONDS = 60
 
 
 def _runtime_token() -> str:
@@ -28,6 +31,21 @@ def _runtime_token_configured() -> bool:
 
 def _constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _signed_token_parts(token: str, ttl_seconds: int) -> tuple[int, str] | None:
+    """Split ``expires_at.signature``, rejecting expired or over-long lifetimes."""
+    expires_at_text, separator, signature = token.partition(".")
+    if not separator or not signature:
+        return None
+    try:
+        expires_at = int(expires_at_text)
+    except ValueError:
+        return None
+    now = int(time.time())
+    if expires_at < now or expires_at > now + ttl_seconds + TOKEN_CLOCK_SKEW_SECONDS:
+        return None
+    return expires_at, signature
 
 
 def _request_runtime_token(request: Request) -> str:
@@ -115,15 +133,10 @@ def _is_workspace_raw_token_authorized(request: Request) -> bool:
     workspace_root = request.query_params.get("workspace_root", "").strip()
     if not raw_token or not raw_path or not workspace_root:
         return False
-    expires_at_text, separator, supplied_signature = raw_token.partition(".")
-    if not separator or not supplied_signature:
+    parts = _signed_token_parts(raw_token, WORKSPACE_RAW_TOKEN_TTL_SECONDS)
+    if parts is None:
         return False
-    try:
-        expires_at = int(expires_at_text)
-    except ValueError:
-        return False
-    if expires_at < int(time.time()):
-        return False
+    expires_at, supplied_signature = parts
     expected_signature = _workspace_raw_token_signature(raw_path, workspace_root, expires_at, secret,
         session_id=request.query_params.get("session_id", ""), conversation_id=request.query_params.get("conversation_id", ""),
         environment_id=request.query_params.get("environment_id", ""))
@@ -157,15 +170,10 @@ def _is_workspace_browser_raw_token_authorized(request: Request) -> bool:
     path = request.query_params.get("path", "").strip()
     if not raw_token or not session_id or not conversation_id or not execution_cwd or not path:
         return False
-    expires_at_text, separator, supplied_signature = raw_token.partition(".")
-    if not separator or not supplied_signature:
+    parts = _signed_token_parts(raw_token, WORKSPACE_RAW_TOKEN_TTL_SECONDS)
+    if parts is None:
         return False
-    try:
-        expires_at = int(expires_at_text)
-    except ValueError:
-        return False
-    if expires_at < int(time.time()):
-        return False
+    expires_at, supplied_signature = parts
     expected = _workspace_browser_raw_token_signature(session_id, conversation_id, execution_cwd, path, expires_at, secret,
         environment_id=request.query_params.get("environment_id", ""))
     return _constant_time_equal(supplied_signature, expected)
@@ -191,15 +199,10 @@ def _is_skill_asset_token_authorized(request: Request) -> bool:
     variant = request.query_params.get("variant", "").strip().lower()
     if not asset_token or not skill_path or variant not in {"small", "large"}:
         return False
-    expires_at_text, separator, supplied_signature = asset_token.partition(".")
-    if not separator or not supplied_signature:
+    parts = _signed_token_parts(asset_token, SKILL_ASSET_TOKEN_TTL_SECONDS)
+    if parts is None:
         return False
-    try:
-        expires_at = int(expires_at_text)
-    except ValueError:
-        return False
-    if expires_at < int(time.time()):
-        return False
+    expires_at, supplied_signature = parts
     expected_signature = _skill_asset_token_signature(skill_path, variant, expires_at, secret)
     return _constant_time_equal(supplied_signature, expected_signature)
 
@@ -220,15 +223,10 @@ def _is_plugin_asset_token_authorized(request: Request) -> bool:
     variant = request.query_params.get("variant", "").strip()
     if not asset_token or not plugin_path or variant not in {"composer", "logo", "logo-dark"}:
         return False
-    expires_at_text, separator, supplied_signature = asset_token.partition(".")
-    if not separator or not supplied_signature:
+    parts = _signed_token_parts(asset_token, PLUGIN_ASSET_TOKEN_TTL_SECONDS)
+    if parts is None:
         return False
-    try:
-        expires_at = int(expires_at_text)
-    except ValueError:
-        return False
-    if expires_at < int(time.time()):
-        return False
+    expires_at, supplied_signature = parts
     expected_signature = _plugin_asset_token_signature(plugin_path, variant, expires_at, secret)
     return _constant_time_equal(supplied_signature, expected_signature)
 
@@ -258,15 +256,10 @@ def _is_attachment_asset_token_authorized(request: Request) -> bool:
     conversation_id = request.query_params.get("conversation_id", "").strip()
     if not asset_token or not artifact_id or not session_id or not conversation_id:
         return False
-    expires_at_text, separator, supplied_signature = asset_token.partition(".")
-    if not separator or not supplied_signature:
+    parts = _signed_token_parts(asset_token, ATTACHMENT_ASSET_TOKEN_TTL_SECONDS)
+    if parts is None:
         return False
-    try:
-        expires_at = int(expires_at_text)
-    except ValueError:
-        return False
-    if expires_at < int(time.time()):
-        return False
+    expires_at, supplied_signature = parts
     expected_signature = _attachment_asset_token_signature(
         artifact_id,
         session_id,
@@ -324,15 +317,10 @@ def _is_artifact_asset_token_authorized(request: Request) -> bool:
     conversation_id = request.query_params.get("conversation_id", "").strip()
     if not asset_token or not artifact_id or not session_id or not conversation_id:
         return False
-    expires_at_text, separator, supplied_signature = asset_token.partition(".")
-    if not separator or not supplied_signature:
+    parts = _signed_token_parts(asset_token, ARTIFACT_ASSET_TOKEN_TTL_SECONDS)
+    if parts is None:
         return False
-    try:
-        expires_at = int(expires_at_text)
-    except ValueError:
-        return False
-    if expires_at < int(time.time()):
-        return False
+    expires_at, supplied_signature = parts
     expected_signature = _artifact_asset_token_signature(
         artifact_id,
         session_id,

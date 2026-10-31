@@ -158,6 +158,20 @@ describe('InspectorTab control-plane refresh', () => {
     vi.unstubAllGlobals();
   });
 
+  it('reads session usage from the store accumulator instead of the inspector ring buffer', async () => {
+    const { providerTraceExportPackage, providerTracePayloadFromExport } = await import('../../chat/providerTrace');
+    const exported = providerTraceExportPackage({ provider: 'openai_responses', model: 'traced-model',
+      request_id: 'req-ring', usage: { input_tokens: 10, output_tokens: 2 } });
+    useAppStore.getState().addInspectorEntry({ targetKind: 'provider', targetId: 'ring-request', conversationId: 'conv-inspector',
+      payload: providerTracePayloadFromExport(exported)!, timestamp: 1 });
+    useAppStore.setState({ usageTotals: { input: 1200, output: 300, cacheRead: 100, cacheWrite: 50, reasoning: 20, turns: 3 } });
+    render(<InspectorTab />);
+    fireEvent.click(screen.getByRole('button', { name: /高级诊断/ }));
+    expect(screen.getByText('3 轮')).toBeTruthy();
+    expect(screen.getByText(`${(1200).toLocaleString()} 输入 / ${(300).toLocaleString()} 输出`)).toBeTruthy();
+    expect(document.body.textContent).not.toContain('10 输入');
+  });
+
   it('opens the bottom terminal from the terminal inspector in chat mode', () => {
     useAppStore.setState({ appMode: 'cowork', dockCollapsed: true, activeBottomTab: 'problems',
       terminalSessions: [{ id: 'terminal-own', conversationId: 'conv-inspector', shell: 'powershell', cwd: 'C:/own' }],

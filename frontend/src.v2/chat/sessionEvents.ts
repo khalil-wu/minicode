@@ -1,6 +1,7 @@
 import { useAppStore } from "../stores";
 import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft, isComposerConversationDeleted } from "../stores/composer-drafts";
 import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
+import { pendingProviderProgressOwner } from "../stores/chat-slice";
 import { captureCommittedUserMessage, capturePendingUserMessageQueueUpdate } from "./sendChatMessage";
 import { subagentModelPatch } from "../lib/subagent-model";
 import type {
@@ -1565,6 +1566,13 @@ export const handleSessionEvent = (
             conversationWorkbenchStates: state.conversationWorkbenchStates,
             conversationRecallTruncations: Object.fromEntries(
               Object.entries(state.conversationRecallTruncations ?? {}).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            turnDiffs: Object.fromEntries(
+              Object.entries(state.turnDiffs).filter(([id]) => knownConversationIds.has(id)),
+            ),
+            pendingProviderProgress: Object.fromEntries(
+              Object.entries(state.pendingProviderProgress)
+                .filter(([key]) => knownConversationIds.has(pendingProviderProgressOwner(key))),
             ),
             pendingApproval,
             approvalQueue,

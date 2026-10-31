@@ -34,6 +34,9 @@ AGENTS_LOADER = ROOT / "backend" / "agents" / "loader.py"
 SERVER_EVENT_VALIDATION = ROOT / "frontend" / "src.v2" / "protocol" / "server-event-validation.ts"
 STORE_TYPES = ROOT / "frontend" / "src.v2" / "stores" / "types.ts"
 COMMON_TYPES = ROOT / "frontend" / "src.v2" / "protocol" / "common-types.ts"
+API_AUTH = ROOT / "backend" / "api" / "auth.py"
+FRONTEND_API = ROOT / "frontend" / "src.v2" / "protocol" / "api.ts"
+FRONTEND_CONVERSATION_BROWSER = ROOT / "frontend" / "src.v2" / "protocol" / "conversation-browser.ts"
 
 
 def parse_python_literal(name: str, source: str) -> set[str]:
@@ -140,6 +143,11 @@ def parse_python_literal_in(name: str, source: str, source_path: Path) -> set[st
     if not match:
         sys.exit(f"could not find Literal {name} in {source_path}")
     return set(re.findall(r'"([^"]+)"', match.group(1)))
+
+
+def parse_signed_token_kinds(source: str) -> set[str]:
+    """``kind:vN`` prefixes of the HMAC payloads both sides format by hand."""
+    return set(re.findall(r"\b([a-z_]+_(?:raw|asset):v\d+):", source))
 
 
 def _string_constants(node: ast.AST) -> set[str]:
@@ -548,6 +556,12 @@ def main() -> int:
         "AGENT_PROGRESS_PROVIDER_STATES",
         parse_python_frozenset("_AGENT_PROGRESS_PROVIDER_STATES", agent_message_src, AGENT_MESSAGE),
         parse_typescript_const_array("AGENT_PROGRESS_PROVIDER_STATES", streaming_types_src),
+    )
+    check_pair(
+        "SIGNED_TOKEN_PAYLOAD_KINDS",
+        parse_signed_token_kinds(API_AUTH.read_text(encoding="utf-8")),
+        parse_signed_token_kinds(FRONTEND_API.read_text(encoding="utf-8"))
+        | parse_signed_token_kinds(FRONTEND_CONVERSATION_BROWSER.read_text(encoding="utf-8")),
     )
     for py_name, ts_name in (
         ("_AGENT_MESSAGE_COMPLETION_STATUSES", "AGENT_MESSAGE_COMPLETION_STATUSES"),

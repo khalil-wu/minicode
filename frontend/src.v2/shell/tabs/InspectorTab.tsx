@@ -15,7 +15,7 @@ import { focusInspectorEntry } from '../../chat/inspectorEntries'
 import type { AgentProgressEntry, ChatMessage, InspectorEntry, ProviderRawMetadata } from '../../stores/types'
 import { branchDisplayName, workspaceDisplayName } from '../../lib/workspace-display'
 import { hasProviderContainerMetadata, hasProviderRefusalMetadata, providerCacheDiagnosis, providerCacheHitRate, providerContainerSummary, providerCurlSkeleton, providerDuplicateInputSummary, providerInstructionsTransportSummary, providerLargestInputItemsSummary, providerLargestToolsSummary, providerLoopMetricsSummary, providerNativeUsageDetails, providerOutputPhaseCounts, providerOutputSequence, providerPromptCacheDiagnosticSummary, providerPromptLargestSections, providerPromptSectionDeltaSummary, providerPromptSectionSummary, providerRefusalSummary, providerRequestDiff, providerRequestDiffSummary, providerRequestModeSummary, providerResponseLifecycle, providerSafeRequestJson, providerSearchSourcesSummary, providerTimelineEventCounts, providerTimelineRows, providerTimelineSequence, providerTraceDiagnostics, providerTraceExportJson, providerTraceExportJsonl, providerTracePayloadFromExport, providerUsageSummary, sanitizeProviderTraceExportValue } from '../../chat/providerTrace'
-import { promptCacheEffectivePromptTokens, promptCacheOrdinaryInputTokens } from '../../chat/cacheUsage'
+import { promptCacheEffectivePromptTokens, promptCacheHitRate, promptCacheOrdinaryInputTokens } from '../../chat/cacheUsage'
 import { capabilityFeatureEnabled } from '../../protocol/capabilities'
 import { fetchReplayExport } from '../../protocol/replay'
 import { getWebSocket } from '../../hooks/useWebSocket'
@@ -586,22 +586,8 @@ const DetailsTab = ({ traceExportEnabled, focusedOnly = false }: { traceExportEn
     if (filter === 'usage') return isProviderTraceEntry(entry) || entry.targetKind === 'budget' || entry.targetKind === 'cache'
     return true
   }), [filter, inspectorEntries])
-  const usageTotals = useMemo(() => providerEntries.reduce(
-    (acc, entry) => {
-      const usage = providerUsageSummary(providerRawFromPayload(entry.payload))
-      acc.input += usage.input
-      acc.ordinaryInput += promptCacheOrdinaryInputTokens(usage)
-      acc.output += usage.output
-      acc.cacheRead += usage.cacheRead
-      acc.cacheWrite += usage.cacheWrite
-      acc.cacheDeleted += usage.cacheDeleted ?? 0
-      acc.promptCacheTotal += promptCacheEffectivePromptTokens(usage)
-      acc.reasoning += usage.reasoning
-      return acc
-    },
-    { input: 0, ordinaryInput: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheDeleted: 0, promptCacheTotal: 0, reasoning: 0 },
-  ), [providerEntries])
-  const sessionCacheHit = useMemo(() => providerCacheHitRate(usageTotals), [usageTotals])
+  const usageTotals = useAppStore((s) => s.usageTotals)
+  const sessionCacheHit = useMemo(() => promptCacheHitRate(usageTotals), [usageTotals])
 
   const importProviderTraceJsonl = async (file: File | undefined) => {
     if (!file) return
@@ -660,11 +646,11 @@ const DetailsTab = ({ traceExportEnabled, focusedOnly = false }: { traceExportEn
           {providerEntries.length > 0 && (
             <InfoCard>
               <InfoRow label="模型调用" value={`${providerEntries.length} 次`} />
+              <InfoRow label="计量轮次" value={`${usageTotals.turns} 轮`} />
               <InfoRow label="令牌" value={`${formatNumber(usageTotals.input)} 输入 / ${formatNumber(usageTotals.output)} 输出`} mono />
-              <InfoRow label="提示词" value={`${formatNumber(usageTotals.ordinaryInput)} 普通 · ${formatNumber(usageTotals.cacheRead)} 缓存读取 · ${formatNumber(usageTotals.cacheWrite)} 缓存写入 · ${formatNumber(usageTotals.promptCacheTotal)} 总量`} mono />
-              <InfoRow label="缓存" value={`${sessionCacheHit == null ? 'n/a' : `${sessionCacheHit}%`} 命中 · 读取 ${formatNumber(usageTotals.cacheRead)} · 写入 ${formatNumber(usageTotals.cacheWrite)}`} tone={sessionCacheHit ? 'accent' : 'muted'} />
-              {usageTotals.cacheDeleted > 0 && <InfoRow label="已删除缓存" value={formatNumber(usageTotals.cacheDeleted)} mono />}
-              <InfoRow label="推理令牌" value={formatNumber(usageTotals.reasoning)} mono />
+              <InfoRow label="提示词" value={`${formatNumber(promptCacheOrdinaryInputTokens(usageTotals))} 普通 · ${formatNumber(usageTotals.cacheRead)} 缓存读取 · ${formatNumber(usageTotals.cacheWrite)} 缓存写入 · ${formatNumber(promptCacheEffectivePromptTokens(usageTotals))} 总量`} mono />
+              <InfoRow label="缓存" value={`${sessionCacheHit == null ? 'n/a' : `${Math.round(sessionCacheHit)}%`} 命中 · 读取 ${formatNumber(usageTotals.cacheRead)} · 写入 ${formatNumber(usageTotals.cacheWrite)}`} tone={sessionCacheHit ? 'accent' : 'muted'} />
+              <InfoRow label="推理令牌" value={formatNumber(usageTotals.reasoning ?? 0)} mono />
               <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 7 }}>
                 {traceExportEnabled && (
                   <>
