@@ -459,6 +459,13 @@ async function composerDocument(page: Page): Promise<ComposerDocumentNode | null
   return page.evaluate(() => (window as any).__zustandStore.getState().richDraft?.document ?? null);
 }
 
+async function captureComposerPage(page: Page, filePath: string) {
+  await page.evaluate(() => new Promise<void>(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  }));
+  await page.screenshot({ path: filePath, caret: "initial" });
+}
+
 async function composerDeletionSnapshot(composer: Locator) {
   return composer.evaluate(element => {
     const state = (window as any).__zustandStore.getState();
@@ -557,10 +564,8 @@ test("real Electron composer deletes reference spacing without a caret jump and 
       expect(afterSpace.trailingBreaks).toHaveLength(1);
       expect(Math.abs(afterSpace.paragraphs[0]!.height - before.paragraphs[0]!.height)).toBeLessThanOrEqual(1);
       expect(afterSpace.trailingBreaks[0]!.y).toBeLessThan(afterSpace.paragraphs[0]!.y + before.paragraphs[0]!.height);
-      const png = await app.evaluate(async ({ BrowserWindow }) =>
-        (await BrowserWindow.getAllWindows()[0]!.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString("base64"));
       const screenshotPath = testInfo.outputPath(`${mode}-after-space-delete.png`);
-      await writeFile(screenshotPath, Buffer.from(png, "base64"));
+      await captureComposerPage(page, screenshotPath);
       await testInfo.attach(`${mode}-after-space-delete`, { path: screenshotPath, contentType: "image/png" });
 
       await page.waitForTimeout(550);
@@ -672,10 +677,8 @@ test("real Electron composer deletes reference spacing without a caret jump and 
       }
       expect(new Set(menuRows.map(row => row.icon)).size).toBe(composerMenuCommands.length);
       observations.push({ mode, phase: "native-slash-menu-row-layout", menu: await menu.boundingBox(), rows: menuRows });
-      const menuPng = await app.evaluate(async ({ BrowserWindow }) =>
-        (await BrowserWindow.getAllWindows()[0]!.capturePage(undefined, { stayHidden: true, stayAwake: true })).toPNG().toString("base64"));
       const menuScreenshotPath = testInfo.outputPath(`${mode}-slash-menu-rows.png`);
-      await writeFile(menuScreenshotPath, Buffer.from(menuPng, "base64"));
+      await captureComposerPage(page, menuScreenshotPath);
       await testInfo.attach(`${mode}-slash-menu-rows`, { path: menuScreenshotPath, contentType: "image/png" });
       // Alt+Enter reaches the line-break keymap with matching suggestions open.
       await composer.press("Alt+Enter");

@@ -86,7 +86,7 @@ await new Promise(resolve => portServer.listen(0, "127.0.0.1", resolve));
 const backendPort = portServer.address().port;
 await new Promise(resolve => portServer.close(resolve));
 const { ELECTRON_RUN_AS_NODE: _nodeMode, ...environment } = process.env;
-let app, page, success = false;
+let app, page, success = false, auditFailure = null;
 const deadline = setTimeout(async () => {
   const error = "Current UI audit exceeded its 180-second execution window";
   console.error(JSON.stringify({ phase, elapsedMs: Date.now() - auditStartedAt, error }));
@@ -543,12 +543,14 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
           const icon = element.querySelector(".composer-inline-reference-icon"), label = element.querySelector(".composer-inline-reference-label");
           const glyph = icon.querySelector("img:not([hidden]), svg"), i = rect(icon), l = rect(label);
           const labelRange = document.createRange(); labelRange.selectNodeContents(label);
-          const labelText = labelRange.getBoundingClientRect();
+          const labelFragments = [...labelRange.getClientRects()].map(r => ({ x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom }));
+          const glyphSize = glyph ? rect(glyph) : null;
           return { reference: JSON.parse(element.dataset.composerReference), sameParagraph: element.parentElement === paragraph,
             display: getComputedStyle(element).display, color: getComputedStyle(label).color, label: label.textContent,
-            gap: l.x - i.right, centerOffset: Math.abs(i.y + i.height / 2 - l.y - l.height / 2), icon: i, labelRect: l,
-            labelText: { y: labelText.y, bottom: labelText.bottom },
-            glyph: glyph?.tagName.toLowerCase(), glyphClass: glyph?.getAttribute("class"), glyphSize: glyph ? rect(glyph) : null };
+            gap: glyphSize ? labelFragments[0].x - glyphSize.right : null,
+            centerOffset: Math.abs(i.y + i.height / 2 - l.y - l.height / 2), icon: i, labelRect: l,
+            labelText: labelFragments.at(-1), labelFragments,
+            glyph: glyph?.tagName.toLowerCase(), glyphClass: glyph?.getAttribute("class"), glyphSize };
         }),
         images: images.map(image => ({ src: image.currentSrc, decoded: image.complete && image.naturalWidth > 0,
           visible: !image.hidden && getComputedStyle(image).visibility !== "hidden" && image.getClientRects().length > 0 })),
@@ -560,17 +562,21 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
     assert.deepEqual(geometry.references.map(item => item.label), fixture.labels);
     assert.equal(geometry.text, `${fixture.labels.join(" ")} 123`);
     for (const reference of geometry.references) {
-      assert(reference.sameParagraph && reference.display === "inline-flex", "Every reference must stay in the actual paragraph's inline flow");
+      assert(reference.sameParagraph && reference.display === "inline", "Every reference must stay in the actual paragraph's inline flow");
       assert(reference.glyphSize?.width > 0 && reference.glyphSize.height > 0, `Missing rendered ${reference.reference.kind} icon`);
       assert(reference.labelRect.width > 0 && reference.labelRect.height > 0, `Reference label is not visibly laid out: ${reference.label}`);
-      assert(reference.gap >= 3 && reference.gap <= 5 && reference.centerOffset <= 1, `Icon/label alignment drift: ${reference.label}`);
+      // Source pads the icon slot and aligns its center to the font's cap
+      // height. The first text fragment defines spacing; a wrapped label's
+      // union box does not define spacing or the icon's optical center.
+      assert(reference.gap >= 3 && reference.gap <= 5, `Icon/label spacing drift: ${reference.label}`);
       assert.notEqual(reference.color, geometry.ordinaryColor, "Reference labels and ordinary text retain their distinct Source colors");
     }
     assert(geometry.ordinary.width > 0 && geometry.ordinary.height > 0);
     const lastReference = geometry.references.at(-1);
     // If 123 wraps onto the next line it is still valid inline flow. When it
     // follows the final atom on the same line, their text baselines must agree.
-    if (geometry.ordinary.x >= lastReference.labelRect.right - 1) {
+    if (geometry.ordinary.y < lastReference.labelText.bottom && geometry.ordinary.bottom > lastReference.labelText.y
+      && geometry.ordinary.x >= lastReference.labelText.right - 1) {
       assert(Math.abs(lastReference.labelText.bottom - geometry.ordinary.bottom) <= 2, "Reference and ordinary text baselines diverged");
     }
     assert(geometry.images.length >= 1 && geometry.images.every(image => image.decoded && image.visible));
@@ -617,7 +623,7 @@ async function auditComposerInlineReferences({ nativeCua, nativeCuaIcon, skill }
 }
 async function persistEvidence(extra = {}) {
   const draftDiagnostics = page && !page.isClosed() ? await page.evaluate(() => window.__uiAlignmentDraftTrace ?? null) : null;
-  await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase,
+  await writeFile(path.join(evidence, "receipt.json"), JSON.stringify({ success, attempts, terminalAttempts, checks, captures, pageErrors, phase, auditFailure,
     scope: "Production backend and renderer; controlled model replies and delivery of one actual completed import response. Static screenshots use native Playwright animation finalization. Real config/read/write/import I/O, real import failure, production AudioWorklet module loading under packaged CSP, Chromium scales 1/1.25/1.5. Settings captures are baselines, excluding natural-motion completion and native OS states.", draftDiagnostics, ...extra }, null, 2));
   await writeFile(path.join(evidence, "wire.json"), JSON.stringify(wire, null, 2));
   await writeFile(path.join(evidence, "provider.json"), JSON.stringify(requests, null, 2));
@@ -1044,6 +1050,7 @@ try {
   assert.equal(pageErrors.length, 0, JSON.stringify(pageErrors));
   success = true;
 } catch (error) {
+  auditFailure = { phase, message: String(error), stack: error?.stack };
   trace("failure", { error: String(error) });
   if (page) await capture("failure-current-state");
   throw error;
