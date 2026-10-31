@@ -91,6 +91,9 @@ class NetworkPermit:
             if not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            elif not task.cancelled():
+                # Revocation can win after the operation has already failed.
+                task.exception()
             revoked.cancel()
             await asyncio.gather(revoked, return_exceptions=True)
 
