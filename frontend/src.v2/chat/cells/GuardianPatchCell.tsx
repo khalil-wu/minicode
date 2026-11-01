@@ -11,7 +11,7 @@ import { workspaceFilePathsEqual } from "../../lib/workspace-path";
 import { InlineDiff } from "../diff/InlineDiff";
 import "./guardian-review.css";
 
-/** Source gT pending: real file + review accessory; no unexecuted diff counts. */
+/** Pending review: the real file plus the review accessory; unexecuted diffs never count. */
 export function GuardianPatchCell({ cell, workspaceRoot }: { cell: ActivityCellState; workspaceRoot: string }) {
   return <div className="activity-cell guardian-patch-cell" data-activity-kind="fileChange" data-guardian-status={cell.automaticApprovalReviews?.at(-1)?.status}>
     {cell.guardianPatchFiles!.map(path => <GuardianPatchFile key={path} cell={cell} path={path} workspaceRoot={workspaceRoot} />)}

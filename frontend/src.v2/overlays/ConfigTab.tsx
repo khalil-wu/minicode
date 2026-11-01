@@ -94,8 +94,8 @@ export function ConfigTab({ active, children }: { active: boolean; children?: Re
     updatePage(owner, current => ({ ...current, pending: { ...current.pending, [targetId]: [...(current.pending[targetId] ?? []), field] },
       errors: { ...current.errors, [targetId]: { ...current.errors[targetId], [field]: undefined } },
       overrides: { ...current.overrides, [targetId]: { ...current.overrides[targetId], [field]: undefined } } }));
-    // Source uTn serializes writes and refreshes the chosen layer version at
-    // dispatch. The queued edit retains its original workspace and scope.
+    // Serialize writes and refresh the chosen layer version at dispatch; the
+    // queued edit retains its original workspace and scope.
     pendingConfigWrite = pendingConfigWrite.then(async () => {
       try {
         const current = await readConfig(owner);

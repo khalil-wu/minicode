@@ -75,7 +75,7 @@ function importOnlyHunk(context: FullDiffContext, hunk: FullDiffHunk, additions:
   return foundImport;
 }
 
-/** Frozen Source Ne/Le. Retain mixed hunks and hunks containing any annotation. */
+/** Retain mixed hunks and hunks containing any annotation. */
 export function filterImportOnlyDiffHunks(context: FullDiffContext, path: string, parser: Parser | null | undefined,
   lineAnnotations: readonly DiffPresentationAnnotation[] = []): FullDiffContext {
   const language = diffPresentationLanguage(path);

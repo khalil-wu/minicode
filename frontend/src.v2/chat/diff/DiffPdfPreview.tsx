@@ -15,14 +15,14 @@ export interface DiffPdfPreviewProps {
   status?: "new" | "deleted" | "changed";
 }
 
-/** Source isolates native PDF rendering in its PdfPreviewPanel boundary. */
+/** Isolates native PDF rendering errors behind a boundary. */
 class PdfPreviewBoundary extends Component<{ children: ReactNode; fallback: ReactNode }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
   render() { return this.state.failed ? this.props.fallback : this.props.children; }
 }
 
-/** Source PDF canvas: preserve printed annotations without interactive layers. */
+/** PDF canvas: preserve printed annotations without interactive layers. */
 function PdfPage({ document, pageNumber, width }: { document: PDFDocumentProxy; pageNumber: number; width: number | null }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [page, setPage] = useState<PDFPageProxy | null>(null);

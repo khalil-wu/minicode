@@ -268,8 +268,8 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   const fileName = filePath.replaceAll("\\", "/").split("/").filter(Boolean).pop() || filePath;
 
   if (request.toolName === "run_command" && request.availableDecisions) {
-    // Source's actual default conversationDetailMode is STEPS_COMMANDS.
-    // MiniCode's legacy ViewMode is not the Source prose/commands setting.
+    // The default conversation detail mode is STEPS_COMMANDS; the legacy
+    // ViewMode is a different axis and not this setting.
     const actor = subagents.find(agent => agent.id === request.sourceAgent || agent.role === request.sourceAgent)?.role;
     const title = request.approvalReason?.trim() || (actor
       ? tr("允许 {v0} 运行此命令？", { v0: actor }) : tr("允许 MiniCode 运行此命令？"));
@@ -413,8 +413,8 @@ const NativeApprovalSourceIcon = ({ kind }: { kind: "terminal" | "info" | "hand"
     background: "currentColor", maskImage: url, WebkitMaskImage: url, maskPosition: "center", maskRepeat: "no-repeat", maskSize: "contain" }} />;
 };
 
-// Source qr -> Yr and shared V6/WSr -> GSr/xWn; this is display formatting,
-// and never changes the frozen amendment sent back to the execution owner.
+// Display-only formatting; it never changes the frozen amendment sent back
+// to the execution owner.
 function sourceApprovalPrefix(prefix: string[]): string | null {
   if (/[\n\r]/.test(prefix.join(" "))) return null;
   return prefix.map(token => {

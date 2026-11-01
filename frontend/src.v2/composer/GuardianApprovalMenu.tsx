@@ -7,7 +7,7 @@ import { approveGuardianDeniedAction, recentGuardianDenials, useGuardianApproval
 import { pushToast } from "../overlays/ToastContainer";
 import "./GuardianApprovalMenu.css";
 
-/** Source nit/rit slash submenu; the approved action stays subject to auto-review. */
+/** Slash submenu for approving a denied action; the retry stays subject to auto-review. */
 export function GuardianApprovalMenu({ conversationId, onClose, onApproved }: { conversationId: string; onClose: () => void; onApproved: () => void }) {
   const { t } = useI18n();
   const ref = useRef<HTMLDivElement>(null);

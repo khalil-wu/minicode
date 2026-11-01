@@ -19,7 +19,7 @@ function update(route: string, value: ReviewExpansion) { routes.set(route, value
 
 export function clearReviewExpansion(route: string) { routes.delete(route); listeners.forEach(listener => listener()); }
 
-/** Source Qy RouteScope: in-memory global expansion and per-path overrides survive comparison changes. */
+/** In-memory global expansion and per-path overrides survive comparison changes. */
 export function useReviewExpansion(route: string) {
   const state = useSyncExternalStore(subscribe, () => get(route));
   return {

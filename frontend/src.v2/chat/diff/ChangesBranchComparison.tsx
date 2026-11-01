@@ -131,8 +131,8 @@ function BranchMenu({ anchor, branches, selectedBranch, loading, error, keyboard
     const items = enabledItems(), current = items.indexOf(event.target as HTMLButtonElement);
     if (!event.ctrlKey && !event.altKey && !event.metaKey && event.key.length === 1) {
       if (event.key === " " && current >= 0 && typeahead.current.length === 0) return;
-      // Source common MenuContent handleTypeaheadSearch/CSe/SSe: repeated
-      // characters cycle by that one character; ordinary strings build for 1s.
+      // Repeated characters cycle by that one character; ordinary strings
+      // build a search value for 1s.
       const search = typeahead.current + event.key;
       typeahead.current = search;
       window.clearTimeout(typeaheadTimer.current);

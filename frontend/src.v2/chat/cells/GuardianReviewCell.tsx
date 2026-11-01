@@ -82,7 +82,7 @@ export function GuardianCommandDenial({ reviews }: { reviews?: GuardianAssessmen
     <p className="guardian-review-rationale">{review.rationale?.trim() || t("未提供拒绝原因")}</p></div>;
 }
 
-/** Source sites-end-resource aS: action summary opens review details. */
+/** The action summary opens review details. */
 export function GuardianReviewCell({ cell }: { cell: GuardianReviewCellState }) {
   const { t } = useI18n();
   const [preference, setExpanded, userToggled] = useTranscriptReadingPreference(`guardian:${cell.id}`, false);

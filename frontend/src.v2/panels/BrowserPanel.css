@@ -449,7 +449,7 @@
 
 .mc-browser-occluded-snapshot { position: absolute; inset: 0 auto auto 0; width: 100%; pointer-events: none; object-fit: fill; }
 
-/* Installed Codex device-stage/handle fixed grays, independent of app mode. */
+/* Device stage/handle fixed grays, independent of app mode. */
 .mc-browser-surface[data-device="true"] { --device-stage: #303030; --device-handle: #414141; --device-handle-hover: #4f4f4f; --device-handle-detail: #afafaf; background: var(--device-stage); }
 .mc-browser-device-handles { position: absolute; z-index: 4; pointer-events: none; }
 .mc-browser-device-handle { position: absolute; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; outline: 0; border-radius: 0; background: var(--device-handle); pointer-events: auto; touch-action: none; user-select: none; }

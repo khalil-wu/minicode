@@ -9,10 +9,10 @@ const bitmapExtensions = new Set(["avif", "bmp", "gif", "ico", "jpeg", "jpg", "p
 const markdownExtensions = new Set(["markdown", "md", "mdown", "mdx", "mkd"]);
 export type DiffPreviewKind = "diff" | "markdown" | "image" | "pdf";
 
-/** Source fOr/pOr: bitmap/PDF always; SVG/Markdown follow the review preference. */
+/** Bitmap/PDF always preview; SVG/Markdown follow the review preference. */
 export function diffPreviewKind(path: string, deleted: boolean, rich: boolean, source: GitDiffSource): DiffPreviewKind {
   const extension = path.split(".").at(-1)?.toLowerCase() ?? "";
-  // Source's Markdown previewPath is null for staged content: retain code there.
+  // Staged Markdown has no preview path: retain code there.
   if (rich && !deleted && source !== "staged" && markdownExtensions.has(extension)) return "markdown";
   if (bitmapExtensions.has(extension) || extension === "svg" && rich) return "image";
   if (extension === "pdf") return "pdf";

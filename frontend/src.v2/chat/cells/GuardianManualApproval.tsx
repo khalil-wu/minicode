@@ -3,7 +3,7 @@ import { useI18n } from "../../i18n";
 import { approveGuardianDeniedAction, useGuardianApprovalState } from "../guardianApprovalState";
 import { pushToast } from "../../overlays/ToastContainer";
 
-/** Installed Codex tC: authorizes one retry; the button itself never executes. */
+/** Authorizes one retry; the button itself never executes. */
 export function GuardianManualApproval({ conversationId, review }: { conversationId: string; review: GuardianAssessment }) {
   const { t } = useI18n();
   const state = useGuardianApprovalState(conversationId);

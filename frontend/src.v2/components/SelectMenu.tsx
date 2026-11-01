@@ -141,7 +141,7 @@ export const SelectMenu = ({
       const above = rect.top - 14;
       const useAbove = below < height && above > below;
       const maxHeight = Math.max(0, Math.min(menuMaxHeight, useAbove ? above : below));
-      // Source menus size to their contents unless the consumer requests a width.
+      // Menus size to their contents unless the consumer requests a width.
       const minWidth = Math.min(menuWidth ?? 0, window.innerWidth - 16);
       const width = Math.min(Math.max(menu.getBoundingClientRect().width, minWidth), window.innerWidth - 16);
       const left = align === "end" ? rect.right - width : rect.left;
@@ -154,8 +154,8 @@ export const SelectMenu = ({
     place();
     const observer = new ResizeObserver(place);
     observer.observe(triggerRef.current!); observer.observe(menuRef.current!);
-    // Source's nonmodal settings menus follow their anchor while ancestors
-    // scroll; scrolling is not an outside interaction that dismisses them.
+    // Nonmodal settings menus follow their anchor while ancestors scroll;
+    // scrolling is not an outside interaction that dismisses them.
     const followScroll = (event: Event) => { if (!event.composedPath().includes(menuRef.current!)) place(); };
     if (settingsSelect) {
       window.addEventListener("resize", place);

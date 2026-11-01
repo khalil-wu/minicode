@@ -14,7 +14,7 @@ export interface HeartbeatRendererFacts {
 
 type Eligibility = Pick<HeartbeatRendererStateCommand, "is_eligible" | "reason">;
 
-/** Installed Codex pqo precedence. Host support remains a backend fact. */
+/** Eligibility precedence. Host support remains a backend fact. */
 export const projectHeartbeatRendererEligibility = (facts: HeartbeatRendererFacts): Eligibility => {
   const blocked = (reason: string): Eligibility => ({ is_eligible: false, reason });
   if (!facts.hasConversation) return blocked("missing_conversation");

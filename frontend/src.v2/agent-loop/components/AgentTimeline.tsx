@@ -143,8 +143,8 @@ const timelineGroupTitle = (group: TimelineGroup, t: Translate, locale: Locale):
   const statusBoundary = group.cells.some((cell) => "status" in cell
     && ["pending", "pending_approval"].includes(cell.status));
   if (!captions.length && group.cells[0].kind === "guardian_review") return guardianActionSummary(group.cells[0].review, t);
-  // Codex VO renders a FormattedList with type="unit": Chinese intentionally
-  // has no separator, while English uses the locale's comma-separated list.
+  // The unit list format keeps Chinese free of separators while English uses
+  // the locale's comma-separated list.
   return statusBoundary ? captions.join(" · ") : new Intl.ListFormat(locale, { type: "unit" }).format(captions);
 };
 
@@ -277,10 +277,10 @@ function CollapsibleThinkingCell({ cell, renderCell }: { cell: Extract<AgentLoop
 export const AgentTimeline = memo(function AgentTimeline({ cells, renderCell, showAllOpenWork = false, expandWorkGroups = false, showCompletedReasoning = false, isRunning = false, onHistoryStartReached }: { cells: AgentLoopProcessCell[]; renderCell: RenderAgentCell; showAllOpenWork?: boolean; expandWorkGroups?: boolean; showCompletedReasoning?: boolean; isRunning?: boolean; onHistoryStartReached?: () => void }) {
   const groups = useMemo(() => groupTimelineCells(cells), [cells]);
   const firstWorkGroup = groups.find((group) => group.kind === "work");
-  // Codex keeps completed reasoning summaries in the expanded transcript; the
-  // live status row carries the heading while a turn is running. Rendering a
-  // settled provider heading in the ordinary process stack creates a second
-  // projection that the desktop surface does not show.
+  // Completed reasoning summaries stay in the expanded transcript; the live
+  // status row carries the heading while a turn is running. Rendering a
+  // settled provider heading in the ordinary process stack would create a
+  // second projection.
   const showSettledReasoning = isRunning || showAllOpenWork || expandWorkGroups || showCompletedReasoning;
   return (
     <div className="chat-turn-process-stack agent-loop-timeline" onWheelCapture={(event) => {

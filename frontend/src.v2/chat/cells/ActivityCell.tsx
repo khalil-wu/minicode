@@ -303,7 +303,7 @@ export const ActivityCell = memo(function ActivityCell({
     </div>;
   }
 
-  // Codex user-input-response is a standalone question disclosure, while its
+  // A user-input response is a standalone question disclosure, while its
   // pending userInput item is absent from the ordinary tool-activity list.
   if (canonicalQuestions) {
     const completed = !isRunning && !["pending", "pending_approval"].includes(presentationStatus);

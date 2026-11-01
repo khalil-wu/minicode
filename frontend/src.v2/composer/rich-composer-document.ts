@@ -60,7 +60,7 @@ tokenizer.core.ruler.after("inline", "composer_tasks_and_cells", state => {
         .replaceAll("&lt;", "<").replaceAll("&gt;", ">").replaceAll("&amp;", "&");
       const content = tokenizer.parse(markdown, state.env);
       // Markdown soft breaks normally become spaces. A cell transport break
-      // represents the visible <br> that the Source HTML parser preserves.
+      // represents a visible <br> in the cell.
       for (const block of content) for (const child of block.children ?? []) {
         if (child.type === "softbreak") child.type = "hardbreak";
       }

@@ -550,9 +550,9 @@ const collaborationCells = (item: TurnActivityItem): CollaborationCellState[] =>
       const recipients = record.recipientIds ?? (record.recipientId ? [record.recipientId] : requestedRecipient ? [requestedRecipient] : []);
       const content = (record.args.message as string | undefined) ?? "";
       cells.push(collaborationCell(record, "sent_message", recipients.map((recipient) => {
-        // Source V2 addresses the root by its canonical path. The runtime
-        // receipt calls that same mailbox `parent`; keep one view identity
-        // for both live receipts and saved native calls.
+        // Messages address the root by its canonical path while the receipt
+        // calls that same mailbox `parent`; keep one view identity for both
+        // live receipts and saved native calls.
         const agentId = recipient === "/root" || recipient === "team-lead" ? "parent" : recipient;
         return { agentId, agentLabel: collaborationAgentLabel(agentId), content };
       })));

@@ -240,8 +240,8 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const liveScrollSignature = useMemo(() => {
     if (!shouldShowMessages || timelineMessages.length === 0) return "empty";
     let last = timelineMessages[timelineMessages.length - 1];
-    // A Source user input is an item in the same physical turn. Its canonical
-    // row can follow the aggregate assistant, whose work/reply still grows.
+    // A user input is an item in the same physical turn. Its canonical row
+    // can follow the aggregate assistant, whose work/reply still grows.
     if (tailTurn) for (let index = timelineMessages.length - 1; index >= 0; index -= 1) {
       if (timelineMessages[index].id === tailTurn.id) {
         last = timelineMessages[index];

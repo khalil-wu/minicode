@@ -22,7 +22,7 @@ function ErrorInlineLinks({ text, conversationId }: { text: string; conversation
 /**
  * ErrorCell — dedicated error display.
  *
- * Source turn failures are neutral, standalone notices. Permission and tool
+ * Turn failures are neutral, standalone notices. Permission and tool
  * notices retain their own presentation and original diagnostics.
  */
 export function ErrorCell({ cell, conversationId }: { cell: ErrorCellState; conversationId?: string }) {

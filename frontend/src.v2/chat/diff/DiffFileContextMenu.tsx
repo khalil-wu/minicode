@@ -54,7 +54,7 @@ export interface DiffFileContextMenuProps {
 
 type MenuState = { position: { x: number; y: number }; location?: DiffLineLocation; selection: string };
 
-/** Source Fe/Re: current file actions, real selection and registered annotation utility. */
+/** Current file actions, real selection and the registered annotation utility. */
 export function DiffFileContextMenu({ path, workspaceRoot, deleted = false, firstChangedLine = 1, preferences, githubUrl,
   canOpenFile = true, onOpenFile, canRequestChanges = true, children }: DiffFileContextMenuProps) {
   const { t, locale } = useI18n();

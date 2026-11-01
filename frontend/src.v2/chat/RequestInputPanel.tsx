@@ -12,7 +12,7 @@ export interface RequestInputPanelQuestion {
   options: Array<{ id: string; label: string; description?: string }>;
 }
 
-/** Codex Work's request-input surface: one question at a time, inside the composer. */
+/** Request-input surface: one question at a time, inside the composer. */
 export function RequestInputPanel({ questions, initialDraft, responding, error, onDraftChange, onSubmit, onCancel }: {
   questions: RequestInputPanelQuestion[];
   initialDraft?: UserInputQuestionDraft;
@@ -61,7 +61,7 @@ export function RequestInputPanel({ questions, initialDraft, responding, error, 
   const selectOption = (id: string) => {
     const answers = setAnswer({ selectedOptionId: id, freeformText: "" });
     setAdvancingChoice(id);
-    // Codex app-primary vz/ut keeps the clicked option visible for 180 ms.
+    // Keep the clicked option visible for 180 ms before advancing.
     timer.current = window.setTimeout(() => { timer.current = null; setAdvancingChoice(null); advance(answers); }, 180);
   };
   const submitCurrent = () => {

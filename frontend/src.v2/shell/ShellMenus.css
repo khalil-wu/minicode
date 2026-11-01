@@ -1,4 +1,4 @@
-/* Source DOc uses railMenu (w-57); thread overflow uses menu (min-width 220px). */
+/* Rail menu is 228px wide; the thread overflow menu keeps a 220px min-width. */
 .context-menu-surface.mc-profile-menu-rail { width: 228px; }
 .context-menu-surface.mc-chat-actions-menu { min-width: min(220px, calc(100vw - 16px)); }
 .context-menu-surface.mc-profile-help-menu {

@@ -237,7 +237,7 @@ const resolveWorkspaceAsset = (src: string, ownerPath: string, workingDirectory:
     path = decodeURIComponent(path);
   } catch (error) {
     if (!(error instanceof URIError)) throw error;
-    // A malformed escape is literal filename text, as in Codex local links.
+    // A malformed escape is literal filename text.
   }
   if (isAbsoluteLocalPath(path)) return { path: toWorkspaceDisplayPath(path, workingDirectory), fragment };
   const ownerDir = dirname(ownerPath);
@@ -1774,6 +1774,3 @@ const PdfViewer = ({ path, workingDirectory }: { path: string; workingDirectory:
     </Suspense>
   );
 };
-
-// TabContextMenu used to be defined inline here; now replaced by the
-// generic ContextMenu component in ../components/ContextMenu.

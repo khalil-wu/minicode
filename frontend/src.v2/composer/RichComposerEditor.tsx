@@ -153,7 +153,7 @@ function convertMode(view: EditorView, plainTextMode: boolean) {
   const value = serializeComposerDocument(view.state.doc, !plainTextMode);
   const document = plainTextMode ? literalComposerDocument(value) : parseComposerMarkdown(value);
   const transaction = view.state.tr;
-  // Source rUu.ne retains the code body in history while adding literal fences.
+  // Converting to plain text retains the code body in history while adding literal fences.
   if (plainTextMode) {
     view.state.doc.descendants((node, position) => {
       if (node.type !== schema.nodes.code_block) return;

@@ -805,7 +805,7 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   border-radius: var(--radius-sm) !important;
 }
 
-/* Source U8(menu), JSn and gCn share this desktop popup surface. */
+/* Shared desktop popup surface for menus and flyouts. */
 .context-menu-surface {
   min-width: min(180px, calc(100vw - 16px));
   border: 0;
@@ -1404,7 +1404,7 @@ kbd {
   white-space: nowrap;
 }
 
-/* Source menu rows keep the focused item and open flyout trigger highlighted. */
+/* Menu rows keep the focused item and open flyout trigger highlighted. */
 .mc-menu-item {
   transition: none !important;
 }

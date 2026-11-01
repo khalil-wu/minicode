@@ -7,7 +7,7 @@ type ReadBatch = { snapshot: GitDiffSnapshot; reads: PendingRead[] };
 type ContentsReply = { status?: "stale-snapshot"; source: string; snapshot_generation: string; results: GitDiffContentResult[] };
 const pendingBatches = new Map<string, ReadBatch>();
 
-// Source groups the same host/cwd/snapshot for 40ms, at most four objects per RPC.
+// Group identical host/cwd/snapshot reads for 40ms, at most four objects per RPC.
 export function readGitFileContents(snapshot: GitDiffSnapshot, requests: GitDiffContentRequest[]): Promise<GitDiffContentResult[]> {
   const key = JSON.stringify([snapshot.conversationId, snapshot.workspaceRoot, snapshot.environmentId,
     snapshot.cwdUri, snapshot.source, snapshot.generation, snapshot.hideWhitespace]);

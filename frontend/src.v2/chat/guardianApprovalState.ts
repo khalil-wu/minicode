@@ -11,7 +11,7 @@ const subscribe = (listener: () => void) => { listeners.add(listener); return ()
 export const guardianApprovalState = (conversationId: string): ApprovalState => states.get(conversationId) ?? empty;
 function publish(conversationId: string, state: ApprovalState): void { states.set(conversationId, state); listeners.forEach(listener => listener()); }
 
-/** Source rJ/iJ: one in-flight operation and a set of recorded review IDs per thread. */
+/** One in-flight operation and a set of recorded review IDs per thread. */
 export function useGuardianApprovalState(conversationId: string): ApprovalState {
   return useSyncExternalStore(subscribe, () => guardianApprovalState(conversationId));
 }
@@ -31,7 +31,7 @@ export async function approveGuardianDeniedAction(conversationId: string, review
   }
 }
 
-/** Source rit: newest ten denied actions that still have an unapproved real event. */
+/** Newest ten denied actions that still have an unapproved real event. */
 export function recentGuardianDenials(conversationId: string, approved = guardianApprovalState(conversationId).approved): GuardianAssessment[] {
   const state = useAppStore.getState();
   const messages = state.conversationId === conversationId ? state.messages : state.conversationMessages[conversationId] ?? [];

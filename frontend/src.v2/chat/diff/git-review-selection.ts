@@ -34,7 +34,7 @@ export function useGitReviewSelection(owner: string, cwd: string) {
   }, [owner, cwd]);
   const update = (next: ReviewSelection | ((current: ReviewSelection) => ReviewSelection), explicitSource = false) => {
     const value = typeof next === "function" ? next(selection) : next;
-    // Source sts keeps a selected commit in ThreadScope, never the global preference.
+    // A selected commit belongs to its thread scope, never the global preference.
     if (explicitSource && value.source !== "commit") localStorage.setItem(key, JSON.stringify(value.source));
     save(owner, cwd, value);
   };

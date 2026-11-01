@@ -7,7 +7,7 @@ export const registerComposerEditHistory = (element: HTMLElement, history: Compo
   return () => { histories.delete(element); };
 };
 
-/** Source mHi: false means a known composer exhausted its own text history. */
+/** false means a known composer exhausted its own text history. */
 export const tryFocusedComposerHistory = (direction: EditHistoryDirection): boolean | null => {
   const active = document.activeElement;
   if (!(active instanceof HTMLElement)) return null;

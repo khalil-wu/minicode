@@ -7,7 +7,7 @@ import { openPreferredWorkspace } from "../lib/open-preferred-target";
 import { useAppStore } from "../stores";
 import { fetchWorkspaceGitStatus } from "../protocol/workspace";
 
-/** Source OJo/kJo share the workspace target catalog between sidebar and header. */
+/** Shares the workspace target catalog between sidebar and header. */
 export function useWorkspaceOpenMenu(workspaceRoot: string | undefined, opened: boolean): ContextMenuItem[] {
   const { t: tr } = useI18n();
   const appMode = useAppStore(state => state.appMode);

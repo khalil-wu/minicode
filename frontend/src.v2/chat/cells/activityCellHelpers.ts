@@ -184,8 +184,8 @@ export function readableRecordLabel(record: ActivityToolRecord, t: Translate = k
     return BROWSER_ACTION_LABELS[action] || action || "Browser";
   }
   if (isCodeModeRecord(record)) return t("运行");
-  // Codex mcp-tool-activity-label Sa uses js's supplied title before the
-  // server/tool label, with the same whitespace and 80-character boundary.
+  // A supplied js title wins over the server/tool label, with normalized
+  // whitespace and an 80-character boundary.
   if (/^mcp__.+__js$/i.test(record.name) && typeof record.args.title === "string") {
     const title = record.args.title.trim().replace(/\s+/g, " ");
     if (title) return title.length <= 80 ? title : `${title.slice(0, 79).trimEnd()}…`;
@@ -200,11 +200,11 @@ export function readableRecordLabel(record: ActivityToolRecord, t: Translate = k
     : readableToolLabel(record.displayHint || record.displaySummary || record.name, running);
 }
 
-/** Return the user-facing target already present in the tool call arguments.
- * Codex/pi render the call's input beside its operation name; use the typed
- * args as the fallback when a provider did not populate inputSummary. */
+/** Return the user-facing target already present in the tool call arguments;
+ * use the typed args as the fallback when a provider did not populate
+ * inputSummary. */
 export function recordInputTarget(record: ActivityToolRecord): string {
-  // Source wait has no receiver/target label; its receipt stays in raw history.
+  // An agent wait has no receiver/target label; its receipt stays in raw history.
   if (isAgentWaitRecord(record)) return "";
   const args = record.args && typeof record.args === "object"
     ? record.args as Record<string, unknown>

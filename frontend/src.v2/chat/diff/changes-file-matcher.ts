@@ -1,4 +1,4 @@
-/** Current desktop Source C4/SWc/CWc + XWc/ZWc; static typed port, no UI or IO. */
+/** Static typed matcher; no UI or IO. */
 interface MatchRange { startOffset: number; endOffset: number }
 type MatchingMode = "IGNORE_CASE" | "MATCH_CASE" | "FIRST_LETTER";
 const MAX_PATTERN_LENGTH = 100, NO_MATCH = -2147483648, PATH_SEPARATOR = "\0", START_MATCH_BOOST = 10000;
@@ -233,7 +233,7 @@ function fileParts(path: string): { fileName: string; parentPath: string } {
   return index === -1 ? { fileName: path, parentPath: "" } : { fileName: path.slice(index + 1), parentPath: path.slice(0, index) };
 }
 
-/** Source fr/pr: filename score first, then full path; stable equal-score order. */
+/** Filename score first, then full path; stable equal-score order. */
 export function rankChangedFilePaths(paths: readonly string[], query: string): string[] {
   const trimmed = query.trim();
   if (trimmed.length === 0) return [...paths].sort((left, right) => {

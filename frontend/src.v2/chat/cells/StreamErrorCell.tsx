@@ -7,7 +7,7 @@ import { useProcessDisclosure } from "../../agent-loop/components/useProcessDisc
 import type { ActivityCellState } from "./cellTypes";
 import "./StreamErrorCell.css";
 
-/** Source stream-error: muted Wi-Fi row; original failure on disclosure. */
+/** Muted Wi-Fi row; the original failure stays on disclosure. */
 export function StreamErrorCell({ cell }: { cell: ActivityCellState }) {
   const { t } = useI18n();
   const progress = cell.progress!;
