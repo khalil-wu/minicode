@@ -2,7 +2,7 @@ import { BarChart3, Book, Brain, BriefcaseBusiness, DollarSign, Dumbbell, Earth,
   Globe, GraduationCap, Heart, HeartPulse, Logs, Music, Palette, PawPrint, Pencil, PencilLine, Plane, Popcorn, Scale,
   Settings2, Sprout, Stethoscope, Terminal, Weight, Wrench } from "./icons";
 
-// Current Codex desktop LIa/HIa/aka/nDa project marker catalogue.
+// Project marker catalogue: icons and the light/dark color pairs.
 export const PROJECT_ICONS = { "bar-chart": BarChart3, book: Book, brain: Brain, "currency-dollar": DollarSign, customize: Settings2,
   "desk-globe": Earth, dumbbell: Dumbbell, edit: Pencil, flask: FlaskConical, folder: Folder, function: FunctionSquare, globe: Globe,
   "graduation-cap": GraduationCap, health: HeartPulse, heart: Heart, kettlebell: Weight, logs: Logs, lotus: Flower2, music: Music,

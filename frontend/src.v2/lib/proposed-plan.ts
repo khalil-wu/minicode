@@ -1,4 +1,4 @@
-// Conversational-plan delimiters emitted by Codex. Fenced examples remain
+// Conversational-plan delimiters emitted by the model. Fenced examples remain
 // ordinary text, and the original assistant item is never rewritten.
 export function proposedPlanParts(content: string) {
   let offset = 0;

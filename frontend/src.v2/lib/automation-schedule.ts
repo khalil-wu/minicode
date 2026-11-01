@@ -21,7 +21,7 @@ export interface CustomScheduleDraft {
   minute: string;
 }
 
-/** The same RFC parser used by Source, at the user-edited schedule boundary. */
+/** RFC 5545 parsing at the user-edited schedule boundary. */
 export function parseAutomationRRule(value: string): RRuleSet | null {
   try {
     const rules = rrulestr(value.replace(/TZID="([^"\r\n]+)"/gi, "TZID=$1"), { forceset: true }) as RRuleSet;

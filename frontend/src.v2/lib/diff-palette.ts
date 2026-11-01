@@ -23,9 +23,9 @@ const mixLab = (background: string, foreground: string, backgroundShare: number)
   formatHex(interpolate([background, foreground], "lab")(1 - backgroundShare))!;
 const withAlpha = (color: string, alpha: number) => formatHex8({ ...rgb(color)!, alpha })!;
 
-/** Actual Source single-theme FileDiff caller, including the app unsafe CSS.
- * Chrome surface paints the pre; host-computed line colors retain raw theme bg.
- * The caller does not enable hover, and line selection remains a separate UI.
+/** Diff palette for a single theme: the chrome surface paints the pre while
+ * line colors mix against the raw theme background. Hover is not enabled and
+ * line selection remains a separate UI.
  */
 export function createDiffPalette(variant: AppearanceVariant, code: DiffCodeColors, chrome: AppearanceColorValues, semantic: SemanticDiffColors): DiffPalette {
   const light = variant === "light";

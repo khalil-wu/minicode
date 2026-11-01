@@ -1,4 +1,4 @@
-/** Exact installed Source ha/xIe and radio check assets; extraction is audited in output/. */
+/** Sidebar options/sort glyphs rendered from the bundled SVG assets. */
 export const SidebarSortSourceIcon = ({ kind }: { kind: "options" | "sort" | "sort-check" }) => {
   const size = kind === "sort-check" ? "var(--mc-menu-check-size, 17px)" : 16;
   const url = `url('${import.meta.env.BASE_URL}apps/sidebar-${kind}.svg')`;

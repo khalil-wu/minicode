@@ -25,7 +25,7 @@ function commentPath(file: string, workspaceRoot: string): string {
   return index >= 0 && (index === 0 || comparedPath[index - 1] === "/") ? path.slice(index + folder.length) : path;
 }
 
-/** Installed desktop Bii/zii: line-start directives, required text, right/end line. */
+/** Line-start directives with required text; the end line defaults to the start line. */
 export function parseCodeComments(markdown: string, workspaceRoot: string): CodeReviewComment[] {
   const comments: CodeReviewComment[] = [];
   for (const line of markdown.split(/\r?\n/)) {

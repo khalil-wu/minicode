@@ -4,8 +4,8 @@ import { useI18n } from "../i18n";
 import type { AppearanceVariant } from "../lib/appearance-colors";
 import { SettingsSourceIcon } from "./SettingsSourceIcon";
 
-// Source za/xr.options and jos/DZ. Account options stay disabled when the
-// ChatGPT account accent consumer is unavailable; Custom edits local colors.
+// Account accent presets stay disabled because there is no account accent
+// source here; Custom edits the local colors.
 const accountAccents = [
   { id: "default", label: "默认", color: "neutral" },
   { id: "blue", label: "蓝色", color: "#3566f0" },

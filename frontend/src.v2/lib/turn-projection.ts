@@ -87,7 +87,7 @@ export interface TurnActivityItem {
 
 export interface TurnProjection {
   activityItems: TurnActivityItem[];
-  /** Source user items split activity while retaining the physical turn. */
+  /** User input items split activity while retaining the physical turn. */
   userInputs?: Array<{ userMessageId: string; segment: number }>;
   finalAnswer: string;
   finalAnswerSource?: string;
@@ -516,8 +516,8 @@ export function projectTurn(
         const item = { ...progressItem(block, segment), status: "info" as const, hasFailure: false };
         const previous = activityItems.at(-1);
         const previousProgress = previous?.progress?.at(-1);
-        // Source stream-error coalesces adjacent numbered retries, preserving
-        // the first row's identity and the latest attempt's original details.
+        // Adjacent numbered retries coalesce into one row, preserving the first
+        // row's identity and the latest attempt's original details.
         if (previous?.segment === segment && isProviderStreamError(previousProgress)
           && previousProgress?.operationId === block.operationId
           && providerRetryCounter(previousProgress) && providerRetryCounter(block)) {
@@ -526,9 +526,9 @@ export function projectTurn(
         } else activityItems.push(item);
         return;
       }
-      // Codex keeps provider request/retry lifecycle in its transient status
-      // surface, never as a transcript item. Keep the same boundary here;
-      // typed tool activity (MCP/image) is not classified as this lifecycle.
+      // Provider request/retry lifecycle belongs to the transient status
+      // surface, never to the transcript; typed tool activity (MCP/image) is
+      // not classified as this lifecycle.
       if (isProviderRequestProgress(block) || ["tool_exec", "tool_wait"].includes(block.toolName || "")) {
         if (block.status === "failed" && block.errorMessage?.trim()) {
           activityItems.push({ ...progressItem(block, segment), title: isProviderRequestProgress(block) ? "错误详情" : "运行", summary: undefined });

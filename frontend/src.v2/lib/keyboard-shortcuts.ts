@@ -128,7 +128,7 @@ const KEY_TOKENS: Record<string, string> = {
 const keyTokenFromEvent = (event: Pick<KeyboardEvent, "code" | "key">): string => {
   if (event.code.startsWith("Key")) return event.code.slice(3).toUpperCase();
   if (event.code.startsWith("Digit")) return event.code;
-  if (event.code && !MODIFIER_CODES.has(event.code)) return event.code.replace(/^(Numpad)/, "$1");
+  if (event.code && !MODIFIER_CODES.has(event.code)) return event.code;
   if (KEY_TOKENS[event.key]) return KEY_TOKENS[event.key];
   if (event.key.length === 1) return event.key.toUpperCase();
   return event.key;

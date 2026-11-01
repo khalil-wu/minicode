@@ -78,7 +78,7 @@ export function splitHunkLineCount(lines: readonly DiffLine[]): number {
   return total + Math.max(additions, deletions);
 }
 
-/** Port of current desktop Source i/a/s/c (26.1013.40934); no new diff or disk read. */
+/** Build full-file hunk context from the patch plus both file contents; no new diff or disk read. */
 export function buildFullDiffContext(patch: string, oldLines: string[], newLines: string[], ignoreWhitespace = false): FullDiffContext | null {
   const [parsed] = parsePatch(patch);
   if (!parsed) return null;
@@ -90,8 +90,8 @@ export function buildFullDiffContext(patch: string, oldLines: string[], newLines
   let oldEnd = 0, newEnd = 0, splitLineCount = 0, unifiedLineCount = 0;
   for (let index = 0; index < parsed.hunks.length; index++) {
     const hunk = parsed.hunks[index], oldLineStart = headers[index].oldLine!, newLineStart = headers[index].newLine!;
-    // Source Nkt preserves the header's zero-count start. jsdiff normalizes it;
-    // use the original coordinates when applying Source Et's exact checks.
+    // A hunk header may carry a zero-count start that jsdiff normalizes away;
+    // use the original coordinates for the exact range checks below.
     const oldStart = Math.max(oldLineStart - 1, 0), newStart = Math.max(newLineStart - 1, 0);
     const gap = newStart - newEnd, oldGap = oldStart - oldEnd;
     if (gap < 0 || oldGap < 0 || gap !== oldGap || newStart + hunk.newLines > newLines.length || oldStart + hunk.oldLines > oldLines.length) return null;

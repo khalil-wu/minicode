@@ -8,8 +8,8 @@ class ThemeShareError extends Error {}
 const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/).transform(value => value.toLowerCase());
 const codeThemeId = z.custom<CodeThemeId>(value => typeof value === "string" && CODE_THEME_CATALOG.some(theme => theme.id === value));
 
-// Codex app-shared kN/$Tt and app-initial d0s/l0s. Only user share text is
-// parsed here; typography is stored per appearance variant.
+// Only user share text is parsed here; typography is stored per appearance
+// variant.
 export const chromeThemeColorsSchema = z.object({
   accent: hexColor,
   accentSource: z.enum(["chatgpt", "custom"]).optional(),
@@ -41,7 +41,7 @@ const sharedThemeSchema = z.object({
   variant: z.enum(["light", "dark"]),
 });
 
-/** Source a0s → t0s: raw or URI-encoded JSON, then variant/registration. */
+/** Raw or URI-encoded JSON, then variant/registration checks. */
 export function parseThemeString(value: string, variant: AppearanceVariant): CodeThemeAppearance {
   const text = value.trim();
   if (!text.startsWith(sharePrefix)) throw new ThemeShareError("Theme share string mismatch");
@@ -53,7 +53,7 @@ export function parseThemeString(value: string, variant: AppearanceVariant): Cod
   return { codeThemeId: shared.codeThemeId, theme };
 }
 
-/** Source i0s format; typography stays private to the current MiniCode user. */
+/** Share format; typography stays private to the current MiniCode user. */
 export function exportThemeString(snapshot: CodeThemeAppearance, variant: AppearanceVariant): string {
   return `${sharePrefix}${JSON.stringify({ codeThemeId: snapshot.codeThemeId, theme: { ...snapshot.theme, fonts: { code: null, ui: null } }, variant })}`;
 }

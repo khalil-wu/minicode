@@ -2,7 +2,7 @@
  * Extract a human-readable label from a multi-line shell command's leading
  * `# comment` line. The model often writes the first line as a comment meant
  * for the human to read (e.g. `# install deps\nnpm install`); surface that as
- * the tool label instead of the raw command. Ported from cc's commentLabel.ts.
+ * the tool label instead of the raw command.
  *
  * Returns undefined when there is no usable leading comment (including shebang
  * `#!` lines, which are not human notes).

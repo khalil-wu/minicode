@@ -36,7 +36,7 @@ function upperBound(values: number[], value: number): number {
   return low;
 }
 
-/** Frozen 26.1007 Pe: parsed top-level, whole-line imports, including multiline nodes. */
+/** Parsed top-level, whole-line imports, including multiline nodes. */
 function importLines(lines: string[], parser: Parser, language: DiffPresentationLanguage): Set<number> {
   const result = new Set<number>(), offsets = [0];
   for (const line of lines) offsets.push(offsets[offsets.length - 1] + line.length);

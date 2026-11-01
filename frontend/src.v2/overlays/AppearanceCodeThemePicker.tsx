@@ -30,8 +30,8 @@ function CodeThemePreview({ id, label, variant, colors }: {
     });
   }, [id, label, variant, t]);
   const preview = seed ?? colors;
-  // Source Un/f0s uses current edited colors in the trigger, and the actual
-  // candidate seed in the menu. The menu is portalled outside the select.
+  // The trigger previews the current edited colors; the menu previews each
+  // candidate's seed. The menu is portalled outside the select.
   const style = {
     "--code-theme-preview-accent": preview.accent,
     "--code-theme-preview-surface": preview.surface,
@@ -43,7 +43,7 @@ function CodeThemePreview({ id, label, variant, colors }: {
   return <span className="appearance-code-theme-preview" data-theme-id={id} style={style} aria-hidden="true">Aa</span>;
 }
 
-/** Source eo/to/io: mode-compatible directory themes, previews and selection. */
+/** Mode-compatible directory themes, previews and selection. */
 export function AppearanceCodeThemePicker({ variant, colors, value, onSelect, active = true }: AppearanceCodeThemePickerProps) {
   const { t } = useI18n();
   const themes = codeThemesForVariant(variant);

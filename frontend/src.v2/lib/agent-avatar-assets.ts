@@ -1,4 +1,4 @@
-// Codex desktop 26.1007.2314 identity palette; see the audit source manifest.
+// Agent identity avatar palette (28 dark/light pairs).
 import avatar0dark from "../assets/agent-avatars/palette-00-dark.svg";
 import avatar0light from "../assets/agent-avatars/palette-00-light.svg";
 import avatar1dark from "../assets/agent-avatars/palette-01-dark.svg";

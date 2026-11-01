@@ -650,7 +650,7 @@
   stroke-width: var(--mc-icon-stroke);
 }
 
-/* Source yc / Ac: 272px three-column mode chooser and exact static vectors. */
+/* 272px three-column mode chooser with static preview vectors. */
 .settings-theme-grid {
   display: grid;
   flex: 0 1 auto;

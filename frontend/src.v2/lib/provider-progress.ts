@@ -98,8 +98,7 @@ export function isProviderRequestProgress(
 
 /**
  * Provider request/retry lifecycle belongs to the transient status surface,
- * not the conversation transcript. Codex keeps the corresponding raw response
- * and retry notifications out of its user-facing item projection.
+ * not the conversation transcript.
  *
  * Keep the semantic check independent of `visibility` so old transcripts that
  * persisted these rows as `timeline` are repaired by the current projection.

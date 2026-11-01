@@ -58,7 +58,7 @@ function ThemeImportDialog({ variant, exampleValue, onClose, onSubmit, trigger, 
   </div>, document.body);
 }
 
-/** Codex general-settings Xa/$a: import dialog and copy action per variant. */
+/** Import dialog and copy action per variant. */
 export function AppearanceThemeSharing({ variant, snapshot, onImport, active = true }: AppearanceThemeSharingProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -71,8 +71,8 @@ export function AppearanceThemeSharing({ variant, snapshot, onImport, active = t
   const copyLabel = t("复制{variant}主题", { variant: variantLabel });
   const exampleValue = exportThemeString(snapshot, variant);
   const close = () => { setOpen(false); setValue(""); };
-  // Source eo owns the import value and its in-flight write outside the modal.
-  // Hiding a retained settings page retires only the portal, not that owner.
+  // The import value and its in-flight write live outside the modal: hiding a
+  // retained settings page retires only the portal, not that state.
   const submit = async () => {
     setPending(true);
     let committed: boolean;

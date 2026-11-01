@@ -24,7 +24,7 @@ const savedThemes = z.object({ light: selectionSchema.nullable(), dark: selectio
 export const parseAppearanceThemes = (raw: string | null): AppearanceThemes =>
   raw === null ? emptyAppearanceThemes() : savedThemes.parse(JSON.parse(raw));
 
-// Reference VJ defaults. Colors are captured separately so enabling the new
+// Default theme preferences. Colors are captured separately so enabling the
 // picker does not replace an existing MiniCode palette on startup.
 export const defaultThemePreferences = (variant: AppearanceVariant) => ({
   contrast: variant === "light" ? 45 : 60,

@@ -1,4 +1,4 @@
-// Installed Codex aC → sC → Zi → app-shared::jst (_sr), terminal-light-16.
+// terminal-light-16 glyph for command activity.
 export const commandActivityIcon = {
   "viewBox": "0 0 16 16",
   "paths": [

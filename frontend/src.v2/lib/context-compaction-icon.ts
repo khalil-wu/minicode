@@ -1,4 +1,4 @@
-// Actual Codex sites-end-resource::xS → os → app-shared export S2i as vu.
+// Context compaction glyph.
 export const contextCompactionIcon = {
   "viewBox": "0 0 16 16",
   "paths": [

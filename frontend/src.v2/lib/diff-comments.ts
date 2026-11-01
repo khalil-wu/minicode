@@ -47,7 +47,7 @@ export function diffCommentSideLabel(comment: DiffComment): string {
 export const formatDiffCommentLocation = (comment: DiffComment): string =>
   `${comment.position.path}:${formatDiffCommentLines(comment.position)}`;
 
-/** Frozen Source GM: Windows aliases share identity; WSL file case is retained. */
+/** Windows path aliases share identity; WSL file case is retained. */
 export function commentWorkspaceKey(value: string): string {
   const slashed = value.replace(/^\\\\\?\\UNC\\(.*)$/i, "//$1")
     .replace(/^\\\\\?\\([a-z]:[\\/].*)$/i, "$1").replace(/\\/g, "/");
@@ -65,7 +65,7 @@ export function commentWorkspaceKey(value: string): string {
   return key === "/" ? key : key.replace(/\/+$/, "");
 }
 
-/** Source i1 identity includes authored text and workspace, but not the hunk. */
+/** Comment identity includes authored text and workspace, but not the hunk. */
 export function diffCommentKey(comment: DiffComment): string {
   const workspace = comment.localWorkspaceRoot == null ? "" : `${commentWorkspaceKey(comment.localWorkspaceRoot)}|`;
   return `${workspace}${comment.position.path}|${comment.position.side}|${formatDiffCommentLines(comment.position)}|${diffCommentText(comment)}`;
@@ -87,7 +87,7 @@ export function mergeDiffComments(current: readonly DiffComment[], incoming: rea
   }).map(cloneDiffComment);
 }
 
-/** Frozen desktop Source Vcn's ordinary file-comment context. */
+/** Ordinary file-comment context for the prompt. */
 export function formatDiffComment(comment: DiffComment, promptNumber: number): string {
   let text = `\n## User Comment ${promptNumber}\nFile: ${comment.position.path}\n`;
   if (comment.localWorkspaceRoot != null) text += `Workspace: ${comment.localWorkspaceRoot}\n`;

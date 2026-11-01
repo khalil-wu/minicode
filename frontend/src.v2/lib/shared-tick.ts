@@ -8,8 +8,7 @@ import { useEffect, useState } from "react";
  * running tool) firing at desync'd phases, each triggering its own re-render
  * scattered across the second. Instead, a single interval drives all
  * subscribers: it starts when the first subscriber joins and stops when the
- * last leaves. Mirrors cc's single-animation-clock pattern (SpinnerAnimationRow
- * / useBlink: "all instances derive state from the same clock").
+ * last leaves, so all instances derive state from the same clock.
  */
 type SecondTickListener = (now: number) => void;
 

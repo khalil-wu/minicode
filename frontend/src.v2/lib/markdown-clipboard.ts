@@ -1,4 +1,4 @@
-/** Codex TBr/OBr: copy semantic Markdown DOM, excluding presentation controls. */
+/** Copy the semantic Markdown DOM, excluding presentation controls. */
 export type MarkdownClipboard = { "text/plain": string; "text/html": string };
 
 const mathSource = "data-math-source";

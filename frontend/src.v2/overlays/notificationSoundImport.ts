@@ -1,4 +1,4 @@
-/** Decode the same user-selected audio formats as Source into a local PCM WAV. */
+/** Decode user-selected audio into a local 24 kHz PCM WAV (mono or stereo, under 30 s). */
 export const notificationSoundWav = async (bytes: number[]): Promise<number[]> => {
   const context = new OfflineAudioContext(2, 1, 24000);
   const audio = await context.decodeAudioData(new Uint8Array(bytes).buffer);

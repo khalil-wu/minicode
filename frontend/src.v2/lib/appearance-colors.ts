@@ -22,7 +22,7 @@ export const defaultAppearanceColors: Record<AppearanceVariant, AppearanceColorV
 export const parseAppearanceColors = (raw: string | null): AppearanceColors =>
   raw === null ? emptyAppearanceColors() : savedColors.parse(JSON.parse(raw));
 
-// Codex settings Ta/ka/Aa: keep incomplete input local, commit six hex digits.
+// Keep incomplete input local; commit only six hex digits.
 export const colorInputDraft = (value: string) => `#${value.toUpperCase().replace(/[^0-9A-F]/g, "").slice(0, 6)}`;
 export const completeColorInput = (value: string) => /^#[0-9A-F]{6}$/.test(value) ? value.toLowerCase() : null;
 
@@ -49,7 +49,7 @@ const onAccent = (color: RGB) => {
   return solid(luminance(color) > .179 ? black : white);
 };
 
-/** Source Yos/Xos/Zos/$os at the reference app-initial theme cluster.
+/** Derive the chrome color tokens for a variant from the three authored colors.
  * Theme selection/import also supplies contrast and semantic colors. Typography
  * and TextMate syntax stay owned by their existing consumers.
  */
@@ -63,8 +63,8 @@ export function appearanceColorTokens(colors: AppearanceColorValues, variant: Ap
   const under = solid(mix(surface, light ? ink : black, (light ? .04 : .16) + (authoredContrast - baseline) * (light ? .0012 : .0015)));
   const control = solid(mix(surface, light ? white : ink, light ? .09 + contrast * .04 : .06 + contrast * .05));
   const elevated = solid(mix(surface, light ? white : ink, light ? .16 + contrast * .12 : .08 + contrast * .08));
-  // Source chrome uses foreground alpha for soft actions and segmented state,
-  // independently of its elevated-secondary surface (which can be pure white).
+  // Soft actions and segmented state use foreground alpha, independently of
+  // the elevated secondary surface (which can be pure white).
   const soft = alpha(ink, .025);
   const selected = alpha(ink, .05);
   const hover = alpha(ink, light ? .08 + contrast * .04 : .05 + contrast * .03);

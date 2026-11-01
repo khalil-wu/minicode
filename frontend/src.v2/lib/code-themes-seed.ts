@@ -14,8 +14,8 @@ export type CodeThemeChromeSeed = {
 type RGB = { red: number; green: number; blue: number; alpha: number };
 type HueRange = { min: number; max: number };
 
-// Source app-initial Mya/Pya/Iya/Rya and WJ/Bya: theme colors are parsed at
-// this data boundary, then ranked by the actual palette rather than by name.
+// Theme colors are parsed at this data boundary, then ranked by the actual
+// palette rather than by name.
 const defaults = {
   dark: { surface: "#181818", ink: "#ffffff", accent: "#339cff",
     semanticColors: { diffAdded: "#40c977", diffRemoved: "#fa423e", skill: "#ad7bf9" } },

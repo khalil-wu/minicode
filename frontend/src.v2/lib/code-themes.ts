@@ -3,7 +3,7 @@ import { codeThemeChromeSeed, type CodeThemeChromeSeed } from "./code-themes-see
 
 export type CodeThemeVariant = "light" | "dark";
 
-// Source dba/HJ registrations. Desktop presets retain their own provenance.
+// Code theme registrations: bundled presets plus @shikijs/themes.
 const registrations = {
   "absolutely": { label: "Absolutely", variants: { dark: () => import("./codex-themes/absolutely-dark.json"), light: () => import("./codex-themes/absolutely-light.json") } },
   "codex": { label: "ChatGPT", variants: { dark: () => import("./codex-themes/codex-dark.json"), light: () => import("./codex-themes/codex-light.json") } },

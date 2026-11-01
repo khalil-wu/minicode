@@ -1,4 +1,4 @@
-// Codex CPt / DPt / OPt, app-shell:right-panel-width:v3 (26.1007.2314).
+// Right panel width bounds for the app shell.
 export const rightPanelMaximumWidth = (mainContentWidth: number) => Math.max(320, mainContentWidth - 352);
 
 // Cap the first-run default at 640 and floor it at 320; the height term only
