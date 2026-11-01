@@ -991,6 +991,35 @@ def _bypass_denylist(host_constraints: list[str]) -> list[str]:
     )
 
 
+def _environment_path_check(scope, deny_patterns: tuple[str, ...]) -> Callable[[str], bool]:
+    """Executor containment plus MiniCode's path denylist, in the executor's domain.
+
+    The captured scope decides what the selected executor may read; the
+    denylist is MiniCode's own file-tool floor and applies to the path relative
+    to the executor's workspace roots exactly as it does for the local root.
+    """
+    from backend.workspace.executor_paths import ExecutorPath
+
+    deny_spec = _compiled_path_deny_spec(deny_patterns)
+    case_insensitive = ExecutorPath.parse(scope.cwd_uri).convention == "windows" or scope.platform_os == "macos"
+    folded_spec = _compiled_path_deny_spec(tuple(pattern.lower() for pattern in deny_patterns)) if case_insensitive else None
+    roots = tuple(scope.resolve_path(root) for root in (*scope.workspace_root_uris, scope.cwd_uri))
+
+    def is_allowed(file_path: str) -> bool:
+        if not scope.resolve_access(file_path).can_read:
+            return False
+        path = scope.resolve_path(file_path)
+        root = next((candidate for candidate in roots if path.is_relative_to(candidate)), None)
+        relative = path.relative_to(root).as_posix() if root is not None else path.native.replace("\\", "/").lstrip("/")
+        if relative in {"", "."}:
+            return True
+        if deny_spec.match_file(relative):
+            return False
+        return folded_spec is None or not folded_spec.match_file(relative.lower())
+
+    return is_allowed
+
+
 class PermissionChecker:
     """
     工具调用权限检查。
@@ -1066,19 +1095,21 @@ class PermissionChecker:
         args: dict[str, Any] | None,
         policy_aliases: tuple[str, ...] = (),
         deny_aliases: tuple[str, ...] = (),
+        *,
+        shell: str | None = None,
     ) -> tuple[PermissionLevel, str] | None:
         """Evaluate parsed Tool(content) rules with deny > ask > allow precedence."""
         from backend.permissions.content_rules import rule_matches_call
 
         restriction_aliases = (*policy_aliases, *deny_aliases)
         for rule in self._content_deny:
-            if rule_matches_call(rule, tool_name, args, effect="deny", policy_aliases=restriction_aliases):
+            if rule_matches_call(rule, tool_name, args, effect="deny", policy_aliases=restriction_aliases, shell=shell):
                 return PermissionLevel.ALWAYS_DENY, rule.tool_glob
         for rule in self._content_ask:
-            if rule_matches_call(rule, tool_name, args, effect="ask", policy_aliases=restriction_aliases):
+            if rule_matches_call(rule, tool_name, args, effect="ask", policy_aliases=restriction_aliases, shell=shell):
                 return PermissionLevel.CONFIRM, rule.tool_glob
         for rule in self._content_allow:
-            if rule_matches_call(rule, tool_name, args, effect="allow", policy_aliases=policy_aliases):
+            if rule_matches_call(rule, tool_name, args, effect="allow", policy_aliases=policy_aliases, shell=shell):
                 return PermissionLevel.AUTO, rule.tool_glob
         return None
 
@@ -1177,16 +1208,30 @@ class PermissionChecker:
             policy_name = tool.policy_identity if tool is not None else tool_name
             aliases = tool.policy_aliases if tool is not None else ()
             deny_aliases = (*aliases, *getattr(tool, "policy_deny_aliases", ())) if tool is not None else ()
-            content_match = self._content_rule_decision(policy_name, args, aliases, deny_aliases)
+            # The conversation's own rule mutations are never compiled into the
+            # native exec-policy sources, so they stay authoritative here: a
+            # session deny wins over the captured classification and a session
+            # ask keeps the prompt that classification would have skipped.
+            override = self._resolve_override_match(policy_name, context.session_overrides, aliases, deny_aliases=deny_aliases)
+            if override is not None and override[1] == PermissionLevel.ALWAYS_DENY:
+                return PermissionLevel.ALWAYS_DENY, "session_override", override[0]
+            content_match = self._content_rule_decision(policy_name, args, aliases, deny_aliases,
+                shell=str(native.command.configured_shell))
             if content_match is not None and content_match[0] == PermissionLevel.ALWAYS_DENY:
                 return PermissionLevel.ALWAYS_DENY, "content_rule", "content_deny"
             if content_match is not None and content_match[0] == PermissionLevel.CONFIRM:
+                ask: tuple[str, str] | None = ("content_rule", "content_ask")
+            elif override is not None and override[1] in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW}:
+                ask = ("session_override", override[0])
+            else:
+                ask = None
+            if ask is not None:
                 if context.approval_policy in {"never", "granular"}:
                     reason = rejected_approval_reason(context, "rules")
                     if reason is not None:
                         source = "managed_requirements" if context.requirements_source else "approval_policy"
                         return PermissionLevel.ALWAYS_DENY, source, reason
-                return PermissionLevel.CONFIRM, "content_rule", "content_ask"
+                return PermissionLevel.CONFIRM, *ask
             if context.strict_auto_review:
                 return PermissionLevel.CONFIRM, "tool", "strict_auto_review"
             return (PermissionLevel.AUTO if native.kind == "skip" else PermissionLevel.CONFIRM,
@@ -1751,7 +1796,7 @@ class PermissionChecker:
             scope = context.environment_scope
             path = scope.resolve_path(file_path)
             return (path == scope.resolve_path(scope.cwd_uri) or any(path == scope.resolve_path(root)
-                for root in scope.workspace_root_uris)) and scope.resolve_access(file_path).can_read
+                for root in scope.workspace_root_uris)) and self.prepare_path_check(context=context)(file_path)
         effective_root = (
             getattr(context, "workspace_root", None)
             if context is not None and getattr(context, "workspace_root", None) is not None
@@ -1784,15 +1829,34 @@ class PermissionChecker:
         """检查路径是否在允许范围内，denylist 优先于 allowlist。"""
         return self.prepare_path_check(context=context, include_granted_permissions=include_granted_permissions)(file_path)
 
+    def _path_deny_patterns(self, context: PermissionContext | None) -> tuple[str, ...]:
+        """The denylist one operation enforces: settings, host constraints and the bypass floor."""
+        path_denylist = list(self._settings.path_denylist)
+        if context is not None:
+            host_denylist: list[str] = []
+            if "denylist" in context.filesystem_constraints:
+                host_denylist = list(context.filesystem_constraints["denylist"])
+                # A host/managed constraint narrows the surface; it does not
+                # replace the built-in secret/repo floor. Appending the floor
+                # last also keeps a host pattern from negating it.
+                path_denylist = [*host_denylist, *_DEFAULT_PATH_DENYLIST]
+            if context.mode == "bypass":
+                path_denylist = _bypass_denylist(host_denylist)
+        return tuple(
+            pattern.replace("\\", "/").strip()
+            for pattern in path_denylist
+            if str(pattern or "").strip()
+        )
+
     def prepare_path_check(self, *, context: PermissionContext | None = None, include_granted_permissions: bool = False) -> Callable[[str], bool]:
         """Prepare one operation's policy; each candidate is resolved afresh.
 
         Search operations check thousands of files against the same roots and
         rules. Resolve those roots once without caching any path decision.
         """
+        deny_patterns = self._path_deny_patterns(context)
         if context is not None and context.environment_scope is not None:
-            scope = context.environment_scope
-            return lambda file_path: scope.resolve_access(file_path).can_read
+            return _environment_path_check(context.environment_scope, deny_patterns)
         effective_root = (
             getattr(context, "workspace_root", None)
             if context is not None and getattr(context, "workspace_root", None) is not None
@@ -1803,7 +1867,6 @@ class PermissionChecker:
             if effective_root is not None
             else None
         )
-        path_denylist = list(self._settings.path_denylist)
         path_allowlist = list(self._settings.path_allowlist)
         readable_roots: list[Path] = []
         if context is not None:
@@ -1812,23 +1875,9 @@ class PermissionChecker:
                     readable_roots.append(Path(str(raw_root)).expanduser().resolve())
                 except (OSError, ValueError):
                     continue
-            host_denylist: list[str] = []
-            if "denylist" in context.filesystem_constraints:
-                host_denylist = list(context.filesystem_constraints["denylist"])
-                # A host/managed constraint narrows the surface; it does not
-                # replace the built-in secret/repo floor. Appending the floor
-                # last also keeps a host pattern from negating it.
-                path_denylist = [*host_denylist, *_DEFAULT_PATH_DENYLIST]
             if "allowlist" in context.filesystem_constraints:
                 path_allowlist = list(context.filesystem_constraints["allowlist"])
-            if context.mode == "bypass":
-                path_denylist = _bypass_denylist(host_denylist)
 
-        deny_patterns = tuple(
-            pattern.replace("\\", "/").strip()
-            for pattern in path_denylist
-            if str(pattern or "").strip()
-        )
         deny_spec = _compiled_path_deny_spec(deny_patterns)
         # Match case-insensitively on NTFS/APFS without changing gitignore's
         # interpretation or the order of negation rules.
@@ -1934,7 +1983,10 @@ class PermissionChecker:
             return ""
         if context is not None and context.environment_scope is not None and tool is not None and tool.requires_execution_environment:
             operation = "write" if tool.get_side_effect_kind(args) in {"workspace", "destructive"} else "read"
+            path_allowed = self.prepare_path_check(context=context)
             for path in tool.get_workspace_paths(args):
+                if not path_allowed(str(path)):
+                    return f"路径 '{path}' 不在允许范围内。禁止的路径模式: {self._settings.path_denylist}。"
                 allowed, reason = self.validate_file_operation(str(path), operation, context=context)
                 if not allowed:
                     return reason

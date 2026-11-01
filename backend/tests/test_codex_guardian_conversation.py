@@ -6,6 +6,7 @@ import json
 import weakref
 from copy import deepcopy
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +23,8 @@ from backend.agent.guardian.prompt import GuardianPermissionEvidence
 from backend.agent.guardian.retained import GuardianEvidenceOwner, GuardianTranscriptEntry
 from backend.llm.base import LLMTurnContext, ToolCallEvent
 from backend.llm.openai_adapter import OpenAIAdapter
+from backend.permissions.exec_policy import ExecPolicyDecision, FrozenExecCommand
+from backend.sandbox.policy import SandboxPolicy
 from backend.tools.command_tool import RunCommandTool
 from backend.tools.registry import ToolRegistry
 from backend.tests.guardian_http_fixture import classifier_events, http_endpoint, send_sse, until
@@ -68,6 +71,17 @@ async def settled(fixture):
 def wire_text(items):
     return "\n".join(part["text"] for item in items if item.get("type") == "message"
         for part in item["content"] if part["type"] in {"input_text", "output_text"})
+
+
+def captured_request(request, ctx, workspace):
+    """Freeze the executable command the way final authorization does before review."""
+    policy = SandboxPolicy.workspace_default(workspace)
+    argv = ["sh", "-c", str(request.arguments["command"])]
+    command = FrozenExecCommand.capture(request, argv=argv, policy_argv=argv, cwd=workspace, configured_shell=Path("sh"),
+        permission=ctx.permission, profile=policy.permission_profile, resolved_profile=policy.resolve(cwd=workspace),
+        windows_sandbox_level="disabled", sandbox_permissions="use_default", prefix_rule=None,
+        environment_id=ctx.environment_id or "local", policy=policy, additional_permissions_present=False)
+    return request.with_exec_policy(ExecPolicyDecision(command, "needs_approval", None, False, None, (tuple(argv),), "{}"))
 
 
 @pytest.mark.asyncio
@@ -123,7 +137,8 @@ async def test_real_conversation_early_score_reaches_frozen_approval_and_revocat
             events.append((kind, data))
 
         call = ToolCallEvent(id="actually-reviewed-call", name="run_command", arguments={"command": "echo approval-boundary"})
-        request = FinalExecutableToolRequest.freeze(call, policy_identity=fixture.registry.get_tool(call.name).policy_identity)
+        request = captured_request(FinalExecutableToolRequest.freeze(call, policy_identity=fixture.registry.get_tool(call.name).policy_identity),
+            fixture.ctx, tmp_path)
         ctx = replace(fixture.ctx, tool_call_id=call.id, authorization_digest=request.digest,
             authorization_policy_identity=request.policy_identity, emit_event=emit)
         fixture.current[0] = ctx

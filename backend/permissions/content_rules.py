@@ -304,18 +304,41 @@ def _deny_match_candidates(subcommand: str) -> list[str]:
     return candidates
 
 
-def _literal_restriction_candidates(command: str) -> list[str]:
-    from backend.permissions.argv_rules import strip_transparent_prefixes
-    from backend.permissions.shell_ast import DYNAMIC_WORD, parse_literal_commands
+def _powershell_host(shell: str | None) -> bool:
+    """Whether PowerShell reads the command text instead of a POSIX shell.
 
-    parsed = parse_literal_commands(command)
-    if parsed is None:
-        return []
+    This follows command_shell_argv/executor_shell_argv: an explicit ``shell``
+    names the host, otherwise the controller platform selects PowerShell on
+    Windows.
+    """
+    if shell is None:
+        return sys.platform == "win32"
+    name = re.split(r"[/\\]", str(shell).strip())[-1].lower()
+    for suffix in (".exe", ".cmd", ".bat", ".com"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name in {"powershell", "pwsh"}
+
+
+def _literal_restriction_candidates(command: str, *, shell: str | None) -> list[str]:
+    from backend.permissions import powershell_ast, shell_ast
+    from backend.permissions.argv_rules import strip_transparent_prefixes
+    from backend.permissions.shell_ast import DYNAMIC_WORD
+
+    # POSIX wrapper lowering (sudo/env/xargs) applies to any host that can run
+    # those binaries. A PowerShell host also needs the PowerShell lowering:
+    # Source exec_policy.rs parses the script with it, and the Bash AST cannot
+    # read ``& 'echo' audit`` as echo. Restrictions take every reading.
+    parsers = [shell_ast, powershell_ast] if _powershell_host(shell) else [shell_ast]
     candidates = []
-    for argv in parsed.commands:
-        unwrapped = strip_transparent_prefixes(argv)
-        if unwrapped and unwrapped[0] != DYNAMIC_WORD:
-            candidates.append(shlex.join(unwrapped))
+    for parser in parsers:
+        parsed = parser.parse_literal_commands(command)
+        if parsed is None:
+            continue
+        for argv in parsed.commands:
+            unwrapped = strip_transparent_prefixes(argv)
+            if unwrapped and unwrapped[0] != DYNAMIC_WORD:
+                candidates.append(shlex.join(unwrapped))
     return candidates
 
 
@@ -343,13 +366,16 @@ def rule_matches_call(
     *,
     effect: str = "allow",
     policy_aliases: tuple[str, ...] = (),
+    shell: str | None = None,
 ) -> bool:
     """True if ``rule`` matches a tool call (tool name + content).
 
     ``effect`` is the rule's outcome ("deny", "ask", or "allow") and selects
     MiniCode's compound-command semantics: deny/ask rules match any subcommand of a
     compound expression (with env/wrapper prefixes stripped), while allow rules
-    only ever match a single non-compound command.
+    only ever match a single non-compound command. ``shell`` names the host
+    shell that reads a command (the captured executor shell when known) and
+    selects the literal-command parser.
     """
     if not any(_tool_rule_matches(name, rule.tool_glob) for name in (tool_name, *policy_aliases)):
         return False
@@ -368,7 +394,8 @@ def rule_matches_call(
             for subcommand in _split_unquoted_subcommands(reading)
             for candidate in _deny_match_candidates(subcommand)
         ) or any(_content_pattern_matches(rule.content, candidate, is_command=True)
-                 for candidate in _literal_restriction_candidates(value))
+                 for candidate in _literal_restriction_candidates(
+                     value, shell=shell if shell is not None else (args or {}).get("shell")))
     # Strip only the SAFE wrapper list for allow rules. Bare env prefixes stay
     # literal, so run_command(npm install:*) matches
     # "timeout 10 npm install" but never "FOO=1 npm install".

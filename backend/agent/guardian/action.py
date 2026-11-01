@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from backend.permissions.grants import permission_profile_payload, current_granted_permissions
-from backend.tools.command_support import command_shell_argv, command_login_allowed
+from backend.permissions.grants import normalize_permission_profile, permission_profile_payload
 from backend.tools.apply_patch_parser import patch_target_paths
 from backend.agent.final_tool_request import _canonical_json_value
+from backend.workspace.executor_paths import ExecutorPath
 
 
 @dataclass(frozen=True)
@@ -63,7 +63,7 @@ class GuardianAction:
             json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2), tool_descriptions, approval_id)
 
     @classmethod
-    def from_tool_request(cls, request, context, *, command_argv: tuple[str, ...] | None = None, mcp_metadata: dict[str, Any] | None = None):
+    def from_tool_request(cls, request, context, *, mcp_metadata: dict[str, Any] | None = None):
         args = _canonical_json_value(request.arguments)
         workspace = Path(context.workspace_root)
         raw_cwd = args.get("cwd") or context.metadata.get("cwd") or workspace
@@ -72,12 +72,26 @@ class GuardianAction:
         cwd = Path(os.path.abspath(cwd))
         name = request.tool_name
         if name == "run_command":
-            argv = command_argv or tuple(command_shell_argv(args["command"], shell=args.get("shell"), login=args.get("login"), allow_login_shell=command_login_allowed(workspace)))
-            payload: dict[str, Any] = {"tool": "exec_command", "command": list(argv), "cwd": str(cwd),
-                "sandbox_permissions": "require_escalated" if args.get("with_escalated_permissions") is True else "use_default", "tty": bool(args.get("tty", False))}
-            grants = current_granted_permissions(context)
-            if not grants.is_empty:
-                payload["additional_permissions"] = permission_profile_payload(grants)
+            # Guardian reviews the frozen executable command: the executor's
+            # argv, cwd and captured sandbox permissions. Source's
+            # approval_request.rs keeps executor cwd/argv the same way; a
+            # controller-side reconstruction reviewed a different action.
+            if request.exec_policy is None:
+                raise ValueError("A run_command Guardian action requires the captured execution policy")
+            command = request.exec_policy.command
+            executor_cwd = command.cwd if isinstance(command.cwd, ExecutorPath) else None
+            payload: dict[str, Any] = {"tool": "exec_command", "command": list(command.policy_argv),
+                "cwd": executor_cwd.native if executor_cwd is not None else str(command.cwd),
+                "sandbox_permissions": command.sandbox_permissions, "tty": bool(args.get("tty", False))}
+            requested = args.get("additional_permissions")
+            if requested is not None:
+                if executor_cwd is not None:
+                    roots = tuple(ExecutorPath.parse(root, platform_os=executor_cwd.platform_os)
+                        for root in context.permission.environment_scope.workspace_root_uris)
+                else:
+                    roots = (workspace.resolve(),)
+                payload["additional_permissions"] = permission_profile_payload(
+                    normalize_permission_profile(requested, cwd=command.cwd, workspace_roots=roots))
             if args.get("justification") is not None:
                 payload["justification"] = args["justification"]
         elif name == "apply_patch":
