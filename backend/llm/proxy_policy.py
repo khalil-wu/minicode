@@ -82,14 +82,17 @@ def provider_proxy_url_for_base_url(
 
     parsed = urlparse(str(base_url or ""))
     host = str(parsed.hostname or "").strip().lower()
+    # WebSocket endpoints are HTTP-equivalent for proxy selection and default
+    # ports (Source outbound_proxy.rs resolves ws/wss the same way).
+    scheme = {"ws": "http", "wss": "https"}.get(parsed.scheme.lower(), parsed.scheme.lower())
     try:
         port = parsed.port
     except ValueError:
         port = None
     if port is None:
-        if parsed.scheme.lower() == "https":
+        if scheme == "https":
             port = 443
-        elif parsed.scheme.lower() == "http":
+        elif scheme == "http":
             port = 80
     no_proxy = ",".join(
         value
@@ -106,7 +109,7 @@ def provider_proxy_url_for_base_url(
     if explicit:
         return explicit
 
-    if parsed.scheme.lower() == "https":
+    if scheme == "https":
         proxy = (
             os.getenv("HTTPS_PROXY", "").strip()
             or os.getenv("https_proxy", "").strip()

@@ -173,6 +173,12 @@ class RealtimeVoiceManager {
       await this.waitReady(record, signal);
       const prepared = await this.request(record, claim, "prepare", { callId, threadId: target.threadId }, signal);
       signal.throwIfAborted();
+      if (args.context && prepared.capability && prepared.capability.version && prepared.capability.version !== "v3") {
+        // Only realtime v3 accepts handoff context (initial_items). Refuse
+        // before the original call is stopped so a rejected transfer cannot
+        // end both conversations.
+        throw new Error("The destination voice task uses realtime " + prepared.capability.version + " and cannot receive handoff context; transfer without context or use a realtime v3 destination.");
+      }
       if (this.active !== claim || claim.phase !== "active") throw new Error("The original voice chat changed before transfer.");
       claim.phase = "stopping";
       const stopped = await this.request(claim.record, claim, "stop", { callId }, signal);

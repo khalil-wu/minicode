@@ -61,3 +61,84 @@ test("timed-out PTY termination retains its session, permits retry and blocks re
   await manager.killAllSessions();
   assert.equal(manager.snapshotSession(session.session_id, 10, "owned-fixture", "fixture-window"), null);
 });
+
+
+test("linux force kill signals the whole process group with SIGKILL", async () => {
+  const signals = [];
+  let exitHandler;
+  const fakePty = {
+    pid: 424242,
+    onData() {},
+    onExit(listener) { exitHandler = listener; },
+    kill(signal) { signals.push("leader:" + (signal || "SIGHUP")); },
+    forceKill() { return this.kill("SIGKILL"); },
+    write() { return true; },
+    resize() {},
+  };
+  const moduleBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "pty-manager.js"), "utf8"), {
+    module: moduleBox,
+    require(name) {
+      if (name === "node:path") return path.posix;
+      if (name === "./preferences") return { resolveTerminalShell: () => ({ executable: "/audit/fake-shell", args: [] }) };
+      return require(name);
+    },
+    process: {
+      platform: "linux", env: {}, cwd: () => "/audit/workspace",
+      kill(pid, signal) {
+        signals.push(pid + ":" + signal);
+        if (signal === "SIGKILL") exitHandler({ exitCode: null, signal: "SIGKILL" });
+      },
+    },
+    setTimeout, clearTimeout, console,
+  });
+  const manager = moduleBox.exports;
+  manager.init({ pty: { spawn: () => fakePty },
+    getWindowByInstanceId: () => ({ isDestroyed: () => false, webContents: { send() {} } }),
+    sanitizedPtyEnv: () => ({}), assertTrustedPath: value => value, appendDesktopLog() {},
+    killExitTimeoutMs: 1, forceKillExitTimeoutMs: 1 });
+  const session = manager.spawnSession("/audit/workspace", "audit-conversation", "audit-window");
+  assert.equal(await manager.killSession(session.session_id, "audit-conversation", "audit-window"), true);
+  assert.deepEqual(signals, ["-424242:SIGTERM", "-424242:SIGKILL"]);
+  assert.equal(manager.listActiveSessions().length, 0);
+});
+
+test("linux force kill falls back to a leader SIGKILL when the group signal fails", async () => {
+  const signals = [];
+  let exitHandler;
+  const fakePty = {
+    pid: 515151,
+    onData() {},
+    onExit(listener) { exitHandler = listener; },
+    kill(signal) {
+      signals.push("leader:" + (signal || "SIGHUP"));
+      if ((signal || "SIGHUP") === "SIGKILL") exitHandler({ exitCode: null, signal: "SIGKILL" });
+    },
+    forceKill() { return this.kill("SIGKILL"); },
+    write() { return true; },
+    resize() {},
+  };
+  const moduleBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, "pty-manager.js"), "utf8"), {
+    module: moduleBox,
+    require(name) {
+      if (name === "node:path") return path.posix;
+      if (name === "./preferences") return { resolveTerminalShell: () => ({ executable: "/audit/fake-shell", args: [] }) };
+      return require(name);
+    },
+    process: {
+      platform: "linux", env: {}, cwd: () => "/audit/workspace",
+      kill() { throw new Error("EPERM"); },
+    },
+    setTimeout, clearTimeout, console,
+  });
+  const manager = moduleBox.exports;
+  manager.init({ pty: { spawn: () => fakePty },
+    getWindowByInstanceId: () => ({ isDestroyed: () => false, webContents: { send() {} } }),
+    sanitizedPtyEnv: () => ({}), assertTrustedPath: value => value, appendDesktopLog() {},
+    killExitTimeoutMs: 1, forceKillExitTimeoutMs: 1 });
+  const session = manager.spawnSession("/audit/workspace", "audit-conversation", "audit-window");
+  assert.equal(await manager.killSession(session.session_id, "audit-conversation", "audit-window"), true);
+  assert.deepEqual(signals, ["leader:SIGHUP", "leader:SIGKILL"]);
+  assert.equal(manager.listActiveSessions().length, 0);
+});

@@ -1302,13 +1302,10 @@ class AnthropicAdapter(LLMAdapter):
                                     provider=self._provider_id,
                                 )
                                 return
-                            if saw_message_delta:
-                                yield _anthropic_stream_protocol_error(
-                                    "duplicate_message_delta",
-                                    event_type=event_type,
-                                    provider=self._provider_id,
-                                )
-                                return
+                            # The provider documents one or more message_delta
+                            # events for top-level changes to the final Message
+                            # object; each may repeat the cumulative usage and
+                            # stop_reason, and none may end the stream.
                             saw_message_delta = True
                             delta = (
                                 event.get("delta")

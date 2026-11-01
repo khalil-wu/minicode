@@ -305,3 +305,14 @@ test("real preload and declared main-frame IPC reach native claim, request, repl
   await voice.release({ claimId: original.claimId });
   assert.equal(f.manager.active, null);
 });
+
+
+test("transfer with handoff context refuses a pre-v3 destination before stopping the original", { timeout: 5000 }, async () => {
+  const f = fixture(), signal = new AbortController().signal;
+  const transfer = f.manager.executeControl(f.payload("transfer_voice_call", { threadId: "B", context: "Actual handoff" }), f.original, signal);
+  const checked = assert.rejects(transfer, /cannot receive handoff context/);
+  f.reply(f.original, await f.next(f.original, "prepare"), { prepared: true, capability: { version: "v2" } });
+  await checked;
+  assert.equal(f.manager.transfer, null);
+  assert.equal(f.manager.active.claimId, f.claim.claimId);
+});

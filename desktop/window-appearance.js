@@ -62,7 +62,9 @@ function set(window, options) {
     });
   }
   appearances.get(window).options = options;
-  nativeTheme.themeSource = options.themeMode;
+  // The per-window theme is applied to this window only. Writing
+  // nativeTheme.themeSource here is a process-wide override, so one window's
+  // explicit dark/light choice repainted every other window's system state.
   return apply(window);
 }
 

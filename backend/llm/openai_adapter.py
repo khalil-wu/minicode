@@ -1333,8 +1333,9 @@ def _responses_error_details(
     """Normalize provider Responses error objects into visible diagnostics."""
 
     safe_value = _responses_safe_provider_value(error)
-    mapping = safe_value if isinstance(safe_value, dict) else {}
-    nested_error = mapping.get("error")
+    envelope = safe_value if isinstance(safe_value, dict) else {}
+    mapping = envelope
+    nested_error = envelope.get("error")
     if isinstance(nested_error, dict):
         mapping = nested_error
 
@@ -1349,6 +1350,10 @@ def _responses_error_details(
         "request_id",
     ):
         value = mapping.get(key)
+        if value is None and key in {"status", "status_code"}:
+            # A wrapped websocket error keeps the HTTP status in the outer
+            # envelope; recovery classification needs it.
+            value = envelope.get(key)
         if value is None or isinstance(value, (dict, list)):
             continue
         if key == "message":
@@ -1356,6 +1361,21 @@ def _responses_error_details(
         elif isinstance(value, str):
             value = _safe_provider_diagnostic_text(value, limit=160)
         details[key] = value
+
+    for layer in (mapping, nested_error, envelope):
+        if not isinstance(layer, dict):
+            continue
+        headers = layer.get("headers")
+        if not isinstance(headers, dict):
+            continue
+        raw_delay = headers.get("Retry-After", headers.get("retry-after"))
+        if raw_delay is None:
+            continue
+        try:
+            details["retry_after_seconds"] = max(0.0, float(str(raw_delay).strip()))
+        except (TypeError, ValueError):
+            continue
+        break
 
     message = str(details.get("message") or "").strip()
     if not message and isinstance(error, str):
@@ -1407,9 +1427,11 @@ def _responses_error_event_raw(
         raw["provider_error_schema_type"] = provider_error_schema_type
     if message:
         raw["provider_error_message"] = message
+    stated_delay = details.get("retry_after_seconds")
+    if stated_delay is None and message:
         stated_delay = retry_after_from_message(message, default=None)
-        if stated_delay is not None:
-            raw["retry_after_seconds"] = stated_delay
+    if stated_delay is not None:
+        raw["retry_after_seconds"] = stated_delay
     raw["provider_error"] = details
     return message, raw
 
@@ -5209,7 +5231,11 @@ class OpenAIAdapter(LLMAdapter):
                     )
                     return
                 elif event_type in {"error", "response.error"}:
-                    error = _get_attr_or_item(event, "error", None) or event
+                    # Pass the whole envelope: the wrapped form carries the
+                    # authoritative HTTP status and Retry-After headers outside
+                    # the nested error object (Source responses_websocket.rs
+                    # reads both layers).
+                    error = event
                     message, error_raw = _responses_error_event_raw(
                         event_type,
                         error,

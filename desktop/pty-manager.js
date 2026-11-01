@@ -279,12 +279,12 @@ function resizeSession(sessionId, cols, rows, conversationId, windowInstanceId) 
   }
 }
 
-function killUnixProcessGroup(pid, fallback) {
+function killUnixProcessGroup(pid, fallback, signal = "SIGTERM") {
   if (!Number.isFinite(pid) || pid <= 0) {
     try { fallback(); } catch {}
     return Promise.resolve();
   }
-  try { process.kill(-pid, "SIGTERM"); } catch { try { fallback(); } catch {} }
+  try { process.kill(-pid, signal); } catch { try { fallback(); } catch {} }
   return Promise.resolve();
 }
 
@@ -315,7 +315,10 @@ async function terminateSession(sessionId, session) {
 
       appendDesktopLog(`[desktop] pty ${sessionId} did not exit after termination; forcing kill`);
       if (process.platform === "win32") session.process.forceKill();
-      else session.process.kill();
+      // node-pty's plain kill() defaults to SIGHUP on the leader process. A
+      // force kill must SIGKILL the whole process group a shell that ignores
+      // TERM/HUP left behind (Source pty.rs kills the captured group).
+      else await killUnixProcessGroup(session.process.pid, () => session.process.kill("SIGKILL"), "SIGKILL");
       if (!await waitForSessionExit(session, forceKillExitTimeoutMs)) {
         appendDesktopLog(`[desktop] pty ${sessionId} did not report exit after forced kill`);
         return false;
