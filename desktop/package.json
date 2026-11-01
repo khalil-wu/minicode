@@ -1,7 +1,7 @@
 {
   "name": "minicode-desktop",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "MiniCode Desktop shell (Electron + backend sidecar)",
   "author": "MiniCode Team",
   "license": "UNLICENSED",

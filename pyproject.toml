@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "minicode"
-version = "0.2.0"
+version = "0.2.1"
 description = "MiniCode Agent — AI 编程助手后端"
 requires-python = ">=3.11"
 dependencies = [
