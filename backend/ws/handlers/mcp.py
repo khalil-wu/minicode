@@ -792,8 +792,13 @@ async def _run_mcp_server_command(
         except Exception as exc:
             runtime_errors.append({"phase": "status_delivery", "message": str(exc)})
     name = str(data.get("name") or data.get("original_name") or "").strip()
-    result_data = _mcp_command_result_data(session, refreshed, name=name, notice=notice,
-        status=_server_status_entry(servers, name))
+    status = _server_status_entry(servers, name)
+    if not configuration_command and status is not None and str(status.get("status") or "") == "error":
+        # A restart that settled in the error state is a failed runtime
+        # update, not a success with an error attached to its data.
+        runtime_errors.append({"phase": "connection",
+            "message": str(status.get("error") or "MCP server failed to connect")})
+    result_data = _mcp_command_result_data(session, refreshed, name=name, notice=notice, status=status)
     if configuration_command:
         result_data.update(configuration_saved=True, runtime_applied=not runtime_errors)
     message = ""
@@ -1148,15 +1153,18 @@ async def handle_mcp_oauth_login(session: "WebSocketSession", data: dict[str, An
         {"type": "mcp_status", "servers": servers},
     )
     name = str(data.get("name", "")).strip()
+    status = _server_status_entry(servers, name)
+    failed = status is not None and str(status.get("status") or "") == "error"
     await session.send_event(
         AgentEvent.command_result(
             "mcp.oauth.login",
-            "",
+            f"MCP login failed: {status.get('error') or 'the server did not connect'}" if failed else "",
+            level="error" if failed else "info",
             data=_mcp_command_result_data(
                 session,
                 refreshed,
                 name=name,
-                status=_server_status_entry(servers, name),
+                status=status,
             ),
         )
     )

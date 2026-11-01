@@ -642,7 +642,13 @@ class SkillLoader:
             return {}
         if not isinstance(payload, dict):
             return {}
-        policy = payload.get("policy") or {}
+        policy = payload.get("policy")
+        if policy is not None and not isinstance(policy, dict):
+            # Source treats malformed optional metadata as a warning for this
+            # Skill; it must not abort the whole inventory discovery.
+            logger.warning("Ignoring invalid Skill policy metadata %s", path)
+            return {}
+        policy = policy or {}
         products = policy.get("products", [])
         if not isinstance(products, list) or any(product not in {"codex", "chatgpt", "atlas"} for product in products):
             logger.warning("Ignoring invalid Skill products metadata %s", path)

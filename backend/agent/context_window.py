@@ -97,7 +97,7 @@ class ContextWindowConfig:
         if self.auto_compact_fallback_prompt is not None and self.auto_compact_fallback_buffer_tokens is None:
             raise ValueError("features.token_budget.auto_compact_fallback_buffer_tokens is required when auto_compact_fallback_prompt is set")
 
-    def limits(self, llm: Any) -> tuple[int | None, int | None]:
+    def limits(self, llm: Any, model_info: Any = None) -> tuple[int | None, int | None]:
         capabilities = capabilities_for_adapter(llm)
         model_window = self.model_context_window
         if model_window is not None and capabilities.max_context_window_verified and capabilities.max_context_window:
@@ -109,7 +109,10 @@ class ContextWindowConfig:
             auto_limit = self.model_auto_compact_token_limit if self.model_auto_compact_token_limit is not None else default_limit
         else:
             auto_limit = min(default_limit, self.model_auto_compact_token_limit) if default_limit is not None and self.model_auto_compact_token_limit is not None else default_limit if default_limit is not None else self.model_auto_compact_token_limit
-        full_limit = model_window * 95 // 100 if model_window is not None else None
+        # The full window is the model's declared usable share of its context
+        # (Source resolved_context_window * effective_context_window_percent).
+        percent = int(model_info.extra.get("effective_context_window_percent", 95)) if model_info is not None else 95
+        full_limit = model_window * percent // 100 if model_window is not None else None
         return auto_limit, full_limit
 
     @property
@@ -145,8 +148,8 @@ class ContextWindowState:
         self.reminder_delivered = False
         self.fallback_delivered = False
 
-    def status(self, config: ContextWindowConfig, llm: Any, active_tokens: int) -> dict[str, Any]:
-        auto_limit, full_limit = config.limits(llm)
+    def status(self, config: ContextWindowConfig, llm: Any, active_tokens: int, model_info: Any = None) -> dict[str, Any]:
+        auto_limit, full_limit = config.limits(llm, model_info)
         baseline = self.prefill_input_tokens if self.prefill_input_tokens is not None else active_tokens
         scoped_tokens = max(0, active_tokens - baseline) if config.model_auto_compact_token_limit_scope == "body_after_prefix" else active_tokens
         remaining = [max(0, limit - used) for limit, used in (

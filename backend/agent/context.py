@@ -838,7 +838,7 @@ class ContextBuilder:
         legacy = self._context_window_config is not None and not self._context_window_config.use_history_notes_extension
         if not native and not legacy:
             return
-        if self._context_window_config.limits(self._llm)[1] is None:
+        if self._context_window_config.limits(self._llm, self._context_window_model_info)[1] is None:
             return
         owner = {"window_id": self._context_window_state.window_id,
             "session_id": session_id, "agent_name": agent_name,
@@ -887,7 +887,7 @@ class ContextBuilder:
                             if self._history[index].role == "assistant"), len(self._history) - 1)
         added = sum(self._window_item_tokens(message) for message in self._history[model_index + 1:])
         used = (window.last_response_total_tokens or 0) + added
-        return window.status(self._context_window_config, self._llm, used)
+        return window.status(self._context_window_config, self._llm, used, self._context_window_model_info)
 
     @staticmethod
     def _window_item_tokens(message: LLMMessage) -> int:
@@ -1480,7 +1480,7 @@ class ContextBuilder:
         skill_instructions = prompt_parts.render_skill_instructions()
         if skill_instructions and self._include_skill_instructions:
             messages.append(LLMMessage(role="developer", content=skill_instructions))
-        if self.token_budget_enabled and self._context_window_config.limits(self._llm)[1] is not None:
+        if self.token_budget_enabled and self._context_window_config.limits(self._llm, self._context_window_model_info)[1] is not None:
             context = self._tool_execution_context
             agent_path = context.metadata.get("agent_path") if context is not None else None
             if context is not None and context.run_context.agent_runtime is not None:

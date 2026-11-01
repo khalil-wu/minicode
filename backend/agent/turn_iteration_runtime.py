@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from dataclasses import replace
 from typing import Any
@@ -24,6 +25,8 @@ from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPo
 from backend.tools.registry import ToolRegistry
 from backend.tools.realtime_tools import active_realtime_service
 from backend.services.context_budget import build_context_compacted_event, context_ledger_snapshot
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -381,6 +384,47 @@ class TurnIterationRuntime:
         boundary_input = await self.turn_kernel.take_boundary_input(
             initial_turn_pending=initial_turn_pending,
         )
+        if (boundary_input.consumed_steer is not None and boundary_input.has_new_input
+                and boundary_input.consumed_steer.input_origin == "user"):
+            # A steer admitted mid-run is user input like the initial prompt.
+            # Source runs UserPromptSubmit on every drained pending UserInput
+            # before recording it (session/turn.rs run_hooks_and_record_inputs,
+            # hook_runtime.rs inspect_pending_input); the same hook decides
+            # this message too.
+            from backend.hooks.manager import HookEvent
+
+            hook_manager = run_context.hook_manager
+            if hook_manager is not None and hook_manager.has_hooks(HookEvent.USER_PROMPT_SUBMIT):
+                from backend.agent.loop_hook_projection import apply_hook_results
+                from backend.agent.loop_preflight import PhaseDeadlineExceeded, await_preflight
+                from backend.agent.turn_kernel import _set_terminal_reason
+
+                try:
+                    prompt_hook_result = await await_preflight(
+                        hook_manager.run_user_prompt_submit(boundary_input.content),
+                        deadline=self.tool_context.deadline_monotonic,
+                        cancel_event=self.tool_context.cancel_event,
+                        run_context=run_context,
+                        llm=self.llm,
+                    )
+                except PhaseDeadlineExceeded:
+                    # The initial preflight admits the message on deadline too;
+                    # the expired turn ends through its own deadline terminal.
+                    logger.warning("Turn deadline reached while running prompt hooks for a steer")
+                    prompt_hook_result = None
+                if prompt_hook_result is not None:
+                    events.extend(apply_hook_results(context=self.context,
+                        user_message=boundary_input.content, hook_results=(prompt_hook_result,)))
+                    if prompt_hook_result.blocked:
+                        await self.turn_kernel.acknowledge_boundary_input(boundary_input)
+                        message = (prompt_hook_result.message or prompt_hook_result.feedback
+                            or "User prompt blocked by hook")
+                        _set_terminal_reason(self.state, "blocked", status="failed")
+                        events.append(AgentEvent.error(message, recoverable=True,
+                            error_type="hook", error_code="user_prompt_blocked"))
+                        return TurnIterationPreparation(tool_schemas, schema_state, events)
+                    if prompt_hook_result.has_updated_input:
+                        boundary_input = replace(boundary_input, content=prompt_hook_result.updated_input)
 
         if boundary_input.has_new_input:
             history_start = self.context.history_length

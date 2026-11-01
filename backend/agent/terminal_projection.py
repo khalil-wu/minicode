@@ -151,19 +151,16 @@ async def terminal_boundary_events(
         context_builder=context_builder,
         defer_completed_clear=True,
     )
-    if checkpoint_status == "save_failed" and str(reason or "") != "checkpoint_save_failed":
+    if status == "completed" and checkpoint_status == "save_failed":
+        # Only a completed turn borrows the retained-checkpoint failure as its
+        # terminal authority, as query_terminal does. A turn that already
+        # failed, timed out, ran out of budget or was cancelled keeps its own
+        # status and reason; the save failure stays durable evidence in the
+        # checkpoint payload below.
         downgraded_reply = bool(str(getattr(state, "reply", "") or "").strip())
         status = "partial" if downgraded_reply else "failed"
         reason = "checkpoint_save_failed"
         _set_terminal_reason(state, reason, status=status)
-    elif checkpoint_status in {"save_failed", "clear_failed"}:
-        # A failed cleanup after a non-completed turn is durable evidence, not
-        # terminal authority. The reason remains the provider/tool/budget fact.
-        _set_terminal_reason(
-            state,
-            str(state.stopped_reason or "unknown"),
-            status="failed",
-        )
     checkpoint = turn_kernel.checkpoint_evidence()
     events: list[AgentEvent] = []
     events.append(

@@ -1,4 +1,4 @@
-"""Configured MCP hooks use the captured, connected MCP owner directly."""
+"""Configured MCP hooks use the captured MCP owner after its admitted startup."""
 from __future__ import annotations
 
 import asyncio
@@ -27,11 +27,16 @@ class _Client:
 
 
 class _Manager:
-    def __init__(self, client, *, enabled=True, connected=True, tools=("inspect",), environment_id="local"):
+    """The production prepare/get_client contract: a dormant cached server is
+    started by prepare_server_call, an unconnectable one raises ConnectionError."""
+
+    def __init__(self, client, *, enabled=True, connected=True, tools=("inspect",), environment_id="local", dormant=False):
         self.client = client
         self.config = MCPServerConfig(name="docs", enabled=enabled, environment_id=environment_id)
         self.connected = connected
+        self.dormant = dormant
         self.tools = tools
+        self.prepared = []
 
     def get_server_config(self, name):
         assert name == "docs"
@@ -39,13 +44,17 @@ class _Manager:
 
     def get_client(self, name):
         assert name == "docs"
-        return self.client if self.connected else None
+        return self.client if self.connected and not self.dormant else None
 
     def get_all_tools(self):
         return {"docs": [MCPToolDef(name=name, description="fixture") for name in self.tools]}
 
-    async def prepare_server_call(self, _name):
-        raise AssertionError("Lifecycle hooks must not connect or wait for a server")
+    async def prepare_server_call(self, name):
+        assert name == "docs"
+        self.prepared.append(name)
+        self.dormant = False
+        if not self.connected:
+            raise ConnectionError(f"MCP server '{name}' is not connected")
 
 
 def _context(tmp_path, manager, **run_fields):
@@ -117,7 +126,7 @@ async def test_configured_mcp_hook_reaches_current_step_manager_with_owner_and_t
     (True, False, ("inspect",), "not connected"),
     (True, True, (), "tool is not enabled"),
 ])
-async def test_mcp_hook_uses_enabled_connected_catalog_without_startup(tmp_path, enabled, connected, tools, message):
+async def test_mcp_hook_reports_disabled_unconnectable_and_unlisted_targets(tmp_path, enabled, connected, tools, message):
     client = _Client()
     manager = _Manager(client, enabled=enabled, connected=connected, tools=tools)
     with pytest.raises(HookExecutionError, match=message):
@@ -126,6 +135,22 @@ async def test_mcp_hook_uses_enabled_connected_catalog_without_startup(tmp_path,
             tool_context=_context(tmp_path, manager),
         )
     assert client.calls == []
+    assert manager.prepared == ([] if not enabled else ["docs"])
+
+
+@pytest.mark.asyncio
+async def test_mcp_hook_waits_for_a_dormant_cached_server_like_ordinary_tools(tmp_path):
+    # Source hook_mcp_executor calls the server with wait_for_server=true; a
+    # cached lazily-started server inherited by a child is dormant until the
+    # first call admits its startup.
+    client = _Client()
+    manager = _Manager(client, dormant=True)
+    assert manager.get_client("docs") is None
+    assert await HookMcpExecutor(manager).execute(
+        server="docs", tool="inspect", input={}, timeout=0.5, tool_context=_context(tmp_path, manager),
+    ) == "{}"
+    assert manager.prepared == ["docs"]
+    assert len(client.calls) == 1
 
 
 @pytest.mark.asyncio

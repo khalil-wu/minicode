@@ -339,7 +339,8 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             requirements_path=source._requirements_path if source is not None else None,
             environment_runtime=runtime, runtime_configs=(),
             startup_policy="LazyWhenCached" if is_subagent else "Eager",
-            optional_startup_grace_ms=optional_startup_grace_ms, feature_flags=feature_flags)
+            optional_startup_grace_ms=optional_startup_grace_ms, feature_flags=feature_flags,
+            source_manager=source)
         prepared.mcp_manager = manager
         prepared.owns_mcp_manager = True
         # Dynamic kernels are admitted only after this step captures its

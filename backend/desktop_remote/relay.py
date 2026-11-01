@@ -268,8 +268,13 @@ class Relay:
     async def _close(self) -> None:
         self.closed = True
         try:
-            await asyncio.gather(*(self._close_stream(stream_id) for stream_id in tuple(self.streams)))
+            try:
+                await asyncio.gather(*(self._close_stream(stream_id) for stream_id in tuple(self.streams)))
+            finally:
+                self.writer.close()
+                await self.writer.wait_closed()
         finally:
-            self.writer.close()
-            await self.writer.wait_closed()
-        self.on_closed()
+            # The owner's attachment slot is released by this callback. A
+            # transport that resets during wait_closed is still closed; the
+            # owner must not keep a dead relay as its active attachment.
+            self.on_closed()

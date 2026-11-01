@@ -785,7 +785,12 @@ class AppBootstrap:
                 workspace_root = session.session_lifecycle.workspace_root_for_conversation(
                     conversation
                 )
-                if self.get_mcp_manager_for_workspace(workspace_root) is not owner_manager:
+                # A captured turn serves its own receiving manager prepared
+                # from the workspace's host manager; that host is the owner.
+                owning_host = owner_manager
+                while getattr(owning_host, "source_manager", None) is not None:
+                    owning_host = owning_host.source_manager
+                if self.get_mcp_manager_for_workspace(workspace_root) is not owning_host:
                     return None, owner
 
                 from backend.agent.conversation_query_guard import (

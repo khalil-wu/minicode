@@ -265,12 +265,19 @@ async def _execute_prompt(
 
         llm = runtime.llm
         if entry.model:
-            from backend.config import get_llm_provider
-            from backend.services.llm_adapter_factory import build_provider_adapter
+            # The hook's model selection stays inside the issuing turn's
+            # captured provider, endpoint and request policy; the process-wide
+            # settings are a different owner.
+            execution = runtime.tool_context.model_execution if runtime.tool_context is not None else None
+            if execution is None:
+                return "", "Prompt hook model selection requires the owning model execution", 1
+            from backend.services.llm_adapter_factory import create_session_llm
 
-            selected_llm = build_provider_adapter(
-                get_llm_provider(),
+            selected_llm = create_session_llm(
+                execution.config,
                 model_override=entry.model,
+                provider_override=execution.provider,
+                model_runtime=execution.model_runtime,
             )
             llm = selected_llm
             owned_llm = selected_llm

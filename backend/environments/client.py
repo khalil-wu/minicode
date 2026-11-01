@@ -143,10 +143,14 @@ class ExecutorClient:
                     raise ExecutorProtocolError("exec-server initialize returned an invalid sessionId")
                 if self.session_id is not None and session_id != self.session_id:
                     raise ExecutorProtocolError("exec-server initialized an unexpected session")
-                self.session_id = session_id
-                if "environmentInfo" in response:
-                    self.environment_info = response["environmentInfo"]
                 await rpc.notify("initialized", {})
+            # The session is installed only once the handshake completed. A
+            # transport that fails before ``initialized`` leaves no session to
+            # resume, so the next attempt starts a fresh one instead of
+            # rejecting every later peer as an unexpected session.
+            self.session_id = session_id
+            if "environmentInfo" in response:
+                self.environment_info = response["environmentInfo"]
             return rpc
         except BaseException:
             self.transport_receipts.append(await rpc.close())

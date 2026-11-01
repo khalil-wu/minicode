@@ -531,8 +531,12 @@ class MCPServerManager:
         optional_startup_grace_ms: int = 1000,
         feature_flags: FeatureFlags | None = None,
         requires_read_only_tools: bool = False,
+        source_manager: "MCPServerManager | None" = None,
     ) -> None:
         self._config_path = config_path or MCP_CONFIG_FILE
+        # A turn's receiving manager is prepared from the host manager whose
+        # configuration it serves; ownership checks resolve back to that host.
+        self.source_manager = source_manager
         self.environment_runtime = environment_runtime
         self._runtime_configs = runtime_configs
         self._startup_policy = startup_policy

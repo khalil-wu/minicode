@@ -55,9 +55,15 @@ class HookMcpExecutor:
         config = self.manager.get_server_config(server)
         if config is None or not config.enabled:
             raise HookExecutionError(f"MCP hook server is not enabled: {server}")
+        # Hooks share the ordinary tool path: a cached server may still be
+        # dormant or starting, so wait for its admitted startup the way
+        # prepare_for_execution does (Source hook_mcp_executor passes
+        # wait_for_server=true).
+        try:
+            await self.manager.prepare_server_call(server)
+        except ConnectionError as error:
+            raise HookExecutionError(f"MCP hook server is not connected: {server}: {error}") from error
         client = self.manager.get_client(server)
-        if client is None:
-            raise HookExecutionError(f"MCP hook server is not connected: {server}")
         if not any(item.name == tool for item in self.manager.get_all_tools().get(server, ())):
             raise HookExecutionError(f"MCP hook tool is not enabled: {server}/{tool}")
         context = tool_context

@@ -99,12 +99,14 @@ async def _list_resource_payload(manager, args, context, *, templates: bool, pre
     if prepare_call is not None:
         names.update(manager.get_all_tools())
     for name in sorted(names):
-        if prepare_call is not None:
-            await prepare_call(name)
-        client = manager.get_client(name)
-        if client is None:
-            continue
         try:
+            # Readiness is per server: one stale cached server must not keep
+            # the healthy ones out of the aggregate listing.
+            if prepare_call is not None:
+                await prepare_call(name)
+            client = manager.get_client(name)
+            if client is None:
+                continue
             # The full listing retains every original MCP resource field.
             items = await client.list_all_resource_items(templates=templates)
             rows.extend({"server": name, **item} for item in items)
