@@ -34,11 +34,11 @@ interface Props {
   onRemoveLastSkill?: () => void;
   placeholder?: string;
   onHistorySearch?: () => void;
-  // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Given the
-  // current caret/direction, returns the prompt to fill, or null to do nothing.
+  // ArrowUp/ArrowDown prompt-history recall. Given the current caret/direction,
+  // returns the prompt to fill, or null to do nothing.
   onRecallHistory?: (direction: "up" | "down") => string | { value: string; document?: RichComposerDocument } | null;
-  // Escape while focused in the composer: interrupt the running turn (cc makes
-  // Escape a global interrupt even while typing). Returns true if it acted.
+  // Escape while focused in the composer: interrupt the running turn (Escape is
+  // a global interrupt even while typing). Returns true if it acted.
   onEscape?: () => boolean;
   conversationId?: string;
   ariaLabel?: string;
@@ -166,7 +166,7 @@ export const ComposerTextarea = ({
     }
     if (menuOpen && e.key !== "Enter") return;
     // Escape interrupts the running turn even while the composer is focused
-    // (cc: Escape is a global interrupt). Only acts when the turn is live;
+    // (Escape is a global interrupt). Only acts when the turn is live;
     // otherwise fall through so normal Escape handling still applies.
     if (e.key === "Escape" && onEscape) {
       if (onEscape()) {
@@ -174,9 +174,9 @@ export const ComposerTextarea = ({
         return;
       }
     }
-    // ArrowUp/ArrowDown prompt-history recall (cc useArrowKeyHistory). Only
-    // when the caret is on the first/last line so arrows still navigate
-    // multi-line text; skipped during IME composition.
+    // ArrowUp/ArrowDown prompt-history recall. Only when the caret is on the
+    // first/last line so arrows still navigate multi-line text; skipped during
+    // IME composition.
     if ((e.key === "ArrowUp" || e.key === "ArrowDown") && onRecallHistory) {
       const el = ref.current!;
       const caret = el.selectionStart;

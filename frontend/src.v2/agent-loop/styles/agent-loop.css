@@ -91,7 +91,7 @@
   box-shadow: none;
 }
 
-/* 进程容器不渲染 cc 风格的 ::before/::after 装饰条。 */
+/* 进程容器不渲染 ::before/::after 装饰条。 */
 .chat-turn-process::before,
 .chat-turn-process::after,
 .agent-loop-process.chat-turn-process::before,

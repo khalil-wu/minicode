@@ -334,9 +334,8 @@ const isContentFreeNarration = (content: string): boolean =>
 
 /**
  * The turn plan owns a dedicated live surface (TurnPlanProgress), so a plan
- * write is not timeline work. cc's TodoWriteTool renders nothing for the same
- * reason (`renderToolUseMessage` returns null); projecting it here produced a
- * run of identical, content-free "Update plan" rows beside the real widget.
+ * write is not timeline work; projecting it here produced a run of identical,
+ * content-free "Update plan" rows beside the real widget.
  */
 const isPlanStateWrite = (record: ToolCallRecord): boolean =>
   String(record.resultKind || "").trim().toLowerCase() === "plan";

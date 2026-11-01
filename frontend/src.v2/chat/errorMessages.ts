@@ -3,8 +3,8 @@ const ERROR_PREFIX_RE = /^Error:\s*/i;
 /**
  * Model-facing markup tags that wrap tool/sandbox errors. These are
  * instructions for the model, not text for the user to read, so strip them
- * from any displayed tool-error text (mirrors cc's FallbackToolUseErrorMessage
- * tag-stripping). Shared by ErrorCell and ActivityCell's failed-record path.
+ * from any displayed tool-error text. Shared by ErrorCell and ActivityCell's
+ * failed-record path.
  */
 const ERROR_MARKUP_TAG_RE = /<\/?(?:tool_use_error|error|sandbox_violation)[^>]*>/gi;
 const UNTRUSTED_RESULT_TAG_RE = /<\/?untrusted_tool_result\b[^>]*>/gi;

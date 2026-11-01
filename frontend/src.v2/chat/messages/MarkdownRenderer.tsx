@@ -1533,9 +1533,8 @@ const normalizeMarkdownSource = (value: string): string => {
  * Returns the index after the last complete block boundary.
  * Content before this point is "stable" and can be memoized.
  *
- * This mirrors cc's StreamingMarkdown approach: find the last closed
- * block boundary so everything before it is final and only the tail
- * re-parses per delta. We check multiple boundary types:
+ * Find the last closed block boundary so everything before it is final and
+ * only the tail re-parses per delta. We check multiple boundary types:
  * - Closed backtick or tilde code fences
  * - Double-newline paragraph breaks
  * - Completed list items (line starting with dash, bullet, or 1. followed by \n)
@@ -1641,7 +1640,7 @@ export function findStableSplitPoint(content: string): number {
 // If content has no markdown syntax markers, skip the full react-markdown
 // pipeline and render as a simple <p>. This covers the majority of short
 // assistant replies ("Sure, let me help with that.") and saves ~2-3ms of
-// parse + render per message. Mirrors cc's hasMarkdownSyntax() check.
+// parse + render per message.
 const MD_SYNTAX_RE = /[#*`|[><\\&_$~\-]|[\n\t]|^ {4}|^ {0,3}(?:\d+[.)]|\+)\s|https?:\/\/|www\.|@/i;
 const FILE_REF_HINT_RE = new RegExp(bareFileRefPattern.source, "i");
 function hasMarkdownSyntax(s: string): boolean {

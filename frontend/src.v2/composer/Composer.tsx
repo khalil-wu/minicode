@@ -239,9 +239,9 @@ export const Composer = ({ minimal = false }: { minimal?: boolean } = {}) => {
   const [reviewOwner, setReviewOwner] = useState<CodeReviewOwner>();
   const [guardianApprovalOwner, setGuardianApprovalOwner] = useState<{ conversationId: string; input: string; selectedCommand: string | null }>();
   const [historyItems, setHistoryItems] = useState<string[]>([]);
-  // ArrowUp/ArrowDown recall cursor (cc useArrowKeyHistory): -1 = live draft,
-  // 0..n-1 = position in most-recent-first history. savedDraft preserves the
-  // in-progress text so ArrowDown past the newest entry restores it.
+  // ArrowUp/ArrowDown recall cursor: -1 = live draft, 0..n-1 = position in
+  // most-recent-first history. savedDraft preserves the in-progress text so
+  // ArrowDown past the newest entry restores it.
   const historyCursorRef = useRef(-1);
   const historySavedDraftRef = useRef("");
   const historySavedDocumentRef = useRef<RichComposerDocument>();
