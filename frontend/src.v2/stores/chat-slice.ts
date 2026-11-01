@@ -195,7 +195,6 @@ const mergeProviderMessageProgress = (
 
 const pendingProviderProgressKey = (conversationId: string, messageId: string): string =>
   `${conversationId}\u0000${messageId}`;
-export const pendingProviderProgressOwner = (key: string): string => key.split("\u0000", 1)[0];
 
 const assistantIsTerminal = (message: AppStore["messages"][number]): boolean =>
   Boolean(message.terminalStatus)

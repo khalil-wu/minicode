@@ -186,7 +186,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
       const state = useAppStore.getState();
       state.openGitReview({ path: "", section: "working", workspaceRoot: browserRoot, conversationId: state.conversationId,
         source: baseBranch && baseBranch !== "HEAD" ? "branch" : "uncommitted", baseBranch, fileOwner: comparisonOwner });
-    }}><FileDiff size={16} />All changes</button>}
+    }}><FileDiff size={16} />{t("全部更改")}</button>}
     {(filtering || loading.has(basePath) && !directories[basePath]) && <div role="status" aria-label={t("正在加载文件…")}><LoaderCircle size={16} className="animate-spin" /></div>}
     <div role="tree" aria-label={t("文件")}>{renderEntries(filter.trim() ? matches : directories[basePath]?.entries ?? [])}</div>
     {!filtering && (filter.trim() ? matches.length === 0 : directories[basePath]?.entries.length === 0) && <p style={{ margin: "4px 14px", color: "var(--text-muted)", fontSize: "var(--text-xs)" }}>{t("未找到文件。")}</p>}

@@ -114,7 +114,7 @@ export const FileContextMenu = ({
     const ok = await showConfirm({
       title: tr("删除"),
       message: tr("删除 {v0}？", { v0: menu.path }),
-      confirmLabel: "Delete",
+      confirmLabel: tr("删除"),
       danger: true,
     });
     if (!ok) return;

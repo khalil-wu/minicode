@@ -685,20 +685,6 @@ const runtimeKindOrder = (kind: ActivityRunItem["kind"]): number =>
   ({ terminal: 0, agent: 1, preview: 2, "background-command": 3, automation: 4 })[kind];
 
 
-function toolSourcePath(record: ReturnType<typeof getToolCallsFromMessage>[number]): string {
-  const candidate = pathArg(record.args.file_path ?? record.args.path ?? record.args.target ?? record.args.filename);
-  if (!candidate || /^https?:\/\//i.test(candidate)) return "";
-  if (!isFileEvidenceTool(record)) return "";
-  return candidate;
-}
-
-function isFileEvidenceTool(record: ReturnType<typeof getToolCallsFromMessage>[number]): boolean {
-  const resultKind = String(record.resultKind || "").toLowerCase();
-  const activityKind = String(record.activityKind || "").toLowerCase();
-  return ["file", "code", "search", "workspace"].includes(resultKind)
-    || ["fileread", "workspacesearch"].includes(activityKind);
-}
-
 function isNonGitWorkspaceError(error?: string): boolean {
   if (!error) return false;
   return /not\s+(?:a\s+)?git\s+(?:repository|repo)|outside\s+(?:a\s+)?git\s+(?:repository|repo)/i.test(error);

@@ -58,6 +58,17 @@ describe("independent file tabs and persistent references", () => {
     switchConversation.mockRestore();
   });
 
+  it("clears the pending cross-conversation reference when that tab is closed before the switch lands", () => {
+    const switchConversation = vi.spyOn(useAppStore.getState(), "requestConversationSwitch").mockImplementation(() => true);
+    const owner = { ...home, scopeId: "conversation:owner-b", conversationId: "owner-b", executionCwd: "C:/b", browserRoot: "C:/b" };
+    const id = useAppStore.getState().openWorkspaceFileTab(owner, "b.txt");
+    expect(useAppStore.getState().pendingWorkspaceFileTabId).toBe(id);
+    useAppStore.getState().closeWorkspaceFileTab(id);
+    expect(useAppStore.getState().pendingWorkspaceFileTabId).toBeNull();
+    expect(useAppStore.getState().workspaceFileTabs).toEqual([]);
+    switchConversation.mockRestore();
+  });
+
   it("restores an older same-owner tab by its original absolute file without touching drafts, buffers or selection", () => {
     const cwd = "C:/tasks/2026-10-25/report";
     const owner = { scopeId: "conversation:a", conversationId: "a", executionCwd: cwd, browserRoot: cwd };

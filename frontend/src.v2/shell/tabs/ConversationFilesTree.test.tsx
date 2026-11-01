@@ -94,11 +94,11 @@ describe("read-only conversation Files tree", () => {
     await waitFor(() => expect(mocks.branches).toHaveBeenCalledWith({ ...regular, conversationId: null, executionCwd: "C:/tasks" }, expect.any(AbortSignal), undefined, "C:/tasks"));
   });
 
-  it("passes the selected repository and comparison to All changes and filters unloaded paths", async () => {
+  it("passes the selected repository and comparison to the all-changes entry and filters unloaded paths", async () => {
     mocks.branches.mockResolvedValue({ is_git_repo: true, current_branch: "feature", default_base_branch: "origin/main", branches: ["origin/main"], commits: [] });
     mocks.search.mockResolvedValue({ results: [{ path: "unloaded/deep.ts" }] });
     show();
-    fireEvent.click(await screen.findByRole("button", { name: "All changes" }));
+    fireEvent.click(await screen.findByRole("button", { name: "全部更改" }));
     expect(useAppStore.getState().gitReviewRequest).toMatchObject({ path: "", workspaceRoot: browserRoot,
       source: "branch", baseBranch: "origin/main", fileOwner: { ...owner, conversationId: null, executionCwd: browserRoot }, conversationId: "owner-a" });
     fireEvent.change(screen.getByRole("textbox", { name: "筛选文件" }), { target: { value: "deep" } });

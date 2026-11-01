@@ -15,7 +15,6 @@ import { clearDiffCommentScope } from "../lib/diff-comment-storage";
 import { cancelConversationComposerUploads } from "../composer/uploads";
 import { latestProjectionCommandIds } from "../protocol/command-projection";
 import { discardConversationDraftsForOwner } from "../stores/conversation-drafts";
-import { pendingProviderProgressOwner } from "../stores/chat-slice";
 import { releaseRetainedInputPreviews } from "../composer/retainedComposerInputs";
 import { saveBlobFile } from "../lib/save-blob";
 
@@ -271,14 +270,13 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
     for (const input of Object.values(useAppStore.getState().retainedComposerInputs)) {
       if (input.owner.kind === "conversation" && input.owner.id === id) releaseRetainedInputPreviews(input);
     }
+    useAppStore.getState().clearPendingProviderProgress(id);
     useAppStore.setState(state => {
       const workbenches = { ...state.conversationWorkbenchStates };
       const sideChats = { ...state.sideChats };
       const turnDiffs = { ...state.turnDiffs };
       delete workbenches[id]; delete sideChats[id]; delete turnDiffs[id];
       return { conversationWorkbenchStates: workbenches, sideChats, turnDiffs,
-        pendingProviderProgress: Object.fromEntries(Object.entries(state.pendingProviderProgress)
-          .filter(([key]) => pendingProviderProgressOwner(key) !== id)),
         retainedComposerInputs: Object.fromEntries(Object.entries(state.retainedComposerInputs)
           .filter(([, input]) => input.owner.kind !== "conversation" || input.owner.id !== id)) };
     });

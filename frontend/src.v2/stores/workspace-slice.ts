@@ -106,7 +106,8 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
       const next = get().workspaceFileTabs.find(value => value.id !== id && value.open && value.pane === "left" && value.owner.scopeId === tab.owner.scopeId);
       const wasFocused = get().panelSlots.some(slot => slot.fileTabId === id && slot.focused);
       get().removePanel(`workspace-file:${id}`);
-      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.flatMap(tab => tab.id !== id ? [tab] : tab.pinned ? [{ ...tab, open: false }] : [])) }));
+      set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.flatMap(tab => tab.id !== id ? [tab] : tab.pinned ? [{ ...tab, open: false }] : [])),
+        ...(state.pendingWorkspaceFileTabId === id ? { pendingWorkspaceFileTabId: null } : {}) }));
       if (wasFocused && next) get().activateWorkspaceFileTab(next.id);
     },
     pinWorkspaceFileTab: (id, pinned) => set(state => ({ workspaceFileTabs: saveFiles(state.workspaceFileTabs.map(tab => tab.id === id ? { ...tab, pinned, ...(pinned ? { isPreview: false } : {}) } : tab)) })),

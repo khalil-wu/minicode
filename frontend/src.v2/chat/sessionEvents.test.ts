@@ -589,6 +589,8 @@ describe("handleSessionEvent", () => {
     const sep = String.fromCharCode(0);
     const turnDiff = { threadId: "conv-gone", turnId: "turn-gone", updatedAt: 1, diff: "--- a\n+++ b" } as unknown as TurnDiffState;
     useAppStore.setState({
+      conversations: [{ id: "conv-gone", title: "Gone", updatedAt: "2026-08-15T09:00:00Z" },
+        { id: "conv-active", title: "Active", updatedAt: "2026-08-15T10:00:00Z" }],
       turnDiffs: { "conv-gone": turnDiff, "conv-active": { ...turnDiff, threadId: "conv-active" } },
       pendingProviderProgress: { [`conv-gone${sep}m1`]: [], [`conv-active${sep}m2`]: [] },
     });
