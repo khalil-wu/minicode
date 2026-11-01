@@ -13,10 +13,11 @@ import { createApprovalSlice } from "./approval-slice";
 import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
-import { applyWorkbenchPreferences, migrateWorkbenchPreferences, dictationPreferencesOf, usesDesktopDictationPreferences } from "../lib/workbench-preferences";
+import { applyWorkbenchPreferences, migrateWorkbenchPreferences, dictationPreferencesOf, usesDesktopDictationPreferences, type WorkbenchPreferences } from "../lib/workbench-preferences";
 import { getDiffCommentScope, transferDiffComments } from "../lib/diff-comment-storage";
 import { applyCodeTextScale, applyReducedMotion, applyPointerCursors, applyDiffMarkerStyle, applyTheme, applyTextScale, initialTheme, readAppearancePreferences, reducedMotionFor, LS, readLS, writeLS, persistEditorTabs, restoreWorkspaceEditorDrafts, reconcileRestoredEditorTabs, editorWorkspaceKey, editorWorkspaceRecoveryLocation } from "./shared-helpers";
 import { isAppearanceStorageKey, readAppearanceStorage } from "../lib/appearance-storage";
+import { safeJsonParse } from "../lib/safe-parse";
 import { flushEditorDrafts, hasPendingEditorDrafts, cachedEditorDrafts } from "./editor-drafts";
 import { workspaceRootsEqual } from "../lib/workspace-path";
 import { dictationController } from "../composer/dictation-controller";
@@ -325,7 +326,7 @@ if (typeof window !== "undefined") {
   window.addEventListener("storage", event => {
     if (event.storageArea !== localStorage) return;
     if (event.key === null || event.key === "minicode.workbench.preferences") {
-      const stored = migrateWorkbenchPreferences(JSON.parse(localStorage.getItem("minicode.workbench.preferences") ?? "{}"));
+      const stored = migrateWorkbenchPreferences(safeJsonParse<Partial<WorkbenchPreferences> & { speechVocabulary?: string }>(localStorage.getItem("minicode.workbench.preferences") ?? "{}", {}));
       const workbenchPreferences = usesDesktopDictationPreferences() ? { ...stored, ...dictationPreferencesOf(useAppStore.getState().workbenchPreferences) } : stored;
       useAppStore.setState({ workbenchPreferences });
       applyWorkbenchPreferences(workbenchPreferences);

@@ -164,14 +164,12 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     const previous = before.pendingPermissionModeChanges[conversationId];
     const confirmation = (async () => {
       if (previous) await previous.confirmation;
-      if (!conversationId && (get().conversationId
-        || !workspaceRootsEqual(get().workingDirectory, workspaceRoot))) return false;
       const accepted = await reportCommandOutcome(
         sendClientCommandAwaitResult({
           type: "conversation.permission_mode.set",
           mode: toBackendPermissionMode(m),
           source: "frontend.ui",
-          ...(conversationId ? { conversation_id: conversationId } : {}),
+          conversation_id: conversationId,
         }, "conversation.permission_mode.set"),
         "切换权限模式失败",
       );

@@ -21,6 +21,7 @@ import {
 } from "./shared-helpers";
 import { isWindowsLikeWorkspacePath, normalizeWorkspacePath, workspaceRootsEqual } from "../lib/workspace-path";
 import { workspaceRequestPath } from "../protocol/workspace-request-path";
+import { safeJsonParse } from "../lib/safe-parse";
 import { reconcileWorkspaceFileReference, reconcileWorkspaceFileTab } from "../protocol/file-workspace";
 import { draftWindowOwnerId } from "./draft-window-owner";
 import type { WorkspaceFileTab } from "./types";
@@ -54,13 +55,14 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
   const layout = loadInitialLayout();
   const filesStorageKey = `minicode.workspaceFiles.${draftWindowOwnerId()}`;
   const saveFiles = (tabs: WorkspaceFileTab[]) => { writeLS(filesStorageKey, JSON.stringify(tabs)); return tabs; };
+  const storedFileTabs = safeJsonParse<unknown>(readLS(filesStorageKey) ?? "[]", []);
   return {
     ...layout,
     initializeWorkspaceView: (conversationId, fullView) => set(state => state.conversationWorkbenchStates[conversationId] ? state : ({
       conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
         [conversationId]: { ...emptyConversationWorkbenchState(), rightPanelExpanded: fullView } },
     })),
-    workspaceFileTabs: JSON.parse(readLS(filesStorageKey) ?? "[]") as WorkspaceFileTab[],
+    workspaceFileTabs: Array.isArray(storedFileTabs) ? storedFileTabs as WorkspaceFileTab[] : [],
     fileBrowserRoots: {},
     pendingWorkspaceFileTabId: null,
     reconcileWorkspaceFileTabs: () => set(state => {

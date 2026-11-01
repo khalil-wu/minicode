@@ -1,6 +1,7 @@
 import type { AppStore } from "./types";
 import { draftWindowOwnerId } from "./draft-window-owner";
 import { readLS, writeLS } from "./shared-helpers";
+import { safeJsonParse } from "../lib/safe-parse";
 import { desktop, type EmbeddedBrowserState } from "../desktop/runtime";
 
 export interface BrowserWorkbenchTab {
@@ -33,7 +34,7 @@ export const browserOwnerId = (state: Pick<AppStore, "conversationId" | "activeC
 const storageKey = (owner: string) => `minicode.browserWorkbench:${JSON.stringify([draftWindowOwnerId(), owner])}`;
 export const readBrowserWorkbench = (owner: string): BrowserWorkbenchSnapshot | null => {
   const saved = readLS(storageKey(owner));
-  return saved ? JSON.parse(saved) as BrowserWorkbenchSnapshot : null;
+  return saved ? safeJsonParse<BrowserWorkbenchSnapshot | null>(saved, null) : null;
 };
 export const writeBrowserWorkbench = (owner: string, snapshot: BrowserWorkbenchSnapshot): void => {
   const key = storageKey(owner), encoded = JSON.stringify(snapshot);
