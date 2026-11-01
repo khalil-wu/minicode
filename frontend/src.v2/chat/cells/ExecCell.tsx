@@ -181,7 +181,7 @@ export function ExecCell({
             && <div className="exec-cell-output-status" data-status={status}>
             {cell.status === "success" && cell.exitCode === 0 && !cell.background && <Check size={13} aria-hidden="true" />}
             <span>{cell.background && cell.status === "success" ? t("已在后台启动")
-              : cell.status === "cancelled" && (!nativeCommand || cell.executionStartedAt != null) ? t("已停止")
+              : cell.status === "cancelled" && (!nativeCommand || cell.executionStartedAt != null) ? t(stoppedByReceipt(cell) ? "已停止" : "已停止等待")
                 : cell.status === "success" && cell.exitCode === 0 ? t("成功")
                   : t("退出码 {code}", { code: cell.exitCode ?? t("未知") })}</span>
           </div>}
@@ -193,13 +193,21 @@ export function ExecCell({
   );
 }
 
+const stoppedByReceipt = (cell: ExecCellState): boolean =>
+  Boolean(cell.transition && cell.transition !== "running" && cell.transition !== "waiting_approval");
+
 function nativeCommandTitle(cell: ExecCellState, running: boolean, duration: string, expanded: boolean, t: Translate): string {
   if (running) return duration ? t("命令已运行 {duration}", { duration }) : t("正在运行命令");
   if (cell.executionStartedAt == null && cell.status !== "success") return t("运行命令");
   if (cell.background && cell.status === "success") return t("已在后台启动");
-  if (cell.status === "cancelled" && cell.executionStartedAt != null) return duration
-    ? t(expanded ? "运行 {duration} 后停止命令" : "运行 {duration} 后停止", { duration })
-    : t(expanded ? "已停止命令" : "已停止");
+  if (cell.status === "cancelled" && cell.executionStartedAt != null) {
+    // A turn interruption seals open calls; only a terminal tool receipt proves
+    // the process itself stopped (a detached command keeps running).
+    if (!stoppedByReceipt(cell)) return t("已停止等待");
+    return duration
+      ? t(expanded ? "运行 {duration} 后停止命令" : "运行 {duration} 后停止", { duration })
+      : t(expanded ? "已停止命令" : "已停止");
+  }
   return duration ? t(expanded ? "命令已在 {duration} 内运行完成" : "已在 {duration} 内运行", { duration })
     : t(expanded ? "已运行命令" : "已运行");
 }

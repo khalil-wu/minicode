@@ -14,6 +14,7 @@
   "已在 {duration} 内运行": "Ran in {duration}",
   "命令已在 {duration} 内运行完成": "Ran command in {duration}",
   "已停止命令": "Stopped command",
+  "已停止等待": "Stopped waiting",
   "运行 {duration} 后停止": "Stopped after {duration}",
   "运行 {duration} 后停止命令": "Stopped command after {duration}",
   "退出码 {code}": "Exit code {code}"

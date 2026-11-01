@@ -206,12 +206,20 @@ describe("ExecCell", () => {
   });
 
   it("shows a real stopped receipt inside disclosure", () => {
-    render(<ExecCell cell={{ kind: "exec", id: "stopped", command: "npm test", status: "cancelled",
+    render(<ExecCell cell={{ kind: "exec", id: "stopped", command: "npm test", status: "cancelled", transition: "cancelled",
       stdoutPreview: ["partial stdout"], stderrPreview: [], collapsed: false, createdAt: 1 }} />);
     expect(screen.getByText("已停止")).toBeTruthy();
     expect(screen.getByText("partial stdout")).toBeTruthy();
     expect(screen.queryByText("失败")).toBeNull();
     expect(screen.queryByText("成功")).toBeNull();
+  });
+
+  it("does not claim a command stopped when only the turn was interrupted", () => {
+    render(<ExecCell cell={{ kind: "exec", id: "interrupted", command: "npm test", status: "cancelled",
+      stdoutPreview: ["partial stdout"], stderrPreview: [], collapsed: false, createdAt: 1 }} />);
+    expect(screen.getAllByText("已停止等待").length).toBeGreaterThan(0);
+    expect(screen.queryByText("已停止")).toBeNull();
+    expect(screen.queryByText("已停止命令")).toBeNull();
   });
 });
 

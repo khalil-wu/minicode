@@ -420,10 +420,12 @@ export const handleCommandResultEvent = (e: ServerEvent): boolean => {
         gitIsolated: Boolean(ev.data?.git_isolated),
       } : conversation),
     }));
+    // conversation.switched already activated this conversation's workspace.
+    // The receipt follows the same execution directory (the worktree for an
+    // isolated task) instead of resetting the editor to the project checkout.
     const state = useAppStore.getState();
-    if (state.conversationId === conversationId && ev.data.workspace_root) {
-      state.setWorkingDirectory(String(ev.data.workspace_root));
-    }
+    const executionRoot = String(ev.data?.execution_cwd || ev.data?.worktree_path || ev.data?.workspace_root || "");
+    if (state.conversationId === conversationId && executionRoot) state.setWorkingDirectory(executionRoot);
   }
 
   return true;

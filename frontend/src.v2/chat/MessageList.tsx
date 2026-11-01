@@ -199,7 +199,6 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
       - INITIAL_VIRTUAL_VIEWPORT_HEIGHT,
   ), [firstHistoricalTurnId, historicalTurns.length, lastHistoricalTurnId, readingState]);
   const virtualListRef = useRef<HTMLDivElement>(null);
-  const virtualConversationRef = useRef(conversationId);
   const [virtualScrollMargin, setVirtualScrollMargin] = useState(0);
   useLayoutEffect(() => {
     if (!shouldVirtualize) {
@@ -229,14 +228,9 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   });
   const renderedMeasurementsRef = useRef(turnVirtualizer.measurementsCache);
   useLayoutEffect(() => { renderedMeasurementsRef.current = turnVirtualizer.measurementsCache; });
-  useLayoutEffect(() => {
-    if (virtualConversationRef.current === conversationId) return;
-    virtualConversationRef.current = conversationId;
-    // The virtualizer instance survives conversation switches. Its internal
-    // size map is keyed by turn id, so discard measurements owned by the old
-    // transcript instead of retaining them across the inactive-chat LRU.
-    turnVirtualizer.measure();
-  }, [conversationId, turnVirtualizer]);
+  // Measurements are keyed by turn id and stay valid across conversation
+  // switches; discarding them here left the saved scroll offset mapping onto
+  // estimated sizes when the user returned to a long conversation.
   const liveScrollSignature = useMemo(() => {
     if (!shouldShowMessages || timelineMessages.length === 0) return "empty";
     let last = timelineMessages[timelineMessages.length - 1];

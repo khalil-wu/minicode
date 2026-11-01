@@ -123,13 +123,14 @@ describe("CommandPalette pending user action guard", () => {
     expect(useAppStore.getState().editorTabs[0].content).toBe("unsaved editor text");
   });
 
-  it("keeps the palette open on Escape when restored runtime state is waiting for user action", () => {
+  it("closes on Escape and leaves the restored pending user action to the composer", () => {
     render(<CommandPalette />);
 
     fireEvent.keyDown(screen.getByRole("combobox"), { key: "Escape" });
 
-    expect(screen.getByRole("combobox")).toBeTruthy();
-    expect(useAppStore.getState().commandPaletteOpen).toBe(true);
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(useAppStore.getState().commandPaletteOpen).toBe(false);
+    expect(useAppStore.getState().runtimeSession?.pending_approvals).toEqual([{ request_id: "ask-1", type: "ask_user" }]);
   });
 
   it("allows closing when only another conversation is waiting for user action", () => {

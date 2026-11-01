@@ -107,7 +107,7 @@ describe("real item/terminal disclosure and child roles", () => {
     expect(screen.getByText("Actual file contents")).toBeTruthy();
   });
 
-  it.each([false,true])("keeps a group's own reading choice without pinning the parent open, transcript=%s", (child) => {
+  it.each([false,true])("keeps a group's own reading choice visible through the completion fold, transcript=%s", (child) => {
     useAppStore.setState((state) => ({ messages: state.messages.map((message) => message.role === "assistant" ? { ...message,
       blocks: [...message.blocks!, { type: "tool_call", record: { id: "read-two", name: "read_file", args: { file_path: "second.md" },
         status: "success", startedAt: 4, finishedAt: 5, outputPreview: "Second file contents" } }] } : message) }));
@@ -115,9 +115,14 @@ describe("real item/terminal disclosure and child roles", () => {
     fireEvent.click(screen.getByRole("button", { name: "已读取文件" }));
     expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
     complete();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
-    expect(screen.getByRole("button", { name: "展开处理步骤" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "已读取文件" })).toBeNull();
+    expect(screen.getByRole("button", { name: "收起处理步骤" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("second.md")).toBeTruthy();
     done();rerender(<ChatTurn turn={turn()} conversationId="lifecycle" isTranscriptMode={child} />);
+    expect(screen.getByRole("button", { name: "收起处理步骤" })).toBeTruthy();
+    expect(screen.getByText("second.md")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "收起处理步骤" }));
+    expect(screen.getByRole("button", { name: "展开处理步骤" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "展开处理步骤" }));
     expect(screen.getByRole("button", { name: "已读取文件" }).getAttribute("aria-expanded")).toBe("true");
     expect(screen.getByText("second.md")).toBeTruthy();

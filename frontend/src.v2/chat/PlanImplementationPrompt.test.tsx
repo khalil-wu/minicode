@@ -6,7 +6,7 @@ import { useAppStore, waitComposerDraftRecovery } from "../stores";
 beforeEach(() => useAppStore.setState({ composerPlainTextMode: true }));
 vi.mock("../composer/RichComposerEditor", async () => ({ RichComposerEditor: (await import("../../test/literal-composer-editor")).LiteralComposerEditor }));
 
-import { promptDraftKey } from "../stores/prompt-drafts";
+import { persistPromptDrafts, promptDraftKey } from "../stores/prompt-drafts";
 import { resetPendingUserMessagesForTests } from "./sendChatMessage";
 import { handleCommandResultEvent } from "./commandResultEvents";
 import { notifyClientCommandReceived, registerWebSocketSender, resetPendingCommandResultsForTests } from "../protocol/ws-outbox";
@@ -49,7 +49,7 @@ beforeEach(async () => {
   useAppStore.setState({ conversationId: "plan-owner", workingDirectory: "C:/plan-owner", isConnected: true, composerDraftsReady: true,
     appMode: "cowork", agentMode: "plan", permissionMode: "confirm", draft: "原主草稿", attachments: [attachment("saved-attachment")],
     quotedMessage: { id: "draft-quote", role: "assistant", content: "原未发送引用" },
-    selectedMentions: [], selectedSkills: [], promptDrafts: {}, messages: [completed], conversationMessages: {},
+    selectedMentions: [], selectedSkills: [], promptDrafts: persistPromptDrafts({}), messages: [completed], conversationMessages: {},
     conversationWorkbenchStates: {}, workspaceComposerDrafts: {}, pendingAgentModeChanges: {}, latestAgentModeCommandIds: {},
     pendingPermissionModeChanges: {}, pendingConversationSwitchId: null, pendingConversationCreateId: null,
     isStreaming: false, conversationStreaming: {}, runtimeSession: null, pendingApproval: null, approvalQueue: [],

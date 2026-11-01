@@ -94,6 +94,13 @@ const bgForKind = (kind: DiffLine["kind"]): string => {
 const respond = async (requestId: string, approved: boolean) => {
   const store = useAppStore.getState();
   const review = store.diffReview;
+  // The response can land after another task's review took the surface; carry
+  // this review's own owner so a late result cannot clear the wrong request.
+  const owner = {
+    ...(review?.conversationId ? { conversationId: review.conversationId } : {}),
+    ...(review?.turnId ? { turnId: review.turnId } : {}),
+    ...(review?.messageId ? { messageId: review.messageId } : {}),
+  };
   store.setDiffReviewState({
     ...(review ?? { requestId, diff: "", files: [], fileDecisions: {}, lineComments: [] }),
     status: "submitted",
@@ -103,11 +110,11 @@ const respond = async (requestId: string, approved: boolean) => {
     const command = buildApprovalResponseCommand(
       requestId,
       approved ? "approve" : "reject",
-      { owner: { conversationId: review?.conversationId, turnId: review?.turnId, messageId: review?.messageId } },
+      { owner },
     );
     const result = await sendPromptResponseCommand(command);
     if (result && !commandResultSucceeded(result)) throw new Error(result.message || "审批未被后端接受");
-    useAppStore.getState().clearDiffReview(requestId);
+    useAppStore.getState().clearDiffReview(requestId, owner);
   } catch (error) {
     const current = useAppStore.getState().diffReview;
     if (current?.requestId === requestId) {

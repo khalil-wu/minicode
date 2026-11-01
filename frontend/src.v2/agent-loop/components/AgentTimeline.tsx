@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type React from "react";
 import { ChevronDown, ChevronRight, PencilLine, TerminalSquare } from "../../lib/icons";
 import type { AgentLoopProcessCell } from "../projection/project-turn";
@@ -16,7 +16,7 @@ import {
 } from "../../chat/cells/activityCellHelpers";
 import { isProviderReasoningSummary } from "../../lib/provider-reasoning";
 import { useTranscriptSearch } from "../../chat/TranscriptSearchContext";
-import { useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
+import { ProcessDetailReadingContext, useTranscriptReadingPreference } from "../../chat/transcriptReadingState";
 import { useProcessDisclosure } from "./useProcessDisclosure";
 import { useActivitySummary } from "./useActivitySummary";
 import { useI18n, type Translate, type TranslationKey, type Locale } from "../../i18n";
@@ -179,6 +179,7 @@ const liveWorkTitle = (cell: AgentLoopProcessCell, t: Translate): string => {
 const WorkGroup = memo(function WorkGroup({ group, renderCell, expandWorkGroups, isRunning, onHistoryStartReached }: { group: TimelineGroup; renderCell: RenderAgentCell; expandWorkGroups: boolean; isRunning: boolean; onHistoryStartReached?: () => void }) {
   const { t, locale } = useI18n();
   const searching = useTranscriptSearch();
+  const protectDetailReading = useContext(ProcessDetailReadingContext);
   const defaultExpanded = expandWorkGroups;
   const [expansionPreference, setExpanded, userToggled] = useTranscriptReadingPreference(`work:${group.key}`, defaultExpanded);
   const expanded = searching || expansionPreference;
@@ -223,6 +224,9 @@ const WorkGroup = memo(function WorkGroup({ group, renderCell, expandWorkGroups,
     <section className={`agent-loop-timeline-group agent-loop-timeline-group-work${liveGroup ? " agent-loop-open-work-group" : ""}`} data-group-kind="work" data-group-open={liveGroup} data-group-expanded={expanded} data-processing={liveGroup} aria-label={title}>
       <button type="button" className="agent-loop-timeline-group-title" data-group-kind="work" aria-expanded={expanded} aria-controls={detailId} onClick={() => {
         userToggled.current = true;
+        // Expanding this group's evidence is an explicit reading choice; the
+        // completion fold must not unmount it while the parent turn folds.
+        if (!expansionPreference) protectDetailReading?.();
         setExpanded((value) => !value);
       }}>
         <span className="agent-loop-timeline-group-icon" aria-hidden="true">{workGlyph(liveGroup && summary.key !== "summary" ? group.cells.find((cell) => cell.id === summary.key) : summaryIconCell)}</span>

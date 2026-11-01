@@ -659,6 +659,78 @@ const upsertConversationMeta = (
   });
 };
 
+type QueuedSnapshotEntry = NonNullable<RuntimeSessionSnapshot["queued_user_messages"]>[number];
+
+const applyQueuedSnapshotToMessages = (messages: ChatMessage[], entry: QueuedSnapshotEntry): ChatMessage[] => {
+  const current = [...messages];
+  const messageId = String(entry.message_id || "").trim();
+  const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
+  const position = typeof entry.position === "number" ? entry.position : undefined;
+  const queuePaused = entry.paused ?? false;
+  const backendContent = String(entry.content ?? "");
+  const input = {
+    content: entry.display_content ?? backendContent,
+    ...(entry.async_request_id !== undefined ? { asyncRequestId: entry.async_request_id } : {}),
+    ...(entry.display_content !== undefined ? { backendContent } : {}),
+    ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
+    ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
+    ...(entry.attachments !== undefined ? { attachmentRefs: normalizeTranscriptAttachmentRefs(entry.attachments) } : {}),
+  };
+  const userIndex = current.findIndex((message) => message.role === "user"
+    && (message.id === userMessageId || message.queueMessageId === messageId));
+  const timestamp = Date.now();
+  if (userIndex >= 0) {
+    current[userIndex] = {
+      ...current[userIndex],
+      ...input,
+      ...(entry.display_content === undefined ? { content: current[userIndex].content } : {}),
+      queueState: "queued",
+      queuePosition: position,
+      queuePaused,
+      queueMessageId: messageId,
+    };
+  } else {
+    const queuedAssistantIndex = current.findIndex((message) => message.id === messageId);
+    current.splice(queuedAssistantIndex >= 0 ? queuedAssistantIndex : current.length, 0, {
+      id: userMessageId,
+      role: "user",
+      ...input,
+      artifacts: [],
+      timestamp,
+      queueState: "queued",
+      queuePosition: position,
+      queuePaused,
+      queueMessageId: messageId,
+    });
+  }
+  const assistantIndex = current.findIndex((message) => message.id === messageId);
+  if (assistantIndex >= 0) {
+    current[assistantIndex] = {
+      ...current[assistantIndex],
+      queueState: "queued",
+      queuePosition: position,
+      queuePaused,
+      queueMessageId: messageId,
+      isStreaming: false,
+      isThinkingStreaming: false,
+    };
+  } else {
+    current.push({
+      id: messageId,
+      role: "assistant",
+      content: "",
+      artifacts: [],
+      timestamp,
+      queueState: "queued",
+      queuePosition: position,
+      queuePaused,
+      queueMessageId: messageId,
+      isStreaming: false,
+    });
+  }
+  return current;
+};
+
 export const applyQueuedUserMessageSnapshot = (
   entries: RuntimeSessionSnapshot["queued_user_messages"],
 ) => {
@@ -666,84 +738,77 @@ export const applyQueuedUserMessageSnapshot = (
   useAppStore.setState((state) => {
     const conversationMessages = { ...state.conversationMessages };
     let activeMessages = state.messages;
+    let sideChats = state.sideChats;
     for (const entry of entries) {
       const conversationId = String(entry?.conversation_id || "").trim();
       const messageId = String(entry?.message_id || "").trim();
       if (!conversationId || !messageId) continue;
       if (isComposerConversationDeleted(conversationId)) continue;
-      const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
-      const position = typeof entry.position === "number" ? entry.position : undefined;
-      const queuePaused = entry.paused ?? false;
-      const backendContent = String(entry.content ?? "");
-      const input = {
-        content: entry.display_content ?? backendContent,
-        ...(entry.async_request_id !== undefined ? { asyncRequestId: entry.async_request_id } : {}),
-        ...(entry.display_content !== undefined ? { backendContent } : {}),
-        ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
-        ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
-        ...(entry.attachments !== undefined ? { attachmentRefs: normalizeTranscriptAttachmentRefs(entry.attachments) } : {}),
-      };
-      const current = conversationMessages[conversationId] ? [...conversationMessages[conversationId]]
+      const base = conversationMessages[conversationId] ? [...conversationMessages[conversationId]]
         : state.conversationId === conversationId ? [...state.messages] : [];
-      const userIndex = current.findIndex((message) => message.role === "user"
-        && (message.id === userMessageId || message.queueMessageId === messageId));
-      const timestamp = Date.now();
-      if (userIndex >= 0) {
-        current[userIndex] = {
-          ...current[userIndex],
-          ...input,
-          ...(entry.display_content === undefined ? { content: current[userIndex].content } : {}),
-          queueState: "queued",
-          queuePosition: position,
-          queuePaused,
-          queueMessageId: messageId,
-        };
-      } else {
-        const queuedAssistantIndex = current.findIndex((message) => message.id === messageId);
-        current.splice(queuedAssistantIndex >= 0 ? queuedAssistantIndex : current.length, 0, {
-          id: userMessageId,
-          role: "user",
-          ...input,
-          artifacts: [],
-          timestamp,
-          queueState: "queued",
-          queuePosition: position,
-          queuePaused,
-          queueMessageId: messageId,
-        });
-      }
-      const assistantIndex = current.findIndex((message) => message.id === messageId);
-      if (assistantIndex >= 0) {
-        current[assistantIndex] = {
-          ...current[assistantIndex],
-          queueState: "queued",
-          queuePosition: position,
-          queuePaused,
-          queueMessageId: messageId,
-          isStreaming: false,
-          isThinkingStreaming: false,
-        };
-      } else {
-        current.push({
-          id: messageId,
-          role: "assistant",
-          content: "",
-          artifacts: [],
-          timestamp,
-          queueState: "queued",
-          queuePosition: position,
-          queuePaused,
-          queueMessageId: messageId,
-          isStreaming: false,
-        });
-      }
+      const current = applyQueuedSnapshotToMessages(base, entry);
       conversationMessages[conversationId] = current;
       if (state.conversationId === conversationId) activeMessages = current;
+      // The visible side chat renders its own message list; the authoritative
+      // queue snapshot must reach it too, not only the hidden cache.
+      const sideThread = sideChats[conversationId];
+      if (sideThread) {
+        sideChats = { ...sideChats, [conversationId]: {
+          ...sideThread, messages: applyQueuedSnapshotToMessages(sideThread.messages, entry) } };
+      }
     }
-    return { conversationMessages, messages: activeMessages };
+    return { conversationMessages, messages: activeMessages, sideChats };
   });
   for (const entry of entries) if (entry.conversation_id && entry.message_id && entry.user_message_id
     && !isComposerConversationDeleted(entry.conversation_id)) captureCommittedUserMessage(entry.conversation_id, entry.user_message_id);
+};
+
+type PendingTurnInputSnapshotEntry = NonNullable<RuntimeSessionSnapshot["pending_turn_inputs"]>[number];
+
+const applySteerSnapshotToMessages = (messages: ChatMessage[], entry: PendingTurnInputSnapshotEntry): ChatMessage[] => {
+  const messageId = String(entry.message_id || "").trim();
+  const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
+  const targetMessageId = String(entry.target_message_id || "").trim();
+  const withoutPlaceholder = messages.filter((message) => !(
+    message.role === "assistant" && message.id === messageId
+  ));
+  const existingUserIndex = withoutPlaceholder.findIndex((message) => (
+    message.role === "user"
+    && (message.id === userMessageId || message.queueMessageId === messageId)
+  ));
+  const attachmentRefs = normalizeTranscriptAttachmentRefs(entry.attachments);
+  const backendContent = String(entry.content ?? "");
+  const input = {
+    content: entry.display_content ?? backendContent,
+    ...(entry.async_request_id !== undefined ? { asyncRequestId: entry.async_request_id } : {}),
+    ...(entry.display_content !== undefined ? { backendContent } : {}),
+    ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
+    ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
+  };
+  const restoredUser: ChatMessage = existingUserIndex >= 0
+    ? {
+        ...withoutPlaceholder[existingUserIndex]!,
+        ...input,
+        ...(entry.display_content === undefined ? { content: withoutPlaceholder[existingUserIndex]!.content } : {}),
+        queueState: undefined,
+        queuePosition: undefined,
+        queueMessageId: messageId,
+        steeredIntoMessageId: targetMessageId || undefined,
+        ...(entry.attachments !== undefined ? { attachmentRefs } : {}),
+      }
+    : {
+        id: userMessageId,
+        role: "user",
+        ...input,
+        attachmentRefs,
+        artifacts: [],
+        timestamp: Number(entry.queued_at_ms || Date.now()),
+        queueMessageId: messageId,
+        steeredIntoMessageId: targetMessageId || undefined,
+      };
+  if (existingUserIndex >= 0) withoutPlaceholder[existingUserIndex] = restoredUser;
+  else withoutPlaceholder.push(restoredUser);
+  return withoutPlaceholder;
 };
 
 export const applyPendingTurnInputSnapshot = (
@@ -753,62 +818,31 @@ export const applyPendingTurnInputSnapshot = (
   useAppStore.setState((state) => {
     const conversationMessages = { ...state.conversationMessages };
     let activeMessages = state.messages;
+    let sideChats = state.sideChats;
     for (const entry of entries) {
       if (entry?.mode !== "steer") continue;
       const conversationId = String(entry.conversation_id || "").trim();
       const messageId = String(entry.message_id || "").trim();
       const userMessageId = String(entry.user_message_id || `user_${messageId}`).trim();
-      const targetMessageId = String(entry.target_message_id || "").trim();
       if (!conversationId || !messageId || !userMessageId) continue;
       if (isComposerConversationDeleted(conversationId)) continue;
-      const current = conversationMessages[conversationId]
+      const base = conversationMessages[conversationId]
         ? [...conversationMessages[conversationId]]
         : state.conversationId === conversationId
           ? [...state.messages]
           : [];
-      const withoutPlaceholder = current.filter((message) => !(
-        message.role === "assistant" && message.id === messageId
-      ));
-      const existingUserIndex = withoutPlaceholder.findIndex((message) => (
-        message.role === "user"
-        && (message.id === userMessageId || message.queueMessageId === messageId)
-      ));
-      const attachmentRefs = normalizeTranscriptAttachmentRefs(entry.attachments);
-      const backendContent = String(entry.content ?? "");
-      const input = {
-        content: entry.display_content ?? backendContent,
-        ...(entry.async_request_id !== undefined ? { asyncRequestId: entry.async_request_id } : {}),
-        ...(entry.display_content !== undefined ? { backendContent } : {}),
-        ...(entry.context_refs !== undefined ? { contextRefs: normalizeMessageContextRefs(entry.context_refs) } : {}),
-        ...(entry.quoted_message !== undefined ? { quotedMessage: normalizeQuotedMessage(entry.quoted_message) } : {}),
-      };
-      const restoredUser: ChatMessage = existingUserIndex >= 0
-        ? {
-            ...withoutPlaceholder[existingUserIndex]!,
-            ...input,
-            ...(entry.display_content === undefined ? { content: withoutPlaceholder[existingUserIndex]!.content } : {}),
-            queueState: undefined,
-            queuePosition: undefined,
-            queueMessageId: messageId,
-            steeredIntoMessageId: targetMessageId || undefined,
-            ...(entry.attachments !== undefined ? { attachmentRefs } : {}),
-          }
-        : {
-            id: userMessageId,
-            role: "user",
-            ...input,
-            attachmentRefs,
-            artifacts: [],
-            timestamp: Number(entry.queued_at_ms || Date.now()),
-            queueMessageId: messageId,
-            steeredIntoMessageId: targetMessageId || undefined,
-          };
-      if (existingUserIndex >= 0) withoutPlaceholder[existingUserIndex] = restoredUser;
-      else withoutPlaceholder.push(restoredUser);
-      conversationMessages[conversationId] = withoutPlaceholder;
-      if (state.conversationId === conversationId) activeMessages = withoutPlaceholder;
+      const restored = applySteerSnapshotToMessages(base, entry);
+      conversationMessages[conversationId] = restored;
+      if (state.conversationId === conversationId) activeMessages = restored;
+      // The visible side chat renders its own message list; the authoritative
+      // steer snapshot must reach it too, not only the hidden cache.
+      const sideThread = sideChats[conversationId];
+      if (sideThread) {
+        sideChats = { ...sideChats, [conversationId]: {
+          ...sideThread, messages: applySteerSnapshotToMessages(sideThread.messages, entry) } };
+      }
     }
-    return { conversationMessages, messages: activeMessages };
+    return { conversationMessages, messages: activeMessages, sideChats };
   });
   for (const entry of entries) if (entry.mode === "steer" && entry.conversation_id && entry.message_id && entry.user_message_id
     && !isComposerConversationDeleted(entry.conversation_id)) captureCommittedUserMessage(entry.conversation_id, entry.user_message_id);
@@ -1567,7 +1601,7 @@ export const handleSessionEvent = (
               Object.entries(state.conversationRecallTruncations ?? {}).filter(([id]) => knownConversationIds.has(id)),
             ),
             turnDiffs: Object.fromEntries(
-              Object.entries(state.turnDiffs).filter(([id]) => knownConversationIds.has(id)),
+              Object.entries(state.turnDiffs).filter(([id]) => knownConversationIds.has(id) || Boolean(state.sideChats[id])),
             ),
             pendingApproval,
             approvalQueue,

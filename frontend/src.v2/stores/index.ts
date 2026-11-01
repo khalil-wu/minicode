@@ -10,6 +10,7 @@ import { createChatSlice } from "./chat-slice";
 import { createComposerSlice } from "./composer-slice";
 import { createAgentSlice } from "./agent-slice";
 import { createApprovalSlice } from "./approval-slice";
+import { loadPromptDrafts } from "./prompt-drafts";
 import { createControlPlaneSlice } from "./control-plane-slice";
 import { createInspectorSlice } from "./inspector-slice";
 import { createEditorSlice } from "./editor-slice";
@@ -336,6 +337,9 @@ if (typeof window !== "undefined") {
       applyTextScale(preferences.textScale); applyCodeTextScale(preferences.codeTextScale, preferences.codeFontBase);
       applyReducedMotion(preferences.reducedMotion); applyPointerCursors(preferences.pointerCursors); applyDiffMarkerStyle(preferences.diffMarkerStyle);
       useAppStore.setState(preferences);
+    }
+    if (event.key === null || event.key === "minicode.agentPromptDrafts") {
+      useAppStore.setState({ promptDrafts: loadPromptDrafts() });
     }
     if (!isAppearanceStorageKey(event.key)) return;
     // Read the complete latest snapshot rather than replaying an older event

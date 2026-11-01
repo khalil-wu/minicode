@@ -137,6 +137,7 @@ export interface ExecCellState {
   outputArtifact?: ArtifactPreview;
   background?: boolean;
   status: "pending" | "pending_approval" | "running" | "success" | "partial" | "failed" | "cancelled";
+  transition?: string;
   exitCode?: number;
   stdoutPreview: string[];
   stderrPreview: string[];

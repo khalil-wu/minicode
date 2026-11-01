@@ -50,6 +50,7 @@ import {
   cacheEditorStateForWorkspace,
   editorStateForWorkspace,
   conversationResetPayload,
+  usageTotalsFromMessages,
   visibleDiffReviewForConversation,
   resumedFromInFlightProjection,
   isInFlightProjection,
@@ -717,7 +718,11 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
               lastUsage: s.lastUsage,
               usageTotals: s.usageTotals,
             }
-          : {}),
+          : {
+              // Restored transcripts carry per-message usage; the headline must
+              // reflect the conversation being opened, not reset to zero.
+              usageTotals: usageTotalsFromMessages(cachedCurrent.conversationMessages[id] ?? []),
+            }),
         // Hydration publishes the same authoritative owner again. Its Git
         // reads still belong to that owner and must keep their request IDs.
         ...(sameConversation && !workspaceChanged ? { gitChanges: s.gitChanges } : {}),

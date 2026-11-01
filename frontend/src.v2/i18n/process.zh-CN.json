@@ -14,6 +14,7 @@
   "已在 {duration} 内运行": "已在 {duration} 内运行",
   "命令已在 {duration} 内运行完成": "命令已在 {duration} 内运行完成",
   "已停止命令": "已停止命令",
+  "已停止等待": "已停止等待",
   "运行 {duration} 后停止": "运行 {duration} 后停止",
   "运行 {duration} 后停止命令": "运行 {duration} 后停止命令",
   "退出码 {code}": "退出码 {code}"

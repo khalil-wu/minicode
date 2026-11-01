@@ -171,6 +171,7 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
         : record.status === "cancelled"
           ? "cancelled"
           : "failed",
+    transition: record.transition,
     exitCode: exitCodeFor(record),
     stdoutPreview: outputLines(stdout),
     stderrPreview: outputLines(stderr),

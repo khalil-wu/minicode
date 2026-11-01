@@ -5,10 +5,8 @@ import { LEFT_SIDEBAR_DEFAULT_WIDTH } from "../stores/shared-helpers";
 import { sendClientCommand } from "../protocol/ws-outbox";
 import { sendChatMessage } from "../chat/sendChatMessage";
 import { toBackendPermissionMode } from "../protocol/permissions";
-import { hasRuntimePendingUserAction, hasRuntimePendingUserActionForConversation } from "../lib/runtime-session";
 import { buildRuntimeSlashPaletteItems, executeRuntimeSlashCommand } from "../lib/runtime-commands";
 import { buildInterruptCommand } from "../lib/interrupt-command";
-import { hasLocalPendingPromptForConversation } from "../lib/pending-prompts";
 import { openSettings } from "../lib/settings-navigation";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { useFocusTrap } from "../hooks/useFocusTrap";
@@ -51,28 +49,6 @@ const highlightMatch = (label: string, query: string): React.ReactNode => {
   );
 };
 
-const hasPendingUserAction = (): boolean => {
-  const state = useAppStore.getState();
-  const activeConversationId = state.conversationId ?? state.runtimeSession?.active_conversation_id;
-  const hasRuntimePending = activeConversationId
-    ? hasRuntimePendingUserActionForConversation(state.runtimeSession, activeConversationId)
-    : hasRuntimePendingUserAction(state.runtimeSession);
-  return Boolean(
-    hasLocalPendingPromptForConversation(
-      [
-        state.pendingApproval,
-        ...state.approvalQueue,
-        state.pendingDiffReview,
-        ...state.diffReviewQueue,
-        state.pendingAskUser,
-        ...state.askUserQueue,
-      ],
-      activeConversationId,
-    ) ||
-    hasRuntimePending,
-  );
-};
-
 export const CommandPalette = () => {
   const { t: tr } = useI18n();
   const commandPaletteOpen = useAppStore((s) => s.commandPaletteOpen);
@@ -103,8 +79,9 @@ export const CommandPalette = () => {
   const [activeIdx, setActiveIdx] = useState(0);
   const bodySearch = useConversationSearch({ query, enabled: commandPaletteOpen && globalSearchEnabled });
   const dialogRef = useFocusTrap(commandPaletteOpen);
+  // Closing the palette never dismisses a pending approval; the approval lives
+  // in the composer. Esc and outside clicks must return to it.
   const closePaletteIfIdle = () => {
-    if (hasPendingUserAction()) return;
     toggleCommandPalette();
   };
 

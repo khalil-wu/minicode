@@ -6,22 +6,24 @@ import { pendingPromptKey, pendingPromptMatchesOwner } from "../lib/pending-prom
 import type { AgentPromptDraft, PendingApproval } from "./types";
 import type { PromptOwner } from "../protocol/prompt-responses";
 
-const removeApprovalDrafts = (drafts: Record<string, AgentPromptDraft>, removed: PendingApproval[]) => {
-  let next = drafts;
+const removeApprovalDrafts = (removed: PendingApproval[]) => {
   for (const request of removed) {
-    next = removePromptDrafts(next, [request.requestId], request.conversationId,
+    removePromptDrafts([request.requestId], request.conversationId,
       { turnId: request.turnId, messageId: request.messageId, taskId: request.taskId });
   }
-  return next;
+  return loadPromptDrafts();
 };
 
 export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> = (set, get) => ({
   promptDrafts: loadPromptDrafts(),
-  updatePromptDraft: ({ requestId, conversationId, inputOwner }, patch) => set((s) => {
+  updatePromptDraft: ({ requestId, conversationId, inputOwner }, patch) => set(() => {
     const key = promptDraftKey({ requestId, conversationId, inputOwner });
+    // Read the shared storage before writing: another window may have drafted
+    // for a different request since this store loaded.
+    const latest = loadPromptDrafts();
     return { promptDrafts: persistPromptDrafts({
-      ...s.promptDrafts,
-      [key]: { ...s.promptDrafts[key], ...patch, requestId, conversationId, ...(inputOwner ? { inputOwner } : {}) },
+      ...latest,
+      [key]: { ...latest[key], ...patch, requestId, conversationId, ...(inputOwner ? { inputOwner } : {}) },
     }) };
   }),
   pendingApproval: null,
@@ -72,13 +74,13 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       if (requestId && !matches(s.pendingApproval)) {
         const remaining = s.approvalQueue.filter(item => !matches(item));
         return {
-          promptDrafts: removeApprovalDrafts(s.promptDrafts, s.approvalQueue.filter(matches)),
+          promptDrafts: removeApprovalDrafts(s.approvalQueue.filter(matches)),
           approvalQueue: remaining,
         };
       }
       const [next, ...rest] = s.approvalQueue;
       return {
-        promptDrafts: removeApprovalDrafts(s.promptDrafts, s.pendingApproval ? [s.pendingApproval] : []),
+        promptDrafts: removeApprovalDrafts(s.pendingApproval ? [s.pendingApproval] : []),
         pendingApproval: next ?? null,
         approvalQueue: rest,
       };
@@ -95,7 +97,7 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       const approvalQueue = s.approvalQueue.filter((queued) => !matches(queued));
       const [next, ...rest] = approvalQueue;
       return {
-        promptDrafts: removeApprovalDrafts(s.promptDrafts, all.filter(matches)),
+        promptDrafts: removeApprovalDrafts(all.filter(matches)),
         pendingApproval: pendingApproval ?? next ?? null,
         approvalQueue: pendingApproval ? approvalQueue : rest,
       };
@@ -205,13 +207,13 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
           && request.messageId === inputOwner.messageId && request.taskId === inputOwner.taskId);
       if (requestId && !matches(s.pendingAskUser)) {
         return {
-          promptDrafts: removePromptDrafts(s.promptDrafts, [requestId], conversationId, inputOwner),
+          promptDrafts: removePromptDrafts([requestId], conversationId, inputOwner),
           askUserQueue: s.askUserQueue.filter((queued) => !matches(queued)),
         };
       }
       const [next, ...rest] = s.askUserQueue;
       return { pendingAskUser: next ?? null, askUserQueue: rest,
-        promptDrafts: removePromptDrafts(s.promptDrafts, [requestId ?? s.pendingAskUser?.requestId ?? ""], conversationId, inputOwner) };
+        promptDrafts: removePromptDrafts([requestId ?? s.pendingAskUser?.requestId ?? ""], conversationId, inputOwner) };
     }),
   clearAskUsers: (requestIds, conversationId, inputOwner) =>
     set((s) => {
@@ -223,7 +225,7 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
         ? null
         : s.pendingAskUser;
       const queue = s.askUserQueue.filter((queued) => !matches(queued));
-      const promptDrafts = removePromptDrafts(s.promptDrafts, requestIds, conversationId, inputOwner);
+      const promptDrafts = removePromptDrafts(requestIds, conversationId, inputOwner);
       if (pending) return { pendingAskUser: pending, askUserQueue: queue, promptDrafts };
       const [next, ...rest] = queue;
       return { pendingAskUser: next ?? null, askUserQueue: rest, promptDrafts };

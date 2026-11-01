@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { tmpdir } from "node:os";
 import { useAppStore } from "../stores";
 import { emptyComposerDraft } from "../stores/composer-drafts";
-import { promptDraftKey } from "../stores/prompt-drafts";
+import { persistPromptDrafts, promptDraftKey } from "../stores/prompt-drafts";
 import type { ClientCommand } from "../protocol/events";
 import { normalizeInboundServerEvent } from "../protocol/server-event-validation";
 import { registerWebSocketSender, rejectAllPendingCommandResults } from "../protocol/ws-outbox";
@@ -105,7 +105,7 @@ beforeEach(() => {
     conversations: ["A", "B"].map(id => ({ id, title: id, updatedAt: "2026-10-31", workspaceRoot: workspace(id) })),
     appMode: "cowork", isConnected: true, isStreaming: false, currentModel: "fixture-model", runtimeSession: null,
     pendingApproval: null, approvalQueue: [], pendingAskUser: null, askUserQueue: [], pendingDiffReview: null, diffReviewQueue: [], diffReview: null,
-    pendingConversationSwitchId: null, pendingConversationCreateId: null, promptDrafts: {}, messages: [], conversationMessages: {},
+    pendingConversationSwitchId: null, pendingConversationCreateId: null, promptDrafts: persistPromptDrafts({}), messages: [], conversationMessages: {},
     conversationStreaming: {}, conversationAgentStates: {}, conversationWorkbenchStates: {}, workspaceComposerDrafts: {},
     sideChats: {}, slashPanelOpen: false, mentionPanelOpen: false, skillPanelOpen: false, slashCommands: [], activeGoal: null,
     selectedSkills: [], selectedMentions: [], availableSkills: [], gitChanges: { workingTree: [], staged: [], untracked: [], loading: false } });
@@ -154,7 +154,7 @@ it.each<PromptKind>(["computer", "form", "question", "url"])("does not resurrect
 it("keeps same-id form drafts separate by turn/task and leaves legacy unowned records untouched", () => {
   const legacy = { requestId: "shared-request", conversationId: "A", elicitationValues: { details: "Legacy text" } };
   const key = promptDraftKey(legacy);
-  useAppStore.setState({ promptDrafts: { [key]: legacy } });
+  useAppStore.setState({ promptDrafts: persistPromptDrafts({ [key]: legacy }) });
   ask("form"); render(<InlineAgentPrompt />);
   expect(screen.getByRole("textbox", { name: "Scope" })).toHaveProperty("value", "");
   fireEvent.change(screen.getByRole("textbox", { name: "Scope" }), { target: { value: "First turn text" } });
@@ -171,7 +171,7 @@ it("keeps same-id plan approval edits scoped to their original request and remov
   const planRequest = (owner: Scope) => receive({ type: "control_request", request_id: "same-plan", ...wireOwner(owner), replayed: true,
     request: { subtype: "can_use_tool", tool_use_id: "same-plan", tool_name: "exit_plan_mode", input: { plan } } });
   const legacy = { requestId: "same-plan", conversationId: "A", initialPlan: plan, plan: "Legacy plan", editing: true };
-  const key = promptDraftKey(legacy); useAppStore.setState({ promptDrafts: { [key]: legacy } });
+  const key = promptDraftKey(legacy); useAppStore.setState({ promptDrafts: persistPromptDrafts({ [key]: legacy }) });
   planRequest(scope()); render(<InlineAgentPrompt />);
   expect(screen.queryByText("Legacy plan")).toBeNull();
   act(() => useAppStore.getState().updatePromptDraft(draftOwner(scope(), "same-plan"), { initialPlan: plan, plan: "First owned edit", editing: true }));
@@ -187,7 +187,7 @@ it("keeps an old two-part record distinct from an explicitly scoped draft even w
   const legacy = { requestId: "ownerless-plan", conversationId: "A", plan: "Keep the old record" };
   const legacyKey = promptDraftKey(legacy);
   const scoped = { requestId: legacy.requestId, conversationId: "A", inputOwner: {} };
-  useAppStore.setState({ promptDrafts: { [legacyKey]: legacy } });
+  useAppStore.setState({ promptDrafts: persistPromptDrafts({ [legacyKey]: legacy }) });
   useAppStore.getState().setApproval({ requestId: legacy.requestId, conversationId: "A", toolName: "ExitPlanMode", args: {} });
   useAppStore.getState().updatePromptDraft(scoped, { plan: "The current explicit owner" });
   useAppStore.getState().clearApproval(legacy.requestId, { conversationId: "A" });

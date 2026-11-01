@@ -21,6 +21,7 @@ import { cachedEditorDrafts, cachedEditorWorkspaceIndex, loadEditorDrafts, persi
 import { canClaimLegacyEditorDrafts, draftWindowOwnerId, windowDraftWorkspaceKey } from "./draft-window-owner";
 import { getContentBlocks, getThinkingFromMessage, getToolCallsFromMessage } from "../lib/content-blocks";
 import { cacheConversationTranscript } from "./conversation-transcript-cache";
+import { promptCacheEffectivePromptTokens, promptCacheOrdinaryInputTokens } from "../chat/cacheUsage";
 import {
   isTerminalToolCallStatus,
   type ToolCallRecord,
@@ -889,6 +890,24 @@ export const mergeResumeToolCalls = (
   }
   return next;
 };
+
+/** Rebuild the session usage headline from a restored transcript's messages. */
+export function usageTotalsFromMessages(messages: ChatMessage[]) {
+  const totals = { input: 0, ordinaryInput: 0, output: 0, cacheRead: 0, cacheWrite: 0, promptCacheTotal: 0, reasoning: 0, turns: 0 };
+  for (const message of messages) {
+    const usage = message.usage;
+    if (!usage) continue;
+    totals.input += Math.max(0, usage.input || 0);
+    totals.ordinaryInput += promptCacheOrdinaryInputTokens(usage);
+    totals.output += Math.max(0, usage.output || 0);
+    totals.cacheRead += Math.max(0, usage.cacheRead || 0);
+    totals.cacheWrite += Math.max(0, usage.cacheWrite || 0);
+    totals.promptCacheTotal += promptCacheEffectivePromptTokens(usage);
+    totals.reasoning += Math.max(0, usage.reasoning || 0);
+    totals.turns += 1;
+  }
+  return totals;
+}
 
 /** Single source of truth for resetting conversation-scoped state on switch/create. */
 export function conversationResetPayload(): Record<string, unknown> {

@@ -17,10 +17,13 @@ export const persistPromptDrafts = (drafts: Record<string, AgentPromptDraft>) =>
   return drafts;
 };
 
-export const removePromptDrafts = (drafts: Record<string, AgentPromptDraft>, requestIds: string[], conversationId?: string,
+export const removePromptDrafts = (requestIds: string[], conversationId?: string,
   inputOwner?: AgentPromptDraft["inputOwner"]) =>
+  // Scope the removal to the shared storage's latest contents so entries
+  // another window drafted for a different request are never replaced by a
+  // stale local map.
   persistPromptDrafts(Object.fromEntries(
-    Object.entries(drafts).filter(([, draft]) => !requestIds.includes(draft.requestId)
+    Object.entries(loadPromptDrafts()).filter(([, draft]) => !requestIds.includes(draft.requestId)
       || (conversationId !== undefined && draft.conversationId !== conversationId)
       || (inputOwner !== undefined && (draft.inputOwner === undefined || draft.inputOwner.turnId !== inputOwner.turnId
         || draft.inputOwner?.messageId !== inputOwner.messageId || draft.inputOwner?.taskId !== inputOwner.taskId))),
