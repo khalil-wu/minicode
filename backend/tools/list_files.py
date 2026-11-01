@@ -163,7 +163,7 @@ class ListFilesTool(BaseTool):
                         continue
                     item = Path(entry.path)
                     rel = item.relative_to(path)
-                    if is_windows_reserved_path(rel):
+                    if os.name == "nt" and is_windows_reserved_path(rel):
                         continue
                     if is_allowed is not None and not is_allowed(item):
                         continue

@@ -1716,23 +1716,30 @@ class SandboxRunner:
                     (str(readable).replace("\\", "/"), target),
                 )
             )
-        container_command = command
+        mapping_rules: list[tuple[re.Pattern[str], str]] = []
         for host_path, container_path in sorted(
             set(path_mappings), key=lambda item: len(item[0]), reverse=True
         ):
             if host_path:
                 suffix = r"[^'\"\r\n;|<>()]*" if host_path.endswith(("\\", "/")) else r"(?:[\\/][^'\"\r\n;|<>()]*)?"
                 boundary = "" if host_path.endswith(("\\", "/")) else r"(?=$|[\\/\s'\";)<>|])"
-                pattern = re.escape(host_path) + boundary + "(" + suffix + ")"
-                container_command = re.sub(
-                    pattern,
-                    lambda match, target=container_path: target + match.group(1).replace("\\", "/"),
-                    container_command,
+                mapping_rules.append((re.compile(
+                    re.escape(host_path) + boundary + "(" + suffix + ")",
                     flags=re.IGNORECASE if sys.platform == "win32" else 0,
+                ), container_path))
+
+        def map_host_paths(text: str) -> str:
+            for pattern, container_path in mapping_rules:
+                text = pattern.sub(
+                    lambda match, target=container_path: target + match.group(1).replace("\\", "/"),
+                    text,
                 )
+            return text
+
+        container_command = map_host_paths(command)
         ready_file = self._sandbox_ready_file
         powershell_command = (Path(argv[0]).stem in {"powershell", "pwsh"}) if argv is not None else sys.platform == "win32"
-        if ready_file is not None:
+        if ready_file is not None and argv is None:
             if powershell_command:
                 container_command = (
                     "Set-Content -LiteralPath '/minicode-control-ready' "
@@ -1820,10 +1827,23 @@ class SandboxRunner:
             if key:
                 args.append(f"--env={key}={value}")
         if argv is not None:
+            # A program's own argv keeps every argument, translated into the
+            # container's path domain. The old layout replaced the final
+            # argument with the joined command text and fit only a
+            # shell-with-payload convention no in-tree caller uses.
             program = Path(argv[0]).stem
             if program == "powershell":
                 program = "pwsh"
-            args.extend((image, program, *argv[1:-1], powershell_script(container_command) if powershell_command else container_command))
+            mapped_tail = [map_host_paths(argument) for argument in argv[1:]]
+            if ready_file is not None:
+                # The interactive child must confirm protected-path setup
+                # before the program runs; sh -lc writes the receipt and then
+                # hands the real program its argv intact.
+                args.extend((image, "/bin/sh", "-lc",
+                    "printf ready > /minicode-control-ready; exec \"$0\" \"$@\"",
+                    program, *mapped_tail))
+            else:
+                args.extend((image, program, *mapped_tail))
         elif sys.platform == "win32":
             args.extend(
                 (

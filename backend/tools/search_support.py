@@ -6,6 +6,7 @@ transport and path filtering helpers are independent of the tool classes.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from backend.async_cleanup import to_thread_cancel_safe
@@ -220,7 +221,7 @@ def _should_ignore_parts(parts: tuple[str, ...]) -> bool:
     # CC/Pi both pass --hidden; hidden source/config files are searchable.  The
     # ignored set is deliberately limited to high-noise metadata trees, while
     # sensitive-file filtering below remains an independent security boundary.
-    return any(p.casefold() in _IGNORED_PATH_PARTS for p in parts) or is_windows_reserved_path(Path(*parts))
+    return any(p.casefold() in _IGNORED_PATH_PARTS for p in parts) or (os.name == "nt" and is_windows_reserved_path(Path(*parts)))
 
 
 def _coerce_nonnegative_int(value: Any, default: int = 0) -> int:

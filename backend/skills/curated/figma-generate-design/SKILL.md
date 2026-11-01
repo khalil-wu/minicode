@@ -116,9 +116,9 @@ Inspect an existing screen's bound variables for the most authoritative results:
 ```js
 const frame = figma.currentPage.findOne(n => n.name === "Existing Screen");
 const varMap = new Map();
-frame.findAll(() => true).forEach(node => {
+for (const node of frame.findAll(() => true)) {
   const bv = node.boundVariables;
-  if (!bv) return;
+  if (!bv) continue;
   for (const [prop, binding] of Object.entries(bv)) {
     const bindings = Array.isArray(binding) ? binding : [binding];
     for (const b of bindings) {
@@ -128,7 +128,7 @@ frame.findAll(() => true).forEach(node => {
       }
     }
   }
-});
+}
 return [...varMap.values()];
 ```
 

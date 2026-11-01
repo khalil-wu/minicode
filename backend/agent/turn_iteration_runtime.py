@@ -187,15 +187,10 @@ class TurnIterationRuntime:
                 run_context.environment_prepared_turn_id = prepared_turn
             else:
                 trace.mark("reuse_environment_capabilities")
+            # bind_skill_manager is reuse-specific; the per-turn sandbox,
+            # environment and instruction binding that follows runs for both
+            # branches and previously appeared twice on the reuse path.
             self.context.bind_skill_manager(prepared.skill_manager, self.workspace_root)
-            self.skill_manager = prepared.skill_manager
-            primary = run_context.turn_environments.primary()
-            policy = local_sandbox_policy(primary.permission_scope.sandbox_context()) if primary is not None and not primary.is_remote else None
-            self.tool_context.sandbox_policy = policy
-            self.tool_context.allow_network = policy.allow_network if policy is not None else False
-            self.tool_context.environment_id = primary.selection.environment_id if primary is not None else ""
-            self.context.configure_project_instructions(snapshot.config.config_layer_stack.project_instruction_config())
-            self.skill_manager = prepared.skill_manager
             primary = run_context.turn_environments.primary()
             policy = local_sandbox_policy(primary.permission_scope.sandbox_context()) if primary is not None and not primary.is_remote else None
             self.tool_context.sandbox_policy = policy

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any, TYPE_CHECKING, cast
 
@@ -194,7 +195,8 @@ async def handle_preview_navigate(session: "WebSocketSession", data: dict[str, A
     scope = await _resolve_scope(session, data, "preview.navigate")
     if scope is None:
         return True
-    url, process, error_event = validate_preview_url(
+    url, process, error_event = await asyncio.to_thread(
+        validate_preview_url,
         data,
         command="preview.navigate",
         session_id=session.session_id,
@@ -222,7 +224,8 @@ async def handle_preview_refresh(session: "WebSocketSession", data: dict[str, An
         return True
     url = str(data.get("url", "")).strip()
     if url:
-        url, _process, error_event = validate_preview_url(
+        url, _process, error_event = await asyncio.to_thread(
+            validate_preview_url,
             {"url": url},
             command="preview.refresh",
             session_id=session.session_id,
@@ -244,7 +247,8 @@ async def handle_preview_verify(session: "WebSocketSession", data: dict[str, Any
     scope = await _resolve_scope(session, data, "preview.verify")
     if scope is None:
         return True
-    url, process, error_event = validate_preview_url(
+    url, process, error_event = await asyncio.to_thread(
+        validate_preview_url,
         data,
         command="preview.verify",
         session_id=session.session_id,

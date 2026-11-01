@@ -289,6 +289,7 @@ class GenerateImageTool(BaseTool):
             reference_paths = args.get("input_images", [])
             recent_count = args.get("num_last_images_to_include")
             output_path = args.get("output_path")
+            save_error = ""
             if reference_paths and recent_count is not None:
                 raise ValueError("Use either input_images or num_last_images_to_include, not both.")
             if (reference_paths or recent_count is not None or output_path) and context is None:
@@ -309,7 +310,13 @@ class GenerateImageTool(BaseTool):
                 turn_context=turn_context,
             )
             if output_path:
-                await save_image_output(output_path, images[0][0], context)
+                try:
+                    await save_image_output(output_path, images[0][0], context)
+                except Exception as save_exc:
+                    # The generation succeeded even when the requested file
+                    # write collided; keep the result and the user's file.
+                    save_error = (redact_secrets(_clean_error_message(save_exc) or str(save_exc)).strip()[:400]
+                        or "the image file could not be saved")
         except Exception as exc:
             classification = classify_llm_error(exc)
             detail = redact_secrets(_clean_error_message(exc) or str(exc)).strip()[:400]
@@ -345,7 +352,8 @@ class GenerateImageTool(BaseTool):
             progress_id=progress_id,
             status="completed",
             message="图像生成完成",
-            detail=f"已生成 {len(images)} 张图片",
+            detail=(f"已生成 {len(images)} 张图片" if not save_error
+                else f"已生成 {len(images)} 张图片，但保存到目标路径失败：{save_error}"),
             count=len(images),
         )
         return ToolResult(
@@ -354,7 +362,9 @@ class GenerateImageTool(BaseTool):
                 + ("Use generatedImage(result.images[0]) to display the selected image."
                    if context is not None and context.result_sink is not None
                    else "The host attached the image artifact to this assistant turn.")
-                + (f" Saved image to {output_path}." if output_path else "")
+                + (f" Saved image to {output_path}." if output_path and not save_error
+                   else f" The image file could not be saved to {output_path} ({save_error}); the original file was left unchanged and the generated image is still attached." if save_error
+                   else "")
             ),
             images=[
                 {"data": image_data, "media_type": media_type}
@@ -363,6 +373,8 @@ class GenerateImageTool(BaseTool):
             result_kind=self.result_kind,
             display_summary=f"Generated {len(images)} image(s)",
             provider=str(settings.get("provider") or "image"),
-            status="success",
+            status="partial" if save_error else "success",
             recoverable=True,
+            user_summary="图像已生成，但无法保存到指定路径；原文件保持不变。" if save_error else None,
+            developer_detail=save_error or None,
         )

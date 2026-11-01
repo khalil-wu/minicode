@@ -365,7 +365,7 @@ Fetches content from a specified URL and processes it using an AI model. Takes a
 
         enforce_network = context is None or context.permission.mode != "bypass"
         if enforce_network:
-            assessment = assess_network_url(url)
+            assessment = await asyncio.to_thread(assess_network_url, url)
             if not assessment.allowed:
                 return self._error_result(
                     f"Network target requires approval or is blocked: {assessment.reason}"

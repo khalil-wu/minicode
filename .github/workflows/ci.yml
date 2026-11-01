@@ -157,7 +157,7 @@ jobs:
           source="$RUNNER_TEMP/linux-wheel-source"
           mkdir -p "$source" "$RUNNER_TEMP/linux-wheel"
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git archive HEAD backend pyproject.toml setup.py MANIFEST.in frontend/public/apps frontend/public/pets frontend/public/theme-boot.js | tar -x -C "$source" \
+          git archive HEAD backend skills pyproject.toml setup.py MANIFEST.in frontend/public/apps frontend/public/pets frontend/public/theme-boot.js | tar -x -C "$source" \
             --exclude='backend/permissions/resources/execpolicy/*' --exclude='backend/network/resources/*'
           mkdir -p "$source/backend/permissions/resources/execpolicy" "$source/backend/network/resources"
           chmod +x backend/permissions/resources/execpolicy/x86_64-unknown-linux-gnu/minicode-execpolicy backend/network/resources/x86_64-unknown-linux-gnu/minicode-network

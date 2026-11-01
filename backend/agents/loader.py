@@ -35,7 +35,7 @@ AgentSource = Literal[
 ]
 EditableAgentSource = Literal["user", "project"]
 _SUPPORTED_AGENT_EFFORT_LEVELS = frozenset(
-    {"off", "minimal", "low", "medium", "high", "xhigh", "max"}
+    {"off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 )
 logger = logging.getLogger(__name__)
 

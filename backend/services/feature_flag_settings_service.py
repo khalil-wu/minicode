@@ -38,7 +38,12 @@ def get_feature_flag_settings() -> dict[str, Any]:
     requirements = get_config_requirements()
     managed = requirements.feature_requirements
     overrides = _settings_overrides(settings_data)
-    effective = feature_flags_payload(settings_data, managed_requirements=managed)
+    # The effective values must come from the same startup layer stack the
+    # runtime resolves; a user-file-only projection missed profile-v2 layers.
+    from backend.config import load_config_layer_stack
+
+    effective = feature_flags_payload(load_config_layer_stack(cwd=None).effective_config(),
+        managed_requirements=managed)
     flags: list[dict[str, Any]] = []
     for name in sorted(DEFAULT_FEATURE_FLAGS):
         # Source internal Stable/UnderDevelopment flags have no display_name.

@@ -868,7 +868,10 @@ def _json_schema_for_annotation(annotation: Any) -> JsonSchema:
         if type(None) in args:
             non_none = [arg for arg in args if arg is not type(None)]
             if non_none:
-                return _json_schema_for_annotation(non_none[0])
+                schema = _json_schema_for_annotation(non_none[0])
+                if isinstance(schema.get("type"), str):
+                    return {**schema, "type": [schema["type"], "null"]}
+                return {"anyOf": [schema, {"type": "null"}]}
     if annotation in {str, inspect.Parameter.empty}:
         return {"type": "string"}
     if annotation is int:

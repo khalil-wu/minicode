@@ -39,6 +39,15 @@ def nontransparent_pixels(image: Image.Image) -> int:
     return sum(1 for alpha in image.getchannel("A").getdata() if alpha > 16)
 
 
+def changed_pixels(image: Image.Image) -> int:
+    """Count pixels whose visible content changed in any channel.
+
+    The continuity metric must see color and eye changes inside an unchanged
+    silhouette, where the alpha difference alone stays zero.
+    """
+    return sum(1 for pixel in image.getdata() if max(pixel) > 16)
+
+
 def center_for_bbox(bbox: tuple[int, int, int, int] | None) -> tuple[float, float] | None:
     if bbox is None:
         return None
@@ -93,7 +102,7 @@ def pair_metric(first: Image.Image, second: Image.Image) -> dict[str, float | in
     first_pixels = nontransparent_pixels(first)
     second_pixels = nontransparent_pixels(second)
     diff = ImageChops.difference(first, second)
-    diff_pixels = nontransparent_pixels(diff)
+    diff_pixels = changed_pixels(diff)
 
     if first_center is None or second_center is None:
         center_delta = None

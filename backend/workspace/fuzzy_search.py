@@ -62,7 +62,7 @@ def iter_search_paths(
                 if (not include_hidden and entry.name.startswith(".")) or entry.is_symlink():
                     continue
                 path = Path(entry.path)
-                if is_windows_reserved_path(path.name):
+                if os.name == "nt" and is_windows_reserved_path(path.name):
                     continue
                 is_dir = entry.is_dir(follow_symlinks=False)
                 if is_dir and (
