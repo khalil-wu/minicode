@@ -33,9 +33,8 @@ const taskKind = (task?: ScheduledTaskEntry) => task?.kind ?? (task && !task.con
 const sourceIcon = (name: string) => <span className="automation-source-icon" aria-hidden="true" style={{ maskImage: `url(${import.meta.env.BASE_URL}apps/automation-${name}.svg)` }} />;
 const DetailRow = ({ label, children }: { label: string; children: ReactNode }) => <div className="automation-detail-row"><span>{label}</span>{children}</div>;
 
-// Exact glyphs used by this installed Source panel: st→CH/RIt, Ye→OH/JIt,
-// Qe→ZSt/pts, and st→J.Input/Flt→Tk/Gxn. Their canvases differ from the
-// general menu controls and from the approval info asset.
+// These glyphs use their own canvases, distinct from the general menu
+// controls and from the approval info asset.
 function AutomationPanelSourceGlyph({ icon }: { icon: "check" | "chevronDown" | "info" | "search" }) {
   switch (icon) {
     case "check":

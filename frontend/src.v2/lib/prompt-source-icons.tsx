@@ -1,4 +1,4 @@
-// Exact Codex 26.1016 prompt controls from their installed Source consumers.
+// Prompt control glyphs.
 const glyphs = {
   "plus": {
     name: "plus-lg-regular-16",

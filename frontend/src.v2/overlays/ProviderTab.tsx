@@ -1814,16 +1814,6 @@ const capabilityValueStyle: CSSProperties = {
   fontWeight: "var(--fw-semibold)",
 };
 
-const inlineWarningStyle: CSSProperties = {
-  padding: "8px 10px",
-  border: "1px solid color-mix(in oklch, var(--state-warning) 35%, var(--border-subtle))",
-  borderRadius: "var(--radius-sm, 8px)",
-  background: "color-mix(in oklch, var(--state-warning) 6%, var(--surface-soft))",
-  color: "var(--text-secondary)",
-  fontSize: "var(--mc-font-caption)",
-  lineHeight: 1.5,
-};
-
 const oauthFlowPanelStyle: CSSProperties = {
   display: "grid",
   gap: 9,

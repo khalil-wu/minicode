@@ -1,5 +1,4 @@
-// Exact static vectors: Codex Desktop 26.1016.6573.0 general-settings-eecb7b8d143c.js.
-// Ac uses full Light/Dark previews and the two original 40px System halves.
+// Static appearance previews: full Light/Dark cards and the two 40px System halves.
 
 function DarkPreview() {
   return (

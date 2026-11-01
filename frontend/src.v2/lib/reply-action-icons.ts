@@ -1,4 +1,4 @@
-// Actual Codex 26.1007.2314 reply glyphs; see the source audit manifest.
+// Reply action glyphs.
 export const replyActionIcons = {
   "copy": {
     "viewBox": "0 0 21 21",

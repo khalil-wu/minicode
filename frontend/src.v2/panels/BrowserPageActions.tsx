@@ -19,7 +19,7 @@ export type BrowserDeviceLayout = { fitWidth: number; fitHeight: number; scale: 
 type DeviceResizeEdge = "left" | "right" | "bottom" | "bottom-left" | "bottom-right";
 type DeviceResizeDrag = { edge: DeviceResizeEdge; startWidth: number; startHeight: number; startPointerX: number; startPointerY: number };
 
-/** Installed Source Qkn/rAn/nAn: 20px side grips and bottom gutter. */
+/** Device stage layout: 20px side grips and a 20px bottom gutter. */
 export function browserDeviceLayout(stage: BrowserDeviceBounds, viewport: BrowserDeviceViewport): BrowserDeviceLayout {
   const fitWidth = Math.max(0, stage.width - 40), fitHeight = Math.max(0, stage.height - 20);
   const scale = Math.min(1, fitWidth / viewport.width, fitHeight / viewport.height);
@@ -29,7 +29,7 @@ export function browserDeviceLayout(stage: BrowserDeviceBounds, viewport: Browse
   } };
 }
 
-/** Installed Source iAn/sAn/F7/I7. Side dragging expands about the centre. */
+/** Side dragging expands about the centre; bottom dragging changes height only. */
 export function resizeBrowserDeviceViewport(drag: DeviceResizeDrag, layout: BrowserDeviceLayout, pointerX: number, pointerY: number) {
   const widthChanges = drag.edge !== "bottom", heightChanges = drag.edge !== "left" && drag.edge !== "right";
   const direction = drag.edge === "left" || drag.edge === "bottom-left" ? -1 : 1;
@@ -94,7 +94,7 @@ export function BrowserDeviceResizeHandles({ viewport, layout, onChange, onResiz
     </button>)}
   </div>;
 }
-// Installed Codex 26.1013.4894.0: app-shared mAn / options-menu-view Xr.
+// Device emulation presets for the browser options menu.
 const DEVICE_PRESETS = [
   ["responsive", "自适应", 390, 844], ["4k", "4K", 2560, 1440], ["laptop-l", "Laptop L", 1440, 900], ["laptop", "Laptop", 1024, 768],
   ["surface-pro-7", "Surface Pro 7", 912, 1368], ["ipad-air", "iPad Air", 820, 1180], ["ipad-mini", "iPad Mini", 768, 1024],
