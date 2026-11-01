@@ -3,6 +3,8 @@ import { useAppStore } from "../stores";
 import { editorWorkspaceKey, editorPathComparisonKey, editorPathsEqual, editorStateForWorkspace, normalizeEditorPath } from "../stores/shared-helpers";
 import { workspacePathWithin, workspaceRootsEqual } from "../lib/workspace-path";
 import { editorModelUri } from "./monacoLanguageServices";
+import { readWorkspaceFile } from "../protocol/workspace";
+import type * as Monaco from "monaco-editor/editor/editor.api.js";
 
 export interface WorkspaceOffsetEdit { offset: number; length: number; text: string; }
 export interface WorkspaceBufferTransaction { before: string; after: string; edits: WorkspaceOffsetEdit[]; label: string; }
@@ -43,6 +45,46 @@ export function offsetRange(before: string, edit: WorkspaceOffsetEdit) {
   return { startLineNumber: start.line, startColumn: start.column, endLineNumber: end.line, endColumn: end.column };
 }
 
+type EditModelHost = { editor: Pick<typeof Monaco.editor, "createModel" | "getModel"> };
+type EditModelFile = { path: string; resource: Monaco.Uri; before: string; original?: string; contentHash?: string; sizeBytes?: number };
+
+/** A model edited outside an open tab keeps the store's tab in step, so the
+ * change shows up as a dirty buffer the user can review and save. */
+export function trackWorkspaceEditModel(monaco: EditModelHost, workspaceRoot: string, file: EditModelFile, existing?: Monaco.editor.ITextModel | null): Monaco.editor.ITextModel {
+  const model = existing ?? monaco.editor.createModel(file.before, undefined, file.resource);
+  if (!trackedModels.has(model)) {
+    trackedModels.add(model);
+    const key = surfaceKey(workspaceRoot, file.path);
+    retainedModels.add(key);
+    const changed = model.onDidChangeContent(() => {
+      const current = useAppStore.getState();
+      const owner = workspaceRootsEqual(current.workingDirectory, workspaceRoot) ? current : editorStateForWorkspace(workspaceRoot);
+      const tab = owner.editorTabs.find((entry) => editorPathsEqual(entry.path, file.path, workspaceRoot));
+      current.adoptEditorModelChanges([{ path: file.path, content: model.getValue(undefined, true), original: tab?.original ?? file.original ?? file.before,
+        contentHash: tab?.contentHash ?? file.contentHash ?? "", sizeBytes: file.sizeBytes }], workspaceRoot);
+    });
+    model.onWillDispose(() => { changed.dispose(); retainedModels.delete(key); });
+  }
+  return model;
+}
+
+/** Monaco's bulk edit service rejects a target without a model. A closed
+ * workspace document is loaded into a tracked buffer first, so a language
+ * service rename lands in a visible, saveable tab instead of a bad edit. */
+export async function ensureWorkspaceEditModels(monaco: EditModelHost, workspaceRoot: string, resources: Monaco.Uri[]): Promise<void> {
+  const missing = new Map<string, Monaco.Uri>();
+  for (const resource of resources) {
+    if (resource.scheme !== "file" || monaco.editor.getModel(resource) || !workspacePathWithin(resource.fsPath, workspaceRoot)) continue;
+    missing.set(resource.toString(), resource);
+  }
+  await Promise.all([...missing.values()].map(async (resource) => {
+    const path = normalizeEditorPath(resource.fsPath, workspaceRoot);
+    const file = await readWorkspaceFile(path, workspaceRoot);
+    if (monaco.editor.getModel(resource)) return;
+    trackWorkspaceEditModel(monaco, workspaceRoot, { path, resource, before: file.content, contentHash: file.content_hash, sizeBytes: file.size_bytes ?? file.size });
+  }));
+}
+
 /** One explicit edit command for search replacements and language-service fixes. */
 export async function applyWorkspaceBufferEdits(workspaceRoot: string, files: WorkspaceBufferEdit[], label: string): Promise<void> {
   const [monaco, { StandaloneServices }, { IBulkEditService }, { withNativeModelUndoGroup }] = await Promise.all([
@@ -72,23 +114,7 @@ export async function applyWorkspaceBufferEdits(workspaceRoot: string, files: Wo
       || (model && file.expectedVersion !== undefined && model.getVersionId() !== file.expectedVersion)) throw new Error(`${path} 已改变，请重新计算并预览修改。`);
     return { ...file, edits, path, resource, tab, markdown, model, after: applyOffsetEdits(file.before, edits) };
   });
-  const native = resolved.filter((file) => !file.markdown).map((file) => {
-    const model = file.model ?? monaco.editor.createModel(file.before, undefined, file.resource);
-    if (!trackedModels.has(model)) {
-      trackedModels.add(model);
-      const key = surfaceKey(workspaceRoot, file.path);
-      retainedModels.add(key);
-      const changed = model.onDidChangeContent(() => {
-        const current = useAppStore.getState();
-        const owner = workspaceRootsEqual(current.workingDirectory, workspaceRoot) ? current : editorStateForWorkspace(workspaceRoot);
-        const tab = owner.editorTabs.find((entry) => editorPathsEqual(entry.path, file.path, workspaceRoot));
-        current.adoptEditorModelChanges([{ path: file.path, content: model.getValue(undefined, true), original: tab?.original ?? file.original ?? file.before,
-          contentHash: tab?.contentHash ?? file.contentHash ?? "", sizeBytes: file.sizeBytes }], workspaceRoot);
-      });
-      model.onWillDispose(() => { changed.dispose(); retainedModels.delete(key); });
-    }
-    return { ...file, model };
-  });
+  const native = resolved.filter((file) => !file.markdown).map((file) => ({ ...file, model: trackWorkspaceEditModel(monaco, workspaceRoot, file, file.model) }));
   const bulk = StandaloneServices.get<import("monaco-editor/editor/browser/services/bulkEditService.js").BulkEditService>(IBulkEditService);
   const edits = native.flatMap((file) => file.edits.map((edit) => ({ resource: file.resource, versionId: file.model.getVersionId(), textEdit: { range: offsetRange(file.before, edit), text: edit.text } })));
   if (edits.length) await withNativeModelUndoGroup(native.map((file) => file.model), () => bulk.apply({ edits }, { label }));

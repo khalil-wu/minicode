@@ -150,14 +150,27 @@ const SkillsCatalog = ({ active }: { active: boolean }) => {
   };
   const allInstalled = useMemo(() => {
     const priority: Record<string, number> = { workspace: 0, user: 1, builtin: 2, managed: 3 };
+    const workspaceByGroup = new Map<string, SettingsSkill>();
     const byName = new Map<string, SettingsSkill>();
     for (const skill of inventory) {
+      const group = skill.catalog_scope?.group_id;
+      if ((skill.source_level || "") === "workspace" && group) {
+        // Identity inside the workspace level is the project: two projects may
+        // legitimately own same-name skills and both stay listed.
+        const key = JSON.stringify([group, skill.name]);
+        const previousGroup = workspaceByGroup.get(key);
+        if (!previousGroup || skill.path.localeCompare(previousGroup.path) < 0) workspaceByGroup.set(key, skill);
+        continue;
+      }
       const previous = byName.get(skill.name);
       const rank = priority[skill.source_level || ""] ?? 4;
       const previousRank = priority[previous?.source_level || ""] ?? 4;
       if (!previous || rank < previousRank || (rank === previousRank && skill.path.localeCompare(previous.path) < 0)) byName.set(skill.name, skill);
     }
-    return [...byName.values()].sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name) || a.name.localeCompare(b.name));
+    const workspaceSkills = [...workspaceByGroup.values()];
+    const shadowedByWorkspace = new Set(workspaceSkills.map((skill) => skill.name));
+    return [...workspaceSkills, ...[...byName.values()].filter((skill) => !shadowedByWorkspace.has(skill.name))]
+      .sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name) || a.name.localeCompare(b.name));
   }, [inventory]);
   const q = query.trim().toLocaleLowerCase();
   const matches = (text: string) => !q || text.toLocaleLowerCase().includes(q);

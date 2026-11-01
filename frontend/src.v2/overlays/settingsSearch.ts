@@ -10,9 +10,7 @@ export const SETTINGS_OPTIONS: SettingsOption[] = [
     ["语言", "应用界面的语言。", "language locale English 简体中文 自动检测 auto detect"],
     ["发送快捷键", "选择 Enter 或 Ctrl+Enter 发送消息。", "发送 换行 输入"],
     ["纯文本输入", "编写消息时，将代码、Markdown 和链接保留为字面文本。", "plain text rich composer 富文本 输入 代码 列表 链接"],
-    ["默认终端位置", "选择终端快捷键和环境动作打开终端标签页的位置。", "terminal bottom right 底部 右侧 环境"],
     ["跟进行为", "选择运行中的消息排队或引导方式。", "队列 补充 消息"],
-    ["更新通道", "检查桌面应用更新。", "版本 桌面 更新"],
   ]),
   ...options("appearance", [
     ["编辑器", "配置缩进、保存时格式化、标签及代码模板。", "大纲 符号 缩略图 自动换行 模板 代码补全"],

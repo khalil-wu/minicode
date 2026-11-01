@@ -77,7 +77,7 @@ export const BrowserIntegrationTab = ({ active = true }: { active?: boolean }) =
           <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("显示完整网址")}</div><div className="settings-row-description">{t("在地址栏中显示路径、查询参数和片段。")}</div></div><button type="button" className="settings-toggle" role="switch" aria-label={t("显示完整网址")} aria-checked={preferences.showFullUrl} data-active={preferences.showFullUrl} onClick={() => void update({ showFullUrl: !preferences.showFullUrl })}><span /></button></div>
         </>}
         <BrowserDataSettings />
-        <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("浏览历史")}</div><div className="settings-row-description">{t("查看和管理在内置浏览器中访问过的页面。")}</div></div><button type="button" className="settings-action-button" aria-label={t("管理浏览历史")} onClick={() => setSection("history")}>{t("管理")}</button></div>
+        {isDesktop() && <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("浏览历史")}</div><div className="settings-row-description">{t("查看和管理在内置浏览器中访问过的页面。")}</div></div><button type="button" className="settings-action-button" aria-label={t("管理浏览历史")} onClick={() => setSection("history")}>{t("管理")}</button></div>}
         {preferences && <div className="settings-row"><div className="settings-row-copy"><div className="settings-row-title">{t("批注截图")}</div><div className="settings-row-description">{t("截图帮助模型理解批注内容，并计入上下文用量。")}</div></div><SelectMenu ariaLabel={t("批注截图")} className="settings-select settings-select-regular" align="end" value={preferences.annotationScreenshotsMode} onValueChange={value => void update({ annotationScreenshotsMode: value as typeof preferences.annotationScreenshotsMode })}><option value="always">{t("始终包含")}</option><option value="necessary">{t("仅拖选区域时")}</option></SelectMenu></div>}
       </div>
     </section>
@@ -166,7 +166,7 @@ function BrowserHistorySettings({ active, onBack, onClear }: { active: boolean; 
   const [expandedDays, setExpandedDays] = useState<Set<string> | null>(null);
   const [menu, setMenu] = useState<{ position: { x: number; y: number }; visit?: BrowserHistoryVisit } | null>(null);
   useEffect(() => {
-    if (!active || pendingOwner) return;
+    if (!active || pendingOwner || !isDesktop()) return;
     let mounted = true;
     setLoading(true);
     setError("");

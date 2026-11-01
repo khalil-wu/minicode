@@ -139,8 +139,9 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
     return () => { operation.abort(); if (url) URL.revokeObjectURL(url); setMediaUrl(undefined); setMediaLoading(false); };
   }, [fileKey, active, connected, media, nativeMedia, version, previewCurrent]);
 
+  const previewingMarkdown = renderMarkdown && media === "text/markdown" && !find;
   const rows = useMemo(() => fileViewerRows(preview?.content ?? "", comparisonError || comparisonLoading ? "" : patch, changes && isGitRepo), [preview?.content, patch, comparisonError, comparisonLoading, changes, isGitRepo]);
-  const showSource = !nativeMedia && preview?.kind !== "binary" && !(renderMarkdown && media === "text/markdown");
+  const showSource = !nativeMedia && preview?.kind !== "binary" && !previewingMarkdown;
   const syntax = useColorizedLines(active && showSource ? rows : NO_COLORIZED_FILE_ROWS, guessLanguageFromPath(tab.path));
   const hits = useMemo(() => query ? rows.flatMap((row, index) => row.text.toLocaleLowerCase().includes(query.toLocaleLowerCase()) ? [index] : []) : [], [rows, query]);
   useEffect(() => { setHit(0); }, [query]);
@@ -234,7 +235,7 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
           : mediaUrl && media.startsWith("audio/") ? <audio className="mc-file-viewer-media" controls src={mediaUrl} />
           : mediaUrl && media.startsWith("video/") ? <video className="mc-file-viewer-media" controls src={mediaUrl} />
           : preview?.kind === "binary" ? <div className="mc-file-viewer-message">{t("不支持应用内预览。此文件是二进制文件，无法提取可显示文本。")}</div>
-          : renderMarkdown && media === "text/markdown" ? <div className="md-prose mc-file-viewer-markdown"><MarkdownRenderer content={preview?.content ?? ""} workspaceRoot={tab.owner.browserRoot} conversationId={tab.owner.conversationId ?? undefined} fileOwner={tab.owner} /></div>
+          : previewingMarkdown ? <div className="md-prose mc-file-viewer-markdown"><MarkdownRenderer content={preview?.content ?? ""} workspaceRoot={tab.owner.browserRoot} documentDirectory={absolutePath.replace(/[\\/][^\\/]*$/, "")} conversationId={tab.owner.conversationId ?? undefined} fileOwner={tab.owner} /></div>
           : <div className="mc-file-viewer-code">{split && changes && branches?.is_git_repo ? <div className="mc-file-viewer-split"><div>{rows.map((_, index) => line(index, "old"))}</div><div>{rows.map((_, index) => line(index, "new"))}</div></div> : rows.map((_, index) => line(index))}</div>}
       </>}
     </div>{treeVisible && <aside className="mc-file-viewer-tree"><ConversationFilesTree key={`${treeOwner.executionCwd}:${treeRoot}`} owner={treeOwner} browserRoot={treeRoot} rootSelected={treeRootSelected} connected={active && connected} version={version} onRootChange={changeTreeRoot}

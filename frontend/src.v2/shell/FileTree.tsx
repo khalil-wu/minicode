@@ -135,6 +135,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const lastChangeSequence = useRef(0);
   const pendingChangesRef = useRef<{ path: string; event: string; timestamp: number }[]>([]);
   const refreshEpochRef = useRef(0);
+  const directoryRequests = useRef(new Map<string, number>());
   const searchEpochRef = useRef(0);
   const gitMap = useMemo(() => {
     const next = new Map<string, GitStatus>();
@@ -155,6 +156,7 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
     const directory = workingDirectory;
     if (!workspaceRootsEqual(directory, useAppStore.getState().workingDirectory)) return;
     const epoch = ++refreshEpochRef.current;
+    directoryRequests.current.clear();
     const isCurrent = () =>
       epoch === refreshEpochRef.current
       && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory);
@@ -256,8 +258,13 @@ export const FileTree = ({ onNavigate }: { onNavigate?: () => void }) => {
   const loadDirectory = useCallback(async (path: string): Promise<boolean> => {
     const directory = workingDirectory;
     const epoch = refreshEpochRef.current;
+    // Two requests for the same directory share the epoch; only the latest one
+    // may replace the children, so a slow older response cannot win.
+    const sequence = (directoryRequests.current.get(path) ?? 0) + 1;
+    directoryRequests.current.set(path, sequence);
     const isCurrent = () =>
       epoch === refreshEpochRef.current
+      && directoryRequests.current.get(path) === sequence
       && workspaceRootsEqual(directory, useAppStore.getState().workingDirectory);
     if (!directory || !isCurrent()) return false;
     setLoadingPaths((current) => new Set(current).add(path));

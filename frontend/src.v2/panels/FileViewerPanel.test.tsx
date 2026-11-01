@@ -235,11 +235,11 @@ it("rebuilds a restored projectless file reference from canonical owner metadata
   expect(useAppStore.getState()).toMatchObject({ conversationId: "a", workingDirectory: cwd, rightStackTab: "file:restored", draft: "unsent" });
 });
 
-it("passes the real file owner through rendered Markdown links and local images instead of treating the browsing base as its cwd", async () => {
+it("passes the real file owner through rendered Markdown links and resolves relative images against the document directory", async () => {
   const base = "C:/tasks", cwd = `${base}/2026-10-25/report`;
   const owner = { scopeId: "conversation:a", conversationId: "a", executionCwd: cwd, browserRoot: base };
   mocks.preview.mockResolvedValue({ path: "2026-10-25/report/outputs/report.md", file_name: "report.md",
-    content: `[Linked](<${cwd}/outputs/linked.md#L7>)\n\n![Local](2026-10-25/report/outputs/pixel.png)`, media_type: "text/markdown", kind: "document", truncated: false });
+    content: `[Linked](<${cwd}/outputs/linked.md#L7>)\n\n![Local](pixel.png)\n\n![Sibling](../assets/logo.png)`, media_type: "text/markdown", kind: "document", truncated: false });
   useAppStore.setState({ conversationId: "a", workingDirectory: cwd, conversations: [{ id: "a", title: "A", updatedAt: "", executionCwd: cwd, projectlessBrowserRoot: base }],
     pendingConversationSwitchId: null, workspaceFileTabs: [] });
   const id = useAppStore.getState().openWorkspaceFileTab(owner, "2026-10-25/report/outputs/report.md");
@@ -256,6 +256,8 @@ it("passes the real file owner through rendered Markdown links and local images 
   expect(raw.pathname).toBe("/api/workspace/browser-raw");
   expect(Object.fromEntries(raw.searchParams)).toMatchObject({ session_id: "file-viewer-session", conversation_id: "a", execution_cwd: cwd,
     path: "2026-10-25/report/outputs/pixel.png" });
+  const sibling = new URL(screen.getByRole("img", { name: "Sibling" }).getAttribute("src")!);
+  expect(Object.fromEntries(sibling.searchParams)).toMatchObject({ path: "2026-10-25/report/assets/logo.png" });
   fireEvent.click(img.closest("button")!);
   expect(useAppStore.getState().workspaceFileTabs.at(-1)?.owner).toEqual(owner);
   expect(useAppStore.getState()).toMatchObject({ conversationId: "a", workingDirectory: cwd, draft: "unsent" });

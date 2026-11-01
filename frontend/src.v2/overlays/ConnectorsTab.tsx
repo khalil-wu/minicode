@@ -73,8 +73,8 @@ const emptyValueRow = (): ValueRow => ({ id: rowId(), value: "" });
 const emptyPairRow = (): EnvRow => ({ id: rowId(), name: "", value: "" });
 const emptyPassThroughRow = (): PassThroughRow => ({ id: rowId(), name: "", source: "local" });
 const mcpPairs = (rows: EnvRow[]): Record<string, string> => Object.fromEntries(rows
-  .filter(row => row.name.trim() && row.value.trim())
-  .map(row => [row.name.trim(), row.value.trim()]));
+  .filter(row => row.name.trim())
+  .map(row => [row.name.trim(), row.value]));
 const inventoryOperationId = () => `mcp-inventory-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`;
 const MCP_INVENTORY_COMMAND_TIMEOUT_MS = 75_000;
 
@@ -793,7 +793,7 @@ export const ConnectorsTab = ({ editorRequest = 0, search: externalSearch, onEdi
       {server.editable && <button type="button" className="settings-toggle settings-mcp-toggle" role="switch"
         aria-checked={server.autoStart !== false} aria-label={`${server.autoStart === false ? tr("启用") : tr("停用")} ${server.name}`}
         data-active={server.autoStart !== false ? "true" : "false"}
-        disabled={server.enabled === false || togglingServer === server.name || Boolean(pendingServerActions[server.name])}
+        disabled={server.enabled === false || Boolean(togglingServer) || Boolean(pendingServerActions[server.name])}
         onClick={() => void toggleServer(server.name, server.autoStart === false)}
         title={server.enabled === false ? server.disabledReason || tr("已被管理策略禁用") : server.autoStart === false ? tr("启用") : tr("停用")}><span /></button>}
     </div>

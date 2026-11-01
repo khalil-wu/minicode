@@ -212,6 +212,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
                     slotId={slot.id}
                     currentSize={slot.size ?? 1}
                     neighborSize={visibleSlots[visibleIndex + 1]?.size ?? 1}
+                    neighborId={visibleSlots[visibleIndex + 1]?.id}
                     onResize={resizePanel}
                   />
                 )}
@@ -228,12 +229,14 @@ const ResizeHandle = ({
   slotId,
   currentSize,
   neighborSize,
+  neighborId,
   onResize,
 }: {
   slotId: string;
   currentSize: number;
   neighborSize: number;
-  onResize: (id: string, delta: number) => void;
+  neighborId?: string;
+  onResize: (id: string, delta: number, neighborId?: string) => void;
 }) => {
   const { t: tr } = useI18n();
   const resizeCleanupRef = useRef<(() => void) | null>(null);
@@ -251,7 +254,7 @@ const ResizeHandle = ({
     const flushResize = () => {
       const delta = nextX - lastX;
       lastX = nextX;
-      if (delta) onResize(slotId, delta);
+      if (delta) onResize(slotId, delta, neighborId);
     };
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== pointerId) return;
@@ -290,7 +293,7 @@ const ResizeHandle = ({
   const currentPercent = Math.round((currentSize / totalSize) * 100);
   const resizeToPercent = (percent: number) => {
     const targetSize = totalSize * (percent / 100);
-    onResize(slotId, (targetSize - currentSize) * 360);
+    onResize(slotId, (targetSize - currentSize) * 360, neighborId);
   };
   const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     const step = event.shiftKey ? 10 : 3;

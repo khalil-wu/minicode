@@ -7,8 +7,12 @@ import { SettingsSourceIcon } from "./SettingsSourceIcon";
 import { Tip } from "../components/Tooltip";
 
 type Hook = { key: string; event: string; handler_type: string; matcher: string | null; command: string | null; prompt: string | null; url: string | null;
+  server?: string | null; tool?: string | null; input?: unknown;
   source_path: string; source: string; plugin_id: string | null; enabled: boolean; is_managed: boolean; current_hash: string; trust_status: string; timeout_seconds: number | null };
 type Snapshot = { hooks: Hook[]; warnings: string[] };
+const hookHandlerLabel = (hook: Hook): string => hook.handler_type === "mcp_tool"
+  ? [hook.server, hook.tool].filter(Boolean).join(".") || hook.handler_type
+  : hook.command || hook.url || hook.handler_type;
 export function HooksTab({ active = true, toolbarHost }: { active?: boolean; toolbarHost?: HTMLElement | null }) {
   const { t } = useI18n();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
@@ -60,12 +64,12 @@ export function HooksTab({ active = true, toolbarHost }: { active?: boolean; too
       <div className="settings-row-title">{t("未找到钩子")}</div><div className="settings-row-description">{t("已配置的钩子将显示在这里。")}</div>
     </div></div></div>}
     {groups.filter(group => group.hooks.length > 0).map(group => <section className="settings-group" key={group.label}><h3 className="settings-group-title">{group.label}</h3><div className="settings-card">{group.hooks.map(hook => <details key={hook.key} className="settings-detail-block">
-      <summary className="settings-row"><span className="settings-row-copy"><span className="settings-row-title">{hook.event}</span><span className="settings-row-description">{hook.command || hook.url || hook.handler_type}</span></span>
-        <button type="button" className="settings-toggle" role="switch" aria-label={`${hook.event}: ${hook.command || hook.handler_type}`} disabled={busy || hook.is_managed || needsTrust.includes(hook)} title={hook.is_managed ? t("受管理的钩子始终开启。") : undefined} aria-checked={hook.enabled} data-active={hook.enabled} onClick={event => { event.preventDefault(); void update([{ key: hook.key, enabled: !hook.enabled }]); }}><span /></button>
+      <summary className="settings-row"><span className="settings-row-copy"><span className="settings-row-title">{hook.event}</span><span className="settings-row-description">{hookHandlerLabel(hook)}</span></span>
+        <button type="button" className="settings-toggle" role="switch" aria-label={`${hook.event}: ${hookHandlerLabel(hook)}`} disabled={busy || hook.is_managed || needsTrust.includes(hook)} title={hook.is_managed ? t("受管理的钩子始终开启。") : undefined} aria-checked={hook.enabled} data-active={hook.enabled} onClick={event => { event.preventDefault(); void update([{ key: hook.key, enabled: !hook.enabled }]); }}><span /></button>
       </summary>
       <div className="settings-page-note"><dl className="settings-hook-details"><dt>{t("来源")}</dt><dd>{hook.plugin_id || hook.source_path}</dd><dt>{t("钩子类型")}</dt><dd>{hook.handler_type}</dd>
         {hook.matcher && <><dt>{t("匹配规则")}</dt><dd>{hook.matcher}</dd></>}
-        <dt>{t("处理程序")}</dt><dd><pre>{hook.command || hook.prompt || hook.url}</pre></dd>
+        <dt>{t("处理程序")}</dt><dd><pre>{hook.command || hook.prompt || hook.url || hookHandlerLabel(hook)}</pre>{hook.handler_type === "mcp_tool" && hook.input !== undefined && <pre>{JSON.stringify(hook.input, null, 2)}</pre>}</dd>
         {hook.timeout_seconds !== null && <><dt>{t("超时")}</dt><dd>{hook.timeout_seconds}s</dd></>}
       </dl><button type="button" className="settings-action-button" onClick={() => { void openManagedSettingsTarget({ kind: "hook", hookKey: hook.key })?.catch(reason => setError(String(reason))); }}>{t("打开配置文件")}</button>
       {needsTrust.includes(hook) && <button type="button" className="settings-action-button" disabled={busy} onClick={() => void update([{ key: hook.key, trusted_hash: hook.current_hash }])}>{t("信任")}</button>}</div>

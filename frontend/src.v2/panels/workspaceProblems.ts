@@ -52,7 +52,7 @@ function problemFromSourceDiagnostic(uri: Monaco.Uri, content: string, version: 
 }
 
 const isTypeScriptModel = (model: Monaco.editor.ITextModel) => ['typescript', 'javascript'].includes(model.getLanguageId())
-const webMarkerLanguages = new Set(['html', 'handlebars', 'razor', 'css', 'scss', 'less', 'json', 'python', 'yaml'])
+const webMarkerLanguages = new Set(['html', 'handlebars', 'razor', 'css', 'scss', 'less', 'json', 'python', 'yaml', 'c', 'cpp'])
 export async function collectWorkspaceProblems(monaco: typeof Monaco, workspaceRoot: string, indexedSources: Array<{ uri: Monaco.Uri; content: string }> = []): Promise<WorkspaceProblem[]> {
   const models = monaco.editor.getModels().filter((model) => model.uri.scheme === 'file'
     && workspacePathWithin(model.uri.fsPath, workspaceRoot) && !isDependencyIndexPath(model.uri.fsPath))

@@ -1,5 +1,5 @@
 import type { GitChangeFile, TurnDiffState } from "../stores/types";
-import { countUnifiedDiffLines, parseUnifiedDiffLines, unifiedDiffFilePaths } from "./unified-diff";
+import { countUnifiedDiffLines, parseDiffGitHeader, parseUnifiedDiffLines, unifiedDiffFilePaths } from "./unified-diff";
 import type { ChatTurnState, DiffCellState } from "../chat/cells/cellTypes";
 import { diffFileChangeType } from "../chat/cells/diffCellLabels";
 
@@ -9,7 +9,6 @@ export interface TurnDiffSummary {
   deletions: number;
 }
 
-const DIFF_HEADER = /^diff --git a\/(.+) b\/(.+)$/;
 const summaries = new WeakMap<TurnDiffState, TurnDiffSummary | null>();
 
 export function summarizeTurnDiff(state: TurnDiffState | null | undefined): TurnDiffSummary | null {
@@ -32,11 +31,11 @@ function parseTurnDiff(state: TurnDiffState): TurnDiffSummary | null {
 
   for (const patch of chunks) {
     const header = patch.split(/\r?\n/, 1)[0] ?? "";
-    const match = DIFF_HEADER.exec(header);
+    const match = parseDiffGitHeader(header);
     if (!match) continue;
     const paths = unifiedDiffFilePaths(parseUnifiedDiffLines(patch));
-    const oldPath = paths.oldPath || match[1];
-    const newPath = paths.newPath || match[2];
+    const oldPath = paths.oldPath || match.oldPath;
+    const newPath = paths.newPath || match.newPath;
     const { plus: additions, minus: deletions } = countUnifiedDiffLines(patch);
     const isBinary = /^(?:Binary files |GIT binary patch)/m.test(patch);
     files.push({

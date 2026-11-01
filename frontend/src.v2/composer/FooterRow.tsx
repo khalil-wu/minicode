@@ -188,7 +188,12 @@ export const FooterRow = memo(({ sendState, isStopping = false, submitting = fal
       }
       if (event.key === "Tab") {
         event.preventDefault(); event.stopPropagation();
-        if (effortOpen) items[(current + (event.shiftKey ? -1 : 1) + items.length) % items.length].focus();
+        // The open menu owns Tab: it steps like the arrows (the reasoning dialog
+        // cycles, the lists clamp) instead of leaving focus pinned in place.
+        const step = event.shiftKey ? -1 : 1;
+        const next = effortOpen ? (current + step + items.length) % items.length
+          : current < 0 ? (step > 0 ? 0 : items.length - 1) : Math.max(0, Math.min(items.length - 1, current + step));
+        items[next].focus();
         return;
       }
       if (slider && !["ArrowDown", "ArrowUp"].includes(event.key)) return;

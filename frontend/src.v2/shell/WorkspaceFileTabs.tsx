@@ -16,7 +16,7 @@ export function workspaceFileTabMenuItems(tab: WorkspaceFileTab, t: Translate, a
   return [
     { label: t(tab.pinned ? "取消置顶到侧边栏" : "置顶到侧边栏"), onClick: () => useAppStore.getState().pinWorkspaceFileTab(tab.id, !tab.pinned) },
     { label: "", separator: true },
-    { label: t("移至左侧面板"), onClick: () => move("left") },
+    { label: t("移至左侧面板"), disabled: useAppStore.getState().appMode === "cowork", onClick: () => move("left") },
     { label: t("移至右侧面板"), onClick: () => move("right") },
     { label: "", separator: true },
     { label: t("关闭"), onClick: actions.close },

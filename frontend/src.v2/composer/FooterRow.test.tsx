@@ -882,7 +882,7 @@ describe("FooterRow permission picker", () => {
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();
   });
 
-  it("keeps the model list non-looping with Tab trapped while leaving the reasoning dialog's traversal separate", async () => {
+  it("keeps the model list non-looping with Tab stepping like the arrows while leaving the reasoning dialog's traversal separate", async () => {
     useAppStore.setState({ availableModels: ["gpt-5", "gpt-5.5"],
       runtimeCapabilities: { provider_capabilities: { reasoning_effort: false, reasoning_effort_levels: [] } } });
     const view = render(<FooterRow sendState="idle" onSend={() => {}} />);
@@ -895,12 +895,17 @@ describe("FooterRow permission picker", () => {
     expect(document.activeElement).toBe(first);
     fireEvent.keyDown(first, { key: "End" });
     expect(document.activeElement).toBe(last);
-    for (const event of [{ key: "ArrowDown" }, { key: "Tab" }, { key: "Tab", shiftKey: true }]) {
+    for (const event of [{ key: "ArrowDown" }, { key: "Tab" }]) {
       expect(fireEvent.keyDown(last, event)).toBe(false);
       expect(document.activeElement).toBe(last);
       expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
     }
-    fireEvent.keyDown(last, { key: "Escape" });
+    expect(fireEvent.keyDown(last, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(first);
+    expect(screen.getByRole("listbox", { name: "选择模型" })).toBeTruthy();
+    expect(fireEvent.keyDown(first, { key: "Tab", shiftKey: true })).toBe(false);
+    expect(document.activeElement).toBe(first);
+    fireEvent.keyDown(first, { key: "Escape" });
     await waitFor(() => expect(document.activeElement).toBe(trigger));
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(sendClientCommandAwaitResult).not.toHaveBeenCalled();

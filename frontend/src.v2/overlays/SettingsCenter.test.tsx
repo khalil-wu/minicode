@@ -1122,14 +1122,12 @@ describe("SettingsCenter reasoning effort visibility", () => {
     expect(screen.getByRole("switch", { name: "让 MiniCode 控制内置浏览器" }).getAttribute("aria-checked")).toBe("true");
   });
 
-  it("opens the Source browser-history subpage", async () => {
+  it("keeps the browser-history subpage to the desktop app that owns the history bridge", () => {
     render(<SettingsCenter />);
     fireEvent.click(screen.getByRole("button", { name: "浏览器" }));
     expect(screen.getByText("管理你的 Browser Use 偏好设置和网站访问权限。")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "管理浏览历史" }));
-    await waitFor(() => expect(useAppStore.getState().browserSettingsSection).toBe("history"));
-    expect(screen.getByRole("textbox", { name: "搜索浏览历史" })).toBeTruthy();
-    expect(screen.queryByText("管理你的 Browser Use 偏好设置和网站访问权限。")).toBeNull();
+    expect(screen.queryByRole("button", { name: "管理浏览历史" })).toBeNull();
+    expect(useAppStore.getState().browserSettingsSection).not.toBe("history");
   });
 
   it("keeps unsupported workspace launchers out of Browser settings", () => {

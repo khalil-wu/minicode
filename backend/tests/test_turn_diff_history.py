@@ -91,6 +91,17 @@ def test_diff_summary_keeps_rename_binary_and_literal_header_lines_inside_hunks(
     ]
 
 
+def test_diff_summary_decodes_git_quoted_header_names():
+    patch = ('diff --git "a/quote\\"name.ts" "b/quote\\"name.ts"\n--- "a/quote\\"name.ts"\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone\n'
+             'diff --git a/plain.ts "b/tab\\tname.ts"\nsimilarity index 100%\nrename from plain.ts\nrename to "tab\\tname.ts"\n'
+             'diff --git "a/\\344\\270\\255.ts" "b/\\344\\270\\255.ts"\n--- "a/\\344\\270\\255.ts"\n+++ "b/\\344\\270\\255.ts"\n@@ -1 +1 @@\n-a\n+b\n')
+    assert turn_diff_file_summaries(patch) == [
+        {"path": 'quote"name.ts', "additions": 0, "deletions": 1},
+        {"path": "tab\tname.ts", "old_path": "plain.ts", "additions": 0, "deletions": 0},
+        {"path": "中.ts", "additions": 1, "deletions": 1},
+    ]
+
+
 @pytest.mark.parametrize("invalid_file", [None, 4, {"path": "a.js", "additions": -1, "deletions": 0},
                                           {"path": "a.js", "additions": 1, "deletions": 0, "is_binary": "yes"}])
 def test_restore_contract_rejects_invalid_deferred_file_summaries(invalid_file):

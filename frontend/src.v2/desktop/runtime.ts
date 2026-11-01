@@ -685,8 +685,8 @@ export function desktopNotificationConversationVisible(conversationId: string, a
   return pane !== null;
 }
 export const onDesktopPreferencesChanged = (callback: (preferences: DesktopPreferences) => void) => desktop()!.preferences.onChanged(callback);
-export const browserHistorySearch = (query: { text?: string; source?: "all" | "agent" | "other" }) => desktop()!.browser.history(query);
-export const browserHistoryRemove = (ids: string[]) => desktop()!.browser.removeHistory(ids);
+export const browserHistorySearch = async (query: { text?: string; source?: "all" | "agent" | "other" }) => desktop()!.browser.history(query);
+export const browserHistoryRemove = async (ids: string[]) => desktop()!.browser.removeHistory(ids);
 export const embeddedBrowserClearBrowsingData = (dataTypes?: BrowserDataType[]) => desktop()!.embeddedBrowser.clearBrowsingData(dataTypes);
 export const embeddedBrowserCapture = (payload: BrowserCaptureRequest) => desktop()!.embeddedBrowser.capture(payload);
 

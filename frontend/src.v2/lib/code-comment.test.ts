@@ -13,6 +13,11 @@ describe("installed desktop code-comment contract", () => {
   it("does not turn incomplete attributes or prose into findings", () => {
     expect(parseCodeComments('Text ::code-comment{title="Inline" body="Reason" file="x"}\n::code-comment{title="Incomplete" file="x"}', "C:/work")).toEqual([]);
   });
+  it("does not turn a fenced directive example into a finding", () => {
+    const directive = '::code-comment{title="Fix" body="Reason" file="x"}';
+    expect(parseCodeComments("```text\n" + directive + "\n```\n~~~\n" + directive + "\n~~~", "C:/work")).toEqual([]);
+    expect(parseCodeComments("```text\n" + directive + "\n```\n" + directive, "C:/work")).toHaveLength(1);
+  });
   it("keeps fenced examples in visible markdown while consuming real directives", () => {
     const directive = '::code-comment{title="Fix" body="Reason" file="x"}';
     expect(withoutCodeCommentDirectives(`Visible request\n${directive}\n\`\`\`text\n${directive}\n\`\`\``))

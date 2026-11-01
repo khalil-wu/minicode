@@ -403,11 +403,15 @@ export const ChatContextCard = ({ displayMode = threadSummaryDisplayMode(window.
       if (!event.url || event.url === "about:blank" || event.type === "new-tab-request"
         || event.type === "numbered-shortcut" || event.type === "external-link-request") return;
       setBrowserTargets((current) => {
-        const nextTarget = { ...event, active: true };
-        const existing = current.some((target) => target.id === event.id);
+        const existing = current.find((target) => target.id === event.id);
+        // The native producer marks background tabs explicitly and sends loading
+        // updates without changing the active view; only an activated target may
+        // demote the others.
+        const active = typeof event.active === "boolean" ? event.active : existing?.active ?? false;
+        const nextTarget = { ...event, active };
         return existing
-          ? current.map((target) => target.id === event.id ? nextTarget : { ...target, active: false })
-          : [nextTarget, ...current.map((target) => ({ ...target, active: false }))];
+          ? current.map((target) => target.id === event.id ? nextTarget : active ? { ...target, active: false } : target)
+          : [nextTarget, ...(active ? current.map((target) => ({ ...target, active: false })) : current)];
       });
     });
     return () => {

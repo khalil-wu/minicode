@@ -176,7 +176,7 @@ export function VoiceSettings({ active = true }: { active?: boolean }) {
         <input ref={element => { entryRefs.current[index] = element; }} aria-label={tr("词典条目 {v0}", { v0: index + 1 })} value={value} placeholder="MiniCode"
           onChange={event => { const entries = [...dictionary]; entries[index] = event.target.value; setDictionaryDraft(entries); }}
           onBlur={() => { if (skipBlur.current) { skipBlur.current = false; return; } saveDictionary(dictionary); }}
-          onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); skipBlur.current = true; addEntry(index + 1); } }} />
+          onKeyDown={event => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); skipBlur.current = true; addEntry(index + 1); } }} />
         <button type="button" className="settings-icon-button" aria-label={tr("移除词典条目 {v0}", { v0: index + 1 })} disabled={dictionary.length === 1 && !value}
           onMouseDown={event => event.preventDefault()} onClick={() => saveDictionary(dictionary.filter((_, entryIndex) => entryIndex !== index))}><Trash2 size={14} /></button>
       </div>)}

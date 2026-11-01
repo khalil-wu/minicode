@@ -2,7 +2,8 @@ import { useAppStore } from "../stores";
 import { composerDraftOf, emptyComposerDraft, type ComposerDraft, type QueuedMessageEdit } from "../stores/composer-drafts";
 import { emptyConversationWorkbenchState } from "../stores/ui-slice";
 import { uniqueMessageId } from "../stores/shared-helpers";
-import { commandResultSucceeded, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { commandResultSucceeded, sendClientCommand, sendClientCommandAwaitResult } from "../protocol/ws-outbox";
+import { captureSteerTurnId } from "../lib/steer-command";
 import type { UserMessageQueueAddCommand } from "../protocol/conversation-types";
 import type { ChatMessage, ComposerAttachment } from "../stores/types";
 import type { SendChatMessageOptions } from "../chat/sendChatMessage";
@@ -217,6 +218,12 @@ export const submitQueuedMessageEdit = async (options: SendChatMessageOptions): 
     }
     try { await restorePosition(edit, messageId); }
     catch (error) { pushToast(error instanceof Error ? error.message : String(error), "error"); }
+    // The task may have finished while the message was being edited. Re-queuing
+    // into an idle conversation must start the queue exactly like Send does; a
+    // running turn drains it by itself.
+    if (captureSteerTurnId(useAppStore.getState(), edit.ownerId) === undefined) {
+      sendClientCommand({ type: "user_message.queue.start", conversation_id: edit.ownerId, message_id: messageId, user_message_id: userMessageId });
+    }
     return true;
   } catch (error) {
     pushToast(error instanceof Error ? error.message : String(error), "error");

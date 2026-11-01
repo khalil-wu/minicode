@@ -337,18 +337,21 @@ export const createWorkspaceSlice: StateCreator<AppStore, [], [], WorkspaceSlice
         persistPanelSlots(normalized);
         return { panelSlots: normalized };
       }),
-    resizePanel: (id, delta) =>
+    resizePanel: (id, delta, neighborId) =>
       set((s) => {
         const index = s.panelSlots.findIndex((p) => p.id === id);
-        if (index < 0 || index >= s.panelSlots.length - 1) return s;
+        // The visible neighbour may not be the next slot: hidden file slots sit
+        // between them in the full list.
+        const neighborIndex = neighborId ? s.panelSlots.findIndex((p) => p.id === neighborId) : index + 1;
+        if (index < 0 || neighborIndex <= index || neighborIndex >= s.panelSlots.length) return s;
         const next = s.panelSlots.slice();
         const current = next[index];
-        const neighbor = next[index + 1];
+        const neighbor = next[neighborIndex];
         const step = delta / 360;
         const currentSize = Math.max(0.45, (current.size ?? 1) + step);
         const neighborSize = Math.max(0.45, (neighbor.size ?? 1) - step);
         next[index] = { ...current, size: currentSize };
-        next[index + 1] = { ...neighbor, size: neighborSize };
+        next[neighborIndex] = { ...neighbor, size: neighborSize };
         const normalized = normalizePanelSlots(next);
         persistPanelSlots(normalized);
         return { panelSlots: normalized };

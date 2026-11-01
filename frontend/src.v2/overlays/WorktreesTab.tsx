@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { SquarePen, Trash2 } from "../lib/icons";
 import { useI18n } from "../i18n";
 import { useAppStore } from "../stores";
@@ -21,9 +21,10 @@ export function WorktreesTab({ active = true }: { active?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(active);
   const [revision, setRevision] = useState(0);
+  const readOperation = useRef<AbortController>();
   useEffect(() => {
     if (!active) return;
-    const controller = new AbortController(); setError("");
+    const controller = readOperation.current = new AbortController(); setError("");
     setLoading(true);
     const reads = ["/api/settings/worktrees", "/api/settings/worktrees/managed"].map(async path => {
       const response = await fetchWithTimeout(new URL(path, apiBase()), { headers: authHeaders(), signal: controller.signal });
@@ -36,6 +37,10 @@ export function WorktreesTab({ active = true }: { active?: boolean }) {
     return () => controller.abort();
   }, [active, revision]);
   const save = async (patch: Partial<Preferences>) => {
+    // A read that started before this write could land after it and revert the
+    // saved value; cancel it and reload once the write has settled.
+    const interrupted = readOperation.current && !readOperation.current.signal.aborted;
+    readOperation.current?.abort(); setLoading(false);
     setBusy(true); setError("");
     try {
       const response = await fetchWithTimeout(new URL("/api/settings/worktrees", apiBase()), { method: "PUT", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify(patch) });
@@ -44,7 +49,7 @@ export function WorktreesTab({ active = true }: { active?: boolean }) {
       if ("worktree_root" in patch) setRoot(null);
       if ("keep_count" in patch) setCount(null);
     } catch (reason) { setError(String(reason)); }
-    finally { setBusy(false); }
+    finally { setBusy(false); if (interrupted) setRevision(value => value + 1); }
   };
   const remove = async (tree: ManagedWorktree) => {
     if (!await showConfirm({ title: t("删除工作树"), message: tree.path, confirmLabel: t("删除"), danger: true })) return;

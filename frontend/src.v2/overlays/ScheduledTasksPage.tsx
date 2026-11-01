@@ -157,7 +157,7 @@ export function ScheduledTasksPage({ active = true }: { active?: boolean }) {
     } catch (error) { pushToast(errorMessage(error), "error"); }
     finally { setPendingTaskId(null); }
   };
-  const visibleRows = rows.filter(({ task, owner }) => (filter === "all" || filter === "active" && task.enabled || filter === "paused" && !task.enabled)
+  const visibleRows = rows.filter(({ task, owner }) => (filter === "all" || filter === "active" && task.enabled || filter === "paused" && !task.enabled || filter === "completed" && Boolean(task.last_run_at) && !task.next_run_at)
     && [task.name, task.prompt, workspaceDisplayName(owner.workspaceRoot), scheduleLabel(tr, task.schedule)].join(" ").toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
     .sort((left, right) => Number(right.task.enabled) - Number(left.task.enabled)
       || (left.task.next_run_at ?? "9999").localeCompare(right.task.next_run_at ?? "9999") || left.task.name.localeCompare(right.task.name));

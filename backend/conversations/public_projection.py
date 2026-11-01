@@ -632,6 +632,64 @@ def _with_tool_artifact_ownership(message: Mapping[str, Any]) -> Mapping[str, An
 _INLINE_TURN_DIFF_MAX_CHARS = 65_536
 
 
+_GIT_QUOTED_TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"')
+_GIT_SIMPLE_ESCAPES = {"n": 10, "t": 9, "r": 13, "a": 7, "b": 8, "f": 12, "v": 11, '"': 34, "\\": 92}
+
+
+def _unquote_git_path(token: str) -> str:
+    """Decode a Git-quoted header name; an unquoted name keeps only the path."""
+    text = token.strip()
+    if len(text) < 2 or not (text.startswith('"') and text.endswith('"')):
+        return token.split("\t", 1)[0]
+    inner = text[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(inner):
+        char = inner[index]
+        if char != "\\":
+            out.extend(char.encode("utf-8"))
+            index += 1
+            continue
+        octal = re.match(r"[0-7]{1,3}", inner[index + 1:index + 4])
+        if octal:
+            out.append(int(octal.group(0), 8))
+            index += 1 + len(octal.group(0))
+            continue
+        following = inner[index + 1] if index + 1 < len(inner) else ""
+        out.append(_GIT_SIMPLE_ESCAPES.get(following, ord(following) if following else 92))
+        index += 2
+    return out.decode("utf-8", "replace")
+
+
+def _split_diff_git_header(line: str) -> tuple[str, str] | None:
+    """Read `diff --git a/old b/new` with either side possibly Git-quoted."""
+    rest = line[len("diff --git "):]
+    if rest.startswith('"'):
+        match = _GIT_QUOTED_TOKEN.match(rest)
+        if match is None:
+            return None
+        first, remainder = match.group(0), rest[match.end():].lstrip(" ")
+    else:
+        at = rest.find(' "b/')
+        if at < 0:
+            at = rest.rfind(" b/")
+        if at < 0:
+            return None
+        first, remainder = rest[:at], rest[at + 1:]
+    if remainder.startswith('"'):
+        match = _GIT_QUOTED_TOKEN.match(remainder)
+        if match is None:
+            return None
+        second = match.group(0)
+    else:
+        second = remainder
+    old_path = _unquote_git_path(first)
+    new_path = _unquote_git_path(second)
+    if not old_path.startswith("a/") or not new_path.startswith("b/"):
+        return None
+    return old_path[2:], new_path[2:]
+
+
 def turn_diff_file_summaries(diff: str) -> list[dict[str, Any]]:
     """Read file headers and hunk counts without retaining a second patch body."""
     files: list[dict[str, Any]] = []
@@ -639,20 +697,20 @@ def turn_diff_file_summaries(diff: str) -> list[dict[str, Any]]:
     in_hunk = False
     for line in diff.split("\n"):
         if line.startswith("diff --git "):
-            match = re.fullmatch(r"diff --git a/(.+) b/(.+)", line)
-            current = None if match is None else {"path": match[2], "old_path": match[1], "additions": 0, "deletions": 0}
+            header = _split_diff_git_header(line)
+            current = None if header is None else {"path": header[1], "old_path": header[0], "additions": 0, "deletions": 0}
             if current is not None:
                 files.append(current)
             in_hunk = False
         elif current is not None:
-            if not in_hunk and line.startswith("--- a/"):
-                current["old_path"] = line[6:]
-            elif not in_hunk and line.startswith("+++ b/"):
-                current["path"] = line[6:]
+            if not in_hunk and line.startswith(("--- a/", '--- "a/')):
+                current["old_path"] = _unquote_git_path(line[4:])[2:]
+            elif not in_hunk and line.startswith(("+++ b/", '+++ "b/')):
+                current["path"] = _unquote_git_path(line[4:])[2:]
             elif not in_hunk and line.startswith("rename from "):
-                current["old_path"] = line[12:]
+                current["old_path"] = _unquote_git_path(line[12:])
             elif not in_hunk and line.startswith("rename to "):
-                current["path"] = line[10:]
+                current["path"] = _unquote_git_path(line[10:])
             elif not in_hunk and line.startswith(("Binary files ", "GIT binary patch")):
                 current["is_binary"] = True
             elif line.startswith("@@ "):

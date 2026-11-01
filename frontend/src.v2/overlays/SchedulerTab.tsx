@@ -60,7 +60,7 @@ interface SchedulerTabProps {
   onClose?: () => void;
 }
 export const SchedulerTab = ({ editor, onClose, ...props }: SchedulerTabProps) => editor
-  ? <ThreadAutomationPanel editor={editor} onClose={onClose} />
+  ? <ThreadAutomationPanel editor={editor} onClose={onClose} active={props.active ?? true} />
   : <SchedulerSettingsTab {...props} />;
 
 const SchedulerSettingsTab = ({ title, description = "", active = true }: Omit<SchedulerTabProps, "editor" | "onClose">) => {
@@ -313,7 +313,7 @@ const SchedulerSettingsTab = ({ title, description = "", active = true }: Omit<S
   // The ordinary scheduler still owns the existing manual Cron form and history.
   if (settingsIntent && (settingsIntent.task.kind === "heartbeat" || parseAutomationRRule(settingsIntent.task.schedule))) {
     const threadEditor = threadEditors.find(editor => editor.task?.id === settingsIntent.task.id);
-    return <ThreadAutomationPanel key={`settings:${settingsIntent.owner.id}:${settingsIntent.task.id}`} inSettings onClose={openAutomations}
+    return <ThreadAutomationPanel key={`settings:${settingsIntent.owner.id}:${settingsIntent.task.id}`} inSettings active={active} onClose={openAutomations}
       editor={{ id: threadEditor?.id ?? `settings:${settingsIntent.task.id}`, owner: settingsIntent.owner,
         task: threadEditor?.task ?? scopedSnapshot?.tasks.find(task => task.id === settingsIntent.task.id) ?? settingsIntent.task, open: true }} />;
   }

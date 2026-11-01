@@ -899,7 +899,7 @@ export interface WorkspaceSlice {
   focusPanel: (id: string, options?: { preserveRightPanelExpanded?: boolean }) => void;
   movePanel: (id: string, direction: -1 | 1) => void;
   reorderPanels: (fromIndex: number, toIndex: number) => void;
-  resizePanel: (id: string, delta: number) => void;
+  resizePanel: (id: string, delta: number, neighborId?: string) => void;
   togglePanelMaximized: (id: string) => void;
   resetPanelLayout: () => void;
   setTerminalSessions: (sessions: TerminalSessionInfo[]) => void;

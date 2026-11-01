@@ -52,6 +52,8 @@ interface Props {
   isStreaming?: boolean;
   citations?: Citation[];
   workspaceRoot?: string;
+  /** Directory of the rendered document; relative links resolve against it. */
+  documentDirectory?: string;
   fileOwner?: WorkspaceFileOwner;
   conversationId?: string;
   knownFilePaths?: string[];
@@ -223,6 +225,10 @@ const isWorkspaceRelativeEditorPath = (path: string): boolean => {
   if (/^[A-Za-z]:[/\\]/.test(trimmed) || /^file:/i.test(trimmed)) return false;
   return !trimmed.split(/[\\/]+/).some((part) => part === "..");
 };
+
+// Inside a rendered document, parent segments are legal; the workspace root
+// still bounds the resolved path.
+const isDocumentRelativePath = (path: string): boolean => isWorkspaceRelativeEditorPath(path.split("..").join("parent"));
 
 const stripFileRefDecorations = (value: string, preserveLineTarget = false): string => {
   const clean = value.trim().replace(/[.,，。;；)）\]}]+$/, "");
@@ -728,7 +734,7 @@ const isWorkspaceRawResourceUrl = (url: string): boolean => {
 
 const workspacePathFromHref = (
   href: string,
-  options: { allowLineTarget?: boolean; allowExternalDeliverable?: boolean; workspaceRoot?: string } = {},
+  options: { allowLineTarget?: boolean; allowExternalDeliverable?: boolean; workspaceRoot?: string; documentDirectory?: string } = {},
 ): string | null => {
   const trimmed = href.trim();
   if (!trimmed) return null;
@@ -736,7 +742,7 @@ const workspacePathFromHref = (
   let candidate = "";
   let fromLocalFrontend = false;
   if (isWorkspaceRawResourceUrl(trimmed)) {
-    candidate = new URL(trimmed).searchParams.get("path") || "";
+    candidate = new URL(trimmed, window.location.href).searchParams.get("path") || "";
   } else if (trimmed.startsWith("minicode-local-file:")) {
     try {
       candidate = decodeURIComponent(trimmed.slice("minicode-local-file:".length));
@@ -791,23 +797,31 @@ const workspacePathFromHref = (
       ? candidate
       : null;
   }
+  // A document rendered from inside the workspace resolves relative links,
+  // parent segments included, against its own directory rather than the
+  // browsing root; the workspace root still bounds the result.
+  const documentDirectory = options.documentDirectory ? absoluteWorkspacePath(options.documentDirectory, workingDirectory) : null;
+  if (documentDirectory && isDocumentRelativePath(safetyPath)) {
+    const resolved = normalizePathLexically(`${documentDirectory}/${candidate}`);
+    return pathWithinWorkspace(resolved, workingDirectory) ? resolved : null;
+  }
   if (!isWorkspaceRelativeEditorPath(safetyPath)) return null;
   return candidate;
 };
 
-const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversationId?: string, fileOwner?: WorkspaceFileOwner): { path: string; src: string } | null => {
+const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversationId?: string, fileOwner?: WorkspaceFileOwner, documentDirectory?: string): { path: string; src: string } | null => {
   if (isWorkspaceRawResourceUrl(url)) {
     try {
       const parsed = new URL(url, window.location.href);
-      const path = workspacePathFromHref(parsed.searchParams.get("path") || "", { workspaceRoot });
+      const path = workspacePathFromHref(parsed.searchParams.get("path") || "", { workspaceRoot, documentDirectory });
       return path ? { path, src: url } : null;
     } catch {
       return null;
     }
   }
-  if (!isLocalImageUrl(url)) return null;
+  if (!isLocalImageUrl(url) && !(documentDirectory && isDocumentRelativePath(url))) return null;
   const workingDirectory = workspaceRoot ?? String(useAppStore.getState().workingDirectory || "");
-  const candidate = workspacePathFromHref(url, { workspaceRoot });
+  const candidate = workspacePathFromHref(url, { workspaceRoot, documentDirectory });
   if (!candidate) return null;
   const absolutePath = absoluteWorkspacePath(candidate, workingDirectory);
   if (!absolutePath) return null;
@@ -829,36 +843,36 @@ const localImageWithinWorkspace = (url: string, workspaceRoot?: string, conversa
     : null;
 };
 
-const workspaceFileTargetFromHref = (href: string, workspaceRoot?: string): { path: string; line?: number; column?: number } | null => {
-  const candidate = workspacePathFromHref(href, { allowLineTarget: true, workspaceRoot });
+const workspaceFileTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): { path: string; line?: number; column?: number } | null => {
+  const candidate = workspacePathFromHref(href, { allowLineTarget: true, workspaceRoot, documentDirectory });
   if (!candidate) return null;
   return parseEditorPathTarget(candidate);
 };
 
-const workspaceGenericFileTargetFromHref = (href: string, workspaceRoot?: string): FileTarget | null => {
-  const candidate = workspacePathFromHref(href, { allowExternalDeliverable: true, workspaceRoot });
+const workspaceGenericFileTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): FileTarget | null => {
+  const candidate = workspacePathFromHref(href, { allowExternalDeliverable: true, workspaceRoot, documentDirectory });
   if (!candidate || isCodeFilePath(candidate) || !anyFilePathPattern.test(candidate)) return null;
   return { path: candidate };
 };
 
-const actionFilePathFromHref = (href: string, workspaceRoot?: string): string | null => {
-  const candidate = workspacePathFromHref(href, { workspaceRoot });
+const actionFilePathFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): string | null => {
+  const candidate = workspacePathFromHref(href, { workspaceRoot, documentDirectory });
   const match = candidate && /^(?:下载[\\/])?打开《([^《》]+)》$/u.exec(candidate);
   return match && anyFilePathPattern.test(match[1]) ? match[1] : null;
 };
 
-const workspaceFolderTargetFromHref = (href: string, workspaceRoot?: string): FolderTarget | null => {
-  const candidate = workspacePathFromHref(href, { workspaceRoot });
+const workspaceFolderTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): FolderTarget | null => {
+  const candidate = workspacePathFromHref(href, { workspaceRoot, documentDirectory });
   if (!candidate || anyFilePathPattern.test(candidate) || /\.[A-Za-z0-9]+》$/.test(candidate)) return null;
   return { path: candidate.replace(/[\\/]+$/, "") };
 };
 
-const editorTargetFromHref = (href: string, workspaceRoot?: string): { path: string; line?: number; column?: number } | null => {
+const editorTargetFromHref = (href: string, workspaceRoot?: string, documentDirectory?: string): { path: string; line?: number; column?: number } | null => {
   if (href.startsWith("minicode-file-ref:")) {
     const params = new URLSearchParams(href.slice("minicode-file-ref:".length));
     const path = params.get("path")?.trim();
     if (!path) return null;
-    const target = workspaceFileTargetFromHref(path, workspaceRoot);
+    const target = workspaceFileTargetFromHref(path, workspaceRoot, documentDirectory);
     if (!target) return null;
     return {
       path: target.path,
@@ -866,7 +880,7 @@ const editorTargetFromHref = (href: string, workspaceRoot?: string): { path: str
       column: parsePositiveInt(params.get("column")),
     };
   }
-  const workspaceTarget = workspaceFileTargetFromHref(href, workspaceRoot);
+  const workspaceTarget = workspaceFileTargetFromHref(href, workspaceRoot, documentDirectory);
   if (workspaceTarget) return workspaceTarget;
   if (href.startsWith("file://")) {
     return null;
@@ -945,7 +959,7 @@ const absoluteEditorTitlePath = (path: string, workingDirectory: string): string
   return root ? `${root}/${normalizedPath.replace(/^\/+/, "")}` : normalizedPath;
 };
 
-type MessageResourceScope = { workspaceRoot?: string; conversationId?: string; knownFilePaths?: string[]; fileOwner?: WorkspaceFileOwner; openFileLinksInSidePanel?: boolean };
+type MessageResourceScope = { workspaceRoot?: string; documentDirectory?: string; conversationId?: string; knownFilePaths?: string[]; fileOwner?: WorkspaceFileOwner; openFileLinksInSidePanel?: boolean };
 
 const filePreviewScope = (workspaceRoot: string, conversationId: string | undefined, fileOwner: WorkspaceFileOwner | undefined) =>
   fileOwner ? { fileOwner, pathRoot: workspaceRoot } : { workspaceRoot, conversationId };
@@ -1127,7 +1141,7 @@ const FolderReferenceChip = ({ target, children, workspaceRoot }: { target: Fold
   );
 };
 
-const MarkdownImage = ({ workspaceRoot, conversationId, fileOwner, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
+const MarkdownImage = ({ workspaceRoot, documentDirectory, conversationId, fileOwner, knownFilePaths: _knownFilePaths, openFileLinksInSidePanel: _openFileLinksInSidePanel, ...props }: React.ImgHTMLAttributes<HTMLImageElement> & MessageResourceScope) => {
   const { t } = useI18n();
   const [loadedRemoteUrl, setLoadedRemoteUrl] = useState<string | null>(null);
   const rawSrc = typeof props.src === "string" ? props.src : "";
@@ -1135,7 +1149,7 @@ const MarkdownImage = ({ workspaceRoot, conversationId, fileOwner, ...props }: R
   const artifactId = artifactIdFromReference(rawSrc);
   const isConnected = useAppStore((s) => s.isConnected);
   const sessionId = getWebSocket()?.sessionId;
-  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot, conversationId, fileOwner);
+  const workspaceLocalImage = artifactId ? null : localImageWithinWorkspace(rawSrc, workspaceRoot, conversationId, fileOwner, documentDirectory);
   const blockedLocalImage = !artifactId && Boolean(rawSrc) && isLocalImageUrl(rawSrc) && !workspaceLocalImage;
   const src = artifactId ? artifactResourceUrl({ artifactId, conversationId, sessionId, source: "artifact", isConnected })
     : workspaceLocalImage?.src ?? rawSrc;
@@ -1321,11 +1335,11 @@ const mdComponents = (
         </div>
       );
     }
-    const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope, true);
+    const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope, true);
     if (inlineEditorTarget) {
       return <FileReferenceChip target={inlineEditorTarget} presentation="code" {...resourceScope}>{children}</FileReferenceChip>;
     }
-    const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot), resourceScope, true);
+    const inlineFileTarget = knownFileTarget(workspaceGenericFileTargetFromHref(text, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope, true);
     if (inlineFileTarget) {
       return <GenericFileReferenceChip target={inlineFileTarget} presentation="code" {...resourceScope}>{children}</GenericFileReferenceChip>;
     }
@@ -1368,21 +1382,21 @@ const mdComponents = (
         </a>
       );
     }
-    const actionFilePath = actionFilePathFromHref(href, resourceScope.workspaceRoot);
+    const actionFilePath = actionFilePathFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
     const parsedEditorTarget = actionFilePath
-      ? workspaceFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot)
-      : editorTargetFromHref(href, resourceScope.workspaceRoot);
+      ? workspaceFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot, resourceScope.documentDirectory)
+      : editorTargetFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
     const editorTarget = href.startsWith("minicode-file-ref:") || actionFilePath
       ? knownFileTarget(parsedEditorTarget, resourceScope)
       : parsedEditorTarget;
     const fileTarget = editorTarget
       ? null
       : actionFilePath
-        ? knownFileTarget(workspaceGenericFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot), resourceScope)
-        : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot);
+        ? knownFileTarget(workspaceGenericFileTargetFromHref(actionFilePath, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope)
+        : workspaceGenericFileTargetFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
     const folderTarget = editorTarget || fileTarget
       ? null
-      : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot);
+      : workspaceFolderTargetFromHref(href, resourceScope.workspaceRoot, resourceScope.documentDirectory);
     const opensInApp = isPreviewableHttpUrl(href);
     if (href.startsWith("minicode-file-ref:") && !editorTarget) {
       return <span className="font-[var(--font-mono)] text-[0.9em]">{props.children}</span>;
@@ -1459,7 +1473,7 @@ const mdComponents = (
   hr: () => <hr className="border-0 h-px my-4 bg-gradient-to-r from-transparent via-[var(--border-subtle)] to-transparent" />,
   img: ({ node: _node, ...props }: MarkdownElementProps<React.ImgHTMLAttributes<HTMLImageElement>>) => {
     const resourceScope = useContext(MarkdownResourceContext);
-    return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} conversationId={resourceScope.conversationId} fileOwner={resourceScope.fileOwner} />;
+    return <MarkdownImage {...props} workspaceRoot={resourceScope.workspaceRoot} documentDirectory={resourceScope.documentDirectory} conversationId={resourceScope.conversationId} fileOwner={resourceScope.fileOwner} />;
   },
   });
 };
@@ -1688,7 +1702,7 @@ const CommittedMarkdown = memo(({ parts, count, ...props }: {
   parts: MarkdownPart[]; count: number; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins;
 }) => <>{parts.slice(0, count).map((part) => <MarkdownPiece key={part.start} part={part} {...props} />)}</>);
 
-function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, conversationId, knownFilePaths, fileOwner, openFileLinksInSidePanel }: Props) {
+function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, documentDirectory, conversationId, knownFilePaths, fileOwner, openFileLinksInSidePanel }: Props) {
   content = withoutCodeCommentDirectives(content);
   const resolved = useResolvedTheme();
   const rawId = useId();
@@ -1703,8 +1717,8 @@ function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot,
   const deferredTail = useDeferredValue(view.tail);
   const tail = isStreaming && view.tail.content.length > 8192 ? deferredTail : view.tail;
   const pathsKey = JSON.stringify(knownFilePaths);
-  const resources = useMemo(() => ({ workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel,
-    knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, conversationId, fileOwner, openFileLinksInSidePanel, pathsKey]);
+  const resources = useMemo(() => ({ workspaceRoot, documentDirectory, conversationId, fileOwner, openFileLinksInSidePanel,
+    knownFilePaths: pathsKey ? JSON.parse(pathsKey) : undefined }), [workspaceRoot, documentDirectory, conversationId, fileOwner, openFileLinksInSidePanel, pathsKey]);
   const boundCitationIndexes = useMemo(() => new Set(
     (citations ?? []).flatMap((citation, index) => citation.source || citation.url ? [index + 1] : []),
   ), [citations]);

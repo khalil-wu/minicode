@@ -252,6 +252,11 @@ export function registerEditorLanguageServices(monaco: typeof Monaco): Monaco.ID
         async provideRenameEdits(model, position, newName, token) {
           const result = await request<{ changes?: Record<string, TextEdit[]>; documentChanges?: Array<{ textDocument: { uri: string }; edits: TextEdit[] }> }>(model, "rename", token, position, { new_name: newName });
           const changes = [...Object.entries(result.changes ?? {}), ...(result.documentChanges ?? []).map((doc) => [doc.textDocument.uri, doc.edits] as const)];
+          // A rename may touch documents that are not open; load them into
+          // tracked buffers so the bulk edit can apply and the user sees the result.
+          const { ensureWorkspaceEditModels } = await import("./applyWorkspaceBufferEdits");
+          await ensureWorkspaceEditModels(monaco, useAppStore.getState().workingDirectory, changes.map(([uri]) => monaco.Uri.parse(uri)));
+          if (token.isCancellationRequested) return { edits: [] };
           return { edits: changes.flatMap(([uri, edits]) => edits.map((edit) => ({ resource: monaco.Uri.parse(uri), textEdit: { range: fromLspRange(edit.range), text: edit.newText }, versionId: undefined }))) };
         },
       }),
