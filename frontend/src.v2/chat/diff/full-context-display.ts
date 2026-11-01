@@ -5,7 +5,7 @@ export type ContextExpansion = Record<string, { fromStart: number; fromEnd: numb
 export interface DiffContextGap { key: string; remaining: number; allowUp: boolean; allowDown: boolean }
 export type ContextDirection = "up" | "down" | "both" | "all";
 
-/** Source expandHunk: 20 from each selected edge; Shift/Expand all uses Infinity. */
+/** Expand 20 lines from each selected edge; Shift/Expand all uses Infinity. */
 export function expandDiffContext(state: ContextExpansion, key: string, direction: ContextDirection): ContextExpansion {
   const previous = state[key] ?? { fromStart: 0, fromEnd: 0 };
   const amount = direction === "all" ? Infinity : 20;

@@ -144,7 +144,7 @@
   transform-origin: bottom;
 }
 
-/* Voice Mn and Config scope use t5 -> qSn with surface=menu and size=default. */
+/* Voice and Config scope selects use the menu surface at the default size. */
 .mc-select-popover[data-settings-select="true"] {
   padding: 4px;
   border: 0;

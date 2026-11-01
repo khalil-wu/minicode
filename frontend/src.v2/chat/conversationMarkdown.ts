@@ -131,7 +131,7 @@ function cellMarkdown(cell: HistoryCellState): string | null {
   }
 }
 
-/** Codex conversation-markdown::fe/he uses a title, quoted user text, disclosed process, and plain final Markdown. */
+/** Conversation Markdown uses a title, quoted user text, disclosed process, and plain final Markdown. */
 export function renderConversationMarkdown(title: string, messages: ChatMessage[], workspaceRoot: string) {
   const parts = [`# ${title.replace(/\s+/g, " ").trim().replaceAll("#", "\\#")}`];
   for (const turn of projectMessagesToTurns(messages, false, workspaceRoot)) {

@@ -52,7 +52,7 @@ type BranchMenuProps = {
   onClose: () => void;
 };
 
-/** Current desktop Ya → Fi/h, shared $8/rxn/gxn/hxn. */
+/** Branch dropdown menu with search and a custom-branch entry. */
 function BranchMenu({ anchor, branches, selectedBranch, loading, error, keyboardOpen, onRetry, onSelectBranch, onClose }: BranchMenuProps) {
   const { t } = useI18n();
   const menu = useRef<HTMLDivElement>(null);
@@ -66,8 +66,8 @@ function BranchMenu({ anchor, branches, selectedBranch, loading, error, keyboard
   const results = searching ? branches?.filter(branch => branch.toLowerCase().includes(trimmed.toLowerCase())) : branches;
   const exact = results?.find(branch => branch === trimmed);
   const showCustom = searching && exact == null;
-  // Ya supplies base-list loading/error only. A typed exact ref remains usable
-  // while that initial request is pending or failed; Fi's search lane is separate.
+  // The base list supplies loading/error only. A typed exact ref remains usable
+  // while that initial request is pending or failed; the search lane is separate.
   const showLoading = !searching && loading;
   const showError = !searching && !loading && error;
   const enabledItems = () => Array.from(menu.current!.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)'));
@@ -95,7 +95,7 @@ function BranchMenu({ anchor, branches, selectedBranch, loading, error, keyboard
     return () => { observer.disconnect(); window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
   }, [anchor]);
   useEffect(() => {
-    // Fi explicitly passes autoFocus=false for Ya. Pointer opening focuses the
+    // The menu is opened without autoFocus. Pointer opening focuses the
     // nonmodal menu; keyboard entry focuses its first enabled item.
     (keyboardOpen ? enabledItems()[0] ?? menu.current! : menu.current!).focus({ preventScroll: true });
     const outside = (event: PointerEvent) => {
@@ -117,8 +117,8 @@ function BranchMenu({ anchor, branches, selectedBranch, loading, error, keyboard
     }
     if (event.key === "Enter") {
       event.preventDefault();
-      // Fi's input callback calls the exact/custom selector directly; Ya does
-      // not supply its optional onClose. Ordinary menu rows close on select.
+      // Enter in the search input selects the exact/custom branch directly and
+      // does not close the menu itself. Ordinary menu rows close on select.
       if (searching) onSelectBranch(exact ?? trimmed);
     } else if (event.key === "ArrowDown" || event.key === "ArrowUp") {
       const items = enabledItems();

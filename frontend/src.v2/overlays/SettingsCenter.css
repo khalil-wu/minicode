@@ -24,7 +24,7 @@
  *  - 本文件只保留 polish 未管的：栅格与布局、间距节奏、各功能区块独有元素。
  *  - 无 !important；无 hex 字面量（主题预览的固定色板除外，见该节说明）。
  *
- * 尺寸以当前 Codex Electron settings 消费者为准；字号继续乘用户 text scale。
+ * 尺寸以桌面端 settings 消费者为准；字号继续乘用户 text scale。
  */
 
 /* ── 页面骨架 ─────────────────────────────────────────────────────────── */
@@ -505,7 +505,7 @@
   transform: translateX(12px);
 }
 
-/* Source's toolbar action is shared by settings pages and their body portals. */
+/* The toolbar action is shared by settings pages and their body portals. */
 .settings-action-button {
   display: inline-flex;
   align-items: center;

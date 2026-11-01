@@ -1,7 +1,7 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useAppStore } from "../../stores";
 
-/** Codex's activity disclosure retains its body through the closing motion. */
+/** The activity disclosure retains its body through the closing motion. */
 export function useProcessDisclosure(expanded: boolean) {
   const [mounted, setMounted] = useState(expanded);
   const element = useRef<HTMLDivElement>(null);

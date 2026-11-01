@@ -92,7 +92,7 @@ function turnDurationMs(turn: ChatTurnState): number | null {
   if (typeof turn.durationMs === "number" && Number.isFinite(turn.durationMs) && turn.durationMs >= 0) {
     return turn.durationMs;
   }
-  // Source's worked-for end is original start + the authoritative duration.
+  // The worked-for end is the original start + the authoritative duration.
   // A viewer's observation/commit time cannot supply a missing execution end.
   return null;
 }

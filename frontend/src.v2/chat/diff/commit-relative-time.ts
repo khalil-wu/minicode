@@ -1,4 +1,4 @@
-/** Source _Dc/TDc/DDc: compact age uses calendar days after the first 24 hours. */
+/** Compact age uses calendar days after the first 24 hours. */
 export function compactCommitTime(dateString: string, now: Date, locale: "zh-CN" | "en-US"): string {
   const date = new Date(dateString);
   const elapsed = now.getTime() - date.getTime();

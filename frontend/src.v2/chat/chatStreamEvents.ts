@@ -1529,8 +1529,8 @@ const applyChatStreamEvent = (
         if (!replayed) pushToast(message, "warning", 3000);
         return true;
       }
-      // Source projects an owned provider error in its turn. Keep the actual
-      // failure there instead of duplicating it as a global toast as well.
+      // A provider error owned by a turn is projected inside that turn. Keep the
+      // actual failure there instead of duplicating it as a global toast as well.
       const transcriptOwnsProviderError = Boolean(err.conversation_id && err.message_id && err.provider_error_type);
       if (!replayed && !transcriptOwnsProviderError) pushToast(message, "error", 6000);
       if (err.error_code === "workspace_missing") {

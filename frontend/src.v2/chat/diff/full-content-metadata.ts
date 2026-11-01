@@ -37,7 +37,7 @@ const sameLine = (left: string, right: string, ignoreWhitespace: boolean) => ign
   ? left.replace(/[ \t\r\n\f\v]/g, "") === right.replace(/[ \t\r\n\f\v]/g, "")
   : left === right;
 
-/** Source full-content-metadata compares carried EOL bytes; display text omits EOL. */
+/** Line comparison uses the carried EOL bytes; display text omits the EOL. */
 export const diffLineText = (line: string) => line.replace(/\r?\n$/, "");
 
 function carriedLines(lines: string[], terminalNewline: boolean): PatchContentLine[] {

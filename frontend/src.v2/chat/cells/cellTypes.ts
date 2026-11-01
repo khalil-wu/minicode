@@ -303,7 +303,7 @@ export interface ChatTurnState {
   toolPage?: ToolHistoryPage;
   turnId?: string;
   userCell: UserMessageCellState | null;
-  /** Source-ordered activity and admitted input within this physical turn. */
+  /** Activity and admitted input within this physical turn, in event order. */
   workItems?: TurnWorkItem[];
   committedCells: Exclude<
     HistoryCellState,

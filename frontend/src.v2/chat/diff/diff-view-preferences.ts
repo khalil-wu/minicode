@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-// Source's app-wide review preferences; the file viewer has separate defaults.
+// App-wide review preferences; the file viewer has separate defaults.
 const preferences = {
   loadFullFiles: { key: "load-full-files", initial: true },
   richPreview: { key: "diffRichPreview", initial: false },

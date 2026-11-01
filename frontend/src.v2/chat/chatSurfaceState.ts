@@ -158,7 +158,7 @@ const execCell = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellStat
     callSource: record.callSource,
     cwd: record.commandPresentation?.cwd ?? (typeof record.args?.cwd === "string" ? record.args.cwd : undefined),
     background: record.args?.run_in_background === true,
-    // Source's planned commandExecution is inProgress before approval. The
+    // A planned commandExecution presents as inProgress before approval. The
     // record still retains waiting_approval and the actual execution clock.
     status: record.commandPresentation && (record.status === "running" || record.status === "pending")
       ? "running"
@@ -205,7 +205,7 @@ const execCells = (record: ToolCallRecord, item?: TurnActivityItem): ExecCellSta
   const actions = execution.commandActions;
   if (!actions || actions.length < 2) return [execution];
   // One canonical command item can describe several parsed shell actions.
-  // Like Codex, each action references the same execution/output receipt.
+  // Each action references the same execution/output receipt.
   return actions.map((action, index) => ({
     ...execution,
     id: `${record.id}:${index}`,

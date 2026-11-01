@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-/** The frozen Source preference is app-wide, versioned, and enabled by default. */
+/** The preference is app-wide, versioned, and enabled by default. */
 export const WORD_DIFFS_STORAGE_KEY = "wordDiffsEnabled.2";
 
 const listeners = new Set<() => void>();

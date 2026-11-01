@@ -804,7 +804,7 @@ export const initialShortcutBindings = (): ShortcutBindings => {
   const customized = new Set<ShortcutActionId>();
   for (const definition of SHORTCUT_DEFINITIONS) {
     const saved = parsed[definition.id];
-    // Existing single-binding preferences implicitly included Source aliases.
+    // Existing single-binding preferences implicitly included the default alias chords.
     if (typeof saved === "string") bindings[definition.id] = saved === definition.defaultBinding
       ? [...DEFAULT_SHORTCUT_BINDINGS[definition.id]] : saved ? [saved] : [];
     else if (Array.isArray(saved) && saved.every(chord => typeof chord === "string")) bindings[definition.id] = [...saved];

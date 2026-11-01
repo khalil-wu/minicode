@@ -14,7 +14,7 @@ import { useDesktopPreferenceTargets } from "../../hooks/useDesktopPreferenceTar
 type RequestChanges = (location?: DiffLineLocation) => void;
 const RequestChangesContext = createContext<MutableRefObject<RequestChanges | undefined> | null>(null);
 
-/** Source requestChangesRef registers the current annotation action and releases only itself. */
+/** Registers the current annotation action and releases only itself on cleanup. */
 export function useDiffRequestChanges(handler: RequestChanges): void {
   const action = useContext(RequestChangesContext);
   useLayoutEffect(() => {

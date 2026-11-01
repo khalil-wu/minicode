@@ -1,7 +1,7 @@
 export type Locale = "zh-CN" | "en-US";
 export type LocaleOverride = Locale | null;
 
-/** Codex stores null for automatic detection; unsupported UI locales use English. */
+/** A null override means automatic detection; unsupported UI locales use English. */
 export function resolveLocale(override: LocaleOverride, detectedLocale: string): Locale {
   if (override !== null) return override;
   const detected = detectedLocale.replaceAll("_", "-").toLowerCase();

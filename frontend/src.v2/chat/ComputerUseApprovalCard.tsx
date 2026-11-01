@@ -29,8 +29,8 @@ export function isComputerUseApproval(request: PendingAskUser): request is Compu
     && request.elicitation.meta.connector_id === "computer-use";
 }
 
-// Source computer-use-app-approval-request-card: this is app access, not a
-// generic empty MCP form. The existing prompt owner/queue still owns settlement.
+// Computer-use app approval is app access, not a generic empty MCP form. The
+// existing prompt owner/queue still owns settlement.
 export function ComputerUseApprovalCard({ request }: { request: ComputerUseRequest }) {
   const { t } = useI18n();
   const meta = request.elicitation.meta;

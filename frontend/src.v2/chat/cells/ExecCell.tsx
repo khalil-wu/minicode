@@ -26,7 +26,7 @@ import { useSharedSecondTick } from "../../lib/shared-tick";
  * A command has one compact lifecycle row and one optional output panel. The
  * row is the canonical process projection; the panel is only mounted after
  * explicit disclosure. Command and output copy actions preserve their own
- * content, as in Codex's embedded shell block.
+ * content.
  */
 export function ExecCell({
   cell,

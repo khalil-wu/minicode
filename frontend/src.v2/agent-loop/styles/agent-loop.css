@@ -676,7 +676,7 @@
   margin-left: 0;
 }
 
-/* Codex's expanded group records are static; its live group header owns sheen. */
+/* Expanded group records are static; only the live group header owns sheen. */
 .agent-loop-timeline-group-work .agent-loop-process-cell .activity-cell-main-button[data-processing="true"],
 .agent-loop-timeline-group-work .agent-loop-process-cell .exec-cell-header-button[data-processing="true"] {
   background: none;

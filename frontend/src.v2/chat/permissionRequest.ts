@@ -3,8 +3,8 @@ import type { AdditionalPermissionProfile } from "../protocol/common-types";
 type FileSystemDetail = { kind: "fileSystem"; access: "read" | "write" | "readWrite"; paths: string[] };
 export type PermissionRequestDetail = { kind: "network" } | FileSystemDetail;
 
-// Installed desktop permission-request-model-5651a96c7a72: combine read/write
-// for the same path and keep explicit special paths in their Source spelling.
+// Combine read/write for the same path and keep explicit special paths in
+// their original spelling.
 export const permissionRequestDetails = (permissions: AdditionalPermissionProfile): PermissionRequestDetail[] => {
   const details: PermissionRequestDetail[] = [];
   if (permissions.network != null) details.push({ kind: "network" });

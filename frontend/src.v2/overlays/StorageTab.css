@@ -120,7 +120,7 @@
 }
 
 .settings-storage-review-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 16px; background: #0002; font-family: var(--font-ui); }
-/* Source default dialog: w-130, spacing=.25rem; app/browser zoom remains global. */
+/* Default dialog: w-130, spacing=.25rem; app/browser zoom remains global. */
 .settings-storage-review { position: relative; box-sizing: border-box; width: calc(.25rem * 130); max-width: 92vw; overflow: hidden; border: .5px solid var(--border-subtle); border-radius: 1.25rem; background: color-mix(in srgb, var(--surface-raised) 90%, transparent); backdrop-filter: blur(24px); color: var(--text-primary); box-shadow: 0 4px 8px -2px #0000001a; }
 .settings-storage-review form { display: flex; flex-direction: column; box-sizing: border-box; max-height: min(85dvh, 44rem); overflow: hidden; margin: 0; padding: 1.25rem; font-size: var(--mc-font-body); line-height: var(--leading-normal); }
 .settings-storage-review header { flex: 0 0 auto; padding-right: 24px; }

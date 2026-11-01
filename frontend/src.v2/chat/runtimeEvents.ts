@@ -1017,7 +1017,7 @@ export const handleRuntimeEvent = (e: ServerEvent, conversationId?: string): boo
       if (!isReplayedRuntimeEvent(e)) {
         sendClientCommand({ type: "session.usage.inspect" });
       }
-      // Canonical item lifecycle already owns the visible Source divider.
+      // Canonical item lifecycle already owns the visible compaction divider.
       if (compacted.compaction_item_id) return true;
       const tokenSummary = beforeTokens != null && afterTokens != null
         ? `从 ${beforeTokens.toLocaleString()} 降至 ${afterTokens.toLocaleString()} tokens${savedTokens ? `，节省 ${savedTokens.toLocaleString()}` : ""}`

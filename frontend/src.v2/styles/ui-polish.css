@@ -1362,7 +1362,7 @@ html[data-reduced-motion="true"] *::after {
   background: var(--surface-active) !important;
 }
 
-/* Default Source dialogs keep their surface in place while controls change. */
+/* Default dialogs keep their surface in place while controls change. */
 .mc-dialog-panel {
   border-radius: 20px;
   font-family: var(--font-ui);

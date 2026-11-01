@@ -215,7 +215,7 @@ const ToolApprovalCard = ({ request, queue }: { request: PendingApproval; queue:
   )).filter((item) => item.label !== "request"), [request.args, request.stdinAction, collaborationTool]);
   const total = 1 + queue.length;
   const displayName = displayToolName(request.toolName);
-  // The Source sandbox intent and justification belong to this frozen request.
+  // The sandbox intent and justification belong to this frozen request.
   const escalated = isEscalatedApproval(request);
   const sandboxStatus = useAppStore((s) => s.runtimeSession?.sandbox_status
     ?? s.runtimeCapabilities?.permission?.sandbox_status);

@@ -23,7 +23,7 @@ function save(owner: string, cwd: string, selection: ReviewSelection) {
 
 export function clearGitReviewSelection(owner: string) { owners.delete(owner); notify(); }
 
-/** Source ThreadScope retains twenty owners; only the explicit source preference is global. */
+/** Per-owner selections retain twenty owners; only the explicit source preference is global. */
 export function useGitReviewSelection(owner: string, cwd: string) {
   useSyncExternalStore(subscribe, () => revision);
   const stored = owners.get(owner);

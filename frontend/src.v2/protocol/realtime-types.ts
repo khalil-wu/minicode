@@ -1,4 +1,4 @@
-/** Source app-server v2/realtime.rs. Session secrets remain on the owner host. */
+/** Realtime session types. Session secrets remain on the owner host. */
 export type RealtimeVersion = "v1" | "v2" | "v3";
 export type RealtimePhase = "inactive" | "starting" | "active" | "stopping";
 

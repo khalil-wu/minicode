@@ -182,7 +182,7 @@ function ToolbarButton({ label, onClick, selected, disabled, children }: {
     aria-pressed={selected} data-selected={selected || undefined} disabled={disabled} onClick={onClick}>{children}</button></Tip>;
 }
 
-/** Source Er: 625px changes controls; compact actions live inside its options menu. */
+/** Changes controls go wide at 625px; below that the compact actions live inside the options menu. */
 export function ChangesToolbarActions({ width, mode, onModeChange, wrap, onWrapChange, allExpanded, onToggleAll,
   onRefresh, refreshDisabled = false, refreshing = false, filesVisible, onToggleFiles, onJumpToFile, jumpOpen = false,
   onCopyGitApplyCommand, copyGitApplyDisabled = false }: ChangesToolbarActionsProps) {

@@ -2,7 +2,7 @@ import type { Parser, SyntaxNode } from "@lezer/common";
 import type { FullDiffContext, FullDiffHunk, FullDiffLine } from "./full-content-metadata";
 
 export type DiffPresentationLanguage = "javascript" | "typescript" | "tsx" | "python" | "rust" | "go" | "java";
-/** Source lineAnnotations use file lines (1 based), never a rendered lineIndex. */
+/** Annotations use file lines (1 based), never a rendered lineIndex. */
 export interface DiffPresentationAnnotation { side: "additions" | "deletions"; lineNumber: number }
 
 export function diffPresentationLanguage(path: string): DiffPresentationLanguage | undefined {

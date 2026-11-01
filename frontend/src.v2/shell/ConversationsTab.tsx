@@ -472,8 +472,8 @@ export const ConversationsTab = ({
   const onNavigateRef = useRef(onNavigate);
   conversationsRef.current = conversations;
   conversationIdRef.current = pendingConversationSwitchId || conversationId;
-  // A thread can be listed under its project and Recents. Codex routes the
-  // selection to the occurrence that opened it (sidebarThreadLocationId).
+  // A thread can be listed under its project and Recents. Selection routes
+  // to the occurrence that opened it (sidebarThreadLocationId).
   // A new/restored thread starts in its visible project row, or in Recents.
   const selectedConversationId = conversationIdRef.current;
   const visibleProject = !activityView && allOrderedProjectGroups.some(({ projectKey, conversations: projectConversations }) =>

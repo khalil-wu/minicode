@@ -48,7 +48,7 @@ function reviewSummary(review: GuardianAssessment, t: Translate): string {
   }
 }
 
-/** Source automatic-approval-review-details D: initially folded, scan only title. */
+/** Review details start folded so a scan reads only the title. */
 export function GuardianReviewDetails({ review }: { review: GuardianAssessment }) {
   const { t } = useI18n();
   const [preference, setExpanded, userToggled] = useTranscriptReadingPreference(`guardian-detail:${review.id}`, false);

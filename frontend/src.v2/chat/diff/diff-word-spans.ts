@@ -23,8 +23,8 @@ const stripEol = (line: string) => line.endsWith("\n") ? line.slice(0, line.ends
 
 function appendPart(parts: WordPart[], value: string, neutral: boolean, lastChange: boolean) {
   const previous = parts.at(-1);
-  // Source word-alt joins a one-character neutral separator to the preceding
-  // changed part. The final change stays separate, including trailing spaces.
+  // A one-character neutral separator joins the preceding changed part. The
+  // final change stays separate, including trailing spaces.
   if (!previous || lastChange) parts.push({ changed: !neutral, value });
   else if (neutral === !previous.changed || neutral && value.length === 1 && previous.changed) previous.value += value;
   else parts.push({ changed: !neutral, value });
@@ -43,8 +43,8 @@ function spansFromParts(parts: WordPart[]): DiffWordSpan[] {
 function pairedWordSpans(deletion: string, addition: string): [DiffWordSpan[], DiffWordSpan[]] {
   const before = stripEol(deletion), after = stripEol(addition);
   if (before.length > 1000 || after.length > 1000) return [[], []];
-  // diff@8.0.4 has the same WordsWithSpace tokenizer and Myers tie handling as
-  // the frozen Source caller. diffWords has different whitespace semantics.
+  // diffWordsWithSpace from diff@8.0.4 supplies the WordsWithSpace tokenizer and
+  // Myers tie handling these spans rely on; diffWords has different whitespace semantics.
   const changes: Change[] = diffWordsWithSpace(before, after);
   const deletions: WordPart[] = [], additions: WordPart[] = [];
   changes.forEach((change, index) => {
@@ -99,7 +99,7 @@ export function buildDiffWordDecorations(lines: readonly DiffWordLine[], options
   for (const block of blocks) {
     const pairedCount = Math.min(block.deletions.length, block.additions.length);
     for (let index = 0; index < pairedCount; index++) {
-      // Source's highlighter iterates diffStyle "both": a pair can be reached
+      // The highlighter iterates diffStyle "both": a pair can be reached
       // through either unified side or its split row in the requested window.
       if (windowed && !inWindow(block.unifiedStart + index)
         && !inWindow(block.unifiedStart + block.deletions.length + index)

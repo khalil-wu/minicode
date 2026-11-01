@@ -33,7 +33,7 @@ export function PlanImplementationPrompt({ owner, plan }: { owner: string; plan:
     const ownerMode = owner === before.conversationId ? before.agentMode : before.conversationWorkbenchStates[owner]?.agentMode;
     const modeCommandId = before.latestAgentModeCommandIds[owner];
     setResponding(true); setError("");
-    // Codex pending-request Wr uses this exact prefix and the plan once.
+    // The implementation request uses this exact prefix and the plan once.
     const content = implement ? `PLEASE IMPLEMENT THIS PLAN:\n${plan.plan}` : feedback!;
     const accepted = await sendChatMessage({ conversationId: owner, agentMode: implement ? "build" : "plan",
       displayContent: content, backendContent: content, quotedMessage: null, awaitAdmission: true });

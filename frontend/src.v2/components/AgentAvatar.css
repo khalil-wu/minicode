@@ -1,4 +1,4 @@
-/* Codex's original light/dark art keeps one identity across every surface. */
+/* The light/dark art keeps one identity across every surface. */
 .mc-agent-avatar {
   --agent-avatar-size: 30px;
   position: relative;

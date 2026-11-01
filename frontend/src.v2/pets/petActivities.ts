@@ -106,8 +106,8 @@ export async function submitPetFollowup(conversationId: string, prompt: string, 
 
 export function desktopPetActivity(state: AppStore, t: Translate): DesktopPetActivity {
   const statuses = new Map<string, DesktopPetTask["status"]>();
-  // MiniCode's parentConversationId also describes user-created forks. Source's
-  // parentThreadId exclusion corresponds to delegated/side chats, not those forks.
+  // MiniCode's parentConversationId also describes user-created forks. The
+  // exclusion here targets delegated/side chats, not those forks.
   const excluded = new Set(state.conversations.filter(conversation => conversation.archived || conversation.conversationType === "side_chat" || conversation.threadSource === "subagent").map(conversation => conversation.id));
   for (const id of Object.keys(state.sideChats)) excluded.add(id);
   for (const conversation of state.conversations) {
