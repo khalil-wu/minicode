@@ -574,15 +574,32 @@ def cleanup_isolated_worktree(
             "detail": "Isolated worktree was never created; nothing to remove.",
         }
     worktree_path = Path(raw_worktree_path).resolve()
-    fallback_base_root = worktree_path.parents[2] if len(worktree_path.parents) >= 3 and worktree_path.parent.name == "worktrees" else worktree_path.parent
     if not worktree_path.exists():
+        # The checkout is gone, so its repository comes from the managed
+        # worktree registry that created it; only the legacy
+        # <repo>/.minicode/worktrees/<id> layout encodes the owner in the path.
+        from backend.services.worktree_settings_service import managed_worktree_record
+
+        record = managed_worktree_record(worktree_path)
+        if record is not None:
+            base_root = Path(record["repo_root"])
+        elif (len(worktree_path.parents) >= 3 and worktree_path.parent.name == "worktrees"
+                and worktree_path.parents[1].name == ".minicode"):
+            base_root = worktree_path.parents[2]
+        else:
+            return {
+                "removed": False,
+                "conversation_id": conversation_id,
+                "path": str(worktree_path),
+                "error": "The missing worktree is not a registered MiniCode-managed worktree; its repository is unknown",
+            }
         return {
             "removed": True,
             "conversation_id": conversation_id,
             "path": str(worktree_path),
             "branch": str(getattr(conversation, "git_branch", "") or ""),
             "head": "",
-            "workspace_root": str(fallback_base_root),
+            "workspace_root": str(base_root),
             "message": "Isolated worktree already removed",
         }
     if current_workspace_root is not None and worktree_path == current_workspace_root:

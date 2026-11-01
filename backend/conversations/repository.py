@@ -1834,17 +1834,22 @@ class ConversationRepository:
 
         if record.conversation_type != "main":
             return
-        state = self._read_sidebar_order()
-        if state["sort_mode"] != "manual":
-            return
-        key = conversation_project_key(record)
-        if key:
-            identifiers = state["project_thread_orders"].get(key, [])
-            state = {**state, "project_thread_orders": {**state["project_thread_orders"],
-                key: [record.id, *[identifier for identifier in identifiers if identifier != record.id]]}}
-        if recent:
-            state = {**state, "recent_thread_ids": [record.id, *[identifier for identifier in state["recent_thread_ids"] if identifier != record.id]]}
-        self._write_sidebar_order(state, advance_inventory=False)
+        # The occurrence file is shared by every conversation. A conversation's
+        # manifest lock does not serialize two moves into the same project, so
+        # this read-modify-write takes the store lock like the explicit
+        # sort/reorder paths do.
+        with self._store_lock():
+            state = self._read_sidebar_order()
+            if state["sort_mode"] != "manual":
+                return
+            key = conversation_project_key(record)
+            if key:
+                identifiers = state["project_thread_orders"].get(key, [])
+                state = {**state, "project_thread_orders": {**state["project_thread_orders"],
+                    key: [record.id, *[identifier for identifier in identifiers if identifier != record.id]]}}
+            if recent:
+                state = {**state, "recent_thread_ids": [record.id, *[identifier for identifier in state["recent_thread_ids"] if identifier != record.id]]}
+            self._write_sidebar_order(state, advance_inventory=False)
 
     def set_conversation_read_state(self, conversation_id: str, has_unread_turn: bool) -> ConversationRecord | None:
         def mutate(record: ConversationRecord) -> bool:

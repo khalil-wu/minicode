@@ -1162,6 +1162,15 @@ class TaskTool(BaseTool):
                     display_summary="Subagent LLM initialization failed",
                     result_kind="subagent",
                 )
+            except BaseException:
+                # Cancelling the parent while a later child is still being
+                # prepared must release the adapters already prepared for its
+                # siblings: no worker has accepted them yet (Source's
+                # PendingSpawn guard releases provisional children on drop).
+                for resolution in prepared_resolutions:
+                    with suppress(Exception):
+                        await _close_subagent_llm_resolution(resolution)
+                raise
             for subagent_id, task, resolution in zip(
                 subagent_ids,
                 tasks,
@@ -4714,21 +4723,58 @@ class TaskTool(BaseTool):
                 if current_task is not None:
                     runtime.release_subagent_task(subagent_id, expected_task=current_task)
 
-        worker_tasks = [asyncio.create_task(run_one(index)) for index in range(total)]
         parent_metadata = metadata_from_context(context)
+        parent_run_id = str(parent_metadata.get("run_id") or "")
+        # The foreground batch reserves the same canonical child paths as the
+        # background batch: two siblings sharing a task_name would otherwise
+        # both publish as one public path and only the first could be
+        # addressed.
+        canonical_task_names = [
+            _normalize_child_task_name(task.get("task_name") or task.get("_task_name"))
+            for task in tasks
+        ]
+        batch_paths: set[str] = set()
+        for subagent_id, canonical_task_name in zip(subagent_ids, canonical_task_names, strict=True):
+            try:
+                candidate_path = runtime.validate_subagent_task_registration(
+                    subagent_id,
+                    parent_run_id=parent_run_id,
+                    canonical_task_name=canonical_task_name,
+                    agent_path_segment=canonical_task_name,
+                )
+            except (RuntimeError, ValueError) as exc:
+                return ToolResult(
+                    content=f"Parallel subagents could not be registered: {exc}",
+                    is_error=True,
+                    status="failed",
+                    display_summary="Parallel subagent registration failed",
+                    result_kind="subagent",
+                )
+            if candidate_path in batch_paths:
+                return ToolResult(
+                    content=f"Agent path {candidate_path!r} is duplicated in this batch.",
+                    is_error=True,
+                    status="blocked",
+                    display_summary="Duplicate agent task name",
+                    result_kind="subagent",
+                )
+            batch_paths.add(candidate_path)
+        worker_tasks = [asyncio.create_task(run_one(index)) for index in range(total)]
         registered_count = 0
         try:
             for index, worker_task in enumerate(worker_tasks):
                 runtime.register_subagent_task(
                     subagent_ids[index],
                     worker_task,
-                    parent_run_id=str(parent_metadata.get("run_id") or ""),
+                    parent_run_id=parent_run_id,
                     parent_tool_call_id=context.tool_call_id,
                     owner_task_id=str(getattr(context, "task_id", "") or ""),
                     session_id=str(getattr(context, "session_id", "") or ""),
                     agent_type=tasks[index].get("agent_type", "general-purpose"),
                     prompt_summary=tasks[index]["description"],
                     input_prompt=tasks[index]["prompt"],
+                    canonical_task_name=canonical_task_names[index],
+                    agent_path_segment=canonical_task_names[index],
                     cancel_with_parent=_subagent_metadata(tasks[index])["cancel_with_parent"],
                     detach_from_parent=_subagent_metadata(tasks[index])["detach_from_parent"],
                     read_only=_subagent_metadata(tasks[index])["read_only"],

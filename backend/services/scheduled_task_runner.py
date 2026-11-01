@@ -440,6 +440,9 @@ async def _run_scheduled_task_owned(
         "timestamp": datetime.now(UTC).isoformat(),
         "terminal_status": status,
         "termination_reason": stopped_reason,
+        # The run's real tool process stays viewable from the conversation,
+        # exactly like an interactive turn's committed assistant message.
+        "tool_calls": _scheduled_tool_call_records(result.get("tool_calls") or []),
         **({"failure_message": errors[-1]} if status == "failed" and errors else {}),
         "metadata": {
             "source": "scheduled_task",
@@ -505,3 +508,28 @@ async def _run_scheduled_task_owned(
         **run_context.lifecycle_cleanup_evidence(),
         "error": stopped_reason if status in {"failed", "cancelled"} else "",
     }
+
+
+def _scheduled_tool_call_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Project the run's non-private tool calls into the transcript record shape.
+
+    The REST result carries ``tool_name``/``tool_call_id``/``tool_input``; the
+    committed assistant message uses the same public tool-call records as an
+    interactive turn, so the run conversation keeps its viewable process.
+    """
+    projected: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        call_id = str(record.get("tool_call_id") or "").strip()
+        name = str(record.get("tool_name") or "").strip()
+        if not call_id or not name:
+            continue
+        public = {key: value for key, value in record.items()
+                  if key not in {"tool_call_id", "tool_name", "tool_input", "tool_output"}}
+        public.update({"id": call_id, "name": name, "args": dict(record.get("tool_input") or {})})
+        output = record.get("tool_output")
+        if isinstance(output, str) and output:
+            public["summary"] = output
+        projected.append(public)
+    return projected

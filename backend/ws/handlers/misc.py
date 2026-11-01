@@ -706,7 +706,11 @@ async def _handle_agent_message(session: "WebSocketSession", data: dict[str, Any
             return True
 
         async def emit_subagent_event(event_type: str, payload: dict[str, Any]) -> None:
-            await session.send_event(AgentEvent(type=event_type, data=payload))
+            # The command-side resume publishes the same conversation-scoped
+            # lifecycle events a running parent turn does; the owner boundary
+            # drops them unless the resolved owning conversation is attached.
+            await session.send_event(AgentEvent(type=event_type,
+                data={**payload, "conversation_id": target_conversation_id}))
 
         try:
             await resume(

@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from backend.agent.message import AgentEvent
+from backend.conversations.public_projection import PUBLIC_RECORD_TEXT_BUDGET
 from backend.ws.payload_contracts import MAX_STREAM_RESUME_BLOCKS, MAX_STREAM_RESUME_TOOLS
 
 
@@ -28,6 +29,7 @@ def stream_resume_pages(
         stream_status=snapshot["stream_status"], event_seq=snapshot["event_seq"],
         started_at=snapshot.get("started_at"),
         last_event_type=snapshot["last_event_type"],
+        record_string_budget=PUBLIC_RECORD_TEXT_BUDGET,
         **({"snapshot_id": snapshot_id, "snapshot_part": part,
             "snapshot_complete": part == page_count - 1} if snapshot_id else {}),
     ) for part in range(page_count)]

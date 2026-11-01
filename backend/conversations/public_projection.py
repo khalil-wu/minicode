@@ -23,6 +23,9 @@ from backend.agent.value_utils import finite_number as _finite_number
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _MAX_PUBLIC_DATA_URL_CHARS = 8 * 1024 * 1024
 _MAX_PUBLIC_JSON_TEXT_CHARS = 8 * 1024 * 1024
+# A resumed live tool record carries the same text budget as its persisted
+# projection, so recovery can replay any record the live turn accepted.
+PUBLIC_RECORD_TEXT_BUDGET = _MAX_PUBLIC_JSON_TEXT_CHARS
 _PUBLIC_DATA_URL_PREFIXES = (
     "data:image/png;base64,",
     "data:image/jpeg;base64,",

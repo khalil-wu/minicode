@@ -1666,6 +1666,7 @@ class AgentEvent:
         snapshot_id: str = "",
         snapshot_part: int | None = None,
         snapshot_complete: bool | None = None,
+        record_string_budget: int = _MAX_EVENT_JSON_STRING_CHARS,
     ) -> AgentEvent:
         clean_conversation_id = _required_event_text(
             conversation_id,
@@ -1695,7 +1696,10 @@ class AgentEvent:
             cleaned: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
             for record in records:
-                clean = _bounded_event_record(record, field_name=field_name)
+                # Resume records are already public projections; their text
+                # budget is the projection's, not the generic metadata cap.
+                clean = _bounded_event_record(record, field_name=field_name,
+                    max_string_characters=record_string_budget)
                 record_id = _required_event_text(
                     clean.get("id"),
                     field_name=f"{field_name}.id",

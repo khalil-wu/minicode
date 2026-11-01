@@ -828,25 +828,18 @@ class AgentControlPlane:
         if self.actor_is_subagent and not self.can_use_operation("message"):
             return None
 
-        parent_id = _parent_id(rendered)
-        visited: set[str] = {target}
-        while parent_id and parent_id not in visited:
-            visited.add(parent_id)
-            parent_record = self.runtime.get_subagent(parent_id)
-            if parent_record is None:
-                parent_record = load_persisted(parent_id)
-            parent_payload = _mapping(parent_record) if parent_record is not None else {}
-            if not parent_payload:
-                break
-            parent_id = _parent_id(parent_payload)
-        root_run_id = parent_id
-        root_run = self.runtime.get_run(root_run_id) if root_run_id else None
+        # The retained identity's owner is read through live, queued and
+        # durable parent edges; a root that fell out of the hydration window
+        # is still the same owner (Source restores v2 agents from the durable
+        # spawn-edge graph without starting a runtime for them).
+        resolve_owner = getattr(self.runtime, "get_agent_owner_run", None)
+        root_run = resolve_owner(target) if callable(resolve_owner) else None
         root_conversation_id = str(
             getattr(root_run, "conversation_id", "") or ""
         ).strip()
         if not root_conversation_id or root_conversation_id != self.conversation_id:
             return None
-        if self.actor_is_subagent and root_run_id != self.root_run_id():
+        if self.actor_is_subagent and str(getattr(root_run, "run_id", "") or "") != self.root_run_id():
             return None
         return AgentTarget(target, rendered)
 

@@ -497,7 +497,10 @@ class TerminalSessionManager:
         shell: str = "",
     ) -> TerminalSession:
         owner = _require_conversation_owner(conversation_id)
-        dead_ids = [sid for sid, session in self._sessions.items() if not session.is_alive]
+        # A session whose shell exit could not be proven keeps cleanup_pending
+        # and stays registered as the recovery handle; only sessions that
+        # actually exited are reaped from the registry.
+        dead_ids = [sid for sid, session in self._sessions.items() if not session.is_alive and not session.cleanup_pending]
         for sid in dead_ids:
             self._sessions.pop(sid, None)
 
@@ -636,7 +639,7 @@ class TerminalSessionManager:
         owner = _require_conversation_owner(conversation_id)
         session = self._sessions.get(session_id)
         if session is None:
-            dead_ids = [sid for sid, existing in self._sessions.items() if not existing.is_alive]
+            dead_ids = [sid for sid, existing in self._sessions.items() if not existing.is_alive and not existing.cleanup_pending]
             for sid in dead_ids:
                 self._sessions.pop(sid, None)
             if len(self._sessions) >= self._max_sessions:

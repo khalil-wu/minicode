@@ -1094,8 +1094,20 @@ class DurableUserMessageQueue:
             if key in common_keys
         ]
         if len(common_slots) == len(desired_common):
-            for slot, entry in zip(common_slots, desired_common, strict=True):
-                merged[slot] = entry
+            # A reorder moves this owner's earlier commands between slots; the
+            # payload adopted for a slot is the owner's own edit only when it
+            # changed that command since its baseline. An entry the owner
+            # merely carried along keeps the newer durable payload another
+            # window committed (Source scopes queue updates to the explicit
+            # queued submission).
+            previous_by_key = dict(previous_indexed)
+            latest_by_key = dict(latest_indexed)
+            for slot, (key, command) in zip(common_slots, desired_common, strict=True):
+                baseline = previous_by_key.get(key)
+                durable = latest_by_key.get(key)
+                if baseline is not None and durable is not None and cls.same_pending_payload(command, baseline):
+                    command = durable
+                merged[slot] = (key, command)
 
         # Insert newly accepted commands relative to the nearest surviving
         # successor. Appended commands have no successor and therefore join

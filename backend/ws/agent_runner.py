@@ -13,6 +13,7 @@ import binascii
 import inspect
 import logging
 import os
+import posixpath
 import subprocess
 import time
 import uuid
@@ -366,12 +367,20 @@ def _reply_attachments_from_tool_calls(records: list[dict[str, Any]]) -> list[di
 
 
 def _attachment_path_key(value: str) -> str:
-    """Normalize Windows-style deliverable paths consistently on every host."""
-    normalized = value.replace("\\", "/")
+    """Compare deliverable paths in their own filesystem's case semantics.
+
+    Drive-letter and UNC paths fold case like the Windows filesystems that
+    serve them. A POSIX executor path keeps its case, so ``Report.txt`` and
+    ``report.txt`` remain two deliverables; the restored chips apply the same
+    split in workspace-path.ts.
+    """
+    normalized = posixpath.normpath(value.replace("\\", "/"))
     drive, separator, remainder = normalized.partition(":/")
-    if separator:
-        normalized = f"{drive.lower()}:/{remainder}"
-    return os.path.normcase(os.path.normpath(normalized)).lower()
+    if separator and len(drive) == 1 and drive.isalpha():
+        return f"{drive.lower()}:/{remainder.lower()}"
+    if normalized.startswith("//"):
+        return normalized.lower()
+    return normalized
 
 
 def _project_agent_message_event(

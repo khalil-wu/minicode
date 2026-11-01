@@ -215,6 +215,18 @@ WRITE_SCOPE_STRATEGIES: frozenset[str] = frozenset({"none", "workspace", "worktr
 METRICS_DIR = DATA_ROOT / "metrics"
 METRICS_FILE = METRICS_DIR / "agent_metrics.jsonl"
 SWARM_DIR = DATA_ROOT / "swarm"
+_DEFAULT_SWARM_DIR = SWARM_DIR
+
+
+def runtime_state_root_for_store(store_dir: Path, *, explicit: bool) -> Path:
+    """The state root that owns a swarm store's message board.
+
+    A caller-supplied store keeps its state beside the store; the process
+    default store's state is the agent runtime root. The cold purge treats a
+    redirected module default the same way the live runtime treats an
+    explicit store directory, so both delete the same board database.
+    """
+    return store_dir.parent if explicit else agent_runtime_root()
 _RUNTIME_INSTANCE_ID = uuid4().hex
 RUNTIME_LEASE_TTL_MS = max(
     10_000,
@@ -329,11 +341,8 @@ class AgentRuntime:
         self._lease_thread: threading.Thread | None = None
         store_dir = swarm_store_dir or ((metrics_file.parent / "swarm") if metrics_file is not None else SWARM_DIR)
         self._swarm_store = FileSwarmStore(store_dir)
-        self._runtime_state_root = (
-            store_dir.parent
-            if metrics_file is not None or swarm_store_dir is not None
-            else agent_runtime_root()
-        )
+        self._runtime_state_root = runtime_state_root_for_store(
+            store_dir, explicit=metrics_file is not None or swarm_store_dir is not None)
         from backend.agent.message_board import MessageBoards
         self.message_boards = MessageBoards(self._runtime_state_root)
         lease = self._swarm_store.claim_runtime_lease(
@@ -4397,6 +4406,17 @@ def purge_persisted_conversation_runtime(conversation_id: str) -> dict[str, Any]
             subagent_records=durable["subagent_records"],
         ),
     )
+    if not removed.get("cleanup_pending"):
+        # The message board is its own local database. The live purge deletes
+        # the conversation's tree after the swarm records; the cold purge owns
+        # the same contract for a runtime that was never hydrated.
+        from backend.agent.message_board import MessageBoards
+
+        boards = MessageBoards(runtime_state_root_for_store(SWARM_DIR, explicit=SWARM_DIR != _DEFAULT_SWARM_DIR))
+        try:
+            boards.delete_tree(owner)
+        finally:
+            boards.close()
     return removed
 
 
