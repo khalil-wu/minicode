@@ -509,7 +509,7 @@
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-weight: var(--fw-normal);
+  font-weight: var(--fw-regular);
   cursor: pointer;
 }
 

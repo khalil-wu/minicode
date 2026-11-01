@@ -1,7 +1,7 @@
 .mc-mcp-app { position: relative; margin: 12px 0; min-width: 0; }
 .mc-mcp-app-inline, .mc-mcp-app-frame-host { width: 100%; min-width: 0; }
 .mc-mcp-app-frame-host iframe, .mc-mcp-app-frame-host webview { display: flex; width: 100%; border: 0; background: transparent; }
-.mc-mcp-app-bordered { border: 1px solid var(--border-default); border-radius: 12px; overflow: hidden; }
+.mc-mcp-app-bordered { border: 1px solid var(--border-subtle); border-radius: 12px; overflow: hidden; }
 .mc-mcp-app-frame-host.mc-mcp-app-fullscreen { height: 100%; border: 0; border-radius: 0; }
 .mc-mcp-app-frame-host.mc-mcp-app-fullscreen iframe, .mc-mcp-app-frame-host.mc-mcp-app-fullscreen webview { height: 100% !important; }
 .mc-mcp-app-status { padding: 12px 0; color: var(--text-secondary); font-size: 13px; }

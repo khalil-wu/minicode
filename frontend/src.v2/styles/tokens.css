@@ -98,6 +98,7 @@
   --border-soft:   oklch(0.870 0.006 250 / 0.18);
   --border-strong: oklch(0.870 0.006 250 / 0.30);
   --border-focus:  var(--accent-primary);
+  --focus-ring:    var(--accent-primary);
 
   /* Neutral interaction colors shared by controls, links and selected text. */
   --accent-primary:   oklch(0.82 0 0);
@@ -454,6 +455,7 @@
   --border-soft:   oklch(0.300 0.006 250 / 0.16);
   --border-strong: oklch(0.300 0.006 250 / 0.28);
   --border-focus:  var(--accent-primary);
+  --focus-ring:    var(--accent-primary);
 
   /* Accent (7) — light mode pushes L lower so primary stays
      ≥ 4.5:1 vs surface-page (P1.4 invariant under light theme). */

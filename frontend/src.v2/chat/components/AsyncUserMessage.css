@@ -2,6 +2,6 @@
 .async-user-message fieldset { border: 0; padding: 0; margin: 0 0 16px; min-width: 0; }
 .async-user-message legend { margin-bottom: 10px; font-weight: 500; }
 .async-user-option { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
-.async-user-message textarea { display: block; width: 100%; resize: vertical; padding: 10px; color: inherit; font: inherit; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 10px; }
-.async-user-message button { padding: 6px 14px; border-radius: 16px; border: 1px solid var(--border-color); color: var(--text-primary); background: var(--bg-secondary); cursor: pointer; }
+.async-user-message textarea { display: block; width: 100%; resize: vertical; padding: 10px; color: inherit; font: inherit; background: var(--surface-soft); border: 1px solid var(--border-subtle); border-radius: 10px; }
+.async-user-message button { padding: 6px 14px; border-radius: 16px; border: 1px solid var(--border-subtle); color: var(--text-primary); background: var(--surface-soft); cursor: pointer; }
 .async-user-message button:disabled { opacity: .5; cursor: default; }

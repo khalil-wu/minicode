@@ -50,7 +50,7 @@
 .settings-search-result strong { font-size: var(--mc-font-secondary); font-weight: var(--fw-medium); }
 .settings-search-result span { color: var(--text-muted); font-size: var(--mc-font-caption); line-height: var(--leading-snug); }
 .settings-search-highlight { outline: 2px solid color-mix(in oklch, var(--accent-primary) 55%, transparent); outline-offset: 5px; border-radius: var(--radius-sm); }
-.settings-unsaved { display: inline-block; margin-left: 9px; color: var(--text-muted); font-size: var(--mc-font-caption); font-weight: var(--fw-normal); }
+.settings-unsaved { display: inline-block; margin-left: 9px; color: var(--text-muted); font-size: var(--mc-font-caption); font-weight: var(--fw-regular); }
 .scheduler-task-title { border: 0; padding: 0; background: transparent; color: var(--text-primary); font-weight: var(--fw-medium); font-size: var(--mc-font-body); text-align: left; }
 .scheduler-task-title:hover { color: var(--accent-primary); }
 .scheduler-task-next, .scheduler-run-date { display: block; color: var(--text-muted); font-size: var(--mc-font-caption); padding-top: 3px; }

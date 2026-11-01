@@ -1536,7 +1536,7 @@
 
 .activity-cell-plan-summary > span:last-child {
   color: var(--text-muted);
-  font-weight: var(--fw-normal);
+  font-weight: var(--fw-regular);
 }
 
 .activity-cell-plan-step {
@@ -1792,7 +1792,7 @@
 
 .exec-cell-no-output {
   color: var(--text-muted);
-  font-weight: var(--fw-normal);
+  font-weight: var(--fw-regular);
 }
 
 .exec-cell-output-pre {

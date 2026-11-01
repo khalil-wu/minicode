@@ -13,7 +13,7 @@
 .voice-shortcut-capture[data-capturing="true"] { outline: 1px solid var(--border-focus); }
 .voice-history-row { display: flex; align-items: center; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border-subtle); }
 .voice-history-copy { display: grid; flex: 1; min-width: 0; gap: 4px; }
-.voice-history-transcript { display: block; overflow: hidden; color: var(--text-primary); font-size: var(--text-sm); font-weight: var(--fw-normal); text-overflow: ellipsis; white-space: nowrap; }
+.voice-history-transcript { display: block; overflow: hidden; color: var(--text-primary); font-size: var(--text-sm); font-weight: var(--fw-regular); text-overflow: ellipsis; white-space: nowrap; }
 .voice-history-time { font-size: var(--text-xs); color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .voice-history-actions { display: flex; flex-shrink: 0; align-items: center; gap: 8px; }
 .voice-history-copy p { margin: 5px 0 0; font-size: var(--text-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
