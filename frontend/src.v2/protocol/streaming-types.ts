@@ -99,11 +99,9 @@ export type StreamingServerEventType =
   | "agent.progress"
   | "runtime.span"
   | "task.update"
-  | "approval_request"
   | "permission.decision"
   | "approval.cancelled"
   | "approval.file_diff"
-  | "ask_user"
   | "done"
   | "error"
   | "stream_resume"
@@ -530,25 +528,6 @@ export interface AgentRunCompletedEvent extends AgentRunRecordPayload {
   type: "agent.run.completed";
 }
 
-export interface ApprovalRequestEvent {
-  type: "approval_request";
-  tool_call_id: string;
-  tool_name: string;
-  args: Record<string, unknown>;
-  conversation_id: string;
-  turn_id?: string;
-  message_id?: string;
-  workspace_root?: string;
-  permission_mode?: string;
-  workspace_scope?: string;
-  source_agent?: string;
-  source_thread?: string;
-  source_tool?: string;
-  diff?: unknown;
-  timeout_seconds?: number;
-  expires_at?: number;
-}
-
 export interface ApprovalFileDiffEvent {
   type: "approval.file_diff";
   conversation_id: string;
@@ -563,18 +542,9 @@ export interface ApprovalFileDiffEvent {
 
 export interface ApprovalCancelledEvent {
   type: "approval.cancelled";
+  conversation_id: string;
   request_ids: string[];
   reason?: string;
-}
-
-export interface AskUserEvent {
-  type: "ask_user";
-  conversation_id: string;
-  tool_call_id: string;
-  question: string;
-  options?: string[];
-  turn_id?: string;
-  message_id?: string;
 }
 
 export interface LifecycleCleanupReceipt {

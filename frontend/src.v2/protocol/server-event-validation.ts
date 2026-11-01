@@ -205,6 +205,13 @@ const REQUIRED_ROUTING_FIELDS: Partial<
     source: "string",
     rules: "record",
   },
+  "permission.mode.updated": {
+    session_id: "string",
+    conversation_id: "string",
+    workspace_root: "string",
+    mode: "string",
+    source: "string",
+  },
   "workspace.recent.list": { projects: "array" },
   "checkpoint.created": {
     id: "string",

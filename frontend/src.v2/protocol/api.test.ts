@@ -120,8 +120,6 @@ describe("api base URLs", () => {
       "conversation-image-1",
     ));
 
-    expect(api.withRuntimeToken("http://127.0.0.1:8100/api/status"))
-      .toBe("http://127.0.0.1:8100/api/status");
     expect(rawUrl.origin + rawUrl.pathname).toBe("http://127.0.0.1:8100/api/workspace/raw");
     expect(rawUrl.searchParams.get("path")).toBe("docs/report.pdf");
     expect(rawUrl.searchParams.get("workspace_root")).toBe("C:\\Desktop\\MiniCode");
@@ -135,25 +133,8 @@ describe("api base URLs", () => {
     expect(artifactUrl.searchParams.get("conversation_id")).toBe("conversation-image-1");
     expect(artifactUrl.searchParams.get("asset_token")).toMatch(/^1700000300\.[A-Za-z0-9_-]+$/);
     expect(artifactUrl.searchParams.get("minicode_token")).toBeNull();
-    expect(api.withRuntimeToken("https://example.com/download"))
-      .toBe("https://example.com/download");
 
     nowSpy.mockRestore();
-  });
-
-  it("keeps runtime token query helper out of general frontend callers", async () => {
-    const fs = await import("node:fs");
-    const path = await import("node:path");
-    const root = path.resolve(__dirname, "..");
-    const files = [
-      path.join(root, "panels", "EditorPanel.tsx"),
-      path.join(root, "shell", "fileTreeHelpers.tsx"),
-    ];
-
-    for (const file of files) {
-      const source = fs.readFileSync(file, "utf8");
-      expect(source).not.toContain("withRuntimeToken(");
-    }
   });
 });
 

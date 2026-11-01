@@ -493,8 +493,6 @@ export interface ConversationCreateCommand {
   title?: string;
   conversation_type?: "main" | "side_chat";
   source_conversation_id?: string;
-  /** @deprecated Use conversation_type. */
-  side_chat?: boolean;
   git_isolated?: boolean;
   workspace_root?: string;
   execution_cwd?: string;

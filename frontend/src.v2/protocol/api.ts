@@ -200,8 +200,6 @@ const artifactAssetToken = (
   return `${expiresAt}.${signature}`;
 };
 
-export const withRuntimeToken = (url: string): string => url;
-
 export const workspaceRawResourceUrlWithToken = (
   path: string,
   workspaceRoot: string,

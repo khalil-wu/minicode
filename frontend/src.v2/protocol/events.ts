@@ -41,11 +41,9 @@ export type {
   RuntimeSpanEvent,
   AgentRunStartedEvent,
   AgentRunCompletedEvent,
-  ApprovalRequestEvent,
   PermissionDecisionEvent,
-    ApprovalFileDiffEvent,
+  ApprovalFileDiffEvent,
   ApprovalCancelledEvent,
-  AskUserEvent,
   DoneEvent,
   ErrorEvent,
   StreamResumeEvent,
@@ -381,10 +379,10 @@ export interface UntypedServerEvent {
     | "guardian_warning"
     | "agent.progress"
     | "runtime.span"
-      | "permission.decision"
+    | "permission.decision"
     | "approval.cancelled"
     | "approval.file_diff"
-      | "done"
+    | "done"
     | "error"
     | "stream_event"
     | "rate_limit"
@@ -535,8 +533,8 @@ export interface UntypedClientCommand {
     | "scheduler.update"
     | "scheduler.history"
     | "scheduler.remove"
-  | "scheduler.toggle"
-  | "scheduler.run_now"
+    | "scheduler.toggle"
+    | "scheduler.run_now"
     | "scheduler.retry"
     | "scheduler.cancel"
     | "scheduler.heartbeat.renderer_state"
@@ -617,11 +615,9 @@ import type {
   RuntimeSpanEvent,
   AgentRunStartedEvent,
   AgentRunCompletedEvent,
-  ApprovalRequestEvent,
   PermissionDecisionEvent,
   ApprovalFileDiffEvent,
   ApprovalCancelledEvent,
-  AskUserEvent,
   DoneEvent,
   ErrorEvent,
   StreamResumeEvent,
@@ -767,11 +763,9 @@ type ServerEventPayload =
   | RuntimeSpanEvent
   | AgentRunStartedEvent
   | AgentRunCompletedEvent
-  | ApprovalRequestEvent
   | PermissionDecisionEvent
   | ApprovalFileDiffEvent
   | ApprovalCancelledEvent
-  | AskUserEvent
   | DoneEvent
   | ErrorEvent
   | StreamEventEvent
