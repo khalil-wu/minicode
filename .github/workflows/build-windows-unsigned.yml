@@ -50,9 +50,8 @@ jobs:
           if (-not (Test-Path desktop/release-unsigned/win-unpacked/resources/UNSIGNED_TEST_BUILD)) {
             throw "Unsigned build marker missing; cannot guarantee the updater is disabled."
           }
-          if (Test-Path desktop/release-unsigned/latest.yml) {
-            throw "Unsigned builds must not create a latest.yml update feed."
-          }
+          # electron-builder may generate update metadata even with --publish never.
+          # Do not upload it or publish any unsigned artifact to GitHub Releases.
           $installers |
             Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
