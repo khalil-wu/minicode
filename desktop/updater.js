@@ -424,6 +424,12 @@ async function init({ app, getMainWindow: nextGetMainWindow, logger, getActivePt
     ? nextGetActivePtySessions
     : getActivePtySessions;
   if (!app?.isPackaged) return false;
+  // Unsigned builds are manual-install test artifacts, never auto-update clients.
+  if (fs.existsSync(path.join(process.resourcesPath, "UNSIGNED_TEST_BUILD"))) {
+    appendDesktopLog("[updater] unsigned test build: automatic updates disabled");
+    emit("disabled", { message: "Unsigned test build: install updates manually." });
+    return false;
+  }
 
   const bootHealth = beginBootHealthCheck(app);
   if (bootHealth.status === "recovery_required") {
