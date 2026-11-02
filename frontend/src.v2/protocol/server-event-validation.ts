@@ -345,11 +345,13 @@ const CONVERSATION_OWNED_EVENT_TYPES = new Set<ServerEventType>([
 ]);
 
 const WORKSPACE_OWNED_EVENT_TYPES = new Set<ServerEventType>([
-  // Generated artifacts and uploaded attachments may belong to a global,
-  // projectless conversation. Their exact conversation owner is mandatory,
-  // while workspace_root is allowed to be the canonical empty string. File,
-  // Git, checkpoint, and preview-runtime events below still require both
-  // ownership boundaries.
+  // Every producer resolves a project root before emitting: session_lifecycle
+  // skips workspace.imported entirely when there is no project_root, and
+  // workspace_imported_payload canonicalizes the path it receives, so the
+  // non-empty workspace owner gate below matches the wire contract; a
+  // projectless import is omitted rather than sent with an empty root. File,
+  // Git, checkpoint, and preview-runtime events below keep both ownership
+  // boundaries as well.
   "workspace.imported",
   "checkpoint.created",
   "checkpoint.list",
