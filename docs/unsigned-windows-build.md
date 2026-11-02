@@ -1,29 +1,30 @@
 # Unsigned Windows test installer
 
 For development and manual testing only. The production signing workflow
-(\`.github/workflows/release-windows.yml\`) remains mandatory for tag-based
+(`.github/workflows/release-windows.yml`) remains mandatory for tag-based
 GitHub Releases and the production auto-update feed.
 
 ## Build without a certificate
 
 1. Open **Actions → MiniCode Windows unsigned test build → Run workflow**.
 2. Select the intended branch and click **Run workflow**.
-3. Download the \`minicode-windows-unsigned-test\` artifact ZIP from the completed run.
-4. Extract it and verify the installer checksum against \`SHA256SUMS.txt\` before running.
+3. Download the `minicode-windows-unsigned-test` artifact ZIP from the completed run.
+4. Extract it and verify the installer checksum against `SHA256SUMS.txt` before running.
 
 A local Windows build is also available:
 
-\`\`\`powershell
+```powershell
 cd frontend
 npm ci
 cd ../desktop
 npm ci
 npm run dist:win:unsigned
-\`\`\`
+```
 
-Output: \`desktop/release-unsigned/*.exe\`. This build uses a separate
+Output: `desktop/release-unsigned/*.exe`. This build uses a separate
 electron-builder configuration that omits the update provider, disables
-code signing, and packages an \`UNSIGNED_TEST_BUILD\` marker. The desktop
+code signing, and packages an `UNSIGNED_TEST_BUILD` marker. electron-builder may still generate local
+update metadata, but none is uploaded to a release or update feed. The desktop
 updater checks the marker and never checks, downloads, or installs updates
 in this build.
 
@@ -36,7 +37,7 @@ in this build.
   for a publisher signature: an attacker controlling the download location
   could replace both the installer and checksum.
 - The workflow is manual-only and uploads to **Actions artifacts**, not
-  GitHub Releases. It must never upload \`latest.yml\` or \`*.blockmap\`
+  GitHub Releases. It must never upload `latest.yml` or `*.blockmap`
   to the production auto-update feed.
 - Unsigned test builds do not use the automatic updater; install subsequent
   versions manually after verifying their provenance.
