@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import backend.tools.search_tools as search_tools
@@ -274,7 +275,7 @@ def test_recursive_list_cache_invalidates_after_external_nested_change(tmp_path)
     assert "src/nested/second.txt" in second.content
 
 
-def test_list_files_skips_windows_reserved_device_names(tmp_path) -> None:
+def test_list_files_hides_windows_reserved_device_names_only_on_windows(tmp_path) -> None:
     (tmp_path / "normal.txt").write_text("ok", encoding="utf-8")
     (tmp_path / "nul").write_text("reserved", encoding="utf-8")
 
@@ -290,7 +291,12 @@ def test_list_files_skips_windows_reserved_device_names(tmp_path) -> None:
 
     assert result.is_error is False
     assert "normal.txt" in result.content
-    assert "nul" not in result.content
+    # Device names are only reserved by Windows; a POSIX project may legally
+    # contain nul, con.txt or aux.py and the listing must show them.
+    if os.name == "nt":
+        assert "nul" not in result.content
+    else:
+        assert "nul" in result.content
 
 
 def test_write_file_refreshes_list_files_result(tmp_path) -> None:

@@ -38,6 +38,10 @@ def test_parallel_task_preserves_child_completion_and_result_identity(
         async def acquire_subagent_slot(self, *args, **kwargs):
             return True
 
+        def validate_subagent_task_registration(self, subagent_id, *, parent_run_id="", canonical_task_name="", agent_path_segment=""):
+            # The real runtime returns the canonical child path the batch reserves.
+            return f"{parent_run_id}/{agent_path_segment or canonical_task_name or subagent_id}"
+
         def register_subagent_task(self, subagent_id, *args, **kwargs):
             registered_ids.append(subagent_id)
 

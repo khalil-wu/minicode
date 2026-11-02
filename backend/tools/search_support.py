@@ -897,9 +897,12 @@ async def _grep_with_ripgrep(
     # include glob; concrete-file authorization is handled before spawning.
     for vcs_dir in (".git", ".svn", ".hg", ".bzr", ".jj", ".sl"):
         file_filters.extend(["--glob", f"!{vcs_dir}"])
-    for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
-        file_filters.extend(["--iglob", f"!**/{reserved}"])
-        file_filters.extend(["--iglob", f"!**/{reserved}.*"])
+    # Device names are reserved by Windows only; a POSIX project may legally
+    # contain nul, con.txt or aux.py and search must still reach them.
+    if os.name == "nt":
+        for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
+            file_filters.extend(["--iglob", f"!**/{reserved}"])
+            file_filters.extend(["--iglob", f"!**/{reserved}.*"])
     for exclude in exclude_globs or []:
         file_filters.extend(["--glob", exclude])
 
@@ -1032,9 +1035,10 @@ async def _glob_with_ripgrep(
     ]
     for ignored in sorted(_IGNORED_PATH_PARTS):
         cmd.extend(["--iglob", f"!**/{ignored}/**"])
-    for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
-        cmd.extend(["--iglob", f"!**/{reserved}"])
-        cmd.extend(["--iglob", f"!**/{reserved}.*"])
+    if os.name == "nt":
+        for reserved in ("nul", "con", "prn", "aux", "com[1-9]", "lpt[1-9]"):
+            cmd.extend(["--iglob", f"!**/{reserved}"])
+            cmd.extend(["--iglob", f"!**/{reserved}.*"])
     for exclude in exclude_globs or []:
         cmd.extend(["--glob", exclude])
     cmd.append(str(search_root))
