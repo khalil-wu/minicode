@@ -1,0 +1,67 @@
+name: MiniCode Windows unsigned test build
+
+# Manual-only. Tag pushes keep using release-windows.yml (signed releases).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Unsigned Windows installer (manual download only)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      CSC_LINK: ""
+      WIN_CSC_LINK: ""
+      CSC_KEY_PASSWORD: ""
+      WIN_CSC_KEY_PASSWORD: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            desktop/package-lock.json
+      - name: Install frontend
+        working-directory: frontend
+        run: npm ci
+      - name: Install desktop
+        working-directory: desktop
+        run: npm ci
+      - name: Build unsigned installer
+        working-directory: desktop
+        run: npm run dist:win:unsigned
+      - name: Verify unsigned test artifact and checksum
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem desktop/release-unsigned/*.exe)
+          if ($installers.Count -ne 1) { throw "Expected exactly one unsigned NSIS installer." }
+          foreach ($installer in $installers) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+            if ($signature.Status -ne "NotSigned") {
+              throw "Unexpected signature state for unsigned installer $($installer.Name): $($signature.Status)"
+            }
+          }
+          if (-not (Test-Path desktop/release-unsigned/win-unpacked/resources/UNSIGNED_TEST_BUILD)) {
+            throw "Unsigned build marker missing; cannot guarantee the updater is disabled."
+          }
+          # electron-builder may generate update metadata even with --publish never.
+          # Do not upload it or publish any unsigned artifact to GitHub Releases.
+          $installers |
+            Get-FileHash -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+            Set-Content desktop/release-unsigned/SHA256SUMS.txt -Encoding ascii
+      - name: Upload unsigned test artifact (not a GitHub Release)
+        uses: actions/upload-artifact@v4
+        with:
+          name: minicode-windows-unsigned-test
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            desktop/release-unsigned/*.exe
+            desktop/release-unsigned/SHA256SUMS.txt

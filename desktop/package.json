@@ -24,6 +24,7 @@
     "runtime:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-python-runtime.ps1",
     "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-node-pty-runtime.js",
     "pack:dir": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
+    "dist:win:unsigned": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis --config unsigned-build.config.cjs --publish never",
     "dist:win": "npm run version:check && npm run runtime:prepare && npm run build:frontend:desktop && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis"
   },
   "devDependencies": {

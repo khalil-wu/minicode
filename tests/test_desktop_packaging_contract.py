@@ -96,3 +96,24 @@ def test_desktop_diagnostics_declares_private_beta_safety_defaults() -> None:
     assert 'backendPermissionMode: "confirm"' in main_source
     assert 'networkAccess: "tool_layer_approval_required"' in main_source
     assert 'windowsSandbox: "docker_workspace_container_fail_closed"' in main_source
+
+
+def test_unsigned_windows_workflow_is_manual_and_never_publishes_releases() -> None:
+    workflow = Path(".github/workflows/build-windows-unsigned.yml").read_text(encoding="utf-8")
+    unsigned_config = Path("desktop/unsigned-build.config.cjs").read_text(encoding="utf-8")
+    updater = Path("desktop/updater.js").read_text(encoding="utf-8")
+    package = json.loads(Path("desktop/package.json").read_text(encoding="utf-8"))
+
+    assert "workflow_dispatch:" in workflow
+    assert "push:" not in workflow
+    assert "contents: read" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "action-gh-release" not in workflow
+    assert "release-unsigned" in unsigned_config
+    assert "signExecutable: false" in unsigned_config
+    assert "publish: []" in unsigned_config
+    assert "UNSIGNED_TEST_BUILD" in unsigned_config
+    assert "UNSIGNED_TEST_BUILD" in updater
+    assert 'emit("disabled"' in updater
+    assert "dist:win:unsigned" in package["scripts"]
+    assert "--publish never" in package["scripts"]["dist:win:unsigned"]
