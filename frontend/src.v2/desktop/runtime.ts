@@ -375,6 +375,7 @@ export interface DesktopPreferences extends DictationPreferences {
   popoutWindowShortcut: string | null;
   popoutWindowProjectlessDefault: boolean;
   confettiEnabled: boolean;
+  autoDownloadUpdates: boolean;
   defaultTerminalLocation: "bottom" | "right";
   composerPlainTextMode: boolean;
   primaryNumberShortcutTarget: "tabs" | "sidebar";

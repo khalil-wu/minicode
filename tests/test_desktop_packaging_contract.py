@@ -92,19 +92,37 @@ def test_pdf_frame_csp_allows_only_local_backend_frames() -> None:
     assert "http:" not in frame_policy.split()
 
 
-def test_release_workflow_requires_signed_update_bundle() -> None:
+def test_release_workflow_builds_the_update_bundle_with_optional_signing() -> None:
     workflow = Path(".github/workflows/release-windows.yml").read_text(encoding="utf-8")
     ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    build_config = Path("desktop/release-build.config.cjs").read_text(encoding="utf-8")
+    package = json.loads(Path("desktop/package.json").read_text(encoding="utf-8"))
+    updater = Path("desktop/updater.js").read_text(encoding="utf-8")
 
     assert "workflow_call:" in ci_workflow
     assert "uses: ./.github/workflows/ci.yml" in workflow
     assert "needs: validation" in workflow
     assert "npm run test:packaged" in workflow
-    assert "Get-AuthenticodeSignature" in workflow
+    # The installer, latest.yml and the blockmap ship whether or not a certificate exists.
     assert "latest.yml" in workflow
     assert "*.blockmap" in workflow
     assert "SHA256SUMS.txt" in workflow
     assert "MINICODE_UPDATE_FEED_URL" in workflow
+    assert "releases/latest/download" in workflow
+    # Signing is optional: a certificate is verified when present, never required.
+    assert "refusing unsigned release" not in workflow
+    assert "Get-AuthenticodeSignature" in workflow
+    assert "CSC_IDENTITY_AUTO_DISCOVERY" in workflow
+    assert "MINICODE_CODE_SIGNING" in workflow
+    assert "--config release-build.config.cjs" in package["scripts"]["dist:win"]
+    # Unsigned builds drop publisherName from the update metadata and carry a marker
+    # the updater reads to switch its verification policy.
+    assert "verifyUpdateCodeSignature: false" in build_config
+    assert "UNSIGNED_BUILD" in build_config
+    assert Path("desktop/build/UNSIGNED_BUILD").is_file()
+    assert "UNSIGNED_BUILD" in updater
+    assert "verifyUpdateCodeSignature = async () => null" in updater
+    assert "autoDownloadUpdates" in updater
 
 
 def test_desktop_startup_failure_surface_exists_and_is_wired() -> None:

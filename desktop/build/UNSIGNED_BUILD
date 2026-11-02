@@ -1,0 +1,1 @@
+MiniCode unsigned build. This installer carries no Authenticode signature; updates are verified by the HTTPS feed and the sha512 published in latest.yml.

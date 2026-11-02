@@ -20,6 +20,8 @@ function applicationMenuHarness(locale = "en-US") {
   let zoomLevel = 0;
   let about;
   let updateChecks = 0;
+  let updateDownloads = 0;
+  let updaterStatus = { status: "idle", codeSigned: true };
   const owner = {
     isDestroyed: () => false,
     webContents: { getZoomLevel: () => zoomLevel, setZoomLevel: (value) => { zoomLevel = value; }, setIgnoreMenuShortcuts: value => { owner.ignoreMenuShortcuts = value; } },
@@ -48,7 +50,8 @@ function applicationMenuHarness(locale = "en-US") {
     }, setApplicationMenu: (value) => { menu = value; },
       getApplicationMenu: () => ({ getMenuItemById(id) { const find = items => { for (const item of items) { if (item.id === id) return item; const nested = item.submenu && find(item.submenu); if (nested) return nested; } }; return find(menu); } }) },
     shell: { openExternal: (url) => { links.push(url); } },
-    updater: { isAvailable: () => updaterAvailable, check: () => { updateChecks++; } },
+    updater: { isAvailable: () => updaterAvailable, check: () => { updateChecks++; }, download: () => { updateDownloads++; },
+      getStatus: () => ({ ...updaterStatus }) },
   });
   moduleValue.exports.buildApplicationMenu(owner);
   return {
@@ -57,9 +60,11 @@ function applicationMenuHarness(locale = "en-US") {
     get about() { return about; },
     get zoomLevel() { return zoomLevel; },
     get updateChecks() { return updateChecks; },
+    get updateDownloads() { return updateDownloads; },
     setBrowser: (value) => { handleBrowser = value; browserVisible = value; },
     setFocusedWindow: (value) => { focusedWindow = value; },
     setUpdater: (value) => { updaterAvailable = value; },
+    setUpdaterStatus: (value) => { updaterStatus = value; },
   };
 }
 
@@ -276,4 +281,18 @@ test("zoom targets the native page or the owner window, and help opens the actua
   h.buildApplicationMenu(h.owner);
   submenu(h, "help").find(item => item.label === "Check for Updates…").click();
   assert.equal(h.updateChecks, 1);
+  // Manual download appears only while an update is available; installing is a
+  // separate explicit action once it is downloaded; an unsigned build says so.
+  assert.equal(submenu(h, "help").some(item => /Update/.test(item.label) && item.label !== "Check for Updates…"), false);
+  h.setUpdaterStatus({ status: "available", version: "0.2.1", codeSigned: true });
+  h.buildApplicationMenu(h.owner);
+  submenu(h, "help").find(item => item.label === "Download Update 0.2.1").click();
+  assert.equal(h.updateDownloads, 1);
+  assert.equal(submenu(h, "help").some(item => /Unsigned build/.test(item.label)), false);
+  h.setUpdaterStatus({ status: "ready", version: "0.2.1", codeSigned: false });
+  h.buildApplicationMenu(h.owner);
+  assert.equal(typeof submenu(h, "help").find(item => item.label === "Install Update 0.2.1 and Restart").click, "function");
+  assert.equal(submenu(h, "help").some(item => item.label === "Download Update 0.2.1"), false);
+  const notice = submenu(h, "help").find(item => /Unsigned build/.test(item.label));
+  assert.equal(notice.enabled, false);
 });

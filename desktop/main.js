@@ -704,6 +704,46 @@ function setApplicationMenuState(window, state) {
   if (window === windowManager.getFocusedMainWindow()) buildApplicationMenu(window);
 }
 
+// Help-menu entries for the current update state. Downloading is manual unless
+// the "download updates automatically" preference is on; installing is always
+// explicit and goes through the update preflight.
+function updateMenuItems(label) {
+  const status = updater.getStatus();
+  const version = status.version ? ` ${status.version}` : "";
+  const items = [{ label: label("检查更新…", "Check for Updates…"), click: () => { void updater.check(); } }];
+  if (status.status === "available") {
+    items.push({ label: label(`下载更新${version}`, `Download Update${version}`), click: () => { void updater.download(); } });
+  } else if (status.status === "downloading") {
+    items.push({ label: label(`正在下载更新${version}…`, `Downloading Update${version}…`), enabled: false });
+  } else if (status.status === "ready") {
+    items.push({ label: label(`安装更新${version}并重启`, `Install Update${version} and Restart`), click: () => { void installUpdateFromMenu(label); } });
+  }
+  if (status.codeSigned === false) {
+    items.push({ label: label("此构建未签名：更新仅校验 HTTPS 与 SHA-512", "Unsigned build: updates verified by HTTPS and SHA-512 only"), enabled: false });
+  }
+  return items;
+}
+
+async function installUpdateFromMenu(label) {
+  try {
+    const preflight = await updater.preflight();
+    if (!preflight.allowed) {
+      const blocking = preflight.checks.filter((check) => check.severity === "blocking").map((check) => check.message);
+      await dialog.showMessageBox({
+        type: "info",
+        title: label("暂时无法安装更新", "The update cannot be installed yet"),
+        message: label("请先完成或关闭以下活动，再安装更新：", "Finish or close the following before installing the update:"),
+        detail: blocking.join("\n"),
+      });
+      return;
+    }
+    const result = await updater.install({ fingerprint: preflight.fingerprint });
+    if (!result.installed) appendDesktopLog(`[updater] menu install declined: ${result.reason || "unknown"}`);
+  } catch (error) {
+    appendDesktopLog(`[updater] menu install failed: ${error.message}`);
+  }
+}
+
 function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
   const locale = desktopPreferences.getPreferences().localeOverride ?? app.getLocale();
   const chinese = /^zh(?:[-_](?:cn|sg|hans.*))?$/i.test(locale);
@@ -919,9 +959,7 @@ function buildApplicationMenu(owner = windowManager.getFocusedMainWindow()) {
         { label: label("故障排除", "Troubleshooting"), click: () => shell.openExternal("https://developers.openai.com/codex/app/troubleshooting") },
         { label: label("系统状态", "System Status"), click: () => shell.openExternal("https://status.openai.com") },
         { type: "separator" },
-        ...updater.isAvailable() ? [{
-          label: label("检查更新…", "Check for Updates…"), click: () => { void updater.check(); },
-        }] : [],
+        ...updater.isAvailable() ? updateMenuItems(label) : [],
         {
           label: label("关于 " + app.getName(), "About " + app.getName()),
           click: () => {
@@ -1521,6 +1559,8 @@ app.whenReady().then(async () => {
       getActiveDownloadIds: embeddedBrowserManager.getActiveDownloadIds,
       prepareRollback: prepareAutomaticRollback,
       completeRollback: () => { rollbackPreparationInProgress = false; },
+      getPreferences: desktopPreferences.getPreferences,
+      onStatusChanged: () => buildApplicationMenu(),
     });
   } catch (error) {
     await createStartupFailureWindow(serializeError(error, "MiniCode could not safely prepare the previous version. Current user content was preserved."));

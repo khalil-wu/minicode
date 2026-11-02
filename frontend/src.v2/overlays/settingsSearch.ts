@@ -11,6 +11,7 @@ export const SETTINGS_OPTIONS: SettingsOption[] = [
     ["发送快捷键", "选择 Enter 或 Ctrl+Enter 发送消息。", "发送 换行 输入"],
     ["纯文本输入", "编写消息时，将代码、Markdown 和链接保留为字面文本。", "plain text rich composer 富文本 输入 代码 列表 链接"],
     ["跟进行为", "选择运行中的消息排队或引导方式。", "队列 补充 消息"],
+    ["自动下载更新", "发现新版本时自动下载；安装前仍会确认并检查未保存的工作。关闭后可在“帮助”菜单手动下载。", "update auto download 更新 版本 下载 安装 手动 检查更新"],
   ]),
   ...options("appearance", [
     ["编辑器", "配置缩进、保存时格式化、标签及代码模板。", "大纲 符号 缩略图 自动换行 模板 代码补全"],

@@ -29,8 +29,8 @@
     "clangd:prepare": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-clangd-runtime.ps1",
     "runtime:windows-sandbox": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-windows-sandbox-runtime.ps1",
     "native:check": "chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=1&& electron scripts/verify-pty-runtime.js && python scripts/verify-network-runtime.py",
-    "pack:dir": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:network && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir",
-    "dist:win": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:network && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis",
+    "pack:dir": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:network && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --dir --config release-build.config.cjs",
+    "dist:win": "npm run version:check && npm run language:prepare && npm run github:prepare && npm run runtime:windows-sandbox && npm run runtime:execpolicy && npm run runtime:network && npm run runtime:prepare && npm run build:frontend:release && npm run native:check && chcp 65001 > nul && set ELECTRON_RUN_AS_NODE=&& electron-builder --win nsis --config release-build.config.cjs",
     "runtime:execpolicy": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-execpolicy-runtime.ps1",
     "runtime:network": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare-network-runtime.ps1"
   },

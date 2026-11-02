@@ -24,6 +24,26 @@ let installInFlight = false;
 let statusSequence = 0;
 let prepareRollback = null;
 let completeRollback = null;
+let getPreferences = () => ({});
+let onStatusChanged = () => {};
+let lastNotifiedStatus = "";
+// A build without an Authenticode signature packages this marker next to
+// app-update.yml (see release-build.config.cjs).
+const UNSIGNED_BUILD_MARKER = "UNSIGNED_BUILD";
+let codeSigned = true;
+
+function detectCodeSigning() {
+  const resourcesPath = String(process.resourcesPath || "");
+  return !(resourcesPath && fs.existsSync(path.join(resourcesPath, UNSIGNED_BUILD_MARKER)));
+}
+
+function autoDownloadEnabled() {
+  try {
+    return Boolean(getPreferences()?.autoDownloadUpdates);
+  } catch {
+    return false;
+  }
+}
 
 const UPDATE_ACTIVITY_FIELDS = [
   "activeTurns",
@@ -218,14 +238,23 @@ function buildUpdatePreflight({
 }
 
 function emit(status, detail = {}) {
-  lastStatus = { status, sequence: ++statusSequence, ...detail };
+  lastStatus = { status, sequence: ++statusSequence, codeSigned, ...detail };
   for (const mainWindow of getMainWindows()) {
     mainWindow.webContents.send("minicode:update:status", lastStatus);
+  }
+  // Menus only need to follow status transitions, not every progress tick.
+  if (status !== lastNotifiedStatus) {
+    lastNotifiedStatus = status;
+    try {
+      onStatusChanged({ ...lastStatus });
+    } catch (error) {
+      appendDesktopLog(`[updater] status listener failed: ${error.message}`);
+    }
   }
 }
 
 function getStatus() {
-  return { ...lastStatus };
+  return { codeSigned, ...lastStatus };
 }
 
 function downloadedUpdateVersion() {
@@ -462,7 +491,7 @@ function beginBootHealthCheck(app) {
   return updateHealth;
 }
 
-async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: nextGetWindowRecord, logger, getActivePtySessions: nextGetActivePtySessions, getActiveDownloadIds: nextGetActiveDownloadIds, prepareRollback: nextPrepareRollback, completeRollback: nextCompleteRollback } = {}) {
+async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: nextGetWindowRecord, logger, getActivePtySessions: nextGetActivePtySessions, getActiveDownloadIds: nextGetActiveDownloadIds, prepareRollback: nextPrepareRollback, completeRollback: nextCompleteRollback, getPreferences: nextGetPreferences, onStatusChanged: nextOnStatusChanged } = {}) {
   if (initialized) return false;
   initialized = true;
   appRef = app || null;
@@ -475,10 +504,13 @@ async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: 
     ? nextGetActivePtySessions
     : getActivePtySessions;
   if (typeof nextGetActiveDownloadIds === "function") getActiveDownloadIds = nextGetActiveDownloadIds;
+  if (typeof nextGetPreferences === "function") getPreferences = nextGetPreferences;
+  if (typeof nextOnStatusChanged === "function") onStatusChanged = nextOnStatusChanged;
   if (!app?.isPackaged) {
     emit("unavailable");
     return false;
   }
+  codeSigned = detectCodeSigning();
 
   const bootHealth = beginBootHealthCheck(app);
   if (bootHealth.status === "recovery_required") {
@@ -507,8 +539,15 @@ async function init({ app, getMainWindows: nextGetMainWindows, getWindowRecord: 
   }
   try {
     ({ autoUpdater } = require("electron-updater"));
-    autoUpdater.autoDownload = false;
+    autoUpdater.autoDownload = autoDownloadEnabled();
     autoUpdater.autoInstallOnAppQuit = false;
+    if (!codeSigned) {
+      // An unsigned build cannot prove a publisher, so Authenticode verification
+      // of downloads is skipped by policy. The HTTPS feed and the sha512 that
+      // electron-updater checks against latest.yml remain in force.
+      autoUpdater.verifyUpdateCodeSignature = async () => null;
+      appendDesktopLog("[updater] unsigned build: Authenticode verification disabled; updates rely on the HTTPS feed and the latest.yml sha512");
+    }
     if (feedUrl) {
       autoUpdater.setFeedURL({ provider: "generic", url: feedUrl });
       appendDesktopLog(`[updater] using validated runtime feed override: ${feedUrl}`);
@@ -576,6 +615,8 @@ async function check() {
     emit("ready", { version: readyVersion });
     return true;
   }
+  // The preference may have changed since the last check.
+  autoUpdater.autoDownload = autoDownloadEnabled();
   await autoUpdater.checkForUpdates();
   return true;
 }
@@ -841,6 +882,7 @@ module.exports = {
   markHealthy,
   getStatus,
   isAvailable: () => autoUpdater !== null,
+  isCodeSigned: () => codeSigned,
   validatedFeedUrl,
   readHealthState,
   writeHealthState,

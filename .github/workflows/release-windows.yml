@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish the signed artifact"
+        description: "Publish the installer as a GitHub release"
         required: true
         default: false
         type: boolean
@@ -23,7 +23,7 @@ jobs:
       contents: read
 
   windows:
-    name: Signed Windows installer
+    name: Windows installer
     needs: validation
     runs-on: windows-latest
     timeout-minutes: 45
@@ -36,22 +36,38 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             desktop/package-lock.json
-      - name: Require signing secrets
+      # A certificate signs the installer when one is configured. Without one
+      # the build is still produced, unsigned: Windows SmartScreen may warn, and
+      # installed copies verify updates by the HTTPS feed plus the latest.yml
+      # sha512 instead of Authenticode (see desktop/release-build.config.cjs).
+      - name: Resolve signing material and update feed
+        id: release
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           MINICODE_UPDATE_FEED_URL: ${{ vars.MINICODE_UPDATE_FEED_URL }}
+          DEFAULT_FEED_URL: https://github.com/${{ github.repository }}/releases/latest/download
         run: |
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)) {
-            throw "WINDOWS_CERTIFICATE_BASE64 is required; refusing unsigned release."
+          $hasCertificate = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_BASE64)
+          $hasPassword = -not [string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)
+          if ($hasCertificate -ne $hasPassword) {
+            throw "WINDOWS_CERTIFICATE_BASE64 and WINDOWS_CERTIFICATE_PASSWORD must be configured together."
           }
-          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CERTIFICATE_PASSWORD)) {
-            throw "WINDOWS_CERTIFICATE_PASSWORD is required; refusing unsigned release."
+          $feedUrl = $env:MINICODE_UPDATE_FEED_URL
+          if ([string]::IsNullOrWhiteSpace($feedUrl)) { $feedUrl = $env:DEFAULT_FEED_URL }
+          if (-not $feedUrl.StartsWith("https://")) {
+            throw "MINICODE_UPDATE_FEED_URL must be an HTTPS URL."
           }
-          if ([string]::IsNullOrWhiteSpace($env:MINICODE_UPDATE_FEED_URL) -or -not $env:MINICODE_UPDATE_FEED_URL.StartsWith("https://")) {
-            throw "MINICODE_UPDATE_FEED_URL repository variable must be an HTTPS URL."
+          $signed = if ($hasCertificate) { "true" } else { "false" }
+          "signed=$signed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "feed_url=$feedUrl" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($hasCertificate) {
+            Write-Host "Code signing certificate configured: the installer will carry an Authenticode signature."
+          } else {
+            Write-Warning "No code signing certificate configured: building an UNSIGNED installer. Windows SmartScreen may warn before it runs; installed copies verify updates by the HTTPS feed and the latest.yml sha512 instead of Authenticode."
           }
+          Write-Host "Update feed: $feedUrl"
       - name: Install frontend
         working-directory: frontend
         run: npm ci
@@ -68,6 +84,7 @@ jobs:
             throw "desktop/package.json version $packageVersion does not match tag $tagVersion"
           }
       - name: Prepare signing certificate
+        if: steps.release.outputs.signed == 'true'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
@@ -75,24 +92,34 @@ jobs:
           $certificatePath = Join-Path $env:RUNNER_TEMP "minicode-signing.p12"
           [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
           "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build signed installer
+      - name: Build installer
         working-directory: desktop
         env:
+          MINICODE_CODE_SIGNING: ${{ steps.release.outputs.signed == 'true' && '1' || '0' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.release.outputs.signed == 'true' && 'true' || 'false' }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          MINICODE_UPDATE_FEED_URL: ${{ vars.MINICODE_UPDATE_FEED_URL }}
+          MINICODE_UPDATE_FEED_URL: ${{ steps.release.outputs.feed_url }}
         run: npm run dist:win
       - name: Smoke test packaged app
         working-directory: desktop
         run: npm run test:packaged
-      - name: Verify installer signature and update metadata
+      - name: Verify installer signature state and update metadata
         shell: pwsh
+        env:
+          EXPECT_SIGNED: ${{ steps.release.outputs.signed }}
         run: |
           $installers = @(Get-ChildItem desktop/release/*.exe)
           if ($installers.Count -eq 0) { throw "No Windows installer was produced." }
           foreach ($installer in $installers) {
             $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
-            if ($signature.Status -ne "Valid") {
-              throw "Invalid Authenticode signature for $($installer.Name): $($signature.Status)"
+            if ($env:EXPECT_SIGNED -eq "true") {
+              if ($signature.Status -ne "Valid") {
+                throw "Invalid Authenticode signature for $($installer.Name): $($signature.Status)"
+              }
+            } elseif ($signature.Status -ne "NotSigned") {
+              throw "Unexpected signature state for the unsigned build $($installer.Name): $($signature.Status)"
+            } else {
+              Write-Warning "$($installer.Name) is unsigned: Windows SmartScreen may warn users before it runs."
             }
           }
           if (-not (Test-Path desktop/release/latest.yml)) {
@@ -101,12 +128,22 @@ jobs:
           if (@(Get-ChildItem desktop/release/*.blockmap).Count -eq 0) {
             throw "No differential update blockmap was produced."
           }
+          $updateConfig = "desktop/release/win-unpacked/resources/app-update.yml"
+          $marker = "desktop/release/win-unpacked/resources/UNSIGNED_BUILD"
+          if ($env:EXPECT_SIGNED -eq "true") {
+            if (Test-Path $marker) { throw "A signed build must not carry the UNSIGNED_BUILD marker." }
+          } else {
+            if (-not (Test-Path $marker)) { throw "The unsigned build is missing its UNSIGNED_BUILD marker." }
+            if ((Test-Path $updateConfig) -and (Select-String -Path $updateConfig -Pattern "publisherName" -Quiet)) {
+              throw "Unsigned update metadata must not advertise a publisherName; the updater would reject every update."
+            }
+          }
           Get-ChildItem desktop/release -File |
             Where-Object { $_.Extension -in ".exe", ".yml", ".blockmap" } |
             Get-FileHash -Algorithm SHA256 |
             ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
             Set-Content desktop/release/SHA256SUMS.txt -Encoding ascii
-      - name: Upload signed release bundle
+      - name: Upload release bundle
         uses: actions/upload-artifact@v4
         with:
           name: minicode-windows-release
@@ -121,6 +158,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', github.run_number) }}
+          body: "${{ steps.release.outputs.signed == 'true' && '' || 'This installer is not code-signed, so Windows SmartScreen may warn before it runs. Verify the download against SHA256SUMS.txt. Installed copies update over the HTTPS feed and verify each download against the sha512 published in latest.yml.' }}"
           files: |
             desktop/release/*.exe
             desktop/release/*.yml

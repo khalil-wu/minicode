@@ -183,6 +183,11 @@ const DesktopGeneralPreferences = ({ active, onOpenLicenses }: { active: boolean
           aria-checked={preferences.defaultWorkspaceFullView} data-active={preferences.defaultWorkspaceFullView}
           onClick={() => void update({ defaultWorkspaceFullView: !preferences.defaultWorkspaceFullView })}><span /></button>
       </SettingsRow>
+      <SettingsRow title={t("自动下载更新")} description={t("发现新版本时自动下载；安装前仍会确认并检查未保存的工作。关闭后可在“帮助”菜单手动下载。")}>
+        <button type="button" className="settings-toggle" role="switch" aria-label={t("自动下载更新")}
+          aria-checked={preferences.autoDownloadUpdates} data-active={preferences.autoDownloadUpdates}
+          onClick={() => void update({ autoDownloadUpdates: !preferences.autoDownloadUpdates })}><span /></button>
+      </SettingsRow>
       {desktop()!.platformInfo.platform === "win32" && <StartupAppsPreference active={active} />}
       <SettingsRow title={t("底部面板")} description={t("在应用顶部显示底部面板入口。") }>
         <button type="button" className="settings-toggle" role="switch" aria-label={t("底部面板")}

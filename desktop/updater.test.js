@@ -23,15 +23,17 @@ const {
   writeHealthState,
 } = require("./updater");
 
-function updaterConfigurationFixture(t, { packaged = true, bundledFeed = false, runtimeFeed = "" } = {}) {
+function updaterConfigurationFixture(t, { packaged = true, bundledFeed = false, runtimeFeed = "", unsigned = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-update-configuration-"));
   t.after(() => {
     assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
     fs.rmSync(root, { recursive: true, force: true });
   });
   if (bundledFeed) fs.writeFileSync(path.join(root, "app-update.yml"), "provider: generic\nurl: https://updates.example.com/minicode\n");
+  if (unsigned) fs.writeFileSync(path.join(root, "UNSIGNED_BUILD"), "unsigned test build\n");
   const calls = { imports: 0, timers: 0, feeds: [], checks: 0 };
   const fakeUpdater = {
+    autoDownload: null,
     setFeedURL: (feed) => calls.feeds.push(feed),
     on: () => {},
     checkForUpdates: async () => { calls.checks += 1; },
@@ -46,7 +48,7 @@ function updaterConfigurationFixture(t, { packaged = true, bundledFeed = false, 
     setTimeout: () => { calls.timers += 1; },
   }, { filename: "updater.js" });
   const app = { isPackaged: packaged, getVersion: () => "0.2.0", getPath: () => root };
-  return { updater: module.exports, app, calls };
+  return { updater: module.exports, app, calls, fakeUpdater };
 }
 
 test("a local package without an update feed never schedules a missing-config request", async (t) => {
@@ -80,6 +82,46 @@ test("an explicit runtime feed works without bundled update configuration", asyn
   assert.deepEqual(calls.feeds.map((feed) => ({ ...feed })), [{ provider: "generic", url: "https://updates.example.com/minicode" }]);
   assert.equal(calls.timers, 1);
   assert.equal(await updater.check(), true);
+});
+
+test("an unsigned build skips Authenticode verification by policy and says so in its status", async (t) => {
+  const { updater, app, calls, fakeUpdater } = updaterConfigurationFixture(t, { bundledFeed: true, unsigned: true });
+  await updater.init({ app });
+  assert.equal(calls.imports, 1);
+  assert.equal(updater.isCodeSigned(), false);
+  assert.equal(typeof fakeUpdater.verifyUpdateCodeSignature, "function");
+  assert.equal(await fakeUpdater.verifyUpdateCodeSignature(["MiniCode Team"], "C:/updates/MiniCode-Setup.exe"), null);
+  assert.equal(updater.getStatus().codeSigned, false);
+});
+
+test("a signed build keeps electron-updater's own signature verification", async (t) => {
+  const { updater, app, fakeUpdater } = updaterConfigurationFixture(t, { bundledFeed: true });
+  await updater.init({ app });
+  assert.equal(updater.isCodeSigned(), true);
+  assert.equal(fakeUpdater.verifyUpdateCodeSignature, undefined);
+  assert.equal(updater.getStatus().codeSigned, true);
+});
+
+test("automatic download follows the desktop preference at every check", async (t) => {
+  const { updater, app, calls, fakeUpdater } = updaterConfigurationFixture(t, { bundledFeed: true });
+  let autoDownloadUpdates = false;
+  await updater.init({ app, getPreferences: () => ({ autoDownloadUpdates }) });
+  assert.equal(fakeUpdater.autoDownload, false);
+  autoDownloadUpdates = true;
+  assert.equal(await updater.check(), true);
+  assert.equal(fakeUpdater.autoDownload, true);
+  assert.equal(calls.checks, 1);
+  autoDownloadUpdates = false;
+  await updater.check();
+  assert.equal(fakeUpdater.autoDownload, false);
+});
+
+test("status transitions reach the menu listener once per state", async (t) => {
+  const { updater, app } = updaterConfigurationFixture(t, { packaged: false });
+  const seen = [];
+  await updater.init({ app, onStatusChanged: (status) => seen.push(status.status) });
+  assert.deepEqual(seen, ["unavailable"]);
+  assert.equal(updater.getStatus().codeSigned, true);
 });
 
 function emptyActivity(revision = 1) {

@@ -509,5 +509,7 @@
   "试试其他标题或项目。": "Try another title or project.",
   "返回应用": "Back to app",
   "从其他 AI 应用导入": "Import from other AI apps",
-  "清除搜索": "Clear search"
+  "清除搜索": "Clear search",
+  "自动下载更新": "Download updates automatically",
+  "发现新版本时自动下载；安装前仍会确认并检查未保存的工作。关闭后可在“帮助”菜单手动下载。": "Download new versions automatically. Installing still asks first and checks for unsaved work. When off, download from the Help menu."
 }
