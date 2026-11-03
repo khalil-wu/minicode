@@ -86,6 +86,9 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not $compiler.StartsWith("rustc $toolchain ")) {
         throw "The pinned Windows sandbox Source requires Rust $toolchain"
     }
+    # Populate the local registry first so the pinned build below can stay offline.
+    & $cargo.Source fetch
+    if ($LASTEXITCODE -ne 0) { throw "MiniCode Windows sandbox dependency fetch failed" }
     & $cargo.Source build --offline --release -p minicode-sandbox-launcher -p codex-windows-sandbox --bin minicode-sandbox-launcher --bin codex-command-runner --bin codex-windows-sandbox-setup
     if ($LASTEXITCODE -ne 0) { throw "MiniCode Windows sandbox Rust build failed" }
 } finally {

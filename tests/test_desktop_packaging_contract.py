@@ -123,6 +123,19 @@ def test_release_workflow_builds_the_update_bundle_with_optional_signing() -> No
     assert "UNSIGNED_BUILD" in updater
     assert "verifyUpdateCodeSignature = async () => null" in updater
     assert "autoDownloadUpdates" in updater
+    # dist:win compiles the pinned native runtimes on the runner: both pinned Rust
+    # toolchains, the pinned Source checkout for the network runtime, a Python for the
+    # preparation scripts, and a crate prefetch for the sandbox build that runs offline.
+    network_script = Path("desktop/scripts/prepare-network-runtime.py").read_text(encoding="utf-8")
+    sandbox_script = Path("desktop/scripts/prepare-windows-sandbox-runtime.ps1").read_text(encoding="utf-8")
+    source_commit = next(line.split('"')[1] for line in network_script.splitlines() if line.startswith("SOURCE_COMMIT = "))
+    assert 'toolchain: "1.95.0"' in workflow
+    assert 'toolchain: "1.99.1"' in workflow
+    assert f"ref: {source_commit}" in workflow
+    assert "path: .tmp/codex-src" in workflow
+    assert "actions/setup-python@v5" in workflow
+    assert "cargo fetch --locked" in workflow
+    assert sandbox_script.index("$cargo.Source fetch") < sandbox_script.index("$cargo.Source build --offline")
 
 
 def test_desktop_startup_failure_surface_exists_and_is_wired() -> None:

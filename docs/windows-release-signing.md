@@ -3,6 +3,16 @@
 `.github/workflows/release-windows.yml` builds the Windows installer for every
 `v*` tag after the full CI validation. A code signing certificate is optional.
 
+## What the installer job builds
+
+`npm run dist:win` compiles the pinned native runtimes before packaging: the
+execution policy and the Windows sandbox with Rust 1.95.0, the network runtime
+with Rust 1.99.1 from the pinned Codex commit checked out at `.tmp/codex-src`.
+The workflow installs both toolchains, checks out that commit, prefetches the
+crates the sandbox build compiles offline, and caches the cargo registry and
+target directories between runs. Without these the job fails inside
+`Build installer` within seconds.
+
 ## Signed releases
 
 Configure the repository secrets `WINDOWS_CERTIFICATE_BASE64` (the `.pfx`/`.p12`

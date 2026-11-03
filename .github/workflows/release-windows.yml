@@ -26,9 +26,21 @@ jobs:
     name: Windows installer
     needs: validation
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # dist:win compiles the pinned native runtimes before packaging. The network
+      # runtime is built from this exact Source commit, which its wrapper expects
+      # at .tmp/codex-src.
+      - uses: actions/checkout@v4
+        with:
+          repository: openai/codex
+          ref: 970111f6cb62cc02fe36a82ea7d71b37a2889c97
+          path: .tmp/codex-src
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -36,6 +48,40 @@ jobs:
           cache-dependency-path: |
             frontend/package-lock.json
             desktop/package-lock.json
+            desktop/language-services/package-lock.json
+      # The execution policy and the Windows sandbox build with Rust 1.95.0, the
+      # network runtime with 1.99.1. The wrappers resolve cargo under
+      # ~/.rustup/toolchains/<version>-x86_64-pc-windows-msvc, so both versions are
+      # installed here; each Source tree also pins its own through rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.99.1"
+          components: clippy, rustfmt, rust-src
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+          components: clippy, rustfmt, rust-src
+      - name: Verify the pinned toolchains are where the runtime wrappers look
+        shell: pwsh
+        run: |
+          foreach ($version in "1.95.0", "1.99.1") {
+            $cargo = Join-Path $env:USERPROFILE ".rustup/toolchains/$version-x86_64-pc-windows-msvc/bin/cargo.exe"
+            if (-not (Test-Path -LiteralPath $cargo)) { throw "Rust $version is not installed at $cargo" }
+            Write-Host "$version -> $(& $cargo --version)"
+          }
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/native-execpolicy/target
+            .tmp/minicode-windows-sandbox-v0.158.0-alpha.2.1/target
+            .tmp/native-network-release/source/codex-rs/target
+          key: windows-native-runtimes-970111f6-0.158.0-alpha.2.1-${{ hashFiles('desktop/native-execpolicy/**', 'desktop/native-network/**', 'desktop/scripts/prepare-*-runtime.*', 'desktop/scripts/patch-windows-sandbox-source.py') }}
+          restore-keys: windows-native-runtimes-970111f6-0.158.0-alpha.2.1-
+      - name: Fetch locked execution policy dependencies
+        working-directory: desktop/native-execpolicy
+        run: cargo fetch --locked
       # A certificate signs the installer when one is configured. Without one
       # the build is still produced, unsigned: Windows SmartScreen may warn, and
       # installed copies verify updates by the HTTPS feed plus the latest.yml
