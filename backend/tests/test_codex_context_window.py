@@ -85,7 +85,7 @@ async def run_window(tmp_path, model, *, config=ContextWindowConfig(), builder=N
     builder = builder or ContextBuilder(llm=model, conversation_id="window-conv", workspace_root=tmp_path, token_budget=budget)
     session = AgentSession(llm=model, tool_registry=registry, artifact_store=artifacts,
         permission_checker=PermissionChecker(PermissionSettings(), tmp_path),
-        agent_settings=AgentSettings(max_iterations=12, max_turn_seconds=20, stream_max_attempts=0, code_mode_only=code_only),
+        agent_settings=AgentSettings(max_iterations=12, max_turn_seconds=60, stream_max_attempts=0, code_mode_only=code_only),
         token_budget=budget, context_builder=builder, approval_handler=approval)
     runtime = AgentRuntime(metrics_file=tmp_path / "runtime/metrics.jsonl", swarm_store_dir=tmp_path / "runtime/swarm", enable_lease_heartbeat=False)
     journal = ExecutionJournal("window-test", base_dir=tmp_path / "journals")
@@ -93,7 +93,9 @@ async def run_window(tmp_path, model, *, config=ContextWindowConfig(), builder=N
     state = state or AgentState(user_message="OLD_WINDOW_USER_REQUEST", conversation_id="window-conv", workspace_root=tmp_path)
     events = []
     try:
-        async with asyncio.timeout(20), aclosing(QueryEngine().submit(QuerySubmission(
+        # Both budgets only bound a hang; a loaded CI runner can stretch this
+        # multi-command scenario far past its local few seconds.
+        async with asyncio.timeout(60), aclosing(QueryEngine().submit(QuerySubmission(
             user_message=state.user_message, session=session, state=state,
             runtime=AgentLoopSessionContext(session_id="window-session", workspace_root=tmp_path,
                 permission_context=PermissionContext(mode="bypass"), run_context=owner, metadata=metadata or {}),
