@@ -69,6 +69,8 @@ jobs:
             if (-not (Test-Path -LiteralPath $cargo)) { throw "Rust $version is not installed at $cargo" }
             Write-Host "$version -> $(& $cargo --version)"
           }
+      # The sandbox build root is cached whole: its script refuses a build root
+      # that exists without the extracted, marked Source tree.
       - uses: actions/cache/restore@v4
         id: native-cache
         with:
@@ -76,10 +78,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/native-execpolicy/target
-            .tmp/minicode-windows-sandbox-v0.158.0-alpha.2.1/target
+            .tmp/minicode-windows-sandbox-v0.158.0-alpha.2.1
             .tmp/native-network-release/source/codex-rs/target
-          key: windows-native-runtimes-970111f6-0.158.0-alpha.2.1-${{ hashFiles('desktop/native-execpolicy/**', 'desktop/native-network/**', 'desktop/scripts/prepare-*-runtime.*', 'desktop/scripts/patch-windows-sandbox-source.py') }}
-          restore-keys: windows-native-runtimes-970111f6-0.158.0-alpha.2.1-
+          key: windows-native-runtimes-v2-970111f6-0.158.0-alpha.2.1-${{ hashFiles('desktop/native-execpolicy/**', 'desktop/native-network/**', 'desktop/scripts/prepare-*-runtime.*', 'desktop/scripts/patch-windows-sandbox-source.py') }}
+          restore-keys: windows-native-runtimes-v2-970111f6-0.158.0-alpha.2.1-
       - name: Fetch locked execution policy dependencies
         working-directory: desktop/native-execpolicy
         run: cargo fetch --locked
@@ -175,7 +177,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             desktop/native-execpolicy/target
-            .tmp/minicode-windows-sandbox-v0.158.0-alpha.2.1/target
+            .tmp/minicode-windows-sandbox-v0.158.0-alpha.2.1
             .tmp/native-network-release/source/codex-rs/target
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Smoke test packaged app
