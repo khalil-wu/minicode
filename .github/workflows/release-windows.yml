@@ -181,8 +181,24 @@ jobs:
             .tmp/native-network-release/source/codex-rs/target
           key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Smoke test packaged app
+        id: smoke
         working-directory: desktop
-        run: npm run test:packaged
+        shell: pwsh
+        run: |
+          # The smoke test inspects its process tree through Windows PowerShell,
+          # which must keep its own module directory rather than inherit pwsh's.
+          $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+          npm run test:packaged 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/packaged-smoke.log"
+          exit $LASTEXITCODE
+      - name: Surface the smoke failure
+        if: failure() && steps.smoke.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP/packaged-smoke.log"
+          if (Test-Path $log) {
+            $tail = Get-Content $log -Tail 60 | ForEach-Object { $_.Substring(0, [Math]::Min($_.Length, 300)) }
+            Write-Output ("::error title=Packaged smoke test failed::" + ($tail -join "%0A"))
+          }
       - name: Verify installer signature state and update metadata
         shell: pwsh
         env:
@@ -224,6 +240,7 @@ jobs:
             ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
             Set-Content desktop/release/SHA256SUMS.txt -Encoding ascii
       - name: Upload release bundle
+        if: always() && steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: minicode-windows-release

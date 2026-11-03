@@ -283,7 +283,7 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
     }
     const toolReply = mainRequest && providerCalls === 1;
     const delta = toolReply ? { tool_calls: [{ index: 0, id: "audio-code", type: "function",
-      function: { name: "tool_exec", arguments: JSON.stringify({ code: `audio({data:${JSON.stringify(wave.toString("base64"))},media_type:"audio/wav"});` }) } }] }
+      function: { name: "tool_exec", arguments: JSON.stringify({ code: `audio({type:"audio",mimeType:"audio/wav",data:${JSON.stringify(wave.toString("base64"))}});` }) } }] }
       : { content: "The audio fixture is ready for playback." };
     response.writeHead(200, { "content-type": "text/event-stream" });
     response.end(`data: ${JSON.stringify({ choices: [{ delta, finish_reason: toolReply ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`);
