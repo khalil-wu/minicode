@@ -22,7 +22,15 @@ if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
     if ($LASTEXITCODE -ne 0) { throw "Could not download official GitHub CLI $version" }
 }
 
-if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $archiveSha256) {
+$stream = [IO.File]::OpenRead($archive)
+$sha = [Security.Cryptography.SHA256]::Create()
+try {
+    $actualSha256 = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant()
+} finally {
+    $sha.Dispose()
+    $stream.Dispose()
+}
+if ($actualSha256 -ne $archiveSha256) {
     throw "Official GitHub CLI archive failed SHA-256 verification"
 }
 Expand-Archive -LiteralPath $archive -DestinationPath $runtimeRoot -Force

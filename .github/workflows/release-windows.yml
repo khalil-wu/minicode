@@ -140,6 +140,10 @@ jobs:
           "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build installer
         working-directory: desktop
+        # The preparation scripts run under Windows PowerShell. Started from a
+        # pwsh step it inherits pwsh's PSModulePath and loses its own module
+        # directory; cmd keeps the machine module path.
+        shell: cmd
         env:
           MINICODE_CODE_SIGNING: ${{ steps.release.outputs.signed == 'true' && '1' || '0' }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.release.outputs.signed == 'true' && 'true' || 'false' }}
