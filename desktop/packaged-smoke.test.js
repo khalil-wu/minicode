@@ -256,7 +256,9 @@ test("packaged Windows app boots renderer, preload, IPC, and managed Python side
   let cdpPort = await allocateLoopbackPort();
   while (cdpPort === backendPort) cdpPort = await allocateLoopbackPort();
   const runtimeToken = crypto.randomBytes(32).toString("base64url");
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "minicode-packaged-smoke-"));
+  // Windows can hand out an 8.3 short path (RUNNER~1) for the temp directory while
+  // the app stores canonical long paths, so every derived path is canonicalized.
+  const userDataDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "minicode-packaged-smoke-")));
   const nestedFile = path.join(userDataDir, "记得日记", "remember-diary", "src", "backup", "backupService.native.ts");
   fs.mkdirSync(path.dirname(nestedFile), { recursive: true });
   fs.writeFileSync(nestedFile, "export const backupFormat = 'JSON';\n", "utf8");
