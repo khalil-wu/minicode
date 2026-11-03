@@ -69,7 +69,8 @@ jobs:
             if (-not (Test-Path -LiteralPath $cargo)) { throw "Rust $version is not installed at $cargo" }
             Write-Host "$version -> $(& $cargo --version)"
           }
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: native-cache
         with:
           path: |
             ~/.cargo/registry
@@ -139,17 +140,40 @@ jobs:
           [IO.File]::WriteAllBytes($certificatePath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_BASE64))
           "CSC_LINK=$certificatePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build installer
+        id: build
         working-directory: desktop
-        # The preparation scripts run under Windows PowerShell. Started from a
-        # pwsh step it inherits pwsh's PSModulePath and loses its own module
-        # directory; cmd keeps the machine module path.
-        shell: cmd
+        shell: pwsh
         env:
           MINICODE_CODE_SIGNING: ${{ steps.release.outputs.signed == 'true' && '1' || '0' }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.release.outputs.signed == 'true' && 'true' || 'false' }}
           CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           MINICODE_UPDATE_FEED_URL: ${{ steps.release.outputs.feed_url }}
-        run: npm run dist:win
+        run: |
+          # The preparation scripts run under Windows PowerShell, which must keep
+          # its own module directory rather than inherit pwsh's PSModulePath.
+          $env:PSModulePath = "C:\Program Files\WindowsPowerShell\Modules;C:\Windows\System32\WindowsPowerShell\v1.0\Modules"
+          npm run dist:win 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP/dist-win.log"
+          exit $LASTEXITCODE
+      - name: Surface the build failure
+        if: failure() && steps.build.outcome == 'failure'
+        shell: pwsh
+        run: |
+          $log = "$env:RUNNER_TEMP/dist-win.log"
+          if (Test-Path $log) {
+            $tail = Get-Content $log -Tail 40 | ForEach-Object { $_.Substring(0, [Math]::Min($_.Length, 300)) }
+            Write-Output ("::error title=Build installer failed::" + ($tail -join "%0A"))
+          }
+      # Saved even when the build fails, so a retry does not recompile from scratch.
+      - uses: actions/cache/save@v4
+        if: always() && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/native-execpolicy/target
+            .tmp/minicode-windows-sandbox-v0.158.0-alpha.2.1/target
+            .tmp/native-network-release/source/codex-rs/target
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Smoke test packaged app
         working-directory: desktop
         run: npm run test:packaged
