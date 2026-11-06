@@ -46,17 +46,17 @@ function loadAppearance() {
   return { appearance: moduleBox.exports, nativeTheme, sent, makeWindow };
 }
 
-test("one window's explicit theme does not repaint another window's system theme", () => {
+test("an explicit theme drives the native frame and system restores it", () => {
   const box = loadAppearance();
   const windowA = box.makeWindow("A");
-  const windowB = box.makeWindow("B");
   box.appearance.set(windowA, { themeMode: "system", opaqueWindows: false });
   assert.equal(box.appearance.get(windowA).theme, "light");
-  box.appearance.set(windowB, { themeMode: "dark", opaqueWindows: true });
-  assert.equal(box.appearance.get(windowA).theme, "light");
-  assert.equal(box.appearance.get(windowB).theme, "dark");
-  // An explicit option must not become a process-wide nativeTheme override.
   assert.equal(box.nativeTheme.themeSource, "system");
-  assert.deepEqual(box.sent.map(entry => [entry.id, entry.state.theme]),
-    [["A", "light"], ["B", "dark"]]);
+  // The Mica backdrop, title bar and native menus only follow nativeTheme, so
+  // an explicit app theme must reach it.
+  box.appearance.set(windowA, { themeMode: "dark", opaqueWindows: false });
+  assert.equal(box.nativeTheme.themeSource, "dark");
+  assert.equal(box.appearance.get(windowA).theme, "dark");
+  box.appearance.set(windowA, { themeMode: "system", opaqueWindows: false });
+  assert.equal(box.nativeTheme.themeSource, "system");
 });

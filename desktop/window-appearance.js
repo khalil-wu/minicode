@@ -62,9 +62,9 @@ function set(window, options) {
     });
   }
   appearances.get(window).options = options;
-  // The per-window theme is applied to this window only. Writing
-  // nativeTheme.themeSource here is a process-wide override, so one window's
-  // explicit dark/light choice repainted every other window's system state.
+  // The theme preference is shared by every window, and the native frame,
+  // Mica backdrop, menus and scrollbars only follow nativeTheme.
+  nativeTheme.themeSource = options.themeMode;
   return apply(window);
 }
 
