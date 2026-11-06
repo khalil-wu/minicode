@@ -1617,13 +1617,16 @@ class ExtensionRunner:
             "system_prompt": current_system_prompt if system_prompt_modified else None,
         }
 
-    async def emit_context(self, messages: Sequence[Any]) -> list[Any]:
+    async def emit_context(self, messages: Sequence[Any]) -> Sequence[Any]:
         """Apply the sequential ``context`` transform before provider I/O."""
 
         self.assert_active()
+        handlers = self._handlers_for("context")
+        if not handlers:
+            return messages
         current = copy.deepcopy(list(messages))
         context = self.create_context()
-        for extension, handler in self._handlers_for("context"):
+        for extension, handler in handlers:
             handler_messages = copy.deepcopy(current)
             event = {"type": "context", "messages": handler_messages}
             try:

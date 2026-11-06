@@ -297,7 +297,8 @@ async def prepare_turn_context(
     emit_context = getattr(lifecycle_runtime, "emit_context", None)
     if callable(emit_context):
         transformed = await emit_context(messages)
-        messages = _coerce_extension_context_messages(transformed)
+        if transformed is not messages:
+            messages = _coerce_extension_context_messages(transformed)
 
     completed_at = epoch_ms()
     await turn_kernel.emit_runtime_span(
