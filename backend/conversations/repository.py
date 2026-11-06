@@ -952,7 +952,7 @@ class ConversationRepository:
             if record.title == "New chat" and next_message.get("role") == "user":
                 record.title = _derive_title(str(next_message.get("content", "")))
             record.updated_at = utc_now_iso()
-            self._commit_record(record)
+            self._commit_record(record, normalized_prefix=replace_index if replace_index >= 0 else len(record.transcript) - 1)
             self._cache_record(record)
             return record
 
@@ -994,7 +994,7 @@ class ConversationRepository:
             record.updated_at = utc_now_iso()
             # Partial turn snapshots are committed only at meaningful
             # lifecycle boundaries, never for every streamed token.
-            self._commit_record(record)
+            self._commit_record(record, normalized_prefix=replace_index if replace_index >= 0 else len(record.transcript) - 1)
             self._cache_record(record)
             return record
 
@@ -2356,7 +2356,7 @@ class ConversationRepository:
                 f"Conversation manifest for '{conversation_id}' is corrupt: {exc}"
             ) from exc
 
-    def _commit_record(self, record: ConversationRecord) -> None:
+    def _commit_record(self, record: ConversationRecord, *, normalized_prefix: int = 0) -> None:
         """Commit meta, transcript, and snapshot behind one atomic marker.
 
         Generation files are immutable once published.  The manifest rename
@@ -2368,10 +2368,13 @@ class ConversationRepository:
         # execution-recovery journal. Enforce the same allowlist for every
         # write path, including imports, clones, branch merges, and detached
         # ConversationRecord callers that bypass append/upsert helpers.
-        record.transcript = _normalize_loaded_transcript(record.transcript)
-        for index, message in enumerate(record.transcript):
-            if not message["id"]:
-                message["id"] = f"legacy-message-{index}"
+        # Callers that loaded a committed record may pass how many leading
+        # messages are unchanged; those were already projected on their own
+        # commit, so re-redacting them made every append O(transcript).
+        prefix = max(0, min(normalized_prefix, len(record.transcript)))
+        record.transcript = record.transcript[:prefix] + _normalize_loaded_transcript(
+            record.transcript[prefix:], index_offset=prefix,
+        )
         record.message_count = len(record.transcript)
         manifest = self._read_manifest(record.id, log_errors=False)
         if manifest is not None and self._manifest_is_deleted(manifest):
@@ -2558,7 +2561,7 @@ class ConversationRepository:
         self._safe_write_text(transcript_path, transcript_text, encoding="utf-8")
         self._safe_write_text(
             snapshot_path,
-            json.dumps(record.context_snapshot or {}, ensure_ascii=False, indent=2),
+            json.dumps(record.context_snapshot or {}, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
 
@@ -3160,6 +3163,8 @@ class ConversationRepository:
 
 def _normalize_loaded_transcript(
     transcript: list[dict[str, Any]],
+    *,
+    index_offset: int = 0,
 ) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for message in transcript:
@@ -3207,7 +3212,7 @@ def _normalize_loaded_transcript(
     # on every load so hydration/export cannot re-expose raw provider frames,
     # credentials, runtime ownership fences, or arbitrary extension metadata.
     projected = project_public_transcript(normalized)
-    for index, message in enumerate(projected):
+    for index, message in enumerate(projected, start=index_offset):
         if not message["id"]:
             message["id"] = f"legacy-message-{index}"
     return projected
