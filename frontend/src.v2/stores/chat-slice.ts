@@ -926,7 +926,8 @@ export const createChatSlice: StateCreator<AppStore, [], [], ChatSlice> = (set, 
             conversationStreaming: s.conversationStreaming,
           };
       return {
-        ...(activate ? { conversationId: id, messages: guardedMessages, isStreaming: nextStreaming, toolCallCount: computeToolCallCount(guardedMessages) } : {}),
+        ...(activate ? { conversationId: id, messages: guardedMessages, isStreaming: nextStreaming, toolCallCount: computeToolCallCount(guardedMessages),
+          usageTotals: usageTotalsFromMessages(guardedMessages) } : {}),
         ...(options?.historyPage ? { conversationHistoryPages: { ...s.conversationHistoryPages, [id]: options.historyPage } } : {}),
         ...(restoredDiff?.threadId === id ? { turnDiffs: { ...s.turnDiffs, [id]: restoredDiff } } : {}),
         conversationMessages: {
