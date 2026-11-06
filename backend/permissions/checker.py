@@ -1223,6 +1223,12 @@ class PermissionChecker:
                 ask: tuple[str, str] | None = ("content_rule", "content_ask")
             elif override is not None and override[1] in {PermissionLevel.CONFIRM, PermissionLevel.DIFF_REVIEW}:
                 ask = ("session_override", override[0])
+            elif native.kind == "skip" and context.mode != "bypass" and (args or {}).get("env"):
+                # The classification read only the command text. An env
+                # override can make a "safe" command run another program
+                # (GIT_EXTERNAL_DIFF, GIT_PAGER, ...), just like an inline
+                # `VAR=value cmd` prefix, which is never classified safe.
+                ask = ("exec_policy", "env_override")
             else:
                 ask = None
             if ask is not None:

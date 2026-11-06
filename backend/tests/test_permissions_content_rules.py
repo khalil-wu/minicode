@@ -292,6 +292,23 @@ async def test_session_auto_override_cannot_bypass_command_escalation_gate(tmp_p
     assert authorization.permission_decision.permission_level == PermissionLevel.CONFIRM
 
 
+@pytest.mark.asyncio
+async def test_env_override_cannot_ride_a_safe_command_classification(tmp_path):
+    checker = _checker(str(tmp_path))
+    confirm = checker.build_context(mode="confirm")
+    plain = await _authorize_command(tmp_path, {"command": "git log -p"}, checker, confirm, SandboxPolicy.bypass())
+    assert plain.permission_decision.permission_level == PermissionLevel.AUTO
+
+    paged = await _authorize_command(tmp_path, {"command": "git log -p", "env": {"GIT_PAGER": "calc.exe"}},
+        checker, checker.build_context(mode="confirm"), SandboxPolicy.bypass())
+    assert paged.request.exec_policy.kind == "skip"
+    assert paged.permission_decision.permission_level == PermissionLevel.CONFIRM
+
+    external = await _authorize_command(tmp_path, {"command": "git diff", "env": {"GIT_EXTERNAL_DIFF": "calc.exe"}},
+        checker, checker.build_context(mode="confirm"), SandboxPolicy.bypass())
+    assert "GIT_EXTERNAL_DIFF is not allowed" in str(external.error)
+
+
 def test_content_allow_cannot_bypass_diff_review_capability_floor():
     td = tempfile.mkdtemp()
     ctx = PermissionContext(mode="confirm")
