@@ -8,8 +8,3 @@ export const codeBlockStyle = (hasLanguage: boolean): CSSProperties => ({
   lineHeight: "var(--editor-line-height)", color: "var(--editor-foreground)",
   whiteSpace: "pre-wrap", overflowWrap: "anywhere",
 });
-
-export const lineNumberColumnStyle: CSSProperties = {
-  display: "inline-block", minWidth: "2.25em", paddingRight: "1.25em",
-  color: "var(--editor-line-number)", opacity: .8, userSelect: "none",
-};

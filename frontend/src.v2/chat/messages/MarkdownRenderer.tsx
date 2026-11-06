@@ -4,7 +4,7 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 import { decodeString } from "micromark-util-decode-string";
 import { formatHex } from "culori";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
-import { codeBlockStyle, lineNumberColumnStyle } from "./code-block-presentation";
+import { codeBlockStyle } from "./code-block-presentation";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -518,7 +518,7 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
       <code>
         {lines.map((line, index) => (
           <span key={index} className="block">
-            <span aria-hidden="true" className="code-theme-line-number" style={lineNumberColumnStyle}>{index + 1}</span>
+            <span aria-hidden="true" className="code-theme-line-number">{index + 1}</span>
             {line}
           </span>
         ))}

@@ -155,16 +155,14 @@ export function useColorizedLines(
     const colorize = async () => {
       if (selection) {
         const { highlightCodeInWorker } = await import("./code-highlighting-worker-client");
-        const tokens = await highlightCodeInWorker(code, language, selection.codeThemeId, theme);
-        const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        return tokens.map(line => line.map(token => `<span${token.color ? ` style="color: ${token.color}"` : ""}>${escape(token.content)}</span>`).join(""));
+        return highlightCodeInWorker(code, language, selection.codeThemeId, theme);
       }
       const monaco = await getMonaco(language);
       if (!isCurrent()) return [];
       await defineMiniCodeMonacoTheme(monaco, theme);
       if (!isCurrent()) return [];
       monaco.editor.setTheme(miniCodeMonacoThemeName(theme));
-      return (await monaco.editor.colorize(code, language, { tabSize: 2 })).split("<br/>");
+      return (await monaco.editor.colorize(code, language, { tabSize: 2 })).split("<br/>").map(sanitizeColorizedHtml);
     };
     colorize().then((htmlLines) => {
         if (canceled) return;
@@ -172,7 +170,7 @@ export function useColorizedLines(
         let codeIdx = 0;
         for (const line of lines) {
           if (line.kind === "add" || line.kind === "del" || line.kind === "context") {
-            htmlByLine.push(sanitizeColorizedHtml(htmlLines[codeIdx] ?? ""));
+            htmlByLine.push(htmlLines[codeIdx] ?? "");
             codeIdx++;
           } else {
             htmlByLine.push("");

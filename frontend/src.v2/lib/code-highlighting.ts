@@ -1,4 +1,4 @@
-import { createHighlighterCore, type HighlighterCore, type ThemedToken } from "@shikijs/core";
+import { createHighlighterCore, type HighlighterCore } from "@shikijs/core";
 import { createJavaScriptRegexEngine } from "@shikijs/engine-javascript";
 import { loadCodeTheme, type CodeThemeId } from "./code-themes";
 import type { AppearanceVariant } from "./appearance-colors";
@@ -51,7 +51,12 @@ export async function prepareCodeHighlighting(id: CodeThemeId, variant: Appearan
   return { highlighter, loaded, lang };
 }
 
-export async function highlightCode(code: string, language: string, id: CodeThemeId, variant: AppearanceVariant): Promise<ThemedToken[][]> {
+const escapeHtml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+
+export async function highlightCode(code: string, language: string, id: CodeThemeId, variant: AppearanceVariant): Promise<string[]> {
   const { highlighter, loaded, lang } = await prepareCodeHighlighting(id, variant, language);
-  return highlighter.codeToTokensBase(code, { lang, theme: loaded.registrationName });
+  const lines = highlighter.codeToTokensBase(code, { lang, theme: loaded.registrationName });
+  // Build the fixed span markup in the worker. The renderer receives escaped
+  // source and bundled theme colors without cloning or reconciling every token.
+  return lines.map(line => line.map(token => `<span${token.color ? ` style="color: ${escapeHtml(token.color)}"` : ""}>${escapeHtml(token.content)}</span>`).join(""));
 }

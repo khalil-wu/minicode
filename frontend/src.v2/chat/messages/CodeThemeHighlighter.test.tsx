@@ -11,7 +11,7 @@ it("keeps the fence header, typography and line-number gutter steady when stream
   const code = "const value = 1;";
   const view = render(<MarkdownRenderer content={`\`\`\`javascript\n${code}\n`} isStreaming />);
   const styles = () => [view.container.querySelector("pre")?.getAttribute("style"),
-    view.container.querySelector(".code-theme-line-number")?.getAttribute("style")];
+    view.container.querySelector(".code-theme-line-number")?.getAttribute("class")];
   expect(view.container.querySelector(".code-block-wrapper")?.textContent).toContain("javascript");
   const before = styles();
   view.rerender(<MarkdownRenderer content={`\`\`\`javascript\n${code}\n\`\`\``} isStreaming={false} />);

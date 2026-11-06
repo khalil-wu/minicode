@@ -1,16 +1,15 @@
-import type { ThemedToken } from "@shikijs/core";
 import type { CodeThemeId, CodeThemeVariant } from "./code-themes";
 
 let worker: Worker | undefined;
 let failure: Error | undefined;
 let sequence = 0;
-const pending = new Map<number, { resolve: (lines: ThemedToken[][]) => void; reject: (error: Error) => void }>();
+const pending = new Map<number, { resolve: (lines: string[]) => void; reject: (error: Error) => void }>();
 
-export function highlightCodeInWorker(code: string, language: string, theme: CodeThemeId, variant: CodeThemeVariant): Promise<ThemedToken[][]> {
+export function highlightCodeInWorker(code: string, language: string, theme: CodeThemeId, variant: CodeThemeVariant): Promise<string[]> {
   if (failure) return Promise.reject(failure);
   if (!worker) {
     worker = new Worker(new URL("./code-highlighting.worker.ts", import.meta.url), { type: "module" });
-    worker.onmessage = ({ data }: MessageEvent<{ requestId: number; lines?: ThemedToken[][]; error?: string }>) => {
+    worker.onmessage = ({ data }: MessageEvent<{ requestId: number; lines?: string[]; error?: string }>) => {
       const request = pending.get(data.requestId)!;
       pending.delete(data.requestId);
       if (data.error !== undefined) request.reject(new Error(data.error));

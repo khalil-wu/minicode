@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { useColorizedLines } from "./monaco-colorize";
 import { useAppStore } from "../stores";
+import { defaultThemePreferences } from "./appearance-themes";
 const themeTokens = readFileSync("src.v2/styles/tokens.css", "utf8");
 
 const native = vi.hoisted(() => ({ colorize: vi.fn(), defineTheme: vi.fn(), setTheme: vi.fn() }));
@@ -22,6 +23,23 @@ afterEach(() => {
   useAppStore.setState({ resolvedTheme: "dark", appearanceColors: { light: null, dark: null }, appearanceThemes: { light: null, dark: null } });
 });
 const lines = (text: string) => [{ kind: "context", text }];
+
+it("maps escaped worker markup to diff rows and recolors with the selected TextMate theme", async () => {
+  const selection = { ...defaultThemePreferences("dark"), codeThemeId: "github" as const };
+  useAppStore.setState({ resolvedTheme: "dark", appearanceThemes: { light: null, dark: selection } });
+  const input = [{ kind: "hunk", text: "@@ -1 +1 @@" },
+    { kind: "del", text: "const old = 1;" }, { kind: "add", text: 'const value = "<img src=x onerror=evil()>";' }];
+  const { result } = renderHook(() => useColorizedLines(input, "typescript"));
+  await waitFor(() => expect(result.current?.[1]).toContain("#FF7B72"));
+  expect(result.current?.[0]).toBe("");
+  const code = document.createElement("code");
+  code.innerHTML = result.current![2];
+  expect(code.textContent).toBe(input[2].text);
+  expect(code.querySelector("img")).toBeNull();
+  act(() => useAppStore.setState({ appearanceThemes: { light: null, dark: { ...selection, codeThemeId: "dracula" } } }));
+  await waitFor(() => expect(result.current?.[1]).toContain("#FF79C6"));
+  expect(native.colorize).not.toHaveBeenCalled();
+});
 
 describe("native colorization result ownership", () => {
   it("does not switch every editor back to an obsolete mode when a pending theme definition completes", async () => {

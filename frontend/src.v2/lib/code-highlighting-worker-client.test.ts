@@ -17,8 +17,8 @@ it("routes concurrent languages and theme generations to their own callers", asy
   const current = highlightCodeInWorker("print('current')", "python", "github", "dark");
   const [a, b] = created.requests;
   expect(a.theme).toBe("codex"); expect(b.variant).toBe("dark");
-  created.onmessage({ data: { requestId: b.requestId, lines: [[{ content: b.code }]] } });
-  expect(await current).toEqual([[{ content: "print('current')" }]]);
+  created.onmessage({ data: { requestId: b.requestId, lines: [`<span>${b.code}</span>`] } });
+  expect(await current).toEqual(["<span>print('current')</span>"]);
   created.onmessage({ data: { requestId: a.requestId, error: "grammar failed" } });
   await expect(old).rejects.toThrow("grammar failed");
   const interrupted = highlightCodeInWorker("next", "text", "codex", "light");
