@@ -19,6 +19,7 @@ from backend.tools.base import (
     MAX_TOOL_RESULT_BYTES,
     MAX_TOOL_RESULT_CHARS,
     MAX_TOOL_RESULT_LINES,
+    ToolResult,
 )
 
 if TYPE_CHECKING:
@@ -276,11 +277,18 @@ def record_file_hash(context: ToolExecutionContext | None, path: Path, value: st
         hashes[key] = value
 
 
-def _validate_expected_hash(path: Path, expected_hash: Any, *, require_hash: bool = True) -> tuple[bool, str]:
+def _validate_expected_hash(path: Path, expected_hash: Any, *, require_hash: bool = True) -> None:
+    """Raise when the guarded write must not proceed.
+
+    FileChangedOnDiskError means the file no longer matches what the model read;
+    every other failure is a plain ValueError describing the missing guard.
+    """
+    from backend.workspace.executor_service import FileChangedOnDiskError
+
     if not path.exists():
         if str(expected_hash or "").strip():
-            return False, "expected_hash must be empty when creating a new file"
-        return True, ""
+            raise ValueError("expected_hash must be empty when creating a new file")
+        return
 
     normalized = str(expected_hash or "").strip().lower()
     if not normalized:
@@ -290,29 +298,36 @@ def _validate_expected_hash(path: Path, expected_hash: Any, *, require_hash: boo
         # stale mental model fails cleanly as "old_string not found" rather than
         # corrupting the file. write_file/notebook keep require_hash=True.
         if not require_hash:
-            return True, ""
-        return (
-            False,
-            "expected_hash is required for existing files. Re-read the file with read_file and retry with its content_hash.",
+            return
+        raise ValueError(
+            "expected_hash is required for existing files. Re-read the file with read_file and retry with its content_hash."
         )
     try:
         current_content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return False, "Only UTF-8 text files support guarded writes"
+        raise ValueError("Only UTF-8 text files support guarded writes") from None
     except OSError as exc:
-        return False, f"Unable to read current file for guarded write ({type(exc).__name__}, errno={exc.errno})"
+        raise ValueError(f"Unable to read current file for guarded write ({type(exc).__name__}, errno={exc.errno})") from exc
 
     actual_hash = content_hash(current_content)
     if actual_hash != normalized:
-        return (
-            False,
-            f"File changed on disk; expected_hash={normalized}, actual_hash={actual_hash}. Re-read before editing.",
+        raise FileChangedOnDiskError(
+            f"File changed on disk; expected_hash={normalized}, actual_hash={actual_hash}. Re-read before editing."
         )
-    return True, ""
+
+
+def external_change_result(tool: Any, error: Exception) -> ToolResult:
+    """Error result for a write refused because the file changed under the model."""
+    from dataclasses import replace
+
+    return replace(
+        tool._error_result(str(error)),
+        display_summary="File changed on disk",
+        user_summary="文件在磁盘上已被外部修改，本次改动未写入；模型会重新读取后再试。",
+    )
 
 
 MAX_FILE_READ_BYTES = 10 * 1024 * 1024  # 10 MB
-
 
 def _read_text_range(
     path: Path,

@@ -15,7 +15,8 @@ from backend.atomic_io import atomic_write_text as _atomic_write_text, canonical
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
-from backend.tools.file_tools_common import _emit_write_diff, _validate_expected_hash, _workspace_display_path, content_hash, record_file_hash
+from backend.workspace.executor_service import FileChangedOnDiskError
+from backend.tools.file_tools_common import _emit_write_diff, _validate_expected_hash, _workspace_display_path, content_hash, external_change_result, record_file_hash
 from backend.tools.path_resolution import _is_bypass_mode, _resolve_path
 from backend.workspace.file_state_cache import get_global_file_cache
 
@@ -141,9 +142,12 @@ class NotebookEditTool(BaseTool):
             read_time_hashes = context.metadata.get("_read_file_hashes")
             if isinstance(read_time_hashes, dict):
                 expected_hash = read_time_hashes.get(canonical_path_mapping_key(read_time_hashes, path))
-        ok, message = _validate_expected_hash(path, expected_hash)
-        if not ok:
-            return self._error_result(message)
+        try:
+            _validate_expected_hash(path, expected_hash)
+        except FileChangedOnDiskError as exc:
+            return external_change_result(self, exc)
+        except ValueError as exc:
+            return self._error_result(str(exc))
 
         try:
             old_content = path.read_bytes().decode("utf-8")
@@ -158,9 +162,12 @@ class NotebookEditTool(BaseTool):
             # edits. Revalidate after waiting so a concurrent editor save is
             # rejected instead of silently overwritten.
             with file_mutation_locks([path]):
-                ok, message = _validate_expected_hash(path, expected_hash)
-                if not ok:
-                    return self._error_result(message)
+                try:
+                    _validate_expected_hash(path, expected_hash)
+                except FileChangedOnDiskError as exc:
+                    return external_change_result(self, exc)
+                except ValueError as exc:
+                    return self._error_result(str(exc))
                 _atomic_write_text(path, new_text)
                 record_file_hash(context, path, content_hash(new_text))
 

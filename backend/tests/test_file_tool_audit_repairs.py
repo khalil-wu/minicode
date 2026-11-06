@@ -349,3 +349,22 @@ def test_store_result_uses_notebook_committed_diff_over_proposed_diff(tmp_path):
     assert event.data["status"] == "success"
     assert event.data["diff"] == result.runtime_metadata["committed_diff"]
     assert "after" in json.dumps(event.data["diff"]) and "WRONG_PENDING_OUTPUT" not in json.dumps(event.data["diff"])
+
+
+@pytest.mark.asyncio
+async def test_notebook_edit_reports_an_external_change_instead_of_crashing(tmp_path):
+    import json as _json
+
+    notebook = tmp_path / "analysis.ipynb"
+    body = {"cells": [{"cell_type": "code", "id": "first", "metadata": {}, "source": ["x = 1"], "outputs": [], "execution_count": None}],
+            "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+    notebook.write_text(_json.dumps(body), encoding="utf-8")
+    stale = content_hash(notebook.read_text(encoding="utf-8"))
+    body["cells"][0]["source"] = ["x = 2  # saved by Jupyter"]
+    notebook.write_text(_json.dumps(body), encoding="utf-8")
+    result = await NotebookEditTool().execute({"notebook_path": "analysis.ipynb", "cell_id": "first",
+        "new_source": "x = 3", "expected_hash": stale}, context=_context(tmp_path, []))
+    assert result.is_error
+    assert "changed on disk" in result.content
+    assert result.display_summary == "File changed on disk"
+    assert "saved by Jupyter" in notebook.read_text(encoding="utf-8")

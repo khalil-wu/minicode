@@ -12,11 +12,13 @@ from backend.tools.path_resolution import PathTraversalError, _is_bypass_mode, _
 from backend.workspace.file_state_cache import get_global_file_cache
 
 
+from backend.workspace.executor_service import FileChangedOnDiskError
 from backend.tools.file_tools_common import (
     _emit_write_diff,
     _generate_limited_unified_diff,
     _path_arg,
     _validate_expected_hash,
+    external_change_result,
     _validate_path_arg_type,
     _validate_text_arg,
     _workspace_display_path,
@@ -243,9 +245,7 @@ class WriteFileTool(BaseTool):
             # committing, and also makes two simultaneous creates deterministic.
             def commit_write():
                 with file_mutation_locks([path]):
-                    ok, message = _validate_expected_hash(path, args.get("expected_hash"))
-                    if not ok:
-                        raise ValueError(message)
+                    _validate_expected_hash(path, args.get("expected_hash"))
                     existed = path.exists()
                     previous = path.read_bytes().decode("utf-8") if existed else None
                     atomic_write_bytes(path, content.encode("utf-8"))
@@ -260,6 +260,8 @@ class WriteFileTool(BaseTool):
             old_content, file_existed_before_write = await run_blocking_io(commit_write)
         except UnicodeDecodeError:
             return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
+        except FileChangedOnDiskError as exc:
+            return external_change_result(self, exc)
         except ValueError as exc:
             return self._error_result(str(exc))
         except PermissionError:

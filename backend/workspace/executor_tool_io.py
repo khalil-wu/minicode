@@ -18,7 +18,9 @@ from backend.tools.file_tools_common import (
     MAX_FILE_READ_BYTES, READ_FILE_MAX_BYTES, READ_FILE_MAX_LINES, _add_line_numbers,
     _generate_limited_unified_diff,
 )
+from backend.tools.file_tools_common import external_change_result
 from backend.workspace.executor_service import (
+    FileChangedOnDiskError,
     ExecutorWorkspaceService, executor_read_hash, record_executor_file_hash, text_hash, validate_text_hash,
     record_executor_file_observation,
 )
@@ -133,6 +135,8 @@ async def executor_write_file(tool, args: dict, context) -> ToolResult:
                 f"content_hash: {text_hash(content)} Diff stats: +{plus} -{minus}.")
             result.runtime_metadata["committed_diff"] = executor_changes_diff(service, [plan])
             return result
+    except FileChangedOnDiskError as error:
+        return external_change_result(tool, error)
     except (OSError, ValueError, ExecutorError) as error:
         return tool._error_result(str(error))
 
@@ -160,6 +164,8 @@ async def executor_edit_file(tool, args: dict, context) -> ToolResult:
                 f"Diff stats: +{plus} -{minus}. content_hash: {text_hash(updated)}")
             result.runtime_metadata["committed_diff"] = executor_changes_diff(service, [plan])
             return result
+    except FileChangedOnDiskError as error:
+        return external_change_result(tool, error)
     except (OSError, ValueError, ExecutorError) as error:
         return tool._error_result(str(error))
 
@@ -222,6 +228,8 @@ async def executor_list_files(tool, args, context):
             if len(output) == limit:
                 result += "\n\n[The requested entry limit was reached.]"
             return tool._success_result(result)
+    except FileChangedOnDiskError as error:
+        return external_change_result(tool, error)
     except (OSError, ValueError, ExecutorError) as error:
         return tool._error_result(str(error))
 
@@ -415,5 +423,7 @@ async def executor_notebook_edit(tool, args, context):
             result = tool._success_result(f"{action} in {service.display(path)} ({count} cells). content_hash: {text_hash(new)}")
             result.runtime_metadata["committed_diff"] = executor_changes_diff(service, [plan])
             return result
+    except FileChangedOnDiskError as error:
+        return external_change_result(tool, error)
     except (OSError, ValueError, ExecutorError) as error:
         return tool._error_result(str(error))

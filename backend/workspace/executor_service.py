@@ -93,6 +93,10 @@ def text_hash(text: str) -> str:
     return hashlib.sha256(normalize_text_newlines(text).encode("utf-8")).hexdigest()
 
 
+class FileChangedOnDiskError(ValueError):
+    """The file no longer matches the hash the model read; its edit was not applied."""
+
+
 def validate_text_hash(previous: str | None, expected, *, require: bool = True) -> None:
     expected = str(expected or "").strip().lower()
     if previous is None:
@@ -105,7 +109,7 @@ def validate_text_hash(previous: str | None, expected, *, require: bool = True) 
         return
     actual = text_hash(previous)
     if actual != expected:
-        raise ValueError(f"File changed on disk; expected_hash={expected}, actual_hash={actual}. Re-read before editing.")
+        raise FileChangedOnDiskError(f"File changed on disk; expected_hash={expected}, actual_hash={actual}. Re-read before editing.")
 
 
 def not_found(error: Exception) -> bool:

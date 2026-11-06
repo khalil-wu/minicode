@@ -23,6 +23,7 @@ from backend.tools.file_tools_common import (
     _generate_limited_unified_diff,
     _path_arg,
     _validate_expected_hash,
+    external_change_result,
     _validate_path_arg_type,
     _validate_text_arg,
     _workspace_display_path,
@@ -478,7 +479,7 @@ class EditFileTool(BaseTool):
         )
 
     async def execute(self, args: dict[str, Any], context: ToolExecutionContext | None = None) -> ToolResult:
-        from backend.workspace.executor_service import uses_executor_io
+        from backend.workspace.executor_service import FileChangedOnDiskError, uses_executor_io
         if uses_executor_io(context):
             from backend.workspace.executor_tool_io import executor_edit_file
             return await executor_edit_file(self, args, context)
@@ -520,9 +521,7 @@ class EditFileTool(BaseTool):
         if old_string == new_string:
             def verify_noop() -> None:
                 with file_mutation_locks([path]):
-                    ok, message = _validate_expected_hash(path, args.get("expected_hash"), require_hash=False)
-                    if not ok:
-                        raise ValueError(message)
+                    _validate_expected_hash(path, args.get("expected_hash"), require_hash=False)
                     current = normalize_text_newlines(path.read_bytes().decode("utf-8"))
                     target = normalize_text_newlines(old_string)
                     count = current.lstrip("\ufeff").count(target)
@@ -541,6 +540,8 @@ class EditFileTool(BaseTool):
                 await run_blocking_io(verify_noop)
             except UnicodeDecodeError:
                 return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
+            except FileChangedOnDiskError as exc:
+                return external_change_result(self, exc)
             except ValueError as exc:
                 return self._error_result(str(exc))
             except OSError as exc:
@@ -553,9 +554,7 @@ class EditFileTool(BaseTool):
             # Read, prepare, and publish the reviewed edit in the same-file queue.
             def commit_edit():
                 with file_mutation_locks([path]):
-                    ok, message = _validate_expected_hash(path, args.get("expected_hash"), require_hash=False)
-                    if not ok:
-                        raise ValueError(message)
+                    _validate_expected_hash(path, args.get("expected_hash"), require_hash=False)
                     previous = path.read_bytes().decode("utf-8")
                     updated, count = prepare_edit_content(
                         previous, old_string, new_string,
@@ -570,6 +569,8 @@ class EditFileTool(BaseTool):
             content, new_content, replaced_count = await run_blocking_io(commit_edit)
         except UnicodeDecodeError:
             return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
+        except FileChangedOnDiskError as exc:
+            return external_change_result(self, exc)
         except ValueError as exc:
             return self._error_result(str(exc))
         except PermissionError:
