@@ -4583,7 +4583,7 @@ class SessionAgentRunnerMixin:
                 requested_run_thinking,
             )
             if not task_selection:
-                conversation = self.conversation_repo.update_model_selection(
+                self.conversation_repo.update_model_selection(
                     conversation.id, provider=run_provider, model=run_model,
                     reasoning_effort=str(run_config.llm.reasoning_effort or ""),
                     only_if_unset=True,

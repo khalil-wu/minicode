@@ -139,18 +139,26 @@ def test_archive_and_restore_use_metadata_when_cold_history_checkpoint_is_corrup
     assert recovered.revision == restored.revision and not recovered.archived
 
 
-def test_warm_archive_invalidates_full_cache_and_keeps_detached_history_and_inventory(tmp_path, monkeypatch):
+def test_warm_archive_retains_owned_history_and_keeps_detached_history_and_inventory(tmp_path, monkeypatch):
     repo = ConversationRepository(tmp_path)
     created = repo.create_conversation(transcript=[{"role": "user", "content": "kept"}], context_snapshot={"history": [{"role": "user", "content": "kept"}]})
     detached = repo.get_conversation(created.id)
+    cached = repo._record_cache[created.id]
     repo.list_conversations()
+    cache_record = repo._cache_record
     def history_forbidden(*args, **kwargs):
         raise AssertionError("warm archive must not load or deepcopy full history")
+    def retain_record(record, *, copy_record=True):
+        assert copy_record is False
+        assert record.transcript is cached.transcript
+        assert record.context_snapshot is cached.context_snapshot
+        cache_record(record, copy_record=copy_record)
     with monkeypatch.context() as scoped:
         scoped.setattr(repo, "_load_record_for_mutation", history_forbidden)
-        scoped.setattr(repo, "_cache_record", history_forbidden)
+        scoped.setattr(repo, "_cache_record", retain_record)
         archived = repo.set_archived(created.id, True)
-        assert created.id not in repo._record_cache and created.id not in repo._record_cache_stamps
+        assert repo._record_cache[created.id] is not cached
+        assert not cached.archived
         assert repo.list_conversations()[0].archived
     archived.title = "caller-owned change"
     assert repo.get_conversation_summary(created.id).title == created.title

@@ -1950,6 +1950,12 @@ class ConversationRepository:
             record.archived = bool(archived)
             record.archived_at = utc_now_iso() if archived else ""
 
+        return self._mutate_summary(conversation_id, mutate)
+
+    def _mutate_summary(
+        self, conversation_id: str, mutate: Callable[[ConversationRecord], bool | None],
+    ) -> ConversationSummary | None:
+        """Commit thread metadata without reading or copying its history."""
         with self._store_lock(conversation_id):
             manifest = self._read_manifest(conversation_id, log_errors=False)
             if manifest is None:
@@ -1962,12 +1968,22 @@ class ConversationRepository:
                 metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
             record = ConversationRecord.from_dict(metadata)
             record.revision = self._manifest_revision(manifest)
-            mutate(record)
+            if mutate(record) is False:
+                return record.to_summary()
+            cached = self._record_cache.get(conversation_id)
+            retain_history = (cached is not None and cached.revision == record.revision
+                and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id))
             record.updated_at = utc_now_iso()
             self._commit_metadata(record)
             summary = record.to_summary()
-            # This record contains metadata only. A later history read must
-            # load the unchanged checkpoint and its existing projection log.
+            if retain_history:
+                # Publish a new metadata owner over the unchanged, repository-
+                # owned history. Neither the old record nor a detached caller
+                # can observe partially applied settings if the commit fails.
+                record.transcript = cached.transcript
+                record.context_snapshot = cached.context_snapshot
+                self._cache_record(record, copy_record=False)
+                return summary
             with self._process_lock:
                 self._record_cache.pop(conversation_id, None)
                 self._record_cache_stamps.pop(conversation_id, None)
@@ -1981,25 +1997,21 @@ class ConversationRepository:
         reasoning_effort: str | None = None,
         selection_mode: str | None = None,
         only_if_unset: bool = False,
-    ) -> ConversationRecord | None:
-        with self._store_lock(conversation_id):
-            record = self._load_record_for_mutation(conversation_id)
-            if record is None:
-                return None
+    ) -> ConversationSummary | None:
+        def mutate(record: ConversationRecord) -> bool:
             if only_if_unset and record.model_selection:
-                return record
+                return False
             selection = {**record.model_selection, "provider": provider, "model": model}
             if reasoning_effort is not None:
                 selection["reasoning_effort"] = reasoning_effort
             if selection_mode is not None:
                 selection["selection_mode"] = selection_mode
             if record.model_selection == selection:
-                return record
+                return False
             record.model_selection = selection
-            record.updated_at = utc_now_iso()
-            self._commit_metadata(record)
-            self._cache_record(record)
-            return record
+            return True
+
+        return self._mutate_summary(conversation_id, mutate)
 
     def update_compaction(
         self,
