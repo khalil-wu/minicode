@@ -88,6 +88,11 @@ class SessionLifecycle:
                 # These intents leave the source owner: fork assigns a child
                 # later, while Header archive navigates to an empty home.
                 target = ""
+            # A scheduled command reserved its intent before worker I/O could reorder it.
+            bound = self._navigation_receipt.get()
+            if (bound is not None and bound.client_command_id == str(data.get("client_command_id") or "")
+                    and bound.target_conversation_id == (target or None)):
+                return bound
             receipt = ForegroundNavigationReceipt(str(data.get("client_command_id") or ""), target or None)
             if kind == "session.restore" and self._foreground_navigation_pending:
                 return receipt

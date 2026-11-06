@@ -263,6 +263,7 @@ class SessionCommandDispatcher:
         self._last_command_backlog_error_at = 0.0
         self._recent_client_command_ids = self._load_recent_client_command_ids()
         self._recent_client_command_id_set = set(self._recent_client_command_ids)
+        self._client_command_store_lock = asyncio.Lock()
 
     @property
     def client_command_store(self) -> ClientCommandDedupStore:
@@ -320,14 +321,14 @@ class SessionCommandDispatcher:
             source="user_queue", connection_generation=connection_generation)
         for command_id, (command, _deliveries) in tuple(self._pending_client_completions.items()):
             self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command)
-        for command in durable_queue.pending_client_commands():
+        for command in await to_thread_cancel_safe(durable_queue.pending_client_commands):
             command_id = self._client_command_id(command)
             if not command_id:
                 continue
-            if self._client_command_seen(command):
+            if await to_thread_cancel_safe(self._client_command_seen, command):
                 # Reconcile a stale pending entry beside a completion record.
                 try:
-                    reconciled = durable_queue.reconcile_archived_client_result(command_id)
+                    reconciled = await to_thread_cancel_safe(durable_queue.reconcile_archived_client_result, command_id)
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     await self._report_durable_queue_load_error(
                         {"reason": "command_result_unreadable", "path": str(durable_queue._result_receipt_path(command_id)), "detail": str(exc)},
@@ -336,7 +337,7 @@ class SessionCommandDispatcher:
                     )
                     continue
                 if not reconciled:
-                    durable_queue.discard_pending_client_command(command_id)
+                    await to_thread_cancel_safe(durable_queue.discard_pending_client_command, command_id)
                 await self._send_client_command_ack(command, duplicate=True)
                 continue
             if not self._recovered_command_owner_ready(command):
@@ -357,7 +358,7 @@ class SessionCommandDispatcher:
         durable_queue = self._session.run_manager.durable_client_commands
         async with self._result_replay_lock:
             while self._session.connection_generation == connection_generation:
-                records, errors = durable_queue.pending_client_results()
+                records, errors = await to_thread_cancel_safe(durable_queue.pending_client_results)
                 damaged_sources = {"client_result:" + str(error["path"]) for error in errors}
                 for source in list(self._reported_durable_queue_load_errors):
                     if source.startswith("client_result:") and source not in damaged_sources:
@@ -373,7 +374,8 @@ class SessionCommandDispatcher:
                             log_context="durable.command.result", envelope=False, wait_for_delivery=True)
                         if not sent or self._session.connection_generation != connection_generation:
                             return
-                        durable_queue.acknowledge_client_result(record["client_command_id"], payload["event_id"])
+                        await to_thread_cancel_safe(durable_queue.acknowledge_client_result,
+                                                    record["client_command_id"], payload["event_id"])
 
     def _schedule_late_client_results(self, deliveries: list[DurableResultDelivery]) -> None:
         generation = self._result_replay_generation
@@ -517,7 +519,7 @@ class SessionCommandDispatcher:
                     await self._send_client_command_ack(command, duplicate=True)
                     await self.emit_cancelled_user_message(command)
                     continue
-            if self._client_command_seen(command):
+            if await to_thread_cancel_safe(self._client_command_seen, command):
                 await self._send_client_command_ack(command, duplicate=True)
                 logger.info(
                     "Skipping duplicate client command %s in session %s",
@@ -527,7 +529,7 @@ class SessionCommandDispatcher:
                 continue
 
             if command.type == "ping":
-                self._mark_client_command_seen(command)
+                await self._mark_client_command_seen(command)
                 await self._send_client_command_ack(command)
                 await self._session.send_payload({"type": "pong"}, log_context="pong")
                 continue
@@ -570,7 +572,7 @@ class SessionCommandDispatcher:
             command_id = self._client_command_id(command)
             durable_queue = self._session.run_manager.durable_client_commands
             if command_id and durable_queue is not None:
-                if durable_queue.has_client_command(command_id):
+                if await to_thread_cancel_safe(durable_queue.has_client_command, command_id):
                     await self._send_client_command_ack(command, duplicate=True)
                     if self._recovered_command_owner_ready(command):
                         self._schedule_durable_client_command(command_id, connection_generation, command_type=command.type, command=command, recovered=True)
@@ -668,12 +670,19 @@ class SessionCommandDispatcher:
         self._active_client_command_ids.add(command_id)
         if command is not None and self._enqueue_scoped_interrupt(command, command_id, connection_generation):
             return
-        task = asyncio.create_task(
-            self._run_durable_client_command(command_id, connection_generation, recovered=recovered)
-        )
+        lifecycle = self._session.session_lifecycle
+        if command is not None:
+            _normalize_command_owner(command)
+        receipt = lifecycle.admit_foreground_navigation(command) if command is not None else None
+        with lifecycle.bind_foreground_navigation(receipt):
+            task = asyncio.create_task(
+                self._run_durable_client_command(command_id, connection_generation, recovered=recovered)
+            )
 
         def _release_active(_task: asyncio.Task[Any]) -> None:
             self._active_client_command_ids.discard(command_id)
+            with lifecycle.bind_foreground_navigation(receipt):
+                lifecycle.finish_foreground_navigation()
 
         task.add_done_callback(_release_active)
         if command_type == "user_message":
@@ -738,42 +747,42 @@ class SessionCommandDispatcher:
         completed_command = self._pending_client_completions.get(client_command_id)
         if completed_command is not None:
             command, deliveries = completed_command
-            self._commit_client_completion(durable_queue, command, client_command_id, deliveries)
+            await self._commit_client_completion(durable_queue, command, client_command_id, deliveries)
             return
         cancellation = await self.cancelled_user_message(client_command_id)
         if cancellation is not None:
             await self.emit_cancelled_user_message(UserCommand(**cancellation["command"]))
             return
-        command = durable_queue.claim_client_command(client_command_id)
-        if command is None:
-            return
         try:
+            command = await to_thread_cancel_safe(durable_queue.claim_client_command, client_command_id)
+            if command is None:
+                return
             if recovered and command.type == "user_message" and not await self._validate_executor_input_workspace(command):
-                durable_queue.release_client_command(client_command_id)
+                await to_thread_cancel_safe(durable_queue.release_client_command, client_command_id)
                 return
             with capture_durable_results(client_command_id) as capture:
                 handled = await self._dispatch_client_command(command, connection_generation)
             if handled is False:
                 # The handler reported a failure; retain the original command
                 # until its delivery and replay semantics can be resolved.
-                durable_queue.release_client_command(client_command_id)
+                await to_thread_cancel_safe(durable_queue.release_client_command, client_command_id)
                 return
         except asyncio.CancelledError:
             try:
-                durable_queue.release_client_command(client_command_id)
+                await to_thread_cancel_safe(durable_queue.release_client_command, client_command_id)
             except Exception:
                 logger.exception("Failed to release cancelled client command %s", client_command_id)
             raise
         except Exception:
             try:
-                durable_queue.release_client_command(client_command_id)
+                await to_thread_cancel_safe(durable_queue.release_client_command, client_command_id)
             except Exception:
                 logger.exception("Failed to release failed client command %s", client_command_id)
             raise
         else:
             deliveries = [delivery for delivery in capture.deliveries if not self._delivery_succeeded(delivery)]
             self._pending_client_completions[client_command_id] = (command, deliveries)
-            self._commit_client_completion(durable_queue, command, client_command_id, deliveries)
+            await self._commit_client_completion(durable_queue, command, client_command_id, deliveries)
 
     async def _validate_executor_input_workspace(self, command: UserCommand, *, already_locked: bool = False) -> bool:
         from backend.environments.errors import ExecutorError
@@ -825,33 +834,38 @@ class SessionCommandDispatcher:
         except (asyncio.CancelledError, Exception):
             return False
 
-    def _commit_client_completion(self, durable_queue: Any, command: UserCommand, command_id: str,
-                                  deliveries: list[DurableResultDelivery]) -> None:
-        def owner_of(delivery: DurableResultDelivery) -> str:
-            data = delivery.payload.get("data")
-            return str(delivery.payload.get("conversation_id") or (data.get("conversation_id") if isinstance(data, dict) else "") or "").strip()
+    async def _commit_client_completion(self, durable_queue: Any, command: UserCommand, command_id: str,
+                                        deliveries: list[DurableResultDelivery]) -> None:
+        def persist() -> list[DurableResultDelivery]:
+            def owner_of(delivery: DurableResultDelivery) -> str:
+                data = delivery.payload.get("data")
+                return str(delivery.payload.get("conversation_id") or (data.get("conversation_id") if isinstance(data, dict) else "") or "").strip()
 
-        owners = tuple(owner for delivery in deliveries if (owner := owner_of(delivery)))
-        publication = self._session.conversation_repo.command_result_publication(owners) if owners else nullcontext(set())
-        with publication as deleted:
-            retained = [delivery for delivery in deliveries
-                        if command.type == "conversation.delete" or owner_of(delivery) not in deleted]
-            if retained:
-                durable_queue.archive_client_results(command_id, [delivery.payload for delivery in retained])
-            if not durable_queue.complete_client_command(command_id):
-                raise RuntimeError(f"Could not complete durable client command {command_id}")
+            owners = tuple(owner for delivery in deliveries if (owner := owner_of(delivery)))
+            publication = self._session.conversation_repo.command_result_publication(owners) if owners else nullcontext(set())
+            with publication as deleted:
+                retained = [delivery for delivery in deliveries
+                            if command.type == "conversation.delete" or owner_of(delivery) not in deleted]
+                if retained:
+                    durable_queue.archive_client_results(command_id, [delivery.payload for delivery in retained])
+                if not durable_queue.complete_client_command(command_id):
+                    raise RuntimeError(f"Could not complete durable client command {command_id}")
+            return retained
+
+        # Completion already follows execution; settle publication before retiring its owner.
+        retained = await await_task_despite_cancellation(asyncio.create_task(asyncio.to_thread(persist)))
         self._pending_client_completions.pop(command_id, None)
         self._schedule_late_client_results(retained)
         # The queue already committed the completion atomically; the existing
         # recent-id log is a secondary index.
-        self._mark_client_command_seen(command)
+        await self._mark_client_command_seen(command)
         for delivery in retained:
             payload, receipt = delivery.payload, delivery.receipt
             if receipt is None:
                 continue
             if receipt.done():
                 if self._delivery_succeeded(delivery):
-                    durable_queue.acknowledge_client_result(command_id, payload["event_id"])
+                    await to_thread_cancel_safe(durable_queue.acknowledge_client_result, command_id, payload["event_id"])
                 continue
 
             async def settle_late_delivery(pending=receipt, event=delivery):
@@ -860,7 +874,7 @@ class SessionCommandDispatcher:
                 except Exception:
                     return
                 if delivered and event.outbox.connected and event.outbox.connection_generation == event.generation:
-                    durable_queue.acknowledge_client_result(command_id, event.payload["event_id"])
+                    await to_thread_cancel_safe(durable_queue.acknowledge_client_result, command_id, event.payload["event_id"])
 
             self.track_command_task(asyncio.create_task(settle_late_delivery()))
 
@@ -1054,31 +1068,33 @@ class SessionCommandDispatcher:
         durable_queue = self._session.run_manager.durable_client_commands
         return durable_queue is not None and durable_queue.is_client_command_completed(client_command_id)
 
-    def _mark_client_command_seen(
+    async def _mark_client_command_seen(
         self,
         command: UserCommand,
     ) -> bool:
         client_command_id = self._client_command_id(command)
         if not client_command_id:
             return False
-        if client_command_id in self._recent_client_command_id_set:
-            return True
-        self._recent_client_command_id_set.add(client_command_id)
-        self._recent_client_command_ids.append(client_command_id)
-        try:
-            self._client_command_store.append(client_command_id, command_type=command.type)
-        except Exception as exc:
-            logger.debug("Failed to persist client command id for %s: %s", self._session.session_id, exc)
-        pruned = False
-        while len(self._recent_client_command_ids) > RECENT_CLIENT_COMMAND_IDS_MAX:
-            removed = self._recent_client_command_ids.pop(0)
-            self._recent_client_command_id_set.discard(removed)
-            pruned = True
-        if pruned:
+        # Appending and compacting one snapshot must stay ordered across workers.
+        async with self._client_command_store_lock:
+            if client_command_id in self._recent_client_command_id_set:
+                return True
+            self._recent_client_command_id_set.add(client_command_id)
+            self._recent_client_command_ids.append(client_command_id)
             try:
-                self._client_command_store.rewrite_ids(self._recent_client_command_ids)
+                await to_thread_cancel_safe(self._client_command_store.append, client_command_id, command_type=command.type)
             except Exception as exc:
-                logger.debug("Failed to compact client command ids for %s: %s", self._session.session_id, exc)
+                logger.debug("Failed to persist client command id for %s: %s", self._session.session_id, exc)
+            pruned = False
+            while len(self._recent_client_command_ids) > RECENT_CLIENT_COMMAND_IDS_MAX:
+                removed = self._recent_client_command_ids.pop(0)
+                self._recent_client_command_id_set.discard(removed)
+                pruned = True
+            if pruned:
+                try:
+                    await to_thread_cancel_safe(self._client_command_store.rewrite_ids, list(self._recent_client_command_ids))
+                except Exception as exc:
+                    logger.debug("Failed to compact client command ids for %s: %s", self._session.session_id, exc)
         return False
 
     async def _send_client_command_ack(
