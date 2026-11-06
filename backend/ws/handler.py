@@ -858,6 +858,7 @@ class WebSocketSession(
                 permission_context=self.permission_context,
                 toolset_policy=self.runtime_toolset_policy(registry, model_selection=model_selection, config_snapshot=config_snapshot),
                 mcp_registry_version=self._mcp_registry_version_snapshot,
+                include_tool_schemas=False,
             )
         except Exception as exc:
             logger.warning(

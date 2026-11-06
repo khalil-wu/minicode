@@ -407,8 +407,9 @@ class CapabilityRegistry:
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
         mcp_registry_version: int = 0,
+        include_tool_schemas: bool = True,
     ) -> dict[str, Any]:
-        """Return a stable capability snapshot for UI/runtime consumers."""
+        """Return capability inventory, optionally with provider-facing schemas."""
         # Each synchronous snapshot shares decisions; the next call evaluates
         # its current permission context again.
         permission_decisions: dict[str, Any] = {}
@@ -420,17 +421,24 @@ class CapabilityRegistry:
             permission_decisions=permission_decisions,
         )
         views = [view for view in views if not self._tools[view.name].private_model_only]
+        if include_tool_schemas:
+            tools = deepcopy([schema for schema in self.get_schemas(
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+                toolset_policy=toolset_policy,
+                mcp_registry_version=mcp_registry_version,
+                permission_decisions=permission_decisions,
+            ) if not self._tools[schema["function"]["name"]].private_model_only])
+        else:
+            from backend.tools.catalog import canonicalize_tool_schemas
+
+            tools = canonicalize_tool_schemas([
+                {"type": "function", "function": {"name": view.name}}
+                for view in views if view.direct and view.schema_available
+            ], tool_registry=self)
         return {
             "version": self._version,
-            "tools": deepcopy(
-                [schema for schema in self.get_schemas(
-                    permission_checker=permission_checker,
-                    permission_context=permission_context,
-                    toolset_policy=toolset_policy,
-                    mcp_registry_version=mcp_registry_version,
-                    permission_decisions=permission_decisions,
-                ) if not self._tools[schema["function"]["name"]].private_model_only]
-            ),
+            "tools": tools,
             "tool_views": [
                 self._build_tool_view_metadata(view)
                 for view in sorted(views, key=lambda item: item.name)
