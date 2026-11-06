@@ -50,6 +50,7 @@ from backend.agent.prompting import (
     split_sys_prompt_prefix,
 )
 from backend.llm.errors import (
+    ProviderErrorType,
     classify_llm_error,
     retry_after_from_message,
     llm_error_raw as _adapter_error_raw,
@@ -1388,6 +1389,13 @@ def _responses_error_details(
     return message, details
 
 
+_RESPONSES_TERMINAL_FAILURE_CODES = frozenset({
+    "context_length_exceeded", "insufficient_quota", "credit_balance_exhausted",
+    "organization_spend_limit_exceeded", "project_spend_limit_exceeded", "usage_not_included",
+    "cyber_policy", "bio_policy", "misalignment_policy_violation", "invalid_prompt",
+})
+
+
 def _responses_error_event_raw(
     event_type: str,
     error: Any,
@@ -1405,10 +1413,18 @@ def _responses_error_event_raw(
             classification_parts.append(f"status={value}")
     classification_input = " ".join(classification_parts)
     classification = classify_llm_error(classification_input)
+    provider_error_type = classification.provider_error_type
+    if (event_type == "response.failed" and not classification.fatal
+            and provider_error_type is ProviderErrorType.UNKNOWN
+            and str(details.get("code") or "").strip() not in _RESPONSES_TERMINAL_FAILURE_CODES):
+        # A failed response with an unrecognized or missing code is a stream
+        # failure the provider may not repeat; retry it with backoff rather
+        # than ending the turn.
+        provider_error_type = ProviderErrorType.NETWORK
     raw: dict[str, Any] = {
         "provider": provider,
         "event_type": event_type,
-        "provider_error_type": classification.provider_error_type,
+        "provider_error_type": provider_error_type,
         "error_type": classification.error_type,
     }
     provider_error_code = str(details.get("code") or "").strip()
