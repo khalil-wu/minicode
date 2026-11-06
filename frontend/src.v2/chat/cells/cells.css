@@ -2495,6 +2495,12 @@ button.diff-cell-file-path:hover {
   line-height: var(--leading-snug);
 }
 
+.md-prose :is(h4, h5, h6) {
+  margin-top: 1em;
+  margin-bottom: 0.4em;
+  line-height: var(--leading-snug);
+}
+
 .md-prose p {
   margin-top: 0;
   margin-bottom: 0.8em;
@@ -2610,6 +2616,13 @@ button.diff-cell-file-path:hover {
 .md-prose tbody tr:nth-child(even) {
   background: color-mix(in oklch, var(--surface-soft) 40%, transparent);
 }
+
+.md-body .code-block-wrapper {
+  margin-block: 0.8em;
+}
+
+.md-body > :first-child { margin-block-start: 0; }
+.md-body > :last-child { margin-block-end: 0; }
 
 /* ════════════════════════════════════════════════════════
    Dark-theme surface tweaks (only where dark diverges from the base value).

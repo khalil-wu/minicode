@@ -12,6 +12,17 @@ vi.mock("mdast-util-from-markdown", async load => {
 
 afterEach(() => { cleanup(); vi.mocked(fromMarkdown).mockClear(); });
 
+it("uses identical paragraph styling before and after the streaming partition is remounted", () => {
+  const source = "First paragraph\n\nSecond paragraph\n\n## Details\n\nFinal paragraph";
+  const streamed = render(<MarkdownRenderer content={source} isStreaming />);
+  streamed.rerender(<MarkdownRenderer content={source} isStreaming={false} />);
+  const paragraphs = [...streamed.container.querySelectorAll("p")].map(p => [p.textContent, p.className, p.getAttribute("style")]);
+  streamed.unmount();
+  const restored = render(<MarkdownRenderer content={source} isStreaming={false} />);
+  expect([...restored.container.querySelectorAll("p")].map(p => [p.textContent, p.className, p.getAttribute("style")])).toEqual(paragraphs);
+  expect(paragraphs).toHaveLength(3);
+});
+
 it("scans completed lines once and preserves list/fence/math blocks", () => {
   const value = "# Title\n\n- first\n\n- second\n\nNext\n\n```ts\nconst x = 1;\n\nconst y = 2;\n```\n\n$$\na+b\n\nc+d\n$$\n\nEnd";
   const partition = new StreamingMarkdownPartition();

@@ -4,8 +4,22 @@ import { afterEach, expect, it } from "vitest";
 import { emptyAppearanceThemes, defaultThemePreferences } from "../../lib/appearance-themes";
 import { useAppStore } from "../../stores";
 import CodeThemeHighlighter from "./CodeThemeHighlighter";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 
 afterEach(() => { cleanup(); useAppStore.setState({ appearanceThemes: emptyAppearanceThemes() }); });
+it("keeps the fence header, typography and line-number gutter steady when streaming settles", async () => {
+  const code = "const value = 1;";
+  const view = render(<MarkdownRenderer content={`\`\`\`javascript\n${code}\n`} isStreaming />);
+  const styles = () => [view.container.querySelector("pre")?.getAttribute("style"),
+    view.container.querySelector(".code-theme-line-number")?.getAttribute("style")];
+  expect(view.container.querySelector(".code-block-wrapper")?.textContent).toContain("javascript");
+  const before = styles();
+  view.rerender(<MarkdownRenderer content={`\`\`\`javascript\n${code}\n\`\`\``} isStreaming={false} />);
+  await waitFor(() => expect(view.container.querySelector("pre code")?.textContent).toContain(code));
+  expect(styles()).toEqual(before);
+  expect(view.container.querySelectorAll(".code-theme-line-number")).toHaveLength(1);
+});
+
 it("updates an already rendered fence with actual TextMate colors in the same mode while retaining typography and source", async () => {
   const themes = { ...emptyAppearanceThemes(), dark: { codeThemeId: "github" as const, ...defaultThemePreferences("dark") } };
   useAppStore.setState({ appearanceThemes: themes });

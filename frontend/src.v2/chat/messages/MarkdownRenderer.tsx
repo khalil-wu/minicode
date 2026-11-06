@@ -4,6 +4,7 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 import { decodeString } from "micromark-util-decode-string";
 import { formatHex } from "culori";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
+import { codeBlockStyle, lineNumberColumnStyle } from "./code-block-presentation";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -505,29 +506,6 @@ const InsertButton = ({ text }: { text: string }) => {
   );
 };
 
-const codeBlockStyle = (hasLanguage: boolean): React.CSSProperties => ({
-  margin: 0,
-  padding: "12px 14px",
-  background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: hasLanguage ? "0 0 var(--radius-sm, 6px) var(--radius-sm, 6px)" : "var(--radius-sm, 6px)",
-  fontSize: "var(--editor-font-size)",
-  fontFamily: "var(--editor-font-family)",
-  lineHeight: "var(--editor-line-height)",
-  color: "var(--editor-foreground)",
-});
-
-const lineNumberColumnStyle: React.CSSProperties = {
-  display: "inline-block",
-  minWidth: "2.25em",
-  paddingRight: "0.8em",
-  marginRight: "0.8em",
-  textAlign: "right",
-  color: "var(--text-muted)",
-  borderRight: "1px solid var(--border-subtle)",
-  userSelect: "none",
-};
-
 const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: string }) => {
   const lines = text.split("\n");
   return (
@@ -540,7 +518,7 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
       <code>
         {lines.map((line, index) => (
           <span key={index} className="block">
-            <span aria-hidden="true" style={lineNumberColumnStyle}>{index + 1}</span>
+            <span aria-hidden="true" className="code-theme-line-number" style={lineNumberColumnStyle}>{index + 1}</span>
             {line}
           </span>
         ))}
@@ -548,6 +526,17 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
     </pre>
   );
 };
+
+const CodeBlockFrame = ({ text, language, children }: { text: string; language?: string; children: React.ReactNode }) => (
+  <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
+    {language && <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
+      <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">{language}</span>
+    </div>}
+    <InsertButton text={text} />
+    <CopyButton text={text} />
+    {children}
+  </div>
+);
 
 const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: ResolvedTheme }) => {
   const { t } = useI18n();
@@ -1281,16 +1270,16 @@ const mdComponents = (
     const id = headingId(base, node?.position?.start?.line);
     const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
     const className = level === 1
-      ? "text-[length:var(--text-2xl)] font-bold mt-5 mb-2.5 first:mt-0"
+      ? "text-[length:var(--text-2xl)] font-bold"
       : level === 2
-        ? "text-[length:var(--text-xl)] font-semibold mt-5 mb-2 first:mt-0"
+        ? "text-[length:var(--text-xl)] font-semibold"
         : level === 3
-          ? "text-[length:var(--text-lg)] font-semibold mt-4 mb-1.5 first:mt-0"
-          : "text-[length:var(--text-base)] font-semibold mt-3 mb-1.5 first:mt-0";
+          ? "text-[length:var(--text-lg)] font-semibold"
+          : "text-[length:var(--text-base)] font-semibold";
     return <Tag {...props} id={id} data-markdown-heading={base} tabIndex={-1} className={className} style={{ scrollMarginTop: 16, ...props.style }} />;
   };
   return ({
-  pre: ({ children }) => <div className="my-4">{children}</div>,
+  pre: ({ children }) => <>{children}</>,
   input: ({ node: _node, checked, ...props }) => <input {...props} checked={checked} role="checkbox" aria-checked={Boolean(checked)} />,
   code({ className, children, node }: MarkdownCodeProps) {
     const resourceScope = useContext(MarkdownResourceContext);
@@ -1314,16 +1303,7 @@ const mdComponents = (
     }
     if (match || isBlock) {
       return (
-        <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
-          {match && (
-            <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
-              <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">
-                {match[1]}
-              </span>
-            </div>
-          )}
-          <InsertButton text={text} />
-          <CopyButton text={text} />
+        <CodeBlockFrame text={text} language={match?.[1]}>
           {streamingTail ? <PlainCodeBlock hasLanguage={Boolean(match)} text={text} /> : <Suspense fallback={<PlainCodeBlock hasLanguage={Boolean(match)} text={text} />}>
             <LazyCodeHighlighter
               hasLanguage={Boolean(match)}
@@ -1333,7 +1313,7 @@ const mdComponents = (
               {text}
             </LazyCodeHighlighter>
           </Suspense>}
-        </div>
+        </CodeBlockFrame>
       );
     }
     const inlineEditorTarget = knownFileTarget(workspaceFileTargetFromHref(text, resourceScope.workspaceRoot, resourceScope.documentDirectory), resourceScope, true);
@@ -1440,7 +1420,7 @@ const mdComponents = (
     );
   },
   p: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLParagraphElement>>) => (
-    <p {...props} className="my-2 leading-[var(--leading-relaxed)]" />
+    <p {...props} className="md-paragraph" />
   ),
   ul: ({ className, node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLUListElement>>) => (
     <ul {...props} className={`my-2 pl-5 list-disc marker:text-[var(--text-muted)]${className ? ` ${className}` : ""}`} />
@@ -1663,7 +1643,7 @@ function hasMarkdownSyntax(s: string): boolean {
 }
 
 const PlainText = memo(({ content }: { content: string }) => (
-  <p className="md-paragraph" style={{ margin: 0 }}>{content}</p>
+  <p className="md-paragraph">{content}</p>
 ));
 PlainText.displayName = "PlainText";
 
@@ -1694,7 +1674,8 @@ const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openF
     const newline = part.content.indexOf("\n");
     const openingLine = newline < 0 ? part.content : part.content.slice(0, newline);
     const language = /^ {0,3}(?:`{3,}|~{3,})(.*)/.exec(openingLine)?.[1].trim();
-    return <PlainCodeBlock hasLanguage={Boolean(language)} text={newline < 0 ? "" : part.content.slice(newline + 1)} />;
+    const text = newline < 0 ? "" : part.content.slice(newline + 1).replace(/\n$/, "");
+    return <CodeBlockFrame text={text} language={language}><PlainCodeBlock hasLanguage={Boolean(language)} text={text} /></CodeBlockFrame>;
   }
   return <StableMarkdown content={content} components={components} plugins={plugins} />;
 });
