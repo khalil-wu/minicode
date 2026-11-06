@@ -175,6 +175,31 @@ def _event(events, event_type: str):
     return next(event for event in events if event.type == event_type)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approval", [
+    {"action": "partial", "decisions": {"a.txt": "approved", "b.txt": "rejected"}},
+    {"action": "approve", "updated_input": {"patch": "different request"}},
+])
+async def test_rejected_or_changed_approval_keeps_declined_paths(tmp_path, approval):
+    from backend.permissions.denial_memory import normalized_denied_path
+    from backend.tools.apply_patch import ApplyPatchTool
+
+    permission = PermissionContext(mode="confirm", source="test")
+    declined = {normalized_denied_path(name, tmp_path) for name in ("a.txt", "b.txt")}
+    permission.denied_write_paths.update(declined)
+    patch = "*** Begin Patch\n*** Add File: a.txt\n+a\n*** Add File: b.txt\n+b\n*** End Patch\n"
+
+    async def decide(_call_id):
+        return approval
+
+    events, _, _ = await _collect_batch(tmp_path, ApplyPatchTool(),
+        ToolCallEvent(id="declined-patch", name="apply_patch", arguments={"patch": patch}),
+        permission=permission, approval_handler=decide)
+    assert _event(events, "tool_result").data["is_error"]
+    assert permission.denied_write_paths == declined
+    assert not (tmp_path / "a.txt").exists() and not (tmp_path / "b.txt").exists()
+
+
 def test_pre_tool_updated_input_is_fully_reauthorized_and_approved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

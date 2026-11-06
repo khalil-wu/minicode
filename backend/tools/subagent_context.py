@@ -666,6 +666,8 @@ def build_subagent_permission_context(
         parent_permission,
         mode=mode,
         session_overrides=dict(parent_permission.session_overrides),
+        # The parent's refusals bind the child too; the set stays shared on purpose.
+        denied_write_paths=parent_permission.denied_write_paths,
         command_prompt_allow_rules=tuple(parent_permission.command_prompt_allow_rules),
         tool_deny_rules=deny_rules,
         filesystem_constraints=_clone_filesystem_constraints(

@@ -1128,6 +1128,7 @@ class PermissionChecker:
         granular_approval: dict[str, bool] | None = None,
         sandbox_mode: str = "",
         requirements_source: str = "",
+        denied_write_paths: set[str] | None = None,
     ) -> PermissionContext:
         normalized_mode = normalize_permission_mode_token(mode)
         # Explicit turn authority retains the complete Source policy. Builtin
@@ -1141,6 +1142,7 @@ class PermissionChecker:
         return PermissionContext(
             mode=normalized_mode,  # type: ignore[arg-type]
             session_overrides=dict(session_overrides or {}),
+            denied_write_paths=denied_write_paths if denied_write_paths is not None else set(),
             command_prompt_allow_rules=tuple(
                 dict.fromkeys(
                     prompt
@@ -1238,6 +1240,12 @@ class PermissionChecker:
                         source = "managed_requirements" if context.requirements_source else "approval_policy"
                         return PermissionLevel.ALWAYS_DENY, source, reason
                 return PermissionLevel.CONFIRM, *ask
+            if native.kind == "skip" and context.denied_write_paths and isinstance(native.command.cwd, Path):
+                from backend.permissions.denial_memory import denied_shell_write_target
+
+                declined = denied_shell_write_target(context, str((args or {}).get("command") or ""), native.command.cwd)
+                if declined:
+                    return PermissionLevel.CONFIRM, "denial_memory", f"writes {declined}, which the user declined earlier in this conversation"
             if context.strict_auto_review:
                 return PermissionLevel.CONFIRM, "tool", "strict_auto_review"
             return (PermissionLevel.AUTO if native.kind == "skip" else PermissionLevel.CONFIRM,

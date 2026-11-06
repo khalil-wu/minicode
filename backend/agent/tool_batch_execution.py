@@ -393,6 +393,13 @@ async def _finalize_tool_result(
         yield event
 
 
+def _captured_command_cwd(request: Any) -> Path | None:
+    """The frozen shell cwd of a captured command request; None for non-shell or remote requests."""
+    native = getattr(request, "exec_policy", None)
+    cwd = getattr(getattr(native, "command", None), "cwd", None)
+    return cwd if isinstance(cwd, Path) else None
+
+
 async def _reject_tool_call(
     tc: ToolCallEvent,
     auto_queue: list[ToolCallEvent],
@@ -1991,6 +1998,11 @@ async def execute_serial(
                         raise asyncio.CancelledError
                 if approval.get("action") in {"reject", "cancel"}:
                     guidance = approval.get("guidance", "user rejected this action")
+                    if approval.get("action") == "reject":
+                        from backend.permissions.denial_memory import record_denied_write_targets
+
+                        record_denied_write_targets(tool_ctx.permission, tc.name, tc.arguments or {},
+                            workspace_root=tool_ctx.workspace_root, command_cwd=_captured_command_cwd(approval_request))
                     yield final_tool_call_event()
                     tool_call_emitted = True
                     result = ToolResult(
@@ -2104,6 +2116,15 @@ async def execute_serial(
                         if decision == "rejected"
                     ]
                     if rejected:
+                        from backend.permissions.denial_memory import normalized_denied_path
+
+                        # Nothing was written; the files the user rejected stay
+                        # declined, as a plain reject would have recorded.
+                        denial_base = Path(tool_ctx.workspace_root) if tool_ctx.workspace_root else None
+                        tool_ctx.permission.denied_write_paths.update(
+                            normalized for normalized in (normalized_denied_path(path, denial_base) for path in rejected)
+                            if normalized
+                        )
                         approved = [
                             str(path)
                             for path, decision in decisions.items()
@@ -2244,6 +2265,11 @@ async def execute_serial(
                     "_approved_request_digests", set()
                 )
                 approved_digests.add(_final_tool_request_digest(tc))
+                if action in {"approve", "partial"}:
+                    from backend.permissions.denial_memory import discard_denied_write_targets
+
+                    discard_denied_write_targets(tool_ctx.permission, tc.name, tc.arguments or {},
+                        workspace_root=tool_ctx.workspace_root, command_cwd=_captured_command_cwd(approval_request))
                 if isinstance(captured_mcp_tool, MCPToolProxy):
                     from backend.mcp.approval import apply_mcp_approval
 

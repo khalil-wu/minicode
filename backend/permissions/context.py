@@ -72,6 +72,10 @@ class PermissionContext:
 
     mode: PermissionMode = "confirm"
     session_overrides: dict[str, PermissionLevel] = field(default_factory=dict)
+    # Write targets the user declined in this conversation. Deliberately one
+    # shared set across the turn's derived contexts: a refusal recorded while
+    # one tool asked must be visible to the next tool's check.
+    denied_write_paths: set[str] = field(default_factory=set, repr=False)
     # Command prompt grants are stored in the session permission context,
     # separate from literal command-content rules. Evaluation is
     # classifier-backed when the host exposes that canonical capability.

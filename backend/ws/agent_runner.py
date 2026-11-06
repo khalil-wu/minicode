@@ -4904,6 +4904,7 @@ class SessionAgentRunnerMixin:
             run_permission_context = replace(self.permission_checker.build_context(
                 mode=run_permission_context.mode,
                 session_overrides=run_permission_context.session_overrides,
+                denied_write_paths=run_permission_context.denied_write_paths,
                 command_prompt_allow_rules=run_permission_context.command_prompt_allow_rules,
                 tool_deny_rules=run_permission_context.tool_deny_rules,
                 filesystem_constraints=merge_plan_constraints(
@@ -4976,6 +4977,7 @@ class SessionAgentRunnerMixin:
                 self.permission_context = replace(self.permission_checker.build_context(
                     mode=self.permission_context.mode,
                     session_overrides=self.permission_context.session_overrides,
+                    denied_write_paths=self.permission_context.denied_write_paths,
                     command_prompt_allow_rules=self.permission_context.command_prompt_allow_rules,
                     tool_deny_rules=self.permission_context.tool_deny_rules,
                     filesystem_constraints=merge_plan_constraints(
