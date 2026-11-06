@@ -22,6 +22,10 @@ import { canonicalWorkspacePath, workspaceDisplayName } from "../lib/workspace-d
 import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
 import { useShallow } from "zustand/react/shallow";
 import { visibleRetainedComposerInputs } from "../composer/retainedComposerInputs";
+import { conversationWorkspacePath } from "../stores/shared-helpers";
+import type { ChatMessage } from "../stores/types";
+
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 // A turn that throws while rendering must not take the rest of the transcript
 // down with it: the row keeps its place and offers the same recovery as the pane.
@@ -42,26 +46,27 @@ const ESTIMATED_TURN_GAP = 8;
 const INITIAL_VIRTUAL_VIEWPORT_HEIGHT = 800;
 const estimateTurnHeight = () => ESTIMATED_TURN_HEIGHT;
 
-export const MessageList = ({ searchActive = false }: { searchActive?: boolean } = {}) => {
+export const MessageList = ({ searchActive = false, previewConversationId }: { searchActive?: boolean; previewConversationId?: string } = {}) => {
   const { t: tr } = useI18n();
-  const messages = useAppStore((s) => s.messages);
-  const retainedDraftInputs = useAppStore(useShallow(visibleRetainedComposerInputs));
-  const pendingDraftMessage = useAppStore(state => selectPendingDraftUserMessage(state)
+  const messages = useAppStore((s) => previewConversationId ? s.conversationMessages[previewConversationId] ?? EMPTY_MESSAGES : s.messages);
+  const retainedDraftInputs = useAppStore(useShallow(state => previewConversationId ? [] : visibleRetainedComposerInputs(state)));
+  const pendingDraftMessage = useAppStore(state => previewConversationId ? undefined : selectPendingDraftUserMessage(state)
     ?? (state.conversationId ? state.preparingComposerMessages[state.conversationId] : undefined));
   const ownedMessages = useMemo(() => {
     const retained = retainedDraftInputs.filter(input => !messages.some(message => message.id === input.message.id)).map(input => input.message);
     const next = retained.length ? [...messages, ...retained] : messages;
     return pendingDraftMessage && !next.some(message => message.id === pendingDraftMessage.id) ? [...next, pendingDraftMessage] : next;
   }, [messages, pendingDraftMessage, retainedDraftInputs]);
-  const isStreaming = useAppStore((s) => s.isStreaming);
+  const isStreaming = useAppStore((s) => !previewConversationId && s.isStreaming);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
-  const conversationId = useAppStore((s) => s.conversationId);
+  const conversationId = useAppStore((s) => previewConversationId ?? s.conversationId);
   const readingState = useMemo(() => conversationId ? conversationReadingState(conversationId) : undefined, [conversationId]);
-  const historyPage = useAppStore((s) => conversationId ? s.conversationHistoryPages[conversationId] : undefined);
-  const revealTarget = useAppStore((s) => s.messageRevealTarget);
-  const hydrating = useAppStore((s) => Boolean(conversationId && s.conversationHydration[conversationId]?.isHydrating));
+  const historyPage = useAppStore((s) => !previewConversationId && conversationId ? s.conversationHistoryPages[conversationId] : undefined);
+  const revealTarget = useAppStore((s) => previewConversationId ? null : s.messageRevealTarget);
+  const hydrating = useAppStore((s) => Boolean(!previewConversationId && conversationId && s.conversationHydration[conversationId]?.isHydrating));
   const pendingConversationSwitchId = useAppStore((s) => s.pendingConversationSwitchId);
-  const workingDirectory = useAppStore((s) => s.workingDirectory);
+  const workingDirectory = useAppStore((s) => previewConversationId
+    ? conversationWorkspacePath(s.conversations.find(item => item.id === previewConversationId)) : s.workingDirectory);
   const conversations = useAppStore((s) => s.conversations);
   const turnDiff = useAppStore((s) => conversationId ? s.turnDiffs[conversationId] : undefined);
   const [sourceMessage, setSourceMessage] = useState<{ id: string; requestId: string } | null>(null);
@@ -99,7 +104,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   const lastRenderedMessageCountRef = useRef(messages.length);
   const userScrollIntentRef = useRef(0);
   const followPausedRef = useRef(false);
-  followPausedRef.current = searchActive || Boolean(sourceMessage);
+  followPausedRef.current = Boolean(previewConversationId) || searchActive || Boolean(sourceMessage);
   const [showAllHistory, setShowAllHistory] = useState(readingState?.viewport?.showAllHistory ?? false);
   const visibleHistoryRef = useRef(showAllHistory);
   visibleHistoryRef.current = showAllHistory;
@@ -331,28 +336,29 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
     isNearBottom.current = viewport?.isFollowing ?? true;
     setIsFollowing(isNearBottom.current);
     setShowScrollBtn(!isNearBottom.current);
-    const currentMessages = useAppStore.getState().messages;
+    const state = useAppStore.getState();
+    const currentMessages = previewConversationId ? state.conversationMessages[previewConversationId] ?? EMPTY_MESSAGES : state.messages;
     lastRenderedMessageIdRef.current = currentMessages.at(-1)?.id ?? null;
     lastRenderedMessageCountRef.current = currentMessages.length;
     historyScrollRef.current = null;
     const frame = viewport && !viewport.isFollowing ? requestAnimationFrame(() => {
       if (!isNearBottom.current) setScrollTop(el, viewport.scrollTop);
     }) : null;
-    if (!viewport || viewport.isFollowing) scheduleBottomScroll();
+    if (!viewport || viewport.isFollowing) scheduleBottomScroll("auto", Boolean(previewConversationId));
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
       if (scrollRafRef.current !== null) {
         cancelAnimationFrame(scrollRafRef.current);
         scrollRafRef.current = null;
       }
-      if (readingState) readingState.viewport = {
+      if (readingState && !previewConversationId) readingState.viewport = {
         scrollTop: el.scrollTop,
         isFollowing: isNearBottom.current,
         showAllHistory: visibleHistoryRef.current,
         measurements: renderedMeasurementsRef.current,
       };
     };
-  }, [readingState, scheduleBottomScroll, setScrollTop]);
+  }, [readingState, scheduleBottomScroll, setScrollTop, previewConversationId]);
 
   const captureHistoryScroll = useCallback(() => {
     const el = ref.current;
@@ -501,6 +507,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
   return (
     <div
       data-testid="message-list-shell"
+      ref={node => { if (node) node.inert = Boolean(previewConversationId); }}
       className="relative flex-1 min-h-0 h-full flex flex-col"
       style={{ position: "relative", flex: 1, minHeight: 0, height: "100%", display: "flex", flexDirection: "column" }}
     >
@@ -569,7 +576,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
                       }}
                     >
                       <SafeBoundary fallback={<TurnRenderFallback />}>
-                        <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
+                        <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} readOnly={Boolean(previewConversationId)} />
                       </SafeBoundary>
                     </div>
                   );
@@ -591,7 +598,7 @@ export const MessageList = ({ searchActive = false }: { searchActive?: boolean }
                   }}
                 >
                 <SafeBoundary fallback={<TurnRenderFallback />}>
-                  <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} />
+                  <ChatTurn turn={turn} conversationId={conversationId ?? undefined} workspaceRoot={workingDirectory} readOnly={Boolean(previewConversationId)} />
                 </SafeBoundary>
                 </div>
               );

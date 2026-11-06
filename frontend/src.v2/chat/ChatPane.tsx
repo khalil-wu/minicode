@@ -54,7 +54,11 @@ export const ChatPane = memo(function ChatPane() {
   ));
   const hasMessages = useAppStore((state) => state.messages.length > 0);
   const pendingDraftMessage = useAppStore(selectPendingDraftUserMessage);
-  const showLoading = !pendingDraftMessage && (Boolean(pendingConversationSwitchId) || (isHydrating && !hasMessages));
+  const hasCachedTarget = useAppStore(state => Boolean(state.pendingConversationSwitchId
+    && state.conversationMessages[state.pendingConversationSwitchId]?.length));
+  const previewConversationId = !pendingDraftMessage && hasCachedTarget ? pendingConversationSwitchId ?? undefined : undefined;
+  const showLoading = !pendingDraftMessage && !previewConversationId && (Boolean(pendingConversationSwitchId) || (isHydrating && !hasMessages));
+  const switching = showLoading || Boolean(previewConversationId);
 
   const handleCloseSearch = useCallback(() => {
     setShowSearch(false);
@@ -98,8 +102,8 @@ export const ChatPane = memo(function ChatPane() {
     <div
       ref={attachPane}
       className="chat-pane flex-1 min-h-0 overflow-hidden w-full"
-      data-switching={showLoading ? "true" : "false"}
-      aria-busy={showLoading}
+      data-switching={switching ? "true" : "false"}
+      aria-busy={switching}
       style={{
         position: "relative",
         display: "grid",
@@ -112,8 +116,8 @@ export const ChatPane = memo(function ChatPane() {
         background: "var(--surface-base)",
       }}
     >
-        {showLoading && (
-          <div role="status" aria-live="polite" className="chat-pane-switch-status">
+        {switching && (
+          <div role="status" aria-live="polite" className="chat-pane-switch-status" data-preview={Boolean(previewConversationId) || undefined}>
             <LoaderCircle size={20} className="animate-spin" aria-hidden="true" />
             <span className="sr-only">{tr("正在打开会话…")}</span>
           </div>
@@ -146,18 +150,19 @@ export const ChatPane = memo(function ChatPane() {
           <div ref={messageContainerRef} className="chat-pane-message-transition" data-hydrating={isHydrating ? "true" : "false"}>
             <SafeBoundary fallback={<ChatErrorFallback />}>
               <TranscriptSearchContext.Provider value={showSearch}>
-              <MessageList searchActive={showSearch} />
+              <MessageList searchActive={showSearch} previewConversationId={previewConversationId} />
               </TranscriptSearchContext.Provider>
             </SafeBoundary>
           </div>
-          <div className="chat-pane-composer-region">
+          <div className="chat-pane-composer-region" ref={node => { if (node) node.inert = Boolean(previewConversationId); }}
+            aria-hidden={Boolean(previewConversationId) || undefined} style={previewConversationId ? { visibility: "hidden" } : undefined}>
             <TurnChangeSummary />
             <SafeBoundary fallback={<ComposerErrorFallback />}>
               <Composer />
             </SafeBoundary>
           </div>
         </div>
-        {pane && <ThreadSummary pane={pane} />}
+        {pane && !previewConversationId && <ThreadSummary pane={pane} />}
         </div>
     </div>
   );

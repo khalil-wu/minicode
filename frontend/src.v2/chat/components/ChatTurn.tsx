@@ -37,7 +37,8 @@ export const ChatTurn = memo(function ChatTurn({
   wide = false,
   defaultProcessExpanded,
   isTranscriptMode = false,
-  allowFileRevert = !isTranscriptMode,
+  readOnly = isTranscriptMode,
+  allowFileRevert = !readOnly,
   conversationId,
   workspaceRoot,
 }: {
@@ -45,6 +46,7 @@ export const ChatTurn = memo(function ChatTurn({
   wide?: boolean;
   defaultProcessExpanded?: boolean;
   isTranscriptMode?: boolean;
+  readOnly?: boolean;
   allowFileRevert?: boolean;
   /** Conversation that owns artifacts in this transcript.  This is explicit
    * because transcript cells can be rendered while another conversation is
@@ -83,7 +85,7 @@ export const ChatTurn = memo(function ChatTurn({
         <HistoryCellRenderer
           cell={cell}
           isActive={isActive}
-          isTranscriptMode={isTranscriptMode}
+          isTranscriptMode={readOnly}
           allowFileRevert={allowFileRevert}
           conversationId={conversationId}
           workspaceRoot={workspaceRoot}
@@ -92,7 +94,7 @@ export const ChatTurn = memo(function ChatTurn({
         />
       </div>
     ),
-    [conversationId, isTranscriptMode, allowFileRevert, workspaceRoot, knownFilePaths],
+    [conversationId, readOnly, allowFileRevert, workspaceRoot, knownFilePaths],
   );
 
   return (
@@ -106,11 +108,11 @@ export const ChatTurn = memo(function ChatTurn({
       hasMoreHistory={hasMoreHistory}
       onLoadHistory={hasMoreHistory ? loadHistory : undefined}
       persistentContent={conversationId && turn.asyncMessages?.length ? <div className="agent-loop-persistent-apps">
-        {turn.asyncMessages?.map(message => <AsyncUserMessage key={message.itemId} message={message} conversationId={conversationId} turnId={turn.turnId} readOnly={isTranscriptMode} />)}
+        {turn.asyncMessages?.map(message => <AsyncUserMessage key={message.itemId} message={message} conversationId={conversationId} turnId={turn.turnId} readOnly={readOnly} />)}
       </div> : undefined}
       collapsedContent={conversationId && mcpApps.length > 0 ? <div className="agent-loop-persistent-apps">
         {mcpApps.map(({ cell, record }) => <McpAppActivity key={record.mcpApp!.id} cell={cell} record={record}
-          conversationId={conversationId} workspaceRoot={workspaceRoot} readOnly={isTranscriptMode} />)}
+          conversationId={conversationId} workspaceRoot={workspaceRoot} readOnly={readOnly} />)}
       </div> : undefined}
     />
     </TranscriptReadingContext.Provider>

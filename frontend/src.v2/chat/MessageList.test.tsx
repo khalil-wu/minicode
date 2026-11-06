@@ -106,6 +106,31 @@ describe("MessageList cell UI", () => {
     });
   });
 
+  it("previews cached target messages without switching the command owner or mixing drafts", () => {
+    const targetId = "conv-message-list-other";
+    const targetMessages: ChatMessage[] = [
+      { id: "target-user", role: "user", content: "Cached target question", artifacts: [], timestamp: 1 },
+      { id: "target-reply", role: "assistant", content: "Cached target answer", artifacts: [], timestamp: 2 },
+    ];
+    useAppStore.setState(state => ({
+      conversations: [...state.conversations, { id: targetId, title: "Other", updatedAt: "", workspaceRoot: "/other" }],
+      conversationMessages: { [targetId]: targetMessages },
+      pendingConversationSwitchId: targetId,
+      draft: "source draft",
+    }));
+    const view = render(<MessageList previewConversationId={targetId} />);
+    expect(screen.getByText("Cached target question")).toBeTruthy();
+    expect(screen.getByText("Cached target answer")).toBeTruthy();
+    expect(screen.queryByText("请检查聊天 UI 输出。")).toBeNull();
+    expect(view.container.querySelector<HTMLElement>('[data-testid="message-list-shell"]')?.inert).toBe(true);
+    expect(useAppStore.getState().conversationId).toBe("conv-message-list-test");
+    expect(useAppStore.getState().draft).toBe("source draft");
+    expect(useAppStore.getState().messages).toBe(conversationMessages);
+    view.rerender(<MessageList />);
+    expect(screen.getByText("请检查聊天 UI 输出。")).toBeTruthy();
+    expect(screen.queryByText("Cached target question")).toBeNull();
+  });
+
   it.each([1, 9, 12, 40])("retains the previous reply DOM and open details when appending to %i turns", (count) => {
     const history: ChatMessage[] = Array.from({ length: count - 1 }, (_, index) => [
       { id: `history-user-${index}`, role: "user" as const, content: `question ${index}`, artifacts: [], timestamp: index },

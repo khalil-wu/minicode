@@ -131,6 +131,23 @@ describe("ChatPane search shortcuts", () => {
     expect(useAppStore.getState().draft).toBe("Unsent prompt");
   });
 
+  it("keeps a cached target visible but read-only until navigation is confirmed", () => {
+    useAppStore.setState({ draft: "source draft", conversationMessages: {
+      "conv-next": [{ id: "target-user", role: "user", content: "cached target", timestamp: 1, artifacts: [] }],
+    } });
+    const { container } = render(<ChatPane />);
+    const composer = screen.getByRole("textbox", { name: "composer" });
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "conv-next" }));
+    expect(container.querySelector<HTMLElement>(".chat-pane-layout")?.style.visibility).not.toBe("hidden");
+    expect(container.querySelector(".chat-pane-switch-status")?.getAttribute("data-preview")).toBe("true");
+    expect(container.querySelector<HTMLElement>(".chat-pane-composer-region")?.inert).toBe(true);
+    expect(screen.queryByRole("textbox", { name: "composer" })).toBeNull();
+    expect(useAppStore.getState().conversationId).toBe("conv-chat-pane");
+    act(() => useAppStore.setState({ pendingConversationSwitchId: null }));
+    expect(screen.getByRole("textbox", { name: "composer" })).toBe(composer);
+    expect(useAppStore.getState().draft).toBe("source draft");
+  });
+
   it("shows an informative hydration status while backend context is being restored", () => {
     useAppStore.setState({
       messages: [{ id: "cached", role: "user", content: "cached content", timestamp: 1, artifacts: [] }],
