@@ -2639,7 +2639,7 @@ button.diff-cell-file-path:hover {
 }
 
 .md-measured-block[data-measured="true"]:focus-within,
-.chat-pane:has(.chat-pane-search) .md-measured-block[data-measured="true"] {
+.chat-pane[data-search-active="true"] .md-measured-block[data-measured="true"] {
   content-visibility: visible;
 }
 

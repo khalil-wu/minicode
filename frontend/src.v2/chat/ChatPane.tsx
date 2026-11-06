@@ -102,6 +102,7 @@ export const ChatPane = memo(function ChatPane() {
     <div
       ref={attachPane}
       className="chat-pane flex-1 min-h-0 overflow-hidden w-full"
+      data-search-active={showSearch || undefined}
       data-switching={switching ? "true" : "false"}
       aria-busy={switching}
       style={{

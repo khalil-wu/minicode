@@ -56,6 +56,7 @@ describe("ChatPane search shortcuts", () => {
     const messages = container.querySelector(".chat-pane-message-transition");
     const composerRegion = container.querySelector(".chat-pane-composer-region");
     expect(search).toBeTruthy();
+    expect(pane?.getAttribute("data-search-active")).toBe("true");
     expect(layout?.parentElement).toBe(pane);
     expect(main?.parentElement).toBe(layout);
     expect(main?.contains(search)).toBe(true);
@@ -66,11 +67,13 @@ describe("ChatPane search shortcuts", () => {
 
     fireEvent.keyDown(window, { key: "f", ctrlKey: true });
     expect(screen.queryByPlaceholderText("在对话中搜索…")).toBeNull();
+    expect(pane?.hasAttribute("data-search-active")).toBe(false);
 
     fireEvent.keyDown(window, { key: "f", ctrlKey: true });
     expect(screen.getByPlaceholderText("在对话中搜索…")).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.queryByPlaceholderText("在对话中搜索…")).toBeNull();
+    expect(pane?.hasAttribute("data-search-active")).toBe(false);
   });
 
   it("lets a focused Monaco editor handle Ctrl+F instead of opening chat search", () => {

@@ -106,6 +106,7 @@ export const MainSlots = ({ mode = "split", forceChat: requestedForceChat = fals
     <div
       ref={surfaceRef}
       className="mc-main-surface"
+      data-home={home || undefined}
       style={{
         flex: 1,
         minWidth: 0,

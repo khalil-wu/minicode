@@ -147,17 +147,17 @@ html[data-theme="dark"] ::selection {
   background: transparent;
 }
 
-.mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .workbench-empty-state {
+.mc-main-surface[data-home="true"] .workbench-empty-state {
   transform: translateY(-11px);
 }
-.mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .workbench-empty-brand {
+.mc-main-surface[data-home="true"] .workbench-empty-brand {
   gap: 28px;
 }
-.mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .chat-pane {
+.mc-main-surface[data-home="true"] .chat-pane {
   --mc-chat-width: 748px;
   --chat-composer-axis-width: min(748px, calc(100% - 32px));
 }
-#root .mc-main-surface:has(.mc-workbench-toolbar[data-home="true"]) .chat-pane .composer-container {
+#root .mc-main-surface[data-home="true"] .chat-pane .composer-container {
   margin-bottom: 24px !important;
 }
 

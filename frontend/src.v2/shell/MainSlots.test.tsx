@@ -147,9 +147,12 @@ describe("MainSlots", () => {
     useAppStore.setState({ conversationId: null, pendingConversationSwitchId: null });
     const { container } = render(<MainSlots />);
     expect(container.querySelector(".mc-workbench-toolbar")?.getAttribute("data-home")).toBe("true");
+    expect(container.querySelector(".mc-main-surface")?.getAttribute("data-home")).toBe("true");
     expect(screen.queryByRole("button", { name: "聊天操作" })).toBeNull();
     expect(screen.queryByRole("button", { name: "切换摘要" })).toBeNull();
     expect(screen.getByRole("button", { name: "新建标签页" })).toBeTruthy();
+    act(() => useAppStore.setState({ pendingConversationSwitchId: "opening-task" }));
+    expect(container.querySelector(".mc-main-surface")?.hasAttribute("data-home")).toBe(false);
   });
 
   it("focuses the floating composer without leaving the full workspace view", () => {
