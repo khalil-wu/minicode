@@ -53,7 +53,7 @@ def resolve_resource_command_scope(session: Any, data: Mapping[str, Any]) -> Com
     if not owner or owner == str(session.active_conversation_id or "").strip():
         return resolve_command_scope(session, data)
 
-    conversation = session.conversation_repo.get_conversation(owner)
+    conversation = session.conversation_repo.get_conversation_summary(owner)
     if conversation is None:
         raise ValueError(f"Conversation '{owner}' was not found")
     from backend.services.workspace_service import conversation_execution_path
@@ -112,7 +112,7 @@ def resolve_command_scope(
     repository = getattr(session, "conversation_repo", None)
     conversation = None
     if conversation_id and repository is not None:
-        conversation = repository.get_conversation(conversation_id)
+        conversation = repository.get_conversation_summary(conversation_id)
         if conversation is None:
             raise ValueError(f"Conversation '{conversation_id}' was not found")
 

@@ -29,7 +29,9 @@ async def capture_workspace_execution(session, conversation_id: str, *, environm
         yield None
         return
 
-    conversation = await asyncio.to_thread(session.conversation_repo.get_conversation, conversation_id)
+    conversation = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
+    if conversation is not None and conversation.permission_mode == "plan":
+        conversation = await asyncio.to_thread(session.conversation_repo.get_conversation, conversation_id)
     if conversation is None or conversation.archived:
         raise HTTPException(404, "The target conversation is not available.")
     permission = session.permission_context_for_conversation(conversation, source="workspace.request")

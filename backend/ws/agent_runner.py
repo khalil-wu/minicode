@@ -1435,9 +1435,14 @@ class SessionAgentRunnerMixin:
 
     def capture_agent_run_request(self, conversation_id: str, *, turn_settings: PreparedTurnSettings | None = None) -> AgentRunRequest:
         """Resolve window-dependent inputs before handing startup to the registered run."""
-        conversation = self.conversation_repo.get_conversation(conversation_id)
+        conversation = self.conversation_repo.get_conversation_summary(conversation_id)
         if conversation is None:
             raise ValueError(f"Conversation '{conversation_id}' was not found")
+        if (not conversation.execution_cwd or conversation.permission_mode == "plan"
+                or turn_settings is not None and turn_settings.permission_mode == "plan"):
+            conversation = self.conversation_repo.get_conversation(conversation_id)
+            if conversation is None:
+                raise ValueError(f"Conversation '{conversation_id}' was not found")
         if turn_settings is None:
             cwd = conversation.execution_cwd or str(Path.cwd().resolve())
             turn_settings = PreparedTurnSettings(workspace_revision=conversation.workspace_binding_revision,
@@ -3681,7 +3686,8 @@ class SessionAgentRunnerMixin:
         clean_id = str(conversation_id or "").strip()
         if not clean_id:
             return None
-        conversation = self.conversation_repo.get_conversation(clean_id)
+        read = self.conversation_repo.get_conversation if bind_command_context else self.conversation_repo.get_conversation_summary
+        conversation = await to_thread_cancel_safe(read, clean_id)
         if conversation is None:
             return None
         refresh = getattr(self, "refresh_tool_registry_if_mcp_changed", None)

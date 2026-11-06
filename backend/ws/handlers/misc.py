@@ -1185,13 +1185,14 @@ async def handle_skills_marketplace_list(session: "WebSocketSession", data: dict
 
 async def handle_commands_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
     from backend.commands.catalog import get_enabled_composer_command_catalog
+    from backend.async_cleanup import to_thread_cancel_safe
 
     # Capture the catalog owner before extension materialization yields. A
     # concurrent switch must not relabel the old scope's extension commands as
     # belonging to the new active conversation.
     conversation_id = str(session.active_conversation_id or "").strip()
     conversation = (
-        session.conversation_repo.get_conversation(conversation_id)
+        await to_thread_cancel_safe(session.conversation_repo.get_conversation_summary, conversation_id)
         if conversation_id
         else None
     )

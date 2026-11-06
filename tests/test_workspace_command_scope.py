@@ -27,7 +27,7 @@ def _session(workspace: Path | None, bound_workspace: str = "") -> SimpleNamespa
     return SimpleNamespace(
         session_id="workspace-scope-session",
         active_conversation_id=conversation.id,
-        conversation_repo=SimpleNamespace(get_conversation=lambda owner: conversation),
+        conversation_repo=SimpleNamespace(get_conversation=lambda owner: conversation, get_conversation_summary=lambda owner: conversation),
         session_lifecycle=SimpleNamespace(workspace_root=workspace, current_workspace_root=lambda: workspace),
         resolve_requested_workspace=lambda requested: resolve_requested_workspace(workspace, requested),
         permission_checker=checker,
