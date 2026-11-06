@@ -687,7 +687,7 @@ class ExecutionJournal:
         clean_type = str(event_type or "system").strip() or "system"
         if clean_type not in EVENT_TYPES:
             clean_type = "system"
-        clean_payload = deepcopy(dict(payload or {}))
+        clean_payload = dict(payload or {})
         with self._locked():
             self._validated_events_unlocked()
             event = self._events_by_id.get(stable_id)
@@ -719,7 +719,7 @@ class ExecutionJournal:
             if not stable_id:
                 raise ValueError("event_id is required for append_once_many")
             clean_type = str(event_type or "system").strip() or "system"
-            prepared.append((clean_type if clean_type in EVENT_TYPES else "system", deepcopy(dict(payload)), stable_id))
+            prepared.append((clean_type if clean_type in EVENT_TYPES else "system", dict(payload), stable_id))
         with self._locked():
             durable = self._validated_events_unlocked()
             claimed = {key: (value.event_type, value.payload) for key, value in self._events_by_id.items()}
@@ -790,20 +790,26 @@ class ExecutionJournal:
             ts_ms=int(ts_ms or epoch_ms()),
             parent_event_id=str(parent_event_id or ""),
         )
-        physical = event.to_dict()
-        # Own the serialized payload: caller mutations after append must not
-        # change the next delta's base or the warm recovery view.
-        event.payload = physical["payload"]
         snapshot = event.payload.get("context_snapshot")
         owner = str(event.payload.get("conversation_id") or "")
         if isinstance(snapshot, dict) and owner in self._context_heads:
             base_id, before, base_seq = self._context_heads[owner]
             before = self._context_snapshot_base(before, durable_events[base_seq:], owner)
-            physical["payload"] = dict(event.payload)
-            physical["payload"].pop("context_snapshot")
-            physical["payload"]["context_snapshot_change"] = {
+            event.payload.pop("context_snapshot")
+            event.payload["context_snapshot_change"] = {
                 "base_event_id": base_id, "change": value_change(before, snapshot),
             }
+            # Detach the changed values once. Reconstruct the warm logical
+            # event exactly like a cold reader, sharing only journal-owned data.
+            physical = event.to_dict()
+            event.payload = dict(physical["payload"])
+            encoded = event.payload.pop("context_snapshot_change")
+            snapshot = apply_value_change(before, encoded["change"])
+            event.payload["context_snapshot"] = snapshot
+        else:
+            physical = event.to_dict()
+            event.payload = physical["payload"]
+            snapshot = event.payload.get("context_snapshot")
         line = json.dumps(physical, ensure_ascii=False, separators=(",", ":"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:

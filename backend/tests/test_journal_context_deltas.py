@@ -26,6 +26,38 @@ def append_snapshot(journal, state, *, owner="conversation", event_id=None):
     return journal.append("system", payload)
 
 
+@pytest.mark.parametrize("mode", ["append", "once", "batch"])
+def test_incremental_snapshot_serializes_only_the_change_and_owns_submitted_values(tmp_path, monkeypatch, mode):
+    from backend.agent.execution_journal import JournalEvent
+
+    journal = ExecutionJournal("owned-deltas", base_dir=tmp_path)
+    original = {"history": [{"role": "user", "content": str(i)} for i in range(1000)]}
+    first = append_snapshot(journal, original)
+    changed = deepcopy(original)
+    changed["history"].append({"role": "user", "content": "next"})
+    payload = {"conversation_id": "conversation", "context_snapshot": changed, "metadata": {"label": "owned"}}
+    serialize = JournalEvent.to_dict
+    def bounded(event):
+        assert "context_snapshot" not in event.payload, "An incremental append traversed the whole snapshot"
+        assert len(json.dumps(event.payload)) < 1000
+        return serialize(event)
+    with monkeypatch.context() as patch:
+        patch.setattr(JournalEvent, "to_dict", bounded)
+        if mode == "append":
+            event = journal.append("system", payload, event_id="next")
+        elif mode == "once":
+            event = journal.append_once("system", payload, event_id="next")
+        else:
+            event, = journal.append_once_many([("system", payload, "next")])
+    changed["history"][0]["content"] = "caller changed old item"
+    changed["history"][-1]["content"] = "caller changed new item"
+    payload["metadata"]["label"] = "caller changed metadata"
+    assert first.payload["context_snapshot"] == original
+    assert event.payload["context_snapshot"]["history"][-1]["content"] == "next"
+    assert event.payload["metadata"]["label"] == "owned"
+    assert journal.read_events()[-1].to_dict() == ExecutionJournal("owned-deltas", base_dir=tmp_path).read_events()[-1].to_dict()
+
+
 def test_context_changes_preserve_each_boundary_across_writers_and_cold_recovery(tmp_path):
     first = ExecutionJournal("snapshots", base_dir=tmp_path)
     original = snapshot()
