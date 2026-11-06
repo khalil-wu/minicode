@@ -437,9 +437,19 @@ def _message_text(message):
 
 
 @pytest.mark.parametrize("blocked", [True, False])
-def test_steered_input_runs_the_user_prompt_submit_hook_before_the_model_sees_it(tmp_path, blocked):
+def test_steered_input_runs_the_user_prompt_submit_hook_before_the_model_sees_it(tmp_path, blocked, monkeypatch):
+    from backend.agent import turn_iteration_admission as admission
+
     runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", swarm_store_dir=tmp_path / "swarm", enable_lease_heartbeat=False)
     hooked = []
+    prepared = []
+    real_prepare = admission.prepare_turn_context
+
+    async def counting_prepare(*args, **kwargs):
+        prepared.append(len(hooked))
+        return await real_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(admission, "prepare_turn_context", counting_prepare)
 
     class Hooks(HookManager):
         def has_hooks(self, event):
@@ -467,6 +477,9 @@ def test_steered_input_runs_the_user_prompt_submit_hook_before_the_model_sees_it
         error = next(event for event in events if event.type == "error")
         assert error.data["error_code"] == "user_prompt_blocked" and "steer refused by hook" in error.data["message"]
         assert (done.data["status"], done.data["reason"]) == ("failed", "blocked")
+        # The block settles the turn: no context is assembled for a provider
+        # call that will never be made.
+        assert all(seen < 2 for seen in prepared), prepared
         history = owner.context_builder.export_snapshot()["history"]
         assert not any("HOOK-BLOCK" in _message_text(message) for message in history)
     else:

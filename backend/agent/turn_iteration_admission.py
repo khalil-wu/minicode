@@ -214,6 +214,16 @@ class TurnIterationAdmission:
                 initial_turn_pending=initial_turn_pending,
             )
             return
+        if self.state.stopped_reason and self.state.stopped_reason != "budget_exceeded":
+            # Preparation already settled the turn (a hook blocked the admitted
+            # steer); mailbox delivery, context assembly and compaction belong
+            # to a turn that will make another provider call.
+            yield self._result(
+                action="terminate",
+                tool_schema_state=tool_schema_state,
+                initial_turn_pending=initial_turn_pending,
+            )
+            return
 
         if self.runtime is not None:
             self.tool_context.metadata["_agent_wait_cursor"] = self.runtime.agent_activity_cursor()
