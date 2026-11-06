@@ -131,6 +131,8 @@
 }
 
 .plugin-catalog-section { display: grid; gap: 18px; padding: 0; margin-bottom: 26px; }
+.plugin-catalog-section > .settings-section-heading { margin-inline: 8px; }
+.plugin-catalog-section > .settings-section-heading > .settings-section-title { margin: 0; font-size: 15px; font-weight: var(--fw-semibold); line-height: 1.5; }
 .plugin-catalog-list { padding: 0; border: 0; background: transparent; box-shadow: none; }
 .plugin-catalog-section .plugin-empty { align-items: flex-start; text-align: left; min-height: 180px; border: 0; background: transparent; box-shadow: none; }
 
