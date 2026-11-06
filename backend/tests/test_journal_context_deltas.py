@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 import json
 
 import pytest
@@ -26,6 +27,55 @@ def append_snapshot(journal, state, *, owner="conversation", event_id=None):
     return journal.append("system", payload)
 
 
+def test_initial_snapshot_owns_its_serialized_payload_without_recursive_dataclass_export(tmp_path, monkeypatch):
+    import backend.agent.execution_journal as module
+
+    journal = ExecutionJournal("serialized-owner", base_dir=tmp_path)
+    payload = {"conversation_id": "owner", "context_snapshot": {"history": [
+        {"role": "user", "content": "中文\r\nexact input", "provider_items": [], "media": {"items": [1, True, None]}}
+        for _ in range(1000)
+    ]}}
+    expected = deepcopy(payload)
+    def no_recursive_export(*args, **kwargs):
+        raise AssertionError("A JSON journal payload was copied through asdict")
+    with monkeypatch.context() as scoped:
+        scoped.setattr(module, "asdict", no_recursive_export)
+        event = journal.append_once("system", payload, event_id="initial")
+    payload["context_snapshot"]["history"][0]["media"]["items"].append("caller changed")
+    assert event.payload == expected
+    exported = event.to_dict()
+    exported["payload"]["context_snapshot"]["history"][0]["content"] = "export changed"
+    assert event.payload == expected
+    assert journal.append_once("system", expected, event_id="initial") is event
+    cold = ExecutionJournal("serialized-owner", base_dir=tmp_path).read_events()
+    assert cold[0].to_dict() == event.to_dict()
+    assert json.loads(journal.path.read_text(encoding="utf-8")) == event.to_dict()
+
+
+def test_journal_json_preserves_dataclass_leaf_encoding_and_rejects_unserializable_facts(tmp_path):
+    from backend.agent.execution_journal import JournalEvent
+
+    @dataclass
+    class Fact:
+        text: str
+        values: list
+
+    fact = Fact("exact 中文", [{"ok": True, "count": 1}])
+    candidate = JournalEvent("system", "leaf-owner", payload={"fact": fact}, event_id="leaf", ts_ms=1)
+    assert candidate.to_json() == json.dumps(candidate.to_dict(), ensure_ascii=False, separators=(",", ":"))
+    journal = ExecutionJournal("leaf-owner", base_dir=tmp_path)
+    event = journal.append("system", {"fact": fact}, event_id="leaf", ts_ms=1)
+    fact.values[0]["count"] = 3
+    assert event.payload["fact"]["values"][0]["count"] == 1
+    before = journal.path.read_bytes()
+    with pytest.raises(TypeError):
+        journal.append("system", {"unsupported": object()})
+    assert journal.path.read_bytes() == before
+    following = journal.append("system", {"following": "accepted"})
+    assert following.seq == event.seq + 1
+    assert [item.to_dict() for item in journal.read_events()] == [item.to_dict() for item in ExecutionJournal("leaf-owner", base_dir=tmp_path).read_events()]
+
+
 @pytest.mark.parametrize("mode", ["append", "once", "batch"])
 def test_incremental_snapshot_serializes_only_the_change_and_owns_submitted_values(tmp_path, monkeypatch, mode):
     from backend.agent.execution_journal import JournalEvent
@@ -36,13 +86,13 @@ def test_incremental_snapshot_serializes_only_the_change_and_owns_submitted_valu
     changed = deepcopy(original)
     changed["history"].append({"role": "user", "content": "next"})
     payload = {"conversation_id": "conversation", "context_snapshot": changed, "metadata": {"label": "owned"}}
-    serialize = JournalEvent.to_dict
+    serialize = JournalEvent.to_json
     def bounded(event):
         assert "context_snapshot" not in event.payload, "An incremental append traversed the whole snapshot"
         assert len(json.dumps(event.payload)) < 1000
         return serialize(event)
     with monkeypatch.context() as patch:
-        patch.setattr(JournalEvent, "to_dict", bounded)
+        patch.setattr(JournalEvent, "to_json", bounded)
         if mode == "append":
             event = journal.append("system", payload, event_id="next")
         elif mode == "once":

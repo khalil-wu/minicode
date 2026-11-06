@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from contextlib import contextmanager, suppress
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Iterable
 from uuid import uuid4
@@ -372,6 +372,13 @@ class JournalEvent:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def to_json(self) -> str:
+        # JSON owns the durable representation. Avoid walking and copying the
+        # entire payload before the encoder visits it; dataclass leaves keep
+        # the same encoding as the detached dictionary export.
+        return json.dumps({item.name: getattr(self, item.name) for item in fields(self)},
+            ensure_ascii=False, separators=(",", ":"), default=asdict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "JournalEvent":
@@ -792,25 +799,24 @@ class ExecutionJournal:
         )
         snapshot = event.payload.get("context_snapshot")
         owner = str(event.payload.get("conversation_id") or "")
-        if isinstance(snapshot, dict) and owner in self._context_heads:
+        has_context_base = isinstance(snapshot, dict) and owner in self._context_heads
+        if has_context_base:
             base_id, before, base_seq = self._context_heads[owner]
             before = self._context_snapshot_base(before, durable_events[base_seq:], owner)
             event.payload.pop("context_snapshot")
             event.payload["context_snapshot_change"] = {
                 "base_event_id": base_id, "change": value_change(before, snapshot),
             }
-            # Detach the changed values once. Reconstruct the warm logical
-            # event exactly like a cold reader, sharing only journal-owned data.
-            physical = event.to_dict()
-            event.payload = dict(physical["payload"])
+        line = event.to_json()
+        # Decode exactly what will be written so caller-owned containers
+        # cannot mutate the cache. Reuse the owned prior snapshot for deltas.
+        event.payload = json.loads(line)["payload"]
+        if has_context_base:
             encoded = event.payload.pop("context_snapshot_change")
             snapshot = apply_value_change(before, encoded["change"])
             event.payload["context_snapshot"] = snapshot
         else:
-            physical = event.to_dict()
-            event.payload = physical["payload"]
             snapshot = event.payload.get("context_snapshot")
-        line = json.dumps(physical, ensure_ascii=False, separators=(",", ":"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
