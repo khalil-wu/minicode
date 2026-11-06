@@ -37,10 +37,10 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); releaseConversationReadingState(owner); });
 
-it("streams real store text into ChatTurn without reprojecting either side of admitted input", () => {
+it.each(["model_final", "pending"])("streams %s store text into ChatTurn without reprojecting either side of admitted input", source => {
   seed(assistant([
     ...Array.from({ length: 64 }, (_, index) => read(`before-${index}`)), input(),
-    ...Array.from({ length: 64 }, (_, index) => read(`after-${index}`)), text(),
+    ...Array.from({ length: 64 }, (_, index) => read(`after-${index}`)), text(source),
   ]));
   const initial = project();
   let latest = initial;
@@ -59,6 +59,9 @@ it("streams real store text into ChatTurn without reprojecting either side of ad
   }
   expect(fullProjection).not.toHaveBeenCalled();
   expect(screen.getByText(/Started word1 .*word25/)).toBeTruthy();
+  expect(latest.activeCell).toMatchObject({ source, partialMarkdown: expect.stringContaining("word25") });
+  expect(latest.finalAnswerCell).toBeNull();
+  expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
   expect(screen.getByText("admitted-user")).toBeTruthy();
   expect(workCells(latest)).toHaveLength(128);
   expect(workCells(latest).map(cell => cell.id)).toEqual(initial.committedCells.map(cell => cell.id));
@@ -68,8 +71,8 @@ it("streams real store text into ChatTurn without reprojecting either side of ad
   expect(latest).toEqual(cold());
 });
 
-it.each(["pending", "commentary"])("updates %s narration only in its actual process section", source => {
-  seed(assistant([read("before"), input(), read("after"), text(source)]));
+it("updates confirmed commentary only in its actual process section", () => {
+  seed(assistant([read("before"), input(), read("after"), text("commentary")]));
   const initial = project();
   useAppStore.getState().appendAgentMessageDelta("live-text", " continued", owner, "physical-answer");
   const next = project();
