@@ -45,6 +45,27 @@ it("keeps old completed blocks mounted when a new completed paragraph arrives", 
   expect(container.textContent).toContain("Second completed.");
 });
 
+it("keeps the mutable paragraph mounted when it becomes a completed block", () => {
+  const view = render(<MarkdownRenderer content="First **paragraph**" isStreaming />);
+  const paragraph = view.container.querySelector("p");
+  view.rerender(<MarkdownRenderer content="First **paragraph**\n\nNext paragraph" isStreaming />);
+  expect(view.container.querySelector("p")).toBe(paragraph);
+});
+
+it.each([
+  ["  ~~~~typescript metadata", "  const indented = 1;\n   const next = 2;", "  ~~~~"],
+  ["````javascript", "const literal = '```';\n```", "````"],
+  ["```text", "<tag> literal &amp; \\(value\\)\n", "```"],
+])("uses the canonical parser for a completed standalone fence %s", (opening, code, closing) => {
+  const source = `${opening}\n${code}\n${closing}\n`;
+  const streamed = render(<MarkdownRenderer content={`${opening}\n${code}`} isStreaming />);
+  streamed.rerender(<MarkdownRenderer content={source} isStreaming={false} />);
+  const projected = streamed.container.querySelector(".code-block-wrapper")?.getAttribute("data-markdown-copy-text");
+  streamed.unmount();
+  const restored = render(<MarkdownRenderer content={source} />);
+  expect(restored.container.querySelector(".code-block-wrapper")?.getAttribute("data-markdown-copy-text")).toBe(projected);
+});
+
 it("resolves later reference definitions across completed chunks", () => {
   const { rerender } = render(<MarkdownRenderer content={"Earlier [reference][ref].\n\nAnother paragraph"} isStreaming />);
   rerender(<MarkdownRenderer content={"Earlier [reference][ref].\n\nAnother paragraph\n\n[ref]: https://example.com\n"} isStreaming />);

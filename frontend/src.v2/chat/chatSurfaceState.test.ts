@@ -1071,7 +1071,7 @@ describe("chat surface explicit projection", () => {
     expect(turns[0]?.finalAnswerCell?.markdownSource).toBe("修复完成。");
   });
 
-  it("streams an unclassified preamble as a live process cell, never as the answer", () => {
+  it("keeps unclassified text in the live tail without committing it as an answer or narration", () => {
     const turns = projectMessagesToTurns([
       message("assistant-1", "assistant", [{
         type: "text",
@@ -1083,15 +1083,10 @@ describe("chat surface explicit projection", () => {
       }], { isStreaming: true }),
     ], true);
 
-    expect(turns[0]?.activeCell).toBeNull();
-    expect(turns[0]?.committedCells).toEqual([
-      expect.objectContaining({
-        kind: "thinking",
-        source: "model_preamble",
-        content: "我先检查相关文件。",
-        isStreaming: true,
-      }),
-    ]);
+    expect(turns[0]?.activeCell).toMatchObject({
+      kind: "streaming_assistant_tail", source: "pending", partialMarkdown: "我先检查相关文件。",
+    });
+    expect(turns[0]?.committedCells).toEqual([]);
     expect(turns[0]?.finalAnswerCell).toBeNull();
   });
 

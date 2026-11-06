@@ -259,11 +259,7 @@ describe("ChatTurn live answer", () => {
     expect(screen.queryByRole("status", { name: "处理中" })).toBeNull();
   });
 
-  it("shows provisional narration in the work zone while the turn is still running", () => {
-    // Unphased providers (chat-completions, Anthropic Messages) cannot label
-    // text as commentary or answer while it streams. That provisional text has
-    // to be on screen during the turn instead of appearing all at once when the
-    // provider finally settles the item.
+  it("shows explicitly classified preamble in the work zone while the turn is still running", () => {
     const turn: ChatTurnState = {
       id: "turn-live-narration",
       userCell: null,

@@ -20,6 +20,29 @@ it("keeps the fence header, typography and line-number gutter steady when stream
   expect(view.container.querySelectorAll(".code-theme-line-number")).toHaveLength(1);
 });
 
+it.each(["\n```\n", "\n```", ""])("retains measured fence nodes when the stream finishes with %j", async closing => {
+  const code = Array.from({ length: 130 }, (_, index) => `const value${index} = ${index};`).join("\n");
+  const source = `Introduction\n\n\`\`\`typescript\n${code}`;
+  const view = render(<MarkdownRenderer content={source} isStreaming />);
+  const frame = view.container.querySelector(".code-block-wrapper");
+  const pre = view.container.querySelector("pre");
+  const groups = [...view.container.querySelectorAll<HTMLElement>(".code-line-group")];
+  groups[0].dataset.measured = "true";
+  groups[0].style.setProperty("--markdown-block-height", "1408px");
+  view.rerender(<MarkdownRenderer content={source + closing} isStreaming={false} />);
+  expect(view.container.querySelector(".code-block-wrapper")).toBe(frame);
+  expect(view.container.querySelector("pre")).toBe(pre);
+  expect([...view.container.querySelectorAll(".code-line-group")]).toEqual(groups);
+  await waitFor(() => expect([...view.container.querySelectorAll("code span[style]")].some(span => span.textContent === "const")).toBe(true));
+  expect(groups[0].style.getPropertyValue("--markdown-block-height")).toBe("1408px");
+  expect(view.container.querySelector(".code-block-wrapper")?.getAttribute("data-markdown-copy-text")).toBe(code);
+  expect(view.container.querySelectorAll(".code-theme-line-number")).toHaveLength(130);
+  if (closing) {
+    view.rerender(<MarkdownRenderer content={`${source}${closing}\n\nMore text follows.`} isStreaming={false} />);
+    expect(view.container.querySelector("pre")).toBe(pre);
+  }
+});
+
 it("updates an already rendered fence with actual TextMate colors in the same mode while retaining typography and source", async () => {
   const themes = { ...emptyAppearanceThemes(), dark: { codeThemeId: "github" as const, ...defaultThemePreferences("dark") } };
   useAppStore.setState({ appearanceThemes: themes });

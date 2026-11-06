@@ -229,6 +229,7 @@ export interface StreamingAssistantTailCellState {
   kind: "streaming_assistant_tail";
   id: string;
   partialMarkdown: string;
+  source?: string;
   updatedAt: number;
 }
 

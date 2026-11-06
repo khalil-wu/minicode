@@ -77,7 +77,7 @@ export function projectChatTurnToAgentLoop(
       committedCells.length > 0
       || Boolean(turn.toolPage?.remaining)
       || turn.status === "interrupted"
-      || (turn.status === "streaming" && !answerCell),
+      || (turn.status === "streaming" && (!answerCell || activeAnswerCell?.source === "pending")),
     durationMs,
     startedAt: turn.startedAt,
     failureMessage: turn.finalAnswerCell?.failureMessage
@@ -107,7 +107,7 @@ function activeTailToAssistantMarkdownCell(
     messageId: id,
     markdownSource: cell.partialMarkdown,
     phase: "final",
-    copyable: true,
+    copyable: cell.source !== "pending",
     createdAt: cell.updatedAt,
     isStreaming: true,
     source: "stream",

@@ -95,7 +95,7 @@ const activitySubtitle = (item: TurnActivityItem): string => {
 
 const thinkingSource = (item: TurnActivityItem): ThinkingCellState["source"] => {
   if (item.collapsible) return "commentary";
-  if (item.source === "commentary") return "commentary";
+  if (item.source === "commentary" || item.source === "cancelled") return "commentary";
   if (item.source === "provider") return "provider";
   if (item.source === "model_preamble") return "model_preamble";
   if (item.source === "post_tool") return "post_tool";
@@ -678,7 +678,8 @@ const liveTail = (
       block.type === "text"
       && block.isStreaming === true
       && block.content.trim()
-      && !["pending", "retained", "commentary", "model_preamble", "post_tool", "runtime"].includes(String(block.source || ""))
+      && !["retained", "commentary", "model_preamble", "post_tool", "runtime"].includes(String(block.source || ""))
+      && (block.source !== "pending" || /[\p{L}\p{N}]/u.test(block.content))
     ) {
       const partialMarkdown = projectSourceAssistantText(block.content, block.source === "model_final" || block.source === "reply");
       if (!partialMarkdown.trim()) continue;
@@ -686,6 +687,7 @@ const liveTail = (
         kind: "streaming_assistant_tail",
         id: block.itemId || `${message.id}-live-answer`,
         partialMarkdown,
+        source: block.source,
         updatedAt: Date.now(),
       };
     }
@@ -784,10 +786,14 @@ function buildTurn(
         createdAt: assistantMessage.timestamp,
       }
     : null;
+  const activeCell = liveTail(blocks, assistantMessage);
+  // Pending text owns the same live Markdown view until its item is classified.
+  // It is neither a committed answer nor confirmed process narration yet.
+  const workActivity = projection.activityItems.filter((item) =>
+    item.id !== activeCell?.id && !item.progress?.some((progress) => progress.stage === "image_generation"),
+  );
   const committedCells = processCells(
-    projection.activityItems.filter((item) =>
-      !item.progress?.some((progress) => progress.stage === "image_generation"),
-    ),
+    workActivity,
     assistantMessage,
     workspaceRoot,
     toolImages,
@@ -850,7 +856,7 @@ function buildTurn(
     turnId: assistantMessage.turnId,
     userCell: userCell(userMessage),
     committedCells: assistantMessage.toolPage?.remaining ? committedCells.filter((cell) => cell.kind !== "diff") : committedCells,
-    activeCell: liveTail(blocks, assistantMessage),
+    activeCell,
     finalAnswerCell,
     status: assistantMessage.isStreaming
       ? "streaming"
@@ -871,9 +877,6 @@ function buildTurn(
   if (projection.userInputs?.length) {
     const workItems: TurnWorkItem[] = [];
     let segmentStart = 0;
-    const workActivity = projection.activityItems.filter((item) =>
-      !item.progress?.some((progress) => progress.stage === "image_generation"),
-    );
     const workToolIds = new Set(workActivity.flatMap((item) => item.records?.map((record) => record.id) ?? []));
     const appendProcess = (segmentEnd: number | undefined, id: string) => {
       const items = workActivity.filter((item) => (item.segment ?? 0) >= segmentStart

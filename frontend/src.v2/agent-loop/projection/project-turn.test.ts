@@ -51,6 +51,14 @@ const baseTurn = (): ChatTurnState => ({
 });
 
 describe("agent-loop process detail projection", () => {
+  it("keeps a pending item live without final-answer actions or a completed process state", () => {
+    const turn: ChatTurnState = { ...baseTurn(), status: "streaming", committedCells: [],
+      activeCell: { kind: "streaming_assistant_tail", id: "pending", partialMarkdown: "Working text", source: "pending", updatedAt: 3 } };
+    const projection = projectChatTurnToAgentLoop(turn);
+    expect(projection.answerCell).toMatchObject({ markdownSource: "Working text", copyable: false, isStreaming: true });
+    expect(projection.hasProcessContent).toBe(true);
+    expect(projection.hasCompleteFinalAnswer).toBe(false);
+  });
   it("keeps an unfinished proposed plan open even after its assistant item stops streaming", () => {
     const turn = { ...baseTurn(), finalAnswerCell: { kind: "assistant_markdown" as const, id: "plan", markdownSource: "<proposed_plan>\n1. Partial plan", copyable: true, createdAt: 2 } };
     expect(projectChatTurnToAgentLoop(turn).hasCompleteFinalAnswer).toBe(false);

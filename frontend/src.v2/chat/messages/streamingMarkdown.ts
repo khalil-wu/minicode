@@ -1,4 +1,4 @@
-export interface MarkdownPart { start: number; content: string }
+export interface MarkdownPart { start: number; content: string; fence?: boolean }
 
 /** Only completed lines advance the scan. Lists and fences retain their own
  * context; reference definitions/HTML require a document-wide Markdown parse. */
@@ -15,9 +15,9 @@ export class StreamingMarkdownPartition {
   private wholeDocument = false;
   private comment = false;
 
-  private commit(end: number): void {
+  private commit(end: number, fence = false): void {
     const content = this.source.slice(this.start, end);
-    if (content.trim()) this.parts.push({ start: this.start, content });
+    if (content.trim()) this.parts.push({ start: this.start, content, ...(fence ? { fence: true } : {}) });
     this.start = end;
     this.blankEnd = 0;
     this.list = false;
@@ -42,7 +42,7 @@ export class StreamingMarkdownPartition {
         const close = /^ {0,3}(`+|~+)[\t ]*$/.exec(line);
         if (close && close[1][0] === this.fence.marker && close[1].length >= this.fence.length) {
           this.fence = null;
-          if (!this.list) this.commit(this.cursor);
+          if (!this.list) this.commit(this.cursor, true);
         }
         continue;
       }
@@ -80,9 +80,10 @@ export class StreamingMarkdownPartition {
     if (this.fence && close && close[1][0] === this.fence.marker && close[1].length >= this.fence.length) openFence = -1;
     if (!this.fence && /^ {0,3}(`{3,}|~{3,})/.test(unfinished)) openFence = this.cursor;
     const start = this.wholeDocument ? 0 : this.start;
+    const standaloneFence = !this.list && !this.wholeDocument && (this.fence?.start === start || openFence === start);
     return {
       parts: this.parts,
-      tail: { start, content: content.slice(start) },
+      tail: { start, content: content.slice(start), ...(standaloneFence ? { fence: true } : {}) },
       openFence: this.list || this.wholeDocument ? -1 : openFence < 0 ? -1 : openFence - start,
       wholeDocument: this.wholeDocument,
     };

@@ -11,6 +11,7 @@ import { TranscriptSearchContext } from "../TranscriptSearchContext";
 import { useAppStore } from "../../stores";
 import type { ServerEvent } from "../../protocol/events";
 import type { StreamBuffer } from "../../lib/stream-buffer";
+import { createStreamBuffer } from "../../lib/stream-buffer";
 import type { ToolCallRecord } from "../../lib/tool-call-reducer";
 
 vi.hoisted(() => Object.defineProperty(globalThis, "matchMedia", { configurable:true, value:() => ({matches:false,addEventListener(){},removeEventListener(){}}) }));
@@ -46,6 +47,65 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("real item/terminal disclosure and child roles", () => {
+  it("retains the live code DOM from a pending item through authoritative completion and done", () => {
+    const text = createStreamBuffer((chunk, owner, itemId, metadata, messageId) =>
+      useAppStore.getState().appendAgentMessageDelta(itemId!, chunk, owner, messageId, metadata?.source));
+    const emit = (event: Record<string, unknown>) => {
+      handleChatStreamEvent({ conversation_id: "lifecycle", message_id: "assistant", turn_id: "actual-turn", ...event } as ServerEvent,
+        "lifecycle", { ...handlers, textStreamBuffer: text });
+      text.flush();
+    };
+    emit({ type: "item.started", item: { id: "live-code", type: "agent_message", source: "pending" } });
+    const code = Array.from({ length: 130 }, (_, index) => `const item${index} = ${index};`).join("\n");
+    const source = `Introduction\n\n\`\`\`typescript\n${code}`;
+    emit({ type: "agent_message.delta", item_id: "live-code", source: "pending", delta: source });
+    const view = render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    const frame = view.container.querySelector(".code-block-wrapper");
+    const pre = view.container.querySelector("pre");
+    const groups = [...view.container.querySelectorAll<HTMLElement>(".code-line-group")];
+    expect(groups).toHaveLength(3);
+    groups[0].dataset.measured = "true";
+    groups[0].style.setProperty("--markdown-block-height", "1408px");
+    expect(turn().finalAnswerCell).toBeNull();
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+    expect(screen.getByLabelText("Agent 处理进度").getAttribute("data-active")).toBe("true");
+    expect(view.container.querySelectorAll(".md-body")).toHaveLength(2); // earlier commentary and live text
+
+    emit({ type: "agent_message.delta", item_id: "live-code", source: "pending", delta: "\n```\n\nConclusion" });
+    view.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(view.container.querySelector("pre")).toBe(pre);
+    emit({ type: "item.completed", item: { id: "live-code", type: "agent_message", source: "model_final",
+      text: `${source}\n\`\`\`\n\nConclusion`, status: "completed" }, finish_reason: "stop" });
+    view.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(view.container.querySelector(".code-block-wrapper")).toBe(frame);
+    expect(view.container.querySelector("pre")).toBe(pre);
+    expect([...view.container.querySelectorAll(".code-line-group")]).toEqual(groups);
+    expect(groups[0].style.getPropertyValue("--markdown-block-height")).toBe("1408px");
+    expect(screen.getByRole("button", { name: "复制回复" })).toBeTruthy();
+    expect(screen.getByLabelText("Agent 处理进度").getAttribute("data-collapsed")).toBe("true");
+    done();
+    view.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(view.container.querySelector("pre")).toBe(pre);
+    expect(view.container.querySelector(".code-block-wrapper")?.getAttribute("data-markdown-copy-text")).toBe(code);
+    expect(useAppStore.getState().draft).toBe("保留的草稿");
+    text.destroy();
+  });
+
+  it.each(["commentary", "cancelled"])("keeps a provisional item as real process evidence when classified %s", source => {
+    useAppStore.getState().startAgentMessage("provisional", "lifecycle", "assistant", "pending");
+    useAppStore.getState().appendAgentMessageDelta("provisional", "我先检查相关文件。", "lifecycle", "assistant", "pending");
+    const view = render(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(screen.getByText("我先检查相关文件。")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "复制回复" })).toBeNull();
+    handle({ type: "item.completed", conversation_id: "lifecycle", message_id: "assistant", turn_id: "actual-turn",
+      item: { id: "provisional", type: "agent_message", text: "我先检查相关文件。", source,
+        status: source === "cancelled" ? "cancelled" : "completed" } });
+    view.rerender(<ChatTurn turn={turn()} conversationId="lifecycle" />);
+    expect(within(screen.getByLabelText("Agent 处理进度")).getByText("我先检查相关文件。")).toBeTruthy();
+    expect(view.container.querySelector('[data-zone="reply"]')).toBeNull();
+    expect(turn().finalAnswerCell).toBeNull();
+  });
+
   it("folds work in the first committed paint containing the completed answer", () => {
     const committedDisclosure: string[] = [];
     const captureCommit = () => {

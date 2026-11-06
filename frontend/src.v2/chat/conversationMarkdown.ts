@@ -137,8 +137,10 @@ export function renderConversationMarkdown(title: string, messages: ChatMessage[
   for (const turn of projectMessagesToTurns(messages, false, workspaceRoot)) {
     if (turn.userCell) parts.push(userMarkdown(turn.userCell));
     const previous = turn.committedCells.map(cellMarkdown).filter((content): content is string => Boolean(content?.trim()));
+    const tail = turn.activeCell?.kind === "streaming_assistant_tail" ? turn.activeCell : null;
+    if (tail?.source === "pending") previous.push(tail.partialMarkdown);
     if (previous.length) parts.push(`<details><summary>${previous.length} previous ${previous.length === 1 ? "message" : "messages"}</summary>\n\n${quote(previous.join("\n\n"))}\n</details>`);
-    const answer = turn.finalAnswerCell?.markdownSource ?? (turn.activeCell?.kind === "streaming_assistant_tail" ? turn.activeCell.partialMarkdown : null);
+    const answer = turn.finalAnswerCell?.markdownSource ?? (tail?.source !== "pending" ? tail?.partialMarkdown : null);
     if (answer?.trim()) parts.push(answer.trim());
   }
   return `${parts.join("\n\n").trimEnd()}\n`;

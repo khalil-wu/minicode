@@ -1,4 +1,4 @@
-import { Children, isValidElement, lazy, memo, Suspense, useState, useCallback, useEffect, useId, useMemo, useRef, createContext, useContext, useDeferredValue } from "react";
+import { Children, isValidElement, memo, useState, useCallback, useEffect, useId, useMemo, useRef, createContext, useContext, useDeferredValue } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { decodeString } from "micromark-util-decode-string";
@@ -6,6 +6,7 @@ import { formatHex } from "culori";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
 import { codeBlockStyle } from "./code-block-presentation";
 import { CodeBlockContent } from "./CodeBlockContent";
+import CodeThemeHighlighter from "./CodeThemeHighlighter";
 import { useMeasuredMarkdownBlock } from "./useMeasuredMarkdownBlock";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
@@ -84,8 +85,6 @@ type MarkdownPositionedProps<T> = T & { node?: MarkdownNodePosition };
 type EditorTarget = { path: string; line?: number; column?: number };
 type FileTarget = { path: string };
 type FolderTarget = { path: string };
-
-const LazyCodeHighlighter = lazy(() => import("./CodeThemeHighlighter"));
 
 const fallbackStrongPattern = /\*\*([^*\r\n]+?)\*\*/g;
 
@@ -1303,15 +1302,14 @@ const mdComponents = (
     if (match || isBlock) {
       return (
         <CodeBlockFrame text={text} language={match?.[1]}>
-          {streamingTail ? <PlainCodeBlock hasLanguage={Boolean(match)} text={text} /> : <Suspense fallback={<PlainCodeBlock hasLanguage={Boolean(match)} text={text} />}>
-            <LazyCodeHighlighter
-              hasLanguage={Boolean(match)}
-              language={match?.[1] ?? "text"}
-              resolvedTheme={resolvedTheme}
-            >
-              {text}
-            </LazyCodeHighlighter>
-          </Suspense>}
+          <CodeThemeHighlighter
+            hasLanguage={Boolean(match)}
+            language={match?.[1] ?? "text"}
+            resolvedTheme={resolvedTheme}
+            isStreaming={streamingTail}
+          >
+            {text}
+          </CodeThemeHighlighter>
         </CodeBlockFrame>
       );
     }
@@ -1667,21 +1665,30 @@ const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openF
 }) => {
   const headingId = useMemo(() => createMarkdownHeadingIdAssigner(`${scopeId}-p${part.start}`), [scopeId, part.start]);
   const components = useMemo(() => mdComponents(resolved, scopeId, headingId, streamingTail), [resolved, scopeId, headingId, streamingTail]);
-  const content = useMemo(() => openFence === 0 ? part.content : normalizeMarkdownSource(part.content), [part.content, openFence]);
-  headingId.reset();
-  if (openFence === 0) {
+  const fence = useMemo(() => {
+    if (!part.fence) return undefined;
+    if (openFence !== 0) {
+      const tree = fromMarkdown(part.content);
+      const node = tree.children[0];
+      if (tree.children.length !== 1 || node?.type !== "code" || node.lang?.toLowerCase() === "mermaid") return undefined;
+      return { text: node.value, language: node.lang?.match(/^\w+/)?.[0] };
+    }
     const newline = part.content.indexOf("\n");
     const openingLine = newline < 0 ? part.content : part.content.slice(0, newline);
     const language = /^ {0,3}(?:`{3,}|~{3,})(.*)/.exec(openingLine)?.[1].trim();
     const text = newline < 0 ? "" : part.content.slice(newline + 1).replace(/\n$/, "");
-    return <CodeBlockFrame text={text} language={language}><PlainCodeBlock hasLanguage={Boolean(language)} text={text} /></CodeBlockFrame>;
+    return { text, language };
+  }, [part, openFence]);
+  const content = useMemo(() => fence ? part.content : normalizeMarkdownSource(part.content), [part.content, fence]);
+  headingId.reset();
+  if (fence) {
+    return <CodeBlockFrame text={fence.text} language={fence.language}>
+      <CodeThemeHighlighter hasLanguage={Boolean(fence.language)} language={fence.language ?? "text"}
+        resolvedTheme={resolved} isStreaming={streamingTail || openFence === 0}>{fence.text}</CodeThemeHighlighter>
+    </CodeBlockFrame>;
   }
   return <StableMarkdown content={content} components={components} plugins={plugins} />;
 });
-
-const CommittedMarkdown = memo(({ parts, count, ...props }: {
-  parts: MarkdownPart[]; count: number; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins;
-}) => <>{parts.slice(0, count).map((part) => <MarkdownPiece key={part.start} part={part} {...props} />)}</>);
 
 function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot, documentDirectory, conversationId, knownFilePaths, fileOwner, openFileLinksInSidePanel }: Props) {
   content = withoutCodeCommentDirectives(content);
@@ -1709,10 +1716,14 @@ function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot,
       ? [...remarkPlugins, fileRefs, [removeCitationMarkers, boundCitationIndexes]]
       : [...remarkPlugins, fileRefs];
   }, [boundCitationIndexes, resources]);
-  const shared = { scopeId, resources, resolved, plugins };
+  // Completed blocks and the mutable tail share one keyed child list. Moving
+  // a finished block under another component remounted its measured DOM.
+  const committed = useMemo(() => view.wholeDocument ? [] : view.parts.map(part =>
+    <MarkdownPiece key={part.start} part={part} scopeId={scopeId} resources={resources} resolved={resolved} plugins={plugins} />),
+  [view.wholeDocument, view.parts, view.parts.length, scopeId, resources, resolved, plugins]);
   return <MarkdownResourceContext.Provider value={resources}><div id={scopeId} className="md-body">
-    {!view.wholeDocument && <CommittedMarkdown parts={view.parts} count={view.parts.length} {...shared} />}
-    {tail.content.trim() && <MarkdownPiece key={tail.start} part={tail} openFence={isStreaming ? view.openFence : -1} streamingTail={Boolean(isStreaming)} {...shared} />}
+    {[...committed, tail.content.trim() && <MarkdownPiece key={tail.start} part={tail} openFence={isStreaming ? view.openFence : -1}
+      streamingTail={Boolean(isStreaming)} scopeId={scopeId} resources={resources} resolved={resolved} plugins={plugins} />]}
   </div></MarkdownResourceContext.Provider>;
 }
 

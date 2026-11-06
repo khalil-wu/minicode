@@ -280,7 +280,7 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(useAppStore.getState().messages[0].isStreaming).toBe(true);
   });
 
-  it("streams provisional text as live narration and keeps it out of the answer surface", () => {
+  it("streams provisional text without committing an answer and classifies the settled commentary", () => {
     handle({
       type: "item.started",
       item: {
@@ -311,19 +311,11 @@ describe("handleChatStreamEvent typed lifecycle", () => {
     expect(useAppStore.getState().messages[0]?.blocks[0]).toHaveProperty("source", "pending");
 
     let turns = projectMessagesToTurns(useAppStore.getState().messages, true);
-    // Provisional text is process narration, not an answer. It has to reach the
-    // timeline delta by delta, while the copyable answer surface stays empty
-    // until the provider settles the item.
-    expect(turns[0]?.activeCell).toBeNull();
+    expect(turns[0]?.activeCell).toMatchObject({
+      kind: "streaming_assistant_tail", source: "pending", partialMarkdown: "我先从官方气象源确认一下。",
+    });
     expect(turns[0]?.finalAnswerCell).toBeNull();
-    expect(turns[0]?.committedCells).toEqual([
-      expect.objectContaining({
-        kind: "thinking",
-        source: "model_preamble",
-        content: "我先从官方气象源确认一下。",
-        isStreaming: true,
-      }),
-    ]);
+    expect(turns[0]?.committedCells).toEqual([]);
 
     handle({
       type: "item.completed",

@@ -13,6 +13,19 @@ const owner = (): ConversationMarkdownOwner => ({ id: "owner-A", title: "A # tit
 beforeEach(() => mocks.fetch.mockReset());
 const response = (payload: unknown) => ({ ok: true, json: async () => payload });
 
+it("keeps unclassified live text in exported process evidence until authoritative completion", () => {
+  const pending: ChatMessage = { ...message("pending-owner", "assistant", ""), isStreaming: true, blocks: [{
+    type: "text", itemId: "pending-item", source: "pending", content: "Visible pending text", isStreaming: true, status: "in_progress",
+  }] };
+  expect(renderConversationMarkdown("Live", [pending], "C:/A")).toBe(
+    "# Live\n\n<details><summary>1 previous message</summary>\n\n> Visible pending text\n</details>\n",
+  );
+  const completed: ChatMessage = { ...pending, isStreaming: false, blocks: [{
+    type: "text", itemId: "pending-item", source: "model_final", content: "Visible pending text", isStreaming: false, status: "completed",
+  }] };
+  expect(renderConversationMarkdown("Live", [completed], "C:/A")).toBe("# Live\n\nVisible pending text\n");
+});
+
 it("copies source title/quoted user/plain final Markdown and reads all older pages without changing its captured reader", async () => {
   const original = owner();
   const messages = original.messages;

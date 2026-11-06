@@ -2,9 +2,9 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 const highlight = vi.hoisted(() => vi.fn());
-vi.mock("./CodeThemeHighlighter", () => ({ default: ({ children }: { children: string }) => {
-  highlight(children);
-  return <pre data-highlighted="true">{children}</pre>;
+vi.mock("./CodeThemeHighlighter", () => ({ default: ({ children, isStreaming }: { children: string; isStreaming?: boolean }) => {
+  if (!isStreaming) highlight(children);
+  return <pre data-highlighted={isStreaming ? undefined : "true"}>{children}</pre>;
 } }));
 import { MarkdownRenderer } from "./MarkdownRenderer";
 

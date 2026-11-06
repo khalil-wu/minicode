@@ -31,12 +31,9 @@ it.each(["model_final", "pending"])("keeps completed tools stable during %s stre
   const after = projectMessagesToTurns(useAppStore.getState().messages, true)[0];
   expect(access).not.toHaveBeenCalled();
   expect(after.committedCells[0]).toBe(before.committedCells[0]);
-  if (source === "model_final") {
-    expect(after.committedCells).toBe(before.committedCells);
-    expect(after.activeCell?.partialMarkdown).toBe("Started continued");
-  } else {
-    expect(after.committedCells.at(-1)).toMatchObject({ kind: "thinking", content: "Started continued" });
-  }
+  expect(after.committedCells).toBe(before.committedCells);
+  expect(after.activeCell?.partialMarkdown).toBe("Started continued");
+  expect(after.activeCell?.source).toBe(source);
   useAppStore.getState().completeAgentMessage({ id: "answer", text: "Final authoritative answer", source: "model_final", status: "completed" }, "conv", undefined, "assistant");
   const settled = projectMessagesToTurns(useAppStore.getState().messages, true)[0];
   expect(settled.finalAnswerCell?.markdownSource).toBe("Final authoritative answer");

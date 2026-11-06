@@ -5,12 +5,13 @@ import type { ResolvedTheme } from "../../stores/types";
 import { codeBlockStyle } from "./code-block-presentation";
 import { CodeBlockContent } from "./CodeBlockContent";
 
-interface Props { children: string; hasLanguage: boolean; language: string; resolvedTheme: ResolvedTheme }
+interface Props { children: string; hasLanguage: boolean; language: string; resolvedTheme: ResolvedTheme; isStreaming?: boolean }
 
-export default function CodeThemeHighlighter({ children, hasLanguage, language, resolvedTheme }: Props) {
+export default function CodeThemeHighlighter({ children, hasLanguage, language, resolvedTheme, isStreaming = false }: Props) {
   const id = useAppStore(state => state.appearanceThemes[resolvedTheme]?.codeThemeId ?? "codex");
   const [result, setResult] = useState<{ code: string; language: string; id: string; variant: string; lines: string[] }>();
   useEffect(() => {
+    if (isStreaming) return;
     let current = true;
     void highlightCodeInWorker(children, language, id, resolvedTheme).then(lines => {
       if (current) setResult({ code: children, language, id, variant: resolvedTheme, lines });
@@ -18,10 +19,10 @@ export default function CodeThemeHighlighter({ children, hasLanguage, language, 
       if (current) console.error("Code highlighting failed", error);
     });
     return () => { current = false; };
-  }, [children, language, id, resolvedTheme]);
-  const lines = result?.code === children && result.language === language && result.id === id && result.variant === resolvedTheme
+  }, [children, language, id, resolvedTheme, isStreaming]);
+  const lines = !isStreaming && result?.code === children && result.language === language && result.id === id && result.variant === resolvedTheme
     ? result.lines : undefined;
-  return <pre className="overflow-x-auto" style={codeBlockStyle(hasLanguage)}>
+  return <pre className="overflow-x-auto" style={codeBlockStyle(hasLanguage)} data-markdown-copy="code-block" data-markdown-copy-text={children}>
     <code><CodeBlockContent text={children} highlightedLines={lines} /></code>
   </pre>;
 }
