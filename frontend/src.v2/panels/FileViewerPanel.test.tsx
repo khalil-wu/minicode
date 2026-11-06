@@ -35,7 +35,7 @@ beforeEach(() => {
   mocks.createUrl.mockReset().mockImplementation(() => `blob:file-viewer-${mocks.createUrl.mock.calls.length}`);
   mocks.revokeUrl.mockClear();
   useAppStore.setState({ workspaceFileTabs: [], isConnected: true, conversationId: null, workingDirectory: "C:/home", previewArtifact: null,
-    fileTreeVersion: 0, draft: "unsent", panelSlots: [{ id: "chat", kind: "chat", focused: true }], conversations: [] });
+    fileTreeVersion: 0, fileChanges: [], draft: "unsent", panelSlots: [{ id: "chat", kind: "chat", focused: true }], conversations: [] });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -109,6 +109,26 @@ it("requests one comparison per file refresh even when the refreshed branches ar
   expect(mocks.diff).toHaveBeenCalledTimes(2);
   expect(mocks.diff).toHaveBeenLastCalledWith(owner, "file.ts", "main", expect.any(AbortSignal));
   expect(useAppStore.getState().draft).toBe("unsent");
+});
+
+it("refreshes only the exact file in its owning workspace", async () => {
+  const owner = { scopeId: "home:/one", conversationId: null, executionCwd: "/one", browserRoot: "/one" };
+  const id = useAppStore.getState().openWorkspaceFileTab(owner, "src/App.ts");
+  render(<FileViewerPanel tabId={id} />);
+  await screen.findByText("saved src/App.ts");
+  for (const [workspaceRoot, path] of [["/two", "src/App.ts"], ["/one", "src/app.ts"], ["/one", "other/src/App.ts"]]) {
+    await act(async () => {
+      useAppStore.setState({ workingDirectory: workspaceRoot });
+      useAppStore.getState().addFileChange({ path, event: "modified", timestamp: 1 });
+    });
+  }
+  expect(mocks.preview).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    useAppStore.setState({ workingDirectory: "/one" });
+    useAppStore.getState().addFileChange({ path: "src/App.ts", event: "modified", timestamp: 2 });
+  });
+  await waitFor(() => expect(mocks.preview).toHaveBeenCalledTimes(2));
+  expect(useAppStore.getState().fileTreeVersion).toBe(0);
 });
 
 it("refreshes original bytes when an image changes without changing media type", async () => {

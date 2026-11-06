@@ -8,6 +8,7 @@ import { ContextMenu, type ContextMenuItem } from "../components/ContextMenu";
 import { FileOpenTargetIcon } from "../components/FileOpenTargetIcon";
 import { useDesktopPreferences } from "../hooks/useDesktopPreferences";
 import { useDesktopPreferenceTargets } from "../hooks/useDesktopPreferenceTargets";
+import { useFileChangeRevision } from "../hooks/useFileChangeRevision";
 import { desktop, runtime, type FileOpenTargetId } from "../desktop/runtime";
 import { preferredFileTargetForWorkspace } from "../lib/open-preferred-target";
 import { workspacePathWithin, workspaceRootsEqual } from "../lib/workspace-path";
@@ -38,7 +39,10 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
   const conversation = useAppStore(state => state.conversations.find(value => value.id === storedTab.owner.conversationId));
   const tab = useMemo(() => reconcileWorkspaceFileTab(storedTab, useAppStore.getState()), [storedTab, conversation]);
   const connected = useAppStore(state => state.isConnected);
-  const version = useAppStore(state => state.fileTreeVersion);
+  const treeVersion = useAppStore(state => state.fileTreeVersion);
+  const absolutePath = workspaceFileAbsolutePath(tab.owner, tab.path);
+  const fileRevision = useFileChangeRevision(tab.owner.executionCwd, absolutePath);
+  const version = `${treeVersion}:${fileRevision}`;
   const { preferences } = useDesktopPreferences();
   const { targets: openTargets } = useDesktopPreferenceTargets(active);
   const ownerKey = JSON.stringify([tab.owner.scopeId, tab.owner.conversationId, tab.owner.executionCwd, tab.owner.browserRoot, tab.owner.environmentId]);
@@ -46,7 +50,7 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
     tab.owner.conversationId ? tab.owner.executionCwd : tab.owner.browserRoot]);
   const fileKey = JSON.stringify([ownerKey, tab.path]);
   const refreshKey = JSON.stringify([fileKey, version]);
-  const [previewState, setPreview] = useState<{ key: string; version: number; value: WorkspaceFilePreviewResponse }>();
+  const [previewState, setPreview] = useState<{ key: string; version: string; value: WorkspaceFilePreviewResponse }>();
   const preview = previewState?.key === fileKey ? previewState.value : null;
   const previewCurrent = previewState?.key === fileKey && previewState.version === version;
   const [loading, setLoading] = useState(true);
@@ -77,7 +81,6 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
   const [renderMarkdown, setRenderMarkdown] = useState(Boolean(tab.isPreview));
   const findInput = useRef<HTMLInputElement>(null);
   const codeRoot = useRef<HTMLDivElement>(null);
-  const absolutePath = workspaceFileAbsolutePath(tab.owner, tab.path);
   const withinExecutionRoot = workspacePathWithin(absolutePath, tab.owner.executionCwd);
   const branches = withinExecutionRoot && branchState?.key === gitOwnerKey ? branchState.value : undefined;
   const isGitRepo = Boolean(branches?.is_git_repo);
@@ -238,7 +241,7 @@ function FileViewer({ tabId, active }: Required<FileViewerPanelProps>) {
           : previewingMarkdown ? <div className="md-prose mc-file-viewer-markdown"><MarkdownRenderer content={preview?.content ?? ""} workspaceRoot={tab.owner.browserRoot} documentDirectory={absolutePath.replace(/[\\/][^\\/]*$/, "")} conversationId={tab.owner.conversationId ?? undefined} fileOwner={tab.owner} /></div>
           : <div className="mc-file-viewer-code">{split && changes && branches?.is_git_repo ? <div className="mc-file-viewer-split"><div>{rows.map((_, index) => line(index, "old"))}</div><div>{rows.map((_, index) => line(index, "new"))}</div></div> : rows.map((_, index) => line(index))}</div>}
       </>}
-    </div>{treeVisible && <aside className="mc-file-viewer-tree"><ConversationFilesTree key={`${treeOwner.executionCwd}:${treeRoot}`} owner={treeOwner} browserRoot={treeRoot} rootSelected={treeRootSelected} connected={active && connected} version={version} onRootChange={changeTreeRoot}
+    </div>{treeVisible && <aside className="mc-file-viewer-tree"><ConversationFilesTree key={`${treeOwner.executionCwd}:${treeRoot}`} owner={treeOwner} browserRoot={treeRoot} rootSelected={treeRootSelected} connected={active && connected} version={treeVersion} onRootChange={changeTreeRoot}
       comparison={treeOwner === tab.owner && workspaceRootsEqual(treeRoot, tab.owner.executionCwd) ? branches : undefined}
       comparisonBase={treeOwner === tab.owner && workspaceRootsEqual(treeRoot, tab.owner.executionCwd) ? base : undefined} /></aside>}</div>
     {menu && <ContextMenu position={menu} onClose={() => setMenu(null)} ariaLabel={t(menu.kind === "open" ? "打开选项菜单" : "文件比较基线")} items={menu.kind === "open" ? openItems : [...new Set(["HEAD", ...(branches?.branches ?? [])])].map(value => ({ label: value, checked: base === value, checkType: "radio", onClick: () => setBase(value) }))} />}

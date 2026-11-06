@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, LoaderCircle, FileDiff, Search } from "../..
 import { ContextMenu } from "../../components/ContextMenu";
 import { uploadComposerFiles } from "../../composer/uploads";
 import { useDesktopPreferences } from "../../hooks/useDesktopPreferences";
+import { useFileChangeRevision } from "../../hooks/useFileChangeRevision";
 import { useDesktopPreferenceTargets } from "../../hooks/useDesktopPreferenceTargets";
 import { desktop, pickWorkspaceDirectory, type FileOpenTargetId } from "../../desktop/runtime";
 import { FileOpenTargetIcon } from "../../components/FileOpenTargetIcon";
@@ -30,6 +31,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
   comparison?: FileWorkspaceBranches | null; comparisonBase?: string; rootSelected?: boolean;
 }) {
   const { t } = useI18n();
+  const fileRevision = useFileChangeRevision(owner.executionCwd);
   const { preferences } = useDesktopPreferences();
   const [directories, setDirectories] = useState<Record<string, ConversationBrowserTree>>({});
   const [expanded, setExpanded] = useState(new Set<string>());
@@ -75,9 +77,9 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
     if (!connected || !owner.browserRoot) { setMenu(null); return; }
     const operation = new AbortController();
     controller.current = operation;
-    void Promise.all([basePath, ...expandedRef.current].map((path) => loadDirectory(path, operation.signal)));
+    void Promise.all([...new Set([basePath, ...expandedRef.current])].map((path) => loadDirectory(path, operation.signal)));
     return () => { operation.abort(); controller.current = null; };
-  }, [owner.conversationId, owner.executionCwd, owner.browserRoot, basePath, connected, version]);
+  }, [owner.conversationId, owner.executionCwd, owner.browserRoot, basePath, connected, version, fileRevision]);
 
   useEffect(() => {
     if (!filter.trim() || !connected || !owner.browserRoot) { setMatches([]); setFiltering(false); return; }
@@ -93,7 +95,7 @@ export function ConversationFilesTree({ owner, browserRoot, connected, version, 
     }).catch(reason => { if (!operation.signal.aborted) setError({ path: basePath, message: reason instanceof Error ? reason.message : String(reason) }); })
       .finally(() => { if (!operation.signal.aborted) setFiltering(false); });
     return () => operation.abort();
-  }, [filter, connected, owner.conversationId, owner.executionCwd, owner.browserRoot, basePath]);
+  }, [filter, connected, owner.conversationId, owner.executionCwd, owner.browserRoot, basePath, version, fileRevision]);
   useEffect(() => {
     if (!connected || !owner.browserRoot || comparison !== undefined) return;
     // The shared task browser root is a filesystem namespace, not this
