@@ -101,7 +101,10 @@ def projected_conversation(root, *, predecessor_projection=False):
     else:
         record = repo.rename_conversation(record.id, "predecessor")
     previous_revision = record.revision
-    record = repo.append_transcript_message(record.id, {"id": "user", "role": "user", "content": "hi"})
+    # Recovery below deliberately needs a predecessor checkpoint; ordinary
+    # appends now share the current generation's incremental projection.
+    record.transcript.append({"id": "user", "role": "user", "content": "hi"})
+    record = repo.save_conversation(record)
     record = repo.commit_turn_projection(
         record.id, assistant_message={"id": "partial", "role": "assistant", "content": "streamed"},
         context_delta={}, partial=True,
