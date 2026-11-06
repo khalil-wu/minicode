@@ -56,18 +56,25 @@ async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_a
         context_snapshot=snapshot)
     repo.update_compaction(conversation.id, "compacted", "Retain the earlier compaction evidence")
     reset_saves = []
-    save = repo.save_context_snapshot
+    commit = repo.commit_turn_projection
     context_reads = Mock(wraps=repo.get_projection_context)
     monkeypatch.setattr(repo, "get_projection_context", context_reads)
 
-    def track_save(owner, value):
-        if not adapter.requests:
+    def track_projection(owner, **kwargs):
+        delta = kwargs.get("context_delta", {})
+        if not adapter.requests and kwargs["assistant_message"] is None and "ui_agent_state" in delta.get("set", {}):
             assert session._conversation_projection_lock(owner).locked()
-            reset_saves.append(deepcopy(value))
-        return save(owner, value)
+            assert set(delta["set"]) == {"ui_agent_state"}
+            assert "history" not in delta and kwargs["return_record"] is False
+            before = repo.get_conversation_summary(owner)
+            result = commit(owner, **kwargs)
+            assert result.content_revision == before.content_revision
+            reset_saves.append(deepcopy(delta))
+            return result
+        return commit(owner, **kwargs)
 
     admission = Mock(wraps=repo.commit_turn_admission)
-    monkeypatch.setattr(repo, "save_context_snapshot", track_save)
+    monkeypatch.setattr(repo, "commit_turn_projection", track_projection)
     monkeypatch.setattr(repo, "commit_turn_admission", admission)
     try:
         await session.command_dispatcher._handle_command_inner(UserCommand("user_message", packet(conversation.id)))
@@ -122,7 +129,7 @@ async def test_changed_ui_write_failure_still_stops_before_provider_and_admissio
         "todos": [], "subagents": [], "agentProgress": []}}
     repo.save_context_snapshot(conversation.id, original)
     save = Mock(side_effect=OSError("actual reset persistence failure"))
-    monkeypatch.setattr(repo, "save_context_snapshot", save)
+    monkeypatch.setattr(repo, "commit_turn_projection", save)
     try:
         assert await session.command_dispatcher._handle_command(UserCommand("user_message", packet(conversation.id))) is False
         await asyncio.gather(*tuple(session.execution_cleanup_tasks))

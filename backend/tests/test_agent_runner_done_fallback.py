@@ -87,7 +87,7 @@ def test_terminal_resume_reads_committed_context_without_replacing_new_navigatio
 
     def commit_projection(owner, **options):
         result = commit(owner, **options)
-        if not options.get("partial", False):
+        if options.get("assistant_message") is not None and not options.get("partial", False):
             repo.patch_context_snapshot(owner, {"resume_owner_marker": "actual persisted context"})
             terminal_committed.set()
         return result
@@ -1289,9 +1289,14 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
         "todos": [{"id": "previous-turn", "content": "Previous completed work", "status": "completed"}],
         "subagents": retained_children, "agentProgress": []}})
 
-    def tracked_save(conversation_id, snapshot):
-        mutation_order.append("save")
-        return original_save(conversation_id, snapshot)
+    commit_projection = session.conversation_repo.commit_turn_projection
+    def tracked_projection(conversation_id, **kwargs):
+        if kwargs["assistant_message"] is None and "ui_agent_state" in kwargs.get("context_delta", {}).get("set", {}):
+            mutation_order.append("save")
+            assert set(kwargs["context_delta"]["set"]) == {"ui_agent_state"}
+            assert "history" not in kwargs["context_delta"]
+            assert kwargs["return_record"] is False
+        return commit_projection(conversation_id, **kwargs)
 
     monkeypatch.setattr(
         "backend.ws.agent_runner._replay_pending_conversation_projections",
@@ -1299,8 +1304,8 @@ def test_new_turn_replays_terminal_projection_before_resetting_context(
     )
     monkeypatch.setattr(
         session.conversation_repo,
-        "save_context_snapshot",
-        tracked_save,
+        "commit_turn_projection",
+        tracked_projection,
     )
     monkeypatch.setattr(
         "backend.ws.agent_runner.load_config",

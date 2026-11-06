@@ -4365,9 +4365,12 @@ class SessionAgentRunnerMixin:
                 )
                 if run_context_snapshot != conversation.context_snapshot:
                     await to_thread_cancel_safe(
-                        self.conversation_repo.save_context_snapshot,
+                        self.conversation_repo.commit_turn_projection,
                         conversation.id,
-                        run_context_snapshot,
+                        assistant_message=None,
+                        context_delta={"set": {UI_AGENT_STATE_SNAPSHOT_KEY: run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]}, "removed": []},
+                        expected_revision=conversation.revision,
+                        return_record=False,
                     )
             else:
                 # Keep the durable snapshot and retained pending projection
