@@ -11,6 +11,7 @@ from backend.agent.provider_protocol import (
     provider_trace_payload as _provider_trace_payload,
 )
 from backend.agent.prompt_cache import (
+    _diff_request_summaries,
     build_prompt_cache_safe_params,
     observe_prompt_cache_break,
     prompt_cache_effective_prompt_tokens,
@@ -24,7 +25,7 @@ from backend.agent.prompting import (
     diff_prompt_section_summaries,
     summarize_prompt_sections,
 )
-from backend.llm.base import LLMMessage, UsageInfo
+from backend.llm.base import LLMMessage, ToolCallEvent, UsageInfo
 
 
 def _summary(**overrides):
@@ -43,6 +44,28 @@ def _summary(**overrides):
     }
     base.update(overrides)
     return base
+
+
+def test_message_shadows_track_tool_and_provider_changes_after_empty_history() -> None:
+    message = LLMMessage(role="assistant", content="Working")
+    empty = build_prompt_cache_safe_params(messages=[message], tool_schemas=[])
+    message.tool_calls = []
+    assert build_prompt_cache_safe_params(messages=[message], tool_schemas=[]) == empty
+
+    message.tool_calls.append(ToolCallEvent(id="call-1", name="read_file", arguments={"path": "private.txt"}))
+    message.provider_items.append({"type": "reasoning", "encrypted_content": "private-reasoning"})
+    populated = build_prompt_cache_safe_params(messages=[message], tool_schemas=[])
+    changes, details = _diff_request_summaries(empty, populated)
+    assert changes == ["message prefix changed"]
+    assert details["message_prefix_delta"]["changed_fields"] == [
+        "provider_item_count", "provider_items_hash", "tool_call_count", "tool_calls_hash",
+    ]
+    assert "private.txt" not in str(populated)
+    assert "private-reasoning" not in str(populated)
+
+    message.tool_calls.clear()
+    message.provider_items.clear()
+    assert build_prompt_cache_safe_params(messages=[message], tool_schemas=[]) == empty
 
 
 def test_prompt_cache_hit_rate_normalizes_provider_usage_semantics() -> None:

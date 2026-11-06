@@ -18,6 +18,7 @@ _MAX_TRACKED_PROMPT_CACHE_SOURCES = 32
 _DEFAULT_MIN_CACHE_DROP_TOKENS = 2_000
 _DEFAULT_RELATIVE_CACHE_DROP = 0.05
 _PROMPT_CACHE_STATE: "OrderedDict[str, _PromptCacheObservation]" = OrderedDict()
+_EMPTY_LIST_FINGERPRINT = _json_fingerprint([])
 
 
 @dataclass(frozen=True)
@@ -192,9 +193,9 @@ def _message_cache_shadow(message: Any) -> dict[str, Any]:
         "content_hash": _short_sha256(content),
         "content_chars": len(content),
         "tool_call_id_hash": _short_sha256(tool_call_id),
-        "tool_calls_hash": _json_fingerprint(call_shapes),
+        "tool_calls_hash": _json_fingerprint(call_shapes) if call_shapes else _EMPTY_LIST_FINGERPRINT,
         "tool_call_count": len(call_shapes),
-        "provider_items_hash": _json_fingerprint(provider_items),
+        "provider_items_hash": _json_fingerprint(provider_items) if provider_items else _EMPTY_LIST_FINGERPRINT,
         "provider_item_count": len(provider_items) if isinstance(provider_items, list) else 0,
     }
 
