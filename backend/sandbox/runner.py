@@ -61,8 +61,35 @@ _LEGACY_CAPTURED_BYTES = MAX_TOOL_RESULT_BYTES - _LEGACY_MARKER_BUDGET
 _LEGACY_CAPTURED_HEAD_BYTES = _LEGACY_CAPTURED_BYTES // 2
 _LEGACY_CAPTURED_TAIL_BYTES = _LEGACY_CAPTURED_BYTES - _LEGACY_CAPTURED_HEAD_BYTES
 _CONTAINER_RUNTIME_CACHE_TTL_SECONDS = 10.0
+_IO_DRAIN_TIMEOUT_SECONDS = 2.0
 _container_runtime_cache: tuple[float, str, str, str, str] | None = None
 _bubblewrap_probe_cache: tuple[float, bool, str] | None = None
+
+
+async def _close_windows_job(job: Any) -> bool:
+    import psutil
+
+    try:
+        # The Job's active count drops before exited members leave the process
+        # table. Keep their identities so exit is proven like other tree kills,
+        # including on a retry after the Job handle was already closed.
+        members = getattr(job, "minicode_members", None)
+        if not job.closed:
+            import win32job
+
+            members = []
+            for pid in win32job.QueryInformationJobObject(job.job, win32job.JobObjectBasicProcessIdList):
+                with suppress(psutil.Error):
+                    members.append(psutil.Process(pid))
+            job.minicode_members = members
+        await job.aclose()
+        _, alive = await asyncio.to_thread(psutil.wait_procs, members, 3.0)
+    except Exception:
+        logger.warning("Command Windows job (pid %s) could not be proven empty", job.pid, exc_info=True)
+        return False
+    if alive:
+        logger.warning("Command Windows job members still present: %s", [process.pid for process in alive])
+    return not alive
 
 
 def _append_bounded_output(sink: bytearray, chunk: bytes) -> None:
@@ -462,6 +489,10 @@ class SandboxRunner:
         self._windows_native_cwd: Path | None = None
         self._windows_launcher_env: dict[str, str] = {}
         self._windows_cleanup_pending = False
+        # Windows Job owning this run()'s process and every descendant. It
+        # stays referenced until its descendants are proven gone.
+        self._process_job: Any | None = None
+        self._process_job_close: asyncio.Future[bool] | None = None
 
     def capability(self, *, cwd: str | Path | None = None) -> SandboxCapability:
         """Report the isolation that will actually be enforced.
@@ -846,7 +877,8 @@ class SandboxRunner:
                 await self._cleanup_container(force=True)
                 if self.process is None else False
             )
-            if self.process is not None or not container_removed or self._windows_cleanup_pending:
+            if (self.process is not None or self._process_job is not None
+                    or not container_removed or self._windows_cleanup_pending):
                 exc.cleanup_pending = True
                 exc.cleanup_reason = "command_resource_cleanup_pending"
             raise
@@ -867,6 +899,8 @@ class SandboxRunner:
         """Retry termination of resources retained by this runner."""
         if self.process is not None:
             return await self._kill_tree(self.process)
+        if not await self._close_process_job():
+            return False
         self._cleanup_sandbox_setup_state()
         return not self._windows_cleanup_pending and await self._cleanup_container(force=True)
 
@@ -932,8 +966,13 @@ class SandboxRunner:
         stderr_total = 0
         stream_totals = {"stdout": 0, "stderr": 0}
         cancel_tree_reaped = True
+        # Set by the transport when the process exits; Process.wait() also
+        # waits for pipe EOF, which a surviving descendant can hold open.
+        exit_observed = asyncio.Event()
 
         try:
+            if self._process_job is not None and not await self._close_process_job():
+                raise OSError("A previous command's Windows job still has live processes")
             spawn_kwargs = {
                 "stdin": (
                     asyncio.subprocess.PIPE
@@ -954,12 +993,29 @@ class SandboxRunner:
                 pty_kwargs = {"cwd": cwd, "env": env}
                 if preserved_fds:
                     pty_kwargs["pass_fds"] = preserved_fds
-                proc = await spawn_pty(wrapped_command, **pty_kwargs)
-            elif isinstance(wrapped_command, list):
-                proc = await spawn_exec(*wrapped_command, **spawn_kwargs)
+                proc = await spawn_pty(wrapped_command, on_exit=exit_observed.set, **pty_kwargs)
+                self.process = proc
             else:
-                proc = await spawn_shell(wrapped_command, **spawn_kwargs)
-            self.process = proc
+                if os.name == "nt":
+                    # Start suspended inside a kill-on-close Job so descendants
+                    # that outlive or detach from the shell are still owned.
+                    import win32process
+
+                    from backend.workspace.executor_process_owner import (
+                        WindowsProcessJob,
+                    )
+
+                    self._process_job = WindowsProcessJob()
+                    spawn_kwargs["creationflags"] = win32process.CREATE_SUSPENDED
+                spawn = spawn_exec if isinstance(wrapped_command, list) else spawn_shell
+                command_args = wrapped_command if isinstance(wrapped_command, list) else [wrapped_command]
+                proc = await spawn(*command_args, on_exit=exit_observed.set, **spawn_kwargs)
+                self.process = proc
+                if self._process_job is not None:
+                    try:
+                        self._process_job.attach_suspended(proc)
+                    except Exception as exc:
+                        raise OSError(f"Could not place command process in its Windows job: {exc}") from exc
             if process_ready_callback is not None:
                 ready_result = process_ready_callback(proc)
                 if inspect.isawaitable(ready_result):
@@ -1057,12 +1113,48 @@ class SandboxRunner:
                     _read_stream(proc.stderr, stderr_capture, stream_name="stderr")
                 )
                 wait_task = asyncio.create_task(proc.wait())
-                completion_task = asyncio.gather(
-                    stdin_task,
-                    stdout_task,
-                    stderr_task,
-                    wait_task,
-                )
+
+                def _raise_reader_failure(readers: tuple[asyncio.Task[Any], ...]) -> None:
+                    for reader in readers:
+                        if reader.done() and not reader.cancelled() and reader.exception() is not None:
+                            raise reader.exception()
+
+                async def _complete() -> tuple[Any, int, int, Any]:
+                    # The command ends when its process exits. A background
+                    # grandchild (`start /b`, `cmd &`) may inherit the pipes and
+                    # hold them open; drain briefly instead of waiting for EOF.
+                    readers = (stdin_task, stdout_task, stderr_task)
+                    exit_task = asyncio.ensure_future(exit_observed.wait())
+                    try:
+                        while True:
+                            _raise_reader_failure(readers)
+                            if wait_task.done() or exit_task.done():
+                                break
+                            # Finished readers (EOF, stdin already written)
+                            # would make wait() return at once; skip them.
+                            await asyncio.wait({wait_task, exit_task, *(r for r in readers if not r.done())},
+                                return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        exit_task.cancel()
+                    returncode = proc.returncode if not wait_task.done() else wait_task.result()
+                    if returncode is None:
+                        returncode = await wait_task
+                    _, pending = await asyncio.wait(readers, timeout=_IO_DRAIN_TIMEOUT_SECONDS)
+                    if pending and self._process_job is not None:
+                        # Descendants still hold the pipes: end them, then
+                        # collect what they already wrote.
+                        await self._close_process_job()
+                        _, pending = await asyncio.wait(pending, timeout=_IO_DRAIN_TIMEOUT_SECONDS)
+                    for reader in pending:
+                        reader.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+                    _raise_reader_failure(readers)
+                    stdout_bytes = stdout_task.result() if not stdout_task.cancelled() else stream_totals["stdout"]
+                    stderr_bytes = stderr_task.result() if not stderr_task.cancelled() else stream_totals["stderr"]
+                    return None, stdout_bytes, stderr_bytes, returncode
+
+                completion_task = asyncio.create_task(_complete())
                 # Setup diagnostics belong to the same output stream as the
                 # command. Drain before waiting for the namespace handshake:
                 # an early launcher exit otherwise loses its stderr entirely.
@@ -1104,7 +1196,18 @@ class SandboxRunner:
 
             stdout_capture.finish()
             stderr_capture.finish()
+            if cancel_event and cancel_event.is_set() and cancel_task is not None:
+                # The root may exit from the cancel kill before that kill has
+                # proven its tree gone; its verdict is the cleanup evidence.
+                try:
+                    await asyncio.shield(cancel_task)
+                except Exception:
+                    logger.warning("Command cancellation kill failed", exc_info=True)
+                    cancel_tree_reaped = False
+            # The root exited; anything left in its Job is an owned descendant.
+            job_closed = await self._close_process_job()
             if cancel_event and cancel_event.is_set():
+                cancel_tree_reaped = cancel_tree_reaped and job_closed
                 return SandboxResult(
                     stdout=stdout_capture.snapshot(),
                     stderr=stderr_capture.snapshot(),
@@ -1138,6 +1241,8 @@ class SandboxRunner:
                     stderr_path=stderr_capture.path,
                     stdout_total_bytes=stdout_total,
                     stderr_total_bytes=stderr_total,
+                    cleanup_pending=not job_closed,
+                    cleanup_reason="" if job_closed else "process_job_survived_completion",
                 )
 
             return SandboxResult(
@@ -1148,15 +1253,16 @@ class SandboxRunner:
                 stderr_path=stderr_capture.path,
                 stdout_total_bytes=stdout_total,
                 stderr_total_bytes=stderr_total,
+                cleanup_pending=not job_closed,
+                cleanup_reason="" if job_closed else "process_job_survived_completion",
             )
 
         except asyncio.CancelledError:
             # Cancellation must terminate the whole process tree and drain
             # reader tasks before the coroutine leaves; otherwise Windows
             # Proactor transports can survive the agent turn and leak output.
-            tree_reaped = True
-            if proc is not None:
-                tree_reaped = await asyncio.shield(self._kill_tree(proc))
+            tree_reaped = await asyncio.shield(
+                self._kill_tree(proc) if proc is not None else self._close_process_job())
             if completion_task is not None and not completion_task.done():
                 try:
                     await asyncio.wait_for(
@@ -1207,9 +1313,8 @@ class SandboxRunner:
                 cleanup_reason="sandbox_setup_cleanup_pending" if self.process is not None else "",
             )
         except OSError as exc:
-            tree_reaped = True
-            if proc is not None:
-                tree_reaped = await asyncio.shield(self._kill_tree(proc))
+            tree_reaped = await asyncio.shield(
+                self._kill_tree(proc) if proc is not None else self._close_process_job())
             stdout_capture.close()
             stderr_capture.close()
             cleanup_captured_output(stdout_capture.path, stderr_capture.path)
@@ -1229,6 +1334,8 @@ class SandboxRunner:
             if proc is not None:
                 tree_reaped = await asyncio.shield(self._kill_tree(proc))
                 record_unproven_cleanup(exc, reaped=tree_reaped, proc=proc)
+            else:
+                await asyncio.shield(self._close_process_job())
             stdout_capture.close()
             stderr_capture.close()
             cleanup_captured_output(stdout_capture.path, stderr_capture.path)
@@ -1605,10 +1712,34 @@ class SandboxRunner:
         if private_desktop is not None:
             private_desktop.close()
 
+    async def _close_process_job(self) -> bool:
+        """Terminate this run's Windows Job and wait until it has no live process.
+
+        Concurrent callers (cancel watcher, timeout, completion) share one
+        shielded close, so none reports success before the Job is empty.
+        ``False`` keeps the Job for ``cleanup()``.
+        """
+        job = self._process_job
+        if job is None:
+            return True
+        task = self._process_job_close
+        # An unproven close is retried; after the handle is closed the retry
+        # re-checks the saved member identities.
+        if task is None or (task.done() and (task.cancelled() or not task.result())):
+            task = self._process_job_close = asyncio.ensure_future(_close_windows_job(job))
+        closed = await asyncio.shield(task)
+        if closed and self._process_job is job:
+            self._process_job = None
+            self._process_job_close = None
+        return closed
+
     async def _kill_tree(self, proc: asyncio.subprocess.Process) -> bool:
         # The sandbox owns container cleanup, while the host child still uses
         # the shared process-group lifecycle used by every other execution path.
-        reaped = await terminate_process_tree(proc)
+        # The Job goes first: it also reaches descendants whose parent already
+        # exited, which a parent/child tree walk cannot find.
+        job_closed = await self._close_process_job()
+        reaped = await terminate_process_tree(proc) and job_closed
         container_removed = await self._cleanup_container(force=True)
         if reaped and container_removed:
             self._cleanup_sandbox_setup_state()
