@@ -36,14 +36,36 @@ def is_git_tool_env(name: str) -> bool:
     return is_git_repository_env(key) or key.startswith("GIT_CONFIG_")
 
 
-def default_user_shell() -> dict[str, str]:
+def powershell_executable(*, native_process: bool = False) -> str | None:
+    """Select the first PowerShell the captured Windows process can own."""
+    candidates = [shutil.which("pwsh"), shutil.which("powershell")]
+    if os.name == "nt":
+        candidates[1:1] = [str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell/7/pwsh.exe")]
+        candidates.append(str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"))
+    else:
+        candidates[1:1] = ["/usr/local/bin/pwsh"]
+    for candidate in candidates:
+        if not candidate or not Path(candidate).is_file():
+            continue
+        if native_process and os.name == "nt":
+            # Store activation aliases (and their package targets) cannot be
+            # launched suspended inside the native PTY/Job process owner.
+            parts = Path(candidate).resolve().parts
+            if any(part.casefold() == "windowsapps" and index + 1 < len(parts)
+                   and (parts[index + 1].casefold().startswith("microsoft.powershell")
+                        or parts[index + 1].casefold() in {"pwsh.exe", "powershell.exe"})
+                   for index, part in enumerate(parts)):
+                continue
+        return candidate
+    return None
+
+
+def default_user_shell(*, native_process: bool = False) -> dict[str, str]:
     """Capture Source's host session shell independently of model metadata."""
     if os.name == "nt":
-        for binary, fixed in (("pwsh", r"C:\Program Files\PowerShell\7\pwsh.exe"),
-                ("powershell", r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")):
-            path = shutil.which(binary)
-            if path is not None or Path(fixed).is_file():
-                return {"name": "powershell", "path": path or fixed}
+        path = powershell_executable(native_process=native_process)
+        if path is not None:
+            return {"name": "powershell", "path": path}
         return {"name": "cmd", "path": "cmd.exe"}
     import pwd
 

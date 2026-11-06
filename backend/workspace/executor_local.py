@@ -433,7 +433,7 @@ class LocalExecutionEnvironmentBackend:
     async def info(self) -> dict:
         if self.process.closed:
             raise ExecutorClosed("local execution environment is closed")
-        shell = default_user_shell()
+        shell = default_user_shell(native_process=True)
         temporary = []
         for key in (("TEMP", "TMP") if os.name == "nt" else ("TMPDIR",)):
             raw = os.environ.get(key)

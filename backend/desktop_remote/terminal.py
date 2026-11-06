@@ -42,7 +42,7 @@ class NativeTerminals:
             if sum(item.record.is_alive for item in self.sessions.values()) >= 8:
                 raise RuntimeError("remote desktop has reached its eight live terminal limit")
             session_id = f"pty-{uuid4().hex}"
-            selected = default_user_shell()
+            selected = default_user_shell(native_process=True)
             shell = selected["path"]
             if os.name != "nt":
                 argv = [shell, "-i"]

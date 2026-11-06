@@ -397,14 +397,9 @@ def command_shell_argv(
 
     def discover(kind: str) -> str | None:
         if kind == "powershell":
-            programs = [shutil.which("pwsh"), shutil.which("powershell")]
-            if sys.platform == "win32":
-                programs[1:1] = [str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell/7/pwsh.exe")]
-                programs.append(str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"))
-            else:
-                programs[1:1] = ["/usr/local/bin/pwsh"]
-            return next((program for program in programs if program and Path(program).is_file()
-                         and (not native_windows_sandbox or (Path(program).suffix.lower() == ".exe" and "/windowsapps/" not in program.replace("\\", "/").lower()))), None)
+            from backend.runtime_env import powershell_executable
+
+            return powershell_executable(native_process=sys.platform == "win32" or native_windows_sandbox)
         paths = {"bash": ("/bin/bash", "/usr/bin/bash"), "zsh": ("/bin/zsh",), "sh": ("/bin/sh",), "cmd": ()}
         return next((program for program in (shutil.which(kind), *paths[kind]) if program and Path(program).is_file()), None)
 
