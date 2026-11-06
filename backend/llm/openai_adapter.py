@@ -5882,7 +5882,6 @@ class OpenAIAdapter(LLMAdapter):
     async def _emit_chat_http_stream_events(
         self,
         payload: dict[str, Any],
-        request_summary: dict[str, Any] | None = None,
         *,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
@@ -5896,7 +5895,7 @@ class OpenAIAdapter(LLMAdapter):
         raw_done: dict[str, Any] = {
             "provider": "openai_chat_completions",
             "model": self._settings.model,
-            "request_summary": request_summary or {},
+            "request_summary": {},
             "safety": _provider_trace_safety(),
             "provider_timeline": provider_timeline,
         }
@@ -6252,32 +6251,12 @@ class OpenAIAdapter(LLMAdapter):
         *,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
-        def build_payload_request_summary(payload: dict[str, Any]) -> dict[str, Any]:
-            payload_messages = (
-                payload.get("messages")
-                if isinstance(payload.get("messages"), list)
-                else []
-            )
-            return _safe_request_summary(
-                model=str(payload.get("model") or self._settings.model),
-                wire_api="chat",
-                instructions=_instruction_text_from_chat_payload(payload_messages),
-                tools=payload.get("tools")
-                if isinstance(payload.get("tools"), list)
-                else [],
-                request_metadata=payload.get("metadata")
-                if isinstance(payload.get("metadata"), dict)
-                else {},
-                input_items=_chat_payload_input_items(payload_messages),
-                request_params=payload,
-            )
-
         payload = _without_unsupported_chat_fields(
             kwargs,
             self._chat_unsupported_fields,
         )
         stream = self._emit_chat_http_stream_events(
-            payload, build_payload_request_summary(payload), metadata=metadata,
+            payload, metadata=metadata,
         )
         try:
             async for event in stream:
@@ -6316,7 +6295,7 @@ class OpenAIAdapter(LLMAdapter):
             self._chat_unsupported_fields,
         )
         stream = self._emit_chat_http_stream_events(
-            retry_payload, build_payload_request_summary(retry_payload), metadata=metadata,
+            retry_payload, metadata=metadata,
         )
         try:
             async for event in stream:
