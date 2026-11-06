@@ -48,6 +48,8 @@ def powershell_executable(*, native_process: bool = False) -> str | None:
         if not candidate or not Path(candidate).is_file():
             continue
         if native_process and os.name == "nt":
+            if Path(candidate).suffix.casefold() != ".exe":
+                continue
             # Store activation aliases (and their package targets) cannot be
             # launched suspended inside the native PTY/Job process owner.
             parts = Path(candidate).resolve().parts
