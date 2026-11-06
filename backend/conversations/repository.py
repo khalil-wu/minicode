@@ -1275,9 +1275,8 @@ class ConversationRepository:
                 record.transcript[replace_index] = next_message
             else:
                 record.transcript.append(next_message)
-            record.context_snapshot = (copy.deepcopy(dict(context_snapshot or {})) if return_record
-                else apply_context_snapshot_delta(record.context_snapshot,
-                    copy.deepcopy(context_snapshot_delta(record.context_snapshot, dict(context_snapshot or {})))))
+            previous_snapshot = record.context_snapshot
+            record.context_snapshot = copy.deepcopy(dict(context_snapshot or {})) if return_record else dict(context_snapshot or {})
             if (agent_mode is not None and expected_agent_mode_revision is not None
                     and record.agent_mode_revision == expected_agent_mode_revision):
                 record.agent_mode = normalize_conversation_agent_mode(agent_mode)
@@ -1296,7 +1295,13 @@ class ConversationRepository:
             if record.title == "New chat":
                 record.title = _derive_title(str(next_message.get("display_content", next_message.get("content", ""))))
             record.updated_at = utc_now_iso()
-            self._commit_record(record, normalized_prefix=None if rewind_projection is not None else normalized_prefix, admission=True)
+            committed_projection = self._commit_record(record, normalized_prefix=None if rewind_projection is not None else normalized_prefix, admission=True)
+            if not return_record:
+                # The projection log already deserialized its written delta.
+                # Reuse those owned values before publishing the internal cache;
+                # a full checkpoint still needs its own detached snapshot.
+                record.context_snapshot = (apply_context_snapshot_delta(previous_snapshot, committed_projection["context_delta"])
+                    if committed_projection is not None else copy.deepcopy(record.context_snapshot))
             self._cache_record(record, copy_record=return_record)
             return record if return_record else record.to_summary()
 
@@ -2173,18 +2178,16 @@ class ConversationRepository:
         base_record: ConversationRecord | None = None,
         admission: bool = False,
         content_changed: bool = True,
-    ) -> None:
-        """Publish metadata and bounded deltas behind the atomic commit marker."""
+    ) -> dict[str, Any] | None:
+        """Publish metadata/deltas and return the log-owned cumulative projection."""
         manifest = self._read_manifest(record.id, log_errors=False)
         if manifest is None or record.revision != self._manifest_revision(manifest):
-            self._commit_record(record)
-            return
+            return self._commit_record(record)
         pointer = manifest.get("projection_log")
         admissions = int(manifest.get("checkpoint_admissions", 0)) + int(admission)
         if context_delta is not None and (admissions >= self._MAX_PROJECTION_ADMISSIONS
                 or pointer and pointer["bytes"] >= self._MAX_PROJECTION_BYTES):
-            self._commit_record(record)
-            return
+            return self._commit_record(record)
         revision = record.revision + 1
         metadata = {**record.to_meta_dict(), "revision": revision}
         payload = {**manifest, "version": _STORAGE_MANIFEST_VERSION, "revision": revision, "metadata": metadata}
@@ -2195,8 +2198,7 @@ class ConversationRepository:
             generation = manifest["current_generation"]
             checkpoint = self._read_generation_metadata(record.id, generation)
             if checkpoint.get("transcript_index_version") != 1:
-                self._commit_record(record)
-                return
+                return self._commit_record(record)
             start = transcript_from if transcript_from is not None else len(record.transcript)
             if content_changed:
                 metadata["content_revision"] = revision
@@ -2228,6 +2230,8 @@ class ConversationRepository:
         record.content_updated_at = metadata["content_updated_at"]
         if context_delta is not None:
             self._cache_partial_projection(record.id, payload["projection_log"], owned_projection)
+            return owned_projection
+        return None
 
     def _cache_record(self, record: ConversationRecord, *, copy_record: bool = True) -> None:
         with self._process_lock:
@@ -2405,7 +2409,7 @@ class ConversationRepository:
                 f"Conversation manifest for '{conversation_id}' is corrupt: {exc}"
             ) from exc
 
-    def _commit_record(self, record: ConversationRecord, *, normalized_prefix: int | None = None, admission: bool = False) -> None:
+    def _commit_record(self, record: ConversationRecord, *, normalized_prefix: int | None = None, admission: bool = False) -> dict[str, Any] | None:
         """Commit meta, transcript, and snapshot behind one atomic marker.
 
         Generation files are immutable once published.  The manifest rename
@@ -2493,10 +2497,9 @@ class ConversationRepository:
             )
 
         if normalized_prefix is not None and manifest is not None and not current_generation_corrupt:
-            self._commit_metadata(record, transcript_from=prefix, base_record=readable_record, admission=admission,
+            return self._commit_metadata(record, transcript_from=prefix, base_record=readable_record, admission=admission,
                 content_changed=readable_record.transcript != record.transcript,
                 context_delta=context_snapshot_delta(readable_record.context_snapshot, record.context_snapshot))
-            return
 
         previous_generation: int | None = (
             readable_generations[0] if readable_generations else None
