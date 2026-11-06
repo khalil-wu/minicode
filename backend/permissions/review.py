@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from backend.atomic_io import preserve_text_line_endings
 from backend.diff.unified import count_unified_diff_changes as _count_unified_diff_changes, iter_unified_diff
 
 
@@ -52,15 +53,8 @@ def generate_file_diff(
 
     如果文件不存在，视为从空文件创建。
     """
-    path = Path(file_path)
-    try:
-        old_content = path.read_bytes().decode("utf-8")
-    except FileNotFoundError:
-        old_content = ""
-    except (UnicodeDecodeError, OSError) as exc:
-        return f"无法生成差异，读取现有文件失败: {file_path}\n{exc}\n"
-
-    return generate_unified_diff(file_path, old_content, new_content, context_lines)
+    payload = generate_file_diff_payload(file_path, new_content, context_lines)
+    return payload["files"][0]["patch"] if payload["format"] == "structured" else payload["raw"]
 
 
 def generate_edit_diff(
@@ -126,8 +120,16 @@ def generate_file_diff_payload(
     new_content: str,
     context_lines: int = 3,
 ) -> dict[str, Any]:
-    status = "modified" if Path(file_path).exists() else "added"
-    patch = generate_file_diff(file_path, new_content, context_lines)
+    try:
+        original = Path(file_path).read_bytes()
+        old_content = original.decode("utf-8")
+        new_content = preserve_text_line_endings(new_content, original)
+        status = "modified"
+    except FileNotFoundError:
+        old_content, status = "", "added"
+    except (UnicodeDecodeError, OSError) as exc:
+        return {"format": "raw", "raw": f"无法生成差异，读取现有文件失败: {file_path}\n{exc}\n"}
+    patch = generate_unified_diff(file_path, old_content, new_content, context_lines)
     return build_structured_diff_payload(
         file_path,
         patch,

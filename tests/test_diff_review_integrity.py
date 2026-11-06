@@ -179,7 +179,10 @@ def test_review_and_turn_patches_reproduce_actual_file_tool_writes(tmp_path, old
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
     target = tmp_path / "sample.txt"
     target.write_bytes(old)
-    expected = b"first\nnew\n" if tool_name == "write_file" else edited
+    if tool_name == "write_file":
+        expected = b"first\r\nnew\r\n" if b"\r\n" in old else b"first\nnew\n"
+    else:
+        expected = edited
     if tool_name == "apply_patch" and old == b"first\rold\r":
         expected = b"first\rnew\r"
     tracker = TurnDiffTracker()
@@ -194,7 +197,7 @@ def test_review_and_turn_patches_reproduce_actual_file_tool_writes(tmp_path, old
     context.metadata["_read_file_hashes"] = {canonical_file_path_key(target): content_hash(old.decode())}
     if tool_name == "write_file":
         tool = WriteFileTool()
-        args = {"file_path": "sample.txt", "content": expected.decode(), "expected_hash": content_hash(old.decode())}
+        args = {"file_path": "sample.txt", "content": "first\nnew\n", "expected_hash": content_hash(old.decode())}
     elif tool_name == "edit_file":
         tool = EditFileTool()
         args = {"file_path": "sample.txt", "old_string": "old", "new_string": "new", "expected_hash": content_hash(old.decode())}
