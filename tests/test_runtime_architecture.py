@@ -351,6 +351,11 @@ def test_run_command_native_cancellation_reaps_child_before_propagating(tmp_path
 
     async def _exercise() -> None:
         monkeypatch.setattr("backend.sandbox.runner.spawn_exec", _fake_spawn_exec)
+        if os.name == "nt":
+            # This process double has no OS handle. Keep the real empty Job's
+            # cleanup while leaving OS attachment to native process tests.
+            from backend.workspace.executor_process_owner import WindowsProcessJob
+            monkeypatch.setattr(WindowsProcessJob, "attach_suspended", lambda self, process: None)
         cancel_event = asyncio.Event()
         tool = RunCommandTool(ArtifactStore(storage_dir=tmp_path / "artifacts"))
         checker = PermissionChecker(permission_settings_from_config({}), tmp_path)
