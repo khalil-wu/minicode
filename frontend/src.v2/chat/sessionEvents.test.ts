@@ -145,6 +145,29 @@ describe("handleSessionEvent", () => {
     expect(sendClientCommand).not.toHaveBeenCalledWith({ type: "commands.list" });
   });
 
+  it("finishes hydration without rehydrating an unchanged transcript or losing the draft", () => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ activeConversationDraftId: null, pendingConversationSwitchId: "conv-light" });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-light", context_pending: true, is_hydrating: true,
+      conversation: { id: "conv-light", title: "History", workspace_root: "C:/repo", revision: 7,
+        transcript: [{ id: "answer", role: "assistant", content: "retained history" }],
+        transcript_page: { before_message_id: "answer", has_more: true, total_messages: 100 } },
+    } as unknown as ServerEvent, buffers);
+    useAppStore.setState({ draft: "still typing" });
+    const messages = useAppStore.getState().messages;
+    const page = useAppStore.getState().conversationHistoryPages["conv-light"];
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "conv-light", is_hydrating: false,
+      session: { active_conversation_id: "conv-light" },
+    } as ServerEvent, buffers);
+    const state = useAppStore.getState();
+    expect(state.conversationHydration["conv-light"].isHydrating).toBe(false);
+    expect(state.messages).toBe(messages);
+    expect(state.messages[0].content).toBe("retained history");
+    expect(state.conversationHistoryPages["conv-light"]).toBe(page);
+    expect(state.draft).toBe("still typing");
+    expect(state.conversationId).toBe("conv-light");
+  });
+
   it("stores provider OAuth authorization state by owner and only toasts the active live owner", () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
     const activeEvent = {

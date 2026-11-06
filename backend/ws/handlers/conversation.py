@@ -1147,6 +1147,8 @@ async def _publish_conversation_switch(
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
     session.refresh_llm_selection()
+    initial_view_delivered = False
+    initial_connection_generation = session.connection_generation
 
     async def restored(owner: str) -> None:
         if owner != session.active_conversation_id or not session.session_lifecycle.foreground_navigation_is_current():
@@ -1171,8 +1173,13 @@ async def _publish_conversation_switch(
             runtime_snapshot = session.runtime_snapshot(include_capabilities=False)
             if owner != session.active_conversation_id:
                 return
+            # The receiver already has this exact public view. Keep the ready
+            # notification small, but resend after changes or a lost connection.
+            same_view = (initial_view_delivered
+                         and initial_connection_generation == session.connection_generation
+                         and current_view == view)
             await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
-                                        "conversation": current_view, "is_hydrating": False,
+                                        **({} if same_view else {"conversation": current_view}), "is_hydrating": False,
                                         **({"capabilities_deferred": True} if data.get("defer_runtime_capabilities") else {}),
                                         "session": runtime_snapshot,
                                         "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")},
@@ -1208,7 +1215,7 @@ async def _publish_conversation_switch(
         record = None
     if record is None:
         session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
-    await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
+    initial_view_delivered = await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
                                 "conversation": view, "is_hydrating": True, "context_pending": True,
                                 "session": session.runtime_snapshot(include_capabilities=False),
                                 "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")}, log_context="conversation.switched")

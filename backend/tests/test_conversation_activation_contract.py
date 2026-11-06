@@ -17,6 +17,7 @@ def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
     projection_lock = asyncio.Lock()
     session = SimpleNamespace(
         active_conversation_id=active_id,
+        connection_generation=1,
         conversation_repo=repo,
         _conversation_projection_lock=lambda _owner: projection_lock,
         ws_manager=None,
@@ -143,6 +144,7 @@ def test_actual_switch_initial_and_hydrated_pages_restore_legacy_image_sources(t
 
     async def scenario():
         await conversation.handle_conversation_switch(session, {"conversation_id": target.id, "_reemit_pending": False})
+        repo.rename_conversation(target.id, "Updated while hydrating")
         callback = session.conversation_runtime.defer_repository_hydration.call_args.kwargs["on_hydration_complete"]
         await callback(target.id)
     asyncio.run(scenario())
@@ -156,6 +158,42 @@ def test_actual_switch_initial_and_hydrated_pages_restore_legacy_image_sources(t
     assert "source" not in repo.get_conversation(target.id).transcript[0]["artifacts"][1]
     assert reads and all(thread_id != loop_thread for thread_id in reads)
     store.shutdown()
+
+
+@pytest.mark.parametrize("interruption", ["none", "transcript", "metadata", "context", "reconnect", "undelivered"])
+def test_hydration_resends_history_only_if_needed(tmp_path, interruption):
+    import json
+    from backend.ws.payload_contracts import validate_session_projection_payload
+
+    repo = ConversationRepository(tmp_path / "conversations")
+    target = repo.create_conversation(transcript=[{"id": "answer", "role": "assistant", "content": "saved " * 10000}])
+    session = _session(repo, "previous")
+    session.send_payload.return_value = interruption != "undelivered"
+
+    async def scenario():
+        await conversation.handle_conversation_switch(session, {"conversation_id": target.id, "_reemit_pending": False})
+        if interruption == "transcript":
+            repo.append_transcript_message(target.id, {"id": "new", "role": "user", "content": "new input"})
+        elif interruption == "metadata":
+            repo.rename_conversation(target.id, "Renamed while hydrating")
+        elif interruption == "context":
+            repo.save_context_snapshot(target.id, {"ui_agent_state": {"subagents": [{"id": "child", "status": "done"}]}})
+        elif interruption == "reconnect":
+            session.connection_generation += 1
+        callback = session.conversation_runtime.defer_repository_hydration.call_args.kwargs["on_hydration_complete"]
+        await callback(target.id)
+
+    asyncio.run(scenario())
+    initial, ready = [call.args[0] for call in session.send_payload.await_args_list]
+    assert initial["conversation"]["transcript"][0]["content"] == target.transcript[0]["content"]
+    assert initial["is_hydrating"] is True and ready["is_hydrating"] is False
+    assert ready["conversation_id"] == target.id and ready["session"]["active_conversation_id"] == target.id
+    validate_session_projection_payload(ready)
+    if interruption == "none":
+        assert "conversation" not in ready
+        assert len(json.dumps(ready)) < len(json.dumps(initial)) / 10
+    else:
+        assert ready["conversation"] == repo.get_conversation_view(target.id)
 
 
 def test_switch_publishes_hydrated_owner_before_requesting_capability_catalog(tmp_path):

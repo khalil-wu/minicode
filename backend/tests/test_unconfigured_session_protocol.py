@@ -537,7 +537,8 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
             await socket.command("conversation.switch", conversation_id=saved.id)
             pending = await socket.until("conversation.switched", conversation_id=saved.id, is_hydrating=True)
             complete = await socket.until("conversation.switched", conversation_id=saved.id, is_hydrating=False)
-            assert pending["conversation"]["transcript"][-1]["content"] == complete["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
+            assert pending["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
+            assert "conversation" not in complete
             assert "capabilities" not in complete["session"]
             capabilities = await socket.until("runtime.capabilities", conversation_id=saved.id,
                 source="workspace.activate.conversation.switch")
@@ -573,9 +574,10 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
 
             for old_task in (unavailable, removed):
                 await socket.command("conversation.switch", conversation_id=old_task.id)
-                await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=True)
+                pending = await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=True)
                 restored = await socket.until("conversation.switched", conversation_id=old_task.id, is_hydrating=False)
-                assert restored["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
+                assert pending["conversation"]["transcript"][-1]["content"] == "Saved entry 23"
+                assert "conversation" not in restored
                 assert "capabilities" not in restored["session"]
                 capabilities = await socket.until("runtime.capabilities", conversation_id=old_task.id,
                     source="workspace.activate.conversation.switch")
