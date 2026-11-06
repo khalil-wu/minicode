@@ -434,3 +434,53 @@ def test_completed_activation_discards_stale_activation_siblings(tmp_path: Path)
     assert (destination / "marker.txt").read_text(encoding="utf-8") == "new"
     assert not backup.exists()
     assert not activate.exists()
+
+
+_ALIAS_MEMBERS = ["bundle/x.", "bundle/x ", "bundle/x\t", "bundle/dir./x", "bundle/x. ."]
+
+
+@pytest.mark.parametrize("member", _ALIAS_MEMBERS)
+def test_shared_member_check_rejects_windows_alias_spellings(member: str) -> None:
+    with pytest.raises(MaterializationError, match="trailing dot or space"):
+        materializer_module._safe_archive_member(member)
+
+
+@pytest.mark.parametrize("member", [
+    "bundle/x", "bundle/.hidden", "bundle/x.txt", "bundle/a..b", "bundle/x~1", "bundle/my file.md",
+    "bundle/con-fig.js", "./bundle/x",
+])
+def test_shared_member_check_keeps_ordinary_names(member: str) -> None:
+    assert materializer_module._safe_archive_member(member).as_posix() == member.removeprefix("./")
+
+
+@pytest.mark.parametrize("alias", ["bundle/x.", "bundle/x "])
+@pytest.mark.parametrize("kind", ["zip", "tar"])
+def test_marketplace_archive_alias_cannot_overwrite_sibling(tmp_path: Path, kind: str, alias: str) -> None:
+    out = tmp_path / "out"
+    if kind == "zip":
+        archive = tmp_path / "alias.zip"
+        with zipfile.ZipFile(archive, "w") as handle:
+            handle.writestr("bundle/x", "original")
+            handle.writestr(alias, "replacement")
+    else:
+        archive = tmp_path / "alias.tar"
+        with tarfile.open(archive, "w") as handle:
+            for name, data in (("bundle/x", b"original"), (alias, b"replacement")):
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                handle.addfile(info, io.BytesIO(data))
+    out.mkdir()
+    with pytest.raises(MaterializationError, match="trailing dot or space"):
+        materializer_module._extract_archive(archive, out)
+    original = out / "bundle" / "x"
+    assert not original.exists() or original.read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="NTFS name normalization is Windows-only")
+def test_windows_really_aliases_trailing_dot_and_space(tmp_path: Path) -> None:
+    # Documents why the check exists: Win32 drops the suffix and opens the sibling.
+    (tmp_path / "x").write_text("original", encoding="utf-8")
+    (tmp_path / "x.").write_text("dot", encoding="utf-8")
+    (tmp_path / "x ").write_text("space", encoding="utf-8")
+    assert [p.name for p in tmp_path.iterdir()] == ["x"]
+    assert (tmp_path / "x").read_text(encoding="utf-8") == "space"

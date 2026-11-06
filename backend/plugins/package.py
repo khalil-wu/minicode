@@ -27,6 +27,7 @@ from backend.plugins.manifest import (
     _validate_plugin_manifest,
     plugin_name_from_directory,
 )
+from backend.plugins.materializer import MaterializationError, _safe_archive_member
 from backend.plugins.policy import PluginSettingsError
 
 def package_plugin_directory(source_path: str | Path, output_dir: str | Path | None = None) -> dict[str, Any]:
@@ -317,18 +318,12 @@ def _validated_plugin_package_infos(
     return validated
 
 def _safe_zip_member_path(name: str) -> str | None:
-    raw = str(name or "").replace("\\", "/")
-    if raw.startswith("/") or raw.startswith("~"):
+    # Same member rules as marketplace archives: traversal, drive/ADS colons
+    # and Windows device names are all refused before extraction.
+    try:
+        return _safe_archive_member(name).as_posix()
+    except MaterializationError:
         return None
-    normalized = raw.strip("/")
-    if not normalized:
-        return None
-    parts = [part for part in normalized.split("/") if part and part != "."]
-    if not parts or any(part == ".." for part in parts):
-        return None
-    if re.match(r"^[A-Za-z]:", parts[0]):
-        return None
-    return "/".join(parts)
 
 def _normalized_extracted_plugin_dir(extract_root: Path) -> Path:
     if _is_plugin_directory(extract_root):

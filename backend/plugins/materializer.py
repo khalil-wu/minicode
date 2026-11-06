@@ -949,6 +949,9 @@ def _safe_archive_member(value: str) -> Path:
         raise MaterializationError(f"archive path escapes destination: {value}")
     if any(":" in part for part in parts):
         raise MaterializationError(f"archive path contains a drive prefix: {value}")
+    # Win32 strips these suffixes, so "x." or "x " would silently overwrite "x".
+    if any(part.endswith((".", " ", "\t")) for part in parts):
+        raise MaterializationError(f"archive path segment has a trailing dot or space: {value}")
     relative = Path(*parts)
     if is_windows_reserved_path(relative):
         raise MaterializationError(f"archive path contains a reserved segment: {value}")

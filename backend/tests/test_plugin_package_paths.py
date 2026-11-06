@@ -222,3 +222,52 @@ def test_regular_plugin_validation_and_packaging_keep_their_metadata(tmp_path: P
         assert archive.namelist() == [".minicode-plugin/plugin.json", "node_modules/runtime.txt", "skills/example/SKILL.md"]
         assert archive.read("node_modules/runtime.txt") == dependency.read_bytes()
         assert archive.read("skills/example/SKILL.md") == skill.read_bytes()
+
+
+@pytest.mark.parametrize("member", [
+    "plugin/readme.txt:hidden", "plugin/readme.txt::$DATA", "plugin/CON", "plugin/aux.js", "plugin/nul.txt",
+    "../x", "/abs", "C:/x", "C:x", r"\srv\share\x",
+])
+def test_local_plugin_package_rejects_unsafe_member_names(tmp_path: Path, member: str) -> None:
+    archive_path = tmp_path / "evil.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(".minicode-plugin/plugin.json", json.dumps({"name": "evil", "version": "1.0.0"}))
+        archive.writestr(member, "payload")
+    destination = tmp_path / "out"
+    destination.mkdir()
+
+    with pytest.raises(PluginSettingsError, match="unsafe path"):
+        package._extract_plugin_package(archive_path, destination)
+    assert list(destination.rglob("*")) == []
+
+
+def test_local_plugin_package_keeps_ordinary_member_names(tmp_path: Path) -> None:
+    archive_path = tmp_path / "ok.zip"
+    names = [".minicode-plugin/plugin.json", "skills/console/SKILL.md", "lib/con-fig.js", "./docs/readme.txt"]
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        for name in names:
+            archive.writestr(name, "x")
+    destination = tmp_path / "out"
+    destination.mkdir()
+
+    package._extract_plugin_package(archive_path, destination)
+
+    assert sorted(p.relative_to(destination).as_posix() for p in destination.rglob("*") if p.is_file()) == [
+        ".minicode-plugin/plugin.json", "docs/readme.txt", "lib/con-fig.js", "skills/console/SKILL.md",
+    ]
+
+
+@pytest.mark.parametrize("alias", ["plugin/x.", "plugin/x ", "plugin.d./x"])
+def test_local_plugin_package_alias_cannot_overwrite_sibling(tmp_path: Path, alias: str) -> None:
+    archive_path = tmp_path / "alias.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(".minicode-plugin/plugin.json", json.dumps({"name": "alias", "version": "1.0.0"}))
+        archive.writestr("plugin/x", "original")
+        archive.writestr("plugin.d/x", "original")
+        archive.writestr(alias, "replacement")
+    destination = tmp_path / "out"
+    destination.mkdir()
+
+    with pytest.raises(PluginSettingsError, match="unsafe path"):
+        package._extract_plugin_package(archive_path, destination)
+    assert list(destination.rglob("*")) == []
