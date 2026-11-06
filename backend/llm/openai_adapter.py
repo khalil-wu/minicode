@@ -3656,6 +3656,7 @@ class OpenAIAdapter(LLMAdapter):
         active_reasoning_item_id = ""
         pending_tool_calls: list[ToolCallEvent] = []
         response_tool_items: dict[str, dict[str, str]] = {}
+        response_tool_delta_bytes: dict[int, int] = {}
         finalized_response_tool_shapes: dict[str, tuple[str, str]] = {}
         response_tool_start_count = 0
         response_output_item_metadata: dict[str, dict[str, Any]] = {}
@@ -4962,13 +4963,21 @@ class OpenAIAdapter(LLMAdapter):
                             # The UI and tool preflight consume canonical object
                             # arguments even when the provider streams raw text.
                             partial_arguments = json.dumps({custom_fields[slot["name"]]: partial_arguments}, ensure_ascii=False)
-                        yield StreamEvent(
-                            type=StreamEventType.TOOL_CALL_DELTA,
-                            tool_call_delta=ToolCallDeltaEvent(
-                                id=slot.get("id") or call_id,
-                                partial_arguments=partial_arguments,
-                            ),
-                        )
+                        # Each delta re-parses the whole argument string
+                        # downstream; emit the first one, then every 128 bytes.
+                        # The .done event carries the complete arguments.
+                        pending_bytes = response_tool_delta_bytes.get(id(slot), _DELTA_DEBOUNCE_BYTES) + len(delta)
+                        if pending_bytes >= _DELTA_DEBOUNCE_BYTES:
+                            response_tool_delta_bytes[id(slot)] = 0
+                            yield StreamEvent(
+                                type=StreamEventType.TOOL_CALL_DELTA,
+                                tool_call_delta=ToolCallDeltaEvent(
+                                    id=slot.get("id") or call_id,
+                                    partial_arguments=partial_arguments,
+                                ),
+                            )
+                        else:
+                            response_tool_delta_bytes[id(slot)] = pending_bytes
 
                 # 函数调用
                 elif event_type in {"response.function_call_arguments.done", "response.custom_tool_call_input.done"}:
