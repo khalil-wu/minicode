@@ -329,6 +329,7 @@
   "开启": "Enable",
   "会话、工作区或 PR 已变化，原自动化确认已取消；请重新选择。": "The chat, workspace, or PR changed. The previous automation confirmation was cancelled; select it again.",
   "选择模型": "Select model",
+  "选择推理强度": "Select reasoning effort",
   "请先选择模型再发送": "Select a model before sending",
   "检查：": "Checks:",
   "项失败": "failed",

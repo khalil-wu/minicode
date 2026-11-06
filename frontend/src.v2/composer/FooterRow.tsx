@@ -471,7 +471,7 @@ export const FooterRow = memo(({ sendState, isStopping = false, submitting = fal
   const showReasoningEffort = supportsReasoningEffort && effortIsDeclared && composerEffortLevels.length > 1;
   const selectedEffort = effortOptions.find((option) => option.id === displayedEffort)
     ?? effortOption(displayedEffort, tr);
-  const effortTitle = tr("选择模型");
+  const effortTitle = tr("选择推理强度");
   const effortLabel = selectedEffort.label;
 
   return (

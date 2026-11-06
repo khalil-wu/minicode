@@ -682,7 +682,7 @@ describe("FooterRow permission picker", () => {
     expect(slider.getAttribute("aria-valuetext")).toBe("Ultra");
   });
 
-  it("keeps the Ultra value while the tooltip only offers the model choice", () => {
+  it("keeps the Ultra value while the tooltip names the effort choice", () => {
     useAppStore.setState({ currentModel: "gpt-6.1-sol", effortLevel: "ultra", runtimeCapabilities: { provider_capabilities: {
       model: "gpt-6.1-sol", reasoning_effort_supported: true,
       reasoning_effort_levels: ["low", "medium", "high", "xhigh", "max", "ultra"],
@@ -690,7 +690,7 @@ describe("FooterRow permission picker", () => {
     } } });
     render(<FooterRow sendState="idle" onSend={() => {}} />);
     const control = screen.getByRole("button", { name: "模型与推理强度：6.1 Sol，Ultra" });
-    expect(control.title).toBe("选择模型");
+    expect(control.title).toBe("选择推理强度");
     fireEvent.click(control);
     expect(screen.getByRole("slider").getAttribute("aria-valuetext")).toBe("Ultra");
     expect(screen.getByRole("slider").getAttribute("max")).toBe("5");
