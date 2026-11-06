@@ -2633,6 +2633,20 @@ button.diff-cell-file-path:hover {
 .md-body > :first-child { margin-block-start: 0; }
 .md-body > :last-child { margin-block-end: 0; }
 
+.md-measured-block[data-measured="true"] {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto var(--markdown-block-height);
+}
+
+.md-measured-block[data-measured="true"]:focus-within,
+.chat-pane:has(.chat-pane-search) .md-measured-block[data-measured="true"] {
+  content-visibility: visible;
+}
+
+@media print {
+  .md-measured-block[data-measured="true"] { content-visibility: visible; }
+}
+
 /* ════════════════════════════════════════════════════════
    Dark-theme surface tweaks (only where dark diverges from the base value).
    Everything else already resolves correctly through the token layer.

@@ -527,15 +527,32 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
   );
 };
 
+const MeasuredMarkdownBlock = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const element = ref.current!;
+    // Measure the real content before allowing the browser to skip its
+    // offscreen layout. Hidden panes retain their last measured block height.
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry.contentRect.height === 0) return;
+      element.style.setProperty("--markdown-block-height", `${entry.contentRect.height}px`);
+      element.dataset.measured = "true";
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return <div {...props} ref={ref} className={`md-measured-block ${className}`} />;
+};
+
 const CodeBlockFrame = ({ text, language, children }: { text: string; language?: string; children: React.ReactNode }) => (
-  <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
+  <MeasuredMarkdownBlock className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
     {language && <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
       <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">{language}</span>
     </div>}
     <InsertButton text={text} />
     <CopyButton text={text} />
     {children}
-  </div>
+  </MeasuredMarkdownBlock>
 );
 
 const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: ResolvedTheme }) => {
@@ -1432,9 +1449,9 @@ const mdComponents = (
     <li {...props} className={`mb-1 leading-[var(--leading-normal)]${className ? ` ${className}` : ""}`} />
   ),
   table: ({ node: _node, ...props }: MarkdownElementProps<React.HTMLAttributes<HTMLTableElement>>) => (
-    <div className="md-table-wrap">
+    <MeasuredMarkdownBlock className="md-table-wrap">
       <table {...props} className="border-collapse text-[var(--text-sm)] w-full" />
-    </div>
+    </MeasuredMarkdownBlock>
   ),
   th: ({ node: _node, ...props }: MarkdownElementProps<React.ThHTMLAttributes<HTMLTableCellElement>>) => (
     <th {...props} className="border border-[var(--border-subtle)] px-2.5 py-1.5 bg-[var(--surface-soft)] text-left font-semibold" />
