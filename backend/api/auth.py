@@ -58,7 +58,14 @@ def _is_runtime_authorized(request: Request) -> bool:
         # Keep tokenless desktop development usable locally, but never expose
         # runtime APIs (including settings and replay) to the LAN by default.
         client_host = str(request.client.host if request.client else "").strip().lower()
-        return client_host in {"127.0.0.1", "::1", "localhost", "testclient", "testserver"}
+        if client_host not in {"127.0.0.1", "::1", "localhost", "testclient", "testserver"}:
+            return False
+        # Loopback alone cannot tell the local UI from any web page the user
+        # visits: a text/plain POST skips preflight and runs the handler even
+        # though CORS hides the response. Apply the WebSocket Origin allowlist.
+        from backend.main import _websocket_origin_allowed
+
+        return _websocket_origin_allowed(request)
     supplied = _request_runtime_token(request)
     return bool(supplied) and _constant_time_equal(supplied, expected)
 
