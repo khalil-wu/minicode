@@ -709,6 +709,53 @@ class ExecutionJournal:
                 ts_ms=ts_ms,
             )
 
+    def append_once_many(self, entries: list[tuple[str, dict[str, Any], str]]) -> list[JournalEvent]:
+        """Publish an ordered group of stable facts with one durability barrier."""
+        if not entries:
+            return []
+        prepared = []
+        for event_type, payload, event_id in entries:
+            stable_id = str(event_id or "").strip()
+            if not stable_id:
+                raise ValueError("event_id is required for append_once_many")
+            clean_type = str(event_type or "system").strip() or "system"
+            prepared.append((clean_type if clean_type in EVENT_TYPES else "system", deepcopy(dict(payload)), stable_id))
+        with self._locked():
+            durable = self._validated_events_unlocked()
+            claimed = {key: (value.event_type, value.payload) for key, value in self._events_by_id.items()}
+            for kind, payload, identity in prepared:
+                if identity in claimed and claimed[identity] != (kind, payload):
+                    raise ExecutionJournalError(f"Execution journal event id {identity!r} changed type or payload")
+                claimed[identity] = (kind, payload)
+            position = self.path.stat().st_size if self.path.exists() else 0
+            previous_seq = durable[-1].seq if durable else 0
+            key = canonical_file_path_key(self.path)
+            saved = []
+            try:
+                for kind, payload, identity in prepared:
+                    event = self._events_by_id.get(identity)
+                    if event is None:
+                        event = self._append_unlocked(kind, payload, event_id=identity, sync=False)
+                    saved.append(event)
+                # Also sync an already-present prefix after recovering a partial batch.
+                with self.path.open("r+b") as handle:
+                    os.fsync(handle.fileno())
+            except Exception as exc:
+                try:
+                    if self.path.exists():
+                        with self.path.open("r+b") as handle:
+                            handle.truncate(position)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                except OSError as rollback:
+                    exc.add_note(f"Journal batch tail could not be restored: {rollback}")
+                self._event_cache = None
+                self._event_cache_signature = None
+                self._seq = previous_seq
+                _WRITE_SEQUENCES[key] = previous_seq
+                raise
+            return saved
+
     def _append_unlocked(
         self,
         event_type: str,
@@ -717,6 +764,7 @@ class ExecutionJournal:
         parent_event_id: str = "",
         event_id: str | None = None,
         ts_ms: int | None = None,
+        sync: bool = True,
     ) -> JournalEvent:
         clean_type = str(event_type or "system").strip() or "system"
         if clean_type not in EVENT_TYPES:
@@ -761,7 +809,8 @@ class ExecutionJournal:
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
             handle.flush()
-            os.fsync(handle.fileno())
+            if sync:
+                os.fsync(handle.fileno())
         self._seq = next_seq
         _WRITE_SEQUENCES[key] = next_seq
         durable_events.append(event)

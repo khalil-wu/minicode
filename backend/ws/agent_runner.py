@@ -5310,22 +5310,19 @@ class SessionAgentRunnerMixin:
             admitted_command_id = str(admitted_input.get("client_command_id") or "")
             run_trace.mark("admission.journal.start")
             pending_prompt = pending_admission_journal.get(admitted_user_id)
+            entries = []
             if pending_prompt is not None:
                 event_id, prompt_payload = pending_prompt
-                await to_thread_cancel_safe(execution_journal.append_once,
-                    "user_prompt", prompt_payload, event_id=event_id)
-                pending_admission_journal.pop(admitted_user_id)
-            # This durable fact is written before entering the provider. Queue
-            # recovery uses it even when a later tool/run terminal is failed.
-            await to_thread_cancel_safe(execution_journal.append_once,
-                "system", {
-                    "lifecycle": "turn_input_consumed", "conversation_id": conversation.id,
-                    "user_message_id": admitted_user_id, "client_command_id": admitted_command_id,
-                    "client_queue_key": str(admitted_input.get("_client_queue_key") or ""),
-                    "assistant_message_id": str(admitted_input.get("assistant_message_id") or assistant_message_id),
-                    "run_id": str(run_metadata.get("run_id") or ""),
-                }, event_id=turn_input_consumption_id(admitted_user_id, admitted_command_id),
-            )
+                entries.append(("user_prompt", prompt_payload, event_id))
+            entries.append(("system", {
+                "lifecycle": "turn_input_consumed", "conversation_id": conversation.id,
+                "user_message_id": admitted_user_id, "client_command_id": admitted_command_id,
+                "client_queue_key": str(admitted_input.get("_client_queue_key") or ""),
+                "assistant_message_id": str(admitted_input.get("assistant_message_id") or assistant_message_id),
+                "run_id": str(run_metadata.get("run_id") or ""),
+            }, turn_input_consumption_id(admitted_user_id, admitted_command_id)))
+            await to_thread_cancel_safe(execution_journal.append_once_many, entries)
+            pending_admission_journal.pop(admitted_user_id, None)
             run_trace.mark("admission.journal.done")
             admission_future = run_metadata.get("_turn_admission_future")
             if isinstance(admission_future, asyncio.Future) and not admission_future.done():
