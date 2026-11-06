@@ -1274,6 +1274,7 @@ const mdComponents = (
   resolvedTheme: ResolvedTheme,
   scopeId: string,
   headingId: ReturnType<typeof createMarkdownHeadingIdAssigner>,
+  streamingTail = false,
 ): MarkdownComponents => {
   const heading = (level: 1 | 2 | 3 | 4 | 5 | 6) => ({ node, ...props }: MarkdownPositionedProps<React.HTMLAttributes<HTMLHeadingElement>>) => {
     const base = markdownHeadingSlug(textFromReactNode(props.children));
@@ -1307,7 +1308,7 @@ const mdComponents = (
             </span>
           </div>
           <CopyButton text={text} />
-          <MermaidBlock chart={text} resolvedTheme={resolvedTheme} />
+          {streamingTail ? <PlainCodeBlock hasLanguage text={text} /> : <MermaidBlock chart={text} resolvedTheme={resolvedTheme} />}
         </div>
       );
     }
@@ -1323,7 +1324,7 @@ const mdComponents = (
           )}
           <InsertButton text={text} />
           <CopyButton text={text} />
-          <Suspense fallback={<PlainCodeBlock hasLanguage={Boolean(match)} text={text} />}>
+          {streamingTail ? <PlainCodeBlock hasLanguage={Boolean(match)} text={text} /> : <Suspense fallback={<PlainCodeBlock hasLanguage={Boolean(match)} text={text} />}>
             <LazyCodeHighlighter
               hasLanguage={Boolean(match)}
               language={match?.[1] ?? "text"}
@@ -1331,7 +1332,7 @@ const mdComponents = (
             >
               {text}
             </LazyCodeHighlighter>
-          </Suspense>
+          </Suspense>}
         </div>
       );
     }
@@ -1682,11 +1683,11 @@ StableMarkdown.displayName = "StableMarkdown";
 
 export const MarkdownRenderer = memo(StreamingMarkdownView);
 
-const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openFence = -1 }: {
-  part: MarkdownPart; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins; openFence?: number;
+const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openFence = -1, streamingTail = false }: {
+  part: MarkdownPart; scopeId: string; resources: MessageResourceScope; resolved: ResolvedTheme; plugins: MarkdownRemarkPlugins; openFence?: number; streamingTail?: boolean;
 }) => {
   const headingId = useMemo(() => createMarkdownHeadingIdAssigner(`${scopeId}-p${part.start}`), [scopeId, part.start]);
-  const components = useMemo(() => mdComponents(resolved, scopeId, headingId), [resolved, scopeId, headingId]);
+  const components = useMemo(() => mdComponents(resolved, scopeId, headingId, streamingTail), [resolved, scopeId, headingId, streamingTail]);
   const content = useMemo(() => openFence === 0 ? part.content : normalizeMarkdownSource(part.content), [part.content, openFence]);
   headingId.reset();
   if (openFence === 0) {
@@ -1731,7 +1732,7 @@ function StreamingMarkdownView({ content, isStreaming, citations, workspaceRoot,
   const shared = { scopeId, resources, resolved, plugins };
   return <MarkdownResourceContext.Provider value={resources}><div id={scopeId} className="md-body">
     {!view.wholeDocument && <CommittedMarkdown parts={view.parts} count={view.parts.length} {...shared} />}
-    {tail.content.trim() && <MarkdownPiece key={tail.start} part={tail} openFence={isStreaming ? view.openFence : -1} {...shared} />}
+    {tail.content.trim() && <MarkdownPiece key={tail.start} part={tail} openFence={isStreaming ? view.openFence : -1} streamingTail={Boolean(isStreaming)} {...shared} />}
   </div></MarkdownResourceContext.Provider>;
 }
 
