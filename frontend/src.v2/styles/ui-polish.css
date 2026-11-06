@@ -836,6 +836,8 @@ html[data-native-window-opaque="false"] .mc-desktop-workspace {
   border-radius: 16px;
   background: var(--menu-surface);
   box-shadow: none;
+  animation: mc-dropdown-enter var(--duration-fast) var(--easing-enter-snappy) both;
+  transform-origin: bottom center;
 }
 .composer-add-menu > button {
   min-height: 0;
