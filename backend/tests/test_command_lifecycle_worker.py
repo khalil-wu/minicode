@@ -186,3 +186,45 @@ async def test_recent_id_compaction_cannot_overwrite_a_later_completion(clone_di
     finally:
         release.set()
         await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["user_message", "conversation.delete"])
+async def test_scheduled_navigation_keeps_its_receipt_after_the_selected_owner_changes(clone_dispatcher, monkeypatch, kind):
+    case = clone_dispatcher
+    lifecycle = case.session.session_lifecycle
+    case.session.active_conversation_id = None if kind == "user_message" else case.source.id
+    data = {"client_command_id": "held-navigation", "conversation_id": case.source.id}
+    if kind == "user_message":
+        data["_implicit_new_conversation_id"] = case.source.id
+    command = UserCommand(kind, data)
+    assert case.queue.persist_client_command(command)
+    entered, release = threading.Event(), threading.Event()
+    claim = case.queue.claim_client_command
+    def held(identity):
+        entered.set()
+        assert release.wait(5)
+        return claim(identity)
+    monkeypatch.setattr(case.queue, "claim_client_command", held)
+    observed = []
+    async def dispatch(value, generation):
+        receipt = lifecycle.admit_foreground_navigation(value)
+        with lifecycle.bind_foreground_navigation(receipt):
+            observed.append(lifecycle.foreground_navigation_is_current())
+        return True
+    case.dispatcher._dispatch_client_command = dispatch
+    case.dispatcher._schedule_durable_client_command("held-navigation", 1, command_type=kind, command=command)
+    tasks = tuple(case.dispatcher.command_tasks | case.dispatcher.execution_command_tasks)
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        latest = lifecycle.admit_foreground_navigation(UserCommand("conversation.switch", {
+            "conversation_id": "new-owner", "client_command_id": "latest-selection"}))
+        case.session.active_conversation_id = "new-owner"
+        release.set()
+        await asyncio.gather(*tasks)
+        assert observed == [False]
+        assert lifecycle._foreground_navigation_receipt is latest
+        assert lifecycle._foreground_navigation_pending
+    finally:
+        release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)

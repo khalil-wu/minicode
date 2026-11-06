@@ -67,6 +67,14 @@ class SessionLifecycle:
         kind = command.type
         data = command.data
         target = str((data.get("last_conversation_id") if kind == "session.restore" else data.get("conversation_id")) or "")
+        if kind == "context.fork" or (kind == "conversation.archive" and data.get("archive_navigation") == "home"):
+            # These intents leave the source owner and assign their destination later.
+            target = ""
+        # Reuse admission before consulting selection state changed by newer work.
+        bound = self._navigation_receipt.get()
+        if (bound is not None and bound.client_command_id == str(data.get("client_command_id") or "")
+                and bound.target_conversation_id == (target or None)):
+            return bound
         activating = (
             kind == "conversation.switch"
             or kind == "session.restore"
@@ -84,15 +92,6 @@ class SessionLifecycle:
             ))
         )
         if activating:
-            if kind == "context.fork" or (kind == "conversation.archive" and data.get("archive_navigation") == "home"):
-                # These intents leave the source owner: fork assigns a child
-                # later, while Header archive navigates to an empty home.
-                target = ""
-            # A scheduled command reserved its intent before worker I/O could reorder it.
-            bound = self._navigation_receipt.get()
-            if (bound is not None and bound.client_command_id == str(data.get("client_command_id") or "")
-                    and bound.target_conversation_id == (target or None)):
-                return bound
             receipt = ForegroundNavigationReceipt(str(data.get("client_command_id") or ""), target or None)
             if kind == "session.restore" and self._foreground_navigation_pending:
                 return receipt
