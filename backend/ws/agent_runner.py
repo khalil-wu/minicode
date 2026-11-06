@@ -1705,8 +1705,8 @@ class SessionAgentRunnerMixin:
         if isinstance(cached, tuple) and len(cached) == 2:
             revision, current_state = cached
         else:
-            record = self.conversation_repo.get_conversation(conversation_id)
-            snapshot = dict(getattr(record, "context_snapshot", {}) or {}) if record is not None else {}
+            checkpoint = self.conversation_repo.get_projection_context(conversation_id)
+            snapshot = checkpoint[1] if checkpoint is not None else {}
             revision = int(snapshot.get(UI_AGENT_STATE_REVISION_KEY) or 0)
             current_state = snapshot.get(UI_AGENT_STATE_SNAPSHOT_KEY)
         next_state = _ui_agent_state_for_event(
@@ -4374,11 +4374,7 @@ class SessionAgentRunnerMixin:
                 # intact until a later flush can commit it. Resetting here
                 # would make a transient write failure look like a successful
                 # empty UI state and strand the pending revision.
-                run_context_snapshot = (
-                    dict(conversation.context_snapshot)
-                    if isinstance(conversation.context_snapshot, dict)
-                    else {}
-                )
+                run_context_snapshot = dict(conversation.context_snapshot)
 
         pre_trace.mark("run.snapshot_ready")
         # Track active streaming metadata for reconnection recovery. Prefer
@@ -4444,10 +4440,6 @@ class SessionAgentRunnerMixin:
                 )
                 else config_provider or resolved_provider
             )
-            conversation = await asyncio.to_thread(self.conversation_repo.get_conversation, conversation.id)
-            pre_trace.mark("run.record_reloaded")
-            if request_snapshot.turn_settings is not None:
-                conversation = request_snapshot.turn_settings.preview(conversation)
             task_selection = request_snapshot.model_selection
             selected_provider = request_snapshot.selected_provider.strip()
             preserve_provider_override = bool(
@@ -5172,7 +5164,7 @@ class SessionAgentRunnerMixin:
             run_trace.mark("admission.enter")
             async with self._conversation_projection_lock(conversation.id):
                 latest = await asyncio.to_thread(
-                    self.conversation_repo.get_conversation,
+                    self.conversation_repo.get_projection_context,
                     conversation.id,
                 )
                 run_trace.mark("admission.load_latest")
@@ -5183,7 +5175,7 @@ class SessionAgentRunnerMixin:
                 _merge_conversation_snapshot_metadata(
                     saved_snapshot,
                     run_context_snapshot if run_metadata.get("_retry_projection") is not None
-                    else getattr(latest, "context_snapshot", None),
+                    else latest[1],
                 )
                 admissions = dict(saved_snapshot.get("turn_admissions") or {})
                 admissions[user_message_id] = {
@@ -5222,7 +5214,7 @@ class SessionAgentRunnerMixin:
                 if prepared_settings is not None and prepared_settings.plan_slug and consumed_steer is None:
                     from backend.agent.plans import PLAN_SLUG_KEY, PlanFileError, plan_slug_from_snapshot
 
-                    existing_slug = plan_slug_from_snapshot(latest.context_snapshot)
+                    existing_slug = plan_slug_from_snapshot(latest[1])
                     if existing_slug and existing_slug != prepared_settings.plan_slug:
                         raise PlanFileError("The conversation plan owner changed while this input was being prepared")
                     saved_snapshot[PLAN_SLUG_KEY] = prepared_settings.plan_slug
@@ -5234,9 +5226,7 @@ class SessionAgentRunnerMixin:
                     context_snapshot=saved_snapshot,
                     return_record=False,
                     assistant_message=steer_assistant,
-                    expected_revision=max(
-                        0, int(getattr(latest, "revision", 0) or 0)
-                    ),
+                    expected_revision=latest[0],
                     rewind_projection=run_metadata.get("_retry_projection"),
                     **({
                         "agent_mode": run_metadata["agent_mode"],

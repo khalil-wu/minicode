@@ -57,6 +57,8 @@ async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_a
     repo.update_compaction(conversation.id, "compacted", "Retain the earlier compaction evidence")
     reset_saves = []
     save = repo.save_context_snapshot
+    context_reads = Mock(wraps=repo.get_projection_context)
+    monkeypatch.setattr(repo, "get_projection_context", context_reads)
 
     def track_save(owner, value):
         if not adapter.requests:
@@ -73,6 +75,7 @@ async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_a
         await session.event_outbox.drain_delivery()
         await session.event_outbox.drain_persistence()
         assert len(adapter.requests) == 1
+        assert context_reads.call_count >= 2
         assert len(reset_saves) == int(dirty_ui)
         admission.assert_called_once()
         accepted_snapshot = admission.call_args.kwargs["context_snapshot"]
@@ -92,6 +95,23 @@ async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_a
         assert any(event.payload.get("lifecycle") == "turn_input_consumed" and event.payload.get("client_command_id") == "current-owned-command" for event in records)
     finally:
         await session.session_lifecycle.shutdown(reason="ui_reset_admission_test")
+
+
+def test_first_ui_progress_reads_only_its_retained_projection(tmp_path, monkeypatch):
+    session, conversation, _ = session_for(tmp_path, monkeypatch)
+    repo = session.conversation_repo
+    snapshot = {"history": [{"role": "user", "content": "retained"}] * 1000,
+        "ui_agent_state": {"plan": None, "todos": [], "subagents": [], "agentProgress": []}}
+    repo.save_context_snapshot(conversation.id, snapshot)
+    monkeypatch.setattr(repo, "get_conversation", Mock(side_effect=AssertionError("UI progress copied conversation history")))
+    async def run():
+        try:
+            session._persist_ui_agent_state_event(conversation.id, "agent.progress", {
+                "id": "provider", "message": "Preparing", "stage": "planning", "status": "running"})
+            assert repo.get_projection_context(conversation.id)[1]["history"] == snapshot["history"]
+        finally:
+            await session.session_lifecycle.shutdown(reason="ui_metadata_test")
+    asyncio.run(run())
 
 
 @pytest.mark.asyncio
