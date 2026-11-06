@@ -255,12 +255,12 @@ def test_sync_cursor_moves_only_at_original_actual_user_admission_committer(tmp_
         builder.bind_tool_context(ToolExecutionContext(PermissionContext(), turn_id="other-turn"))
         await builder.start_turn("input", AgentState(user_message="input"))
         assert builder.last_admitted_node_repl_response_sequence == 0
-        builder.admit_node_repl_evidence(boundary_input=None, history_start=0, history_end=builder.history_length)
+        builder.admit_node_repl_evidence(boundary_input=None, history_start=0, history_end=builder.history_length, capture_snapshot=builder.export_snapshot)
         assert builder.last_admitted_node_repl_response_sequence == 0
         builder.bind_tool_context(ToolExecutionContext(PermissionContext(), turn_id="review-turn"))
-        builder.admit_node_repl_evidence(boundary_input=None, history_start=builder.history_length, history_end=builder.history_length)
+        builder.admit_node_repl_evidence(boundary_input=None, history_start=builder.history_length, history_end=builder.history_length, capture_snapshot=builder.export_snapshot)
         assert builder.last_admitted_node_repl_response_sequence == 0
-        builder.admit_node_repl_evidence(boundary_input=None, history_start=0, history_end=builder.history_length)
+        builder.admit_node_repl_evidence(boundary_input=None, history_start=0, history_end=builder.history_length, capture_snapshot=builder.export_snapshot)
         assert builder.last_admitted_node_repl_response_sequence == 3 and builder.pending_node_repl_evidence_admission is None
         cloned = clone_context_builder(builder)
         assert cloned.last_admitted_node_repl_response_sequence == 3

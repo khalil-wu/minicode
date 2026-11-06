@@ -619,6 +619,7 @@ def test_successful_foreground_child_retains_its_fresh_adapter_until_thread_clos
                 boundary_input=SimpleNamespace(consumed_steer=None, content=kwargs["user_message"]),
                 history_start=history_start,
                 history_end=context.history_length,
+                capture_snapshot=context.export_snapshot,
             )
             yield AgentEvent.agent_message_completed("child completed")
 
@@ -688,7 +689,8 @@ def test_child_extension_followup_starts_an_owned_next_turn(monkeypatch, tmp_pat
             start = builder.history_length
             builder.append_user(kwargs["user_message"])
             await kwargs["metadata"]["commit_turn_admission"](
-                boundary_input=SimpleNamespace(content=kwargs["user_message"]), history_start=start, history_end=builder.history_length)
+                boundary_input=SimpleNamespace(content=kwargs["user_message"]), history_start=start, history_end=builder.history_length,
+                capture_snapshot=builder.export_snapshot)
             if len(prompts) == 1:
                 actions = kwargs["run_context"].extension_actions
                 actions.send_user_message("Complete the second instruction", {"deliverAs": "followUp"})

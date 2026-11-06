@@ -313,6 +313,7 @@ async def _admit_runner_turn(kwargs) -> None:
         boundary_input=SimpleNamespace(consumed_steer=None),
         history_start=history_start,
         history_end=context.history_length,
+        capture_snapshot=context.export_snapshot,
     )
 
 
@@ -324,6 +325,7 @@ async def _admit_query_submission(submission) -> None:
         boundary_input=SimpleNamespace(consumed_steer=None),
         history_start=history_start,
         history_end=context.history_length,
+        capture_snapshot=context.export_snapshot,
     )
 
 

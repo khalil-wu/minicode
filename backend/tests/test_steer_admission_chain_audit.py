@@ -132,7 +132,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
                     raise OSError("admission disk write failed")
                 patch.setattr(repo, "commit_turn_admission", fail_commit)
                 with pytest.raises(OSError, match="admission disk write failed"):
-                    await namespace["_commit_turn_admission"](boundary_input=boundary, history_start=0, history_end=1)
+                    await namespace["_commit_turn_admission"](boundary_input=boundary, history_start=0, history_end=1, capture_snapshot=context.export_snapshot)
             assert len(turn_state.finalize(terminal_status="partial").blocks) == 1
             assert repo.get_conversation(conversation.id).transcript == []
             assert events == []
@@ -147,7 +147,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
             # with an earlier snapshot after acquiring the same boundary.
             await projection_lock.acquire()
             admission = asyncio.create_task(namespace["_commit_turn_admission"](
-                boundary_input=boundary, history_start=0, history_end=1))
+                boundary_input=boundary, history_start=0, history_end=1, capture_snapshot=context.export_snapshot))
             await projection_lock.queued.wait()
             projection_lock.queued.clear()
             partial = asyncio.create_task(namespace["_write_partial_turn"](force=True))
@@ -164,7 +164,7 @@ async def test_admission_and_journal_use_the_admitted_inputs_identity(tmp_path, 
                 "type": "user_input", "userMessageId": "user-steer"}
         else:
             await namespace["_commit_turn_admission"](
-                boundary_input=boundary, history_start=0, history_end=1)
+                boundary_input=boundary, history_start=0, history_end=1, capture_snapshot=context.export_snapshot)
         saved = repo.get_conversation(conversation.id)
         assert saved.context_snapshot["turn_admissions"][message_id]["client_command_id"] == command_id
         assert saved.context_snapshot["turn_admissions"][message_id]["client_queue_key"] == origin

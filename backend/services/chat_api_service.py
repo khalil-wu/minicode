@@ -66,13 +66,13 @@ def _bind_rest_turn_input_owner(run_context: RunContext, repository: Any, conver
         if store is not None:
             store.close()
 
-    async def commit(*, boundary_input, history_start, history_end):
+    async def commit(*, boundary_input, history_start, history_end, capture_snapshot):
         item = boundary_input.consumed_steer
         if item is None:
             return
         command = item.original_command
         context = run_context.context_builder
-        snapshot = context.export_snapshot()
+        snapshot = capture_snapshot()
         admissions = dict(snapshot.get("turn_admissions") or {})
         admission = {
             "history_start": history_start, "history_end": history_end,

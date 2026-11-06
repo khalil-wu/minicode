@@ -424,6 +424,16 @@ class TurnIterationRuntime:
         if boundary_input.has_new_input:
             history_start = self.context.history_length
             admission_snapshot = self.context.export_snapshot()
+            admission_history_revision = self.context._history_store.revision
+
+            def capture_admitted_snapshot() -> dict[str, Any]:
+                from backend.conversations.context_delta import apply_context_snapshot_delta
+
+                changes, _ = self.context.export_snapshot_delta(
+                    admission_snapshot, since_revision=admission_history_revision,
+                )
+                return apply_context_snapshot_delta(admission_snapshot, changes)
+
             try:
                 if self.skill_manager is not None:
                     primary = run_context.turn_environments.primary() if run_context.turn_environments is not None else None
@@ -495,6 +505,7 @@ class TurnIterationRuntime:
                         boundary_input=boundary_input,
                         history_start=history_start,
                         history_end=self.context.history_length,
+                        capture_snapshot=capture_admitted_snapshot,
                     )
                     if hasattr(committed, "__await__"):
                         await committed

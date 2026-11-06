@@ -81,6 +81,66 @@ def test_reusing_state_starts_with_a_fresh_query_budget(query_factory):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("rewrite_prefix", [False, True])
+@pytest.mark.parametrize("commit_fails", [False, True])
+def test_admission_capture_reuses_rollback_history_and_keeps_current_metadata(query_factory, monkeypatch, rewrite_prefix, commit_fails):
+    from backend.agent import context as context_module
+
+    session, submission = query_factory
+    provider = Provider()
+    owner = session(provider)
+    builder = owner.context_builder = ContextBuilder()
+    builder.load_snapshot({"history": [{"role": "user" if index % 2 == 0 else "assistant", "content": f"retained {index}"}
+                                      for index in range(1000)]})
+    original_history = builder.export_snapshot()["history"]
+    capture_sizes = []
+    captures = []
+    start_turn = builder.start_turn
+
+    async def admit_text(*args, **kwargs):
+        admitted = await start_turn(*args, **kwargs)
+        if rewrite_prefix:
+            builder._history = [replace(builder._history[0], content="rewritten prefix"), *builder._history[1:]]
+        return admitted
+
+    monkeypatch.setattr(builder, "start_turn", admit_text)
+
+    def commit(*, boundary_input, history_start, history_end, capture_snapshot):
+        # Child/host callbacks may finish metadata work before capturing.
+        builder.extension_state["admission_marker"] = {"items": ["current"]}
+        expected = builder.export_snapshot()
+        visited = []
+        sanitize = context_module._sanitize_provider_items
+        with monkeypatch.context() as scoped:
+            scoped.setattr(context_module, "_sanitize_provider_items", lambda items: (visited.append(items), sanitize(items))[1])
+            captured = capture_snapshot()
+        assert captured == expected
+        assert captured["history"][-1]["accepted_input"]["message_id"] == "new-input"
+        capture_sizes.append(len(visited))
+        captures.append(captured)
+        assert history_start == 1000 and history_end == 1001
+        if commit_fails:
+            raise OSError("controlled admission failure")
+
+    async def scenario():
+        request = submission(owner, "unique admitted input")
+        request.runtime.metadata.update(user_message_id="new-input", commit_turn_admission=commit)
+        events = [event async for event in QueryEngine().submit(request)]
+        assert capture_sizes == [1001 if rewrite_prefix else 1]
+        assert len(captures) == 1
+        if commit_fails:
+            assert provider.calls == 0
+            assert builder.export_snapshot()["history"][:1000] == original_history
+            assert "admission_marker" not in builder.extension_state
+            assert any(event.type == "error" for event in events)
+        else:
+            assert provider.calls == 1
+            assert next(event for event in events if event.type == "done").data["status"] == "completed"
+            assert builder.extension_state["admission_marker"] == {"items": ["current"]}
+
+    asyncio.run(scenario())
+
+
 def test_image_only_response_completes_without_inventing_answer_text(query_factory):
     session, submission = query_factory
     item = {"type": "reasoning", "id": "image-reasoning", "encrypted_content": "opaque", "summary": []}

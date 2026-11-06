@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import Callable
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -3461,6 +3462,7 @@ class TaskTool(BaseTool):
                         boundary_input: Any,
                         history_start: int,
                         history_end: int,
+                        capture_snapshot: Callable[[], dict[str, Any]],
                     ) -> None:
                         nonlocal pending_extension_followup_id
                         del history_end
@@ -3469,7 +3471,7 @@ class TaskTool(BaseTool):
                             sub_context_builder.extension_state["followups"].pop(0)
                             child_run_context.extension_actions.changed({"fields": {"followups": {
                                 "value": list(sub_context_builder.extension_state["followups"])}}, "remove": []})
-                        snapshot = sub_context_builder.export_snapshot()
+                        snapshot = capture_snapshot()
                         event_id = "user_prompt_" + hashlib.sha256(
                             (
                                 f"{subagent_id}\0{turn_run_id}\0{max(0, int(history_start))}\0"

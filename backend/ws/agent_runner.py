@@ -5086,6 +5086,7 @@ class SessionAgentRunnerMixin:
             boundary_input: Any,
             history_start: int,
             history_end: int,
+            capture_snapshot: Callable[[], dict[str, Any]],
         ) -> None:
             if internal_turn and getattr(boundary_input, "consumed_steer", None) is None:
                 return
@@ -5173,7 +5174,7 @@ class SessionAgentRunnerMixin:
                 run_trace.mark("admission.load_latest")
                 if latest is None:
                     raise RuntimeError("conversation disappeared during turn admission")
-                saved_snapshot = await asyncio.to_thread(run_context_builder.export_snapshot)
+                saved_snapshot = await asyncio.to_thread(capture_snapshot)
                 run_trace.mark("admission.export_snapshot")
                 _merge_conversation_snapshot_metadata(
                     saved_snapshot,

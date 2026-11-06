@@ -100,7 +100,7 @@ class GuardianContextBuilder(ContextBuilder):
         self.pending_parts = ()
         return messages[-1]
 
-    def admit_node_repl_evidence(self, *, boundary_input, history_start: int, history_end: int) -> None:
+    def admit_node_repl_evidence(self, *, boundary_input, history_start: int, history_end: int, capture_snapshot) -> None:
         # QueryEngine invokes its actual admission committer after the complete
         # user history/evidence append succeeds. A rolled-back start_turn must
         # not move this cursor merely because messages were briefly prepared.
