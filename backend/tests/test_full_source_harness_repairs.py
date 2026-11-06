@@ -85,7 +85,7 @@ def test_retry_is_private_until_one_durable_user_and_rewind_commit(tmp_path, mon
     assert [item["id"] for item in repo.get_conversation(conversation.id).transcript] == ["old-user", "old-answer"]
     assert context.export_snapshot()["history"] == before_history
     commit_record = repo._commit_record
-    monkeypatch.setattr(repo, "_commit_record", lambda _: (_ for _ in ()).throw(OSError("admission write failed")))
+    monkeypatch.setattr(repo, "_commit_record", lambda _, **_kwargs: (_ for _ in ()).throw(OSError("admission write failed")))
     with pytest.raises(OSError, match="admission write failed"):
         repo.commit_turn_admission(conversation.id, user_message={"id": "new-user", "role": "user", "content": "redo"},
             context_snapshot=prepared["context_snapshot"], rewind_projection=prepared, expected_revision=conversation.revision)

@@ -136,10 +136,10 @@ async def test_real_startup_failures_keep_unadmitted_thread_settings(tmp_path, m
     else:
         commit = session.conversation_repo._commit_record
 
-        def fail_admission(record):
+        def fail_admission(record, **kwargs):
             if any(item.get("id") == "rejected-settings-user" for item in record.transcript):
                 raise OSError("controlled admission write failure")
-            return commit(record)
+            return commit(record, **kwargs)
 
         monkeypatch.setattr(session.conversation_repo, "_commit_record", fail_admission)
     try:
@@ -376,7 +376,7 @@ def test_repository_admission_publishes_settings_and_message_in_one_generation(t
         "workspace_binding": {"workspace_root": str(selected), "execution_cwd": str(selected)},
         "expected_workspace_binding_revision": 0}
     if write_fails:
-        def fail(_record):
+        def fail(_record, **_kwargs):
             raise OSError("controlled generation failure")
         with monkeypatch.context() as fault:
             fault.setattr(repository, "_commit_record", fail)

@@ -96,6 +96,99 @@ def test_failed_append_keeps_previous_generation_and_cached_history(tmp_path, mo
     assert [item["id"] for item in retried.transcript] == ["old", "retry"]
 
 
+@pytest.mark.parametrize("replace_user", [False, True])
+@pytest.mark.parametrize("steer", [False, True])
+def test_turn_admission_projects_from_the_first_changed_message(tmp_path, monkeypatch, replace_user, steer):
+    repo = ConversationRepository(tmp_path)
+    original = repo.create_conversation(transcript=[
+        {"id": f"message-{index}", "role": "user" if index % 2 == 0 else "assistant", "content": f"history {index}"}
+        for index in range(40)
+    ])
+    token = "sk-" + "testcredential" * 4
+    user = {"id": "message-38" if replace_user else "new-user", "role": "user", "content": f"input {token}"}
+    assistant = {"id": "message-39", "role": "assistant", "content": "before steer"} if steer else None
+    snapshot = {"history": [{"role": "user", "content": "execution context"}]}
+    expected = copy.deepcopy(original.transcript)
+    if steer:
+        expected[39] = assistant
+    if replace_user:
+        expected[38] = user
+    else:
+        expected.append(user)
+    expected = _normalize_loaded_transcript(expected)
+    projected_ids = []
+    project = repository_module.project_public_transcript
+
+    def observe(messages):
+        projected_ids.extend(item["id"] for item in messages)
+        return project(messages)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(repository_module, "project_public_transcript", observe)
+        saved = repo.commit_turn_admission(original.id, user_message=user, assistant_message=assistant,
+                                           context_snapshot=snapshot, expected_revision=original.revision)
+    start = 38 if replace_user else 39 if steer else 40
+    assert projected_ids == [item["id"] for item in expected[start:]]
+    assert saved.transcript == expected
+    restored = ConversationRepository(tmp_path).get_conversation(original.id)
+    assert restored.transcript == expected and restored.context_snapshot == snapshot
+    replay = repo.commit_turn_admission(original.id, user_message=user, assistant_message=assistant,
+                                        context_snapshot=snapshot, expected_revision=original.revision)
+    assert replay.revision == saved.revision and replay.transcript == saved.transcript
+    assert token not in json.dumps(restored.transcript)
+
+
+@pytest.mark.parametrize("mode", ["new", "replace", "context_only", "save_context"])
+def test_full_turn_and_context_checkpoints_skip_unchanged_history(tmp_path, monkeypatch, mode):
+    repo = ConversationRepository(tmp_path)
+    original = repo.create_conversation(transcript=[
+        {"id": f"message-{index}", "role": "assistant", "content": f"history {index}"}
+        for index in range(40)
+    ])
+    assistant = {"id": "message-35" if mode == "replace" else "new-answer", "role": "assistant", "content": "done"}
+    snapshot = {"history": [{"role": "assistant", "content": "new checkpoint"}]}
+    expected = copy.deepcopy(original.transcript)
+    if mode == "new":
+        expected.append(assistant)
+    elif mode == "replace":
+        expected[35] = assistant
+    expected = _normalize_loaded_transcript(expected)
+    projected_ids = []
+    project = repository_module.project_public_transcript
+
+    def observe(messages):
+        projected_ids.extend(item["id"] for item in messages)
+        return project(messages)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(repository_module, "project_public_transcript", observe)
+        if mode == "save_context":
+            saved = repo.save_context_snapshot(original.id, snapshot)
+        else:
+            saved = repo.commit_turn_projection(original.id, assistant_message=None if mode == "context_only" else assistant,
+                                                context_snapshot=snapshot, expected_revision=original.revision)
+    start = 35 if mode == "replace" else 40
+    assert projected_ids == [item["id"] for item in expected[start:]]
+    assert saved.transcript == expected
+    restored = ConversationRepository(tmp_path).get_conversation(original.id)
+    assert restored.transcript == expected and restored.context_snapshot == snapshot
+
+
+def test_rewind_admission_does_not_trust_replacement_history(tmp_path):
+    repo = ConversationRepository(tmp_path)
+    original = repo.create_conversation(transcript=[{"id": "first", "role": "user", "content": "before"}])
+    token = "sk-" + "testcredential" * 4
+    rewound = [{"id": "first", "role": "assistant", "content": "stale content", "private_transport": "hidden",
+                "blocks": [{"type": "text", "content": f"final {token}", "itemId": "answer", "source": "model_final", "status": "completed"}]}]
+    saved = repo.commit_turn_admission(original.id, user_message={"id": "retry", "role": "user", "content": "retry"},
+        context_snapshot={}, rewind_projection={"transcript": rewound, "summary": "", "memory_pollution_sources": []})
+    expected = _normalize_loaded_transcript([*rewound, {"id": "retry", "role": "user", "content": "retry"}])
+    assert saved.transcript == expected
+    assert token not in json.dumps(saved.transcript)
+    assert "private_transport" not in saved.transcript[0]
+    assert ConversationRepository(tmp_path).get_conversation(original.id).transcript == expected
+
+
 def test_context_checkpoint_uses_compact_json_without_changing_recovery(tmp_path):
     repo = ConversationRepository(tmp_path)
     snapshot = {"history": [{"role": "user", "content": "中文\n  keep indentation"}],

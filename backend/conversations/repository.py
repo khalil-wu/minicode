@@ -1081,6 +1081,7 @@ class ConversationRepository:
                         expected=expected_revision,
                         current=current_revision,
                     )
+            normalized_prefix = len(record.transcript)
             if assistant_message is not None:
                 next_message = projected_message or {}
                 message_id = str(next_message.get("id") or "").strip()
@@ -1096,6 +1097,7 @@ class ConversationRepository:
                         -1,
                     )
                 if replace_index >= 0:
+                    normalized_prefix = replace_index
                     previous_notification = record.transcript[replace_index].get("metadata", {}).get("completion_notification")
                     merge_message_delegations(record.transcript[replace_index], next_message)
                     record.transcript[replace_index] = next_message
@@ -1117,7 +1119,7 @@ class ConversationRepository:
             if context_delta is not None:
                 self._commit_metadata(record, assistant_message=projected_message, context_delta=context_delta)
             else:
-                self._commit_record(record)
+                self._commit_record(record, normalized_prefix=normalized_prefix)
             self._cache_record(record, copy_record=return_record)
             return record if return_record else record.to_summary()
 
@@ -1226,7 +1228,9 @@ class ConversationRepository:
                     current=current_revision,
                 )
 
+            normalized_prefix = len(record.transcript)
             if rewind_projection is not None:
+                normalized_prefix = 0
                 record.transcript = project_public_transcript(rewind_projection["transcript"])
                 record.summary = rewind_projection["summary"]
                 record.memory_pollution_sources = list(rewind_projection["memory_pollution_sources"])
@@ -1239,6 +1243,7 @@ class ConversationRepository:
                 assistant_index = next((index for index, item in enumerate(record.transcript)
                     if item.get("id") == next_assistant["id"]), -1)
                 if assistant_index >= 0:
+                    normalized_prefix = min(normalized_prefix, assistant_index)
                     merge_message_delegations(record.transcript[assistant_index], next_assistant)
                     record.transcript[assistant_index] = next_assistant
                 else:
@@ -1254,6 +1259,7 @@ class ConversationRepository:
                 -1,
             )
             if replace_index >= 0:
+                normalized_prefix = min(normalized_prefix, replace_index)
                 realtime_blocks = [block for block in record.transcript[replace_index].get("blocks", [])
                     if block.get("type") == "realtime"]
                 if realtime_blocks and not next_message.get("blocks"):
@@ -1280,7 +1286,7 @@ class ConversationRepository:
             if record.title == "New chat":
                 record.title = _derive_title(str(next_message.get("display_content", next_message.get("content", ""))))
             record.updated_at = utc_now_iso()
-            self._commit_record(record)
+            self._commit_record(record, normalized_prefix=normalized_prefix)
             self._cache_record(record)
             return record
 
@@ -2064,7 +2070,7 @@ class ConversationRepository:
                 return None
             record.context_snapshot = dict(context_snapshot)
             record.updated_at = utc_now_iso()
-            self._commit_record(record)
+            self._commit_record(record, normalized_prefix=len(record.transcript))
             self._cache_record(record)
             return record
 
