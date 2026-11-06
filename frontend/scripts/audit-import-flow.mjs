@@ -43,6 +43,7 @@ export async function auditImportFlow({ page, profile, sourceHome, capture, chec
     await page.keyboard.press("Escape");
     await page.locator(".mc-project-dialog-backdrop").click({ position: { x: 4, y: 4 } });
     await pending.waitFor();
+    await pending.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
     const scrollGeometry = await pending.evaluate(element => {
       const content = element.querySelector(".settings-import-files-content");
       return { width: element.getBoundingClientRect().width, display: getComputedStyle(element).display,
