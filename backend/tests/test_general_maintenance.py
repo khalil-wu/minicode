@@ -251,6 +251,7 @@ def test_cold_selection_only_returns_existing_seven_day_history_files(tmp_path):
 def test_cold_selection_finishes_file_stats_before_a_checkpoint_reclaims_its_previous_generation(tmp_path, monkeypatch):
     repository = ConversationRepository(tmp_path / "conversations")
     record = old_chat(repository, "Cold generation")
+    repository._MAX_PROJECTION_ADMISSIONS = 0
     repository.append_transcript_message(record.id, {"id": "second", "role": "user", "content": "Second checkpoint"})
     files = repository.history_paths(record.id)
     retired = next(path for path in files if ".g1.transcript.jsonl" in path.name)

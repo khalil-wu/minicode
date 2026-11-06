@@ -69,6 +69,7 @@ def test_partial_context_and_transcript_survive_reload_metadata_change_and_journ
     assert repo.get_conversation(record.id).revision == recovered.revision
     assert pending.event_id
 
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     terminal = repo.commit_turn_projection(record.id,
         assistant_message={"id": "answer", "role": "assistant", "content": "done"},
         context_snapshot=final_snapshot, expected_revision=recovered.revision)

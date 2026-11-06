@@ -47,6 +47,7 @@ def test_metadata_revision_survives_checkpoint_recovery_and_delete(tmp_path):
     repo.rename_conversation(created.id, "retained title")
     repo.set_archived(created.id, True)
     before = repo.get_conversation(created.id)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     repo.save_context_snapshot(created.id, {"history": [{"role": "user", "content": "new"}]})
     manifest = json.loads((tmp_path / f"{created.id}.manifest.json").read_text(encoding="utf-8"))
     (tmp_path / f"{created.id}.g{manifest['current_generation']}.snapshot.json").write_text("{broken", encoding="utf-8")
@@ -83,7 +84,7 @@ def test_summary_inventory_uses_manifest_and_observes_other_repository_edits(tmp
     assert repo.list_conversations() == []
 
 
-@pytest.mark.parametrize("version", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("version", [1, 2, 3, 4, 5, 6, 7, 8])
 def test_legacy_checkpoint_is_readable_and_metadata_write_upgrades_manifest(tmp_path, version):
     repo = ConversationRepository(tmp_path)
     created = repo.create_conversation(transcript=[{"role": "user", "content": "old release"}])
@@ -94,7 +95,7 @@ def test_legacy_checkpoint_is_readable_and_metadata_write_upgrades_manifest(tmp_
     upgraded = ConversationRepository(tmp_path)
     assert upgraded.get_conversation(created.id).transcript == created.transcript
     renamed = upgraded.rename_conversation(created.id, "new release")
-    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 8
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == 9
     assert ConversationRepository(tmp_path).get_conversation(created.id).revision == renamed.revision
 @pytest.mark.parametrize("inline_metadata", [True, False])
 def test_archive_and_restore_use_metadata_when_cold_history_checkpoint_is_corrupt(tmp_path, monkeypatch, inline_metadata):

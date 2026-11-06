@@ -901,6 +901,7 @@ def test_conversation_repository_commits_meta_transcript_and_snapshot_as_one_gen
     from backend.conversations.repository import ConversationRepository
 
     repo = ConversationRepository(base_dir=tmp_path)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     created = repo.create_conversation(memory_mode="disabled")
 
     repo.append_transcript_message(
@@ -968,6 +969,7 @@ def test_conversation_repository_uses_atomic_replaces_and_releases_lock(tmp_path
     monkeypatch.setattr(atomic_io_module.os, "replace", recording_replace)
 
     repo = ConversationRepository(base_dir=tmp_path)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     created = repo.create_conversation()
     repo.append_transcript_message(
         created.id,
@@ -997,6 +999,7 @@ def test_conversation_manifest_is_the_commit_point_when_generation_write_fails(t
     from backend.conversations.repository import ConversationRepository
 
     repo = ConversationRepository(base_dir=tmp_path)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     created = repo.create_conversation(title="Before failure")
     manifest_path = tmp_path / f"{created.id}.manifest.json"
     original_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1031,6 +1034,7 @@ def test_conversation_reader_falls_back_whole_generation_when_current_is_invalid
     for corruption in ("missing", "malformed", "message_count"):
         base_dir = tmp_path / corruption
         repo = ConversationRepository(base_dir=base_dir)
+        repo._MAX_PROJECTION_ADMISSIONS = 0
         created = repo.create_conversation(title=f"Fallback {corruption}")
         repo.append_transcript_message(
             created.id,
@@ -1073,6 +1077,7 @@ def test_conversation_repository_recovers_write_from_readable_previous_generatio
 
     base_dir = tmp_path / corruption
     repo = ConversationRepository(base_dir=base_dir)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     created = repo.create_conversation(title="Recoverable write")
     repo.append_transcript_message(
         created.id,
@@ -1130,6 +1135,7 @@ def test_conversation_repository_rejects_write_when_current_and_previous_generat
     )
 
     repo = ConversationRepository(base_dir=tmp_path)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     created = repo.create_conversation(title="Corrupt write")
     repo.append_transcript_message(
         created.id,
@@ -1271,6 +1277,7 @@ def test_conversation_generation_retention_and_delete_cleanup(tmp_path) -> None:
     from backend.conversations.repository import ConversationRepository
 
     repo = ConversationRepository(base_dir=tmp_path)
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     created = repo.create_conversation()
     for index in range(4):
         repo.append_transcript_message(

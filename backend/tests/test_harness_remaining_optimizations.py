@@ -61,6 +61,7 @@ def test_indexed_page_combines_current_partial_projection_and_metadata(tmp_path)
 def test_indexed_read_uses_existing_generation_recovery_for_a_damaged_transcript(tmp_path, warm_inventory):
     repo = ConversationRepository(tmp_path)
     original = repo.create_conversation(transcript=history(120), context_snapshot={"history": history(120)})
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     changed = repo.append_transcript_message(original.id, {"id": "new", "role": "user", "content": "new"})
     repo.transcript_path(original.id).write_text("broken JSON\n", encoding="utf-8")
     reader = ConversationRepository(tmp_path)

@@ -60,7 +60,7 @@ def test_partial_growth_is_linear_and_cold_page_preserves_block_zero(tmp_path, m
             path = repo._partial_projection_path(record.id, manifest["current_generation"])
             measured[index + 1] = sum(writes) + path.stat().st_size
     assert measured[64] < measured[32] * 2.3
-    assert manifest["version"] == 8
+    assert manifest["version"] == 9
     assert "partial_projection" not in manifest
     page = ConversationRepository(tmp_path).get_conversation_view(record.id)
     assert page["transcript"][-1]["content"] == text
@@ -98,11 +98,12 @@ def test_failed_manifest_write_and_incomplete_tail_are_not_replayed(tmp_path, mo
     assert ConversationRepository(tmp_path).get_conversation(record.id).transcript[-1]["content"] == "retried"
 
 
-def test_checkpoint_fallback_retains_the_previous_projection_log_and_reclaims_it(tmp_path):
+def test_checkpoint_fallback_retains_the_previous_projection_log_and_reclaims_it(tmp_path, monkeypatch):
     repo = ConversationRepository(tmp_path)
     record = repo.create_conversation(context_snapshot={"history": []})
     before = advance(repo, record.id, "retained partial")
     old_log = repo._partial_projection_path(record.id, repo._read_manifest(record.id)["current_generation"])
+    monkeypatch.setattr(repo, "_MAX_PROJECTION_BYTES", 1)
     committed = repo.commit_turn_projection(record.id, assistant_message=message("done"),
                                            context_snapshot={"history": []}, expected_revision=before.revision)
     manifest = repo._read_manifest(record.id)
@@ -115,7 +116,10 @@ def test_checkpoint_fallback_retains_the_previous_projection_log_and_reclaims_it
     assert restored.revision == before.revision
     snapshot_path.write_bytes(valid)
     repo.append_transcript_message(record.id, {"id": "next", "role": "user", "content": "next"})
+    # The next explicit checkpoint retires the fallback journal.
+    repo.save_conversation(repo.get_conversation(record.id))
     assert not old_log.exists()
+    monkeypatch.setattr(repo, "_MAX_PROJECTION_BYTES", 4 * 1024 * 1024)
     advance(repo, record.id, "new partial")
     assert list(tmp_path.glob("*.projection.jsonl"))
     assert repo.delete_conversation(record.id)
@@ -139,7 +143,8 @@ def test_legacy_inline_projection_migrates_without_losing_its_base(tmp_path):
     advance(repo, record.id, "legacy")
     path = repo._manifest_path_for(record.id)
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    manifest["partial_projection"] = repo._load_partial_projection(record.id, manifest)
+    manifest["partial_projection"] = {"assistant_message": message("legacy", terminal_status="partial"),
+                                      "context_delta": repo._load_partial_projection(record.id, manifest)["context_delta"]}
     manifest.pop("projection_log")
     manifest["version"] = 3
     path.write_text(json.dumps(manifest), encoding="utf-8")

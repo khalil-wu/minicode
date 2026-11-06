@@ -62,6 +62,7 @@ def test_native_items_use_the_same_history_and_request_estimate():
 def test_other_conversation_reads_do_not_wait_for_generation_write(tmp_path, monkeypatch):
     repository = ConversationRepository(tmp_path)
     first, second = repository.create_conversation(), repository.create_conversation()
+    repository._MAX_PROJECTION_ADMISSIONS = 0
     entered, release = threading.Event(), threading.Event()
     original = repository._write_generation
 

@@ -418,6 +418,7 @@ def test_resume_plan_recovery_and_concurrent_history_write_share_the_storage_mut
 def test_repository_hydration_uses_the_readable_generation_revision_after_corruption(tmp_path, warm_summary_index):
     repo = ConversationRepository(tmp_path)
     conversation = repo.create_conversation(context_snapshot={"history": [{"role": "user", "content": "readable history"}]})
+    repo._MAX_PROJECTION_ADMISSIONS = 0
     changed = repo.save_context_snapshot(conversation.id, {"history": [{"role": "user", "content": "damaged generation"}]})
     (tmp_path / f"{conversation.id}.g{changed.revision}.snapshot.json").write_text("{broken", encoding="utf-8")
     cold = ConversationRepository(tmp_path)

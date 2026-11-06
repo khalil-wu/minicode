@@ -146,6 +146,7 @@ def test_new_checkpoint_reclaims_all_stale_zstd_generations_and_delete_removes_b
     repository = ConversationRepository(tmp_path / "conversations")
     first = make_history(repository, count=2)
     first_files = compress_record(repository, first.id)
+    repository._MAX_PROJECTION_ADMISSIONS = 0
     repository.append_transcript_message(first.id, {"id": "new-user", "role": "user", "content": "Continue without changing old history"})
     second_files = compress_record(repository, first.id)
     assert first_files and second_files
@@ -161,6 +162,7 @@ def test_new_checkpoint_reclaims_all_stale_zstd_generations_and_delete_removes_b
 def test_truncated_current_frame_recovers_previous_generation_and_retains_damaged_evidence(tmp_path):
     repository = ConversationRepository(tmp_path / "conversations")
     first = make_history(repository, count=2)
+    repository._MAX_PROJECTION_ADMISSIONS = 0
     repository.append_transcript_message(first.id, {"id": "next-user", "role": "user", "content": "A newer checkpoint"})
     compress_record(repository, first.id)
     manifest = json.loads((repository.storage_root / f"{first.id}.manifest.json").read_text(encoding="utf8"))
