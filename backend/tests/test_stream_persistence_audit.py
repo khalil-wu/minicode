@@ -152,9 +152,9 @@ async def test_later_success_supersedes_a_failed_partial_projection(tmp_path, mo
              "context_snapshot": {"history": []}, "expected_revision": record.revision}
     journal.append_lifecycle("conversation_projection_pending", early)
     with monkeypatch.context() as patch:
-        def fail(*args):
+        def fail(*args, **kwargs):
             raise PermissionError("temporary write failure")
-        patch.setattr(repository, "_write_generation", fail)
+        patch.setattr("backend.conversations.repository.append_projection", fail)
         with pytest.raises(PermissionError):
             repository.commit_turn_projection(record.id, **{key: value for key, value in early.items() if key != "conversation_id"})
     final = {**early, "assistant_message": {"id": "a1", "role": "assistant", "content": "final", "terminal_status": "completed"}}
@@ -444,7 +444,7 @@ async def test_rewind_refuses_a_foreign_active_turn(tmp_path):
     async def send(*args, **kwargs):
         return True
     host = SimpleNamespace(active_conversation_id=owner, session_id="fixture",
-        conversation_repo=SimpleNamespace(get_conversation=lambda key: SimpleNamespace(id=owner, workspace_root=str(tmp_path), worktree_path="")),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda key: SimpleNamespace(id=owner, workspace_root=str(tmp_path), worktree_path="")),
         session_lifecycle=SimpleNamespace(workspace_root=tmp_path, current_workspace_root=lambda: tmp_path),
         resolve_requested_workspace=lambda value: tmp_path, running_agent_task_for=lambda owner: None,
         checkpoint_manager=SimpleNamespace(get=lambda value: record, rewind=rewind), send_payload=send, send_event=send)

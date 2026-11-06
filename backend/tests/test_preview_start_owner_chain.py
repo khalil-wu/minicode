@@ -39,7 +39,7 @@ async def test_start_readiness_retains_the_original_process_and_request_owner(tm
     conversation = SimpleNamespace(id=process.conversation_id, workspace_root=str(tmp_path), worktree_path="")
     session = SimpleNamespace(
         session_id=process.session_id, active_conversation_id=process.conversation_id,
-        conversation_repo=SimpleNamespace(get_conversation=lambda _: conversation),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda _: conversation),
         session_lifecycle=SimpleNamespace(workspace_root=tmp_path, current_workspace_root=lambda: tmp_path),
         resolve_requested_workspace=lambda requested: resolve_requested_workspace(tmp_path, requested),
         send_event=AsyncMock(),

@@ -291,11 +291,8 @@ def test_preview_refresh_validates_url_and_preserves_command_scope(
     )
 
     class _ConversationRepo:
-        def get_conversation(self, conversation_id: str) -> Any:
-            return conversation if conversation_id == "conversation-1" else None
-
         def get_conversation_summary(self, conversation_id: str) -> Any:
-            return self.get_conversation(conversation_id)
+            return conversation if conversation_id == "conversation-1" else None
 
     session = SimpleNamespace(
         session_id="session-1",
@@ -581,7 +578,7 @@ def test_commands_list_keeps_captured_owner_and_workspace_across_await(
     new_conversation = SimpleNamespace(id="conversation-new", workspace_root=str(new_workspace))
 
     class _ConversationRepo:
-        def get_conversation(self, conversation_id: str) -> Any:
+        def get_conversation_summary(self, conversation_id: str) -> Any:
             return {
                 "conversation-old": old_conversation,
                 "conversation-new": new_conversation,

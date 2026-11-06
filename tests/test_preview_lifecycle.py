@@ -277,7 +277,7 @@ def test_preview_start_handler_does_not_accept_late_http_success(monkeypatch, tm
         session = SimpleNamespace(
             session_id=launched.session_id,
             active_conversation_id=conversation.id,
-            conversation_repo=SimpleNamespace(get_conversation=lambda owner: conversation),
+            conversation_repo=SimpleNamespace(get_conversation_summary=lambda owner: conversation),
             session_lifecycle=SimpleNamespace(workspace_root=tmp_path, current_workspace_root=lambda: tmp_path),
             resolve_requested_workspace=lambda requested: resolve_requested_workspace(tmp_path, requested),
             send_event=AsyncMock(),

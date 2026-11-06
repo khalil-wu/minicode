@@ -60,7 +60,7 @@ async def test_invalid_scheduler_requests_settle_as_ws_errors_without_dispatchin
 
     session = SimpleNamespace(
         active_conversation_id="owned", send_event=send_event,
-        conversation_repo=SimpleNamespace(get_conversation=lambda cid: SimpleNamespace(id=cid, workspace_root=root, worktree_path="")),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda cid: SimpleNamespace(id=cid, workspace_root=root, worktree_path="")),
         session_lifecycle=SimpleNamespace(workspace_root=tmp_path, current_workspace_root=lambda: tmp_path),
         resolve_requested_workspace=lambda requested: tmp_path,
     )
@@ -123,7 +123,7 @@ async def test_task_mutation_ack_keeps_its_real_task_when_the_reader_switches_af
 
     session = SimpleNamespace(
         session_id="scheduler-mutation-receipt", active_conversation_id="A", send_event=send_event, send_payload=send_payload,
-        conversation_repo=SimpleNamespace(get_conversation=lambda cid: SimpleNamespace(id=cid, workspace_root=str(root_a if cid == "A" else root_b), worktree_path="")),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda cid: SimpleNamespace(id=cid, workspace_root=str(root_a if cid == "A" else root_b), worktree_path="")),
         session_lifecycle=SimpleNamespace(workspace_root=root_a, current_workspace_root=lambda: session.session_lifecycle.workspace_root),
         resolve_requested_workspace=lambda requested: root_a if requested == str(root_a) else root_b,
     )
@@ -179,7 +179,7 @@ async def test_list_ack_keeps_the_same_execution_snapshot_when_the_view_differs(
 
     session = SimpleNamespace(
         session_id="scheduler-list-receipt", active_conversation_id="A", send_event=send_event, send_payload=send_payload,
-        conversation_repo=SimpleNamespace(get_conversation=lambda cid: SimpleNamespace(id=cid,
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda cid: SimpleNamespace(id=cid,
             workspace_root=str(view_root if cid == "A" else root_b), execution_cwd=str(execution_root) if cid == "A" else "", worktree_path="")),
         session_lifecycle=SimpleNamespace(workspace_root=view_root, current_workspace_root=lambda: session.session_lifecycle.workspace_root),
         resolve_requested_workspace=lambda requested: Path(requested or session.session_lifecycle.workspace_root),
@@ -227,7 +227,7 @@ async def test_toggle_and_remove_ack_keep_the_original_execution_owner_after_sna
 
     session = SimpleNamespace(
         session_id="scheduler-controls-receipt", active_conversation_id="A", send_event=send_event, send_payload=send_payload,
-        conversation_repo=SimpleNamespace(get_conversation=lambda cid: SimpleNamespace(id=cid,
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda cid: SimpleNamespace(id=cid,
             workspace_root=str(view_root if cid == "A" else root_b), execution_cwd=str(execution_root) if cid == "A" else "", worktree_path="")),
         session_lifecycle=SimpleNamespace(workspace_root=view_root, current_workspace_root=lambda: session.session_lifecycle.workspace_root),
         resolve_requested_workspace=lambda requested: Path(requested or session.session_lifecycle.workspace_root),
@@ -322,7 +322,7 @@ async def test_target_thread_discovers_and_operates_the_explicit_management_root
 
     session = SimpleNamespace(
         session_id="scheduler-target-route", active_conversation_id="B", draft="Keep B draft", send_event=send_event, send_payload=send_payload,
-        conversation_repo=SimpleNamespace(get_conversation=lambda cid: SimpleNamespace(id=cid, workspace_root=str(root_b), execution_cwd=str(root_b), worktree_path="")),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda cid: SimpleNamespace(id=cid, workspace_root=str(root_b), execution_cwd=str(root_b), worktree_path="")),
         session_lifecycle=SimpleNamespace(workspace_root=root_b, current_workspace_root=lambda: root_b),
         resolve_requested_workspace=lambda requested: Path(requested or root_b),
     )

@@ -175,7 +175,7 @@ async def test_skill_list_captures_workspace_before_slow_discovery(tmp_path, mon
 
     messages = []
     owner = SimpleNamespace(active_conversation_id="same-owner", root=root_a, skill_manager=HeldManager(SkillLoader(root_a)))
-    owner.conversation_repo = SimpleNamespace(get_conversation=lambda _: SimpleNamespace(workspace_root=str(owner.root), worktree_path=""))
+    owner.conversation_repo = SimpleNamespace(get_conversation_summary=lambda _: SimpleNamespace(workspace_root=str(owner.root), worktree_path=""))
     owner.session_lifecycle = SimpleNamespace(workspace_root=root_a, current_workspace_root=lambda: owner.root)
     owner.resolve_requested_workspace = lambda _: owner.root
 

@@ -17,7 +17,7 @@ def menu_session(tmp_path):
     conversation = SimpleNamespace(id="A", workspace_root=str(tmp_path), worktree_path="")
     return SimpleNamespace(
         session_id="session", active_conversation_id="A",
-        conversation_repo=SimpleNamespace(get_conversation=lambda _: conversation),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda _: conversation),
         session_lifecycle=SimpleNamespace(workspace_root=tmp_path, current_workspace_root=lambda: tmp_path),
         resolve_requested_workspace=lambda value: resolve_requested_workspace(tmp_path, value),
         send_event=AsyncMock(),
@@ -57,11 +57,21 @@ async def test_start_finishes_after_http_probe_and_retains_its_original_owner(tm
         return verifier.PreviewVerification(process.effective_url, True, 200, 3)
     monkeypatch.setattr(verifier, "wait_until_ready", verify)
     task = asyncio.create_task(handle_preview_launch_start(session, {"conversation_id": "A", "workspace_root": str(tmp_path), "client_command_id": "start-request"}))
-    await waiting.wait()
-    assert not any(call.args[0].type == "command.result" for call in session.send_event.await_args_list)
-    session.active_conversation_id = "B"
-    release.set()
-    await task
+    probe = asyncio.create_task(waiting.wait())
+    try:
+        done, _ = await asyncio.wait((task, probe), timeout=2, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            await task
+        assert waiting.is_set(), "preview launch never reached its HTTP probe"
+        assert not any(call.args[0].type == "command.result" for call in session.send_event.await_args_list)
+        session.active_conversation_id = "B"
+        release.set()
+        await task
+    finally:
+        release.set()
+        probe.cancel()
+        task.cancel()
+        await asyncio.gather(task, probe, return_exceptions=True)
     result = session.send_event.await_args.args[0]
     assert result.type == "command.result" and result.data["level"] == "success"
     assert result.data["conversation_id"] == "A"
@@ -109,10 +119,20 @@ async def test_stop_has_no_semantic_success_until_the_owned_process_is_confirmed
         return [process]
     monkeypatch.setattr("backend.preview.stop_preview_launch", stop)
     task = asyncio.create_task(handle_preview_launch_stop(session, {"conversation_id": "A", "workspace_root": str(tmp_path), "name": "web", "client_command_id": "stop-request"}))
-    await waiting.wait()
-    assert session.send_event.await_count == 0
-    release.set()
-    await task
+    stopping = asyncio.create_task(waiting.wait())
+    try:
+        done, _ = await asyncio.wait((task, stopping), timeout=2, return_when=asyncio.FIRST_COMPLETED)
+        if task in done:
+            await task
+        assert waiting.is_set(), "preview stop never reached its process owner"
+        assert session.send_event.await_count == 0
+        release.set()
+        await task
+    finally:
+        release.set()
+        stopping.cancel()
+        task.cancel()
+        await asyncio.gather(task, stopping, return_exceptions=True)
     stopped, completed = [call.args[0] for call in session.send_event.await_args_list]
     assert stopped.type == "preview.launch.stopped"
     assert completed.type == "command.result" and completed.data["level"] == "success"

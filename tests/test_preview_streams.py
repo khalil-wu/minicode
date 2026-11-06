@@ -111,7 +111,7 @@ def test_preview_stop_handler_only_stops_the_current_workspace(monkeypatch, tmp_
     session = SimpleNamespace(
         session_id="shared-session",
         active_conversation_id=conversation.id,
-        conversation_repo=SimpleNamespace(get_conversation=lambda owner: conversation),
+        conversation_repo=SimpleNamespace(get_conversation_summary=lambda owner: conversation),
         session_lifecycle=SimpleNamespace(workspace_root=current, current_workspace_root=lambda: current),
         resolve_requested_workspace=lambda requested: resolve_requested_workspace(current, requested),
         send_event=send_event,
