@@ -137,9 +137,9 @@
   --command-accent-strong: oklch(0.86 0 0);
   --command-border:        oklch(0.82 0 0 / 0.48);
 
-  /* The desktop platform default is shared by UI and ordinary prose. */
-  --font-cjk:   "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --font-app:   -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Bundled Latin UI face with native PingFang when available and an offline CJK fallback. */
+  --font-cjk:   "PingFang SC", "Hiragino Sans GB", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --font-app:   "Anthropic Sans", var(--font-cjk);
   --font-ui:    var(--font-app);
   --font-mono:  "SFMono-Regular", Menlo, Consolas, "Liberation Mono", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", monospace;
   --editor-font-family: var(--font-mono);

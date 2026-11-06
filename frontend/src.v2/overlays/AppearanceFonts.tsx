@@ -111,7 +111,7 @@ export function AppearanceFonts({ variant, fonts, onChange, advanced = false, ac
     const label = key === "ui" ? t(advanced ? "界面字体样式" : "字体") : t(key === "content" ? "内容字体" : "代码字体");
     const familyAria = t("{variant}{font}", { variant: variantLabel, font: key === "ui" ? t("界面字体") : label });
     const styleAria = t("{variant}{font}样式", { variant: variantLabel, font: key === "ui" ? t("界面字体") : label });
-    const defaultLabel = t(key === "content" ? "跟随界面字体" : "系统");
+    const defaultLabel = t(key === "content" ? "跟随界面字体" : key === "ui" ? "默认" : "系统");
     return <div className="settings-row" key={key}><div className="settings-row-copy"><div className="settings-row-title">{label}</div></div>
       <div className="appearance-font-controls">
         {loading ? <span role="status" aria-label={t("正在读取字体…")}><LoaderCircle className="settings-spin" size={13} aria-hidden="true" /></span> : <>
