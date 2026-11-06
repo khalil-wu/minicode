@@ -368,3 +368,15 @@ async def test_notebook_edit_reports_an_external_change_instead_of_crashing(tmp_
     assert "changed on disk" in result.content
     assert result.display_summary == "File changed on disk"
     assert "saved by Jupyter" in notebook.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_write_file_keeps_an_existing_files_crlf_line_endings(tmp_path):
+    from backend.tools.write_file import WriteFileTool
+
+    target = tmp_path / "windows.txt"
+    target.write_bytes(b"one\r\ntwo\r\n")
+    result = await WriteFileTool().execute({"file_path": "windows.txt", "content": "one\nTWO\nthree\n",
+        "expected_hash": content_hash("one\ntwo\n")}, context=_context(tmp_path, []))
+    assert not result.is_error, result.content
+    assert target.read_bytes() == b"one\r\nTWO\r\nthree\r\n"

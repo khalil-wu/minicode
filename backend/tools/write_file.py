@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from backend.atomic_io import atomic_write_bytes, file_mutation_locks, run_blocking_io
+from backend.atomic_io import atomic_write_bytes, file_mutation_locks, preserve_text_line_endings, run_blocking_io
 from backend.permissions.context import ToolExecutionContext
 from backend.security.sensitive_files import is_protected_write_path
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, ToolSchema
@@ -247,17 +247,19 @@ class WriteFileTool(BaseTool):
                 with file_mutation_locks([path]):
                     _validate_expected_hash(path, args.get("expected_hash"))
                     existed = path.exists()
-                    previous = path.read_bytes().decode("utf-8") if existed else None
-                    atomic_write_bytes(path, content.encode("utf-8"))
+                    raw = path.read_bytes() if existed else None
+                    previous = raw.decode("utf-8") if raw is not None else None
+                    written = preserve_text_line_endings(content, raw) if raw is not None else content
+                    atomic_write_bytes(path, written.encode("utf-8"))
                     record_file_hash(context, path, content_hash(content))
                     get_global_file_cache().invalidate(path)
                     invalidate_workspace_file_caches(
                         changed_paths=(path,), workspace_root=workspace_root,
                         file_tree_changed=not existed or path.name == ".gitignore"
                     )
-                    return previous, existed
+                    return previous, existed, written
 
-            old_content, file_existed_before_write = await run_blocking_io(commit_write)
+            old_content, file_existed_before_write, written_content = await run_blocking_io(commit_write)
         except UnicodeDecodeError:
             return self._error_result(f"Cannot read binary or non-UTF-8 file: {file_path}")
         except FileChangedOnDiskError as exc:
@@ -274,7 +276,7 @@ class WriteFileTool(BaseTool):
                 context,
                 file_path=file_path,
                 old_content=old_content,
-                new_content=content,
+                new_content=written_content,
                 display_path=_workspace_display_path(path, file_path, context),
             )
 
