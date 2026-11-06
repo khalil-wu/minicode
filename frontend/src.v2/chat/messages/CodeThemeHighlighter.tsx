@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useAppStore } from "../../stores";
 import { highlightCodeInWorker } from "../../lib/code-highlighting-worker-client";
 import type { ResolvedTheme } from "../../stores/types";
 import { codeBlockStyle } from "./code-block-presentation";
-import { PlainCodeContent } from "./PlainCodeContent";
+import { CodeBlockContent } from "./CodeBlockContent";
 
 interface Props { children: string; hasLanguage: boolean; language: string; resolvedTheme: ResolvedTheme }
 
@@ -21,8 +21,7 @@ export default function CodeThemeHighlighter({ children, hasLanguage, language, 
   }, [children, language, id, resolvedTheme]);
   const lines = result?.code === children && result.language === language && result.id === id && result.variant === resolvedTheme
     ? result.lines : undefined;
-  const html = useMemo(() => lines?.map((line, index) => `<span class="block"><span aria-hidden="true" class="code-theme-line-number">${index + 1}</span>${line}</span>`).join(""), [lines]);
-  return <pre className="overflow-x-auto" style={codeBlockStyle(hasLanguage)}>{html !== undefined
-    ? <code dangerouslySetInnerHTML={{ __html: html }} />
-    : <code><PlainCodeContent text={children} /></code>}</pre>;
+  return <pre className="overflow-x-auto" style={codeBlockStyle(hasLanguage)}>
+    <code><CodeBlockContent text={children} highlightedLines={lines} /></code>
+  </pre>;
 }

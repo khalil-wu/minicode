@@ -5,7 +5,8 @@ import { decodeString } from "micromark-util-decode-string";
 import { formatHex } from "culori";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
 import { codeBlockStyle } from "./code-block-presentation";
-import { PlainCodeContent } from "./PlainCodeContent";
+import { CodeBlockContent } from "./CodeBlockContent";
+import { useMeasuredMarkdownBlock } from "./useMeasuredMarkdownBlock";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -515,25 +516,13 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
       data-markdown-copy="code-block"
       data-markdown-copy-text={text}
     >
-      <code><PlainCodeContent text={text} /></code>
+      <code><CodeBlockContent text={text} /></code>
     </pre>
   );
 };
 
 const MeasuredMarkdownBlock = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const element = ref.current!;
-    // Measure the real content before allowing the browser to skip its
-    // offscreen layout. Hidden panes retain their last measured block height.
-    const observer = new ResizeObserver(([entry]) => {
-      if (entry.contentRect.height === 0) return;
-      element.style.setProperty("--markdown-block-height", `${entry.contentRect.height}px`);
-      element.dataset.measured = "true";
-    });
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
+  const ref = useMeasuredMarkdownBlock<HTMLDivElement>();
   return <div {...props} ref={ref} className={`md-measured-block ${className}`} />;
 };
 
