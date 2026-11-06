@@ -216,14 +216,14 @@ def test_hydration_barrier_waits_for_complete_history_before_provider_turn(tmp_p
     runtime.active_conversation_id = conversation.id
     entered = threading.Event()
     release = threading.Event()
-    original = ContextBuilder.deserialize_snapshot_history
+    original = ContextBuilder._deserialize_normalized_history
 
     def blocked(raw_history, **kwargs):
         entered.set()
         release.wait(timeout=2)
         return original(raw_history, **kwargs)
 
-    monkeypatch.setattr(ContextBuilder, "deserialize_snapshot_history", staticmethod(blocked))
+    monkeypatch.setattr(ContextBuilder, "_deserialize_normalized_history", staticmethod(blocked))
 
     async def exercise():
         assert runtime.load_active_conversation_snapshot(conversation.id, conversation.context_snapshot, snapshot_revision=conversation.revision)
@@ -253,7 +253,7 @@ def test_hydration_reloads_only_changed_context_and_keeps_full_work_off_loop(tmp
     full_reads, decoded = [], []
     entered, release = threading.Event(), threading.Event()
     read = repo.get_conversation
-    deserialize = ContextBuilder.deserialize_snapshot_history
+    deserialize = ContextBuilder._deserialize_normalized_history
 
     def read_full(owner):
         assert threading.get_ident() != loop_thread, "full record copied on the event loop"
@@ -271,7 +271,7 @@ def test_hydration_reloads_only_changed_context_and_keeps_full_work_off_loop(tmp
         raise AssertionError("changed context must use the asynchronous partial hydration path")
 
     monkeypatch.setattr(repo, "get_conversation", read_full)
-    monkeypatch.setattr(ContextBuilder, "deserialize_snapshot_history", staticmethod(decode))
+    monkeypatch.setattr(ContextBuilder, "_deserialize_normalized_history", staticmethod(decode))
     monkeypatch.setattr(builder, "load_snapshot", full_load_is_not_a_reload)
 
     async def exercise():

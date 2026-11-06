@@ -317,8 +317,10 @@ class ConversationRuntime:
         on_hydration_complete: Callable[[str], Any] | None,
     ) -> None:
         try:
+            # load_snapshot_partial normalized and detached the whole history
+            # before splitting it. Preserve that boundary during prefix decode.
             parsed_history = await asyncio.to_thread(
-                ContextBuilder.deserialize_snapshot_history,
+                ContextBuilder._deserialize_normalized_history,
                 pending_history,
             )
         except asyncio.CancelledError:

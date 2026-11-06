@@ -135,7 +135,7 @@ async def test_failed_hydration_is_observed_and_closes_loading_projection(monkey
         notified.append(owner)
     def fail(history):
         raise ValueError("decode failed")
-    monkeypatch.setattr(ContextBuilder, "deserialize_snapshot_history", fail)
+    monkeypatch.setattr(ContextBuilder, "_deserialize_normalized_history", fail)
     runtime.load_active_conversation_snapshot("conv_probe", {}, snapshot_revision=1, notify=True, on_hydration_complete=complete)
     await asyncio.gather(runtime._hydration_task, return_exceptions=True)
     with pytest.raises(RuntimeError, match="hydration failed"):

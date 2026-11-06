@@ -1151,6 +1151,7 @@ class ContextBuilder:
             self._pending_hydration_frozen_prefix_count = 0
         self._history[insert_at:insert_at] = missing
         self._history_store.ensure_timestamps()
+        self._history_store.rebuild_token_cache(changed_from=insert_at)
 
     @staticmethod
     def _skill_path_from_fragment(fragment: str) -> str:
@@ -4070,7 +4071,6 @@ class ContextBuilder:
         self._executor_read_file_hashes.clear()
         self._ensure_invoked_skill_messages()
         self._history_store.ensure_timestamps()
-        self._history_store.rebuild_token_cache()
         from backend.conversations.context_delta import rebase_turn_admissions
         self._turn_admissions = rebase_turn_admissions(
             self._turn_admissions, removed_prefix=removed_prefix,
@@ -4503,7 +4503,7 @@ class ContextBuilder:
             return
 
         self._load_snapshot_metadata(snapshot, guardian_history_reset=guardian_history_reset)
-        self._history = self.deserialize_snapshot_history(
+        self._history = self._deserialize_normalized_history(
             self._snapshot_history_with_admissions(snapshot)
         )
         if not self._history_frozen_metadata_present and self._history:
@@ -4517,7 +4517,6 @@ class ContextBuilder:
             default=0,
         )
         self._ensure_invoked_skill_messages()
-        self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
 
     def load_snapshot_partial(
@@ -4567,7 +4566,7 @@ class ContextBuilder:
             pending_count,
             full_frozen_count,
         )
-        self._history = self.deserialize_snapshot_history(
+        self._history = self._deserialize_normalized_history(
             recent_history,
             # Legacy snapshots have no timestamps. Number the eagerly
             # loaded suffix by its absolute position in the full sanitized
@@ -4589,7 +4588,6 @@ class ContextBuilder:
         )
         if not pending_history:
             self._ensure_invoked_skill_messages()
-        self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
         return pending_history
 
@@ -4618,9 +4616,6 @@ class ContextBuilder:
         """Prepend hydrated prefix messages via ConversationHistory."""
         self._history_store.prepend(messages)
         self._ensure_invoked_skill_messages()
-        # ConversationHistory rebuilds before durable Skill messages are
-        # restored. Rebuild once more so accounting matches the final prompt.
-        self._history_store.rebuild_token_cache()
         self._reconstruct_tool_result_budget_state()
 
     def _snapshot_history_with_admissions(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
@@ -4678,12 +4673,26 @@ class ContextBuilder:
         *,
         timestamp_offset: int = 0,
     ) -> list[LLMMessage]:
+        """Import raw history once before constructing provider messages."""
+        return ContextBuilder._deserialize_normalized_history(
+            ContextBuilder.sanitize_snapshot_history(raw_history), timestamp_offset=timestamp_offset,
+        )
+
+    @staticmethod
+    def _deserialize_normalized_history(
+        history: list[dict[str, Any]], *, timestamp_offset: int = 0,
+    ) -> list[LLMMessage]:
+        """Consume an owned normalized slice without treating it as a new history.
+
+        A recent suffix can begin with an in-turn developer message. Applying
+        the import prefix rules again would silently drop that instruction.
+        """
         try:
             deterministic_timestamp_offset = max(0, int(timestamp_offset))
         except (TypeError, ValueError):
             deterministic_timestamp_offset = 0
         parsed_history: list[LLMMessage] = []
-        for raw in ContextBuilder.sanitize_snapshot_history(raw_history):
+        for raw in history:
             raw_timestamp = raw.get("timestamp_ms")
             try:
                 parsed_timestamp = (
@@ -4713,7 +4722,7 @@ class ContextBuilder:
                         ToolCallEvent(
                             id=call_id,
                             name=call_name,
-                            arguments=dict(raw_arguments) if isinstance(raw_arguments, dict) else {},
+                            arguments=deepcopy(raw_arguments) if isinstance(raw_arguments, dict) else {},
                             native_type=str(tool_call.get("native_type") or ""),
                             native_namespace=str(tool_call.get("native_namespace") or ""),
                             native_name=str(tool_call.get("native_name") or ""),
@@ -4724,32 +4733,27 @@ class ContextBuilder:
                     parsed_tool_calls = None
             parsed_history.append(
                 LLMMessage(
-                    role=_normalize_message_role(raw.get("role", "user")),
-                    content=_message_content_text(raw.get("content", "")),
+                    role=raw["role"],
+                    content=raw["content"],
                     name=raw.get("name"),
                     tool_call_id=raw.get("tool_call_id"),
                     tool_calls=parsed_tool_calls,
-                    is_error=bool(raw.get("is_error", False)),
-                    phase=str(raw.get("phase") or "")[:40],
+                    is_error=raw["is_error"],
+                    phase=raw["phase"],
                     input_origin=raw["input_origin"],
-                    answer_source=str(raw.get("answer_source") or "")[:40],
+                    answer_source=raw["answer_source"],
                     content_kind=str(raw.get("content_kind") or ""),
-                    provider_items=_sanitize_provider_items(raw.get("provider_items")),
+                    provider_items=raw["provider_items"],
                     mcp_output=deepcopy(raw.get("mcp_output")),
                     code_mode_output=deepcopy(raw.get("code_mode_output")),
                     tool_search_output=deepcopy(raw.get("tool_search_output")),
                     history_notes_output=deepcopy(raw.get("history_notes_output")),
                     native_tool_output=deepcopy(raw.get("native_tool_output")),
                     private_model_only=raw.get("private_model_only") is True,
-                    images=_sanitize_media_items(raw.get("images")),
-                    documents=_sanitize_media_items(
-                        raw.get("documents"),
-                        document=True,
-                    ),
-                    attachment_refs=_sanitize_attachment_refs(
-                        raw.get("attachment_refs")
-                    ),
-                    runtime_context=str(raw.get("runtime_context") or ""),
+                    images=raw["images"],
+                    documents=raw["documents"],
+                    attachment_refs=raw["attachment_refs"],
+                    runtime_context=raw["runtime_context"],
                     is_user_input=raw["is_user_input"],
                     accepted_input=deepcopy(raw.get("accepted_input")),
                     timestamp_ms=parsed_timestamp,
