@@ -1,5 +1,9 @@
-.mc-project-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: var(--dialog-overlay); font-family: var(--font-ui); }
-.mc-project-dialog { width: min(480px, calc(100vw - 48px)); padding: 24px; display: grid; gap: 24px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); }
+.mc-project-dialog-backdrop { position: fixed; inset: 0; z-index: var(--z-dialog); display: grid; place-items: center; padding: 24px; background: var(--dialog-overlay); font-family: var(--font-ui); animation: overlay-in var(--duration-fast) var(--easing-standard) both; }
+.mc-project-dialog { width: min(480px, calc(100vw - 48px)); padding: 24px; display: grid; gap: 24px; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-strong-overlay); animation: modal-in var(--duration-base) var(--easing-enter) both; }
+/* Opened from the sidebar, where the settings stylesheet that owns this class may not be loaded yet. */
+.mc-project-dialog :where(.settings-action-button) { display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 10px; border: 1px solid var(--border-subtle); border-radius: 10px; background: var(--surface-soft); color: var(--text-secondary); font: inherit; font-size: var(--text-chrome); line-height: 18px; white-space: nowrap; transition: background-color var(--transition-fast), border-color var(--transition-fast), color var(--transition-fast); }
+.mc-project-dialog :where(.settings-action-button) > svg { width: 14px; height: 14px; flex: none; }
+.mc-project-dialog :where(.settings-action-button:not([data-primary="true"])):hover:not(:disabled) { background: var(--surface-hover); color: var(--text-primary); }
 .mc-project-dialog h2 { margin: 0; font-size: var(--text-lg); font-weight: var(--fw-semibold); }
 .mc-project-name-input { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); }
 .mc-project-name-input input { flex: 1; min-width: 0; padding: 6px 0; border: 0; outline: 0; background: transparent; color: inherit; font: inherit; }
@@ -11,4 +15,4 @@
 .mc-project-dialog footer { display: flex; justify-content: flex-end; gap: 10px; }
 .mc-project-dialog button { cursor: pointer; }
 .mc-project-dialog button:disabled { cursor: default; opacity: .5; }
-.mc-project-dialog footer button[data-primary="true"] { background: var(--text-primary); color: var(--surface-raised); }
+.mc-project-dialog footer button[data-primary="true"] { border-color: var(--text-primary); background: var(--text-primary); color: var(--surface-raised); }
