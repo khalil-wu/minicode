@@ -16,6 +16,48 @@ from backend.ws.manager import WebSocketManager
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("history", [False, True])
+async def test_published_selection_accepts_restore_before_old_command_cleanup(tmp_path, monkeypatch, history):
+    manager = WebSocketManager()
+    session, _ = await manager.connect(**_connection(tmp_path, session_id="published-navigation"))
+    monkeypatch.setattr(session, "refresh_llm_selection", lambda **_: None)
+    monkeypatch.setattr(session.session_lifecycle, "schedule_runtime_capabilities", lambda **_: None)
+    monkeypatch.setattr(session, "switch_workspace_for_conversation", AsyncMock(return_value=True))
+    original = session.conversation_repo.create_conversation(title="Original")
+    selected = session.conversation_repo.create_conversation(title="Selected",
+        transcript=[{"id": "old-input", "role": "user", "content": "Retained"}] if history else [])
+    restored = session.conversation_repo.create_conversation(title="Restored")
+    session.active_conversation_id = original.id
+    published, release = asyncio.Event(), asyncio.Event()
+    send = session.send_payload
+    async def hold_after_publication(payload, **kwargs):
+        delivered = await send(payload, **kwargs)
+        if payload.get("type") == "conversation.switched" and payload.get("conversation_id") == selected.id and not published.is_set():
+            published.set()
+            await release.wait()
+        return delivered
+    monkeypatch.setattr(session, "send_payload", hold_after_publication)
+    first = asyncio.create_task(session.command_dispatcher._dispatch_client_command(UserCommand("conversation.switch", {
+        "conversation_id": selected.id, "client_command_id": "published-selection"}), session.connection_generation))
+    followup = None
+    try:
+        await asyncio.wait_for(published.wait(), 5)
+        assert not session.session_lifecycle._foreground_navigation_pending
+        followup = asyncio.create_task(session.command_dispatcher._dispatch_client_command(UserCommand("session.restore", {
+            "last_conversation_id": restored.id, "client_command_id": "restore-after-publication"}), session.connection_generation))
+        await asyncio.sleep(0)
+        assert session.session_lifecycle._foreground_navigation_target_id == restored.id
+        release.set()
+        assert all(await asyncio.wait_for(asyncio.gather(first, followup), 10))
+        assert session.active_conversation_id == restored.id
+        assert not session.session_lifecycle._foreground_navigation_pending
+    finally:
+        release.set()
+        await asyncio.gather(first, *([followup] if followup is not None else []), return_exceptions=True)
+        await _release_session(session)
+
+
+@pytest.mark.asyncio
 async def test_two_switches_to_the_same_target_publish_only_the_latest_receipt(tmp_path, monkeypatch):
     manager = WebSocketManager()
     connection = _connection(tmp_path, session_id="same-target-navigation")

@@ -1178,6 +1178,7 @@ async def _publish_conversation_switch(
             same_view = (initial_view_delivered
                          and initial_connection_generation == session.connection_generation
                          and current_view == view)
+            session.session_lifecycle.finish_foreground_navigation()
             await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
                                         **({} if same_view else {"conversation": current_view}), "is_hydrating": False,
                                         **({"capabilities_deferred": True} if data.get("defer_runtime_capabilities") else {"capabilities_pending": True}),
@@ -1215,6 +1216,7 @@ async def _publish_conversation_switch(
         record = None
     if record is None:
         session.conversation_runtime.defer_repository_hydration(target.id, on_hydration_complete=restored)
+    session.session_lifecycle.finish_foreground_navigation()
     initial_view_delivered = await session.send_payload({"type": "conversation.switched", "conversation_id": target.id,
                                 "conversation": view, "is_hydrating": True, "context_pending": True,
                                 "session": session.runtime_snapshot(include_capabilities=False),

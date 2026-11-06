@@ -300,6 +300,7 @@ async def handle_session_restore(session: "WebSocketSession", data: dict[str, An
         )
         if superseded:
             restored_payload["conversation_switched_follows"] = False
+        session.session_lifecycle.finish_foreground_navigation()
         await session.send_payload(
             restored_payload,
             log_context="session.restored", wait_for_delivery=False,
