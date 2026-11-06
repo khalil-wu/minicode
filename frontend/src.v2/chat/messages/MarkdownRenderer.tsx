@@ -5,6 +5,7 @@ import { decodeString } from "micromark-util-decode-string";
 import { formatHex } from "culori";
 import { StreamingMarkdownPartition, type MarkdownPart } from "./streamingMarkdown";
 import { codeBlockStyle } from "./code-block-presentation";
+import { PlainCodeContent } from "./PlainCodeContent";
 import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -507,7 +508,6 @@ const InsertButton = ({ text }: { text: string }) => {
 };
 
 const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: string }) => {
-  const lines = text.split("\n");
   return (
     <pre
       style={codeBlockStyle(hasLanguage)}
@@ -515,14 +515,7 @@ const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: str
       data-markdown-copy="code-block"
       data-markdown-copy-text={text}
     >
-      <code>
-        {lines.map((line, index) => (
-          <span key={index} className="block">
-            <span aria-hidden="true" className="code-theme-line-number">{index + 1}</span>
-            {line}
-          </span>
-        ))}
-      </code>
+      <code><PlainCodeContent text={text} /></code>
     </pre>
   );
 };

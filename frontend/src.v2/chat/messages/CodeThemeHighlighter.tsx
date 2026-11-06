@@ -3,6 +3,7 @@ import { useAppStore } from "../../stores";
 import { highlightCodeInWorker } from "../../lib/code-highlighting-worker-client";
 import type { ResolvedTheme } from "../../stores/types";
 import { codeBlockStyle } from "./code-block-presentation";
+import { PlainCodeContent } from "./PlainCodeContent";
 
 interface Props { children: string; hasLanguage: boolean; language: string; resolvedTheme: ResolvedTheme }
 
@@ -23,7 +24,5 @@ export default function CodeThemeHighlighter({ children, hasLanguage, language, 
   const html = useMemo(() => lines?.map((line, index) => `<span class="block"><span aria-hidden="true" class="code-theme-line-number">${index + 1}</span>${line}</span>`).join(""), [lines]);
   return <pre className="overflow-x-auto" style={codeBlockStyle(hasLanguage)}>{html !== undefined
     ? <code dangerouslySetInnerHTML={{ __html: html }} />
-    : <code>{children.split("\n").map((line, index) => <span className="block" key={index}>
-      <span aria-hidden="true" className="code-theme-line-number">{index + 1}</span><span>{line}</span>
-    </span>)}</code>}</pre>;
+    : <code><PlainCodeContent text={children} /></code>}</pre>;
 }
