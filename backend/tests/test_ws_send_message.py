@@ -46,6 +46,7 @@ class _Session:
         self.tool_registry = _Registry(task_tool)
         self._workspace_root = tmp_path
         self.conversation_repo = SimpleNamespace(get_conversation=lambda _id: SimpleNamespace(workspace_root=str(tmp_path), worktree_path=""))
+        self.conversation_repo.get_conversation_summary = self.conversation_repo.get_conversation
         self.command_results: list[dict] = []
         self.events: list[dict] = []
         self.session_lifecycle = SimpleNamespace(

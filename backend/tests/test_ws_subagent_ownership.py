@@ -27,7 +27,7 @@ class Session:
         self.events = []
         self.results = []
         self.payloads = []
-        self.conversation_repo = SimpleNamespace(get_conversation=lambda _id: SimpleNamespace(
+        self.conversation_repo = SimpleNamespace(get_conversation_summary=lambda _id: SimpleNamespace(
             workspace_root=str(workspace), worktree_path="",
         ))
         self.session_lifecycle = SimpleNamespace(
