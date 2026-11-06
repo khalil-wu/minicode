@@ -17,8 +17,18 @@ import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
 const ThreadSummary = ({ pane }: { pane: HTMLDivElement }) => {
   const [displayMode, setDisplayMode] = useState(() => threadSummaryDisplayMode(pane.clientWidth));
   useLayoutEffect(() => {
-    setDisplayMode(threadSummaryDisplayMode(pane.clientWidth));
-    const observer = new ResizeObserver(([entry]) => setDisplayMode(threadSummaryDisplayMode(entry.contentRect.width)));
+    let previous = threadSummaryDisplayMode(pane.clientWidth);
+    setDisplayMode(previous);
+    const store = useAppStore.getState();
+    if (previous === "overlay" && store.contextCardPinned) store.setContextCardCollapsed(true);
+    const observer = new ResizeObserver(([entry]) => {
+      const next = threadSummaryDisplayMode(entry.contentRect.width);
+      // A pinned sidebar becoming a popover must not cover the conversation
+      // without a click. Keep the pin preference and only close this surface.
+      if (next === "overlay" && previous !== "overlay") useAppStore.getState().setContextCardCollapsed(true);
+      previous = next;
+      setDisplayMode(next);
+    });
     observer.observe(pane);
     return () => observer.disconnect();
   }, [pane]);

@@ -99,10 +99,15 @@ describe("thread summary through WorkbenchShell, MainSlots and ChatPane", () => 
     expect(summary()?.getAttribute("data-display-mode")).toBe("shift");
     expect(summary()?.getAttribute("data-surface")).toBe("inline");
     resize(1095);
+    expect(summary()).toBeNull();
+    expect(toggle().getAttribute("aria-pressed")).toBe("false");
+    expect(useAppStore.getState().contextCardPinned).toBe(true);
+    fireEvent.click(toggle());
     expect(summary()?.getAttribute("data-display-mode")).toBe("overlay");
     expect(summary()?.getAttribute("data-surface")).toBe("popover");
-    expect(toggle().getAttribute("aria-pressed")).toBe("true");
-    expect(container.querySelector(".chat-pane-layout")?.contains(card)).toBe(true);
+    resize(900);
+    expect(summary()?.getAttribute("data-surface")).toBe("popover");
+    expect(container.querySelector(".chat-pane-layout")?.contains(summary())).toBe(true);
     expect(screen.getByRole("textbox", { name: "Summary test composer" })).toBe(composer);
     expect((composer as HTMLTextAreaElement).value).toBe("Retain the unsent draft");
     act(() => composer.focus());
