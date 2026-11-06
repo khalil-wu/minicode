@@ -8,12 +8,13 @@ version = "0.2.3"
 description = "MiniCode Agent — AI 编程助手后端"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.115,<1.0",
+  "fastapi>=0.130,<1.0",
+  "starlette>=0.49.1,<1.0",
   "openai>=1.75,<2.0",
   "uvicorn[standard]>=0.32,<1.0",
   "anthropic>=0.42,<1.0",
-  "mcp[cli]>=1.27.1,<2.0",
-  "Pillow>=11,<13",
+  "mcp[cli]>=1.30,<2.0",
+  "Pillow>=13,<14",
   "pydantic>=2.0,<3.0",
   "jsonschema>=4.23,<5.0",
   "httpx>=0.28,<1.0",
@@ -31,7 +32,7 @@ dependencies = [
   "python-dateutil>=2.9,<3.0",
   "defusedxml>=0.7,<1.0",
   "keyring>=25,<26",
-  "filelock>=3.16,<4.0",
+  "filelock>=4.2.1,<5.0",
   "tomlkit>=0.13.3,<1.0",
   "zstandard==0.25.0",
   "regex>=2024.11,<2027",
