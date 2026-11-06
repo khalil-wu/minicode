@@ -1334,13 +1334,16 @@ async def _flush_queue(
                     if _tool_supports_diff(tc.name, tool_registry)
                     else None
                 )
-                call_context = _context_before_dispatch(tc, tool_ctx, tool_registry, ctx)
-                result = await run_tool_with_timeout(
-                    tc,
-                    tool_registry,
-                    call_context,
-                    iteration_id=iteration_id,
-                )
+                try:
+                    call_context = _context_before_dispatch(tc, tool_ctx, tool_registry, ctx)
+                    result = await run_tool_with_timeout(
+                        tc,
+                        tool_registry,
+                        call_context,
+                        iteration_id=iteration_id,
+                    )
+                except Exception as exc:
+                    result = _execution_exception_result(exc)
                 _invalidate_workspace_views_after_mutation(
                     tc,
                     tool_registry=tool_registry,
@@ -2338,9 +2341,12 @@ async def execute_serial(
         result = routed.result
     else:
         tool_ctx = _context_before_dispatch(tc, tool_ctx, tool_registry, ctx)
-        result = await run_tool_with_timeout(
-            tc, tool_registry, tool_ctx, iteration_id=iteration_id
-        )
+        try:
+            result = await run_tool_with_timeout(
+                tc, tool_registry, tool_ctx, iteration_id=iteration_id
+            )
+        except Exception as exc:
+            result = _execution_exception_result(exc)
 
     _invalidate_workspace_views_after_mutation(
         tc,

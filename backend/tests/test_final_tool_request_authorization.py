@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -724,3 +725,36 @@ def test_ws_pending_approval_rejects_explicit_wrong_digest() -> None:
         assert (await future)["request_digest"] == digest
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["serial", "batch"])
+async def test_serial_tool_execution_error_becomes_a_tool_result(tmp_path, monkeypatch, entry):
+    from backend.agent import tool_batch_execution
+
+    async def failing_run(*args, **kwargs):
+        raise RuntimeError("executor metadata probe failed")
+
+    monkeypatch.setattr(tool_batch_execution, "run_tool_with_timeout", failing_run)
+    tool = _ModeTool()
+    tc = ToolCallEvent(id=f"raises-{entry}", name=tool.name, arguments={"mode": "read"})
+    permission = PermissionContext(mode="confirm", source="test")
+    if entry == "batch":
+        events, _, _ = await _collect_batch(tmp_path, tool, tc, permission=permission)
+    else:
+        registry = ToolRegistry()
+        registry.register(tool)
+        checker = PermissionChecker(PermissionSettings(), tmp_path)
+        tool_ctx = ToolExecutionContext(permission=permission, workspace_root=tmp_path)
+        authorization = await _authorize_final_tool_request(tc, tool_registry=registry,
+            permission_checker=checker, permission_context=permission, tool_ctx=tool_ctx)
+        _bind_final_tool_request(tc, authorization.request)
+        context = ContextBuilder(TokenBudget())
+        context.append_assistant_tool_calls([tc])
+        events = [event async for event in execute_serial(tc, perm=PermissionLevel.AUTO,
+            permission_decision=authorization.permission_decision, permission_checker=checker,
+            permission_context=permission, ctx=context, state=AgentState(user_message="test", iterations=1),
+            tool_registry=registry, tool_ctx=tool_ctx, approval_handler=None, skill_manager=None, iteration_id="iter:1")]
+    result = _event(events, "tool_result").data
+    assert result["is_error"]
+    assert "executor metadata probe failed" in json.dumps(result, ensure_ascii=False)
