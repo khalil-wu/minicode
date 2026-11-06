@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronRight, CircleAlert } from "lucide-react";
+import { ChevronRight, CircleAlert } from "lucide-react";
 import type { AgentTurnStatus } from "../projection/project-turn";
 import { useSharedSecondTick } from "../../lib/shared-tick";
 import { useI18n, type Translate } from "../../i18n";
@@ -94,7 +94,7 @@ export function AgentProcessSummary({
         onClick={onToggle}
       >
         {content}
-        {processExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        <ChevronRight size={14} className="agent-loop-process-chevron" aria-hidden="true" />
       </button>
     </div>
   );

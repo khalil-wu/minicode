@@ -445,6 +445,15 @@
   font-size: var(--text-sm);
 }
 
+.agent-loop-process-chevron {
+  flex-shrink: 0;
+  transition: transform var(--duration-base) var(--easing-enter);
+}
+
+.agent-loop-process-summary[aria-expanded="true"] .agent-loop-process-chevron {
+  transform: rotate(90deg);
+}
+
 .agent-loop-diff-area .diff-cell-stats {
   font-size: var(--text-xs);
 }

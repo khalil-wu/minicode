@@ -13,11 +13,9 @@ export const useReplyViewport = (
     const measure = (height: number) => {
       // Hidden mounted panes have no viewport. Retain their last measured
       // reply height so returning does not collapse and re-expand the reply.
-      if (height === 0) return;
-      if (height !== viewportHeight) {
-        viewportHeight = height;
-        scroll.style.setProperty("--reply-viewport-height", `${height}px`);
-      }
+      if (height === 0 || height === viewportHeight) return;
+      viewportHeight = height;
+      scroll.style.setProperty("--reply-viewport-height", `${height}px`);
       followLatest();
     };
     const style = getComputedStyle(scroll);

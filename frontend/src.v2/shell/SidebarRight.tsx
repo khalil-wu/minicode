@@ -641,6 +641,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
         />
       )}
       <div className="mc-sidebar-right-content">
+      <div className="mc-sidebar-right-inner" style={{ width: expanded || embedded ? "100%" : `${sidebarWidth}px` }}>
       <div className="mc-sidebar-right-header">
         {expanded && <button type="button" className="mc-sidebar-return-chat" aria-label={tr("返回主聊天")} title={tr("返回主聊天")}
           onClick={() => setRightPanelExpanded(false)}><MessageCircle size={15} /><span>{mainConversationTitle}</span></button>}
@@ -828,6 +829,7 @@ export const SidebarRight = ({ embedded = false, visible = true, initialTab }: S
           </Suspense>
         </div>;
       })}
+      </div>
       </div>
     </aside>
   );
