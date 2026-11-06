@@ -76,8 +76,8 @@ def apply_value_change(before: Any, change: dict[str, Any] | None, *, in_place: 
 def append_projection(
     path: Path, *, committed_bytes: int, revision: int,
     previous: dict[str, Any], current: dict[str, Any], seed_revision: int | None = None,
-) -> int:
-    """Write and sync before publishing the returned byte position in the manifest.
+) -> tuple[int, dict[str, Any]]:
+    """Sync the delta and return its byte position and owned materialized state.
 
     The conversation writer already owns the file lock. Bytes beyond the prior
     manifest position belong to a failed publication and are replaced on retry.
@@ -87,6 +87,9 @@ def append_projection(
         entries.append({"revision": seed_revision, "change": {"value": previous}})
     entries.append({"revision": revision, "change": value_change(previous, current)})
     encoded = "".join(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n" for entry in entries).encode("utf-8")
+    # Reuse the serialization ownership boundary. Only changed values cross
+    # JSON; unchanged branches stay with the prior repository-owned cache.
+    owned = apply_value_change(previous, json.loads(encoded.splitlines()[-1])["change"])
     path = materialize_history_for_append(path)
     with path.open("r+b" if path.exists() else "w+b") as handle:
         handle.seek(committed_bytes)
@@ -94,7 +97,7 @@ def append_projection(
         handle.write(encoded)
         handle.flush()
         os.fsync(handle.fileno())
-        return handle.tell()
+        return handle.tell(), owned
 
 
 def read_projection(path: Path, *, committed_bytes: int, revision: int) -> dict[str, Any]:

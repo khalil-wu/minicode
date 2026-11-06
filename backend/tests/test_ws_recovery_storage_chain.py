@@ -104,12 +104,14 @@ def test_terminal_tool_metadata_and_preview_survive_late_events_and_done_fence()
 def test_projection_committed_bytes_preserve_unicode_and_ignore_uncommitted_suffix(tmp_path):
     path = tmp_path / "projection.jsonl"
     first = {"assistant_message": {"id": "a", "content": "中文"}, "context_delta": {}}
-    pos = append_projection(path, committed_bytes=0, revision=1, previous={}, current=first)
+    pos, owned = append_projection(path, committed_bytes=0, revision=1, previous={}, current=first)
+    assert owned == first
     with path.open("ab") as stream:
         stream.write(b'uncommitted-partial')
     assert read_projection(path, committed_bytes=pos, revision=1) == first
     second = {"assistant_message": {"id": "a", "content": "中文🌟"}, "context_delta": {}}
-    pos = append_projection(path, committed_bytes=pos, revision=2, previous=first, current=second)
+    pos, owned = append_projection(path, committed_bytes=pos, revision=2, previous=owned, current=second)
+    assert owned == second
     assert read_projection(path, committed_bytes=pos, revision=2) == second
     with pytest.raises(ValueError, match="manifest"):
         read_projection(path, committed_bytes=pos, revision=3)

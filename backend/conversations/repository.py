@@ -1070,7 +1070,7 @@ class ConversationRepository:
                     and existing_message == projected_message
                     and (context_delta is None or apply_context_snapshot_delta(record.context_snapshot, context_delta) == record.context_snapshot)
                 ):
-                    return record
+                    return record if return_record else record.to_summary()
                 manifest = self._read_manifest(conversation_id, log_errors=False) or {}
                 projection_revision = int(manifest.get("projection_revision") or manifest.get("current_generation") or current_revision)
                 # Renaming/archiving while a turn streams does not change its
@@ -1110,7 +1110,7 @@ class ConversationRepository:
                 if not partial and notification is not None and previous_notification is None:
                     record.has_unread_turn |= notification["should_mark_unread"]
             record.context_snapshot = (
-                apply_context_snapshot_delta(record.context_snapshot, context_delta)
+                apply_context_snapshot_delta(record.context_snapshot, copy.deepcopy(context_delta))
                 if context_delta is not None
                 else copy.deepcopy(dict(context_snapshot or {}))
             )
@@ -1121,7 +1121,8 @@ class ConversationRepository:
             if context_delta is not None:
                 record.transcript = record.transcript[:normalized_prefix] + _normalize_loaded_transcript(
                     record.transcript[normalized_prefix:], index_offset=normalized_prefix)
-                self._commit_metadata(record, transcript_from=normalized_prefix, context_delta=context_delta)
+                self._commit_metadata(record, transcript_from=normalized_prefix, context_delta=context_delta,
+                    content_changed=assistant_message is not None)
             else:
                 self._commit_record(record, normalized_prefix=normalized_prefix)
             self._cache_record(record, copy_record=return_record)
@@ -2206,7 +2207,7 @@ class ConversationRepository:
                     base.transcript, record.transcript, start=start),
                 "context_delta": compose_context_snapshot_deltas(previous.get("context_delta", {}), context_delta),
             }
-            position = append_projection(
+            position, owned_projection = append_projection(
                 self._partial_projection_path(record.id, generation),
                 committed_bytes=pointer["bytes"] if pointer else 0, revision=revision,
                 previous=previous, current=partial_projection_state,
@@ -2226,7 +2227,7 @@ class ConversationRepository:
         record.content_revision = metadata["content_revision"]
         record.content_updated_at = metadata["content_updated_at"]
         if context_delta is not None:
-            self._cache_partial_projection(record.id, payload["projection_log"], partial_projection_state)
+            self._cache_partial_projection(record.id, payload["projection_log"], owned_projection)
 
     def _cache_record(self, record: ConversationRecord, *, copy_record: bool = True) -> None:
         with self._process_lock:
@@ -3115,10 +3116,11 @@ class ConversationRepository:
     def _cache_partial_projection(
         self, conversation_id: str, pointer: dict[str, int], projection: dict[str, Any],
     ) -> None:
+        """Retain state owned by the projection decoder, never caller payloads."""
         stat = history_stat(self._partial_projection_path(conversation_id, pointer["generation"]))
         with self._process_lock:
             self._partial_projection_cache[conversation_id] = (
-                pointer["generation"], pointer["bytes"], (stat.st_mtime_ns, stat.st_size), copy.deepcopy(projection),
+                pointer["generation"], pointer["bytes"], (stat.st_mtime_ns, stat.st_size), projection,
             )
             self._partial_projection_cache.move_to_end(conversation_id)
             while len(self._partial_projection_cache) > self._MAX_RECORD_CACHE:

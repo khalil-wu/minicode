@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import json
 
 import pytest
@@ -67,6 +68,60 @@ def test_partial_growth_is_linear_and_cold_page_preserves_block_zero(tmp_path, m
     assert page["transcript"][-1]["blocks"][0]["content"] == text
     restored = ConversationRepository(tmp_path).get_conversation(record.id)
     assert restored.context_snapshot["history"][0]["content"] == text
+
+
+def test_appended_projection_owns_new_values_and_reuses_committed_branches(tmp_path):
+    from backend.conversations.projection_log import append_projection, read_projection
+
+    path = tmp_path / "owned.jsonl"
+    initial = {"context_delta": {"history": [{"role": "user", "content": "kept", "nested": [1, 2]}]},
+        "transcript": {"updates": {"0": message("prefix")}}}
+    position, first = append_projection(path, committed_bytes=0, revision=1, previous={}, current=initial)
+    current = deepcopy(initial)
+    current["transcript"]["updates"]["0"]["content"] = "prefix tail"
+    current["context_delta"]["history"].append({"role": "assistant", "content": "new"})
+    position, second = append_projection(path, committed_bytes=position, revision=2, previous=first, current=current)
+    assert second["context_delta"]["history"][0] is first["context_delta"]["history"][0]
+    current["context_delta"]["history"][-1]["content"] = "caller changed"
+    initial["context_delta"]["history"][0]["nested"].append(3)
+    assert first["context_delta"]["history"][0]["nested"] == [1, 2]
+    assert first["transcript"]["updates"]["0"]["content"] == "prefix"
+    assert second["context_delta"]["history"][-1]["content"] == "new"
+    assert read_projection(path, committed_bytes=position, revision=2) == second
+
+
+@pytest.mark.parametrize("return_record", [True, False])
+def test_projection_input_mutations_cannot_change_warm_context_or_next_commit(tmp_path, return_record):
+    repo = ConversationRepository(tmp_path)
+    created = repo.create_conversation(context_snapshot={"history": []})
+    delta = {"set": {"notes": [{"text": "retained"}]}, "removed": [], "history_from": 0,
+        "history": [{"role": "user", "content": "accepted"}]}
+    committed = repo.commit_turn_projection(created.id, assistant_message=None, context_delta=delta,
+        expected_revision=created.revision, return_record=return_record)
+    delta["set"]["notes"][0]["text"] = "uncommitted"
+    delta["history"][0]["content"] = "uncommitted"
+    if return_record:
+        committed.context_snapshot["notes"][0]["text"] = "detached result"
+    warm = repo.get_conversation(created.id)
+    cold = ConversationRepository(tmp_path).get_conversation(created.id)
+    assert warm.context_snapshot == cold.context_snapshot
+    assert warm.context_snapshot["notes"] == [{"text": "retained"}]
+    assert warm.context_snapshot["history"][0]["content"] == "accepted"
+    assert warm.content_revision == created.content_revision
+    repo.commit_turn_projection(created.id, assistant_message=None,
+        context_delta={"set": {"next": "saved"}, "removed": []}, return_record=False)
+    assert repo.get_conversation(created.id) == ConversationRepository(tmp_path).get_conversation(created.id)
+
+
+def test_idempotent_internal_projection_keeps_its_summary_return_contract(tmp_path):
+    repo = ConversationRepository(tmp_path)
+    created = repo.create_conversation(context_snapshot={"history": []})
+    options = {"assistant_message": message("committed"), "context_delta": {"set": {}, "removed": []},
+        "expected_revision": created.revision, "return_record": False}
+    first = repo.commit_turn_projection(created.id, **options)
+    replayed = repo.commit_turn_projection(created.id, **options)
+    assert replayed == first
+    assert not hasattr(replayed, "transcript")
 
 
 def test_failed_manifest_write_and_incomplete_tail_are_not_replayed(tmp_path, monkeypatch):
