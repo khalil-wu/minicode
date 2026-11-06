@@ -49,6 +49,7 @@ export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGo
     return () => { window.removeEventListener("keydown", handleKeyDown, true); document.removeEventListener("focusin", handleFocus); };
   }, [highlighted, onClose]);
   const choose = (action: () => void) => { onClose(true); action(); };
+  const enabledPlugins = plugins.filter(plugin => plugin.enabled && plugin.id);
   return <div ref={menu} className="mc-dropdown-menu composer-add-menu" role="menu" aria-label={tr("添加内容")}
     onMouseDown={event => { if ((event.target as Element).closest('button[role="menuitem"]')) event.preventDefault(); }}>
     <div className="composer-menu-heading">{tr("添加")}</div>
@@ -60,10 +61,10 @@ export function ComposerAddMenu({ workspaceRoot, planMode, planAvailable, showGo
       onMouseMove={() => { if (goalAvailable) setHighlighted("goal"); }} onClick={() => choose(onGoal)}><PromptSourceIcon icon="target" /><span>{tr("目标")}</span><small>{tr("设置持续追求的目标")}</small></button>}
     <button type="button" role="menuitem" disabled={!planAvailable} data-add-menu-item="plan" data-highlighted={planAvailable && highlighted === "plan" || undefined} aria-current={planAvailable && highlighted === "plan" || undefined}
       onMouseMove={() => { if (planAvailable) setHighlighted("plan"); }} onClick={() => choose(onPlan)}><PromptSourceIcon icon="lightbulb" /><span>{tr("计划模式")}</span><small>{planMode ? tr("关闭计划模式") : tr("开启计划模式")}</small></button>
-    <div className="composer-add-section"><span>{tr("插件")}</span></div>
+    {(loading || error || enabledPlugins.length > 0) && <div className="composer-add-section"><span>{tr("插件")}</span></div>}
     {loading && <div className="composer-add-status" role="status">{tr("正在读取插件…")}</div>}
     {error && <div className="composer-add-status" role="alert">{error}</div>}
-    {plugins.filter(plugin => plugin.enabled && plugin.id).map(plugin => {
+    {enabledPlugins.map(plugin => {
       const reference = composerPluginReference(plugin, { computerUse: tr("电脑") });
       return <button key={plugin.id} type="button" role="menuitem" data-add-menu-item={plugin.id}
       data-highlighted={highlighted === plugin.id || undefined} aria-current={highlighted === plugin.id || undefined}

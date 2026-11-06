@@ -266,3 +266,13 @@ it.each(["client", "canonical", "submitting"] as const)("disables plan/goal mous
   expect(plan.disabled).toBe(false); expect(goal.disabled).toBe(false);
   expect((screen.getByRole("button", { name: "关闭计划模式" }) as HTMLButtonElement).disabled).toBe(false);
 });
+
+it("omits the plugin section heading when no plugin is enabled", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({plugins:[
+    {id:"disabled@personal",name:"disabled",marketplace:"personal",enabled:false},
+  ]}),{status:200})));
+  render(<ComposerAddMenu workspaceRoot="C:/menu-project" planMode={false} planAvailable showGoal goalAvailable onFiles={vi.fn()} onGoal={vi.fn()} onPlan={vi.fn()} onPlugin={vi.fn()} onClose={vi.fn()} />);
+  await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+  expect(screen.getByRole("menuitem", { name: /文件和文件夹/ })).toBeTruthy();
+  expect(screen.queryByText("插件")).toBeNull();
+});
