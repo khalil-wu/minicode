@@ -43,9 +43,11 @@ export const getCodeHighlighter = () => engine ??= createHighlighterCore({
 
 export async function prepareCodeHighlighting(id: CodeThemeId, variant: AppearanceVariant, language?: string) {
   const [highlighter, loaded] = await Promise.all([getCodeHighlighter(), loadCodeTheme(id, variant)]);
-  await highlighter.loadTheme({ ...loaded.theme, name: loaded.registrationName });
+  if (!highlighter.getLoadedThemes().includes(loaded.registrationName)) {
+    await highlighter.loadTheme({ ...loaded.theme, name: loaded.registrationName });
+  }
   const lang = codeHighlightLanguage(language ?? "text");
-  if (lang !== "text") await highlighter.loadLanguage(languages[lang]);
+  if (lang !== "text" && !highlighter.getLoadedLanguages().includes(lang)) await highlighter.loadLanguage(languages[lang]);
   return { highlighter, loaded, lang };
 }
 

@@ -154,8 +154,8 @@ export function useColorizedLines(
 
     const colorize = async () => {
       if (selection) {
-        const { highlightCode } = await import("./code-highlighting");
-        const tokens = await highlightCode(code, language, selection.codeThemeId, theme);
+        const { highlightCodeInWorker } = await import("./code-highlighting-worker-client");
+        const tokens = await highlightCodeInWorker(code, language, selection.codeThemeId, theme);
         const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
         return tokens.map(line => line.map(token => `<span${token.color ? ` style="color: ${token.color}"` : ""}>${escape(token.content)}</span>`).join(""));
       }

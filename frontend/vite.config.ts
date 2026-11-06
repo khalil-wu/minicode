@@ -83,6 +83,7 @@ export default defineConfig(async ({ command, mode }) => {
   }
   return {
     base: "./",
+    worker: { format: "es" },
     plugins: [react(), devCspRelaxPlugin],
     // The workspace TypeScript service lives behind a Worker URL. Include its
     // import graph in the initial scan so opening the editor cannot replace
