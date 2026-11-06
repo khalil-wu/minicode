@@ -128,7 +128,7 @@ def local_timezone_name(now: datetime | None = None) -> str:
     return f"UTC{sign}{hours:02d}:{minutes:02d}"
 
 
-def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
+def clone_context_builder(builder: "ContextBuilder", *, copy_history: bool = True) -> "ContextBuilder":
     """Clone reusable prompt/history state for branch-style agent runs."""
     cloned = copy(builder)
     for name in (
@@ -155,9 +155,9 @@ def clone_context_builder(builder: "ContextBuilder") -> "ContextBuilder":
     ):
         if hasattr(builder, name):
             setattr(cloned, name, deepcopy(getattr(builder, name)))
-    # History accounting is independent; the shared estimator is stateless.
-    cloned._history_store = builder._history_store.clone()
-    cloned.guardian_evidence = deepcopy(builder.guardian_evidence)
+    # Prompt previews only read history/evidence; branch clones still own them.
+    cloned._history_store = builder._history_store.clone() if copy_history else builder._history_store
+    cloned.guardian_evidence = deepcopy(builder.guardian_evidence) if copy_history else builder.guardian_evidence
     cloned._withheld_media_timestamps = set()
     cloned._tool_execution_context = None
     cloned._git_status_authority = None

@@ -711,7 +711,7 @@ class QueryEngine:
         # The observer starts before canonical tool/hook binding. A preview
         # may read instructions, but must not execute old InstructionsLoaded
         # callbacks or consume the real builder's load/compaction reason.
-        preview = clone_context_builder(turn_ctx.context_builder)
+        preview = clone_context_builder(turn_ctx.context_builder, copy_history=False)
         preview.bind_hook_manager(None)
         rendered_prompt = str(
             preview.base_system_prompt(turn_ctx.state) or ""
