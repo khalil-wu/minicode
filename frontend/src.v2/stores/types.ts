@@ -2124,7 +2124,7 @@ export interface ApprovalSlice {
   markApprovalSubmitted: (requestId: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   markApprovalError: (requestId: string, error: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   clearApproval: (requestId?: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
-  clearApprovals: (requestIds: string[], owner?: import("../protocol/prompt-responses").PromptOwner) => void;
+  clearApprovals: (requestIds: string[], owner?: import("../protocol/prompt-responses").PromptOwner, options?: { keepDrafts?: boolean }) => void;
   setDiffReview: (d: PendingDiffReview) => void;
   updateDiffReviewStatus: (requestId: string, patch: Pick<DiffReviewState, "status" | "error">, owner?: import("../protocol/prompt-responses").PromptOwner) => void;
   clearDiffReview: (requestId?: string, owner?: import("../protocol/prompt-responses").PromptOwner) => void;

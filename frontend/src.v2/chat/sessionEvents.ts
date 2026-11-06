@@ -1,4 +1,6 @@
 import { useAppStore } from "../stores";
+import { pendingPromptMatchesOwner } from "../lib/pending-prompts";
+import type { PendingApproval, PendingDiffReview } from "../stores/types";
 import { composerDraftOf, composerWorkspaceKey, emptyComposerDraft, isComposerConversationDeleted } from "../stores/composer-drafts";
 import { selectPendingDraftUserMessage } from "../stores/conversation-drafts";
 import { captureCommittedUserMessage, capturePendingUserMessageQueueUpdate } from "./sendChatMessage";
@@ -1370,6 +1372,24 @@ export const handleSessionEvent = (
         || stringValue(ev.session?.active_conversation_id)
         || activeConversation?.id
         || "";
+      // The backend re-announces every approval it still holds right after this
+      // snapshot (sync: all owners; restore: the restored owner). Prompts the
+      // server dropped while the renderer was disconnected would otherwise stay
+      // on screen and answer as stale.
+      {
+        // Only the active conversation is guaranteed a re-announcement: an
+        // observer sync re-sends the observed owner's prompts, or none. A
+        // re-sent prompt keeps the request id, so the user's draft is kept.
+        const staleOwner = activeConversationId ? { conversationId: activeConversationId } : null;
+        if (staleOwner !== null) {
+          const approvals = [s.pendingApproval, ...s.approvalQueue]
+            .filter((item): item is PendingApproval => Boolean(item) && pendingPromptMatchesOwner(item, staleOwner));
+          if (approvals.length) s.clearApprovals(approvals.map(item => item.requestId), staleOwner, { keepDrafts: true });
+          const reviews = [s.pendingDiffReview, ...s.diffReviewQueue]
+            .filter((item): item is PendingDiffReview => Boolean(item) && pendingPromptMatchesOwner(item, staleOwner));
+          if (reviews.length) s.clearDiffReviews(reviews.map(item => item.requestId), staleOwner);
+        }
+      }
       const pendingNavigation = useAppStore.getState();
       const pendingConversationId = pendingNavigation.pendingConversationSwitchId ?? pendingNavigation.pendingConversationCreateId;
       const activate = !pendingNavigation.activeConversationDraftId

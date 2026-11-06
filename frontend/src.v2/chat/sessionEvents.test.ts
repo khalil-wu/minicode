@@ -3424,3 +3424,29 @@ describe("handleSessionEvent", () => {
     });
   });
 });
+
+describe("session snapshots drop prompts the backend no longer holds", () => {
+  const approval = (requestId: string, conversationId: string) => ({ requestId, conversationId, toolName: "write_file", args: {} });
+
+  it("clears only the active conversation's approvals on session.synced and keeps the user's drafts", () => {
+    useAppStore.setState({ conversationId: "A", pendingApproval: approval("r1", "A"), approvalQueue: [approval("r2", "B")],
+      pendingDiffReview: null, diffReviewQueue: [] });
+    useAppStore.getState().updatePromptDraft({ requestId: "r1", conversationId: "A" }, { answer: "half-typed reason" });
+    handleSessionEvent({ type: "session.synced", session_id: "s1", synced: true, active_conversation_id: "A",
+      session: { session_id: "s1", active_conversation_id: "A" } } as unknown as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+    // An observer sync re-announces only its observed owner (or none), so the
+    // other conversation's prompt stays; the active one is re-sent by id.
+    expect(useAppStore.getState().pendingApproval).toMatchObject({ requestId: "r2", conversationId: "B" });
+    expect(useAppStore.getState().approvalQueue).toEqual([]);
+    expect(Object.values(useAppStore.getState().promptDrafts).some(draft => draft.requestId === "r1")).toBe(true);
+  });
+
+  it("clears only the restored owner's prompts on session.restored", () => {
+    useAppStore.setState({ conversationId: "A", pendingApproval: approval("r1", "A"), approvalQueue: [approval("r2", "B")],
+      pendingDiffReview: null, diffReviewQueue: [] });
+    handleSessionEvent({ type: "session.restored", conversation: null, messages: [], active_conversation_id: "A",
+      session: { session_id: "s1", active_conversation_id: "A" } } as unknown as ServerEvent, { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() });
+    expect(useAppStore.getState().pendingApproval).toMatchObject({ requestId: "r2", conversationId: "B" });
+    expect(useAppStore.getState().approvalQueue).toEqual([]);
+  });
+});

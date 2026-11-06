@@ -85,7 +85,7 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
         approvalQueue: rest,
       };
     }),
-  clearApprovals: (requestIds, owner) =>
+  clearApprovals: (requestIds, owner, options) =>
     set((s) => {
       if (requestIds.length === 0) return s;
       const ids = new Set(requestIds);
@@ -97,7 +97,7 @@ export const createApprovalSlice: StateCreator<AppStore, [], [], ApprovalSlice> 
       const approvalQueue = s.approvalQueue.filter((queued) => !matches(queued));
       const [next, ...rest] = approvalQueue;
       return {
-        promptDrafts: removeApprovalDrafts(all.filter(matches)),
+        ...(options?.keepDrafts ? {} : { promptDrafts: removeApprovalDrafts(all.filter(matches)) }),
         pendingApproval: pendingApproval ?? next ?? null,
         approvalQueue: pendingApproval ? approvalQueue : rest,
       };
