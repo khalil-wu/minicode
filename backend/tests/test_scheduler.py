@@ -588,3 +588,23 @@ def test_scheduler_does_not_retry_callback_body_type_error(monkeypatch, tmp_path
         assert run.error == "callback body failed"
 
     asyncio.run(scenario())
+
+
+def test_failed_tick_does_not_end_the_scheduler_loop(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(scheduler_module, "SCHEDULE_FILE", tmp_path / "scheduled_tasks.json")
+    scheduler = TaskScheduler()
+    scheduler._last_worktree_cleanup_at = float("inf")
+    ticks: list[int] = []
+
+    def tick(_now) -> None:
+        ticks.append(len(ticks))
+        if len(ticks) == 1:
+            raise OSError(28, "No space left on device")
+        scheduler._running = False
+
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(scheduler, "_tick", tick)
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", lambda _delay: real_sleep(0))
+    scheduler._running = True
+    asyncio.run(asyncio.wait_for(scheduler._run_loop(), timeout=5))
+    assert ticks == [0, 1]

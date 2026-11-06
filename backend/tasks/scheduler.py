@@ -958,13 +958,22 @@ class TaskScheduler:
         """Source controller checks at 30 seconds, with at most three per tick."""
         try:
             while self._running:
-                self._tick(datetime.now(UTC))
+                # One failed tick (a full disk, a locked store) must not end the
+                # loop: _running stays True, so start() would never revive it.
+                try:
+                    self._tick(datetime.now(UTC))
+                except Exception:
+                    logger.exception("Scheduled task tick failed")
                 if time.monotonic() - self._last_worktree_cleanup_at >= 600:
                     from backend.async_cleanup import to_thread_cancel_safe
                     from backend.api import _state
                     from backend.services.worktree_settings_service import cleanup_managed_worktrees
                     self._last_worktree_cleanup_at = time.monotonic()
-                    results = await to_thread_cancel_safe(cleanup_managed_worktrees, ws_manager=_state.ws_manager)
+                    try:
+                        results = await to_thread_cancel_safe(cleanup_managed_worktrees, ws_manager=_state.ws_manager)
+                    except Exception:
+                        logger.exception("Managed worktree cleanup failed")
+                        results = []
                     for result in results:
                         if not result["removed"]:
                             logger.info("Managed worktree cleanup skipped %s: %s", result["path"], result["error"])
