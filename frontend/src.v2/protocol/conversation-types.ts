@@ -341,6 +341,7 @@ export interface ConversationSwitchedEvent {
   conversation?: ConversationRecordPayload | null;
   is_hydrating?: boolean;
   context_pending?: boolean;
+  capabilities_pending?: boolean;
   capabilities_deferred?: boolean;
   session?: RuntimeSessionSnapshot | null;
   snapshot_at?: string;

@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { handleSessionEvent } from "./sessionEvents";
+import { handleRuntimeEvent } from "./runtimeEvents";
 import { useAppStore } from "../stores";
 import type { ServerEvent } from "../protocol/events";
 import type { StreamBuffer } from "../lib/stream-buffer";
@@ -392,6 +393,29 @@ describe("handleSessionEvent", () => {
       workspace_root: "C:/repo" }, { silent: true });
   });
 
+  it.each(["pending", "deferred"] as const)("uses the %s capability inventory instead of querying skills twice", async mode => {
+    const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
+    useAppStore.setState({ activeConversationDraftId: null, conversationDrafts: {}, availableSkills: [], runtimeCapabilities: null });
+    handleSessionEvent({ type: "conversation.switched", conversation_id: "catalog-owner", is_hydrating: false,
+      ...(mode === "pending" ? { capabilities_pending: true } : { capabilities_deferred: true }),
+      conversation: { id: "catalog-owner", title: "Catalog", workspace_root: "C:/repo", transcript: [] },
+    } as ServerEvent, buffers);
+    await vi.waitFor(() => expect(sendClientCommand).toHaveBeenCalledWith({ type: "commands.list" }));
+    expect(vi.mocked(sendClientCommand).mock.calls.some(([command]) => command.type === "skills.list")).toBe(false);
+    expect(sendClientCommand).toHaveBeenCalledWith({ type: "mcp.list", conversation_id: "catalog-owner", workspace_root: "C:/repo" }, { silent: true });
+    if (mode === "deferred") {
+      expect(sendClientCommand).toHaveBeenCalledWith({ type: "runtime.capabilities.inspect", source: "workspace.activate.conversation.switch" }, { silent: true });
+    }
+    handleRuntimeEvent({ type: "runtime.capabilities", conversation_id: "other-owner", workspace_root: "C:/repo",
+      capabilities: { skills: [{ name: "foreign-skill", description: "Not this conversation" }] },
+    } as ServerEvent);
+    expect(useAppStore.getState().availableSkills).toEqual([]);
+    handleRuntimeEvent({ type: "runtime.capabilities", conversation_id: "catalog-owner", workspace_root: "C:/repo",
+      capabilities: { skills: [{ name: "owned-skill", description: "Current conversation" }] },
+    } as ServerEvent);
+    expect(useAppStore.getState().availableSkills.map(skill => skill.name)).toEqual(["owned-skill"]);
+  });
+
   it("does not request a stale catalog when the user selects another conversation before the refresh", async () => {
     const buffers = { textStreamBuffer: makeBuffer(), thinkingStreamBuffer: makeBuffer() };
     handleSessionEvent({ type: "conversation.switched", conversation_id: "first-owner", is_hydrating: false, capabilities_deferred: true,
@@ -438,7 +462,7 @@ describe("handleSessionEvent", () => {
     else {
       expect(sendClientCommand).toHaveBeenCalledWith({ type: "commands.list" });
       expect(sendClientCommand).toHaveBeenCalledWith({ type: "runtime.capabilities.inspect", source: "workspace.activate.conversation.switch" }, { silent: true });
-      expect(sendClientCommand).toHaveBeenCalledWith({ type: "skills.list", conversation_id: "first-owner", workspace_root: "C:/repo" }, { silent: true });
+      expect(vi.mocked(sendClientCommand).mock.calls.some(([command]) => command.type === "skills.list")).toBe(false);
       expect(sendClientCommand).toHaveBeenCalledWith({ type: "mcp.list", conversation_id: "first-owner", workspace_root: "C:/repo" }, { silent: true });
     }
   });

@@ -1180,7 +1180,7 @@ async def _publish_conversation_switch(
                          and current_view == view)
             await session.send_payload({"type": "conversation.switched", "conversation_id": owner,
                                         **({} if same_view else {"conversation": current_view}), "is_hydrating": False,
-                                        **({"capabilities_deferred": True} if data.get("defer_runtime_capabilities") else {}),
+                                        **({"capabilities_deferred": True} if data.get("defer_runtime_capabilities") else {"capabilities_pending": True}),
                                         "session": runtime_snapshot,
                                         "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")},
                                        log_context="conversation.switched", wait_for_delivery=False)

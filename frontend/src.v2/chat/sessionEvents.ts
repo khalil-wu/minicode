@@ -1780,7 +1780,8 @@ export const handleSessionEvent = (
           if (owner) {
             if (ev.capabilities_deferred) sendClientCommand({ type: "runtime.capabilities.inspect",
               source: "workspace.activate.conversation.switch" }, { silent: true });
-            if (!hasSkills) sendClientCommand({ type: "skills.list", conversation_id: owner,
+            // Full capabilities carry skills; retain a list fallback for older peers.
+            if (!hasSkills && !ev.capabilities_pending && !ev.capabilities_deferred) sendClientCommand({ type: "skills.list", conversation_id: owner,
               workspace_root: root }, { silent: true });
             sendClientCommand({ type: "mcp.list", conversation_id: owner,
               workspace_root: root || undefined }, { silent: true });

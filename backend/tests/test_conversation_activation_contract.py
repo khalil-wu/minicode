@@ -219,6 +219,9 @@ def test_switch_publishes_hydrated_owner_before_requesting_capability_catalog(tm
 
     asyncio.run(scenario())
     assert order == ["hydrating", "hydrated", "capabilities"]
+    payload = session.send_payload.await_args_list[-1].args[0]
+    assert payload["capabilities_pending"] is True
+    assert "capabilities_deferred" not in payload
 
 
 def test_first_message_switch_leaves_capability_refresh_to_its_owner(tmp_path):
@@ -236,6 +239,7 @@ def test_first_message_switch_leaves_capability_refresh_to_its_owner(tmp_path):
     payload = session.send_payload.await_args_list[-1].args[0]
     assert payload["conversation_id"] == target.id
     assert payload["is_hydrating"] is False and payload["capabilities_deferred"] is True
+    assert "capabilities_pending" not in payload
     session.session_lifecycle.schedule_runtime_capabilities.assert_not_called()
 
 
