@@ -58,5 +58,29 @@ export async function highlightCode(code: string, language: string, id: CodeThem
   const lines = highlighter.codeToTokensBase(code, { lang, theme: loaded.registrationName });
   // Build the fixed span markup in the worker. The renderer receives escaped
   // source and bundled theme colors without cloning or reconciling every token.
-  return lines.map(line => line.map(token => `<span${token.color ? ` style="color: ${escapeHtml(token.color)}"` : ""}>${escapeHtml(token.content)}</span>`).join(""));
+  return lines.map(line => {
+    let html = "";
+    let content = "";
+    let color: string | undefined;
+    const flush = () => {
+      if (content) html += `<span${color ? ` style="color: ${escapeHtml(color)}"` : ""}>${escapeHtml(content)}</span>`;
+    };
+    for (const token of line) {
+      // This renderer applies foreground color only. Whitespace has no ink,
+      // background or decoration, so it belongs to the adjoining color run.
+      if (!token.content.trim()) {
+        content += token.content;
+        continue;
+      }
+      if (!content.trim()) color = token.color;
+      if (token.color !== color) {
+        flush();
+        content = "";
+        color = token.color;
+      }
+      content += token.content;
+    }
+    flush();
+    return html;
+  });
 }

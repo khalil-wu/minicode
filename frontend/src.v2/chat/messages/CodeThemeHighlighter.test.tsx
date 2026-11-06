@@ -33,7 +33,7 @@ it.each(["\n```\n", "\n```", ""])("retains measured fence nodes when the stream 
   expect(view.container.querySelector(".code-block-wrapper")).toBe(frame);
   expect(view.container.querySelector("pre")).toBe(pre);
   expect([...view.container.querySelectorAll(".code-line-group")]).toEqual(groups);
-  await waitFor(() => expect([...view.container.querySelectorAll("code span[style]")].some(span => span.textContent === "const")).toBe(true));
+  await waitFor(() => expect([...view.container.querySelectorAll("code span[style]")].some(span => span.textContent?.trim() === "const")).toBe(true));
   expect(groups[0].style.getPropertyValue("--markdown-block-height")).toBe("1408px");
   expect(view.container.querySelector(".code-block-wrapper")?.getAttribute("data-markdown-copy-text")).toBe(code);
   expect(view.container.querySelectorAll(".code-theme-line-number")).toHaveLength(130);
@@ -48,7 +48,7 @@ it("updates an already rendered fence with actual TextMate colors in the same mo
   useAppStore.setState({ appearanceThemes: themes });
   const code = '// 注释\nconst answer = "<Hello>";';
   const view = render(<CodeThemeHighlighter hasLanguage language="javascript" resolvedTheme="dark">{code}</CodeThemeHighlighter>);
-  const token = () => Array.from(view.container.querySelectorAll('code span[style]')).find(span => span.textContent === "const") as HTMLElement;
+  const token = () => Array.from(view.container.querySelectorAll('code span[style]')).find(span => span.textContent?.trim() === "const") as HTMLElement;
   await waitFor(() => expect(token()?.style.color).toBe("rgb(255, 123, 114)"));
   act(() => useAppStore.setState({ appearanceThemes: { ...themes, dark: { ...themes.dark, codeThemeId: "dracula" } } }));
   await waitFor(() => expect(token()?.style.color).toBe("rgb(255, 121, 198)"));
