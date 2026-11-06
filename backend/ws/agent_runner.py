@@ -5232,6 +5232,7 @@ class SessionAgentRunnerMixin:
                     conversation.id,
                     user_message=user_projection,
                     context_snapshot=saved_snapshot,
+                    return_record=False,
                     assistant_message=steer_assistant,
                     expected_revision=max(
                         0, int(getattr(latest, "revision", 0) or 0)
