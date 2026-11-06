@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from backend.glob_patterns import compile_glob_filter
+from backend.security.sensitive_files import application_state_roots
 from backend.workspace.fuzzy_search import iter_search_paths
 from backend.workspace.service import WorkspaceService
 
@@ -67,11 +68,15 @@ def search_workspace_text(service: WorkspaceService, request: WorkspaceTextSearc
     includes = [compile_glob_filter(item) for item in request.include]
     excludes = [compile_glob_filter(item) for item in request.exclude]
     root = service.workspace_root_path()
+    # Resolved once per request, like the project index scan; every candidate
+    # still has its real target resolved and checked before it is opened.
+    application_roots = application_state_roots()
     buffers: dict[str, SearchBuffer] = {}
     issues: list[dict[str, str]] = []
     def path_key(value: str) -> str:
         return value.casefold() if os.name == "nt" else value
-    paths = {path_key(path.relative_to(root).as_posix()): path.relative_to(root).as_posix() for path, is_dir in iter_search_paths(root) if not is_dir}
+    paths = {path_key(relative): relative for relative in (
+        path.relative_to(root).as_posix() for path, is_dir in iter_search_paths(root) if not is_dir)}
     for buffer in request.buffers:
         try:
             path = service.resolve_workspace_path(buffer.path)
@@ -98,18 +103,26 @@ def search_workspace_text(service: WorkspaceService, request: WorkspaceTextSearc
             read_only = buffer.read_only
         else:
             try:
-                snapshot = service.read_file(relative)
-            except HTTPException as exc:
+                content, metadata = service.read_indexed_text(root / relative, root=root, application_roots=application_roots)
+            except FileNotFoundError:
+                exc = HTTPException(status_code=404, detail=f"Path not found: {relative}")
+            except IsADirectoryError:
+                exc = HTTPException(status_code=400, detail="Path must point to a file.")
+            except HTTPException as error:
+                exc = error
+            else:
+                exc = None
+            if exc is not None:
                 # Binary, oversized, inaccessible or removed files cannot form
                 # editable replacements. Report their actual read boundary.
                 if exc.status_code not in {400, 403, 404, 413, 415, 422}:
-                    raise
+                    raise exc
                 issues.append({"path": relative, "message": str(exc.detail)})
                 continue
-            content = original = snapshot.content
-            content_hash = snapshot.content_hash
-            read_only = not bool((root / relative).stat().st_mode & stat.S_IWUSR)
-        if "\x00" in content:
+            original = content
+            content_hash = ""
+            read_only = not bool(metadata.st_mode & stat.S_IWUSR)
+        if "\x00" in content or pattern.search(content) is None:
             continue
         utf16, line_starts = _text_index(content)
         matches: list[dict[str, Any]] = []
@@ -134,6 +147,8 @@ def search_workspace_text(service: WorkspaceService, request: WorkspaceTextSearc
                 "groups": groups, "named_groups": {name: groups[index - 1] for name, index in pattern.groupindex.items()}})
             count += 1
         if matches:
+            if buffer is None:
+                content_hash = service.content_hash(content)
             files.append({"path": relative, "content": content, "original": original, "content_hash": content_hash,
                 "size_bytes": len(content.encode("utf-8")), "read_only": read_only, "from_buffer": buffer is not None, "matches": matches})
         if truncated:

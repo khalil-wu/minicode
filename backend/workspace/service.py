@@ -139,19 +139,33 @@ class WorkspaceService:
     def _read_indexed_file_snapshot(
         self, path: Path, *, root: Path, application_roots: tuple[Path, ...],
     ) -> tuple[WorkspaceFileResponse, os.stat_result]:
+        target = self._indexed_read_target(path, root=root, application_roots=application_roots)
+        return self._read_file_snapshot_with_stat(target, root, path.relative_to(root).as_posix())
+
+    def read_indexed_text(
+        self, path: Path, *, root: Path, application_roots: tuple[Path, ...],
+    ) -> tuple[str, os.stat_result]:
+        """Same checks and bounds as read_indexed_file, without building a snapshot.
+
+        Batch scanners that discard most files use this to avoid hashing and
+        re-resolving content that never reaches the response.
+        """
+        target = self._indexed_read_target(path, root=root, application_roots=application_roots)
+        content, _raw_size, metadata = self._read_bounded_text(target, path.relative_to(root).as_posix())
+        return content, metadata
+
+    def _indexed_read_target(self, path: Path, *, root: Path, application_roots: tuple[Path, ...]) -> Path:
         target = path.resolve()
         if target != root and root not in target.parents:
             raise HTTPException(status_code=400, detail="Path is outside workspace root.")
         self.ensure_not_sensitive_file(path, application_roots=application_roots, resolved_path=target)
         self.ensure_not_sensitive_file(target, application_roots=application_roots, resolved_path=target)
-        return self._read_file_snapshot_with_stat(target, root, path.relative_to(root).as_posix())
+        return target
 
     def _read_file_snapshot(self, target: Path, root: Path, requested_path: str) -> WorkspaceFileResponse:
         return self._read_file_snapshot_with_stat(target, root, requested_path)[0]
 
-    def _read_file_snapshot_with_stat(
-        self, target: Path, root: Path, requested_path: str,
-    ) -> tuple[WorkspaceFileResponse, os.stat_result]:
+    def _read_bounded_text(self, target: Path, requested_path: str) -> tuple[str, int, os.stat_result]:
         try:
             with target.open("rb") as handle:
                 stat = os.fstat(handle.fileno())
@@ -169,14 +183,19 @@ class WorkspaceService:
             raise HTTPException(status_code=400, detail="Only UTF-8 text files are supported.") from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=f"Permission denied: {requested_path}") from exc
+        return content, len(raw), stat
 
+    def _read_file_snapshot_with_stat(
+        self, target: Path, root: Path, requested_path: str,
+    ) -> tuple[WorkspaceFileResponse, os.stat_result]:
+        content, raw_size, stat = self._read_bounded_text(target, requested_path)
         snapshot = WorkspaceFileResponse(
             workspace_root=str(root),
             path=self.to_workspace_relative(target),
             name=target.name,
             content=content,
             content_hash=self.content_hash(content),
-            size_bytes=len(raw),
+            size_bytes=raw_size,
             modified_at=self.iso_timestamp(stat.st_mtime),
             language_hint=self.infer_language_hint(target),
         )
