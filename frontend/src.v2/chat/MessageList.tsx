@@ -352,7 +352,10 @@ export const MessageList = ({ searchActive = false, previewConversationId }: { s
         scrollRafRef.current = null;
       }
       if (readingState && !previewConversationId) readingState.viewport = {
-        scrollTop: el.scrollTop,
+        // React has already replaced the content before layout cleanup. A
+        // shorter preview may clamp the DOM position; retain this owner's
+        // last observed position instead of reading the incoming transcript.
+        scrollTop: lastScrollTopRef.current,
         isFollowing: isNearBottom.current,
         showAllHistory: visibleHistoryRef.current,
         measurements: renderedMeasurementsRef.current,

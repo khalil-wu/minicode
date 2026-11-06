@@ -97,6 +97,7 @@ it("restores scroll and paused follow after a pending switch unmounts the transc
   await waitFor(() => expect(scroll.scrollTop).toBe(1600));
   fireEvent.wheel(scroll, { deltaY: -120 });
   scroll.scrollTop = 420;
+  fireEvent.scroll(scroll);
   view.unmount();
   expect(conversationReadingState(owner).viewport).toMatchObject({ scrollTop: 420, isFollowing: false });
   view = render(<MessageList />);
@@ -106,4 +107,29 @@ it("restores scroll and paused follow after a pending switch unmounts the transc
   await waitFor(() => expect(scroll.scrollTop).toBe(420));
   act(() => useAppStore.setState({ isStreaming: true }));
   expect(scroll.scrollTop).toBe(420);
+});
+
+it("saves the owner's reading position before a shorter cached preview clamps the shared scroll element", async () => {
+  const target = "reading-other";
+  useAppStore.setState(state => ({ conversations: [...state.conversations, { id: target, title: "Short", updatedAt: "" }],
+    conversationMessages: { [target]: [{ id: "short-user", role: "user", content: "Short cached conversation", artifacts: [], timestamp: 3 }] } }));
+  const view = render(<MessageList />);
+  const scroll = screen.getByTestId("message-list-scroll");
+  let top = 0;
+  const contentHeight = () => scroll.textContent?.includes("Short cached conversation") ? 400 : 1600;
+  Object.defineProperties(scroll, {
+    scrollHeight: { configurable: true, get: contentHeight },
+    clientHeight: { configurable: true, value: 400 },
+    scrollTop: { configurable: true, get: () => Math.min(top, contentHeight() - 400), set: (value: number) => { top = Math.min(value, contentHeight() - 400); } },
+  });
+  await waitFor(() => expect(scroll.scrollTop).toBe(1200));
+  await act(() => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+  fireEvent.wheel(scroll, { deltaY: -120 });
+  scroll.scrollTop = 420;
+  fireEvent.scroll(scroll);
+  view.rerender(<MessageList previewConversationId={target} />);
+  expect(scroll.scrollTop).toBe(0);
+  expect(conversationReadingState(owner).viewport).toMatchObject({ scrollTop: 420, isFollowing: false });
+  view.rerender(<MessageList />);
+  await waitFor(() => expect(scroll.scrollTop).toBe(420));
 });
