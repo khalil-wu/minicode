@@ -150,9 +150,9 @@ export const shouldReplayQueuedCommand = (
   queued: QueuedCommand,
   _now: number = Date.now(),
 ): boolean => {
-  // A client command is durable once it has an id.  The server owns
-  // de-duplication and ordering, so the browser must never discard a command
-  // merely because a reconnect took longer than an invented local TTL.
+  // Keep retry ownership until the server receipt. Mutations are acknowledged
+  // after durable admission; read projections after producing their result.
+  // Reconnect duration alone never discards a pending request.
   void queued;
   return true;
 };

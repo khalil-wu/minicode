@@ -34,6 +34,15 @@ logger = logging.getLogger(__name__)
 MAX_PENDING_COMMAND_TASKS = 100
 COMMAND_BACKLOG_ERROR_INTERVAL_SECONDS = 2.0
 
+# Read projections can be requested again after reconnect. Source schedules
+# these independently; only mutations need durable command admission.
+# git.pr_status is deliberately absent: it may launch a configured auto-fix.
+READ_ONLY_REFRESH_COMMAND_TYPES = frozenset({
+    "commands.list", "diff.git_staged", "diff.git_working_tree", "scheduler.list",
+    "env.list", "mcp.list", "session.usage.inspect", "runtime.capabilities.inspect",
+    "skills.list", "skills.marketplace.list",
+})
+
 
 def _admitted_input_origin(admission: dict[str, Any], projection: dict[str, Any] | None, runtime: Any) -> str:
     origin = str(admission.get("client_queue_key") or "")
@@ -130,6 +139,8 @@ def _requires_selected_conversation(command_type: str) -> bool:
 
 def _is_conversation_lifecycle_command(command_type: str) -> bool:
     normalized = str(command_type or "").strip()
+    if normalized in READ_ONLY_REFRESH_COMMAND_TYPES:
+        return False
     return (
         normalized == "user_message"
         or normalized.startswith("conversation.")
@@ -519,7 +530,8 @@ class SessionCommandDispatcher:
                     await self._send_client_command_ack(command, duplicate=True)
                     await self.emit_cancelled_user_message(command)
                     continue
-            if await to_thread_cancel_safe(self._client_command_seen, command):
+            refresh = command.type in READ_ONLY_REFRESH_COMMAND_TYPES
+            if not refresh and await to_thread_cancel_safe(self._client_command_seen, command):
                 await self._send_client_command_ack(command, duplicate=True)
                 logger.info(
                     "Skipping duplicate client command %s in session %s",
@@ -567,6 +579,15 @@ class SessionCommandDispatcher:
                             error_code="command.backlog",
                         )
                     )
+                continue
+
+            if refresh:
+                # Capture the requesting selection before another navigation
+                # is admitted. Result delivery stays on this connection epoch.
+                if not (command.data.get("owner_conversation_id") or command.data.get("ownerConversationId")
+                        or command.data.get("conversation_id")) and self._session.active_conversation_id:
+                    command.data["owner_conversation_id"] = self._session.active_conversation_id
+                self._schedule_transient_client_command(command, connection_generation)
                 continue
 
             command_id = self._client_command_id(command)
@@ -647,7 +668,12 @@ class SessionCommandDispatcher:
         if self._enqueue_scoped_interrupt(command, "", connection_generation):
             return
         async def _guarded_handle() -> None:
-            await self._dispatch_client_command(command, connection_generation)
+            handled = await self._dispatch_client_command(command, connection_generation)
+            if command.type in READ_ONLY_REFRESH_COMMAND_TYPES and handled:
+                # Keep the browser's retry ownership until the read's result
+                # was produced; a pending read is never durably acknowledged.
+                with self._session.event_outbox.bind_connection_generation(connection_generation):
+                    await self._send_client_command_ack(command)
 
         task = asyncio.create_task(_guarded_handle())
         if command.type == "user_message":
