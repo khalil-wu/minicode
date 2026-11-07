@@ -347,10 +347,10 @@ def test_unchanged_extension_generation_does_not_reload_history_but_replacement_
     bind = host._bind_lifecycle_runtime_command_snapshot
     bindings = []
 
-    def capture_bind(runner, **kwargs):
+    async def capture_bind(runner, **kwargs):
         assert host._extension_runtime_state("conv_runnerdone")["lock"].locked()
         bindings.append(kwargs["conversation"].context_snapshot)
-        return bind(runner, **kwargs)
+        return await bind(runner, **kwargs)
 
     monkeypatch.setattr(host, "_bind_lifecycle_runtime_command_snapshot", capture_bind)
 

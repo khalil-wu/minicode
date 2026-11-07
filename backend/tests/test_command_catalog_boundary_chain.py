@@ -16,7 +16,7 @@ async def test_catalog_read_reuses_published_context_but_dispatch_rebinds_curren
     runner = SimpleNamespace(active=True)
     monkeypatch.setattr(session, "_ensure_lifecycle_runtime", AsyncMock(return_value=runner))
     monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
-    bind = Mock()
+    bind = AsyncMock()
     monkeypatch.setattr(session, "_bind_lifecycle_runtime_command_snapshot", bind)
     monkeypatch.setattr(session, "_mark_lifecycle_runtime_host_actions_bound", Mock())
     try:

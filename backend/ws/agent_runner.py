@@ -2341,7 +2341,7 @@ class SessionAgentRunnerMixin:
                 # candidate a conversation-owned command snapshot before the
                 # scoped command projection is atomically replaced; otherwise
                 # a concurrent slash dispatch can reach a half-bound runner.
-                self._bind_lifecycle_runtime_command_snapshot(
+                await self._bind_lifecycle_runtime_command_snapshot(
                     next_runtime,
                     conversation=conversation,
                     tool_registry=tool_registry,
@@ -2350,12 +2350,18 @@ class SessionAgentRunnerMixin:
                     skill_manager=skill_manager,
                     config=config,
                 )
+                if bool(getattr(self, "_extension_runtimes_shutting_down", False)) or state.get("shutting_down"):
+                    capability.discard("Extension generation was discarded during command snapshot preparation")
+                    return None
                 command_registry = getattr(self, "command_registry", None)
                 if command_registry is not None:
                     next_runtime.bind_command_registry(
                         command_registry,
                         scope_id=owner_id,
                     )
+            except asyncio.CancelledError:
+                capability.discard("Extension command snapshot preparation was cancelled before publication")
+                raise
             except Exception:
                 logger.exception(
                     "Failed to bind fresh MiniCode extension generation for conversation %s",
@@ -3610,7 +3616,7 @@ class SessionAgentRunnerMixin:
         if isinstance(state, LifecycleGenerationState) and state.is_current(runner):
             state["host_actions_bound"] = True
 
-    def _bind_lifecycle_runtime_command_snapshot(
+    async def _bind_lifecycle_runtime_command_snapshot(
         self,
         runner: Any,
         *,
@@ -3664,9 +3670,17 @@ class SessionAgentRunnerMixin:
             workspace_root=workspace_root,
             skill_config_stack=config.config_layer_stack,
         )
-        context_builder.load_snapshot(
+        state = self._extension_runtime_state(conversation_id)
+        await to_thread_cancel_safe(context_builder.load_snapshot,
             dict(getattr(conversation, "context_snapshot", {}) or {})
         )
+        # History reconstruction yields to input reception and other streams.
+        # A turn can bind its live context, or retire this generation, while
+        # the worker prepares the independent command snapshot.
+        task = self.run_manager.run_tasks.get(conversation_id)
+        if state.get("shutting_down") or not runner.active or (state.is_current(runner) and isinstance(task, asyncio.Task)
+                and not task.done() and state.get("host_actions_bound")):
+            return
         cancel_event = self.run_manager.cancel_events.get(conversation_id)
         self._bind_lifecycle_runtime_host_actions(
             runner,
@@ -3740,7 +3754,7 @@ class SessionAgentRunnerMixin:
             # context while streaming.
             return runner
 
-        self._bind_lifecycle_runtime_command_snapshot(
+        await self._bind_lifecycle_runtime_command_snapshot(
             runner,
             conversation=conversation,
             tool_registry=tool_registry,
