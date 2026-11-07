@@ -36,6 +36,7 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
 
     def load():
         from backend.agent.context import ContextBuilder
+        from backend.runtime_env import default_user_shell
 
         record = session.conversation_repo.get_execution_context(conversation_id, prepare_resume=True)
         if record is None or record.archived:
@@ -43,7 +44,8 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
         builder = ContextBuilder(token_budget=config.token_budget, agent_settings=config.agent,
             conversation_id=conversation_id, workspace_root=workspace)
         builder.load_snapshot(record.context_snapshot)
-        return builder, record.context_snapshot
+        shell = thread.user_shell if thread is not None and thread.user_shell is not None else default_user_shell()
+        return builder, record.context_snapshot, shell
 
     prepared = await to_thread_cancel_safe(load)
     if (prepared is None or session.active_conversation_id != conversation_id or session.session_lifecycle.is_shutting_down
@@ -53,7 +55,9 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
     thread.capture_memory_settings(config.memories)
     if thread.model_context is not None or thread.pending_tasks():
         return
-    builder, snapshot = prepared
+    builder, snapshot, shell = prepared
+    if thread.user_shell is None:
+        thread.user_shell = shell
     thread.retain_model_context(builder, snapshot, workspace)
     session._model_context_prewarm = (thread, thread.model_context)
 

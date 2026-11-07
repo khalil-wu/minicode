@@ -86,7 +86,7 @@ class RunContext:
     is_subagent: bool = False
     thread_environments: ThreadEnvironments | None = None
     retain_thread_environments: bool = False
-    user_shell: dict[str, str] = field(default_factory=default_user_shell)
+    user_shell: dict[str, str] | None = None
     environment_thread_runtime: ConversationThreadRuntime | None = None
     node_repl_owner: Any | None = None
     initial_turn_environments: TurnEnvironmentSnapshot | None = None
@@ -173,6 +173,11 @@ class RunContext:
     user_stop_receipt: dict[str, Any] | None = None
     user_stop_acceptance: asyncio.Future[None] | None = None
     exec_policy_owner: Any | None = None
+
+    def capture_user_shell(self) -> dict[str, str]:
+        if self.user_shell is None:
+            self.user_shell = default_user_shell()
+        return self.user_shell
 
     async def capture_turn_environments(self) -> TurnEnvironmentSnapshot:
         captured = await self.thread_environments.snapshot()

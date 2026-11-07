@@ -223,9 +223,9 @@ class SDKSession:
                 run_context = RunContext(lifecycle_cleanup_tasks=self.lifecycle_cleanup_tasks)
             else:
                 self.lifecycle_cleanup_tasks = run_context.lifecycle_cleanup_tasks
-            if self._user_shell is None:
+            if self._user_shell is None and run_context.user_shell is not None:
                 self._user_shell = dict(run_context.user_shell)
-            else:
+            elif self._user_shell is not None:
                 run_context.user_shell = dict(self._user_shell)
             manager = run_kwargs.pop("environment_manager", self._environment_manager or run_context.environment_manager)
             if manager is None:
@@ -264,6 +264,8 @@ class SDKSession:
         finally:
             if self._active_run_context is not None:
                 self._thread_environments = self._active_run_context.thread_environments
+                if self._active_run_context.user_shell is not None:
+                    self._user_shell = dict(self._active_run_context.user_shell)
             self._active_query = False
             self._active_query_task = None
             self._active_query_stream = None

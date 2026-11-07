@@ -199,6 +199,13 @@ async def bootstrap_agent_loop(
         llm=request.llm,
     )
     run_context.context_builder = context
+    from backend.async_cleanup import to_thread_cancel_safe
+
+    shell_owner = run_context.environment_thread_runtime or agent_session or run_context
+    if shell_owner.user_shell is None:
+        shell_owner.user_shell = dict(await to_thread_cancel_safe(run_context.capture_user_shell))
+    if run_context.user_shell is None:
+        run_context.user_shell = dict(shell_owner.user_shell)
     context_tool = request.tool_registry.get_tool("new_context")
     model_snapshot = run_context.model_execution
     if model_snapshot is not None:

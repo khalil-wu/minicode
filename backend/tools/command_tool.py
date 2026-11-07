@@ -379,7 +379,8 @@ class RunCommandTool(BaseTool):
             from backend.permissions.environment_command import executor_shell_argv
 
             raw = executor_shell_argv(environment, str(args["command"]), shell=args.get("shell"), login=args.get("login"),
-                fallback_shell=context.run_context.user_shell)
+                fallback_shell=(context.run_context.capture_user_shell()
+                    if environment.shell is None and args.get("shell") is None else context.run_context.user_shell))
         else:
             raw = command_shell_argv(str(args["command"]), shell=args.get("shell"), login=args.get("login"),
                 allow_login_shell=environment.config.allow_login_shell if environment is not None else context.run_context.exec_policy_owner.allow_login_shell,

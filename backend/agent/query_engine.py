@@ -99,6 +99,7 @@ class AgentSession:
     close_thread_resources: Callable[[], Awaitable[Any]] | None = None
     close_model: Callable[[], Awaitable[None]] | None = None
     model_retirement_tasks: set[asyncio.Task] = field(default_factory=set)
+    user_shell: dict[str, str] | None = None
     closed: bool = field(default=False, init=False)
 
     def command_manager(self, session_id: str) -> BackgroundCommandManager:

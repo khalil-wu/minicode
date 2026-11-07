@@ -3531,7 +3531,7 @@ class TaskTool(BaseTool):
                     environment_host_captured=parent_run_context.environment_host_captured,
                     inherited_turn_environments=(parent_run_context.turn_environments.clone()
                         if child_agent_session.thread_environments is None and parent_run_context.turn_environments is not None else None),
-                    user_shell=dict(parent_run_context.user_shell),
+                    user_shell=copy(parent_run_context.user_shell),
                     session_source="subagent",
                     is_subagent=True,
                     isolated=agent_worktree is not None,

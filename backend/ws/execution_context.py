@@ -110,6 +110,7 @@ class ConversationThreadRuntime:
     cua_repl_companions: Any | None = None
     exec_policy_owner: Any | None = None
     memory_version: MemoryVersion | None = None
+    user_shell: dict[str, str] | None = None
     model_context: tuple[Any, dict[str, Any], int, str] | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)

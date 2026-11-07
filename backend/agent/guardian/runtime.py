@@ -298,7 +298,7 @@ class GuardianRuntime:
         if parent_owner is not None:
             owner.environment_manager = parent_owner.environment_manager
             owner.environment_manager_lease = parent_owner.environment_manager_lease
-            owner.user_shell = dict(parent_owner.user_shell)
+            owner.user_shell = deepcopy(parent_owner.user_shell)
             owner.environment_host_mcp_manager = parent_owner.environment_host_mcp_manager
             owner.environment_host_skill_manager = parent_owner.environment_host_skill_manager
             owner.environment_host_captured = parent_owner.environment_host_captured
