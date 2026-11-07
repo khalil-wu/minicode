@@ -123,6 +123,47 @@ async def test_role_model_is_applied_after_validating_request_and_preserves_prep
         await _resolve_subagent_llm(parent, parent_metadata={}, run_context=owner, agent_type="worker", effort_override="ultra", workspace_root=tmp_path, build_adapter=False)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("selection", ["explicit", "default", "role_overrides_request"])
+async def test_v2_rejects_disabled_requested_child_before_role_or_adapter_creation(tmp_path, selection):
+    from backend.tests.test_task_model_resolution import _parent_fixture, _parent_run_context
+
+    parent, runtime, config, metadata = _parent_fixture()
+    disabled = "claude-opus-4-6"
+    runtime.models[1] = replace(runtime.models[1], extra={"multi_agent_version": "disabled"})
+    options = {"model_override": disabled, "role_requested": False}
+    if selection == "default":
+        config.config_layer_stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("session_flags"),
+            {"agents": {"default_subagent_model": disabled}}),))
+        options["model_override"] = ""
+    elif selection == "role_overrides_request":
+        (tmp_path / "worker.toml").write_text('model="claude-sonnet-4-6"\n', encoding="utf-8")
+        config.config_layer_stack = role_stack(tmp_path, {"worker": {"description": "Worker", "config_file": "worker.toml"}}).config_layer_stack
+        options["role_requested"] = True
+    metadata["_subagent_parent_runtime"]["config"] = config
+    owner = _parent_run_context(metadata)
+    with pytest.raises(ValueError, match="Unknown model.*spawn_agent") as error:
+        await _resolve_subagent_llm(parent, parent_metadata={}, run_context=owner, agent_type="worker",
+            multi_agent_version="v2", workspace_root=tmp_path, build_adapter=True, **options)
+    available = str(error.value).split("Available models:", 1)[1]
+    assert disabled not in available and "claude-sonnet-4-6" in available
+    assert parent.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_disabled_child_metadata_does_not_change_v1_or_inherited_v2_selection(tmp_path):
+    from backend.tests.test_task_model_resolution import _parent_fixture, _parent_run_context
+
+    parent, runtime, _config, metadata = _parent_fixture()
+    runtime.models = [replace(model, extra={"multi_agent_version": "disabled"}) for model in runtime.models]
+    owner = _parent_run_context(metadata)
+    inherited = await _resolve_subagent_llm(parent, parent_metadata={}, run_context=owner, agent_type="default",
+        role_requested=False, multi_agent_version="v2", workspace_root=tmp_path, build_adapter=False)
+    selected = await _resolve_subagent_llm(parent, parent_metadata={}, run_context=owner, agent_type="default",
+        role_requested=False, multi_agent_version="v1", model_override="claude-opus-4-6", workspace_root=tmp_path, build_adapter=False)
+    assert inherited.model == parent._settings.model and selected.model == "claude-opus-4-6"
+
+
 def test_role_projection_keeps_parent_authority_and_restrictions_for_cold_resume(tmp_path):
     config = role_stack(tmp_path, {})
     parent_permissions = config.permissions

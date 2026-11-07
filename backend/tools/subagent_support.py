@@ -41,7 +41,7 @@ from backend.llm.model_selection import (
 )
 from backend.llm.base import LLMAdapter
 from backend.llm.openai_adapter import OpenAIAdapter
-from backend.llm.model_request_policy import ModelRequestPolicy, resolve_model_request_policy
+from backend.llm.model_request_policy import ModelRequestPolicy, resolve_model_request_policy, source_model_request_capabilities
 from backend.tools.agent_control_plane import (
     normalize_agent_fork_turns,
     normalize_agent_task_name,
@@ -490,7 +490,7 @@ async def _resolve_subagent_llm(
             prepared = await _resolve_subagent_llm(inherited_llm, parent_metadata=parent_metadata, run_context=run_context,
                 model_execution=snapshot, agent_type="default", model_override=requested_model,
                 provider_override=provider_override, effort_override=requested_effort, workspace_root=workspace_root,
-                build_adapter=False, _apply_source_role=False)
+                build_adapter=False, multi_agent_version=spawn_version, _apply_source_role=False)
             requested_effort = prepared.effort
         requested_model = source_overrides.get("model", requested_model)
         requested_effort = source_overrides.get("model_reasoning_effort", requested_effort)
@@ -616,6 +616,15 @@ async def _resolve_subagent_llm(
                 f"Unknown model '{target_model}' for subagent. "
                 f"Available models: {', '.join(str(item) for item in available[:20])}."
             )
+
+    # Source filters explicit/default model requests before applying a role.
+    # A configured role's model is resolved separately above, after that check.
+    if model_was_selected and spawn_version == "v2" and not (_apply_source_role and "model" in source_overrides):
+        if source_model_request_capabilities(target_model, runtime_model).get("multi_agent_version") == "disabled":
+            available = [model.id for model in model_runtime.get_models(target_provider)
+                if source_model_request_capabilities(model.id, model).get("multi_agent_version") != "disabled"
+                and model.extra.get("show_in_picker", True)] if model_runtime is not None else []
+            raise ValueError(f"Unknown model '{target_model}' for spawn_agent. Available models: {', '.join(available[:5])}")
 
     model_changed = target_provider != parent_provider or target_model != parent_model
     available_efforts = model_thinking_levels(
