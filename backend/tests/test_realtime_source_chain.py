@@ -239,7 +239,7 @@ async def test_actual_webrtc_http_offer_and_original_call_sideband(version):
     async with peer() as remote:
         server = await asyncio.start_server(http_peer, "127.0.0.1", 0)
         async with server:
-            base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1"
+            base = f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/v1?deployment=fixture"
             params = Start(threadId="original-thread", outputModality="audio", version=version,
                 transport={"type": "webrtc", "sdp": "v=0\r\nactual-offer"})
             config = RealtimeConfig(remote.base_url, {"Authorization": "Bearer original-call-auth"}, version=version, call_base_url=base)
@@ -248,7 +248,12 @@ async def test_actual_webrtc_http_offer_and_original_call_sideband(version):
             try:
                 assert connection.sdp == "v=0\r\nactual-loopback-answer"
                 method, headers, body = requests[0]
-                assert method == f"POST /v1/{'live' if version == 'v3' else 'realtime/calls'} HTTP/1.1"
+                verb, target, protocol = method.split()
+                call_url = urlsplit(target)
+                assert verb == "POST" and protocol == "HTTP/1.1"
+                assert call_url.path == f"/v1/{'live' if version == 'v3' else 'realtime/calls'}"
+                assert parse_qs(call_url.query) == {"deployment": ["fixture"], **(
+                    {"intent": ["quicksilver"], "architecture": ["avas"]} if version == "v1" else {})}
                 assert headers["authorization"] == "Bearer original-call-auth"
                 assert b'actual-offer' in body and b'actual session instructions' in body
                 assert b'name="sdp"' in body and b'name="session"' in body

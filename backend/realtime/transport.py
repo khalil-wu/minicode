@@ -162,8 +162,11 @@ class RealtimeConnection:
         if self.start.transport.type == "webrtc":
             base = self.config.call_base_url or self.config.base_url
             parsed = urlsplit(base)
+            query = list(parse_qsl(parsed.query))
+            if self.version == "v1":
+                query.extend((("intent", "quicksilver"), ("architecture", "avas")))
             endpoint = urlunsplit(({"ws": "http", "wss": "https"}.get(parsed.scheme, parsed.scheme), parsed.netloc,
-                parsed.path.rstrip("/") + ("/live" if self.version == "v3" else "/realtime/calls"), parsed.query, ""))
+                parsed.path.rstrip("/") + ("/live" if self.version == "v3" else "/realtime/calls"), urlencode(query), ""))
             model = self.start.model or self.config.model or ("gpt-live-1-codex" if self.version == "v3" else "gpt-realtime-1.5")
             session = {**self.session, "model": model}
             async with application_http_client(endpoint, policy=self.config.network_policy, proxy_mode=self.config.proxy_mode) as client:
