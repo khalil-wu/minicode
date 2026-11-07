@@ -178,6 +178,7 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
   const host = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView>();
   const latest = useRef(props); latest.current = props;
+  const renderedProps = useRef(props);
   const committed = useRef(props.value);
   const committedDocument = useRef(props.document);
   const composing = useRef(false);
@@ -247,9 +248,15 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
     }
     previousReferences.current = references;
     if (transaction.docChanged) view.dispatch(transaction);
-    view.setProps({ editable: () => !latest.current.disabled, attributes: { ...view.props.attributes as Record<string, string>,
-      "aria-label": current.ariaLabel, "aria-disabled": String(current.disabled), "data-enter-behavior": current.enterBehavior,
-      "data-plain": String(plainTextMode.current) } });
+    const previous = renderedProps.current;
+    if (current.disabled !== previous.disabled || current.ariaLabel !== previous.ariaLabel
+        || current.enterBehavior !== previous.enterBehavior || current.plainTextMode !== previous.plainTextMode
+        || current.placeholder !== previous.placeholder) {
+      view.setProps({ attributes: { ...view.props.attributes as Record<string, string>,
+        "aria-label": current.ariaLabel, "aria-disabled": String(current.disabled), "data-enter-behavior": current.enterBehavior,
+        "data-plain": String(plainTextMode.current) } });
+    }
+    renderedProps.current = current;
   };
   useImperativeHandle(ref, () => ({
     focus: () => viewRef.current!.focus(),
@@ -272,7 +279,7 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
       state: EditorState.create({ schema, doc: initial, selection: initialSelection,
         plugins: plugins(() => latest.current.placeholder, props.plainTextMode, editorHistory.current) }),
       editable: () => !latest.current.disabled,
-      attributes: { role: "textbox", "aria-multiline": "true", "aria-label": props.ariaLabel,
+      attributes: { role: "textbox", "aria-multiline": "true", "aria-label": props.ariaLabel, "aria-disabled": String(props.disabled),
         "data-composer-input": "", "data-enter-behavior": props.enterBehavior, "data-rich-composer": "",
         "data-plain": String(props.plainTextMode),
         class: "composer-textarea composer-rich-text ProseMirror", spellcheck: "true" },
@@ -383,10 +390,16 @@ export const RichComposerEditor = forwardRef<ComposerInputHandle, Props>((props,
     const unregisterHistory = registerComposerEditHistory(view.dom, { hasText: () => !!view.state.doc.textContent,
       undo: () => undo(view.state, view.dispatch), redo: () => redo(view.state, view.dispatch) });
     const initialState = richDocumentState(view.state.doc, plainTextMode.current);
-    committed.current = initialState.markdown;
-    committedDocument.current = initialState;
+    // The constructor already restored this exact input. Its canonical store
+    // echo is published below; restoring it again would reset the selection.
+    committed.current = props.value;
+    committedDocument.current = props.document;
     synchronizeView();
-    if ((props.value || props.document) && committedDocument.current === initialState) latest.current.onChange(initialState.markdown, readSelection(), initialState);
+    if ((props.value || props.document) && view.state.doc === initial) {
+      committed.current = initialState.markdown;
+      committedDocument.current = initialState;
+      latest.current.onChange(initialState.markdown, readSelection(), initialState);
+    }
     if (props.initialFocus && !view.dom.closest('[hidden], [aria-hidden="true"]')) view.focus();
     return () => { disposed = true; unregisterHistory(); clearTimeout(compositionEndTimer.current); view.destroy(); viewRef.current = undefined; };
   }, []);

@@ -36,12 +36,12 @@ function Harness({ document, position, plainTextMode }: { document: Node; positi
 }
 
 beforeEach(() => {
-  const originalSetProps = EditorView.prototype.setProps;
+  const originalFocus = EditorView.prototype.focus;
   // Observe the production view without replacing any keymap, transaction or
   // deletion command. Geometry below only lets PM scroll in jsdom.
-  vi.spyOn(EditorView.prototype, "setProps").mockImplementation(function (this: EditorView, props) {
+  vi.spyOn(EditorView.prototype, "focus").mockImplementation(function (this: EditorView) {
     view = this;
-    return originalSetProps.call(this, props);
+    return originalFocus.call(this);
   });
   const rect = new DOMRect(0, 0, 600, 80);
   Object.defineProperty(Range.prototype, "getClientRects", { configurable: true, value: () => [rect] });
