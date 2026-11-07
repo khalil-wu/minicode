@@ -774,6 +774,10 @@ class ContextBuilder:
             self._skill_config_stack = config_stack
         source = (id(manager), os.path.normcase(os.path.normpath(str(workspace_root or ""))),
             self._skill_config_stack.fingerprint if self._skill_config_stack is not None else None)
+        if (not force_reload and manager is self._skill_manager and turn_id
+                and turn_id == self._skill_snapshot_turn_id and self._skill_snapshot_source is not None
+                and source[1:] == self._skill_snapshot_source[1:]):
+            return
         if not refresh and not force_reload and source == self._skill_snapshot_source:
             return
         self._skill_manager = manager.snapshot(workspace_root, role_config=self._skill_role_config, role_features=self._skill_role_features, config_stack=self._skill_config_stack, force_reload=force_reload)

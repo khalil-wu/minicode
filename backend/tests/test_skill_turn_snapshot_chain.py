@@ -47,6 +47,35 @@ def _host(root, monkeypatch, stack):
     return host, calls
 
 
+def test_same_turn_rebind_keeps_the_captured_owner_until_scope_or_config_changes(tmp_path, monkeypatch):
+    root_a, root_b = tmp_path / "a", tmp_path / "b"
+    _skill(root_a, "owned", "Original")
+    _skill(root_b, "other", "Other workspace")
+    stack = ConfigLayerStack(())
+    host, scans = _host(root_a, monkeypatch, stack)
+    context = ContextBuilder(workspace_root=root_a, skill_manager=host, skill_config_stack=stack)
+    context.bind_skill_manager(host, root_a, refresh=True, force_reload=True, turn_id="turn-a")
+    captured = context.skill_manager
+    _skill(root_a, "owned", "Edited while running")
+    count = len(scans)
+    context.bind_skill_manager(captured, root_a, refresh=True, config_stack=stack, turn_id="turn-a")
+    assert context.skill_manager is captured
+    assert context.skill_manager.get_meta("owned").description == "Original"
+    assert len(scans) == count
+
+    restricted_stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(tmp_path / "settings.json")),
+        {"skills": {"config": [{"name": "owned", "enabled": False}]}}),))
+    context.bind_skill_manager(captured, root_a, refresh=True, config_stack=restricted_stack, turn_id="turn-a")
+    assert context.skill_manager is not captured
+    assert context.skill_manager.get_meta("owned") is None
+    assert captured.get_meta("owned").description == "Original"
+    context.bind_skill_manager(context.skill_manager, root_b, refresh=True, config_stack=stack, turn_id="turn-a")
+    assert context.skill_manager.get_meta("other") is not None
+    assert context.skill_manager.get_meta("owned") is None
+    context.bind_skill_manager(captured, root_a, refresh=True, force_reload=True, config_stack=stack, turn_id="turn-b")
+    assert context.skill_manager.get_meta("owned").description == "Edited while running"
+
+
 def test_captured_host_roles_and_executor_catalog_project_without_rediscovery(tmp_path, monkeypatch):
     root_a, root_b = tmp_path / "a", tmp_path / "b"
     _skill(root_a, "open", "Original")

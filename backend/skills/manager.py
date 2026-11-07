@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import re
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -110,7 +110,13 @@ class SkillManager:
     def snapshot(self, project_root: Path | str | None | object = _KEEP_PROJECT_ROOT, *, role_config: dict[str, Any] | None = None, role_features: dict[str, bool] | None = None, config_stack: Any = None, force_reload: bool = False) -> SkillManager:
         """Capture discovery for a task without rebinding the window's loader."""
         self._ensure_discovered()
-        loader = deepcopy(self._loader)
+        source_loader = self._loader
+        if isinstance(source_loader, SkillLoader) and config_stack is not None:
+            # The captured turn supplies this binding below. Copying the old
+            # stack only to discard it duplicates unrelated provider/plugin state.
+            source_loader = copy(source_loader)
+            source_loader._config_stack = None
+        loader = deepcopy(source_loader)
         snapshot = SkillManager(loader)
         snapshot._discovered = self._discovered
         snapshot._is_snapshot = True
