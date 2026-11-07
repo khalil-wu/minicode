@@ -76,13 +76,31 @@ class _BudgetCtx:
 
 
 def test_manage_context_budget_does_nothing_below_pi_reserve_boundary() -> None:
-    ctx = _BudgetCtx(token_usage=760)
+    ctx = _BudgetCtx(token_usage=700)
     state = AgentState(user_message="continue")
 
-    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
+    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000, response_reserve=150)))
 
     assert events == []
     assert ctx.compact_calls == 0
+
+
+def test_compaction_decision_and_warning_share_one_exact_request_measurement():
+    from unittest.mock import Mock
+    from backend.agent.context import ContextBuilder
+    from backend.llm.base import LLMMessage
+
+    budget = TokenBudget(total=200_000)
+    context = ContextBuilder(token_budget=budget)
+    context.get_budget_snapshot = Mock(wraps=context.get_budget_snapshot)
+    messages = [LLMMessage(role="user", content="x" * (170_000 * 4))]
+    state = AgentState(user_message="continue")
+    async def collect():
+        return [event async for event in manage_context_budget(context, state, budget, [], messages=messages)]
+    events = asyncio.run(collect())
+    assert [event.type for event in events] == ["budget.warning"]
+    context.get_budget_snapshot.assert_called_once()
+    assert context.get_budget_snapshot.call_args.kwargs["messages"] is messages
 
 
 def test_manage_context_budget_lets_the_provider_decide_when_the_estimate_stays_high() -> None:
@@ -96,7 +114,7 @@ def test_manage_context_budget_lets_the_provider_decide_when_the_estimate_stays_
     ctx = _BudgetCtx(token_usage=900, after_compact_usage=870)
     state = AgentState(user_message="continue")
 
-    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
+    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000, response_reserve=150)))
 
     assert [event.type for event in events] == ["context_compacted"]
     assert events[0].data["before_tokens"] == 900
@@ -110,7 +128,7 @@ def test_manage_context_budget_emits_one_compaction_when_reserve_is_restored() -
     ctx = _BudgetCtx(token_usage=900, after_compact_usage=500)
     state = AgentState(user_message="continue")
 
-    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
+    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000, response_reserve=150)))
 
     assert [event.type for event in events] == ["context_compacted"]
     assert ctx.compact_calls == 1
@@ -125,13 +143,13 @@ def test_autocompact_failure_counter_is_owned_by_context_across_turn_states() ->
     ctx = _FailingCtx(token_usage=900)
     for _ in range(3):
         events = asyncio.run(
-            _collect(ctx, AgentState(user_message="continue"), TokenBudget(total=1000))
+            _collect(ctx, AgentState(user_message="continue"), TokenBudget(total=1000, response_reserve=150))
         )
         assert events[-1].type == "error"
 
     assert ctx.consecutive_autocompact_failures == 3
     fourth = asyncio.run(
-        _collect(ctx, AgentState(user_message="continue"), TokenBudget(total=1000))
+        _collect(ctx, AgentState(user_message="continue"), TokenBudget(total=1000, response_reserve=150))
     )
     assert fourth[0].data["error_code"] == "autocompact_circuit_open"
     assert ctx.compact_calls == 3
@@ -147,7 +165,7 @@ def test_compaction_boundary_uses_estimate_until_post_compaction_actual_is_known
     ctx = _EstimatedAfterCompactCtx(token_usage=900, after_compact_usage=500)
     state = AgentState(user_message="continue")
 
-    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
+    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000, response_reserve=150)))
 
     assert events[0].type == "context_compacted"
     assert events[0].data["before_tokens"] == 900
@@ -170,7 +188,7 @@ def test_pre_compact_blocked_is_reported_without_vetoing_compaction() -> None:
     ctx.hook_manager = _HookManager()
     state = AgentState(user_message="continue")
 
-    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
+    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000, response_reserve=150)))
 
     assert ctx.compact_calls == 1
     assert "pre_compact_blocked" not in [event.data.get("error_code") for event in events]
@@ -216,7 +234,7 @@ def test_compact_hook_messages_are_visible_without_becoming_model_instructions()
         return "summary"
 
     ctx.compact = compact
-    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000)))
+    events = asyncio.run(_collect(ctx, state, TokenBudget(total=1000, response_reserve=150)))
 
     assert events and events[0].type == "context_compacted"
     assert compact_focus == ["continue"]

@@ -53,8 +53,9 @@ async def manage_context_budget(
             async for event in run_context_window_compaction(ctx, state):
                 yield event
         return
-    if not ctx.needs_compaction(state, tool_schemas=tool_schemas, **request_args):
-        warning = _pre_compaction_warning(ctx, state, budget, tool_schemas, **request_args)
+    snapshot = ctx.get_budget_snapshot(state, tool_schemas=tool_schemas, **request_args)
+    if int(snapshot.get("used", 0)) <= max(0, budget.total - budget.reserved_response_tokens):
+        warning = _pre_compaction_warning(ctx, state, budget, tool_schemas, snapshot=snapshot, **request_args)
         if warning is not None:
             yield warning
         return
@@ -96,6 +97,7 @@ def _pre_compaction_warning(
     tool_schemas: list[dict[str, Any]],
     *,
     messages: list[LLMMessage] | None = None,
+    snapshot: dict[str, Any] | None = None,
 ) -> AgentEvent | None:
     """Announce the approaching compaction boundary exactly once per band.
 
@@ -111,7 +113,8 @@ def _pre_compaction_warning(
         # "roomy" and "compacting" to warn about.
         return None
     request_args = {"messages": messages} if messages is not None else {}
-    snapshot = ctx.get_budget_snapshot(state, tool_schemas=tool_schemas, **request_args)
+    if snapshot is None:
+        snapshot = ctx.get_budget_snapshot(state, tool_schemas=tool_schemas, **request_args)
     total = int(snapshot.get("total", 0) or 0)
     if total <= 0:
         return None
