@@ -211,7 +211,7 @@ def discover_execution_agents(workspace_root: str | Path | None = None, *, confi
     from backend.config import load_config
 
     config = config if config is not None else load_config(cwd=workspace_root, resolve_credentials=False)
-    legacy = discover_agents(workspace_root)
+    legacy = discover_agents(workspace_root, config_stack=config.config_layer_stack)
     names = {name: definition for name, definition in legacy.items() if name not in SOURCE_ROLE_NAMES}
     names.update({f"legacy:{name}": definition for name, definition in legacy.items() if name in SOURCE_ROLE_NAMES})
     return {**names, **load_source_agent_roles(config.config_layer_stack)}

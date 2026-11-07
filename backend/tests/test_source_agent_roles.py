@@ -218,12 +218,43 @@ def test_legacy_markdown_named_worker_does_not_replace_source_builtin(tmp_path, 
     folder = tmp_path / "legacy-agents"
     folder.mkdir()
     (folder / "worker.md").write_text('---\nname: worker\ndescription: Old worker\n---\nOld instructions\n', encoding="utf-8")
-    monkeypatch.setattr(loader, "_agent_search_dirs", lambda root=None: [folder])
+    monkeypatch.setattr(loader, "_agent_search_dirs", lambda root=None, **kwargs: [folder])
     names = discover_execution_agents(tmp_path, config=role_stack(tmp_path, {}))
     assert "worker" not in names
     assert names["legacy:worker"].prompt == "Old instructions"
     assert build_subagent_prompt("worker", "Implement", get_custom_agent=names.get) == "Implement"
     assert "Old instructions" in build_subagent_prompt("legacy:worker", "Implement", get_custom_agent=names.get)
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_execution_catalog_uses_captured_requirements_without_reloading_host_config(tmp_path, monkeypatch, restricted):
+    from unittest.mock import Mock
+    from backend.agents import loader
+    from backend.agents.source_roles import discover_execution_agents
+    from backend.config_requirements import ConfigRequirements
+
+    workspace = tmp_path / "workspace"
+    project_agents = workspace / ".minicode" / "agents"
+    project_agents.mkdir(parents=True)
+    managed = tmp_path / "managed"
+    (managed / "agents").mkdir(parents=True)
+    (project_agents / "custom.md").write_text("---\nname: custom\ndescription: Project custom agent\n---\nProject instruction", encoding="utf-8")
+    (managed / "agents" / "admin.md").write_text("---\nname: admin\ndescription: Managed custom agent\n---\nManaged instruction", encoding="utf-8")
+    monkeypatch.setattr(loader, "_get_managed_minicode_dir", lambda: managed)
+    monkeypatch.setenv("MINICODE_CONFIG_DIR", str(tmp_path / "user"))
+    config = role_stack(tmp_path / "config", {})
+    config = replace(config, config_layer_stack=replace(config.config_layer_stack,
+        requirements=ConfigRequirements(raw={"strict_plugin_only_customization": ["agents"] if restricted else []})))
+    reload = Mock(side_effect=AssertionError("An admitted catalog already owns its config"))
+    monkeypatch.setattr("backend.config.load_config_layer_stack", reload)
+    names = discover_execution_agents(workspace, config=config)
+    reload.assert_not_called()
+    assert ("custom" in names) is not restricted
+    assert "admin" in names
+    # A later admitted configuration can narrow the same on-disk catalog.
+    restrictive = replace(config, config_layer_stack=replace(config.config_layer_stack,
+        requirements=ConfigRequirements(raw={"strict_plugin_only_customization": ["agents"]})))
+    assert "custom" not in discover_execution_agents(workspace, config=restrictive)
 
 
 @pytest.mark.asyncio

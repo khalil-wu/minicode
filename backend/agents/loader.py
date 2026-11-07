@@ -94,7 +94,7 @@ class AgentDefinition:
         )
 
 
-def _agent_search_dirs(workspace_root: Path | None = None) -> list[Path]:
+def _agent_search_dirs(workspace_root: Path | None = None, *, config_stack=None) -> list[Path]:
     """Return MiniCode agent scopes in managed, user, project order."""
     root = workspace_root
     scopes = get_markdown_directories(
@@ -103,7 +103,8 @@ def _agent_search_dirs(workspace_root: Path | None = None) -> list[Path]:
         managed_root=_get_managed_minicode_dir(),
         session_project_root=root,
     )
-    if _agents_restricted_to_plugins(root):
+    if (config_stack.requirements.restricts_customization_to_plugins("agents")
+            if config_stack is not None else _agents_restricted_to_plugins(root)):
         scopes = [scope for scope in scopes if scope.source == "policy"]
     return [scope.path for scope in scopes]
 
@@ -139,6 +140,7 @@ def _source_for_agent_dir(directory: Path, workspace_root: Path | None) -> Agent
 
 def discover_agent_definitions(
     workspace_root: str | Path | None = None,
+    *, config_stack=None,
 ) -> list[AgentDefinition]:
     """Return every discovered file with its MiniCode setting-source identity.
 
@@ -154,7 +156,7 @@ def discover_agent_definitions(
     )
     definitions: list[AgentDefinition] = []
     seen_files: set[tuple[int, int]] = set()
-    for directory in _agent_search_dirs(root):
+    for directory in _agent_search_dirs(root, config_stack=config_stack):
         if not directory.is_dir():
             continue
         source = _source_for_agent_dir(directory, root)
@@ -176,13 +178,13 @@ def discover_agent_definitions(
     return definitions
 
 
-def discover_agents(workspace_root: str | Path | None = None) -> dict[str, AgentDefinition]:
+def discover_agents(workspace_root: str | Path | None = None, *, config_stack=None) -> dict[str, AgentDefinition]:
     """Scan agent directories and return {name: AgentDefinition}.
 
     User definitions are overridden by the closest project definition and then
     by managed policy. Unknown sources remain first-wins for embedders.
     """
-    return effective_agents(discover_agent_definitions(workspace_root))
+    return effective_agents(discover_agent_definitions(workspace_root, config_stack=config_stack))
 
 
 def effective_agents(definitions: list[AgentDefinition]) -> dict[str, AgentDefinition]:
