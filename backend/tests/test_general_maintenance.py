@@ -2,6 +2,7 @@ import asyncio
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -18,6 +19,46 @@ from backend.ws.conversation_runtime import ConversationRuntime
 
 NOW = datetime(2026, 10, 20, tzinfo=UTC)
 OLD = datetime(2025, 1, 1, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("blocked_stage", ["summary", "history_paths"])
+async def test_maintenance_disk_reads_do_not_block_foreground_and_share_one_inventory(tmp_path, monkeypatch, blocked_stage):
+    repository = ConversationRepository(tmp_path / "conversations")
+    repository.create_conversation(title="Retained")
+    manager = SimpleNamespace(resource_sessions=lambda: [], execution_contexts=SimpleNamespace(context_for=lambda _id: None))
+    monkeypatch.setattr(maintenance, "_current_scheduler", lambda: None)
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), threading.Event()
+    read = repository.list_conversations
+    scan = maintenance.cold_history_files
+    calls = []
+    def wait_for_foreground():
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5), "Foreground did not run while the disk read was held"
+    def summaries():
+        calls.append(True)
+        if blocked_stage == "summary":
+            wait_for_foreground()
+        return read()
+    def history(*args, **kwargs):
+        if blocked_stage == "history_paths":
+            wait_for_foreground()
+        return scan(*args, **kwargs)
+    monkeypatch.setattr(repository, "list_conversations", summaries)
+    monkeypatch.setattr(maintenance, "cold_history_files", history)
+    task = asyncio.create_task(maintenance.maintain_local_chats(manager, repository=repository,
+        auto_archive_after_days=0, compress_local_history=True, now=NOW))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        foreground = asyncio.Event()
+        loop.call_soon(foreground.set)
+        await asyncio.wait_for(foreground.wait(), .5)
+        assert not task.done() and not release.is_set()
+    finally:
+        release.set()
+        result = await task
+    assert len(calls) == 1 and result["archived_conversation_ids"] == []
 
 
 def old_chat(repository, title, **fields):
@@ -42,9 +83,9 @@ def test_candidates_retain_recent_pinned_unread_running_scheduled_and_foreign_ch
     archived = old_chat(repository, "Already archived", archived=True)
     foreign = old_chat(repository, "Foreign", thread_source="unknown")
     repository.create_conversation(title="Recent")
-    candidates = maintenance.archive_candidates(repository, inactive_days=7, protected_ids={active.id}, now=NOW)
+    candidates = maintenance.archive_candidates(repository.list_conversations(), inactive_days=7, protected_ids={active.id}, now=NOW)
     assert [chat.id for chat in candidates] == [eligible.id]
-    assert not maintenance.archive_candidates(repository, inactive_days=0, protected_ids=set(), now=NOW)
+    assert not maintenance.archive_candidates(repository.list_conversations(), inactive_days=0, protected_ids=set(), now=NOW)
     assert not any(repository.get_conversation(chat.id).archived for chat in [eligible, pinned, unread, active, foreign])
     assert repository.get_conversation(archived.id).archived
 
@@ -241,7 +282,7 @@ def test_cold_selection_only_returns_existing_seven_day_history_files(tmp_path):
     for file in repository.storage_root.iterdir():
         if not file.name.startswith(recent.id + "."):
             os.utime(file, (OLD.timestamp(), OLD.timestamp()))
-    files = maintenance.cold_history_files(repository, protected_ids={protected.id}, now=NOW)
+    files = maintenance.cold_history_files(repository, repository.list_conversations(), protected_ids={protected.id}, now=NOW)
     assert files
     assert all(file.name.startswith(cold.id + ".") for file in files)
     assert not any(file.name.endswith((".meta.json", ".manifest.json")) for file in files)
@@ -296,7 +337,7 @@ def test_cold_selection_finishes_file_stats_before_a_checkpoint_reclaims_its_pre
 
     monkeypatch.setattr(repository, "_store_lock", writer_waits_for_reader_owner)
     monkeypatch.setattr(Path, "is_file", checkpoint_requested_after_file_probe)
-    selected = maintenance.cold_history_files(repository, protected_ids=set(), now=NOW)
+    selected = maintenance.cold_history_files(repository, repository.list_conversations(), protected_ids=set(), now=NOW)
     assert probed and checkpoint_finished and not retired.exists()
     assert retired in selected
     assert maintenance.compress_cold_history(repository, selected, now=NOW) == 2
@@ -312,7 +353,7 @@ def test_zstd_fixture_compression_keeps_exact_bytes_index_reads_and_resume_write
     draft_file.write_text('{"draft":"ORIGINAL UNSENT DRAFT"}', encoding="utf8")
     for file in repository.storage_root.iterdir():
         os.utime(file, (OLD.timestamp(), OLD.timestamp()))
-    files = maintenance.cold_history_files(repository, protected_ids=set(), now=NOW)
+    files = maintenance.cold_history_files(repository, repository.list_conversations(), protected_ids=set(), now=NOW)
     before = {file: file.read_bytes() for file in files}
     assert maintenance.compress_cold_history(repository, files, now=NOW) == len(files)
     assert all(not file.exists() and compressed_history_path(file).exists() for file in files)

@@ -38,20 +38,20 @@ def _conversation_busy(manager, sessions, conversation_id: str, scheduler) -> bo
         if name != "scheduled_tasks"))
 
 
-def archive_candidates(repository, *, inactive_days: int, protected_ids: set[str], now: datetime) -> list[Any]:
+def archive_candidates(summaries, *, inactive_days: int, protected_ids: set[str], now: datetime) -> list[Any]:
     if inactive_days == 0:
         return []
     cutoff = now - timedelta(days=inactive_days)
-    return sorted((chat for chat in repository.list_conversations()
+    return sorted((chat for chat in summaries
         if not chat.archived and not chat.pinned and not chat.has_unread_turn
         and chat.id not in protected_ids and chat.thread_source not in {"unknown", "cloud_threads.create", "subagent"}
         and datetime.fromisoformat(chat.updated_at) < cutoff), key=lambda chat: (chat.updated_at, chat.id))
 
 
-def cold_history_files(repository, *, protected_ids: set[str], now: datetime) -> list[Path]:
+def cold_history_files(repository, summaries, *, protected_ids: set[str], now: datetime) -> list[Path]:
     cutoff = now - timedelta(days=7)
     files = []
-    for chat in repository.list_conversations():
+    for chat in summaries:
         if chat.id in protected_ids:
             continue
         # Checkpoints reclaim old generations under this same owner lock.
@@ -75,10 +75,11 @@ async def maintain_local_chats(manager, *, auto_archive_after_days: int, compres
     sessions = list(manager.resource_sessions())
     repository = repository or (sessions[0].conversation_repo if sessions else ConversationRepository())
     scheduler = _current_scheduler()
-    protected_ids = {chat.id for chat in repository.list_conversations()
+    summaries = await asyncio.to_thread(repository.list_conversations)
+    protected_ids = {chat.id for chat in summaries
         if _conversation_busy(manager, sessions, chat.id, scheduler)}
     archived = []
-    candidates = archive_candidates(repository, inactive_days=auto_archive_after_days,
+    candidates = archive_candidates(summaries, inactive_days=auto_archive_after_days,
         protected_ids=protected_ids | _heartbeat_targets(scheduler), now=current_time) if sessions else []
     for candidate in candidates:
         if len(archived) == 50:
@@ -123,7 +124,8 @@ async def maintain_local_chats(manager, *, auto_archive_after_days: int, compres
     if compress_local_history:
         removed_history_temporaries = await asyncio.to_thread(repository.cleanup_history_temporaries,
             older_than_ns=int((current_time - timedelta(hours=6)).timestamp() * 1_000_000_000))
-        files = cold_history_files(repository, protected_ids=protected_ids, now=current_time)
+        files = await asyncio.to_thread(cold_history_files, repository, summaries,
+            protected_ids=protected_ids, now=current_time)
         compressed_files = await asyncio.to_thread(compress, repository, files, now=current_time)
     return {"archived_conversation_ids": archived, "compressed_files": compressed_files,
         "removed_history_temporaries": removed_history_temporaries}

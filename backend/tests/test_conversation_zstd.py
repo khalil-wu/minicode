@@ -43,7 +43,7 @@ def compress_record(repository, conversation_id):
     for path in paths:
         if path.exists():
             os.utime(path, (OLD.timestamp(), OLD.timestamp()))
-    files = cold_history_files(repository, protected_ids=set(), now=NOW)
+    files = cold_history_files(repository, repository.list_conversations(), protected_ids=set(), now=NOW)
     assert compress_cold_history(repository, files, now=NOW) == len(files)
     return files
 
@@ -351,10 +351,10 @@ def test_compression_is_opt_in_and_does_not_touch_active_or_recent_history(tmp_p
     repository = ConversationRepository(tmp_path / "conversations")
     record = make_history(repository, count=2)
     paths = repository.history_paths(record.id)
-    assert not cold_history_files(repository, protected_ids=set(), now=datetime.now(UTC))
+    assert not cold_history_files(repository, repository.list_conversations(), protected_ids=set(), now=datetime.now(UTC))
     for path in paths:
         os.utime(path, (OLD.timestamp(), OLD.timestamp()))
-    assert not cold_history_files(repository, protected_ids={record.id}, now=NOW)
+    assert not cold_history_files(repository, repository.list_conversations(), protected_ids={record.id}, now=NOW)
     manager = SimpleNamespace(resource_sessions=lambda: [], execution_contexts=SimpleNamespace(context_for=lambda _id: None))
     monkeypatch.setattr(maintenance, "_current_scheduler", lambda: None)
     def forbidden(*_args, **_kwargs):
