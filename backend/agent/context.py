@@ -746,6 +746,21 @@ class ContextBuilder:
             if snapshot is not None:
                 self.bind_context_window_model(snapshot)
 
+    def release_turn_bindings(self) -> None:
+        """Retain model history while relinquishing the completed turn's owners."""
+        self._tool_execution_context = None
+        self._llm_turn_context = None
+        self._hook_manager = None
+        self._skill_manager = None
+        self._skill_executor = None
+        self._skill_snapshot_source = None
+        self._skill_snapshot_turn_id = ""
+        self._extension_system_prompt_override = None
+        self._prepared_environment_snapshot = None
+        self._git_status_authority = None
+        self._environment_project_guidelines = ""
+        self._environment_project_directory = None
+
     @property
     def skill_manager(self) -> Any | None:
         return self._skill_manager

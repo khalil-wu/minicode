@@ -4369,16 +4369,21 @@ class SessionAgentRunnerMixin:
                 run_context_snapshot = dict(conversation.context_snapshot)
 
         pre_trace.mark("run.snapshot_ready")
-        run_context_builder = ContextBuilder(
-            token_budget=request_snapshot.config.token_budget,
-            agent_settings=request_snapshot.config.agent,
-            skill_executor=request_snapshot.skill_executor,
-            conversation_id=conversation.id,
-            workspace_root=run_workspace_root,
-        )
-        history_task = asyncio.create_task(to_thread_cancel_safe(
-            run_context_builder.load_snapshot, run_context_snapshot))
-        retain_cleanup_task(history_task, run_context.lifecycle_cleanup_tasks)
+        thread_runtime = run_context.environment_thread_runtime
+        run_context_builder = (thread_runtime.take_model_context(run_context_snapshot, run_workspace_root)
+            if thread_runtime is not None and retry_projection is None else None)
+        history_task = None
+        if run_context_builder is None:
+            run_context_builder = ContextBuilder(
+                token_budget=request_snapshot.config.token_budget,
+                agent_settings=request_snapshot.config.agent,
+                skill_executor=request_snapshot.skill_executor,
+                conversation_id=conversation.id,
+                workspace_root=run_workspace_root,
+            )
+            history_task = asyncio.create_task(to_thread_cancel_safe(
+                run_context_builder.load_snapshot, run_context_snapshot))
+            retain_cleanup_task(history_task, run_context.lifecycle_cleanup_tasks)
         pre_trace.mark("run.history.start")
         # Discovery is independent of journal recovery and the persisted model
         # snapshot. Join it at the first consumer instead of serializing both.
@@ -4753,7 +4758,8 @@ class SessionAgentRunnerMixin:
 
         # Decode durable history while the transport and extension runtime are
         # prepared. Bind the final selected runtime only after that work joins.
-        await asyncio.shield(history_task)
+        if history_task is not None:
+            await asyncio.shield(history_task)
         pre_trace.mark("run.load_snapshot")
         run_context_builder.bind_budget(run_config.token_budget)
         run_context_builder._agent_settings = run_config.agent
@@ -6549,11 +6555,14 @@ class SessionAgentRunnerMixin:
                             )
                         elif pending_ui_state is not None:
                             self.ui_agent_state_store.cache.pop(conversation.id, None)
-                        if conversation.id == self.active_conversation_id:
+                        if conversation.id == self.active_conversation_id or thread_runtime is not None:
                             hydration_generation = self.conversation_runtime._hydration_generation
                             committed_context = await asyncio.to_thread(
                                 self.conversation_repo.get_projection_context, conversation.id,
                             )
+                            if (thread_runtime is not None and terminal_status == "completed" and committed_context is not None
+                                    and thread_runtime._model_snapshot(committed_context[1]) == thread_runtime._model_snapshot(saved_snapshot)):
+                                thread_runtime.retain_model_context(run_context_builder, committed_context[1], run_workspace_root)
                             if (
                                 conversation.id == self.active_conversation_id
                                 and hydration_generation == self.conversation_runtime._hydration_generation

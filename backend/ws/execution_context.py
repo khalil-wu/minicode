@@ -108,8 +108,33 @@ class ConversationThreadRuntime:
     mcp_connections: Any | None = None
     cua_repl_companions: Any | None = None
     exec_policy_owner: Any | None = None
+    model_context: tuple[Any, dict[str, Any], int, str] | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
+
+    def take_model_context(self, snapshot: dict[str, Any], workspace_root: Any):
+        """Transfer the completed thread context to its next admitted turn."""
+        retained, self.model_context = self.model_context, None
+        if retained is None:
+            return None
+        builder, saved, history_revision, workspace = retained
+        if (workspace != str(workspace_root or "") or self.pending_tasks()
+                or builder._history_store.revision != history_revision
+                or saved != self._model_snapshot(snapshot)):
+            return None
+        builder.release_turn_bindings()
+        return builder
+
+    def retain_model_context(self, builder, snapshot: dict[str, Any], workspace_root: Any) -> None:
+        # Snapshot branches belong to the committed repository generation.
+        # A later mutation/recovery must match that generation before reuse.
+        self.model_context = (builder, self._model_snapshot(snapshot), builder._history_store.revision,
+            str(workspace_root or ""))
+
+    @staticmethod
+    def _model_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        return {key: value for key, value in snapshot.items()
+            if key not in {"ui_agent_state", "_ui_agent_state_revision"}}
 
     def retain_turn(self, task: asyncio.Task[Any], cleanup_tasks: set[asyncio.Task[Any]]) -> None:
         self._turn_borrowers[task] = cleanup_tasks
@@ -131,6 +156,7 @@ class ConversationThreadRuntime:
             await self.realtime_runtime.aclose()
         while pending := self.pending_tasks():
             await asyncio.wait(pending)
+        self.model_context = None
         if self.mcp_app_runtime is not None:
             await self.mcp_app_runtime.close_conversation(self.store_identity, self.conversation_id)
         if self.mcp_connections is not None:
