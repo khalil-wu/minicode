@@ -701,7 +701,7 @@ html[data-theme="light"] .workbench-home {
 
 .mc-sidebar-left-inner {
   display: flex;
-  flex: 1 0 auto;
+  flex: 1 1 0%;
   flex-direction: column;
   min-height: 0;
   padding: 0 8px 8px;

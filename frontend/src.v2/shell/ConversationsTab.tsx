@@ -747,6 +747,7 @@ export const ConversationsTab = memo(function ConversationsTab({
   const renderSortableThreads = (items: TreeConversation[], scope: "project" | "recent", projectId?: string) => {
     const byId = new Map(items.map(item => [item.id, item]));
     return <SidebarSortableList identifiers={items.map(item => item.id)} scope={scope}
+      virtualize retainedIds={menuFor ? [menuFor.slice(menuFor.indexOf(":") + 1)] : []}
       ariaLabel={scope === "project" ? tr("项目中的聊天") : tr("最近聊天")}
       disabled={sidebarSortMode !== "manual" || pendingSortMode !== null} renamingId={renaming}
       renderRow={(identifier, binding) => cloneElement(renderSessionRow(byId.get(identifier)!, scope), binding)}
@@ -836,6 +837,7 @@ export const ConversationsTab = memo(function ConversationsTab({
       <div
         ref={listRef}
         data-testid="conversation-list"
+        data-sidebar-scroll
         style={sessionListWrapStyle}
         onScroll={handleConversationListScroll}
       >
@@ -880,6 +882,7 @@ export const ConversationsTab = memo(function ConversationsTab({
           <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{tr("已固定")}</span></div>
           <PinnedWorkspaceFiles />
           <PinnedConversationList conversations={pinnedConversations} renderRow={renderSessionRow} renamingId={renaming}
+            retainedIds={menuFor ? [menuFor.slice(menuFor.indexOf(":") + 1)] : []}
             onDragStart={() => setMenuFor(null)} onReorder={async (movedId, beforeId, visibleIds) => Boolean(await runMenuCommand({
               type: "conversation.pin.reorder", moved_conversation_id: movedId, before_conversation_id: beforeId, visible_conversation_ids: visibleIds,
             }))} />

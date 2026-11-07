@@ -10,11 +10,12 @@ type Props = {
   onReorder: (movedId: string, beforeId: string | null, visibleIds: string[]) => Promise<boolean>;
   renamingId: string | null;
   onDragStart: () => void;
+  retainedIds?: string[];
 };
-export const PinnedConversationList = ({ conversations, renderRow, onReorder, renamingId, onDragStart }: Props) => {
+export const PinnedConversationList = ({ conversations, renderRow, onReorder, renamingId, onDragStart, retainedIds }: Props) => {
   const byId = new Map(conversations.map(conversation => [conversation.id, conversation]));
   return <SidebarSortableList identifiers={conversations.map(conversation => conversation.id)} scope="pinned" ariaLabel="已固定聊天"
     renderRow={(identifier, binding) => cloneElement(renderRow(byId.get(identifier)!, "pinned"), binding)}
     renderOverlay={identifier => renderRow(byId.get(identifier)!, "pinned-overlay")}
-    onReorder={onReorder} renamingId={renamingId} onDragStart={onDragStart} />;
+    onReorder={onReorder} renamingId={renamingId} onDragStart={onDragStart} virtualize retainedIds={retainedIds} />;
 };
