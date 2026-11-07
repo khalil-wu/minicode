@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections import Counter
+from collections import Counter, OrderedDict
 from copy import deepcopy
 from dataclasses import replace
+from itertools import count
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -25,6 +26,7 @@ from backend.async_cleanup import (
 from backend.tools.base import BaseTool, PermissionLevel, ToolResult, execution_exception_result, validate_tool_input
 
 logger = logging.getLogger(__name__)
+_SCHEMA_REVISIONS = count(1)
 
 class CapabilityRegistry:
     """In-memory registry for tools, commands, and skills."""
@@ -36,6 +38,7 @@ class CapabilityRegistry:
         self._tool_owners: dict[str, str] = {}
         self._tool_schema_revisions: dict[str, int] = {}
         self._schema_cache: dict[str, list[dict[str, Any]]] = {}
+        self._schema_templates: OrderedDict[str, str] = OrderedDict()
         self._validated_policies: set[tuple[str, int]] = set()
         self._version = 0
         self._schema_source = object()
@@ -57,7 +60,7 @@ class CapabilityRegistry:
                 )
             logger.warning("Replacing tool '%s' owned by %s", tool.name, self._tool_owners.get(tool.name, "unknown"))
         self._tools[tool.name] = tool
-        self._tool_schema_revisions[tool.name] = self._version + 1
+        self._tool_schema_revisions[tool.name] = next(_SCHEMA_REVISIONS)
         self._tool_owners[tool.name] = str(owner or getattr(tool, "owner", None) or "builtin")
         self._touch()
 
@@ -134,7 +137,9 @@ class CapabilityRegistry:
         clone._tool_schema_revisions = dict(self._tool_schema_revisions)
         clone._commands = deepcopy(self._commands)
         clone._skills = deepcopy(self._skills)
-        clone._schema_cache = deepcopy(self._schema_cache)
+        # Each run owns mutable projections; equivalent sibling runs can read
+        # one immutable serialized template for the exact tool generations.
+        clone._schema_templates = self._schema_templates
         clone._validated_policies = set(self._validated_policies)
         clone._version = self._version
         clone._schema_source = self._schema_source
@@ -655,6 +660,12 @@ class CapabilityRegistry:
         cached = self._schema_cache.get(cache_key)
         if cached is not None:
             return cached
+        template = self._schema_templates.get(cache_key)
+        if template is not None:
+            self._schema_templates.move_to_end(cache_key)
+            schemas = json.loads(template)
+            self._schema_cache[cache_key] = schemas
+            return schemas
 
         # Single source of truth: derive direct schemas from ToolSchemaView.
         # A view has a non-None schema iff it is directly visible and not denied.
@@ -719,6 +730,10 @@ class CapabilityRegistry:
         schemas = canonicalize_tool_schemas(schemas, tool_registry=self)
 
         self._schema_cache[cache_key] = schemas
+        self._schema_templates[cache_key] = json.dumps(schemas, ensure_ascii=False, separators=(",", ":"))
+        self._schema_templates.move_to_end(cache_key)
+        while len(self._schema_templates) > 32:
+            self._schema_templates.popitem(last=False)
         return schemas
 
     async def execute(

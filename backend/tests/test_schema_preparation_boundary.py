@@ -32,6 +32,46 @@ def prepare_schemas(registry, checker, permission, policy, *, previous=None):
         toolset_policy=policy, previous=previous, permission_decisions=decisions)
 
 
+def test_sibling_runs_reuse_schema_generation_without_sharing_mutable_payloads(tmp_path):
+    calls = []
+
+    class ReadTool(BaseTool):
+        name = "owned_read"
+        read_only = True
+
+        def __init__(self, field):
+            self.field = field
+
+        def get_schema(self):
+            calls.append(self.field)
+            return ToolSchema(self.name, "Read owned data", {"type": "object",
+                "properties": {self.field: {"type": "string"}}, "required": [self.field]})
+
+        async def execute(self, args, context=None):
+            raise AssertionError("Schema lookup does not execute tools")
+
+    registry = ToolRegistry()
+    registry.register(ReadTool("original"))
+    first, second = registry.fork(), registry.fork()
+    original = first.get_schemas()
+    first_count = len(calls)
+    original[0]["function"]["parameters"]["required"].append("first-run-only")
+    reused = second.get_schemas()
+    # The current tool spec is still inspected for capability/revision facts;
+    # building, postprocessing and canonicalizing its payload are reused.
+    assert len(calls) - first_count < first_count
+    assert reused[0]["function"]["parameters"]["required"] == ["original"]
+    replacement = ReadTool("updated")
+    second.register(replacement, replace=True)
+    changed = second.get_schemas()
+    assert changed[0]["function"]["parameters"]["required"] == ["updated"]
+    assert first.get_schemas() is original
+    third = registry.fork()
+    assert third.get_schemas()[0]["function"]["parameters"]["required"] == ["original"]
+    permission = PermissionContext(mode="confirm", tool_deny_rules=["owned_read"])
+    assert third.get_schemas(permission_checker=PermissionChecker(PermissionSettings(), tmp_path), permission_context=permission) == []
+
+
 @pytest.mark.parametrize("code_mode_only", [False, True])
 def test_real_tool_surface_shares_decisions_without_changing_provider_contract(tmp_path, monkeypatch, code_mode_only):
     config = AppConfig(llm=LLMSettings(api_key=""), config_layer_stack=ConfigLayerStack(()))
