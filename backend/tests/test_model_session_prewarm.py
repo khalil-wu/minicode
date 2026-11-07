@@ -370,3 +370,21 @@ async def test_navigation_retires_a_speculative_adapter_without_a_loaded_core(tm
         assert not any(key[:2] == ("conversation", record.id) for key in session._llm_adapter_cache)
     finally:
         await session.session_lifecycle.shutdown(reason="speculative-prewarm")
+
+
+@pytest.mark.asyncio
+async def test_startup_route_survives_warmup_handoff_but_not_the_next_completed_turn():
+    def handshake(_socket, _request, response):
+        response.headers["x-codex-turn-state"] = "startup-route"
+        return response
+    async def respond(socket, request, index):
+        await socket.send(json.dumps(terminal(str(index), output=[])))
+    async with endpoint(respond, process_response=handshake) as (adapter, requests, connections):
+        await adapter.schedule_session_preconnect(metadata("startup-prewarm"))
+        await adapter.schedule_session_prewarm([], [], metadata("prepared-prompt"))
+        await completed(adapter, [LLMMessage("user", "First actual request")], owner=metadata("first"))
+        assert requests[0]["client_metadata"]["x-codex-turn-state"] == "startup-route"
+        assert requests[1]["client_metadata"]["x-codex-turn-state"] == "startup-route"
+        await completed(adapter, [LLMMessage("user", "Next actual request")], owner=metadata("second"))
+        assert "x-codex-turn-state" not in requests[2]["client_metadata"]
+        assert len(connections) == 1

@@ -188,7 +188,7 @@ def test_exhausted_websocket_retries_switch_to_http_with_a_new_attempt(tmp_path,
 
 
 @asynccontextmanager
-async def endpoint(responder, *, http_client=None, process_request=None, compression="deflate", handle_warmup=False):
+async def endpoint(responder, *, http_client=None, process_request=None, process_response=None, compression="deflate", handle_warmup=False):
     requests, connections = [], []
     async def handler(socket):
         connections.append(socket)
@@ -199,7 +199,8 @@ async def endpoint(responder, *, http_client=None, process_request=None, compres
                 continue
             requests.append(request)
             await responder(socket, request, len(requests))
-    async with serve(handler, "127.0.0.1", 0, max_size=None, close_timeout=1, process_request=process_request, compression=compression) as server:
+    async with serve(handler, "127.0.0.1", 0, max_size=None, close_timeout=1, process_request=process_request,
+            process_response=process_response, compression=compression) as server:
         port = server.sockets[0].getsockname()[1]
         adapter = OpenAIAdapter(LLMSettings(api_key="fixture", provider="openai", model="fixture-model",
             base_url=f"http://127.0.0.1:{port}/v1", wire_api="responses", proxy_mode="direct", responses_websocket=True), http_client=http_client)

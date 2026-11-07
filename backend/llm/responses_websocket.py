@@ -86,6 +86,7 @@ class _Connection:
     baseline: list[dict[str, Any]] = field(default_factory=list)
     response_id: str = ""
     turn_state: str = ""
+    last_request_warmup: bool = False
 
 
 class ResponsesWebSocketPool:
@@ -174,7 +175,10 @@ class ResponsesWebSocketRequest:
             connection = _Connection(socket, identity, owner=self.owner)
         if connection.owner != self.owner:
             connection.owner = self.owner
-            connection.turn_state = ""
+            # Startup hands the prepared session to its first regular turn.
+            # Only a completed generation starts a fresh turn-state domain.
+            if connection.response_id and not connection.last_request_warmup:
+                connection.turn_state = ""
         # The token received from the previous handshake belongs on this
         # request. A token learned from the current handshake starts with the
         # next request, matching the upstream turn-state contract.
@@ -294,6 +298,7 @@ class ResponsesWebSocketRequest:
             connection.baseline = [_replay_item(item) for item in
                                    [*self.payload.get("input", []), *self.response.get("output", [])]]
             connection.response_id = self.response["id"]
+            connection.last_request_warmup = self.payload.get("generate") is False
             key = thread_owner(self.owner)
             previous = self.pool.idle.get(key)
             self.pool.idle[key] = connection
