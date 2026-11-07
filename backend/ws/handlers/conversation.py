@@ -75,7 +75,7 @@ def _conversation_cleanup_owner(
 
 
 async def _broadcast_conversation_lists(
-    session: "WebSocketSession", *, inventory: tuple[str, int, list[Any]] | None = None, archive_navigation: str | None = None,
+    session: "WebSocketSession", *, archive_navigation: str | None = None,
 ) -> list[str]:
     """Publish one authoritative inventory snapshot to every connected renderer."""
 
@@ -84,7 +84,7 @@ async def _broadcast_conversation_lists(
         if not owner_session.is_connected:
             continue
         try:
-            list_arguments = {"inventory": inventory} if inventory is not None else {}
+            list_arguments = {}
             if owner_session is session and archive_navigation is not None:
                 list_arguments["archive_navigation"] = archive_navigation
             sent = await await_with_deadline(
@@ -1310,11 +1310,16 @@ async def _activate_conversation_or_blank(
 
 
 async def handle_conversation_list(session: "WebSocketSession", data: dict[str, Any]) -> bool:
+    if "known_conversation_ids" in data:
+        session._directory_known_ids = set(data["known_conversation_ids"])
+        store_id = await asyncio.to_thread(session.conversation_repo.store_instance_id)
+        session._directory_inventory_revision = (data.get("known_inventory_revision", 0)
+            if data.get("known_inventory_instance_id") == store_id else 0)
     preferred = str(data.get("preferred_conversation_id") or "").strip()
     if preferred:
         await _activate_conversation_or_blank(session, preferred)
     elif session.active_conversation_id:
-        active = session.conversation_repo.get_conversation(session.active_conversation_id)
+        active = session.conversation_repo.get_conversation_summary(session.active_conversation_id)
         if active is None or getattr(active, "archived", False):
             await _activate_conversation_or_blank(session)
     await session.send_conversation_list()
@@ -1503,7 +1508,6 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
             )
             return True
         fallback_errors: list[str] = []
-        inventory = await asyncio.to_thread(session.conversation_repo.list_conversations_with_revision)
         home_activated = False
         home_superseded = request.archive_navigation == "home" and not session.session_lifecycle.foreground_navigation_is_current()
         if request.archive_navigation == "home" and not home_superseded:
@@ -1525,7 +1529,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
             if owner_session.active_conversation_id != conversation_id:
                 continue
             try:
-                await _activate_conversation_or_blank(owner_session, conversation_summaries=inventory[2])
+                await _activate_conversation_or_blank(owner_session)
             except Exception:
                 logger.exception(
                     "Failed to activate a fallback after archiving %s for session %s",
@@ -1534,7 +1538,7 @@ async def handle_conversation_archive(session: "WebSocketSession", data: dict[st
                 )
                 fallback_errors.append(str(owner_session.session_id))
         _schedule_long_term_memory_forgetting(session, updated)
-        broadcast_errors = await _broadcast_conversation_lists(session, inventory=inventory, archive_navigation=request.archive_navigation)
+        broadcast_errors = await _broadcast_conversation_lists(session, archive_navigation=request.archive_navigation)
         projection_errors = list(dict.fromkeys([*fallback_errors, *broadcast_errors]))
         if session.ws_manager is not None:
             if not await session.ws_manager.unload_conversation_execution(conversation_id, reason="conversation_archived"):

@@ -432,14 +432,14 @@ def choose_conversation_activation_target(
             return candidate
         return None
 
-    available = [
-        item
-        for item in (conversations if conversations is not None else conversation_repo.list_conversations())
-        if (
-            not getattr(item, "archived", False)
-            and normalize_conversation_type(getattr(item, "conversation_type", None)) == "main"
-        )
-    ]
+    if conversations is None:
+        from backend.conversations.models import ConversationSummary
+
+        conversation_repo.directory.ensure_current()
+        available = [ConversationSummary.from_dict(item) for item in conversation_repo.directory.page(
+            {"limit": 1, "conversation_type": "main", "use_state_db_only": True})["data"]]
+    else:
+        available = [item for item in conversations if not item.archived and item.conversation_type == "main"]
     if not available:
         return None
     return available[0]

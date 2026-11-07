@@ -109,6 +109,8 @@ class ConversationRepository:
         from backend.conversations.thread_resources import ThreadResourceReferences
         self.thread_sections = ThreadSectionStore(self)
         self.thread_resources = ThreadResourceReferences(self)
+        from backend.conversations.directory import ConversationDirectory
+        self.directory = ConversationDirectory(self)
         self._store_file_lock = FileLock(self._store_lock_path, timeout=60)
         self._summary_index: dict[str, ConversationSummary] | None = None
         self._summary_index_stamps: dict[str, tuple[tuple[int, int], ...]] = {}
@@ -784,15 +786,8 @@ class ConversationRepository:
         *,
         conversation_type: ConversationType | None = None,
     ) -> tuple[str, int, list[ConversationSummary]]:
-        with self._store_lock():
-            conversations = self._list_conversations_unlocked(
-                conversation_type=conversation_type,
-            )
-            return (
-                self._read_or_create_store_instance_id_unlocked(),
-                self._read_store_revision_unlocked(),
-                conversations,
-            )
+        return self.directory.all_summaries(
+            normalize_conversation_type(conversation_type) if conversation_type is not None else None)
 
     def store_instance_id(self) -> str:
         """Return the durable identity of this conversation store."""
@@ -881,6 +876,8 @@ class ConversationRepository:
                         json.dumps(tombstone, ensure_ascii=False, indent=2),
                         encoding="utf-8",
                     )
+                    self.directory.committed(None, conversation_id=conversation_id,
+                        revision=self._read_store_revision_unlocked())
             except Exception:
                 published = self._read_manifest(conversation_id, log_errors=False)
                 if not (
@@ -1758,7 +1755,7 @@ class ConversationRepository:
             ordered = [next(replacements) if identifier in visible else identifier for identifier in current]
             if ordered != current or saved["sort_mode"] != "manual":
                 atomic_write_text(self._pinned_order_path, json.dumps({"thread_ids": ordered, "sort_mode": "manual"}, ensure_ascii=False), encoding="utf-8")
-                self._advance_store_revision_unlocked()
+                self.directory.reordered(self._advance_store_revision_unlocked())
             return ordered
 
     def _read_sidebar_order(self) -> dict[str, Any]:
@@ -1774,7 +1771,7 @@ class ConversationRepository:
         state = {**state, "revision": state["revision"] + 1}
         atomic_write_text(self._sidebar_order_path, json.dumps(state, ensure_ascii=False), encoding="utf-8")
         if advance_inventory:
-            self._advance_store_revision_unlocked()
+            self.directory.reordered(self._advance_store_revision_unlocked())
 
     def get_sidebar_order(self, conversations: list[ConversationSummary]) -> dict[str, Any]:
         from backend.conversations.sidebar_order import thread_orders
@@ -2225,6 +2222,8 @@ class ConversationRepository:
                 self._manifest_path_for(record.id),
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             )
+            self.directory.committed(ConversationSummary.from_dict(metadata), conversation_id=record.id,
+                revision=self._read_store_revision_unlocked())
         record.revision = revision
         record.content_revision = metadata["content_revision"]
         record.content_updated_at = metadata["content_updated_at"]
@@ -2571,6 +2570,8 @@ class ConversationRepository:
                     json.dumps(manifest_payload, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
+                self.directory.committed(record.to_summary(), conversation_id=record.id,
+                    revision=self._read_store_revision_unlocked())
         except Exception:
             # Keep detached callers retryable after a pre-commit failure. If
             # the atomic manifest replacement actually became authoritative

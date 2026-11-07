@@ -276,63 +276,45 @@ def test_conversation_inventory_epoch_fields_are_atomic() -> None:
             validate_session_projection_payload(payload)
 
 
-def _conversation_list_session(versioned_listing: Any) -> WebSocketSession:
+def _conversation_list_session(directory_payload: dict) -> WebSocketSession:
     session = object.__new__(WebSocketSession)
-    session.conversation_runtime = SimpleNamespace(
-        active_conversation_id=None,
-        active_conversation=None,
-    )
+    session._directory_known_ids = set()
+    session._directory_inventory_revision = 0
+    session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
     session.runtime_snapshot = Mock(return_value={"session_id": "session-list"})
-    session.send_payload = AsyncMock(return_value=True)
+    session.sent = AsyncMock(return_value=True)
+    async def validated_send(payload, **kwargs):
+        validate_session_projection_payload(payload)
+        return await session.sent(payload, **kwargs)
+    session.send_payload = validated_send
     session.ws_manager = None
     session.session_lifecycle = SimpleNamespace(foreground_navigation_is_current=lambda: True)
-    session.conversation_repo = SimpleNamespace(
-        list_conversations_with_revision=lambda: versioned_listing,
-        get_pinned_order=lambda _summaries: {"pinned_conversation_ids": [], "pinned_sort_mode": "manual"},
-        get_sidebar_order=lambda _summaries: {},
-        thread_sections=SimpleNamespace(list=lambda: []),
-    )
+    session.conversation_repo = SimpleNamespace(directory=SimpleNamespace(inventory=lambda **_: directory_payload),
+        thread_sections=SimpleNamespace(list=lambda: []))
     return session
 
 
-def test_send_conversation_list_projects_production_epoch_and_legacy_double() -> None:
-    summary = _conversation().to_summary()
-    versioned = _conversation_list_session((
-        "0123456789abcdef0123456789abcdef",
-        9,
-        [summary],
-    ))
-    asyncio.run(versioned.send_conversation_list())
-    versioned_payload = versioned.send_payload.await_args.args[0]
-    assert versioned_payload["inventory_instance_id"] == "0123456789abcdef0123456789abcdef"
-    assert versioned_payload["inventory_revision"] == 9
-    versioned.runtime_snapshot.assert_called_once_with(include_capabilities=False)
-
-    legacy = _conversation_list_session((9, [summary]))
-    asyncio.run(legacy.send_conversation_list())
-    legacy_payload = legacy.send_payload.await_args.args[0]
-    assert "inventory_instance_id" not in legacy_payload
-    assert "inventory_revision" not in legacy_payload
+def test_send_conversation_list_projects_production_directory_epoch() -> None:
+    session = _conversation_list_session({"inventory_instance_id": "0123456789abcdef0123456789abcdef",
+        "inventory_revision": 9, "conversations": [_conversation().to_summary().to_dict()],
+        "partial_inventory": True, "removed_conversation_ids": [], "directory_page": {"next_cursor": None}})
+    asyncio.run(session.send_conversation_list())
+    payload = session.sent.await_args.args[0]
+    assert payload["inventory_instance_id"] == "0123456789abcdef0123456789abcdef"
+    assert payload["inventory_revision"] == 9 and payload["partial_inventory"]
+    session.runtime_snapshot.assert_called_once_with(include_capabilities=False)
 
 
-@pytest.mark.parametrize(
-    "versioned_listing",
-    [
-        ("", 1, []),
-        ("0123456789abcdef0123456789abcdef", -1, []),
-        ("0123456789abcdef0123456789abcdef", 1.5, []),
-        ("0123456789abcdef0123456789abcdef", True, []),
-        ("0123456789abcdef0123456789abcdef", 9_007_199_254_740_992, []),
-        ("0123456789abcdef0123456789abcdef",),
-    ],
-)
-def test_send_conversation_list_rejects_malformed_versioned_repository_results(
-    versioned_listing: Any,
-) -> None:
-    session = _conversation_list_session(versioned_listing)
-    with pytest.raises(ValueError, match="list_conversations_with_revision"):
+@pytest.mark.parametrize("invalid", [
+    {"inventory_instance_id": ""}, {"inventory_revision": -1}, {"inventory_revision": 1.5},
+    {"inventory_revision": True}, {"inventory_revision": 9_007_199_254_740_992},
+])
+def test_send_conversation_list_rejects_malformed_directory_epoch(invalid) -> None:
+    session = _conversation_list_session({"inventory_instance_id": "0123456789abcdef0123456789abcdef",
+        "inventory_revision": 9, "conversations": [], **invalid})
+    with pytest.raises(ValueError):
         asyncio.run(session.send_conversation_list())
-    session.send_payload.assert_not_awaited()
+    session.sent.assert_not_awaited()
 
 
 def test_session_replay_contract_accepts_durable_links_across_transient_seq_gaps() -> None:

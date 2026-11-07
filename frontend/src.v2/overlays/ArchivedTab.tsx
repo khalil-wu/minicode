@@ -13,6 +13,10 @@ import { showConfirm } from "./DialogService";
 import { useConversationSearch } from "../hooks/useConversationSearch";
 import { capabilityFeatureEnabled } from "../protocol/capabilities";
 import { searchResultConversation } from "../protocol/conversation-search";
+import { useConversationDirectory } from "../hooks/useConversationDirectory";
+import { fetchConversationDirectory } from "../protocol/conversation-directory";
+import { toConversationMeta } from "../chat/sessionEvents";
+import { getWebSocket } from "../hooks/useWebSocket";
 import "./ArchivedTab.css";
 
 type ArchiveMenu = { anchor: HTMLButtonElement; kind: "filter" | "project"; project?: string };
@@ -23,6 +27,7 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
   const conversations = useAppStore(state => active ? state.conversations : EMPTY_CONVERSATIONS);
   const workspaces = useAppStore(state => state.recentWorkspaces);
   const runtimeCapabilities = useAppStore(state => state.runtimeCapabilities);
+  const pagedDirectory = useAppStore(state => state.conversationDirectory !== null);
   const archived = conversations.filter(conversation => conversation.archived && conversation.conversationType !== "side_chat");
   const [restoringIds, setRestoringIds] = useState<Record<string, boolean>>({});
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
@@ -30,6 +35,8 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
   const [project, setProject] = useState<string | null>(null);
   const [sort, setSort] = useState<"updated" | "created" | "alphabetical">("updated");
   const [type, setType] = useState<"all" | "local">("all");
+  const directory = useConversationDirectory(active && pagedDirectory, { archived: true,
+    sort_key: sort === "created" ? "created_at" : "updated_at" }, sort === "alphabetical" || project !== null);
   const [menu, setMenu] = useState<ArchiveMenu | null>(null);
   const [projectMenu, setProjectMenu] = useState<HTMLButtonElement | null>(null);
   useEffect(() => {
@@ -47,6 +54,15 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
     observer.observe(target);
     return () => observer.disconnect();
   }, [bodySearch.hasMore, bodySearch.loading, bodySearch.error, bodySearch.loadMore]);
+  useEffect(() => {
+    const target = searchEnd.current;
+    if (!target || !directory.hasMore || directory.loading || directory.error) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting)) void directory.loadMore();
+    }, { root: target.closest(".settings-center-content"), rootMargin: "120px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [directory.hasMore, directory.loading, directory.error, directory.loadMore]);
   const projectRoot = (conversation: ConversationMeta) => conversation.projectId ?? (conversation.workspaceRoot || conversation.worktreePath || "");
   const projectName = (root: string) => root ? workspaces.find(workspace => canonicalWorkspacePath(workspace.path) === canonicalWorkspacePath(root))?.name || workspaceDisplayName(root) : t("无项目");
   const projects = [...new Map([...workspaces.map(workspace => workspace.path), ...archived.map(projectRoot)].map(root => [canonicalWorkspacePath(root), root])).values()];
@@ -84,8 +100,22 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
     finally { setRestoringIds(current => { const next = { ...current }; delete next[conversation.id]; return next; }); }
   };
   const deleteConversations = async (items: ConversationMeta[], kind: "single" | "project" | "all") => {
+    const requestedIds = items.map(item => item.id);
     setDeletingIds(current => ({ ...current, ...Object.fromEntries(items.map(item => [item.id, true])) }));
     try {
+      if (pagedDirectory && kind !== "single") {
+        const sessionId = getWebSocket()!.sessionId;
+        const selectedProject = kind === "project" ? projectRoot(items[0]) : null;
+        const all: ConversationMeta[] = [];
+        let cursor: string | null = null;
+        do {
+          const page = await fetchConversationDirectory({ archived: true, limit: 100, cursor, use_state_db_only: true }, sessionId);
+          if (getWebSocket()?.sessionId !== sessionId) return;
+          all.push(...page.data.map(toConversationMeta));
+          cursor = page.next_cursor;
+        } while (cursor);
+        items = selectedProject === null ? all : all.filter(item => canonicalWorkspacePath(projectRoot(item)) === canonicalWorkspacePath(selectedProject));
+      }
       const confirmed = await showConfirm({
         title: kind === "all" ? t("删除所有已归档聊天？") : kind === "project" ? t("删除项目内所有已归档聊天？") : t("删除已归档聊天？"),
         message: kind === "all" ? t("这会永久删除所有本地已归档聊天。") : kind === "project" ? t("这会永久删除此项目中的 {count} 个本地已归档聊天。", { count: items.length }) : t("这会永久删除此已归档聊天。"),
@@ -97,7 +127,7 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
         if (!deleted) return;
       }
     } finally {
-      setDeletingIds(current => { const next = { ...current }; for (const item of items) delete next[item.id]; return next; });
+      setDeletingIds(current => { const next = { ...current }; for (const id of requestedIds) delete next[id]; return next; });
     }
   };
   const deleteAll = archived.length > 0 ? <button type="button" className="settings-action-button" data-danger="true" disabled={busy} onClick={() => void deleteConversations(archived, "all")}><Trash2 size={14} />{t("全部删除")}</button> : null;
@@ -124,10 +154,10 @@ export const ArchivedTab = ({ toolbarHost, active = true }: { toolbarHost?: HTML
       </div>)}</div>
     </section>)}</div>
     <div ref={searchEnd} className="settings-archive-search-status">
-      {bodySearch.loading && <p role="status">{t("正在搜索…")}</p>}
-      {bodySearch.error && <p role="alert">{bodySearch.error}</p>}
+      {(bodySearch.loading || directory.loading) && <p role="status">{t("正在搜索…")}</p>}
+      {(bodySearch.error || directory.error) && <p role="alert">{bodySearch.error || directory.error}</p>}
     </div>
-    {matching.length === 0 && !bodySearch.loading && !bodySearch.error && <div className="settings-archive-empty"><Archive aria-hidden="true" /><strong>{archived.length ? t("没有匹配的任务") : t("没有已归档任务")}</strong><span>{archived.length ? t("试试其他标题或项目。") : t("从会话菜单归档的任务会显示在这里。")}</span></div>}
+    {matching.length === 0 && !bodySearch.loading && !bodySearch.error && !directory.loading && !directory.error && <div className="settings-archive-empty"><Archive aria-hidden="true" /><strong>{archived.length ? t("没有匹配的任务") : t("没有已归档任务")}</strong><span>{archived.length ? t("试试其他标题或项目。") : t("从会话菜单归档的任务会显示在这里。")}</span></div>}
     {active && menu && <ContextMenu position={{ x: menu.anchor.getBoundingClientRect().right - 220, y: menu.anchor.getBoundingClientRect().bottom + 6 }} anchor={menu.anchor} onClose={() => setMenu(null)} items={menuItems} />}
     {active && projectMenu && <ContextMenu position={{ x: projectMenu.getBoundingClientRect().right - 240, y: projectMenu.getBoundingClientRect().bottom + 6 }} anchor={projectMenu} onClose={() => setProjectMenu(null)} items={[
       { label: t("全部项目"), checked: project === null, onClick: () => setProject(null) },

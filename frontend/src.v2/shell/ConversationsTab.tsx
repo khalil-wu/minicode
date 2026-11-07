@@ -41,6 +41,7 @@ import { getWebSocket } from "../hooks/useWebSocket";
 import { useSidebarSections, type SidebarSection } from "../protocol/thread-metadata";
 import { SidebarSections } from "./SidebarSections";
 import { handoffConversationWorktree } from "../lib/handoff-worktree";
+import { fetchConversationDirectory, publishDirectoryPage } from "../protocol/conversation-directory";
 
 // The menu invocation owns its reply even after the reader changes chats.
 const runMenuCommand = async (command: ClientCommand): Promise<CommandResultEvent | undefined> => {
@@ -223,6 +224,8 @@ export const ConversationsTab = ({
 }) => {
   const { t: tr } = useI18n();
   const conversations = useAppStore((s) => s.conversations);
+  const directory = useAppStore(s => s.conversationDirectory);
+  const [loadingDirectory, setLoadingDirectory] = useState<string | null>(null);
   const pinnedConversationIds = useAppStore((s) => s.pinnedConversationIds);
   const hasPinnedFiles = useAppStore(s => s.workspaceFileTabs.some(tab => tab.pinned));
   const pinnedConversationSortMode = useAppStore((s) => s.pinnedConversationSortMode);
@@ -615,6 +618,27 @@ export const ConversationsTab = ({
       return next;
     });
   }, []);
+  const loadDirectoryPage = async (projectKey?: string) => {
+    const scope = projectKey ?? "recent";
+    const cursor = projectKey === undefined ? directory?.nextCursor : directory?.projectCursors[projectKey];
+    const sessionId = getWebSocket()?.sessionId;
+    if (!cursor || !sessionId || loadingDirectory !== null) return;
+    setLoadingDirectory(scope);
+    try {
+      const page = await fetchConversationDirectory({ cursor, limit: 25,
+        sidebar_scope: projectKey === undefined ? "recent" : "project", sidebar_project: projectKey }, sessionId);
+      if (publishDirectoryPage(page, sessionId, { projectKey })) {
+        if (projectKey === undefined) setRecentLimit(count => count + 25);
+        else setExpandedProjects(current => new Set([...current, projectKey]));
+      }
+    } catch (error) {
+      pushToast(error instanceof Error ? error.message : String(error), "error");
+    } finally { setLoadingDirectory(null); }
+  };
+  const showMoreRecent = () => {
+    if (directory?.nextCursor) void loadDirectoryPage();
+    else setRecentLimit(count => count + 20);
+  };
   const addProject = async () => {
     useAppStore.setState({ projectEditTarget: "create" });
     onNavigateRef.current?.();
@@ -764,16 +788,33 @@ export const ConversationsTab = ({
       {!collapsedGroups.has(projectKey) && <div className="mc-workspace-group-body">
         <div className="mc-workspace-group-body-inner" style={taskSectionBodyStyle}>
           {renderSortableThreads(expandedProjects.has(projectKey) ? orderedConversations : orderedConversations.slice(0, 5), "project", group.path)}
-          {orderedConversations.length > 5 && <button type="button" className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
-            aria-expanded={expandedProjects.has(projectKey)} onClick={() => toggleProjectExpansion(projectKey)}>
-            {expandedProjects.has(projectKey) ? tr("收起") : tr("展开显示")}</button>}
+          {(orderedConversations.length > 5 || directory?.projectCursors[projectKey]) && <button type="button" className="mc-sidebar-more-recents mc-sidebar-more-project-sessions"
+            disabled={loadingDirectory === projectKey} aria-expanded={expandedProjects.has(projectKey)}
+            onClick={() => directory?.projectCursors[projectKey] ? void loadDirectoryPage(projectKey) : toggleProjectExpansion(projectKey)}>
+            {expandedProjects.has(projectKey) && !directory?.projectCursors[projectKey] ? tr("收起") : tr("展开显示")}</button>}
         </div>
       </div>}
     </section>
   );
-  const sectionThreadIds = (section: SidebarSection) => [...new Set(section.item_keys.flatMap(key => key.startsWith("thread:")
-    ? filtered.some(item => item.id === key.slice(7)) ? [key.slice(7)] : []
-    : allProjectGroups.get(workspaceGroupIdentity(key.slice(8)))?.items.map(item => item.id) ?? []))];
+  const sectionThreadIds = async (section: SidebarSection) => {
+    const identifiers = new Set(section.item_keys.flatMap(key => key.startsWith("thread:")
+      ? filtered.some(item => item.id === key.slice(7)) ? [key.slice(7)] : []
+      : allProjectGroups.get(workspaceGroupIdentity(key.slice(8)))?.items.map(item => item.id) ?? []));
+    if (directory) {
+      const sessionId = getWebSocket()!.sessionId;
+      for (const key of section.item_keys.filter(item => item.startsWith("project:"))) {
+        let cursor: string | null = null;
+        do {
+          const page = await fetchConversationDirectory({ sidebar_scope: "project", sidebar_project: workspaceGroupIdentity(key.slice(8)),
+            limit: 100, cursor }, sessionId);
+          if (getWebSocket()?.sessionId !== sessionId) throw new Error(tr("后端连接尚未就绪，恢复连接后将重新读取。"));
+          for (const item of page.data) identifiers.add(item.id);
+          cursor = page.next_cursor;
+        } while (cursor);
+      }
+    }
+    return [...identifiers];
+  };
   const projectGroupsById = new Map(orderedProjectGroups.map(group => [group.projectKey, group]));
   const isEmpty = activityView ? filtered.length === 0
     : !hasPinnedFiles && pinnedConversations.length === 0 && projectGroups.size === 0 && sections.length === 0 && (!showRecent || recentConversations.length === 0);
@@ -801,10 +842,11 @@ export const ConversationsTab = ({
         {!activityView && <SidebarSections sections={sections} collapsed={collapsedGroups} onToggle={toggleGroup}
           onNew={() => { void editSection(); }} onEdit={section => { void editSection(section); }}
           onRemove={id => { void sectionAction(`/sections/${id}`, undefined, "DELETE"); }}
-          onRead={section => { for (const id of sectionThreadIds(section)) setReadState(id, false); }}
+          onRead={section => { void sectionThreadIds(section).then(ids => { for (const id of ids) setReadState(id, false); })
+            .catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); }}
           onArchive={section => { void (async () => {
             if (!await showConfirm({ title: tr("归档分组中的聊天？"), message: section.name, confirmLabel: tr("归档") })) return;
-            for (const id of sectionThreadIds(section)) {
+            for (const id of await sectionThreadIds(section)) {
               const result = await setConversationArchived(id, true);
               if (!wsOutbox.commandResultSucceeded(result)) throw new Error(result.message);
             }
@@ -867,12 +909,12 @@ export const ConversationsTab = ({
             </div>;
           })}
         </section>)}
-        {activityView && filtered.length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
+        {activityView && (filtered.length > recentLimit || directory?.nextCursor) && <button type="button" className="mc-sidebar-more-recents" disabled={loadingDirectory === "recent"} onClick={showMoreRecent}>{tr("显示更多")}</button>}
         {!activityView && showRecent && recentConversations.length > 0 && <section aria-label={tr("最近")} className="mc-sidebar-recents">
           <div className="mc-sidebar-project-heading"><span className="mc-sidebar-project-label">{tr("最近")}</span>
             <SidebarSortMenu section="chats" mode={sidebarSortMode} onSelect={mode => { void selectSortMode(mode); }} onNewSection={() => { void editSection(); }} /></div>
           <div className="mc-sidebar-recent-list">{renderSortableThreads(recentConversations, "recent")}</div>
-          {filtered.filter(conversation => !conversation.pinned).length > recentLimit && <button type="button" className="mc-sidebar-more-recents" onClick={() => setRecentLimit((count) => count + 20)}>{tr("显示更多")}</button>}
+          {(filtered.filter(conversation => !conversation.pinned).length > recentLimit || directory?.nextCursor) && <button type="button" className="mc-sidebar-more-recents" disabled={loadingDirectory === "recent"} onClick={showMoreRecent}>{tr("显示更多")}</button>}
         </section>}
       </div>
       {workspaceMenu && <ProjectContextMenu path={workspaceMenu.path} position={workspaceMenu} anchor={workspaceMenu.anchor} onClose={() => setWorkspaceMenu(null)} />}

@@ -31,6 +31,7 @@ from .models import ChatRequest, ChatResponse, UploadResponse
 from backend.services.tool_registry_factory import get_attachment_store as _get_attachment_store
 from backend.services.conversation_resources_service import background_command_detail, conversation_resource_page
 from backend.services.conversation_search_service import conversation_search_page
+from backend.services.conversation_directory_service import ConversationDirectoryRequest, conversation_directory_page
 from backend.services.conversation_payload_service import restore_tool_artifact_sources
 from backend.ws.command_scope import resolve_command_scope
 from backend.conversations.import_export import import_conversation_tree
@@ -39,6 +40,19 @@ _UPLOAD_READ_CHUNK = 1024 * 1024
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.post("/api/conversations/list")
+async def list_conversations(request: ConversationDirectoryRequest, response: Response,
+        session_id: str = Query(..., min_length=1)):
+    session = _state.ws_manager.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "Session is not connected.")
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await run_in_threadpool(conversation_directory_page, session, request)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
 
 
 @router.get("/api/conversations/search")

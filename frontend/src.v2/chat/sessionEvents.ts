@@ -262,7 +262,7 @@ export const applyUserMessageQueueUpdate = (event: UserMessageQueueUpdatedEvent)
   });
 };
 
-const toConversationMeta = (conversation: ConversationSummary) => ({
+export const toConversationMeta = (conversation: ConversationSummary) => ({
   id: conversation.id,
   title: maybeString(conversation.title) ?? "未命名",
   updatedAt: maybeString(conversation.updated_at) ?? new Date().toISOString(),
@@ -1529,7 +1529,10 @@ export const handleSessionEvent = (
               return Number.isFinite(updatedAt) && updatedAt > snapshotAt;
             })
           : [];
-        const conversationMetas = [...mergedIncomingMetas, ...newerThanSnapshot];
+        const removedByDirectory = new Set(ev.removed_conversation_ids ?? []);
+        const retainedPageMetas = ev.partial_inventory && !inventoryEpochChanged
+          ? storeState.conversations.filter(item => !incomingIds.has(item.id) && !removedByDirectory.has(item.id)) : [];
+        const conversationMetas = [...mergedIncomingMetas, ...(ev.partial_inventory ? retainedPageMetas : newerThanSnapshot)];
         const currentEffectiveActiveConversationId = visibleActiveConversationId(
           storeState.conversationId ?? undefined,
           conversationMetas,
@@ -1594,6 +1597,14 @@ export const handleSessionEvent = (
           }
           return {
             conversations: nextConversationMetas,
+            conversationDirectory: ev.directory_page ? (ev.directory_page.append
+              ? { nextCursor: ev.directory_page.project_key === undefined ? ev.directory_page.next_cursor : state.conversationDirectory?.nextCursor ?? null,
+                projectCursors: { ...state.conversationDirectory?.projectCursors, ...(ev.directory_page.project_key !== undefined
+                  ? { [ev.directory_page.project_key]: ev.directory_page.next_cursor } : {}) } }
+              : inventoryEpochChanged || !state.conversationDirectory || ev.sidebar_order?.revision !== state.sidebarOrder?.revision
+                ? { nextCursor: ev.directory_page.next_cursor, projectCursors: ev.directory_page.project_cursors ?? {} }
+                : { ...state.conversationDirectory, projectCursors: { ...ev.directory_page.project_cursors, ...state.conversationDirectory.projectCursors } })
+              : ev.partial_inventory ? state.conversationDirectory : null,
             conversationInventoryInstanceId: incomingInventoryInstanceId
               ?? state.conversationInventoryInstanceId,
             conversationInventoryRevision: incomingInventoryRevision

@@ -139,6 +139,8 @@ def test_real_inventory_producer_projects_pinned_order_and_revision_after_cold_r
     alpha, bravo = seed(repository, tmp_path, ("alpha", "bravo"))
     repository.reorder_pinned_conversations(bravo, alpha, [alpha, bravo])
     session = object.__new__(WebSocketSession)
+    session._directory_known_ids = set()
+    session._directory_inventory_revision = 0
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
     session.session_lifecycle = SessionLifecycle(session)
     session.ws_manager = None

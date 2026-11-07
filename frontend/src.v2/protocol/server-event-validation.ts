@@ -1730,6 +1730,7 @@ const hasValidSemanticPayload = (
     const activeId = value.active_conversation_id;
     const activeConversation = value.active_conversation;
     const sidebarOrder = value.sidebar_order;
+    const directoryPage = value.directory_page;
     const conversationIds = Array.isArray(conversations)
       ? conversations.map((item) => isRecord(item) ? String(item.id ?? "").trim() : "")
       : [];
@@ -1738,6 +1739,13 @@ const hasValidSemanticPayload = (
       && conversations.every(isConversationSummaryPayload)
       && conversationIds.every(Boolean)
       && new Set(conversationIds).size === conversationIds.length
+      && (!('partial_inventory' in value) || typeof value.partial_inventory === "boolean")
+      && (!('removed_conversation_ids' in value) || Array.isArray(value.removed_conversation_ids)
+        && value.removed_conversation_ids.every(id => isBoundedString(id, 1_024)))
+      && (directoryPage === undefined || isRecord(directoryPage)
+        && (directoryPage.next_cursor === null || typeof directoryPage.next_cursor === "string")
+        && (directoryPage.project_cursors === undefined || isRecord(directoryPage.project_cursors)
+          && Object.values(directoryPage.project_cursors).every(cursor => cursor === null || typeof cursor === "string")))
       && (!("inventory_instance_id" in value)
         || value.inventory_instance_id === undefined
         || isBoundedString(value.inventory_instance_id, 128))

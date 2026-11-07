@@ -354,6 +354,8 @@ class WebSocketSession(
         self._notification_hook_tasks: set[asyncio.Task[Any]] = set()
         # Streaming reconnection support
         self._conversation_streams: dict[str, dict[str, Any]] = {}
+        self._directory_known_ids: set[str] = set()
+        self._directory_inventory_revision = 0
         self._resolve_llm_provider = get_llm_provider
         self._resolve_available_models = get_available_models
         self._resolve_models_source = get_models_source
@@ -1718,52 +1720,17 @@ class WebSocketSession(
                 self.ws_manager.schedule_observer_runtime_updates(self)
         return sent
 
-    async def send_conversation_list(self, *, inventory: tuple[str, int, list[Any]] | None = None, archive_navigation: str | None = None) -> bool:
-        list_with_revision = getattr(
-            self.conversation_repo,
-            "list_conversations_with_revision",
-            None,
-        )
-        inventory_instance_id: str | None = None
-        inventory_revision: int | None = None
-        if callable(list_with_revision):
-            versioned_listing = inventory if inventory is not None else await asyncio.to_thread(list_with_revision)
-            if isinstance(versioned_listing, tuple) and len(versioned_listing) == 3:
-                raw_instance_id, raw_revision, summaries = versioned_listing
-                if not isinstance(raw_instance_id, str) or not raw_instance_id.strip():
-                    raise ValueError(
-                        "list_conversations_with_revision returned an invalid inventory instance id"
-                    )
-                if (
-                    isinstance(raw_revision, bool)
-                    or not isinstance(raw_revision, int)
-                    or raw_revision < 0
-                    or raw_revision > 9_007_199_254_740_991
-                ):
-                    raise ValueError(
-                        "list_conversations_with_revision returned an invalid inventory revision"
-                    )
-                inventory_instance_id = raw_instance_id.strip()
-                inventory_revision = raw_revision
-            elif isinstance(versioned_listing, tuple) and len(versioned_listing) == 2:
-                # Compatibility for older repository doubles. They cannot
-                # identify a durable inventory epoch, so keep the projection
-                # explicitly legacy instead of inventing an empty instance.
-                _legacy_revision, summaries = versioned_listing
-            else:
-                raise ValueError("list_conversations_with_revision returned an invalid result")
-        else:
-            summaries = await asyncio.to_thread(self.conversation_repo.list_conversations)
-        conversations = [
-            item.to_dict()
-            for item in summaries
-            if getattr(item, "conversation_type", "main") == "main"
-        ]
-        pinned_order, sidebar_order, sidebar_sections = await asyncio.gather(
-            asyncio.to_thread(self.conversation_repo.get_pinned_order, summaries),
-            asyncio.to_thread(self.conversation_repo.get_sidebar_order, summaries),
-            asyncio.to_thread(self.conversation_repo.thread_sections.list),
-        )
+    async def send_conversation_list(self, *, archive_navigation: str | None = None) -> bool:
+        from backend.workspace.recent_projects import RecentProjectStore
+        from backend.conversations.sidebar_order import project_key
+
+        projects = await asyncio.to_thread(RecentProjectStore().list)
+        sections = await asyncio.to_thread(self.conversation_repo.thread_sections.list)
+        project_keys = {project_key(project.path) for project in projects if project.pinned is not False}
+        project_keys.update(project_key(key[8:]) for section in sections for key in section["item_keys"] if key.startswith("project:"))
+        directory = await asyncio.to_thread(self.conversation_repo.directory.inventory,
+            known_ids=tuple(self._directory_known_ids), since_revision=self._directory_inventory_revision,
+            active_id=self.active_conversation_id, project_keys=tuple(project_keys))
         while True:
             if not self.session_lifecycle.foreground_navigation_is_current():
                 return False
@@ -1781,6 +1748,10 @@ class WebSocketSession(
                 ):
                     active = None
                     self.active_conversation_id = owner = None
+                if active is not None and not any(item["id"] == owner for item in directory["conversations"]):
+                    from backend.conversations.models import ConversationSummary
+
+                    directory["conversations"].append(ConversationSummary.from_dict(active).to_dict())
                 # Inventory updates change sidebar metadata, not the tool
                 # catalog. Capability events own that more expensive projection.
                 runtime_snapshot = self.runtime_snapshot(include_capabilities=False)
@@ -1790,22 +1761,19 @@ class WebSocketSession(
                     "type": "conversation.list",
                     "conversation_id": owner,
                     "active_conversation_id": owner,
-                    "conversations": conversations,
+                    **directory,
                     "active_conversation": active,
                     "session": runtime_snapshot,
                     "snapshot_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                    **pinned_order,
-                    **sidebar_order,
-                    "sidebar_sections": sidebar_sections,
                 }
-                if inventory_instance_id is not None and inventory_revision is not None:
-                    payload["inventory_instance_id"] = inventory_instance_id
-                    payload["inventory_revision"] = inventory_revision
                 if archive_navigation is not None:
                     payload["archive_navigation"] = archive_navigation
-                return await self.send_payload(
-                    payload, log_context="conversation.list", wait_for_delivery=False,
-                )
+                sent = await self.send_payload(payload, log_context="conversation.list", wait_for_delivery=False)
+                if sent:
+                    self._directory_known_ids.update(item["id"] for item in directory["conversations"])
+                    self._directory_known_ids.difference_update(directory["removed_conversation_ids"])
+                    self._directory_inventory_revision = directory["inventory_revision"]
+                return sent
 
     async def send_event(self, event: AgentEvent) -> None:
         # Broadcast paths may hand the same AgentEvent instance to multiple

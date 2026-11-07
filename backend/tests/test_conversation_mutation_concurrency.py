@@ -442,8 +442,8 @@ def test_archive_coordinates_only_target_resources_before_persisting(monkeypatch
         owner.terminal_manager.destroy_sessions_for_conversation.assert_awaited_once_with(target.id)
         assert any(call.args == (owner, target.id) and call.kwargs["reason"] == "conversation_archived"
                    for call in stop_runs.await_args_list)
-    repository.list_conversations_with_revision.assert_called_once()
-    activate.assert_awaited_once_with(session, conversation_summaries=[])
+    repository.list_conversations_with_revision.assert_not_called()
+    activate.assert_awaited_once_with(session)
     result = session.emit_command_result.await_args
     assert result.args[0] == "conversation.archive"
     assert result.args[1] == "会话已归档。"

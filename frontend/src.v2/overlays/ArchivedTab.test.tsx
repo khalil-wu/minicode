@@ -18,6 +18,7 @@ vi.mock("./ToastContainer", () => ({ pushToast: toast }));
 beforeEach(() => {
   vi.clearAllMocks();
   useAppStore.setState({ conversationId: "active", pendingConversationSwitchId: null, activeConversationDraftId: null,
+    conversationDirectory: null,
     appMode: "cowork", settingsOpen: true, draft: "unsent current owner text", workingDirectory: "C:/active",
     recentWorkspaces: [], runtimeCapabilities: null, isConnected: true, conversations: [
       { id: "archive-A", title: "检查项目", archived: true, workspaceRoot: "C:/alpha", createdAt: "2026-09-01T08:00:00Z", updatedAt: "2026-10-01T08:00:00Z" },
@@ -31,6 +32,30 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+it("loads all archived pages before confirming bulk deletion, including threads absent from the initial inventory", async () => {
+  vi.stubGlobal("IntersectionObserver", class { observe() {} disconnect() {} });
+  useAppStore.setState({ conversationDirectory: { nextCursor: null, projectCursors: {} },
+    conversationInventoryInstanceId: "archive-store", conversationInventoryRevision: 1 });
+  readArchive.mockImplementation(async (_url: URL, init: RequestInit) => {
+    const query = JSON.parse(String(init.body));
+    return { ok: true, json: async () => ({ data: query.cursor ? [
+      { id: "archive-unloaded", title: "Previously unloaded", archived: true, updated_at: "2026-11-07T08:00:00Z", revision: 1 },
+    ] : [{ id: "archive-A", title: "First archive", archived: true, updated_at: "2026-11-07T08:00:00Z", revision: 1 }],
+    next_cursor: query.cursor ? null : "archive-next", backwards_cursor: null,
+    inventory_instance_id: "archive-store", inventory_revision: 1 }) };
+  });
+  confirm.mockResolvedValue(true);
+  render(<ArchivedTab />);
+  await screen.findByText("First archive");
+  fireEvent.click(screen.getByRole("button", { name: "全部删除" }));
+  await waitFor(() => expect(deleteCommand).toHaveBeenCalledTimes(2));
+  expect(deleteCommand.mock.calls.map(([command]) => command.conversation_id)).toEqual(["archive-A", "archive-unloaded"]);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(useAppStore.getState().draft).toBe("unsent current owner text");
+  await waitFor(() => expect(screen.getByRole("button", { name: "全部删除" }).hasAttribute("disabled")).toBe(false));
+  vi.unstubAllGlobals();
+});
 
 it.each(["filter", "project", "project-actions"])("closes the %s portal when its page becomes inactive and keeps the chosen search and filters", kind => {
   const view = render(<ArchivedTab />);

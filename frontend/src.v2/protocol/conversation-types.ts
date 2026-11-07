@@ -323,6 +323,9 @@ export interface ConversationListEvent {
   type: "conversation.list";
   inventory_instance_id?: string;
   inventory_revision?: number;
+  partial_inventory?: boolean;
+  removed_conversation_ids?: string[];
+  directory_page?: { next_cursor: string | null; project_cursors?: Record<string, string | null>; append?: boolean; project_key?: string };
   pinned_conversation_ids?: string[];
   pinned_sort_mode?: "manual" | "updated_at";
   sidebar_order?: SidebarOrderPayload;

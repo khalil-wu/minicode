@@ -1595,6 +1595,7 @@ export interface ChatSlice {
   conversations: ConversationMeta[];
   conversationInventoryInstanceId: string | null;
   conversationInventoryRevision: number;
+  conversationDirectory: { nextCursor: string | null; projectCursors: Record<string, string | null> } | null;
   pinnedConversationIds: string[];
   pinnedConversationSortMode: "manual" | "updated_at";
   sidebarOrder: import("../protocol/conversation-types").SidebarOrderPayload | null;

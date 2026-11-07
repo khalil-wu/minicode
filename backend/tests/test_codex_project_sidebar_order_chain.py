@@ -199,6 +199,8 @@ def test_actual_inventory_producer_restores_saved_project_order_and_common_mode(
     repository.set_sidebar_sort_mode("manual", {str(project): [alpha, bravo]})
     repository.reorder_sidebar_threads(str(project), bravo, alpha, [alpha, bravo])
     session = object.__new__(WebSocketSession)
+    session._directory_known_ids = set()
+    session._directory_inventory_revision = 0
     session.conversation_runtime = SimpleNamespace(active_conversation_id=None, active_conversation=None)
     session.session_lifecycle = SessionLifecycle(session)
     session.ws_manager = None

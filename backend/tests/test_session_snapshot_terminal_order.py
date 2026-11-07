@@ -162,7 +162,7 @@ async def test_conversation_list_keeps_the_current_owner_across_repository_await
     loop = asyncio.get_running_loop()
     entered, release = asyncio.Event(), threading.Event()
     read_page = owner.conversation_repo.get_conversation_view
-    read_sidebar = owner.conversation_repo.get_sidebar_order
+    read_sidebar = owner.conversation_repo.directory.inventory
     pages = []
 
     def page(owner_id, *args, **kwargs):
@@ -181,7 +181,7 @@ async def test_conversation_list_keeps_the_current_owner_across_repository_await
         return result
 
     monkeypatch.setattr(owner.conversation_repo, "get_conversation_view", page)
-    monkeypatch.setattr(owner.conversation_repo, "get_sidebar_order", sidebar)
+    monkeypatch.setattr(owner.conversation_repo.directory, "inventory", sidebar)
     listing = asyncio.create_task(owner.send_conversation_list())
     try:
         await asyncio.wait_for(entered.wait(), 5)

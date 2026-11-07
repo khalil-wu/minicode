@@ -1039,7 +1039,9 @@ export const useWebSocketConnection = () => {
         }
         replayPendingClientCommands();
         flushOfflineQueue();
-        sendOrCoalesceCommand({ type: "conversation.list" });
+        const inventory = useAppStore.getState();
+        sendOrCoalesceCommand({ type: "conversation.list", known_conversation_ids: inventory.conversations.map(item => item.id),
+          known_inventory_revision: inventory.conversationInventoryRevision, known_inventory_instance_id: inventory.conversationInventoryInstanceId });
         const draftId = useAppStore.getState().activeConversationDraftId;
         if (draftId) {
           void useAppStore.getState().refreshConversationDraftSelection(draftId);
