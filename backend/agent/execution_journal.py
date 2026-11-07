@@ -406,7 +406,9 @@ class ExecutionJournal:
         self.base_dir = base_dir
         self._terminal_record_reader = terminal_record_reader
         self.path = get_journal_path(self.agent_id, base_dir=base_dir)
+        self._thread_lock = _lock_for(self.path)
         self._process_lock = _process_lock_for(self.path)
+        self._path_key = canonical_file_path_key(self.path)
         self._event_cache: list[JournalEvent] | None = None
         self._event_cache_signature: tuple[int, int, int] | None = None
         self._tool_states: dict[str, tuple[str, JournalEvent]] = {}
@@ -415,7 +417,7 @@ class ExecutionJournal:
         self._context_heads: dict[str, tuple[str, dict[str, Any], int]] = {}
         self.unacknowledged_tail_records = 0
         self.unacknowledged_tail_path: Path | None = None
-        key = canonical_file_path_key(self.path)
+        key = self._path_key
         with self._locked():
             self._isolate_incomplete_tail_unlocked()
             compact_journal_file(self.path)
@@ -427,7 +429,7 @@ class ExecutionJournal:
 
     @contextmanager
     def _locked(self):
-        with _lock_for(self.path):
+        with self._thread_lock:
             with self._process_lock:
                 yield
 
@@ -736,7 +738,7 @@ class ExecutionJournal:
                 claimed[identity] = (kind, payload)
             position = self.path.stat().st_size if self.path.exists() else 0
             previous_seq = durable[-1].seq if durable else 0
-            key = canonical_file_path_key(self.path)
+            key = self._path_key
             saved = []
             try:
                 for kind, payload, identity in prepared:
@@ -776,7 +778,7 @@ class ExecutionJournal:
         clean_type = str(event_type or "system").strip() or "system"
         if clean_type not in EVENT_TYPES:
             clean_type = "system"
-        key = canonical_file_path_key(self.path)
+        key = self._path_key
         # Validate a changed durable chain before appending. Once this
         # instance has validated the current file identity, its own fsync'd
         # appends extend that proof instead of reparsing the entire journal

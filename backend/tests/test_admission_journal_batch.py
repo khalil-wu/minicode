@@ -10,6 +10,22 @@ def entries():
             ("system", {"lifecycle": "turn_input_consumed", "conversation_id": "conv", "user_message_id": "user"}, "consumed")]
 
 
+def test_journal_reuses_captured_lock_identity_and_sees_other_writer(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    first = ExecutionJournal("shared", base_dir=tmp_path)
+    second = ExecutionJournal("shared", base_dir=tmp_path)
+    assert first._thread_lock is second._thread_lock
+    with monkeypatch.context() as scoped:
+        resolve = Mock(side_effect=AssertionError("Journal lock identity was already captured"))
+        scoped.setattr("backend.agent.execution_journal.canonical_file_path_key", resolve)
+        first.append("system", {"source": "first"})
+        second.append_once_many(entries())
+        assert [event.seq for event in first.read_events()] == [1, 2, 3]
+        resolve.assert_not_called()
+    assert [event.seq for event in ExecutionJournal("shared", base_dir=tmp_path).read_events()] == [1, 2, 3]
+
+
 def test_admission_batch_preserves_two_facts_with_one_fsync(tmp_path, monkeypatch):
     journal = ExecutionJournal("batch", base_dir=tmp_path)
     calls = []
