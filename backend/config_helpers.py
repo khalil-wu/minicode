@@ -100,6 +100,7 @@ class LLMSettings:
     supports_image_detail_original: bool = False
     supports_search_tool: bool = False
     aws: Mapping[str, Any] | None = field(default=None, repr=False)
+    command_auth: Mapping[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -183,11 +184,11 @@ def resolve_context_window_details(
 
 def _normalize_provider(provider: str) -> str:
     value = str(provider or "").strip().lower()
-    if value in {"openai", "anthropic", "custom"}:
+    if value in {"openai", "anthropic", "custom", "gcp"}:
         return value
     raise SettingsError(
         f"Unknown LLM provider '{str(provider or '').strip() or '<empty>'}'. "
-        "Choose one of: openai, anthropic, custom."
+        "Choose one of: openai, anthropic, custom, gcp."
     )
 
 
@@ -1474,7 +1475,10 @@ def get_image_generation_settings(
     if settings_data is None:
         settings_data = _load_effective_settings_json()
     selected_provider = _normalize_provider(provider or get_llm_provider(settings_data))
-    if selected_provider == "anthropic":
+    if selected_provider == "gcp":
+        section = {"image_mode": "disabled"}
+        inherited_wire_api = "responses"
+    elif selected_provider == "anthropic":
         section = get_anthropic_settings(settings_data, resolve_credentials=resolve_credentials)
         inherited_wire_api = "anthropic"
     elif selected_provider == "custom":
@@ -1696,10 +1700,17 @@ def get_llm_settings_payload(
         "custom": custom["model"],
         "openai": openai["model"],
     }
+    from backend.llm.gcp import provider_config, GCP_MODELS, configured, vertex_base_url
+    gcp = provider_config(settings_data)
+    active_by_provider["gcp"] = gcp.get("model", settings_data.get("model", ""))
 
     return {
         "provider": provider,
-        "providers": ["openai", "anthropic", "custom"],
+        "providers": ["openai", "anthropic", "custom", "gcp"],
+        "gcp": {"display_name": "Google Cloud Vertex AI", "model": active_by_provider["gcp"],
+            "available_models": list(GCP_MODELS), "base_url": vertex_base_url(gcp) if configured(gcp) else "",
+            "wire_api": "responses", "models_source": "bundled", "has_api_key": configured(gcp),
+            "reasoning_effort": gcp.get("reasoning_effort", ""), "image_mode": "disabled"},
         "openai": {
             "display_name": openai["display_name"],
             "has_api_key": bool(openai["api_key"]),
@@ -1828,11 +1839,15 @@ def get_llm_settings_payload(
     }
 
 
-def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_credentials: bool = True) -> LLMSettings:
+def load_llm_settings(settings_data: dict[str, Any] | None = None, *, resolve_credentials: bool = True, cwd: Path | None = None) -> LLMSettings:
     """从环境变量与 settings.json 加载 LLM 配置。"""
     if settings_data is None:
         settings_data = _load_effective_settings_json()
     active_provider = get_llm_provider(settings_data)
+
+    if active_provider == "gcp":
+        from backend.llm.gcp import llm_settings
+        return llm_settings(settings_data, cwd=cwd if cwd is not None else STATE_ROOT)
 
     if active_provider == "anthropic":
         anthropic = get_anthropic_settings(settings_data, resolve_credentials=resolve_credentials)

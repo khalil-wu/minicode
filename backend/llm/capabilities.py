@@ -188,7 +188,7 @@ def capabilities_from_openai_settings(
         default_reasoning_summary=str(settings.default_reasoning_summary or ""),
         vision=False if dedicated_image_model else "image" in settings.input_modalities if settings.input_modalities else None,
         native_pdf=False if dedicated_image_model else None,
-        image_generation=True if dedicated_image_model else None,
+        image_generation=False if provider_id == "gcp" else True if dedicated_image_model else None,
         native_compaction=(
             wire_api == "responses" and not dedicated_image_model and (
                 settings.native_compaction if settings.native_compaction is not None

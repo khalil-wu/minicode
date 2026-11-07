@@ -187,6 +187,7 @@ class ExtensionCapabilitySource:
         model_runtime = ModelRuntime(
             on_change=self.on_model_change,
             settings_snapshot=config_stack.effective_config(),
+            cwd=loader_cwd,
         )
         model_registry = ModelRegistry(model_runtime)
         try:

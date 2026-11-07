@@ -235,6 +235,14 @@ def build_provider_adapter(
         }
         return adapter
 
+    if normalized == "gcp":
+        from backend.config import STATE_ROOT
+        from backend.llm.gcp import llm_settings
+        from backend.config_helpers import _load_effective_settings_json
+        settings = llm_settings(settings_snapshot if settings_snapshot is not None else _load_effective_settings_json(),
+            cwd=STATE_ROOT, model_override=model_override)
+        return build_wire_adapter(settings, network_policy=network_policy)
+
     if normalized == "anthropic":
         anthropic_settings = get_anthropic_settings(settings_snapshot)
         api_key = anthropic_settings["api_key"]
@@ -396,6 +404,7 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec", *, network_p
             default_reasoning_summary=spec.default_reasoning_summary,
             supports_custom_tools=spec.supports_custom_tools,
             supports_hosted_web_search=spec.supports_hosted_web_search,
+            supports_search_tool=spec.supports_search_tool,
             responses_websocket=spec.responses_websocket,
             native_compaction=spec.native_compaction,
             comp_hash=spec.comp_hash,
@@ -412,7 +421,8 @@ def _build_registered_provider_adapter(spec: "ProviderAdapterSpec", *, network_p
             ),
             auth_header=bool(spec.auth_header),
         )
-        return OpenAIAdapter(settings=settings, **({"network_policy": network_policy} if network_policy is not None and network_policy.managed else {}))
+        return OpenAIAdapter(settings=settings, **({"request_auth": spec.request_auth} if spec.request_auth is not None else {}),
+            **({"network_policy": network_policy} if network_policy is not None and network_policy.managed else {}))
 
     # ModelRuntime validates this before publication. Keep the construction
     # boundary fail-closed if a future runtime accidentally passes a new API.

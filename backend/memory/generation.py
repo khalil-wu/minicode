@@ -874,12 +874,14 @@ class MemoryGenerationCoordinator:
         return rendered + "```\n"
 
     async def _consolidate_phase2(self, memory_root: Path) -> None:
-        await run_memory_consolidation_agent(
-            llm=self.llm,
-            memory_root=memory_root,
-            prompt=build_consolidation_prompt(memory_root),
-            token_budget=self.token_budget,
-        )
+        from backend.llm.gcp import memory_consolidation_adapter
+        async with memory_consolidation_adapter(self.llm) as llm:
+            await run_memory_consolidation_agent(
+                llm=llm,
+                memory_root=memory_root,
+                prompt=build_consolidation_prompt(memory_root),
+                token_budget=self.token_budget,
+            )
 
     @staticmethod
     def _phase2_inputs(memory_root: Path) -> dict[str, bytes]:

@@ -340,6 +340,9 @@ def get_available_models(
     settings_data: dict[str, Any] | None = None,
 ) -> list[str]:
     active_provider = _normalize_provider(provider or get_llm_provider(settings_data))
+    if active_provider == "gcp":
+        from backend.llm.gcp import GCP_MODELS
+        return list(GCP_MODELS)
     if active_provider == "anthropic":
         return get_anthropic_settings(settings_data, resolve_credentials=False)["available_models"]
     if active_provider == "custom":
@@ -353,6 +356,8 @@ def get_models_source(
 ) -> str:
     """Return the persisted model list source ('live' or '') for the given provider."""
     active_provider = _normalize_provider(provider or get_llm_provider(settings_data))
+    if active_provider == "gcp":
+        return "bundled"
     if active_provider == "anthropic":
         return get_anthropic_settings(settings_data, resolve_credentials=False).get("models_source", "")
     if active_provider == "custom":

@@ -2489,14 +2489,17 @@ class OpenAIAdapter(LLMAdapter):
         self,
         settings: LLMSettings,
         http_client: httpx.AsyncClient | None = None,
-        *, network_policy=None,
+        *, network_policy=None, request_auth=None,
     ) -> None:
         if settings.aws is not None and (settings.wire_api != "responses" or settings.responses_websocket):
             raise ValueError("Amazon Bedrock uses Responses over HTTP; select wire_api=responses and disable Responses WebSocket")
+        if settings.provider == "gcp" and (settings.wire_api != "responses" or settings.responses_websocket):
+            raise ValueError("Google Cloud Vertex AI uses Responses over HTTP")
         self._settings = settings
         from backend.application_network import application_network_policy, application_http_client, ApplicationHttpClient
         self._application_network = network_policy if network_policy is not None else application_network_policy()
         self._bedrock_auth = None
+        self._provider_request_auth = request_auth.with_network_policy(self._application_network) if request_auth is not None else None
         self._content_item_kinds_enabled = True
         self._default_headers = {
             str(key): str(value)
@@ -2516,6 +2519,12 @@ class OpenAIAdapter(LLMAdapter):
         self._chat_unsupported_fields: set[str] = set()
         if http_client is None:
             http_options: dict[str, Any] = {}
+            if request_auth is not None:
+                http_options["auth"] = self._provider_request_auth
+            elif settings.command_auth is not None:
+                from backend.llm.command_auth import CommandBearerAuth
+                http_options["auth"] = CommandBearerAuth(dict(settings.command_auth), network_policy=self._application_network)
+                self._provider_request_auth = http_options["auth"]
             if settings.aws is not None:
                 from backend.llm.bedrock import BedrockRequestAuth
                 http_options["auth"] = BedrockRequestAuth(settings.aws, api_key=settings.api_key,
@@ -2873,12 +2882,16 @@ class OpenAIAdapter(LLMAdapter):
         return self.supports_hosted_web_search()
 
     def _apply_model_request_options(self, payload: dict[str, Any], *, model: str, responses: bool, disable_reasoning: bool = False) -> None:
+        if self._settings.provider == "gcp" and responses and "reasoning" in payload:
+            payload["reasoning"].pop("summary", None)
+            if not payload["reasoning"]:
+                payload.pop("reasoning")
         policy = self.model_request_policy()
         if policy.model != model:
             return
         if responses and policy.reasoning_summary is not None:
             reasoning = payload.setdefault("reasoning", {})
-            if policy.supports_reasoning_summary_parameter and policy.reasoning_summary != "none" and not disable_reasoning:
+            if self._settings.provider != "gcp" and policy.supports_reasoning_summary_parameter and policy.reasoning_summary != "none" and not disable_reasoning:
                 reasoning["summary"] = policy.reasoning_summary
             else:
                 reasoning.pop("summary", None)
@@ -5562,6 +5575,8 @@ class OpenAIAdapter(LLMAdapter):
             if side_options is not None and side_options.use_small_fast_model
             else self._settings.model
         )
+        if self._settings.provider == "gcp" and side_options is not None and side_options.operation == "memory_phase1_extraction":
+            model = "gpt-6-luna"
         client_metadata = _responses_side_client_metadata(side_options)
         prompt_cache_enabled = side_options is None or side_options.enable_prompt_cache
         prompt_cache_key = (

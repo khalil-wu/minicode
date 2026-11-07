@@ -109,6 +109,8 @@ class ModelRuntime:
         models_path: str | Path | None = None,
         provider_configs: Mapping[str, Any] | None = None,
         settings_snapshot: Mapping[str, Any] | None = None,
+        cwd: Path | None = None,
+        network_policy=None,
     ) -> None:
         self._extension_providers: dict[str, dict[str, Any]] = {}
         self._refreshed_extension_models: dict[str, tuple[Any, ...]] = {}
@@ -142,6 +144,10 @@ class ModelRuntime:
             models_store = ProviderModelsStorage()
         self._models_store = models_store
         self._settings_snapshot = deepcopy(dict(settings_snapshot)) if settings_snapshot is not None else None
+        from backend.config import STATE_ROOT
+        self._cwd = cwd if cwd is not None else STATE_ROOT
+        self._network_policy = network_policy
+        self._gcp_auth_owner = None
         self._base_providers = self._load_base_providers()
         self._models_path = (
             Path(models_path).expanduser().resolve(strict=False)
@@ -182,6 +188,7 @@ class ModelRuntime:
         self._resolved_oauth_auth.clear()
         self._resolved_auth_credential.clear()
         self._oauth_model_credentials.clear()
+        self._gcp_auth_owner = None
 
 
     def _base_provider(self, provider_id: str) -> Any | None:
@@ -208,9 +215,21 @@ class ModelRuntime:
         configured = _api_key_config(extension)
         if configured is not None:
             return configured
+        if clean_id == "gcp":
+            return self._gcp_auth()
         base = self._base_provider(clean_id)
         auth = _provider_member(base, "auth")
         return _provider_member(auth, "api_key")
+
+    def _gcp_config(self) -> dict:
+        return {**self._base_providers["gcp"]["gcp"], **self._model_configs.get("gcp", {})}
+
+    def _gcp_auth(self):
+        from backend.llm.gcp import GcpAuth
+        config = self._gcp_config()
+        if self._gcp_auth_owner is None or self._gcp_auth_owner.config != config:
+            self._gcp_auth_owner = GcpAuth(config, cwd=self._cwd, network_policy=self._network_policy)
+        return self._gcp_auth_owner
 
     def _has_provider_auth_capability(self, provider_id: str) -> bool:
         if self._oauth_provider(provider_id) is not None:
@@ -236,11 +255,18 @@ class ModelRuntime:
     _base_model = staticmethod(_base_model)
 
     def _load_base_providers(self) -> dict[str, dict[str, Any]]:
-        return _load_base_providers(
-            openai=get_openai_settings(self._settings_snapshot, resolve_credentials=False),
-            anthropic=get_anthropic_settings(self._settings_snapshot, resolve_credentials=False),
-            custom=get_custom_settings(self._settings_snapshot, resolve_credentials=False),
+        from backend.llm.gcp import base_provider
+        from backend.config_helpers import _load_effective_settings_json
+        settings = self._settings_snapshot
+        if settings is None:
+            settings = _load_effective_settings_json()
+        providers = _load_base_providers(
+            openai=get_openai_settings(settings, resolve_credentials=False),
+            anthropic=get_anthropic_settings(settings, resolve_credentials=False),
+            custom=get_custom_settings(settings, resolve_credentials=False),
         )
+        providers["gcp"] = base_provider(settings)
+        return providers
 
     def _provider_lock(self, provider_id: str, *, oauth: bool) -> asyncio.Lock:
         clean_id = _clean_text(provider_id)
@@ -568,6 +594,8 @@ class ModelRuntime:
                 )
                 context = _ProviderAuthContext(explicit_env)
                 input_value = _AttributeMapping(ctx=context)
+                if clean_id == "gcp" and api_key_provider is self._gcp_auth_owner:
+                    input_value["force"] = force
                 if credential is not None:
                     input_value["credential"] = _AttributeMapping(credential)
                 check = self._auth_method(api_key_provider, "check")
@@ -1501,6 +1529,10 @@ class ModelRuntime:
                 and isinstance(stored_before_auth, Mapping)
                 and stored_before_auth.get("type") == "oauth"
             )
+            # Vertex has a bundled static catalog. Reading/refreshing that
+            # catalog needs no token command; the selected request owns auth.
+            if provider_id == "gcp" and not current:
+                continue
             if not offline_stored_oauth:
                 try:
                     await self.refresh_provider_auth(
@@ -2072,6 +2104,7 @@ class ModelRuntime:
             and not has_overrides
             and config.get("api_key") is None
             and "auth_header" not in config
+            and provider_id != "gcp"
         ):
             raise ProviderRegistrationError(
                 f'Provider {provider_id}: must specify "base_url", "headers", '
@@ -2322,6 +2355,15 @@ class ModelRuntime:
                 "models": list(self._refreshed_extension_models[provider_id]),
             }
         config = self._model_configs.get(provider_id)
+        if provider_id == "gcp":
+            from backend.llm.gcp import GCP_MODELS, configured, vertex_base_url
+            config = self._gcp_config()
+            if configured(config):
+                config["base_url"] = vertex_base_url(config)
+            if "models" in config:
+                config["models"] = [model for model in config["models"] if model["id"] in GCP_MODELS]
+            if not config:
+                config = None
         base_models = self._apply_model_config(provider_id, base_models, config)
 
         def finalize(
@@ -2332,13 +2374,15 @@ class ModelRuntime:
                 if apply_oauth_modifier and extension is not None
                 else models
             )
-            if not apply_model_overrides:
-                return projected
-            return self._apply_model_overrides(
-                provider_id,
-                projected,
-                extension=extension,
-            )
+            if apply_model_overrides:
+                projected = self._apply_model_overrides(provider_id, projected, extension=extension)
+            if provider_id == "gcp" and (config is not None or extension is not None):
+                from backend.llm.gcp import GCP_MODELS, configured, vertex_base_url, vertex_model
+                gcp_config = self._gcp_config()
+                url = vertex_base_url(gcp_config) if configured(gcp_config) else ""
+                ids = {model["id"] for model in gcp_config["models"]} if "models" in gcp_config else set(GCP_MODELS)
+                projected = tuple(vertex_model(replace(model, base_url=url)) for model in projected if model.id in GCP_MODELS and model.id in ids)
+            return projected
 
         if extension is None:
             return finalize(base_models)
@@ -2791,6 +2835,9 @@ class ModelRuntime:
             # This selects the real SDK credential chain. Its credentials are
             # resolved at execution; it is not a successful connection claim.
             return True
+        if provider_id == "gcp":
+            from backend.llm.gcp import configured
+            return configured(self._gcp_config())
         try:
             credentials = self._stored_credential(provider_id)
         except (ProviderCredentialCorruptError, VaultReadError):
@@ -2983,6 +3030,8 @@ class ModelRuntime:
             raise ProviderRegistrationError(f"Unknown provider '{clean_id}'")
         from backend.config_helpers import _get_llm_section
         settings = _get_llm_section(self._settings_snapshot).get(clean_id, {})
+        if clean_id == "gcp":
+            return self._gcp_config().get("base_url")
         if "base_url" in settings:
             return settings["base_url"]
         environment_name = {"openai": "OPENAI_BASE_URL", "anthropic": "ANTHROPIC_BASE_URL", "custom": "CUSTOM_BASE_URL"}[clean_id]
@@ -2996,6 +3045,8 @@ class ModelRuntime:
         from backend.vault.store import VaultReadError
         clean_id = _clean_text(provider_id)
         oauth = self._oauth_provider(clean_id)
+        if clean_id == "gcp":
+            return {"configured": self.has_configured_auth(clean_id), "source": "command", "oauth_supported": False}
         api_key_provider = self._api_key_provider(clean_id)
         try:
             credentials = self._stored_credential(clean_id)
@@ -3339,6 +3390,7 @@ class ModelRuntime:
         )
         return ProviderAdapterSpec(
             provider_id=clean_provider,
+            request_auth=self._gcp_auth().request_auth if clean_provider == "gcp" else None,
             aws=self._provider_aws_config(clean_provider),
             model_id=model.id,
             api=model.api,

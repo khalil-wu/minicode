@@ -663,8 +663,12 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
     # load_llm_settings raises only for contradictory provider configuration;
     # those errors must remain visible instead of being replaced with an empty
     # provider that silently changes the runtime boundary.
-    llm = (load_llm_settings(settings_data) if resolve_credentials
-           else load_llm_settings(settings_data, resolve_credentials=False))
+    if get_llm_provider(settings_data) == "gcp":
+        llm = load_llm_settings(settings_data, resolve_credentials=resolve_credentials,
+            cwd=cwd if isinstance(cwd, Path) else STATE_ROOT)
+    else:
+        llm = (load_llm_settings(settings_data) if resolve_credentials
+               else load_llm_settings(settings_data, resolve_credentials=False))
 
     permissions = permission_settings_from_config(settings_data)
     if permissions.approval_policy is not None:

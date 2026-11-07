@@ -464,6 +464,7 @@ def _consume_previous_turn_aborted(session: Any, conversation_id: str = "") -> b
 
 _LLM_ADAPTER_IDENTITY_FIELDS = (
     "api_key",
+    "command_auth",
     "base_url",
     "small_fast_model",
     "reasoning_effort",
@@ -743,12 +744,12 @@ async def _refresh_session_model_auth(
     original = snapshot.llm.provider_adapter_spec
     if runtime is None or original is None:
         return snapshot
-    await runtime.refresh_provider_auth(snapshot.provider, publish_snapshot=False)
+    await runtime.refresh_provider_auth(snapshot.provider, publish_snapshot=False, force=force)
 
     def refreshed_spec():
         current = runtime.resolve_adapter_spec(snapshot.provider, snapshot.model)
         return replace(original, api_key=current.api_key, base_url=current.base_url,
-            headers=current.headers, env=current.env, auth_header=current.auth_header)
+            headers=current.headers, env=current.env, auth_header=current.auth_header, request_auth=current.request_auth)
 
     spec = refreshed_spec()
     if force and spec == original:
@@ -759,7 +760,7 @@ async def _refresh_session_model_auth(
 
     from backend.services.llm_adapter_factory import _build_registered_provider_adapter
 
-    adapter = _build_registered_provider_adapter(spec)
+    adapter = _build_registered_provider_adapter(spec, network_policy=snapshot.config.application_network_policy)
     adapter.provider_adapter_spec = spec
     adapter._request_model_costs = snapshot.llm._request_model_costs
     _apply_thinking_level(adapter, snapshot.model_info, snapshot.thinking_level)

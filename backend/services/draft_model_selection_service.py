@@ -20,7 +20,7 @@ def draft_model_selection(workspace_root: str, model: str = "", reasoning_effort
     settings = stack.effective_config()
     # A request owns this catalog. Refreshing a live thread's ModelRuntime here
     # would change its next step while the user was only editing another draft.
-    runtime = ModelRuntime(settings_snapshot=settings)
+    runtime = ModelRuntime(settings_snapshot=settings, cwd=Path(scope) if scope else None)
     provider = config.llm.provider
     definitions = runtime.get_models(provider)
     if error := runtime.get_error():

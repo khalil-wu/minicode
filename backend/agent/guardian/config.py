@@ -54,6 +54,8 @@ def review_model_for_execution(parent) -> ReviewModel:
         (() if parent.model_info is None else (parent.model_info,)))
     oauth = parent.model_runtime.is_using_oauth(parent.provider) if parent.model_runtime is not None else False
     preferred = "gpt-5.6-luna" if parent.provider == "openai" and parent.config.llm.api_key and not oauth else "codex-auto-review"
+    if parent.provider == "gcp":
+        preferred = "gpt-6-luna"
     return select_review_model(parent, tuple(models), default_review_model_id=preferred)
 
 
