@@ -284,15 +284,22 @@ def test_changed_projection_and_deleted_owner_are_skipped_during_publication(tmp
 
 
 def test_query_journal_recovers_a_committed_terminal_into_compressed_history_without_rewriting_its_raw_evidence(tmp_path):
+    from backend.agent.context import ContextBuilder
+
     repository = ConversationRepository(tmp_path / "conversations")
-    before = {"history": [{"role": "user", "content": "Original input"}], "pending_draft": "KEEP UNSENT CONTENT"}
+    context = ContextBuilder()
+    context.append_user("Original input")
+    before = {**context.export_snapshot(), "pending_draft": "KEEP UNSENT CONTENT"}
+    history_revision = context._history_store.revision
     record = repository.create_conversation(transcript=[{"id": "original-user", "role": "user", "content": "Original input"}], context_snapshot=before)
-    after = {**deepcopy(before), "history": [*before["history"], {"role": "assistant", "content": "Recovered original answer"}]}
+    context.append_assistant("Recovered original answer")
+    after = {**deepcopy(before), **context.export_snapshot()}
     journal = ExecutionJournal("fixture-query-recovery", base_dir=tmp_path / "sidechains")
     recorder = QueryJournalRecorder(journal=journal,
         metadata={"run_id": "fixture-run", "user_message_id": "original-user", "assistant_message_id": "recovered-answer"},
-        state=SimpleNamespace(reply="Recovered original answer"), context_builder=SimpleNamespace(export_snapshot=lambda: deepcopy(after)),
-        turn_kernel=None, conversation_id=record.id, projection_base_snapshot=deepcopy(before))
+        state=SimpleNamespace(reply="Recovered original answer"), context_builder=context,
+        turn_kernel=None, conversation_id=record.id, projection_base_snapshot=deepcopy(before),
+        projection_history_revision=history_revision)
     recorder.record_terminal_intent(AgentEvent.done(status="completed"))
     recorder.record_event(AgentEvent(type="agent.run.completed", data={"run_id": "fixture-run", "status": "completed"}))
     raw_evidence = journal.path.read_bytes()
