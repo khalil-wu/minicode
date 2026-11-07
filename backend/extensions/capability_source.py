@@ -72,8 +72,9 @@ class ExtensionCapabilitySource:
         except OSError:
             return ""
 
-    def fingerprint(self) -> str:
-        config_stack = load_config_layer_stack(cwd=self.workspace_root)
+    def fingerprint(self, *, config_stack: Any | None = None) -> str:
+        if config_stack is None:
+            config_stack = load_config_layer_stack(cwd=self.workspace_root)
         snapshot = get_plugin_snapshot(config_stack=config_stack)
         self._config_stack = config_stack
         self._plugin_snapshot = snapshot

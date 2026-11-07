@@ -2231,22 +2231,26 @@ class SessionAgentRunnerMixin:
                 # before the still-old runner is rebound.
                 tool_registry = published_registry
 
-            project_trusted = bool(
-                workspace_root is not None and is_workspace_trusted(workspace_root)
-            )
             replacing_runtime = runtime is not None and bool(
                 getattr(runtime, "active", False)
             )
-            capability_source = ExtensionCapabilitySource(
-                session_owner=str(getattr(self, "session_id", "") or id(self)),
-                owner_id=owner_id,
-                workspace_root=workspace_root,
-                project_trusted=project_trusted,
-                on_model_change=lambda runtime, provider_id, action: self._on_model_runtime_changed(
-                    owner_id, runtime, provider_id, action
-                ),
-            )
-            generation_fingerprint = capability_source.fingerprint()
+            def discover_capability():
+                source = ExtensionCapabilitySource(
+                    session_owner=str(getattr(self, "session_id", "") or id(self)),
+                    owner_id=owner_id,
+                    workspace_root=workspace_root,
+                    project_trusted=bool(workspace_root is not None and is_workspace_trusted(workspace_root)),
+                    on_model_change=lambda runtime, provider_id, action: self._on_model_runtime_changed(
+                        owner_id, runtime, provider_id, action),
+                )
+                captured_stack = config.config_layer_stack if config is not None else None
+                fingerprint = (source.fingerprint(config_stack=captured_stack) if captured_stack is not None
+                               else source.fingerprint())
+                return source, fingerprint
+
+            capability_source, generation_fingerprint = await to_thread_cancel_safe(discover_capability)
+            if bool(getattr(self, "_extension_runtimes_shutting_down", False)) or state.get("shutting_down"):
+                return None
             runtime_fingerprint = str(state.get("fingerprint") or "")
 
             if runtime is not None and bool(getattr(runtime, "active", False)):

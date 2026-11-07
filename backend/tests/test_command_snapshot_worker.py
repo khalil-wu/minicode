@@ -8,6 +8,7 @@ import pytest
 from backend.agent.context import ContextBuilder
 from backend.config import AppConfig, LLMSettings
 from backend.extensions.capability_source import LoadedLifecycleCapability
+from backend.extensions.capability_source import ExtensionCapabilitySource
 from backend.extensions.loader import clear_extension_cache
 from backend.tests.test_agent_runner_done_fallback import _Session
 from backend.tools.registry import ToolRegistry
@@ -112,3 +113,51 @@ async def test_unpublished_command_snapshot_is_drained_and_discarded(tmp_path, m
         await asyncio.gather(task, return_exceptions=True)
         await host._shutdown_lifecycle_runtimes("test complete")
         clear_extension_cache()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", ["cancel", "shutdown", "continue"])
+async def test_slow_capability_fingerprint_yields_before_loading_or_publishing_runtime(tmp_path, monkeypatch, stop):
+    host = _Session(tmp_path, [])
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+    loaded = []
+
+    def fingerprint(source, **kwargs):
+        assert threading.get_ident() != loop_thread
+        entered.set()
+        assert release.wait(5), "Capability discovery blocked input reception"
+        return "captured-content"
+
+    class ReachedLoad(Exception):
+        pass
+
+    async def load(source, **kwargs):
+        loaded.append(source)
+        raise ReachedLoad()
+
+    monkeypatch.setattr("backend.ws.agent_runner.is_workspace_trusted", lambda root: True)
+    monkeypatch.setattr(ExtensionCapabilitySource, "fingerprint", fingerprint)
+    monkeypatch.setattr(ExtensionCapabilitySource, "load", load)
+    task = asyncio.create_task(host._ensure_lifecycle_runtime(
+        conversation_id="conv_runnerdone", workspace_root=tmp_path, tool_registry=ToolRegistry()))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        if stop == "cancel":
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        elif stop == "shutdown":
+            await host._shutdown_lifecycle_runtimes("during fingerprint")
+        release.set()
+        if stop == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            assert await task is None
+        assert bool(loaded) is (stop == "continue")
+        assert host._extension_runtime_states.get("conv_runnerdone", {}).get("runtime") is None
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await host._shutdown_lifecycle_runtimes("test complete")
