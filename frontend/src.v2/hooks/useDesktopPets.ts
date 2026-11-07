@@ -3,7 +3,7 @@ import { desktop, isDesktop } from "../desktop/runtime";
 import { useAppStore } from "../stores";
 import { pushToast } from "../overlays/ToastContainer";
 import { useI18n } from "../i18n";
-import { desktopPetActivity, petTaskActions, submitPetFollowup } from "../pets/petActivities";
+import { desktopPetActivity, petTaskActions, submitPetFollowup, selectPetActivityInputs, petActivityInputsEqual } from "../pets/petActivities";
 
 export function useDesktopPets() {
   const { t } = useI18n();
@@ -32,7 +32,7 @@ export function useDesktopPets() {
       await pets.completeAction({ id: request.id, ...(error ? { error } : {}) });
     });
     publish();
-    const unsubscribe = useAppStore.subscribe(publish);
+    const unsubscribe = useAppStore.subscribe(selectPetActivityInputs, publish, { equalityFn: petActivityInputsEqual });
     const refresh = () => { last = ""; publish(); };
     window.addEventListener("pets:refreshed", refresh);
     window.addEventListener("pets:activity-changed", publish);

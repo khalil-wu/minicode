@@ -1,6 +1,6 @@
 import type { DesktopPetActivity, DesktopPetTask } from "../desktop/runtime";
 import type { Translate } from "../i18n";
-import type { AppStore, PendingApproval, PendingAskUser, PendingDiffReview } from "../stores/types";
+import type { AppStore, ChatMessage, PendingApproval, PendingAskUser, PendingDiffReview } from "../stores/types";
 import { useAppStore } from "../stores";
 import { buildApprovalResponseCommand, buildAskUserResponseCommand,
   buildNetworkApprovalResponseCommand, buildPermissionsResponseCommand, buildRequestUserInputResponseCommand } from "../protocol/prompt-responses";
@@ -19,6 +19,41 @@ const owner = (request: PendingApproval | PendingAskUser | PendingDiffReview) =>
 const approvalRequests = (state: AppStore) => [...(state.pendingApproval ? [state.pendingApproval] : []), ...state.approvalQueue];
 const askRequests = (state: AppStore) => [...(state.pendingAskUser ? [state.pendingAskUser] : []), ...state.askUserQueue];
 const diffRequests = (state: AppStore) => [...(state.pendingDiffReview ? [state.pendingDiffReview] : []), ...state.diffReviewQueue];
+
+function lastAssistant(messages: ChatMessage[], streaming = false): ChatMessage | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === "assistant" && (!streaming || message.isStreaming || message.isThinkingStreaming)) return message;
+  }
+}
+
+const activityFields = ["id", "turnId", "terminalStatus", "completedAt", "timestamp", "runStartedAt", "isStreaming", "isThinkingStreaming"] as const;
+const sameMessageActivity = (left: ChatMessage | undefined, right: ChatMessage | undefined) =>
+  left === right || Boolean(left && right && activityFields.every(key => left[key] === right[key]));
+const sameHistoryActivity = (left: ChatMessage[], right: ChatMessage[]) => left === right
+  || sameMessageActivity(lastAssistant(left), lastAssistant(right))
+    && sameMessageActivity(lastAssistant(left, true), lastAssistant(right, true));
+
+export const selectPetActivityInputs = (state: AppStore) => ({
+  conversations: state.conversations, conversationId: state.conversationId, conversationStreaming: state.conversationStreaming,
+  isStreaming: state.isStreaming, isConnected: state.isConnected, messages: state.messages,
+  conversationMessages: state.conversationMessages, sideChats: state.sideChats,
+  pendingApproval: state.pendingApproval, approvalQueue: state.approvalQueue,
+  pendingAskUser: state.pendingAskUser, askUserQueue: state.askUserQueue,
+  pendingDiffReview: state.pendingDiffReview, diffReviewQueue: state.diffReviewQueue,
+});
+type PetActivityInputs = ReturnType<typeof selectPetActivityInputs>;
+export const petActivityInputsEqual = (left: PetActivityInputs, right: PetActivityInputs) =>
+  (Object.keys(left) as (keyof PetActivityInputs)[]).every(key => {
+    if (left[key] === right[key]) return true;
+    if (key === "messages") return sameHistoryActivity(left.messages, right.messages);
+    if (key === "conversationMessages") return Object.keys(left.conversationMessages).length === Object.keys(right.conversationMessages).length
+      && Object.keys(left.conversationMessages).every(id => right.conversationMessages[id]
+        && sameHistoryActivity(left.conversationMessages[id], right.conversationMessages[id]));
+    if (key === "sideChats") return Object.keys(left.sideChats).length === Object.keys(right.sideChats).length
+      && Object.keys(left.sideChats).every(id => id in right.sideChats);
+    return false;
+  });
 function reviewInMain(request: PendingApproval | PendingAskUser | PendingDiffReview, t: Translate): Action {
   return { id: JSON.stringify([request.requestId, request.conversationId, request.turnId, request.messageId, "open"]), label: t("审阅"), openInMainWindow: true,
     submit: async () => { throw new Error("This request must be reviewed in its original task window."); } };
@@ -120,7 +155,7 @@ export function desktopPetActivity(state: AppStore, t: Translate): DesktopPetAct
   if (state.isStreaming && state.conversationId) statuses.set(state.conversationId, "running");
   for (const conversation of state.conversations) {
     const messages = conversation.id === state.conversationId ? state.messages : state.conversationMessages[conversation.id] ?? [];
-    const latest = [...messages].reverse().find(message => message.role === "assistant");
+    const latest = lastAssistant(messages);
     if (latest?.terminalStatus === "failed" && !state.conversationStreaming[conversation.id] && !(conversation.id === state.conversationId && state.isStreaming)) statuses.set(conversation.id, "failed");
   }
   for (const request of diffRequests(state)) if (request.conversationId) statuses.set(request.conversationId, "waiting");
@@ -133,14 +168,14 @@ export function desktopPetActivity(state: AppStore, t: Translate): DesktopPetAct
     const completion = petCompletionNotification(id);
     if (!completion) return true;
     const messages = id === state.conversationId ? state.messages : state.conversationMessages[id] ?? [];
-    const latest = [...messages].reverse().find(message => message.role === "assistant");
+    const latest = lastAssistant(messages);
     if (latest && (completion.identity.messageId && completion.identity.messageId !== latest.id
       || completion.identity.turnId && latest.turnId && completion.identity.turnId !== latest.turnId)) return true;
     return completion.notification.body !== null && !completion.notification.has_pending_continuation;
   }).map(([id, status]) => {
     const conversation = state.conversations.find(conversation => conversation.id === id);
     const messages = id === state.conversationId ? state.messages : state.conversationMessages[id] ?? [];
-    const latest = [...messages].reverse().find(message => message.role === "assistant");
+    const latest = lastAssistant(messages);
     const approval = approvalRequests(state).find(request => request.conversationId === id);
     const ask = askRequests(state).find(request => request.conversationId === id);
     const diff = diffRequests(state).find(request => request.conversationId === id);
