@@ -4250,6 +4250,7 @@ class SessionAgentRunnerMixin:
             skill_snapshot_task = asyncio.create_task(to_thread_cancel_safe(
                 request_snapshot.skill_manager.snapshot, request_snapshot.workspace_root,
                 config_stack=request_snapshot.config.config_layer_stack,
+                force_reload=True,
             ))
             run_context.skill_snapshot_task = skill_snapshot_task
             retain_cleanup_task(skill_snapshot_task, run_context.lifecycle_cleanup_tasks)

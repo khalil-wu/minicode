@@ -121,7 +121,7 @@ class SkillManager:
             loader.set_project_root(project_root)
         if isinstance(loader, SkillLoader):
             config_changed = config_stack is not None and (
-                loader._config_stack is None or loader._config_stack.fingerprint != config_stack.fingerprint
+                loader._discovery_config_fingerprint != config_stack.fingerprint
             )
             if config_stack is not None:
                 loader._config_stack = config_stack

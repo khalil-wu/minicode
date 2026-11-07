@@ -95,6 +95,7 @@ class SkillLoader:
         self._direct_skill_roots: set[str] = set()
         self._disabled_plugin_roots: set[str] = set()
         self._config_stack = None
+        self._discovery_config_fingerprint: str | None = None
         self._extra_roots: tuple[Path, ...] = ()
 
     def set_extra_roots(self, roots: tuple[Path, ...]) -> None:
@@ -358,6 +359,7 @@ class SkillLoader:
 
         self._catalog = [meta for meta, _path_key in catalog]
         self._discovered = True
+        self._discovery_config_fingerprint = stack.fingerprint
         self._path_cache = {path_key: meta for meta, path_key in catalog}
         self._full_cache.clear()
         logger.info("发现 %d 个 Skills: %s", len(catalog), ", ".join(meta.name for meta in self._catalog))

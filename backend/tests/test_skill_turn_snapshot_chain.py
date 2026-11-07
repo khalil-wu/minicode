@@ -92,6 +92,29 @@ def test_captured_host_roles_and_executor_catalog_project_without_rediscovery(tm
     assert len(scans) == 4
 
 
+def test_live_host_catalog_remembers_discovery_config_without_freezing_next_turn(tmp_path, monkeypatch):
+    _skill(tmp_path, "owned", "Initial description")
+    stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("session_flags"), {}),))
+    monkeypatch.setattr("backend.config.load_config_layer_stack", lambda cwd=None: stack)
+    host, scans = _host(tmp_path, monkeypatch, None)
+    captured = host.clone_host_catalog()
+    projection = captured.snapshot(tmp_path, config_stack=stack)
+    assert not scans
+    assert host._loader._config_stack is None
+    assert projection.get_meta("owned").description == "Initial description"
+    _skill(tmp_path, "owned", "Edited before the next turn")
+    _skill(tmp_path, "installed", "New skill")
+    next_turn = captured.snapshot(tmp_path, config_stack=stack, force_reload=True)
+    assert len(scans) == 1
+    assert next_turn.get_meta("owned").description == "Edited before the next turn"
+    assert next_turn.get_meta("installed") is not None
+    assert projection.get_meta("owned").description == "Initial description"
+    restricted = ConfigLayerStack((ConfigLayer(ConfigLayerSource("session_flags"),
+        {"skills": {"config": [{"name": "owned", "enabled": False}]}}),))
+    assert captured.snapshot(tmp_path, config_stack=restricted).get_meta("owned") is None
+    assert len(scans) == 2
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["captured_request", "sdk", "fork"])
 async def test_query_and_bootstrap_share_one_scan_and_next_real_turn_sees_files(tmp_path, monkeypatch, entry):
