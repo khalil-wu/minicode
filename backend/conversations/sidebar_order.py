@@ -22,7 +22,8 @@ def conversation_project_key(conversation: Any) -> str:
 
 def ordered_members(saved: list[str], current: list[str]) -> list[str]:
     membership = set(current)
-    return [identifier for identifier in saved if identifier in membership] + [identifier for identifier in current if identifier not in saved]
+    retained = set(saved)
+    return [identifier for identifier in saved if identifier in membership] + [identifier for identifier in current if identifier not in retained]
 
 
 def replace_visible_slots(current: list[str], visible_ids: list[str], moved_id: str, before_id: str | None) -> list[str]:
@@ -43,8 +44,12 @@ def thread_orders(conversations: list[Any], saved: dict[str, Any]) -> tuple[list
     threads = sorted((item for item in conversations if item.conversation_type == "main"),
                      key=lambda item: (item.updated_at, item.id), reverse=True)
     projects: dict[str, list[str]] = {}
+    project_keys: dict[str, str] = {}
     for item in threads:
-        key = conversation_project_key(item)
+        membership = item.project_id if item.project_id is not None else item.worktree_path or item.workspace_root
+        if membership not in project_keys:
+            project_keys[membership] = project_key(membership)
+        key = project_keys[membership]
         if key:
             projects.setdefault(key, []).append(item.id)
     return (ordered_members(saved["recent_thread_ids"], [item.id for item in threads]),

@@ -1783,7 +1783,7 @@ class ConversationRepository:
             return {"sidebar_order": {**state, "recent_thread_ids": recent, "project_thread_orders": projects}}
 
     def set_sidebar_sort_mode(self, mode: str, project_seeds: dict[str, list[str]]) -> None:
-        from backend.conversations.sidebar_order import conversation_project_key, project_key, thread_orders
+        from backend.conversations.sidebar_order import project_key, thread_orders
 
         if mode not in {"manual", "updated_at"}:
             raise ValueError("Sidebar sort mode must be manual or updated_at")
@@ -1795,22 +1795,26 @@ class ConversationRepository:
             by_id = {item.id: item for item in summaries if item.conversation_type == "main"}
             orders = dict(state["project_thread_orders"])
             if mode == "manual":
+                recent, projects = thread_orders(summaries, state)
                 for raw_project, identifiers in project_seeds.items():
                     key = project_key(raw_project)
+                    members = set(projects.get(key, [])) if key else {
+                        item.id for item in by_id.values()
+                        if not (item.project_id if item.project_id is not None else item.worktree_path or item.workspace_root)
+                    }
                     if len(set(identifiers)) != len(identifiers) or any(
-                        identifier not in by_id or conversation_project_key(by_id[identifier]) != key for identifier in identifiers
+                        identifier not in by_id or identifier not in members for identifier in identifiers
                     ):
                         raise ValueError("The project chats changed before manual sorting was selected")
                     # Source qoo -> Joo/sAr seeds visible projects once and
                     # restores an existing manual order on later mode changes.
                     if key not in orders:
                         orders[key] = identifiers
-                recent, _ = thread_orders(summaries, state)
                 state = {**state, "recent_thread_ids": recent, "project_thread_orders": orders}
             self._write_sidebar_order({**state, "sort_mode": mode})
 
     def reorder_sidebar_threads(self, project_id: str | None, moved_id: str, before_id: str | None, visible_ids: list[str]) -> None:
-        from backend.conversations.sidebar_order import conversation_project_key, project_key, replace_visible_slots, thread_orders
+        from backend.conversations.sidebar_order import project_key, replace_visible_slots, thread_orders
 
         with self._store_lock():
             state = self._read_sidebar_order()
@@ -1819,8 +1823,9 @@ class ConversationRepository:
             summaries = self._list_conversations_unlocked()
             recent, projects = thread_orders(summaries, state)
             key = project_key(project_id) if project_id is not None else None
+            project_members = set(projects.get(key, []))
             eligible = {item.id for item in summaries if item.conversation_type == "main" and not item.archived and not item.pinned
-                        and (key is None or conversation_project_key(item) == key)}
+                        and (key is None or item.id in project_members)}
             if not set(visible_ids).issubset(eligible):
                 raise ValueError("The project chats changed before this reorder")
             current = recent if key is None else projects.get(key, [])

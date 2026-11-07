@@ -25,6 +25,39 @@ def order(repository):
     return repository.get_sidebar_order(repository.list_conversations())["sidebar_order"]
 
 
+def test_large_order_projection_resolves_each_project_once_and_keeps_saved_slots(tmp_path, monkeypatch):
+    from backend.conversations import sidebar_order
+
+    projects = [str(tmp_path / "a"), str(tmp_path / "b")]
+    records = [SimpleNamespace(id=f"conv-{index:05}", updated_at=f"{index:05}", conversation_type="main",
+        project_id=None, worktree_path="", workspace_root=projects[index % 2]) for index in range(10_000)]
+    expected = {root: project_key(root) for root in projects}
+    state = sidebar_order.empty_sidebar_order()
+    state["recent_thread_ids"] = [records[5].id, records[2].id, "deleted"]
+    state["project_thread_orders"] = {expected[projects[0]]: [records[8].id, records[0].id]}
+    resolved = []
+    resolve = sidebar_order.project_key
+
+    def observe(root):
+        resolved.append(root)
+        return resolve(root)
+
+    monkeypatch.setattr(sidebar_order, "project_key", observe)
+    recent, grouped = sidebar_order.thread_orders(records, state)
+    assert sorted(resolved) == sorted(projects)
+    assert recent[:2] == [records[5].id, records[2].id]
+    assert recent[2:] == [item.id for item in reversed(records) if item.id not in recent[:2]]
+    assert grouped[expected[projects[0]]][:2] == [records[8].id, records[0].id]
+    assert len(grouped[expected[projects[0]]]) == len(grouped[expected[projects[1]]]) == 5000
+    # Every projection observes current membership and filesystem identities.
+    resolved.clear()
+    records[0].project_id = projects[1]
+    _, regrouped = sidebar_order.thread_orders(records, state)
+    assert sorted(resolved) == sorted(projects)
+    assert records[0].id not in regrouped[expected[projects[0]]]
+    assert records[0].id in regrouped[expected[projects[1]]]
+
+
 def test_source_project_occurrence_reorder_keeps_hidden_slots_and_all_record_bytes(tmp_path):
     repository = ConversationRepository(tmp_path / "conversations")
     project = tmp_path / "Alpha"
