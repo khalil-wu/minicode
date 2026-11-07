@@ -89,7 +89,8 @@ def test_real_tool_surface_shares_decisions_without_changing_provider_contract(t
         actual = prepare_schemas(registry.fork(), checker, permission, policy)
         counts = Counter(call.args[0] for call in evaluate.call_args_list)
         assert actual == reference
-        assert len(counts) == len(registry.list_tools())
+        assert "read_file" in counts
+        assert {schema["function"]["name"] for schema in actual.tool_schemas} <= counts.keys()
         assert set(counts.values()) == {1}
     finally:
         artifacts.shutdown()

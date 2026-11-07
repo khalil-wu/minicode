@@ -254,6 +254,7 @@ class CapabilityRegistry:
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
         materialize_schema: bool = True,
+        permission_decisions: dict[str, Any] | None = None,
     ) -> Any | None:
         """Return the current ToolSchemaView for one registered tool."""
         tool = self._tools.get(name)
@@ -266,6 +267,7 @@ class CapabilityRegistry:
             permission_checker=permission_checker,
             permission_context=permission_context,
             materialize_schema=materialize_schema,
+            permission_decisions=permission_decisions,
         )
 
     def _build_schema_view_for_tool(

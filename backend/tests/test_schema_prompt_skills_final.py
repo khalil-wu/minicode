@@ -88,21 +88,45 @@ def test_schema_derivation_omits_synthetic_directory_without_building_a_search_i
     import backend.tools.tool_search as search
 
     registry = ToolRegistry()
-    registry.register(ToolSearchTool(registry))
+    tool_search = ToolSearchTool(registry)
+    registry.register(tool_search)
     for index in range(200):
         registry.register(MCPToolProxy("fixture", MCPToolDef(f"act_{index}", "Detailed rules " * 300), None))
-    views = Mock(wraps=registry.build_schema_views)
-    monkeypatch.setattr(registry, "build_schema_views", views)
     tokenize = Mock(side_effect=AssertionError("Names-only discovery should not tokenize descriptions"))
     monkeypatch.setattr(search, "_tokenize", tokenize)
     policy = ToolsetPolicy(supports_search_tool=True)
     schemas = registry.get_schemas(toolset_policy=policy)
-    views.reset_mock()
+    monkeypatch.setattr(tool_search, "model_description", Mock(
+        side_effect=AssertionError("MCP guidance must not rebuild unrelated tool descriptions")))
     state = derive_turn_tool_schema_state(base_tool_schemas=schemas, mcp_instructions={}, tool_registry=registry, toolset_policy=policy)
     assert state.deferred_tools_prompt_block == ""
     assert "available-deferred-tools" not in state.runtime_guidance
-    assert views.call_count == 1
     assert tokenize.call_count == 0
+
+
+@pytest.mark.parametrize("code_mode", [False, True])
+def test_mcp_guidance_reuses_current_decisions_and_keeps_denied_servers_out(tmp_path, monkeypatch, code_mode):
+    registry = ToolRegistry()
+    registry.register(ToolSearchTool(registry))
+    for server in ("allowed", "denied"):
+        registry.register(MCPToolProxy(server, MCPToolDef("read", "Read data",
+            annotations={"readOnlyHint": True}), None))
+    checker = PermissionChecker(PermissionSettings(always_deny=["mcp__denied__read"]), tmp_path)
+    permission = PermissionContext(mode="confirm", workspace_root=tmp_path)
+    policy = ToolsetPolicy(code_mode_enabled=code_mode, supports_search_tool=not code_mode)
+    decisions = {}
+    schemas = registry.get_schemas(permission_checker=checker, permission_context=permission,
+        toolset_policy=policy, permission_decisions=decisions)
+    evaluated_names = set(decisions)
+    evaluate = Mock(wraps=checker.evaluate)
+    monkeypatch.setattr(checker, "evaluate", evaluate)
+    state = derive_turn_tool_schema_state(base_tool_schemas=schemas,
+        mcp_instructions={"allowed": "ALLOWED SERVER RULES", "denied": "DENIED SERVER RULES"},
+        tool_registry=registry, permission_checker=checker, permission_context=permission,
+        toolset_policy=policy, permission_decisions=decisions)
+    assert "ALLOWED SERVER RULES" in state.runtime_guidance
+    assert "DENIED SERVER RULES" not in state.runtime_guidance
+    assert all(call.args[0] not in evaluated_names for call in evaluate.call_args_list)
 
 
 def test_direct_schema_build_does_not_materialize_deferred_metadata(monkeypatch):

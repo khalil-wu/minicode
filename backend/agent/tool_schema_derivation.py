@@ -274,19 +274,23 @@ def derive_turn_tool_schema_state(
         for schema in canonical_base_schemas
     )
     names = sorted(tool_schema_names(canonical_base_schemas))
-    views = tool_registry.build_schema_views(
-        toolset_policy=toolset_policy,
-        permission_checker=permission_checker,
-        permission_context=permission_context,
-        materialize_schema=False,
-        permission_decisions=permission_decisions,
-    ) if tool_registry is not None else []
     reachable_mcp_tools = set()
     reachable_mcp_servers = None
     if tool_registry is not None:
+        views = (
+            tool_registry.get_schema_view(
+                name,
+                toolset_policy=toolset_policy,
+                permission_checker=permission_checker,
+                permission_context=permission_context,
+                materialize_schema=False,
+                permission_decisions=permission_decisions,
+            )
+            for name in tool_registry.list_tools() if name.startswith("mcp__")
+        )
         reachable_mcp_tools = {
             view.name for view in views
-            if view.name.startswith("mcp__") and (view.direct or view.code_mode_available
+            if (view.direct or view.code_mode_available
                 or ("tool_search" in names and view.exposure in {"deferred", "deferred_model_only"}))
         }
         reachable_mcp_servers = {
