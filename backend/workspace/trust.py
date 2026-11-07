@@ -24,13 +24,11 @@ def trust_created_task_directory(task_directory: Path) -> None:
         atomic_write_text(TRUSTED_WORKSPACES_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def trusted_workspace_roots() -> tuple[Path, ...]:
-    """Read the desktop main process' authoritative workspace-trust ledger."""
-
+def _trusted_workspace_values() -> list[str]:
     try:
         payload = json.loads(TRUSTED_WORKSPACES_FILE.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return ()
+        return []
     values = (
         payload
         if isinstance(payload, list)
@@ -39,13 +37,13 @@ def trusted_workspace_roots() -> tuple[Path, ...]:
         else []
     )
     if not isinstance(values, list):
-        return ()
+        return []
+    return [value for value in values if isinstance(value, str) and value.strip()]
 
-    trusted: list[Path] = []
+
+def _resolved_trusted_roots(values):
     seen: set[str] = set()
     for value in values:
-        if not isinstance(value, str) or not value.strip():
-            continue
         try:
             candidate = Path(value).expanduser().resolve()
         except OSError:
@@ -56,8 +54,12 @@ def trusted_workspace_roots() -> tuple[Path, ...]:
         if key in seen:
             continue
         seen.add(key)
-        trusted.append(candidate)
-    return tuple(trusted)
+        yield candidate
+
+
+def trusted_workspace_roots() -> tuple[Path, ...]:
+    """Read the desktop main process' authoritative workspace-trust ledger."""
+    return tuple(_resolved_trusted_roots(_trusted_workspace_values()))
 
 
 def is_workspace_trusted(workspace_root: Path | None) -> bool:
@@ -71,7 +73,13 @@ def is_workspace_trusted(workspace_root: Path | None) -> bool:
         return False
     if not resolved.is_dir():
         return False
-    for trusted_root in trusted_workspace_roots():
+    # Native picker/task creation stores canonical roots. Check lexical
+    # ancestors first, then resolve their actual current targets before trust.
+    # Alias entries still participate; no authorization survives a ledger edit
+    # or a directory/junction change through a retained result cache.
+    values = _trusted_workspace_values()
+    values.sort(key=lambda value: not resolved.is_relative_to(Path(value).expanduser().absolute()))
+    for trusted_root in _resolved_trusted_roots(values):
         try:
             resolved.relative_to(trusted_root)
             return True
