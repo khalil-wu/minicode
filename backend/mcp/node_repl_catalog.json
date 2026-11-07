@@ -1,0 +1,68 @@
+{
+  "instructions": "Use js for persistent Node JavaScript with top-level await and redeclarable bindings. Use dynamic import(); static imports and node:process are unavailable. nodeRepl.write(value) emits text; await nodeRepl.emitImage(dataUrl or {bytes,mimeType}) emits an image. nodeRepl.cwd, homeDir, tmpDir and requestMeta expose this execution context. This is a real Node kernel, separate from Code Mode.",
+  "tools": [
+    {
+      "name": "js",
+      "description": "Use js for persistent Node JavaScript with top-level await and redeclarable bindings. Use dynamic import(); static imports and node:process are unavailable. nodeRepl.write(value) emits text; await nodeRepl.emitImage(dataUrl or {bytes,mimeType}) emits an image. nodeRepl.cwd, homeDir, tmpDir and requestMeta expose this execution context. This is a real Node kernel, separate from Code Mode. Default timeout_ms is 30000; timeout or cancellation resets the kernel.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "js_reset",
+      "description": "Reset the JavaScript kernel and clear all bindings. Added node_modules directories remain available.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "js_add_node_module_dir",
+      "description": "Add an absolute node_modules directory for package imports. The directory remains available after js_reset.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": true
+      }
+    }
+  ]
+}

@@ -320,13 +320,7 @@ async function execute(request, signal, expectedGeneration) {
     });
   } finally { clearTimeout(timer); signal.removeEventListener('abort', cancel); }
 }
-const common = 'Use js for persistent Node JavaScript with top-level await and redeclarable bindings. Use dynamic import(); static imports and node:process are unavailable. nodeRepl.write(value) emits text; await nodeRepl.emitImage(dataUrl or {bytes,mimeType}) emits an image. nodeRepl.cwd, homeDir, tmpDir and requestMeta expose this execution context. This is a real Node kernel, separate from Code Mode.';
-const tools = [
-  { name: 'js', description: common + ' Default timeout_ms is 30000; timeout or cancellation resets the kernel.',
-    inputSchema: { type: 'object', properties: { code: { type: 'string' }, timeout_ms: { type: 'integer', minimum: 1 }, title: { type: 'string' } }, required: ['code'], additionalProperties: false } },
-  { name: 'js_reset', description: 'Reset the JavaScript kernel and clear all bindings. Added node_modules directories remain available.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-  { name: 'js_add_node_module_dir', description: 'Add an absolute node_modules directory for package imports. The directory remains available after js_reset.', inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'], additionalProperties: false } },
-].map(tool => ({ ...tool, annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true } }));
+const { instructions: common, tools } = /*__MINICODE_NODE_REPL_CATALOG__*/ {};
 async function handle(request) {
   if (request.method === 'notifications/cancelled') { requests.get(request.params.requestId)?.abort(); return; }
   if (request.id === undefined) return;

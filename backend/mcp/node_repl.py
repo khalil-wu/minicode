@@ -18,12 +18,14 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from backend.mcp.client import MCPClient, MCPTransport
+from backend.mcp.client import MCPClient, MCPTransport, MCPToolDef
 from backend.mcp.executor_stdio import executor_stdio_client
 from backend.mcp.connections import MCPConnection, MCPConnectionView
 
 SOURCE_PREFIX = "builtin:node_repl:"
-_SERVER = Path(__file__).with_name("node_repl_server.mjs").read_text(encoding="utf-8")
+_CATALOG = json.loads(Path(__file__).with_name("node_repl_catalog.json").read_text(encoding="utf-8"))
+_SERVER = Path(__file__).with_name("node_repl_server.mjs").read_text(encoding="utf-8").replace(
+    "/*__MINICODE_NODE_REPL_CATALOG__*/ {}", json.dumps(_CATALOG, ensure_ascii=False, separators=(",", ":")))
 
 
 def _env_policy(attachment):
@@ -307,6 +309,14 @@ async def register_node_companion(run_context, registry, agent_session, *, execu
         await owner.retire(config)
     manager.environment_runtime.node_repl_companions = owner
     manager._runtime_configs = tuple(item for item in manager._runtime_configs if item.name != "node_repl") + (config,)
+    # The bundled server and its advertised catalog use the same source. Admit
+    # the real connection normally, but don't wait for tools/list to rediscover
+    # these definitions before a model can answer an unrelated user request.
+    manager._capture_catalog_context(config)
+    catalog = manager._catalog_contexts.get(config.name)
+    if catalog is not None and catalog.get() is None:
+        catalog.publish(catalog.begin_fetch(), [MCPToolDef(name=tool["name"], description=tool["description"],
+            input_schema=tool["inputSchema"], annotations=tool["annotations"]) for tool in _CATALOG["tools"]], _CATALOG["instructions"])
     await manager.ensure_server_startup(config)
     await manager.capture_startup_readiness(names=(config.name,))
     manager.validate_required_startups(names=(config.name,))

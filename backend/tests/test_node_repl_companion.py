@@ -59,6 +59,83 @@ async def companion(tmp_path, *, environment_config=None):
 def body(result):
     return "\n".join(block["text"] for block in result.content if block["type"] == "text")
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required_connection", [False, True])
+async def test_builtin_catalog_does_not_wait_for_node_startup_and_calls_still_wait(tmp_path, monkeypatch, required_connection):
+    from backend.agent.run_context import RunContext
+    from backend.mcp.node_repl import NodeReplMCPClient, register_node_companion, _CATALOG
+    from backend.tools.registry import ToolRegistry
+
+    backend = LocalExecutionEnvironmentBackend()
+    environments = EnvironmentManager(tmp_path, local_backend=backend)
+    config = EnvironmentConfig(PermissionProfile.disabled(), (tmp_path.as_uri(),))
+    async def resolve(selection, config, environment, info):
+        return config
+    thread = ThreadEnvironments(environments, ThreadEnvironmentDefaults(config, "disabled"), resolve_config=resolve)
+    await thread.update_selections([TurnEnvironmentSelection.from_request(TurnEnvironmentRequest(
+        "local", tmp_path.as_uri(), (tmp_path.as_uri(),), EnvironmentConfigState.ready(config)))])
+    snapshot = await thread.snapshot()
+    runtime = MCPEnvironmentRuntime(environments, snapshot, local_cwd=tmp_path.as_uri())
+    flags = FeatureFlags({})
+    manager = MCPServerManager(config_path=tmp_path / "mcp.json", workspace_root=tmp_path,
+        environment_runtime=runtime, runtime_configs=(), optional_startup_grace_ms=1000, feature_flags=flags)
+    policy = manager._apply_mcp_policies
+    def apply_policy(configs, **kwargs):
+        result = policy(configs, **kwargs)
+        for item in result:
+            item.required = required_connection
+            item.startup_readiness = "connection"
+        return result
+    monkeypatch.setattr(manager, "_apply_mcp_policies", apply_policy)
+    entered, release = asyncio.Event(), asyncio.Event()
+    connect = NodeReplMCPClient.connect
+    async def held_connect(client):
+        entered.set()
+        await release.wait()
+        await connect(client)
+    monkeypatch.setattr(NodeReplMCPClient, "connect", held_connect)
+    owner = SimpleNamespace(node_repl_companions=None)
+    run = RunContext(turn_environments=snapshot, environment_capabilities=SimpleNamespace(mcp_manager=manager),
+        node_repl_owner=owner, network_step=SimpleNamespace(policy_for=lambda _: None))
+    registry = ToolRegistry()
+    from backend.mcp.registry import MCPToolRegistry
+    MCPToolRegistry(registry, mcp_manager=manager)
+    execution = SimpleNamespace(config=AppConfig(llm=LLMSettings(api_key="")), model_info=None)
+    try:
+        registering = asyncio.create_task(register_node_companion(run, registry, None, execution=execution))
+        if required_connection:
+            await asyncio.wait_for(entered.wait(), 3)
+            assert not registering.done()
+            release.set()
+        await asyncio.wait_for(registering, 10)
+        assert manager.catalog_is_cached("node_repl") is not required_connection
+        assert entered.is_set() is required_connection
+        assert {tool.name for tool in manager.get_all_tools()["node_repl"]} == {tool["name"] for tool in _CATALOG["tools"]}
+        if not required_connection:
+            assert manager.get_client("node_repl") is None
+        preparing = asyncio.create_task(manager.prepare_server_call("node_repl"))
+        await asyncio.wait_for(entered.wait(), 3)
+        if not required_connection:
+            assert not preparing.done()
+        release.set()
+        await asyncio.wait_for(preparing, 10)
+        client = manager.get_client("node_repl")
+        actual = await client.list_tools()
+        assert [(tool.name, tool.description, tool.input_schema) for tool in actual] == [
+            (tool["name"], tool["description"], tool["inputSchema"]) for tool in _CATALOG["tools"]]
+        assert client.instructions == _CATALOG["instructions"]
+        assert body(await client.call_tool("js", {"code": "nodeRepl.write(2+2)"})) == "4"
+    finally:
+        release.set()
+        await manager.stop_all()
+        if owner.node_repl_companions is not None:
+            await owner.node_repl_companions.aclose()
+        await runtime.aclose()
+        await snapshot.aclose()
+        await thread.aclose()
+        await environments.close()
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("runtime", ["system", "desktop-bundled"])
 async def test_real_node_mcp_catalog_persistent_redeclaration_imports_and_metadata(tmp_path, monkeypatch, runtime, request):
@@ -241,6 +318,7 @@ async def test_retiring_manager_reuses_original_process_and_permission_change_ha
             environment_runtime=runtime, runtime_configs=(fixture.config,))
         try:
             await manager.start_all()
+            await manager.prepare_server_call("node_repl")
             assert manager.get_client("node_repl") is fixture.client
             assert body(await fixture.client.call_tool("js", {"code": "nodeRepl.write(original)"})) == original
             assert len(fixture.backend.process.processes) == 1
@@ -348,8 +426,8 @@ async def test_real_builtin_registration_obeys_captured_environment_mcp_authorit
             model_info=SimpleNamespace(extra={"node_repl_disabled": not model_disabled})))
     try:
         await register_node_companion(run, registry, None, execution=run.model_execution)
-        await manager.wait_for_server_startup("node_repl")
         if allowed_server == "node_repl" and not model_disabled:
+            await manager.prepare_server_call("node_repl")
             client = manager.get_client("node_repl")
             assert client is not None and client.connected, manager.get_all_status()
             assert len(backend.process.processes) == 1
@@ -406,7 +484,8 @@ async def test_scope_retirement_waits_for_original_call_then_stops_its_timer(tmp
             environment_runtime=runtime, runtime_configs=(changed,))
         try:
             await manager.start_all()
-            await manager.wait_for_server_startup("node_repl")
+            if scope_change == "filesystem":
+                await manager.prepare_server_call("node_repl")
             current = manager.get_client("node_repl")
             if scope_change == "mcp-authority":
                 assert current is None and not fixture.backend.process.processes

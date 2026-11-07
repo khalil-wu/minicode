@@ -1454,10 +1454,12 @@ class MCPServerManager:
             except MCPTokenStoreError as exc:
                 await self._report_credential_store_failure(config.name, exc)
                 return
-            if self._startup_policy == "LazyWhenCached":
+            lazy_catalog = self._startup_policy == "LazyWhenCached" or (
+                config.source.startswith(NODE_SOURCE) and (not config.required or config.startup_readiness == "catalog"))
+            if lazy_catalog:
                 self._dormant_servers.add(config.name)
             cached = self._cached_startup(config)
-            if self._startup_policy == "LazyWhenCached" and cached is not None:
+            if lazy_catalog and cached is not None:
                 self._project_cached_startup(state, cached)
                 await self._notify_status(config.name, state.status)
                 return
