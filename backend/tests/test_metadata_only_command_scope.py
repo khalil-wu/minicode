@@ -40,6 +40,33 @@ def test_command_scope_never_copies_history_just_to_find_its_workspace(tmp_path,
     assert scope.conversation_id == record.id and scope.workspace_root == str(root)
 
 
+def test_direct_summary_reads_reuse_metadata_without_loading_the_full_inventory(tmp_path, monkeypatch):
+    session, record, _ = owner(tmp_path)
+    reader = ConversationRepository(session.conversation_repo.storage_root)
+    loads = []
+    load = reader._load_summary
+
+    def read_metadata(identity, **kwargs):
+        loads.append(identity)
+        return load(identity, **kwargs)
+
+    def forbidden():
+        raise AssertionError("One summary must not scan the full conversation directory")
+
+    monkeypatch.setattr(reader, "_load_summary", read_metadata)
+    monkeypatch.setattr(reader, "_discover_summary_stamps", forbidden)
+    first = reader.get_conversation_summary(record.id)
+    first.title = "Caller-owned edit"
+    assert reader.get_conversation_summary(record.id).title == record.title
+    assert loads == [record.id]
+    session.conversation_repo.rename_conversation(record.id, "Changed in another window")
+    assert reader.get_conversation_summary(record.id).title == "Changed in another window"
+    assert reader.get_conversation_summary(record.id).title == "Changed in another window"
+    assert loads == [record.id, record.id]
+    session.conversation_repo.delete_conversation(record.id)
+    assert reader.get_conversation_summary(record.id) is None
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("plan", [False, True])
 async def test_workspace_capture_uses_metadata_except_for_plan_constraints(tmp_path, monkeypatch, plan):

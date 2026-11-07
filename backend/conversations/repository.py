@@ -113,7 +113,9 @@ class ConversationRepository:
         from backend.conversations.directory import ConversationDirectory
         self.directory = ConversationDirectory(self)
         self._store_file_lock = FileLock(self._store_lock_path, timeout=60)
-        self._summary_index: dict[str, ConversationSummary] | None = None
+        # Individual metadata reads populate this cache too. Directory pages
+        # no longer call the legacy full inventory loader before using it.
+        self._summary_index: dict[str, ConversationSummary] = {}
         self._summary_index_stamps: dict[str, tuple[tuple[int, int], ...]] = {}
         self._record_cache: OrderedDict[str, ConversationRecord] = OrderedDict()
         self._record_cache_stamps: dict[str, tuple[tuple[int, int], ...]] = {}
@@ -3223,8 +3225,6 @@ class ConversationRepository:
         )
 
     def _ensure_summary_index_loaded(self) -> None:
-        if self._summary_index is None:
-            self._summary_index = {}
         disk_stamps = self._discover_summary_stamps()
         discovered_ids = set(disk_stamps)
         for conversation_id in set(self._summary_index) - discovered_ids:
