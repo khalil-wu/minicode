@@ -227,7 +227,9 @@ class SessionPermissionRuntimeMixin:
             await target.emit_permission_rules_updated(conversation_id=conversation_id, source=source)
 
     def sync_permission_mode_with_active_conversation(self, *, source: str) -> str:
-        active = self.active_conversation
+        active = self.conversation_repo.get_conversation_summary(self.active_conversation_id) if self.active_conversation_id else None
+        if active is not None and active.permission_mode == "plan":
+            active = self.conversation_repo.get_conversation(active.id)
         self.permission_context = self.permission_context_for_conversation(active, source=source)
         self.session_lifecycle.schedule_runtime_capabilities(source=f"workspace.activate.{source}")
         return self.permission_context.mode

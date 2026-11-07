@@ -35,6 +35,8 @@ def test_bound_metadata_binds_fresh_cwd_without_loading_the_full_record(tmp_path
     bound = session.session_lifecycle.bind_execution_for_operation(stale, metadata_only=True)
 
     assert bound.execution_cwd == str(workspace)
+    assert bound.permission_deny_rules == ["run_command"]
+    assert bound.permission_overrides == {"read_file": "auto"}
     summary.assert_called_once_with(conversation.id)
     full.assert_not_called()
     complete = session.session_lifecycle.bind_execution_for_operation(stale)
@@ -42,6 +44,41 @@ def test_bound_metadata_binds_fresh_cwd_without_loading_the_full_record(tmp_path
     assert complete.permission_deny_rules == ["run_command"]
     assert complete.permission_overrides == {"read_file": "auto"}
     assert complete.context_snapshot["history"][0]["content"] == "Retained history"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["confirm", "bypass"])
+async def test_non_plan_request_and_window_permissions_keep_persisted_rules_without_history(tmp_path, monkeypatch, mode):
+    session, record, _adapter = session_for(tmp_path, monkeypatch)
+    repository = session.conversation_repo
+    repository.update_permission_mode(record.id, mode)
+    repository.update_permission_rules(record.id, deny_rules=["run_command"], overrides={"read_file": "auto"})
+    cold = ConversationRepository(repository.storage_root)
+    for owner in (repository, cold):
+        summary = owner.get_conversation_summary(record.id)
+        assert summary.permission_deny_rules == ["run_command"]
+        assert summary.permission_overrides == {"read_file": "auto"}
+        summary.permission_deny_rules.clear()
+        summary.permission_overrides.clear()
+        assert owner.get_conversation_summary(record.id).permission_deny_rules == ["run_command"]
+        assert owner.get_conversation_summary(record.id).permission_overrides == {"read_file": "auto"}
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Ordinary permission capture must not load the transcript")
+
+    monkeypatch.setattr(repository, "get_conversation", forbidden)
+    try:
+        request = session.capture_agent_run_request(record.id)
+        assert request.permission.mode == mode
+        assert request.permission.tool_deny_rules == ["run_command"]
+        assert request.permission.session_overrides == {"read_file": PermissionLevel.AUTO}
+        assert session.permission_checker.evaluate("run_command", {"command": "echo blocked"},
+            context=request.permission).decision == "deny"
+        assert session.sync_permission_mode_with_active_conversation(source="test.metadata") == mode
+        assert session.permission_context.tool_deny_rules == ["run_command"]
+        assert session.permission_context.session_overrides == {"read_file": PermissionLevel.AUTO}
+    finally:
+        await session.session_lifecycle.shutdown(reason="metadata_permission_test")
 
 
 @pytest.mark.asyncio

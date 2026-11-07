@@ -166,6 +166,8 @@ class ConversationSummary:
     permission_mode: ConversationPermissionMode = DEFAULT_CONVERSATION_PERMISSION_MODE
     permission_mode_revision: int = 0
     permission_previous_mode: ConversationPermissionMode | str = ""
+    permission_deny_rules: list[str] = field(default_factory=list)
+    permission_overrides: dict[str, ConversationPermissionRuleLevel] = field(default_factory=dict)
     summary: str = ""
     compaction_state: ConversationCompactionState = "clean"
     message_count: int = 0
@@ -230,6 +232,8 @@ class ConversationSummary:
             ),
             permission_mode_revision=_normalize_revision(payload.get("permission_mode_revision")),
             permission_previous_mode=_normalize_previous_permission_mode(payload.get("permission_previous_mode")),
+            permission_deny_rules=normalize_permission_deny_rules(payload.get("permission_deny_rules", [])),
+            permission_overrides=normalize_permission_overrides(payload.get("permission_overrides", {})),
             summary=str(payload.get("summary") or ""),
             compaction_state=payload.get("compaction_state", "clean"),
             message_count=int(payload.get("message_count") or 0),
@@ -335,6 +339,8 @@ class ConversationRecord:
             permission_mode=self.permission_mode,
             permission_mode_revision=self.permission_mode_revision,
             permission_previous_mode=self.permission_previous_mode,
+            permission_deny_rules=list(self.permission_deny_rules),
+            permission_overrides=dict(self.permission_overrides),
             summary=self.summary,
             compaction_state=self.compaction_state,
             message_count=self.message_count or len(self.transcript),
