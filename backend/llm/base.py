@@ -112,9 +112,10 @@ async def emit_provider_lifecycle_request(
     emit_request = getattr(runner, "emit_before_provider_request", None)
     if not callable(emit_request):
         return payload
-    # Extensions can mutate nested request items. Give the hook ownership of
-    # its request copy, without copying ordinary unhooked provider calls.
-    hook_payload = deepcopy(payload)
+    # The extension runner is present even with no request handlers. Keep its
+    # generation check, but only detach nested request data for actual hooks.
+    has_handlers = getattr(runner, "has_handlers", None)
+    hook_payload = payload if callable(has_handlers) and not has_handlers("before_provider_request") else deepcopy(payload)
     try:
         value = await emit_request(hook_payload)
     except LifecycleStaleError:
