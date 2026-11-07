@@ -4,6 +4,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import json
 
 from fastapi import FastAPI
 import httpx
@@ -65,6 +66,8 @@ def test_filtering_sections_projects_provider_source_and_relations(directory_cas
     assert ids(page(model_providers=["vertex"])) == [records[0].id]
     assert set(ids(page(source_kinds=["subagent"]))) == {child.id, grandchild.id}
     assert child.id not in ids(page(limit=100))
+    assert ids(page(parent_thread_id=records[0].id)) == [child.id]
+    assert set(ids(page(ancestor_thread_id=records[0].id))) == {child.id, grandchild.id}
     assert ids(page(parent_thread_id=records[0].id, source_kinds=["subagent"])) == [child.id]
     assert set(ids(page(ancestor_thread_id=records[0].id, source_kinds=["subagent"]))) == {child.id, grandchild.id}
     assert ids(page(archived=True)) == [records[2].id]
@@ -137,6 +140,69 @@ def test_cold_directory_scan_releases_publication_lock_and_retries_concurrent_co
         page = reading.result(timeout=5)
     assert len(calls) == 2
     assert next(item for item in page["data"] if item["id"] == records[0].id)["title"] == "Concurrent rename"
+
+
+def test_legacy_summary_preserves_metadata_without_hydrating_or_normalizing_history(tmp_path, monkeypatch):
+    repo = ConversationRepository(tmp_path / "legacy")
+    payload = {"id": "conv_legacy_summary", "title": "Old conversation", "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-02T00:00:00Z", "transcript": [{"id": "u", "role": "user", "content": "original"},
+            {"id": "a", "role": "assistant", "content": "answer"}],
+        "context_snapshot": {"history": [{"role": "user", "runtime_context": "<environment_context><cwd>C:/original</cwd></environment_context>"}]},
+        "model_selection": {"provider": "custom", "model": "original"}, "pinned": True,
+        "memory_pollution_sources": ["untrusted-output"], "resource_references": [{"id": "resource", "payload": {"value": "original"}}]}
+    path = repo.storage_root / (payload["id"] + ".json")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    original_bytes = path.read_bytes()
+    monkeypatch.setattr(repo, "_load_record", lambda *_: pytest.fail("A summary must not hydrate model history"))
+    monkeypatch.setattr("backend.conversations.repository._normalize_loaded_transcript", lambda *_: pytest.fail("A summary must not normalize transcript blocks"))
+    summary = repo.directory.page()["data"][0]
+    assert summary["message_count"] == 2
+    assert summary["execution_cwd"] == "C:/original"
+    assert summary["memory_polluted"] and summary["pinned"]
+    assert summary["model_selection"] == payload["model_selection"]
+    assert summary["resource_references"] == payload["resource_references"]
+    assert "context_snapshot" not in summary and "transcript" not in summary
+    assert path.read_bytes() == original_bytes
+
+
+def test_summary_scan_uses_discovered_layout_but_direct_reads_observe_later_file_changes(tmp_path):
+    repo = ConversationRepository(tmp_path / "legacy")
+    identifier = "conv_summary_changed"
+    path = repo.storage_root / (identifier + ".json")
+    path.write_text(json.dumps({"id": identifier, "title": "First", "transcript": []}), encoding="utf-8")
+    assert repo.directory.page()["data"][0]["title"] == "First"
+    path.write_text(json.dumps({"id": identifier, "title": "Changed on disk", "transcript": [1, 2, 3]}), encoding="utf-8")
+    summary = repo.get_conversation_summary(identifier)
+    assert summary.title == "Changed on disk" and summary.message_count == 3
+    path.write_text("{broken", encoding="utf-8")
+    assert repo.directory.page()["data"] == []
+    from backend.conversations.repository import ConversationStorageCorruptError
+    with pytest.raises(ConversationStorageCorruptError):
+        repo.get_conversation_summary(identifier)
+
+
+def test_bulk_legacy_scan_keeps_generation_cache_reads_on_the_lock_owner(tmp_path, monkeypatch):
+    repo = ConversationRepository(tmp_path / "mixed")
+    original = repo.create_conversation(title="Generation metadata")
+    manifest_path = repo.storage_root / f"{original.id}.manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("metadata")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    for index in range(256):
+        identifier = f"conv_parallel_{index:04}"
+        (repo.storage_root / (identifier + ".json")).write_text(json.dumps({"id": identifier, "title": str(index), "transcript": []}), encoding="utf-8")
+    reader = ConversationRepository(repo.storage_root)
+    owning_thread = threading.get_ident()
+    read = reader._read_generation_metadata
+    calls = []
+    def observed(*args):
+        assert threading.get_ident() == owning_thread
+        calls.append(args)
+        return read(*args)
+    monkeypatch.setattr(reader, "_read_generation_metadata", observed)
+    summaries = reader.list_conversations()
+    assert len(summaries) == 257 and len(calls) == 1
+    assert next(item for item in summaries if item.id == original.id).title == "Generation metadata"
 
 
 def test_sidebar_refresh_is_bounded_and_publishes_known_changes_and_deletions(directory_case):

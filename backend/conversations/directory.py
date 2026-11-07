@@ -61,7 +61,9 @@ class ConversationDirectory:
         membership = summary.project_id if summary.project_id is not None else summary.worktree_path or summary.workspace_root
         if membership not in project_keys:
             project_keys[membership] = project_key(membership)
-        payload = json.dumps(summary.to_dict(), ensure_ascii=False, separators=(",", ":"))
+        # Encoding owns the resulting string; deepcopying all summary fields
+        # first adds no ownership boundary to the stored JSON.
+        payload = json.dumps(vars(summary), ensure_ascii=False, separators=(",", ":"))
         return (summary.id, summary.created_at, summary.updated_at, summary.content_updated_at or summary.updated_at,
             summary.model_selection.get("provider", ""), summary.thread_source, summary.archived, summary.conversation_type,
             summary.project_id, project_keys[membership], summary.execution_cwd or summary.worktree_path or summary.workspace_root,
@@ -169,7 +171,7 @@ class ConversationDirectory:
                 params.extend(sources)
             else:
                 clauses.append("conversation_type='main'")
-                if query.get("conversation_type") is None:
+                if query.get("conversation_type") is None and not (query.get("parent_thread_id") or query.get("ancestor_thread_id")):
                     clauses.append("source_kind IN ('user','cli','vscode','appServer','exec')")
             for key, field in (("model_providers", "provider"), ("excluded_thread_ids", "id")):
                 values = query.get(key)

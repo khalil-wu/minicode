@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import copy
 import hashlib
@@ -3003,8 +3004,9 @@ class ConversationRepository:
                 f"Conversation '{conversation_id}' legacy record is corrupt: {exc}"
             ) from exc
 
-    def _load_summary(self, conversation_id: str) -> ConversationSummary | None:
-        if self._manifest_path_for(conversation_id).exists():
+    def _load_summary(self, conversation_id: str, *, disk_stamp=None) -> ConversationSummary | None:
+        has_manifest = disk_stamp[0] != (-1, -1) if disk_stamp is not None else self._manifest_path_for(conversation_id).exists()
+        if has_manifest:
             manifest = self._read_manifest(conversation_id)
             if self._manifest_is_deleted(manifest):
                 return None
@@ -3021,7 +3023,8 @@ class ConversationRepository:
                 metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
             return ConversationSummary.from_dict(metadata)
         meta_path = self._meta_path_for(conversation_id)
-        if meta_path.exists():
+        has_metadata = disk_stamp[1] != (-1, -1) if disk_stamp is not None else meta_path.exists()
+        if has_metadata:
             try:
                 payload = json.loads(self._safe_read_text(meta_path, encoding="utf-8"))
                 return ConversationSummary.from_dict(payload)
@@ -3031,10 +3034,20 @@ class ConversationRepository:
                     f"Conversation summary for '{conversation_id}' is corrupt: {e}"
                 ) from e
 
-        record = self._load_record(conversation_id)
-        if record is None:
+        legacy_path = self._legacy_path_for(conversation_id)
+        if disk_stamp is None and not legacy_path.exists():
             return None
-        return record.to_summary()
+        try:
+            payload = json.loads(self._safe_read_text(legacy_path, encoding="utf-8"))
+            # Legacy files include the transcript and private checkpoint in
+            # one JSON document. The directory projects metadata directly;
+            # transcript hydration/normalization belongs to an actual open.
+            payload["message_count"] = int(payload.get("message_count") or len(payload.get("transcript") or []))
+            return ConversationSummary.from_dict(payload)
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            raise ConversationStorageCorruptError(
+                f"Conversation summary for '{conversation_id}' is corrupt: {error}"
+            ) from error
 
     def _read_transcript(self, conversation_id: str) -> list[dict[str, Any]]:
         return self._read_transcript_path(
@@ -3212,37 +3225,47 @@ class ConversationRepository:
         for conversation_id in set(self._summary_index) - discovered_ids:
             self._summary_index.pop(conversation_id, None)
             self._summary_index_stamps.pop(conversation_id, None)
+        pending = []
         for conversation_id in discovered_ids:
             stamp = disk_stamps[conversation_id]
             if len(self._summary_index_stamps.get(conversation_id, ())) == 2:
                 # Older manifests keep summary metadata in a generation file.
                 stamp = self._summary_disk_stamp(conversation_id)
-            if (
-                conversation_id in self._summary_index
-                and self._summary_index_stamps.get(conversation_id) == stamp
-            ):
-                continue
+            if conversation_id not in self._summary_index or self._summary_index_stamps.get(conversation_id) != stamp:
+                pending.append((conversation_id, stamp))
+
+        def read(item):
+            conversation_id, stamp = item
             try:
-                summary = self._load_summary(conversation_id)
+                return conversation_id, stamp, self._load_summary(conversation_id, disk_stamp=stamp)
             except ConversationStorageCorruptError as exc:
-                # Listing is an inventory operation: one unreadable record
-                # must not hide healthy conversations. Direct get/read paths
-                # still propagate the same corruption error to the caller.
-                logger.warning(
-                    "Skipping corrupt conversation %s while building summary index: %s",
-                    conversation_id,
-                    exc,
-                )
-                summary = None
-            if summary is not None:
-                manifest = self._manifest_cache.get(conversation_id)
-                if manifest is not None and manifest[1].get("metadata") is None:
-                    stamp = self._summary_disk_stamp(conversation_id)
-                self._summary_index[summary.id] = summary
-                self._summary_index_stamps[conversation_id] = stamp
-            else:
-                self._summary_index.pop(conversation_id, None)
-                self._summary_index_stamps.pop(conversation_id, None)
+                logger.warning("Skipping corrupt conversation %s while building summary index: %s", conversation_id, exc)
+                return conversation_id, stamp, None
+
+        def publish(results):
+            for conversation_id, stamp, summary in results:
+                if summary is not None:
+                    manifest = self._manifest_cache.get(conversation_id)
+                    if manifest is not None and manifest[1].get("metadata") is None:
+                        stamp = self._summary_disk_stamp(conversation_id)
+                    self._summary_index[summary.id] = summary
+                    self._summary_index_stamps[conversation_id] = stamp
+                else:
+                    self._summary_index.pop(conversation_id, None)
+                    self._summary_index_stamps.pop(conversation_id, None)
+
+        # Old generation metadata uses the repository's reentrant cache lock;
+        # resolve those manifests on their owning thread before parallel IO.
+        publish(map(read, (item for item in pending if item[1][0] != (-1, -1))))
+        pending = [item for item in pending if item[1][0] == (-1, -1)]
+        if len(pending) < 128:
+            publish(map(read, pending))
+        else:
+            # Independent legacy reads overlap Windows filesystem latency. Keep
+            # outstanding work bounded; only this owner publishes the index.
+            with ThreadPoolExecutor(max_workers=8, thread_name_prefix="conversation-summary") as executor:
+                for offset in range(0, len(pending), 256):
+                    publish(executor.map(read, pending[offset:offset + 256]))
 
     def _discover_summary_stamps(self) -> dict[str, tuple[tuple[int, int], ...]]:
         """Use one directory inventory for discovery and summary freshness."""
