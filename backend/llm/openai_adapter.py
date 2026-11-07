@@ -3663,7 +3663,6 @@ class OpenAIAdapter(LLMAdapter):
         response_message_phases: dict[str, str] = {}
         usage: UsageInfo | None = None
         provider_timeline: list[dict[str, Any]] = []
-        request_summary_ready = False
         raw_done: dict[str, Any] = {
             "provider": "openai_responses",
             "model": self._settings.model,
@@ -4284,13 +4283,11 @@ class OpenAIAdapter(LLMAdapter):
 
         try:
             async for event in stream:
-                if not request_summary_ready:
-                    # The transport has now applied hooks and selected full
-                    # input or a delta. Summarize those actual bytes once.
-                    sent_payload = wire_request_payload or kwargs
-                    raw_done["model"] = str(sent_payload.get("model") or self._settings.model)
-                    raw_done["request_summary"] = build_responses_request_summary(sent_payload)
-                    request_summary_ready = True
+                # Hooks and continuation selection have run in the transport.
+                # Usage needs only the actual model; full diagnostics wait
+                # until the stream has been delivered.
+                sent_payload = wire_request_payload or kwargs
+                raw_done["model"] = str(sent_payload.get("model") or self._settings.model)
                 if event is _RESPONSES_TRANSPORT_ACTIVITY:
                     yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
                     continue
@@ -5382,6 +5379,8 @@ class OpenAIAdapter(LLMAdapter):
                 _responses_message_text_from_item(item)
                 for item in output if _get_attr_or_item(item, "type", "") == "message"
             )
+        raw_done["request_summary"] = await asyncio.to_thread(
+            build_responses_request_summary, wire_request_payload or kwargs)
         yield StreamEvent(
             type=StreamEventType.DONE,
             usage=usage,
@@ -5924,19 +5923,19 @@ class OpenAIAdapter(LLMAdapter):
         )
         payload_tools = sent_payload.get("tools")
         payload_metadata = sent_payload.get("metadata")
-        request_summary = _safe_request_summary(
-            model=str(sent_payload.get("model") or self._settings.model),
-            wire_api="chat",
-            instructions=_instruction_text_from_chat_payload(payload_messages),
-            tools=payload_tools if isinstance(payload_tools, list) else [],
-            request_metadata=(
-                payload_metadata if isinstance(payload_metadata, dict) else {}
-            ),
-            input_items=_chat_payload_input_items(payload_messages),
-            request_params=sent_payload,
-        )
+        request_summary = {}
         raw_done["request_summary"] = request_summary
-        raw_done["model"] = request_summary["model"]
+        raw_done["model"] = str(sent_payload.get("model") or self._settings.model)
+
+        async def capture_request_summary():
+            if not request_summary:
+                request_summary.update(await asyncio.to_thread(_safe_request_summary,
+                    model=raw_done["model"], wire_api="chat",
+                    instructions=_instruction_text_from_chat_payload(payload_messages),
+                    tools=payload_tools if isinstance(payload_tools, list) else [],
+                    request_metadata=payload_metadata if isinstance(payload_metadata, dict) else {},
+                    input_items=_chat_payload_input_items(payload_messages), request_params=sent_payload))
+
         async with _openai_http_stream(
             self._http_client,
             "POST",
@@ -5949,6 +5948,8 @@ class OpenAIAdapter(LLMAdapter):
                 response.status_code,
                 getattr(response, "headers", {}),
             )
+            if response.status_code >= 400:
+                await capture_request_summary()
             await self._chat_http_raise_for_status(response)
 
             malformed_budget = SSEMalformedBudget()
@@ -5996,6 +5997,7 @@ class OpenAIAdapter(LLMAdapter):
                     )
                 error_payload = chunk.get("error")
                 if error_payload is not None:
+                    await capture_request_summary()
                     # Classify like the Responses path does. Emitting a bare
                     # message left provider_stream_error_event with nothing to
                     # read, so an auth failure streamed over HTTP 200 was
@@ -6144,6 +6146,7 @@ class OpenAIAdapter(LLMAdapter):
                             tool_prefetch_emitted = True
                     continue
 
+        await capture_request_summary()
         if not saw_terminal_event and finish_reason:
             # Some OpenAI-compatible gateways close the SSE response after a
             # valid finish_reason without emitting the optional [DONE] sentinel.

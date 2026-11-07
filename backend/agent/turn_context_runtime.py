@@ -8,7 +8,7 @@ from typing import Any
 
 from backend.agent.loop_runtime_helpers import epoch_ms
 from backend.agent.prompt_cache import (
-    build_prompt_cache_safe_params,
+    build_prompt_cache_fork_params,
     prompt_cache_fork_diagnostic,
 )
 from backend.agent.provider_protocol import (
@@ -316,7 +316,9 @@ async def prepare_turn_context(
     )
 
     section_summary = state.prompt_context.get("prompt_section_summary")
-    safe_params = build_prompt_cache_safe_params(
+    # Admission/fork metadata consumes the instruction and schema fingerprints.
+    # Per-message wire diagnostics belong to the adapter's actual sent payload.
+    safe_params = build_prompt_cache_fork_params(
         messages=messages,
         tool_schemas=tool_schemas,
         request_metadata=request_metadata,

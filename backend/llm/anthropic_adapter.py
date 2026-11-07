@@ -11,6 +11,7 @@ Anthropic Claude 适配器（DESIGN.md §一 LLM Adapter）。
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -539,14 +540,7 @@ class AnthropicAdapter(LLMAdapter):
             kwargs["tools"] = request_tools
             kwargs["tool_choice"] = {"type": "tool", "name": "web_search"}
 
-        request_summary = _anthropic_safe_request_summary_from_payload(
-            kwargs,
-            metadata,
-        )
-
-        stream = self._stream_messages(
-            kwargs, request_summary=request_summary, metadata=metadata
-        )
+        stream = self._stream_messages(kwargs, metadata=metadata)
         try:
             async for event in stream:
                 if event.type == StreamEventType.DONE:
@@ -629,7 +623,6 @@ class AnthropicAdapter(LLMAdapter):
         self,
         kwargs: dict[str, Any],
         *,
-        request_summary: dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Stream the MiniCode Anthropic Messages wire protocol."""
@@ -667,10 +660,7 @@ class AnthropicAdapter(LLMAdapter):
                 kwargs,
                 metadata=metadata,
             )
-            request_summary = _anthropic_safe_request_summary_from_payload(
-                wire_payload,
-                metadata,
-            )
+            request_model = str(wire_payload.get("model") or self._model)
             async with self._get_http_client().stream(
                 "POST",
                 self._messages_url(),
@@ -810,7 +800,7 @@ class AnthropicAdapter(LLMAdapter):
                                 yield StreamEvent(
                                     type=StreamEventType.USAGE,
                                     usage=usage,
-                                    raw={"provider": self._provider_id, "model": request_summary["model"], "usage": dict(provider_usage_metadata)},
+                                    raw={"provider": self._provider_id, "model": request_model, "usage": dict(provider_usage_metadata)},
                                 )
                             stop_reason = (
                                 str(message.get("stop_reason") or "")
@@ -1381,7 +1371,7 @@ class AnthropicAdapter(LLMAdapter):
                                 yield StreamEvent(
                                     type=StreamEventType.USAGE,
                                     usage=usage,
-                                    raw={"provider": self._provider_id, "model": request_summary["model"], "usage": dict(provider_usage_metadata)},
+                                    raw={"provider": self._provider_id, "model": request_model, "usage": dict(provider_usage_metadata)},
                                 )
                         elif event_type == "message_stop":
                             if current_content_kind:
@@ -1466,6 +1456,8 @@ class AnthropicAdapter(LLMAdapter):
                 "cache_deleted_input_tokens": usage.cache_deleted_input_tokens,
                 **provider_usage_metadata,
         }
+        request_summary = await asyncio.to_thread(
+            _anthropic_safe_request_summary_from_payload, wire_payload, metadata)
         done_raw: dict[str, Any] = {
             "provider": self._provider_id,
             "model": request_summary["model"],

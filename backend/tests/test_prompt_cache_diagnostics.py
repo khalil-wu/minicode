@@ -13,6 +13,7 @@ from backend.agent.provider_protocol import (
 from backend.agent.prompt_cache import (
     _diff_request_summaries,
     build_prompt_cache_safe_params,
+    build_prompt_cache_fork_params,
     observe_prompt_cache_break,
     prompt_cache_effective_prompt_tokens,
     prompt_cache_hit_rate,
@@ -52,6 +53,7 @@ def test_message_shadows_track_tool_and_provider_changes_after_empty_history() -
     message.tool_calls = []
     assert build_prompt_cache_safe_params(messages=[message], tool_schemas=[]) == empty
 
+
     message.tool_calls.append(ToolCallEvent(id="call-1", name="read_file", arguments={"path": "private.txt"}))
     message.provider_items.append({"type": "reasoning", "encrypted_content": "private-reasoning"})
     populated = build_prompt_cache_safe_params(messages=[message], tool_schemas=[])
@@ -66,6 +68,19 @@ def test_message_shadows_track_tool_and_provider_changes_after_empty_history() -
     message.tool_calls.clear()
     message.provider_items.clear()
     assert build_prompt_cache_safe_params(messages=[message], tool_schemas=[]) == empty
+
+
+def test_fork_metadata_keeps_consumed_fields_without_hashing_each_history_message(monkeypatch):
+    from backend.agent import prompt_cache
+
+    messages = [LLMMessage(role="system", content="stable instructions"), *[
+        LLMMessage(role="user", content=f"history {index}") for index in range(1000)]]
+    expected = build_prompt_cache_safe_params(messages=messages, tool_schemas=[])
+    expected.pop("message_shadows")
+    def unexpected(_message):
+        raise AssertionError("Fork metadata traversed message shadow contents")
+    monkeypatch.setattr(prompt_cache, "_message_cache_shadow", unexpected)
+    assert build_prompt_cache_fork_params(messages=messages, tool_schemas=[]) == expected
 
 
 def test_prompt_cache_hit_rate_normalizes_provider_usage_semantics() -> None:

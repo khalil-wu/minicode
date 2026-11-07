@@ -207,6 +207,16 @@ def build_prompt_cache_safe_params(
     request_metadata: dict[str, Any] | None = None,
     prompt_section_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    return {**build_prompt_cache_fork_params(messages=messages, tool_schemas=tool_schemas,
+        request_metadata=request_metadata, prompt_section_summary=prompt_section_summary),
+        "message_shadows": [_message_cache_shadow(message) for message in messages]}
+
+
+def build_prompt_cache_fork_params(
+    *, messages: list[Any], tool_schemas: list[dict[str, Any]] | None,
+    request_metadata: dict[str, Any] | None = None,
+    prompt_section_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return a compact, non-secret snapshot of cache-critical request parts.
 
     This is deliberately a hash-only structure. It can be carried through tool
@@ -235,7 +245,6 @@ def build_prompt_cache_safe_params(
         "tool_names": _safe_tool_names_from_schemas(tool_schemas),
         **tool_size_summary,
         "message_count": len(messages),
-        "message_shadows": [_message_cache_shadow(message) for message in messages],
         "metadata_keys": sorted(str(key) for key in metadata.keys()),
         "prompt_section_summary": cache_section_summary,
     }
