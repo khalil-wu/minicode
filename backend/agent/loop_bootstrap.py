@@ -323,6 +323,19 @@ async def bootstrap_agent_loop(
     resolved_metadata["_concurrent_reasoning_summaries"] = model_snapshot.config.feature_flags.enabled(
         "concurrent_reasoning_summaries", False
     )
+    from backend.permissions.exec_policy import ExecPolicyOwner, config_folders
+    from backend.async_cleanup import retain_cleanup_task, to_thread_cancel_safe
+
+    thread_runtime = run_context.environment_thread_runtime
+    owner = thread_runtime.exec_policy_owner if thread_runtime is not None else context._exec_policy_owner
+    policy_task = None
+    if (owner is None or owner.folders != config_folders(turn_config_stack)
+            or owner._requirements_rules != turn_config_stack.requirements.value_for("rules")):
+        home = Path(next(layer.source.file for layer in reversed(turn_config_stack.get_layers()) if layer.source.kind == "user")).parent
+        # Native policy parsing is independent of environment/MCP discovery.
+        # Join before constructing the network step or publishing tool policy.
+        policy_task = asyncio.create_task(to_thread_cancel_safe(ExecPolicyOwner, home=home, stack=turn_config_stack))
+        retain_cleanup_task(policy_task, run_context.lifecycle_cleanup_tasks)
     from backend.skills.manager import SkillManager
 
     if isinstance(skill_manager, SkillManager):
@@ -600,14 +613,8 @@ async def bootstrap_agent_loop(
             else "" if run_context.turn_environments is not None else "local"),
     )
     tool_context.permission_grants.begin_turn(tool_context.turn_id)
-    from backend.permissions.exec_policy import ExecPolicyOwner, config_folders
-    from backend.async_cleanup import to_thread_cancel_safe
-    thread_runtime = run_context.environment_thread_runtime
-    owner = thread_runtime.exec_policy_owner if thread_runtime is not None else context._exec_policy_owner
-    if (owner is None or owner.folders != config_folders(turn_config_stack)
-            or owner._requirements_rules != turn_config_stack.requirements.value_for("rules")):
-        home = Path(next(layer.source.file for layer in reversed(turn_config_stack.get_layers()) if layer.source.kind == "user")).parent
-        owner = await to_thread_cancel_safe(ExecPolicyOwner, home=home, stack=turn_config_stack)
+    if policy_task is not None:
+        owner = await asyncio.shield(policy_task)
         if owner.load_warning is not None and emit_event is not None:
             await emit_event("system_notice", {"conversation_id": conversation_id,
                 "message": owner.load_warning.message, "level": "warning"})
