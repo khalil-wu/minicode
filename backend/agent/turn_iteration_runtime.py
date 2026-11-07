@@ -145,6 +145,23 @@ class TurnIterationRuntime:
                 # step. Refresh that choice under the same admission deadline.
         trace.mark("refresh_model_auth")
         snapshot = run_context.model_execution
+        if run_context.plugin_capabilities_changed:
+            from backend.async_cleanup import to_thread_cancel_safe
+            from backend.hooks.manager import load_hook_manager_for_workspace
+
+            previous_hooks = run_context.hook_manager
+            hooks = await to_thread_cancel_safe(load_hook_manager_for_workspace, self.workspace_root,
+                config_layer_stack=run_context.plugin_capability_config,
+                session_id=previous_hooks.scope_id, owner_session_id=previous_hooks.owner_session_id)
+            hooks.adopt_session_runtime(previous_hooks)
+            hooks.bind_runtime(llm=self.llm, tool_registry=self.base_tool_registry, tool_context=self.tool_context)
+            run_context.hook_manager = hooks
+            self.context.bind_hook_manager(hooks)
+            if run_context.environment_manager is None and self.context.skill_manager is not None:
+                skills = await to_thread_cancel_safe(self.context.skill_manager.snapshot, self.workspace_root,
+                    config_stack=run_context.plugin_capability_config, force_reload=True)
+                self.context.bind_skill_manager(skills, self.workspace_root, config_stack=run_context.plugin_capability_config)
+                run_context.skill_manager = self.context.skill_manager
         if run_context.environment_manager is not None:
             from backend.agent.environment_runtime import refresh_run_environment_capabilities
             from backend.workspace.executor_local_policy import local_sandbox_policy
@@ -161,6 +178,7 @@ class TurnIterationRuntime:
                 and run_context.network_step is not None
                 and prepared_turn != ""
                 and getattr(run_context, "environment_prepared_turn_id", "") == prepared_turn
+                and not run_context.plugin_capabilities_changed
             )
             if not reuse_prepared:
                 prepared = await refresh_run_environment_capabilities(run_context,
@@ -209,8 +227,13 @@ class TurnIterationRuntime:
                 )
                 model_events.append(build_context_compacted_event(summary, before, context_ledger_snapshot(self.context)))
         self.sync_active_session_model(snapshot)
+        if run_context.plugin_capabilities_changed:
+            run_context.plugin_install_candidates = None
+            run_context.plugin_capabilities_changed = False
         mcp_version, mcp_instructions = self.mcp_catalog(self.base_tool_registry)
         self.tool_registry = self.base_tool_registry.fork()
+        from backend.tools.plugin_install import bind_plugin_install_tools
+        await bind_plugin_install_tools(self.tool_registry, self.tool_context)
         self.tool_context.tool_registry = self.tool_registry
         self.tool_context.run_context.active_tool_registry = self.tool_registry
         self.state.loaded_deferred_tools.intersection_update(self.tool_registry.list_tools())

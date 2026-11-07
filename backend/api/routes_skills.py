@@ -378,6 +378,46 @@ async def install_plugin_api(request: PluginInstallRequest, response: Response) 
     return result
 
 
+class PluginInstallPromptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str
+    request_id: str
+    conversation_id: str
+    turn_id: str
+    message_id: str = ""
+
+
+@router.post("/api/plugins/install-request")
+async def install_requested_plugin_api(request: PluginInstallPromptRequest, response: Response) -> dict[str, Any]:
+    """Install exactly the candidate shown by an outstanding owned prompt."""
+    from backend.plugins.install_suggestions import discover_install_candidates
+
+    session = _state.ws_manager.get_session(request.session_id)
+    if session is None:
+        raise HTTPException(409, "The original plugin request session is unavailable")
+    pending = session.turn_wait_state.pending_approval_payloads.get(request.request_id)
+    if pending is None or any(str(pending.get(key) or "") != getattr(request, key)
+            for key in ("conversation_id", "turn_id", "message_id")):
+        raise HTTPException(409, "The original plugin installation request is no longer pending")
+    prompt = pending.get("request", {})
+    meta = prompt.get("_meta", {})
+    if (prompt.get("subtype") != "elicitation" or meta.get("codex_approval_kind") != "tool_suggestion"
+            or meta.get("tool_type") != "plugin" or meta.get("suggest_type") != "install"):
+        raise HTTPException(409, "This request does not authorize plugin installation")
+    stack, root = await to_thread_cancel_safe(_plugin_scope, pending.get("workspace_root", ""))
+    manager = PluginManager(config_stack=stack, workspace_root=root)
+    installed = await to_thread_cancel_safe(manager.resolve, meta["tool_id"], require_enabled=False)
+    if installed is not None and installed.get("store_valid") is not False and not installed.get("load_errors"):
+        return {"installed": True, "plugin_id": meta["tool_id"]}
+    candidates = await to_thread_cancel_safe(discover_install_candidates, stack, root)
+    candidate = next((entry for entry in candidates if entry.id == meta["tool_id"] and entry.source == meta["source"]), None)
+    if candidate is None:
+        raise HTTPException(409, "The selected plugin or its installation source has changed")
+    result = await install_plugin_api(PluginInstallRequest(plugin_name=candidate.plugin_name, marketplace=candidate.marketplace,
+        refresh_marketplace=False, workspace_root=str(root or "")), response)
+    return {**result, "installed": True, "plugin_id": candidate.id}
+
+
 @router.put("/api/plugins/{plugin_name}/state")
 async def update_plugin_state_api(plugin_name: str, request: PluginStateUpdateRequest, response: Response) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"

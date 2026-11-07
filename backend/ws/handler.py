@@ -2034,6 +2034,9 @@ class WebSocketSession(
             schema = event.data.get("schema")
             if isinstance(schema, dict):
                 request["schema"] = dict(schema)
+            for key in ("mode", "_meta"):
+                if key in event.data:
+                    request[key] = event.data[key]
             control_payload = {
                 "type": "control_request",
                 "request_id": request_id,

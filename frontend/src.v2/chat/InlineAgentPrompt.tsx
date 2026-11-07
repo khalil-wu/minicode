@@ -1,4 +1,5 @@
 import { useI18n, type Translate } from "../i18n";
+import { isPluginInstallRequest, PluginInstallRequestCard } from "./PluginInstallRequestCard";
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { elicitationChoices, elicitationContent, elicitationDefaults, type ElicitationField } from "./elicitationForm";
 import {
@@ -99,6 +100,7 @@ export const InlineAgentPrompt = ({ conversationId }: { conversationId?: string 
         : visibleAskUser.requestUserInput ? <RequestUserInputCard key={JSON.stringify([visibleAskUser.conversationId, visibleAskUser.requestId,
             visibleAskUser.turnId, visibleAskUser.messageId, visibleAskUser.taskId])}
             request={{ ...visibleAskUser, requestUserInput: visibleAskUser.requestUserInput }} />
+        : isPluginInstallRequest(visibleAskUser) ? <PluginInstallRequestCard key={pendingPromptKey(visibleAskUser)} request={visibleAskUser} />
         : isComputerUseApproval(visibleAskUser) ? <ComputerUseApprovalCard key={JSON.stringify([visibleAskUser.conversationId,
             visibleAskUser.requestId, visibleAskUser.turnId, visibleAskUser.messageId, visibleAskUser.taskId])} request={visibleAskUser} />
         : visibleAskUser.elicitation?.mode === "url" ? <McpUrlElicitationCard key={pendingPromptKey(visibleAskUser)}

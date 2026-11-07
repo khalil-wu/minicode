@@ -175,7 +175,11 @@ async def refresh_run_environment_capabilities(run_context, *, permission_contex
     run_context.owns_mcp_connections = connection_owner is run_context
     host_skills = run_context.environment_host_skill_manager
     context = run_context.context_builder
-    if previous is not None and previous.thread_id == conversation_id and previous.turn_id == turn_id:
+    if run_context.plugin_capabilities_changed and host_skills is not None:
+        from backend.async_cleanup import to_thread_cancel_safe
+        host_skills = await to_thread_cancel_safe(host_skills.snapshot, workspace_root,
+            config_stack=run_context.plugin_capability_config, force_reload=True)
+    elif previous is not None and previous.thread_id == conversation_id and previous.turn_id == turn_id:
         host_skills = previous.skill_manager
     elif context is not None and context._skill_snapshot_turn_id == turn_id:
         # A reused SDK/fork owner can retain an earlier turn's host source.
@@ -185,7 +189,7 @@ async def refresh_run_environment_capabilities(run_context, *, permission_contex
         # Parent host inventory is a discovery source, not the receiving
         # thread's scope. Bind before registry construction so prompt selection
         # and skill consumers use the same role/config/workspace projection.
-        context.bind_skill_manager(host_skills, workspace_root, refresh=True, config_stack=config_stack,
+        context.bind_skill_manager(host_skills, workspace_root, refresh=True, config_stack=run_context.plugin_capability_config or config_stack,
             force_reload=context._skill_snapshot_turn_id != turn_id, turn_id=turn_id)
         host_skills = context.skill_manager
     prepared = await prepare_environment_capabilities(turn_environments=snapshot,

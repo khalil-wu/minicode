@@ -594,7 +594,8 @@ class SessionApprovalRuntimeMixin:
                         else "approval"
                     ),
                 )
-                timeout_seconds = None if request.get("subtype") == "request_user_input" else self._approval_timeout_seconds()
+                timeout_seconds = None if (request.get("subtype") == "request_user_input"
+                    or request.get("_meta", {}).get("codex_approval_kind") == "tool_suggestion") else self._approval_timeout_seconds()
                 result = await asyncio.wait_for(future, timeout=timeout_seconds)
             else:
                 result = queued_response

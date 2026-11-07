@@ -1182,7 +1182,7 @@ async def run_tool(
             delattr(tc, "_pre_tool_hook_applied")
         if pre_result is not None:
             return pre_result
-    hook_mgr = _tool_hook_manager(tool_ctx)
+    hook_mgr = tc.__dict__.pop("_captured_pre_tool_hook_manager", _tool_hook_manager(tool_ctx))
 
     gate = tool_ctx.run_context.tool_execution_gate if tool_ctx.run_context is not None else None
     tool = _tool_for_call(tc, tool_registry)
@@ -1557,6 +1557,7 @@ async def _apply_pre_tool_hook_owned(
                 status="blocked",
                 display_summary="Extension hook failed",
             )
+    tc._captured_pre_tool_hook_manager = hook_mgr
     setattr(tc, "_pre_tool_hook_applied", True)
     async_service = tool_ctx.run_context.guardian_async_service if tool_ctx.run_context is not None else None
     if async_service is not None:

@@ -1,5 +1,9 @@
 {
   "安装插件": "Install plugin",
+  "不再建议此插件": "Don't suggest this plugin again",
+  "暂不安装": "Not now",
+  "插件安装超时，请重试查看安装状态。": "Plugin installation timed out. Retry to check its status.",
+  "安装插件失败": "Plugin installation failed",
   "插件设置": "Plugin settings",
   "插件目录": "Plugin directory",
   "公开": "Public",
