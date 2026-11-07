@@ -1549,7 +1549,7 @@ class ContextBuilder:
         attachment_tokens_left = max(
             0, self._budget.total - self._budget.reserved_response_tokens
             - sum(self._estimate_history_message(message) for message in messages + history),
-        )
+        ) if not supports_pdf and any(message.documents for message in history) else 0
         for message in history:
             if message.timestamp_ms in self._withheld_media_timestamps:
                 references = ", ".join(
@@ -2896,11 +2896,11 @@ class ContextBuilder:
         a tool result and the next assistant response.
         """
         keep_recent = max(0, int(keep_recent_user_turns))
+        frozen_count = self._history_frozen_count
+        unsent = self._history[frozen_count:]
         wrapped_turn_indexes: list[int] = []
-        for index, message in enumerate(self._history):
+        for index, message in enumerate(unsent, frozen_count):
             if message.role != "user" or message.tool_call_id or message.tool_calls:
-                continue
-            if index < self._history_frozen_count:
                 continue
             content = str(message.content or "")
             stripped = self._strip_trusted_runtime_context(message)
@@ -2916,7 +2916,7 @@ class ContextBuilder:
         )
         next_history: list[LLMMessage] = []
         changed = 0
-        for index, message in enumerate(self._history):
+        for index, message in enumerate(unsent, frozen_count):
             if message.role != "user" or message.tool_call_id or message.tool_calls:
                 next_history.append(message)
                 continue
@@ -2952,7 +2952,7 @@ class ContextBuilder:
                 )
             )
         if changed:
-            self._history = next_history
+            self._history = self._history[:frozen_count] + next_history
             # This branch only changes unsent entries under normal operation;
             # reset defensively for restored/legacy histories whose sent
             # boundary is not known precisely.
