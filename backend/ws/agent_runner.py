@@ -4263,12 +4263,6 @@ class SessionAgentRunnerMixin:
             await wait_for_hydration(conversation.id)
             pre_trace.mark("run.hydrated")
 
-        if run_context.skill_snapshot_task is not None:
-            skills = await asyncio.shield(run_context.skill_snapshot_task)
-            request_snapshot = replace(request_snapshot, skill_manager=skills, skill_snapshot_pending=False)
-            run_context.start_request = request_snapshot
-            run_context.skill_snapshot_task = None
-
         def _owns_query_claim() -> bool:
             return query_claim is None or conversation_query_guards().owns(query_claim)
 
@@ -4380,6 +4374,14 @@ class SessionAgentRunnerMixin:
                 run_context_snapshot = dict(conversation.context_snapshot)
 
         pre_trace.mark("run.snapshot_ready")
+        # Discovery is independent of journal recovery and the persisted model
+        # snapshot. Join it at the first consumer instead of serializing both.
+        if run_context.skill_snapshot_task is not None:
+            skills = await asyncio.shield(run_context.skill_snapshot_task)
+            request_snapshot = replace(request_snapshot, skill_manager=skills, skill_snapshot_pending=False)
+            run_context.start_request = request_snapshot
+            run_context.skill_snapshot_task = None
+
         # Track active streaming metadata for reconnection recovery. Prefer
         # the client-created assistant placeholder id so late events from an
         # old turn cannot attach to a newer assistant message.

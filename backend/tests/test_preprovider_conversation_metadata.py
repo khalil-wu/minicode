@@ -22,6 +22,45 @@ def packet(conversation_id):
 
 
 @pytest.mark.asyncio
+async def test_skill_discovery_overlaps_recovery_and_finishes_before_provider(tmp_path, monkeypatch):
+    from threading import Event
+    from backend.skills.loader import SkillLoader
+    from backend.skills.manager import SkillManager
+    from backend.ws import agent_runner
+
+    session, conversation, adapter = session_for(tmp_path, monkeypatch)
+    loader = SkillLoader(tmp_path)
+    monkeypatch.setattr(loader, "_search_dirs", lambda: [])
+    session.skill_manager = SkillManager(loader)
+    session.skill_manager.discover()
+    started, release = Event(), Event()
+    snapshot = SkillManager.snapshot
+    replay = agent_runner._replay_pending_conversation_projections
+
+    def held_snapshot(manager, *args, **kwargs):
+        started.set()
+        assert release.wait(5), "Discovery must overlap recovery instead of delaying it"
+        return snapshot(manager, *args, **kwargs)
+
+    async def recover(*args, **kwargs):
+        assert await asyncio.to_thread(started.wait, 5)
+        assert adapter.requests == []
+        release.set()
+        await replay(*args, **kwargs)
+
+    monkeypatch.setattr(SkillManager, "snapshot", held_snapshot)
+    monkeypatch.setattr(agent_runner, "_replay_pending_conversation_projections", recover)
+    try:
+        await session.command_dispatcher._handle_command_inner(UserCommand("user_message", packet(conversation.id)))
+        await asyncio.gather(*tuple(session.execution_cleanup_tasks))
+        assert len(adapter.requests) == 1
+        assert any(message.content.endswith("Continue the accepted work") for message in adapter.requests[0])
+    finally:
+        release.set()
+        await session.session_lifecycle.shutdown(reason="parallel_skill_capture_test")
+
+
+@pytest.mark.asyncio
 async def test_dispatch_reads_only_candidate_input_evidence(tmp_path, monkeypatch):
     session, conversation, _adapter = session_for(tmp_path, monkeypatch)
     full = Mock(wraps=session.conversation_repo.get_conversation)
