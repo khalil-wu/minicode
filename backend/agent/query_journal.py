@@ -85,7 +85,7 @@ class QueryJournalRecorder:
     def record_turn_started(self) -> None:
         self.projection_base_snapshot = self.context_builder.export_snapshot()
         self.projection_history_revision = self.context_builder._history_store.revision
-        self.lifecycle(
+        started = self.lifecycle(
             "turn_started",
             {
                 "conversation_id": self.conversation_id,
@@ -94,6 +94,10 @@ class QueryJournalRecorder:
                 "context_snapshot": self.projection_base_snapshot,
             },
         )
+        if started is not None:
+            # The journal owns the serialized recovery base. Reuse its exact
+            # immutable history branches in later admission/terminal deltas.
+            self.projection_base_snapshot = started.payload["context_snapshot"]
         self.lifecycle(
             "provider_claimed",
             {"conversation_id": self.conversation_id},

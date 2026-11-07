@@ -19,6 +19,32 @@ def recorder(tmp_path):
         builder, None, "conversation")
 
 
+def test_query_captures_share_only_owned_unchanged_journal_history(tmp_path, monkeypatch):
+    from backend.conversations import projection_log
+
+    owner = recorder(tmp_path)
+    owner.record_turn_started()
+    started = owner.journal.read_events()[0]
+    assert owner.projection_base_snapshot is started.payload["context_snapshot"]
+    owner.context_builder.append_assistant("new reply")
+    captured = owner.capture_context_snapshot()
+    base = owner.projection_base_snapshot["history"]
+    assert all(original is updated for original, updated in zip(base, captured["history"]))
+    traversed = []
+    change = projection_log.value_change
+    ids = {id(item) for item in base}
+
+    def observe(before, after):
+        if id(before) in ids:
+            traversed.append(before is after)
+        return change(before, after)
+
+    monkeypatch.setattr(projection_log, "value_change", observe)
+    owner.record_terminal_intent(AgentEvent.done(status="completed"))
+    assert traversed and all(traversed)
+    assert ExecutionJournal("snapshot-reuse", base_dir=tmp_path).read_events()[-1].payload["context_snapshot"] == captured
+
+
 @pytest.mark.parametrize("mutation", ["append", "rewrite", "expired", "clear"])
 def test_journal_snapshot_reuses_history_and_keeps_exact_recovery_after_changes(tmp_path, monkeypatch, mutation):
     from backend.agent import context as context_module
