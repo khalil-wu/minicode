@@ -3429,14 +3429,25 @@ class ContextBuilder:
         if messages is None:
             workspace_root = self._workspace_root_for_state(state)
             messages = self._render_prompt_messages(state, workspace_root)
-        system_tokens = sum(self._estimate_history_message(m) for m in messages if m.role == "system")
-        developer_tokens = sum(self._estimate_history_message(m) for m in messages if m.role == "developer")
         plugin_instructions = self._build_plugin_instructions(state).strip()
-        plugin_tokens = sum(
-            self._estimate_history_message(m) for m in messages
-            if plugin_instructions and m.role == "developer" and m.content == plugin_instructions
-        )
-        history_tokens = sum(self._estimate_history_message(m) for m in messages if m.role not in {"system", "developer"})
+        # History mutations already update their accounting. Reuse estimates
+        # only for the exact retained messages; media projections, repaired
+        # tool results and extension replacements have their own identities.
+        retained_estimates = {id(message): tokens for message, tokens in zip(
+            self._history, self._history_token_estimates)}
+        system_tokens = developer_tokens = plugin_tokens = history_tokens = 0
+        for message in messages:
+            tokens = retained_estimates.get(id(message))
+            if tokens is None:
+                tokens = self._estimate_history_message(message)
+            if message.role == "system":
+                system_tokens += tokens
+            elif message.role == "developer":
+                developer_tokens += tokens
+                if plugin_instructions and message.content == plugin_instructions:
+                    plugin_tokens += tokens
+            else:
+                history_tokens += tokens
         tools_tokens = estimate_tool_schema_tokens(tool_schemas)
         if tool_schemas is not None:
             self._request_tool_schema_tokens = tools_tokens
