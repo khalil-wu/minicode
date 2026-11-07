@@ -772,8 +772,9 @@ class LLMMessage:
 
     def to_openai_message(self) -> dict[str, Any]:
         """转换为 OpenAI Chat Completions API 格式。"""
-        from backend.llm.native_compaction import require_native_context_origin
-        require_native_context_origin([self])
+        if self.provider_items:
+            from backend.llm.native_compaction import require_native_context_origin
+            require_native_context_origin([self])
         msg: dict[str, Any] = {"role": self.role}
 
         text_parts = self.user_text_parts() if self.role == "user" else []
