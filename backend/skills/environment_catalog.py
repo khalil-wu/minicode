@@ -244,7 +244,9 @@ class ExecutorSkillCatalog:
                         raise ValueError("Skill frontmatter exceeds the Source name/description limit")
                     optional = skill.get("metadata")
                     try:
-                        details = yaml.safe_load(optional["contents"]) if optional is not None else {}
+                        from backend.skills.frontmatter import parse_skill_yaml
+
+                        details = parse_skill_yaml(optional["contents"]) if optional is not None else {}
                         details = details or {}
                         if not isinstance(details, dict) or any(details.get(key) is not None and not isinstance(details[key], dict)
                             for key in ("policy", "interface", "dependencies")):

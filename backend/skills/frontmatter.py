@@ -3,9 +3,21 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
+from functools import lru_cache
 from typing import Any
 
 import yaml
+
+
+@lru_cache(maxsize=256)
+def _parse_yaml_contents(contents: str):
+    return yaml.safe_load(contents)
+
+
+def parse_skill_yaml(contents: str):
+    """Reuse unchanged syntax while every catalog owns its decoded metadata."""
+    return deepcopy(_parse_yaml_contents(contents))
 
 
 def parse_skill_frontmatter(content: str, fallback_name: str) -> dict[str, Any]:
@@ -17,7 +29,7 @@ def parse_skill_frontmatter(content: str, fallback_name: str) -> dict[str, Any]:
     if match is None:
         raise ValueError("SKILL.md requires YAML frontmatter")
     try:
-        metadata = yaml.safe_load(match.group(1))
+        metadata = parse_skill_yaml(match.group(1))
     except yaml.YAMLError as exc:
         raise ValueError(f"Invalid SKILL.md YAML frontmatter: {exc}") from exc
     if not isinstance(metadata, dict):

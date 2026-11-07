@@ -597,6 +597,9 @@ class SkillLoader:
             fm.get("disable-model-invocation", False),
             default=False,
         )
+        icon_values = (interface.get("icon_small"), interface.get("icon_large"))
+        asset_root = (skill_file.parent.resolve() if any(isinstance(value, str) and value.strip() for value in icon_values)
+            else skill_file.parent)
 
         return SkillMeta(
             name=qualified_name,
@@ -605,8 +608,8 @@ class SkillLoader:
                 self._metadata_text(interface.get("display_name"))
             ),
             short_description=self._metadata_text(interface.get("short_description")),
-            icon=self._safe_skill_asset(skill_file.parent, interface.get("icon_small")),
-            icon_large=self._safe_skill_asset(skill_file.parent, interface.get("icon_large")),
+            icon=self._safe_skill_asset(asset_root, icon_values[0]),
+            icon_large=self._safe_skill_asset(asset_root, icon_values[1]),
             brand_color=self._metadata_text(interface.get("brand_color")),
             mcp_dependencies=mcp_dependencies,
             mcp_dependency_specs=mcp_dependency_specs,
@@ -645,7 +648,9 @@ class SkillLoader:
         if not path.is_file():
             return {}
         try:
-            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+            from backend.skills.frontmatter import parse_skill_yaml
+
+            payload = parse_skill_yaml(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             logger.warning("Ignoring invalid skill metadata %s: %s", path, exc)
             return {}
@@ -665,12 +670,12 @@ class SkillLoader:
         return payload
 
     @staticmethod
-    def _safe_skill_asset(skill_dir: Path, value: Any) -> str:
+    def _safe_skill_asset(resolved_skill_dir: Path, value: Any) -> str:
         if not isinstance(value, str) or not value.strip():
             return ""
-        candidate = (skill_dir / value).resolve()
+        candidate = (resolved_skill_dir / value).resolve()
         try:
-            candidate.relative_to(skill_dir.resolve())
+            candidate.relative_to(resolved_skill_dir)
         except ValueError:
             return ""
         return str(candidate) if candidate.is_file() else ""
