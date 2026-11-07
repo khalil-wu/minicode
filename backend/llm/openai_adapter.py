@@ -2758,6 +2758,8 @@ class OpenAIAdapter(LLMAdapter):
             else:
                 payload.setdefault("response_format", {"type": "json_schema", "json_schema": schema})
         tier = policy.service_tier_for_request(self.current_service_tier())
+        if self._settings.aws is not None and tier not in policy.service_tiers:
+            tier = None
         if tier is not None:
             payload["service_tier"] = tier
 

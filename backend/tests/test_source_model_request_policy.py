@@ -101,6 +101,28 @@ def test_unsupported_model_options_are_omitted_and_output_schema_is_retained():
     assert policy.service_tier_for_request("default") is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("aws, tiers, expected", [
+    (None, (), "flex"), ({"region": "us-east-1"}, (), None),
+    ({"region": "us-east-1"}, ("flex",), "flex"),
+])
+async def test_bedrock_flex_requires_advertised_support_on_actual_wire(aws, tiers, expected):
+    requests = []
+    async def respond(request):
+        requests.append(json.loads(request.content))
+        stream = "".join("data: " + json.dumps(event) + "\n\n" for event in completed_wire("responses"))
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, content=stream.encode())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = OpenAIAdapter(LLMSettings(api_key="fixture", provider="custom", model="gpt-6.1-sol",
+            base_url="https://example.test/v1", wire_api="responses", aws=aws), http_client=client)
+        adapter.apply_model_request_policy(ModelRequestPolicy(model="gpt-6.1-sol", service_tier="flex", service_tiers=tiers))
+        try:
+            _ = [event async for event in adapter.stream_chat([LLMMessage(role="user", content="Answer")])]
+        finally:
+            await adapter.aclose()
+    assert len(requests) == 1 and requests[0].get("service_tier") == expected
+
+
 def test_responses_verbosity_coexists_with_schema_and_summary_none_removes_only_summary():
     adapter = OpenAIAdapter(LLMSettings(api_key="test", model="gpt-6.1-sol", wire_api="responses"))
     adapter.apply_model_request_policy(ModelRequestPolicy(model="gpt-6.1-sol", reasoning_summary="none", verbosity="low"))
