@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Mapping
 
 from backend.memory.text_utils import truncate_middle_tokens as _truncate_middle_tokens
+from backend.memory.settings import MemoryVersion
 
 
 TEMPLATE_ROOT = Path(__file__).with_name("templates")
@@ -64,9 +65,13 @@ def _render_template(source: str, values: Mapping[str, str], *, name: str) -> st
 
 
 STAGE1_SYSTEM_PROMPT = _load_template("stage_one_system.md")
+STAGE1_SYSTEM_PROMPT_V2 = _load_template("stage_one_system_v2.md")
 _STAGE1_INPUT_TEMPLATE = _load_template("stage_one_input.md")
+_STAGE1_INPUT_V2_TEMPLATE = _load_template("stage_one_input_v2.md")
 _CONSOLIDATION_TEMPLATE = _load_template("consolidation.md")
+_CONSOLIDATION_V2_TEMPLATE = _load_template("consolidation_v2.md")
 _READ_PATH_TEMPLATE = _load_template("read_path.md")
+_READ_PATH_V2_TEMPLATE = _load_template("read_path_v2.md")
 AD_HOC_INSTRUCTIONS = _load_template("ad_hoc_instructions.md")
 
 
@@ -75,25 +80,28 @@ def build_stage1_input(
     rollout_path: str,
     rollout_cwd: str,
     rollout_contents: str,
+    version: MemoryVersion = MemoryVersion.V1,
+    rollout_git_branch: str = "",
 ) -> str:
     return _render_template(
-        _STAGE1_INPUT_TEMPLATE,
+        _STAGE1_INPUT_TEMPLATE if version is MemoryVersion.V1 else _STAGE1_INPUT_V2_TEMPLATE,
         {
             "rollout_path": str(rollout_path),
             "rollout_cwd": str(rollout_cwd),
             "rollout_contents": str(rollout_contents),
+            **({"rollout_git_branch": rollout_git_branch or "unknown"} if version is MemoryVersion.V2 else {}),
         },
         name="stage-one input",
     )
 
 
-def build_consolidation_prompt(memory_root: Path | str) -> str:
+def build_consolidation_prompt(memory_root: Path | str, *, version: MemoryVersion = MemoryVersion.V1) -> str:
     root = Path(memory_root).expanduser().resolve()
     extensions_root = root / "extensions"
     extensions_exist = extensions_root.is_dir()
     extension_values = {"memory_extensions_root": str(extensions_root)}
     return _render_template(
-        _CONSOLIDATION_TEMPLATE,
+        _CONSOLIDATION_TEMPLATE if version is MemoryVersion.V1 else _CONSOLIDATION_V2_TEMPLATE,
         {
             "memory_root": str(root),
             "memory_extensions_folder_structure": (
@@ -120,7 +128,7 @@ def build_consolidation_prompt(memory_root: Path | str) -> str:
     )
 
 
-def build_memory_read_prompt(memory_root: Path | str, memory_summary: str) -> str:
+def build_memory_read_prompt(memory_root: Path | str, memory_summary: str, *, version: MemoryVersion = MemoryVersion.V1) -> str:
     summary = _truncate_middle_tokens(
         str(memory_summary).strip(),
         MEMORY_SUMMARY_TOKEN_LIMIT,
@@ -128,10 +136,16 @@ def build_memory_read_prompt(memory_root: Path | str, memory_summary: str) -> st
     if not summary:
         return ""
     return _render_template(
-        _READ_PATH_TEMPLATE,
+        _READ_PATH_TEMPLATE if version is MemoryVersion.V1 else _READ_PATH_V2_TEMPLATE,
         {
             "base_path": str(Path(memory_root).expanduser().resolve()),
             "memory_summary": summary,
         },
         name="memory read path",
     )
+
+
+def valid_v2_summary(summary: str) -> bool:
+    return (summary.splitlines()[:1] == ["v1"] and len(summary.encode("utf-8")) < 10_000
+        and {"## User Profile", "## User preferences", "## General Tips", "## What's in Memory"}
+            .issubset(line.strip() for line in summary.splitlines()))

@@ -3343,12 +3343,11 @@ def _schedule_long_term_memory_forgetting(
     conversation: Any,
 ) -> None:
     from backend.config import load_config
-    if not load_config(cwd=session.session_lifecycle.workspace_root_for_conversation(conversation), resolve_credentials=False).feature_flags.enabled("memories"):
-        return
+    config = load_config(cwd=session.session_lifecycle.workspace_root_for_conversation(conversation), resolve_credentials=False)
     try:
         from backend.memory.generation import schedule_memory_forgetting
 
-        memory_llm = getattr(session, "llm", None)
+        memory_llm = getattr(session, "llm", None) if config.feature_flags.enabled("memories") else None
         memory_task = schedule_memory_forgetting(
             repository=session.conversation_repo,
             llm=memory_llm,

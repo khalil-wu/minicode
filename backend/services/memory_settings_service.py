@@ -19,7 +19,7 @@ def get_memory_settings() -> dict:
     stack = load_config_layer_stack(cwd=None)
     settings = stack.effective_config()
     features = load_feature_flags(settings, managed_requirements=stack.requirements.feature_requirements)
-    memories = memory_settings_from_config(settings)
+    memories = memory_settings_from_config(settings, enabled=features.enabled("memories"))
     origins = stack.origins()
     locked = [name for name in MEMORY_FIELDS if (origin := origins.get(f"memories.{name}")) is not None and origin.source.kind in MANAGED_SOURCES]
     feature_locked = "memories" in stack.requirements.feature_requirements or "MINICODE_FEATURE_MEMORIES" in os.environ

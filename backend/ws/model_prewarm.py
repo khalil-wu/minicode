@@ -50,6 +50,7 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
             or conversation_id in session.run_manager.run_tasks):
         return
     thread = registry.thread_runtime(store_id, conversation_id)
+    thread.capture_memory_settings(config.memories)
     if thread.model_context is not None or thread.pending_tasks():
         return
     builder, snapshot = prepared

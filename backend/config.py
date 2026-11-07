@@ -798,7 +798,7 @@ def load_config(*, cwd: Path | None | object = _CONFIG_CWD_UNSET, resolve_creden
         permissions=permissions,
         agent=agent,
         feature_flags=feature_flags,
-        memories=memory_settings_from_config(settings_data),
+        memories=memory_settings_from_config(settings_data, enabled=feature_flags.enabled("memories")),
         config_layer_stack=config_layer_stack,
         application_network_policy=network_policy,
         mcp_optional_startup_grace_ms=mcp_grace,

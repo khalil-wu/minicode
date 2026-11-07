@@ -3647,17 +3647,19 @@ class SessionAgentRunnerMixin:
             model=str(getattr(self, "selected_model", "") or ""),
         )
         run_llm = getattr(self, "llm", None)
+        if self.ws_manager is not None:
+            store_id = await to_thread_cancel_safe(self.conversation_repo.store_instance_id)
+            thread = self.ws_manager.execution_contexts.thread_runtime(store_id, conversation_id)
+            config = replace(config, memories=thread.capture_memory_settings(config.memories))
         from backend.memory.settings import memory_policy_snapshot
         from backend.tools.memory_tools import memory_tools_for_run
         memory_policy = memory_policy_snapshot(config)
         run_memory_manager = getattr(self, "memory_manager", None) if memory_policy["enabled"] and memory_policy["use_memories"] else None
-        if workspace_root is not None and memory_policy["enabled"] and memory_policy["use_memories"]:
-            from backend.memory.file_memory import FileMemory
+        if memory_policy["enabled"] and memory_policy["use_memories"]:
             from backend.memory.manager import MemoryManager
 
-            run_memory_manager = MemoryManager(
-                FileMemory.for_workspace(workspace_root)
-            )
+            run_memory_manager = await to_thread_cancel_safe(MemoryManager.for_workspace,
+                workspace_root, version=config.memories.version)
         tool_registry = memory_tools_for_run(tool_registry, run_memory_manager.file_memory if run_memory_manager is not None else None)
         context_builder = ContextBuilder(
             token_budget=config.token_budget,
@@ -4773,14 +4775,16 @@ class SessionAgentRunnerMixin:
 
         from backend.memory.settings import memory_policy_snapshot
         from backend.tools.memory_tools import memory_tools_for_run
+        if run_context.environment_thread_runtime is not None:
+            run_config = replace(run_config, memories=run_context.environment_thread_runtime.capture_memory_settings(run_config.memories))
         run_memory_policy = memory_policy_snapshot(run_config)
         run_metadata["memory_settings"] = run_memory_policy
         run_memory_manager = request_snapshot.memory_manager if run_memory_policy["enabled"] and run_memory_policy["use_memories"] else None
-        if run_workspace_root is not None and run_memory_policy["enabled"] and run_memory_policy["use_memories"]:
-            from backend.memory.file_memory import FileMemory
+        if run_memory_policy["enabled"] and run_memory_policy["use_memories"]:
             from backend.memory.manager import MemoryManager
 
-            run_memory_manager = MemoryManager(FileMemory.for_workspace(run_workspace_root))
+            run_memory_manager = await to_thread_cancel_safe(MemoryManager.for_workspace,
+                run_workspace_root, version=run_config.memories.version)
         run_tool_registry = memory_tools_for_run(run_tool_registry, run_memory_manager.file_memory if run_memory_manager is not None else None)
 
         # Decode durable history while the transport and extension runtime are
@@ -4973,6 +4977,7 @@ class SessionAgentRunnerMixin:
                 startup_sandbox_mode=startup_sandbox_mode,
                 token_budget=int(getattr(run_config.token_budget, "total", 0) or 0),
                 foreground_tasks=lambda: tuple(self.run_manager.run_tasks.values()),
+                settings=run_config.memories,
             )
             _lease_session_llm_for_task(self, run_llm, memory_task)
 

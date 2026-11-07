@@ -1495,6 +1495,14 @@ class ContextBuilder:
         # explicit tool results instead of an implicit per-turn injection.
 
         messages.append(LLMMessage(role="system", content=system_content))
+        if prompt_parts.memory_context:
+            from backend.memory.settings import MemoryVersion
+            from backend.memory.text_utils import split_evidence_chunks
+
+            memory = self._memory_manager.file_memory
+            chunks = (split_evidence_chunks(prompt_parts.memory_context) if memory.version is MemoryVersion.V2
+                else [prompt_parts.memory_context])
+            messages.extend(LLMMessage(role="developer", content=chunk, content_kind="memories.instructions") for chunk in chunks)
         if self._execution_environment_snapshot() is not None:
             from backend.agent.environment_prompt import ENVIRONMENTS_INSTRUCTIONS
 

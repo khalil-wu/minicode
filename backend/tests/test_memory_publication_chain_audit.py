@@ -10,22 +10,25 @@ from backend.conversations.repository import ConversationRepository
 from backend.memory.file_memory import FileMemory
 from backend.memory.generation import MemoryGenerationCoordinator
 from backend.memory.local_backend import LocalMemoryBackend
+from backend.memory.settings import MemorySettings, MemoryVersion
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version", [MemoryVersion.V1, MemoryVersion.V2])
 @pytest.mark.parametrize("outcome", ["publish", "disabled", "cancel", "note_changed", "commit_error"])
-async def test_phase2_publishes_only_a_committed_eligible_tree(tmp_path, monkeypatch, outcome):
+async def test_phase2_publishes_only_a_committed_eligible_tree(tmp_path, monkeypatch, outcome, version):
     from backend.memory import generation
 
     memory_root = tmp_path / "memory"
-    monkeypatch.setattr(FileMemory, "workspace_memory_dir", classmethod(lambda _cls, _workspace: memory_root))
+    monkeypatch.setattr(FileMemory, "workspace_memory_dir", classmethod(lambda _cls, _workspace, *, version: memory_root))
     repository = ConversationRepository(tmp_path / "conversations")
     record = repository.create_conversation(workspace_root=str(tmp_path / "workspace"))
     coordinator = MemoryGenerationCoordinator(
-        repository=repository, llm=object(), workspace_root=tmp_path / "workspace",
+        repository=repository, llm=object(), workspace_root=tmp_path / "workspace", settings=MemorySettings(version=version),
     )
     summary = memory_root / "memory_summary.md"
-    summary.write_text("v1\nCommitted old summary", encoding="utf-8")
+    headings = "\n## User Profile\n## User preferences\n## General Tips\n## What's in Memory\n"
+    summary.write_text("v1\nCommitted old summary" + headings, encoding="utf-8")
     (memory_root / "MEMORY.md").write_text("Committed old handbook", encoding="utf-8")
     claim = coordinator.store.claim_stage1(
         thread_id=record.id, source_revision=record.content_revision,
@@ -41,7 +44,7 @@ async def test_phase2_publishes_only_a_committed_eligible_tree(tmp_path, monkeyp
     async def consolidate(*, memory_root, **_kwargs):
         staged_roots.append(memory_root)
         assert memory_root != coordinator.memory_root
-        (memory_root / "memory_summary.md").write_text("v1\nNew published summary", encoding="utf-8")
+        (memory_root / "memory_summary.md").write_text("v1\nNew published summary" + headings, encoding="utf-8")
         (memory_root / "MEMORY.md").write_text("New published handbook", encoding="utf-8")
         started.set()
         await proceed.wait()

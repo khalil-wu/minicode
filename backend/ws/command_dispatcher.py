@@ -41,6 +41,7 @@ READ_ONLY_REFRESH_COMMAND_TYPES = frozenset({
     "commands.list", "diff.git_staged", "diff.git_working_tree", "scheduler.list",
     "env.list", "mcp.list", "session.usage.inspect", "runtime.capabilities.inspect",
     "skills.list", "skills.marketplace.list",
+    "thread/memory/read", "memory/status",
 })
 
 
@@ -105,7 +106,7 @@ def _normalize_command_owner(command: UserCommand) -> None:
     # in the explicit resource-owner field throughout admission and replay.
     if owner and not command.type.startswith("scheduler."):
         command.data["conversation_id"] = str(owner).strip()
-    if command.type.startswith("thread/realtime/") and "conversation_id" not in command.data:
+    if (command.type.startswith("thread/realtime/") or command.type == "thread/memory/read") and "conversation_id" not in command.data:
         command.data["conversation_id"] = command.data.get("threadId", "")
 
 _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {

@@ -138,7 +138,8 @@ class AppBootstrap:
             logger.warning("Websocket session log cleanup failed: %s", exc)
 
         try:
-            self.file_memory = FileMemory()
+            self.file_memory = FileMemory(version=self.config.memories.version,
+                initialize=self.config.feature_flags.enabled("memories"))
             self.memory_manager = MemoryManager(self.file_memory)
             logger.info("File memory is ready")
         except Exception as exc:

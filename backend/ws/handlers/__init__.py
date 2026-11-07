@@ -24,6 +24,7 @@ from backend.ws.handlers.guardian import HANDLERS as _guardian
 from backend.ws.handlers.sidebar import HANDLERS as _sidebar
 from backend.ws.handlers.realtime import HANDLERS as _realtime
 from backend.ws.handlers.catalog_queue import HANDLERS as _catalog_queue
+from backend.ws.handlers.memory import HANDLERS as _memory
 
 def _merge_domain_handlers(
     domains: tuple[tuple[str, dict[str, Callable[..., Any]]], ...],
@@ -62,6 +63,7 @@ HANDLERS: dict[str, Callable[..., Any]] = _merge_domain_handlers(
         ("sidebar", _sidebar),
         ("realtime", _realtime),
         ("catalog_queue", _catalog_queue),
+        ("memory", _memory),
     )
 )
 

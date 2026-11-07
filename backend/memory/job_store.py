@@ -13,6 +13,7 @@ from typing import Iterable
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from backend.memory.paths import resolve_memory_path
+from backend.memory.settings import MemoryVersion
 
 
 STAGE1_JOB_KIND = "memory_stage1"
@@ -44,12 +45,13 @@ class Stage1Output:
     selected_for_phase2_source_revision: int | None = None
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 _CREATE_MEMORY_STATE = """
 CREATE TABLE IF NOT EXISTS memory_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-    catalog_revision INTEGER NOT NULL
+    catalog_revision INTEGER NOT NULL,
+    max_consolidated_threads INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -106,8 +108,10 @@ class MemoryJobStore:
     and cannot commit into the reset generation.
     """
 
-    def __init__(self, path: Path | str, *, reset_lock: FileLock | None = None) -> None:
+    def __init__(self, path: Path | str, *, reset_lock: FileLock | None = None,
+                 version: MemoryVersion = MemoryVersion.V1) -> None:
         self.path = Path(path)
+        self.version = MemoryVersion(version)
         self._reset_lock = reset_lock or FileLock(
             self.path.parent / f".{self.path.name}.reset.lock"
         )
@@ -149,6 +153,8 @@ class MemoryJobStore:
         )
         connection.execute(_CREATE_STAGE1_OUTPUTS)
         connection.execute(_CREATE_JOBS)
+        if "max_consolidated_threads" not in cls._table_columns(connection, "memory_state"):
+            connection.execute("ALTER TABLE memory_state ADD COLUMN max_consolidated_threads INTEGER NOT NULL DEFAULT 0")
 
         output_columns = cls._table_columns(connection, "stage1_outputs")
         job_columns = cls._table_columns(connection, "jobs")
@@ -330,7 +336,7 @@ class MemoryJobStore:
                 connection.commit()
                 return False
 
-            if raw_memory and rollout_summary:
+            if rollout_summary and (raw_memory or self.version is MemoryVersion.V2):
                 written = connection.execute(
                     """
                     INSERT INTO stage1_outputs (
@@ -631,7 +637,7 @@ class MemoryJobStore:
             rows = connection.execute(
                 """
                 SELECT * FROM stage1_outputs
-                WHERE raw_memory != '' AND rollout_summary != ''
+                WHERE (? OR raw_memory != '') AND rollout_summary != ''
                   AND (
                     (usage_count IS NULL AND source_updated_at >= ?)
                     OR (usage_count IS NOT NULL AND COALESCE(last_usage, 0) >= ?)
@@ -642,7 +648,7 @@ class MemoryJobStore:
                          thread_id DESC
                 LIMIT ?
                 """,
-                (cutoff, cutoff, -1 if limit is None else max(0, int(limit))),
+                (self.version is MemoryVersion.V2, cutoff, cutoff, -1 if limit is None else max(0, int(limit))),
             ).fetchall()
         return [self._stage1_from_row(row) for row in rows]
 
@@ -683,6 +689,8 @@ class MemoryJobStore:
                         output.source_revision,
                     ),
                 )
+            connection.execute("UPDATE memory_state SET max_consolidated_threads = MAX(max_consolidated_threads, ?) WHERE singleton=1",
+                (len(selected),))
             connection.execute(
                 """
                 UPDATE jobs SET
@@ -703,6 +711,10 @@ class MemoryJobStore:
             )
             connection.commit()
             return True
+
+    def max_consolidated_thread_count(self) -> int:
+        with self._connect() as connection:
+            return int(connection.execute("SELECT max_consolidated_threads FROM memory_state WHERE singleton=1").fetchone()[0])
 
     def fail_phase2(
         self,

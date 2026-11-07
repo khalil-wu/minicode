@@ -25,7 +25,7 @@ class _MemoryTool(BaseTool):
 
     def _memory_for(self, context: ToolExecutionContext | None) -> FileMemory:
         workspace_root = getattr(context, "workspace_root", None) if context else None
-        return FileMemory.for_workspace(workspace_root) if workspace_root else self._memory
+        return FileMemory.for_workspace(workspace_root, version=self._memory.version) if workspace_root else self._memory
 
     def _execute_backend_sync(
         self,

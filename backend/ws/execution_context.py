@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from backend.memory.settings import MemorySettings, MemoryVersion
     from backend.agent.environment_selection import ThreadEnvironments
     from backend.ws.handler import WebSocketSession
 
@@ -108,9 +109,16 @@ class ConversationThreadRuntime:
     mcp_connections: Any | None = None
     cua_repl_companions: Any | None = None
     exec_policy_owner: Any | None = None
+    memory_version: MemoryVersion | None = None
     model_context: tuple[Any, dict[str, Any], int, str] | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
+
+    def capture_memory_settings(self, settings: MemorySettings) -> MemorySettings:
+        from dataclasses import replace
+        if self.memory_version is None:
+            self.memory_version = settings.version
+        return replace(settings, version=self.memory_version)
 
     def take_model_context(self, snapshot: dict[str, Any], workspace_root: Any):
         """Transfer the completed thread context to its next admitted turn."""

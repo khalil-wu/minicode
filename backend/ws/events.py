@@ -261,6 +261,7 @@ ClientCommandType = Literal[
     "conversation.project.set",
     "conversation.memory_mode.set",
     "memory.reset",
+    "thread/memory/read", "memory/status",
     "conversation.permission_mode.set",
     "conversation.goal.set",
     "conversation.agent_mode.set",

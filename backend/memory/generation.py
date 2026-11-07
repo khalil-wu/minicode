@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Callable
@@ -32,10 +32,14 @@ from backend.memory.job_store import JobClaim, MEMORY_DB_NAME, MemoryJobStore, S
 from backend.memory.paths import resolve_memory_path
 from backend.memory.prompts import (
     STAGE1_SYSTEM_PROMPT,
+    STAGE1_SYSTEM_PROMPT_V2,
     PHASE2_WORKSPACE_DIFF_FILE,
     build_consolidation_prompt,
     build_stage1_input,
+    valid_v2_summary,
 )
+from backend.memory.settings import MemorySettings, MemoryVersion, memory_settings_for_workspace
+from backend.memory.text_utils import split_evidence_chunks, truncate_middle_bytes
 from backend.runtime_env import sanitized_git_env
 from backend.secret_redaction import redact_secrets
 
@@ -68,6 +72,10 @@ PHASE1_OUTPUT_SCHEMA: dict[str, Any] = {
     },
     "required": ["raw_memory", "rollout_summary", "rollout_slug"],
     "additionalProperties": False,
+}
+PHASE1_OUTPUT_SCHEMA_V2 = {
+    "type": "object", "properties": {"rollout_summary": {"type": "string"}, "rollout_slug": {"type": "string"}},
+    "required": ["rollout_summary", "rollout_slug"], "additionalProperties": False,
 }
 
 _INJECTED_FRAGMENT_RES = (
@@ -155,7 +163,7 @@ class Phase2WorkspaceState:
     artifacts_valid: bool
 
 
-_STARTUP_TASKS: dict[tuple[str, int], asyncio.Task[Any]] = {}
+_STARTUP_TASKS: dict[tuple[str, int, MemoryVersion], asyncio.Task[Any]] = {}
 
 
 def schedule_memory_startup(
@@ -168,35 +176,51 @@ def schedule_memory_startup(
     foreground_tasks: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
     startup_sandbox_mode: str | None = None,
     startup_subagent_header: str | None = None,
+    settings: MemorySettings | None = None,
 ) -> asyncio.Task[Any] | None:
     """Start maintenance in a clean task context so turn usage is not inherited."""
 
     if llm is None or not workspace_root or memory_reset_in_progress():
         return None
-    key = (str(Path(workspace_root).resolve()), id(llm))
-    existing = _STARTUP_TASKS.get(key)
-    if existing is not None and not existing.done():
-        return existing
-    coordinator = MemoryGenerationCoordinator(
-        repository=repository,
-        llm=llm,
-        workspace_root=workspace_root,
-        token_budget=token_budget,
-        foreground_tasks=foreground_tasks,
-    )
-    task = asyncio.create_task(
-        coordinator.run_startup(current_conversation_id=current_conversation_id,
-            startup_sandbox_mode=startup_sandbox_mode, startup_subagent_header=startup_subagent_header),
-        name=f"memory-startup:{current_conversation_id}",
-        context=contextvars.Context(),
-    )
-    _track_background_task(task)
-    _STARTUP_TASKS[key] = task
-    def finished(done: asyncio.Task[Any]) -> None:
-        if _STARTUP_TASKS.get(key) is done:
-            _STARTUP_TASKS.pop(key)
-    task.add_done_callback(finished)
-    return task
+    settings = settings or memory_settings_for_workspace(workspace_root)
+    if not settings.generate_memories:
+        return None
+    tasks = []
+    for version in settings.generation_versions():
+        key = (str(Path(workspace_root).resolve()), id(llm), version)
+        existing = _STARTUP_TASKS.get(key)
+        if existing is not None and not existing.done():
+            tasks.append(existing)
+            continue
+
+        async def run_version(version=version):
+            if foreground_tasks is not None:
+                while active := {task for task in foreground_tasks() if not task.done()}:
+                    await asyncio.wait(active)
+            coordinator = await _to_thread_cancel_safe(MemoryGenerationCoordinator,
+                repository=repository, llm=llm, workspace_root=workspace_root, token_budget=token_budget,
+                foreground_tasks=foreground_tasks, settings=replace(settings, version=version))
+            await coordinator.run_startup(current_conversation_id=current_conversation_id,
+                startup_sandbox_mode=startup_sandbox_mode, startup_subagent_header=startup_subagent_header)
+
+        task = asyncio.create_task(run_version(), name=f"memory-startup:{version}:{current_conversation_id}", context=contextvars.Context())
+        _track_background_task(task)
+        _STARTUP_TASKS[key] = task
+        def finished(done: asyncio.Task[Any], key=key) -> None:
+            if _STARTUP_TASKS.get(key) is done:
+                _STARTUP_TASKS.pop(key)
+        task.add_done_callback(finished)
+        tasks.append(task)
+    if len(tasks) == 1:
+        return tasks[0]
+    async def finish_versions():
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if errors:
+            raise BaseExceptionGroup("Memory version workers failed", errors)
+    joined = asyncio.create_task(finish_versions(), name=f"memory-startup:{current_conversation_id}", context=contextvars.Context())
+    _track_background_task(joined)
+    return joined
 
 
 def schedule_memory_forgetting(
@@ -207,18 +231,25 @@ def schedule_memory_forgetting(
     conversation_id: str,
     token_budget: int | None = None,
 ) -> asyncio.Task[Any] | None:
-    if llm is None or not workspace_root or not conversation_id or memory_reset_in_progress():
+    if not workspace_root or not conversation_id or memory_reset_in_progress():
         return None
-    coordinator = MemoryGenerationCoordinator(
-        repository=repository,
-        llm=llm,
-        workspace_root=workspace_root,
-        token_budget=token_budget,
-    )
+    async def forget_versions():
+        settings = await _to_thread_cancel_safe(memory_settings_for_workspace, workspace_root)
+        for version in MemoryVersion:
+            root = await _to_thread_cancel_safe(FileMemory.workspace_memory_dir, workspace_root, version=version)
+            if not root.exists():
+                continue
+            memory = FileMemory(root, version=version, initialize=False)
+            store = MemoryJobStore(root / MEMORY_DB_NAME, reset_lock=memory.reset_lock, version=version)
+            await _to_thread_cancel_safe(store.remove_thread_output, conversation_id)
+            if llm is None or not settings.generate_memories:
+                continue
+            coordinator = await _to_thread_cancel_safe(MemoryGenerationCoordinator,
+                repository=repository, llm=llm, workspace_root=workspace_root, token_budget=token_budget,
+                settings=replace(settings, version=version))
+            await coordinator._run_phase2()
     task = asyncio.create_task(
-        coordinator.forget_and_consolidate(
-            conversation_id=conversation_id,
-        ),
+        forget_versions(),
         name=f"memory-forget:{conversation_id}",
         context=contextvars.Context(),
     )
@@ -253,15 +284,19 @@ class MemoryGenerationCoordinator:
         token_budget: int | None = None,
         now: Any | None = None,
         foreground_tasks: Callable[[], Iterable[asyncio.Task[Any]]] | None = None,
+        settings: MemorySettings | None = None,
     ) -> None:
         self.repository = repository
         self.llm = llm
         self.workspace_root = Path(workspace_root).expanduser().resolve()
-        self.file_memory = FileMemory.for_workspace(self.workspace_root)
+        self.settings = settings or memory_settings_for_workspace(self.workspace_root)
+        self.version = self.settings.version
+        self.file_memory = FileMemory.for_workspace(self.workspace_root, version=self.version)
         self.memory_root = self.file_memory.memory_dir
         self.store = MemoryJobStore(
             self.memory_root / MEMORY_DB_NAME,
             reset_lock=self.file_memory.reset_lock,
+            version=self.version,
         )
         self.worker_id = uuid.uuid4().hex
         self.token_budget = int(token_budget or 0)
@@ -326,6 +361,7 @@ class MemoryGenerationCoordinator:
 
     def _scoped_conversations(self) -> list[Any]:
         results: list[Any] = []
+        workspace_memories = {}
         summaries = list(self.repository.list_conversations())
         summaries.sort(
             key=lambda item: str(getattr(item, "updated_at", "") or ""),
@@ -336,7 +372,9 @@ class MemoryGenerationCoordinator:
             if not root:
                 continue
             try:
-                candidate_root = FileMemory.workspace_memory_dir(root)
+                if root not in workspace_memories:
+                    workspace_memories[root] = FileMemory.workspace_memory_dir(root, version=self.version)
+                candidate_root = workspace_memories[root]
             except (OSError, ValueError):
                 continue
             if candidate_root != self.memory_root:
@@ -430,7 +468,7 @@ class MemoryGenerationCoordinator:
                     or self._generation_mode(conversation) != "enabled" or bool(getattr(conversation, "archived", False))):
                 await _to_thread_cancel_safe(self.store.abandon_stage1, claim)
                 return
-            rollout = self._serialize_rollout(conversation)
+            rollout = await _to_thread_cancel_safe(self._serialize_rollout, conversation)
             result = await self._extract_phase1(conversation, rollout, startup_source=startup_source)
             current = await _to_thread_cancel_safe(
                 self.repository.get_conversation_summary,
@@ -470,6 +508,9 @@ class MemoryGenerationCoordinator:
             )
 
     def _serialize_rollout(self, conversation: Any) -> str:
+        if self.version is MemoryVersion.V2:
+            from backend.memory.rollout_input import serialize_tiered_input
+            return serialize_tiered_input(conversation.transcript, max_bytes=self._phase1_input_char_budget())
         filtered: list[dict[str, Any]] = []
         for raw_message in list(getattr(conversation, "transcript", []) or []):
             if not isinstance(raw_message, dict):
@@ -527,11 +568,13 @@ class MemoryGenerationCoordinator:
             rollout_path=rollout_path,
             rollout_cwd=str(getattr(conversation, "workspace_root", "") or self.workspace_root),
             rollout_contents=rollout,
+            rollout_git_branch=str(getattr(conversation, "git_branch", "") or ""),
+            version=self.version,
         )
-        messages = [
-            LLMMessage(role="system", content=STAGE1_SYSTEM_PROMPT),
-            LLMMessage(role="user", content=prompt),
-        ]
+        messages = [LLMMessage(role="system", content=STAGE1_SYSTEM_PROMPT if self.version is MemoryVersion.V1 else STAGE1_SYSTEM_PROMPT_V2)]
+        messages.extend([LLMMessage(role="user", content=prompt)] if self.version is MemoryVersion.V1 else [
+            LLMMessage(role="user", content=chunk, content_kind="memories.extraction_evidence", is_user_input=False)
+            for chunk in split_evidence_chunks(prompt)])
         source_options: dict[str, Any] = {}
         if startup_source is not None:
             turn_id = new_uuid7()
@@ -558,25 +601,28 @@ class MemoryGenerationCoordinator:
                     operation="memory_phase1_extraction",
                     query_source="background",
                     enable_prompt_cache=True,
-                    output_schema=PHASE1_OUTPUT_SCHEMA,
+                    output_schema=PHASE1_OUTPUT_SCHEMA if self.version is MemoryVersion.V1 else PHASE1_OUTPUT_SCHEMA_V2,
                     **source_options,
                 ),
             )
             if callable(side_query)
             else self.llm.simple_chat(messages)
         )
-        payload = _parse_exact_json(response, {"raw_memory", "rollout_summary", "rollout_slug"})
-        raw_memory = payload.get("raw_memory")
+        keys = {"rollout_summary", "rollout_slug"} | ({"raw_memory"} if self.version is MemoryVersion.V1 else set())
+        payload = _parse_exact_json(response, keys)
+        raw_memory = payload.get("raw_memory", "")
         rollout_summary = payload.get("rollout_summary")
         rollout_slug = payload.get("rollout_slug")
         if not isinstance(raw_memory, str) or not isinstance(rollout_summary, str):
             raise MemoryGenerationError("Phase 1 response fields must be strings")
-        if rollout_slug is not None and not isinstance(rollout_slug, str):
+        if (self.version is MemoryVersion.V2 or rollout_slug is not None) and not isinstance(rollout_slug, str):
             raise MemoryGenerationError("Phase 1 rollout_slug must be a string or null")
         raw_memory = redact_secrets(raw_memory).strip()
         rollout_summary = redact_secrets(rollout_summary).strip()
+        if self.version is MemoryVersion.V2:
+            rollout_summary = truncate_middle_bytes(rollout_summary, 9_000)
         normalized_slug = redact_secrets(rollout_slug or "").strip() or None
-        if not raw_memory or not rollout_summary:
+        if not rollout_summary or self.version is MemoryVersion.V1 and not raw_memory:
             return Phase1Result("", "", None)
         return Phase1Result(raw_memory, rollout_summary, normalized_slug)
 
@@ -816,6 +862,8 @@ class MemoryGenerationCoordinator:
             if outputs
             else "# Raw Memories\n\nNo raw memories yet.\n"
         )
+        if self.version is MemoryVersion.V2:
+            return ""
         raw_path = resolve_memory_path(root, "raw_memories.md")
         if _read_text(raw_path) != raw_memories:
             atomic_write_text(raw_path, raw_memories)
@@ -879,7 +927,7 @@ class MemoryGenerationCoordinator:
             await run_memory_consolidation_agent(
                 llm=llm,
                 memory_root=memory_root,
-                prompt=build_consolidation_prompt(memory_root),
+                prompt=build_consolidation_prompt(memory_root, version=self.version),
                 token_budget=self.token_budget,
             )
 
@@ -972,10 +1020,10 @@ class MemoryGenerationCoordinator:
 
     def _artifacts_valid(self, memory_root: Path | None = None) -> bool:
         root = self.memory_root if memory_root is None else memory_root
-        if not resolve_memory_path(root, "MEMORY.md").is_file():
+        if self.version is MemoryVersion.V1 and not resolve_memory_path(root, "MEMORY.md").is_file():
             return False
         summary = _read_text(resolve_memory_path(root, "memory_summary.md"))
-        return summary.splitlines()[:1] == ["v1"]
+        return valid_v2_summary(summary) if self.version is MemoryVersion.V2 else summary.splitlines()[:1] == ["v1"]
 
     def _git(self, *args: str, check: bool = True, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         root = self.memory_root if cwd is None else cwd

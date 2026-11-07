@@ -77,6 +77,8 @@ export type ConversationClientCommandType =
   | "conversation.project.set"
   | "conversation.memory_mode.set"
   | "memory.reset"
+  | "thread/memory/read"
+  | "memory/status"
   | "conversation.permission_mode.set"
   | "conversation.agent_mode.set"
   | "conversation.goal.set"
@@ -668,6 +670,16 @@ export interface ConversationAgentModeSetCommand {
 export interface MemoryResetCommand {
   type: "memory.reset";
   confirmed: true;
+}
+
+export interface ThreadMemoryReadCommand {
+  type: "thread/memory/read";
+  threadId: string;
+}
+
+export interface MemoryStatusCommand {
+  type: "memory/status";
+  minConsolidatedThreads?: number;
 }
 
 export interface ConversationGoalSetCommand {

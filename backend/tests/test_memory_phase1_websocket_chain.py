@@ -154,22 +154,21 @@ async def test_actual_startup_phase1_ws_preserves_idle_main_history_identity_and
             async with foreground_scene(tmp_path, adapter, conversation_id=startup.id) as foreground:
                 before = deepcopy(foreground.builder.export_snapshot())
                 admitted, = [message for message in foreground.builder._history if message.is_user_input]
-                native_input, = [item for item in server.records[0].body["input"]
-                    if item.get("id") == admitted.accepted_input["model_item_id"]]
+                native_input, = [item for record in server.records if record.body.get("generate") is not False
+                    for item in record.body["input"] if item.get("role") == "user"
+                    and item.get("content") == [{"type": "input_text", "text": "FOREGROUND_ACTUAL_INPUT"}]]
                 assert native_input["content"] == [{"type": "input_text", "text": "FOREGROUND_ACTUAL_INPUT"}]
-                assert native_input["internal_chat_message_metadata_passthrough"] == {
-                    "turn_id": admitted.accepted_input["turn_id"], "content_item_kinds": ["user.text"],
-                }
+                assert "internal_chat_message_metadata_passthrough" not in native_input
+                assert admitted.accepted_input["model_item_id"] and admitted.accepted_input["turn_id"]
                 records = list(foreground.owner.llm_turn_context.side_call_records)
-                idle = adapter._responses_websocket.idle
-                assert idle is not None
+                idle, = adapter._responses_websocket.idle.values()
                 baseline, response_id = deepcopy(idle.baseline), idle.response_id
                 task = schedule_memory_startup(repository=repository, llm=adapter, workspace_root=tmp_path,
                     current_conversation_id=startup.id, startup_sandbox_mode="workspace-write")
                 await asyncio.wait_for(task, 10)
                 assert foreground.builder.export_snapshot() == before
                 assert foreground.owner.llm_turn_context.side_call_records == records
-                assert adapter._responses_websocket.idle is idle
+                assert list(adapter._responses_websocket.idle.values()) == [idle]
                 assert idle.baseline == baseline and idle.response_id == response_id
                 assert not adapter._responses_websocket.active and not adapter._responses_side_pools
                 assert not server.connections[0].closed
@@ -214,7 +213,7 @@ async def test_phase1_disabled_or_unsupported_ws_uses_actual_http_without_changi
             assert len(server.handshakes) == int(enabled)
             assert not adapter._responses_websocket.http_only
             assert adapter._responses_websocket.unavailable_status is None
-            assert adapter._responses_websocket.idle is None and not adapter._responses_websocket.active
+            assert not adapter._responses_websocket.idle and not adapter._responses_websocket.active
             assert not adapter._responses_side_pools
             assert outputs(tmp_path)[0].thread_id == old.id
             if enabled:
@@ -299,7 +298,7 @@ async def test_concurrent_phase1_requests_leave_active_main_lease_and_continuati
             release_main.set()
             events = await asyncio.wait_for(main_task, 5)
             assert events[-1].type == StreamEventType.DONE
-            assert adapter._responses_websocket.idle is original_connection
+            assert adapter._responses_websocket.idle[("main-session", "main-thread", "user")] is original_connection
             await main_call([*messages, LLMMessage(role="assistant", content="MAIN_ACTIVE_DONE"),
                 LLMMessage(role="user", content="CONTINUE_MAIN")])
             main_records = [item for item in server.records if not is_memory(item.headers)]
@@ -378,7 +377,7 @@ async def test_phase1_partial_usage_and_actual_socket_owner_close_on_every_termi
             assert_source(server.records[0], startup.id)
             await until(lambda: server.records[0].connection.closed)
             assert not adapter._responses_side_pools and not adapter._responses_websocket.active
-            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.idle
             assert len({id(call) for call in calls}) == 1 and calls[0].turn is None
             assert calls[0].record["usage"]["input_tokens"] == 4
             assert calls[0].record["usage"]["output_tokens"] == 2

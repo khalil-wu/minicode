@@ -15,7 +15,7 @@ from backend.config import AppConfig, LLMSettings, load_config
 from backend.conversations.repository import ConversationRepository
 from backend.feature_flags import FeatureFlags
 from backend.memory.file_memory import FileMemory
-from backend.memory.settings import MemorySettings, memory_policy_snapshot
+from backend.memory.settings import MemorySettings, MemoryVersion, memory_policy_snapshot
 
 
 @pytest.fixture
@@ -57,7 +57,8 @@ def test_host_master_saves_three_fields_without_changing_threads_memories_or_ins
     instructions.write_text("Keep authored instructions", encoding="utf-8")
     before = host_settings.client.get("/api/settings/memory").json()
     assert before["feature_enabled"] is False
-    assert before["memories"] == {"generate_memories": True, "use_memories": True, "disable_on_external_context": False}
+    assert before["memories"] == {"generate_memories": True, "use_memories": True, "disable_on_external_context": False,
+        "version": "v1", "dual_write": False}
     response = host_settings.client.put("/api/settings/memory", json={"enabled": True})
     assert response.status_code == 200, response.text
     saved = json.loads(host_settings.user.read_text(encoding="utf-8"))
@@ -67,7 +68,8 @@ def test_host_master_saves_three_fields_without_changing_threads_memories_or_ins
     saved["feature_flags"] = {"plugins": False}
     host_settings.user.write_text(json.dumps(saved), encoding="utf-8")
     assert memory_policy_snapshot(load_config(cwd=None, resolve_credentials=False)) == {
-        "enabled": True, "generate_memories": True, "use_memories": True, "disable_on_external_context": False}
+        "enabled": True, "generate_memories": True, "use_memories": True, "disable_on_external_context": False,
+        "version": "v1", "dual_write": False}
     assert repository.get_conversation(disabled.id).memory_mode == "disabled"
     assert repository.get_conversation(polluted.id).memory_mode == "polluted"
     assert handbook.read_text(encoding="utf-8") == "Keep existing memory"
@@ -89,7 +91,8 @@ def test_generation_default_applies_only_to_new_threads_and_external_policy_is_i
     response = host_settings.client.put("/api/settings/memory", json={"disable_on_external_context": False})
     assert response.status_code == 200, response.text
     config = load_config(cwd=None, resolve_credentials=False)
-    assert config.memories == MemorySettings(generate_memories=False, use_memories=True, disable_on_external_context=False)
+    assert config.memories == MemorySettings(generate_memories=False, use_memories=True, disable_on_external_context=False,
+        version=MemoryVersion.V2)
     assert "no_memories_if_mcp_or_web_search" not in json.loads(host_settings.user.read_text(encoding="utf-8"))["memories"]
 
 

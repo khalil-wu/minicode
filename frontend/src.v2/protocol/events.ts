@@ -143,6 +143,8 @@ export type {
   ConversationMemoryModeSetCommand,
   ConversationAgentModeSetCommand,
   MemoryResetCommand,
+  ThreadMemoryReadCommand,
+  MemoryStatusCommand,
   ConversationGoalSetCommand,
   LlmModelSetCommand,
   TurnSettingsUpdateCommand,
@@ -572,6 +574,8 @@ export interface UntypedClientCommand {
     | "conversation.project.set"
     | "conversation.memory_mode.set"
     | "memory.reset"
+    | "thread/memory/read"
+    | "memory/status"
     | "conversation.goal.set"
     | "conversation.agent_mode.set"
     | "preview.detect"
@@ -905,6 +909,8 @@ import type {
   ConversationMemoryModeSetCommand,
   ConversationAgentModeSetCommand,
   MemoryResetCommand,
+  ThreadMemoryReadCommand,
+  MemoryStatusCommand,
   ConversationGoalSetCommand,
   LlmModelSetCommand,
   TurnSettingsUpdateCommand,
@@ -1073,6 +1079,8 @@ type ClientCommandPayload =
   | ConversationMemoryModeSetCommand
   | ConversationAgentModeSetCommand
   | MemoryResetCommand
+  | ThreadMemoryReadCommand
+  | MemoryStatusCommand
   | ConversationGoalSetCommand
   | ProviderOAuthCommand
   | PreviewDetectCommand
@@ -1282,6 +1290,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "conversation.project.set",
   "conversation.memory_mode.set",
   "memory.reset",
+  "thread/memory/read", "memory/status",
   "conversation.permission_mode.set",
   "conversation.goal.set",
   "conversation.agent_mode.set",

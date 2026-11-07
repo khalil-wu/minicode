@@ -200,6 +200,7 @@ class PromptParts:
     project_guidelines: str = ""
     conditional_rules: str = ""
     skill_context: str = ""
+    memory_context: str = ""
 
     def render_system(self) -> str:
         parts = [self.stable, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, self.context]
@@ -229,7 +230,7 @@ class PromptParts:
             return "\n\n".join(
                 s.content for s in sections
                 if s.layer == layer
-                and s.name not in {"project_guidelines", "conditional_rules", "skill_context"}
+                and s.name not in {"project_guidelines", "conditional_rules", "skill_context", "memory_context"}
                 and s.content.strip()
             )
 
@@ -244,6 +245,9 @@ class PromptParts:
             ),
             skill_context="\n\n".join(
                 s.content for s in sections if s.name == "skill_context" and s.content.strip()
+            ),
+            memory_context="\n\n".join(
+                s.content for s in sections if s.name == "memory_context" and s.content.strip()
             ),
         )
 

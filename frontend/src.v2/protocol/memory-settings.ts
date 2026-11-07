@@ -3,7 +3,8 @@ import { apiBase, authHeaders, errorMessageFromResponseText, fetchWithTimeout } 
 
 export interface MemorySettingsPayload {
   feature_enabled: boolean;
-  memories: { generate_memories: boolean; use_memories: boolean; disable_on_external_context: boolean };
+  memories: { generate_memories: boolean; use_memories: boolean; disable_on_external_context: boolean;
+    version: "v1" | "v2"; dual_write: boolean };
   path: string;
   feature_locked: boolean;
   locked_fields: string[];

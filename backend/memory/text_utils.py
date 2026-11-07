@@ -5,8 +5,12 @@ from __future__ import annotations
 
 def truncate_middle_tokens(value: str, max_tokens: int) -> str:
     """Keep both ends of text while applying MiniCode's byte-based token cap."""
+    return truncate_middle_bytes(value, max(0, int(max_tokens)) * 4)
 
-    max_bytes = max(0, int(max_tokens)) * 4
+
+def truncate_middle_bytes(value: str, max_bytes: int) -> str:
+    """Keep complete UTF-8 codepoints within the byte-based memory contract."""
+
     encoded = value.encode("utf-8")
     if len(encoded) <= max_bytes:
         return value
@@ -22,3 +26,13 @@ def truncate_middle_tokens(value: str, max_tokens: int) -> str:
     right = encoded[-right_budget:].decode("utf-8", errors="ignore") if right_budget else ""
     removed_tokens = (len(encoded) - len(left.encode("utf-8")) - len(right.encode("utf-8")) + 3) // 4
     return f"{left}…{removed_tokens} tokens truncated…{right}"
+
+
+def split_evidence_chunks(text: str, max_bytes: int = 8_900) -> list[str]:
+    encoded = text.encode("utf-8")
+    chunks = []
+    while encoded:
+        chunk = encoded[:max_bytes].decode("utf-8", errors="ignore")
+        chunks.append(chunk)
+        encoded = encoded[len(chunk.encode("utf-8")):]
+    return chunks
