@@ -22,17 +22,20 @@ def packet(conversation_id):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_checks_owner_metadata_then_reads_full_admission_evidence_once(tmp_path, monkeypatch):
+async def test_dispatch_reads_only_candidate_input_evidence(tmp_path, monkeypatch):
     session, conversation, _adapter = session_for(tmp_path, monkeypatch)
     full = Mock(wraps=session.conversation_repo.get_conversation)
     summary = Mock(wraps=session.conversation_repo.get_conversation_summary)
+    execution = Mock(wraps=session.conversation_repo.get_execution_context)
     start = AsyncMock()
     monkeypatch.setattr(session.conversation_repo, "get_conversation", full)
     monkeypatch.setattr(session.conversation_repo, "get_conversation_summary", summary)
+    monkeypatch.setattr(session.conversation_repo, "get_execution_context", execution)
     monkeypatch.setattr(session, "start_agent_run", start)
     try:
         await session.command_dispatcher._handle_command_inner(UserCommand("user_message", packet(conversation.id)))
-        full.assert_called_once_with(conversation.id)
+        full.assert_not_called()
+        execution.assert_called_once_with(conversation.id, transcript_ids=("current-owned-user",))
         assert summary.call_args_list[0].args == (conversation.id,)
         start.assert_awaited_once()
         assert start.await_args.kwargs["conversation_id"] == conversation.id

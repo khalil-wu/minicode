@@ -4340,7 +4340,7 @@ class SessionAgentRunnerMixin:
             flushed_ui_state = await self._flush_ui_agent_state_now_unlocked(conversation.id)
             pre_trace.mark("run.ui_state_flushed")
             latest_for_turn = await asyncio.to_thread(
-                self.conversation_repo.get_conversation,
+                self.conversation_repo.get_execution_context,
                 conversation.id,
             )
             pre_trace.mark("run.record_loaded")

@@ -2830,6 +2830,26 @@ class ConversationRepository:
                 self._cache_record(cached, copy_record=False)
             return cached.revision, cached.context_snapshot
 
+    def get_execution_context(self, conversation_id: str, *, transcript_ids: tuple[str, ...] = ()) -> ConversationRecord | None:
+        """Capture run metadata and an immutable model snapshot without UI history.
+
+        The run deserializer owns its resulting messages. It reads this
+        repository-owned snapshot and must never mutate its nested values.
+        """
+        with self._store_lock(conversation_id):
+            cached = self._record_cache.get(conversation_id)
+            if cached is None or self._record_cache_stamps.get(conversation_id) != self._record_disk_stamp(conversation_id):
+                cached = self._load_record(conversation_id)
+                if cached is None:
+                    return None
+                self._cache_record(cached, copy_record=False)
+            record = ConversationRecord.from_dict(cached.to_meta_dict())
+            record.context_snapshot = cached.context_snapshot
+            if transcript_ids:
+                selected = set(transcript_ids)
+                record.transcript = [copy.deepcopy(item) for item in cached.transcript if item.get("id") in selected]
+            return record
+
     def _load_record(self, conversation_id: str) -> ConversationRecord | None:
         if self._manifest_path_for(conversation_id).exists():
             return self._load_committed_record(conversation_id)

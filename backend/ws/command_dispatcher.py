@@ -1780,8 +1780,16 @@ class SessionCommandDispatcher:
             ).hexdigest() if client_command_id else uuid.uuid4().hex
             user_message_id = str(command.data.get("user_message_id") or "").strip()
             assistant_message_id = str(command.data.get("assistant_message_id") or "").strip()
+            candidates = [user_message_id or f"user_{stable_command_suffix}"]
+            legacy_suffix = "".join(character for character in client_command_id
+                if character.isascii() and (character.isalnum() or character in {"-", "_"}))
+            if not user_message_id and legacy_suffix:
+                candidates.append(f"user_{legacy_suffix}")
             current_for_admission = (
-                self._session.conversation_repo.get_conversation(target_conversation_id)
+                (self._session.conversation_repo.get_conversation(target_conversation_id)
+                 if command.data.get("_legacy_user_message_identity")
+                 else self._session.conversation_repo.get_execution_context(target_conversation_id,
+                     transcript_ids=tuple(candidates)))
                 if (client_command_id or requested_agent_mode is not None or requested_permission_mode is not None
                     or requested_workspace_root) and target_conversation_id else None
             )
@@ -1814,11 +1822,6 @@ class SessionCommandDispatcher:
                 users = {str(item.get("id") or ""): item for item in (
                     current_for_admission.transcript if current_for_admission is not None else []
                 ) if isinstance(item, dict) and item.get("role") == "user"}
-                candidates = [user_message_id or f"user_{stable_command_suffix}"]
-                legacy_suffix = "".join(character for character in client_command_id
-                    if character.isascii() and (character.isalnum() or character in {"-", "_"}))
-                if not user_message_id and legacy_suffix:
-                    candidates.append(f"user_{legacy_suffix}")
                 if not user_message_id and command.data.get("_legacy_user_message_identity"):
                     # Old request IDs may contain only Unicode letters, so R6
                     # used random message IDs. Inspect its recorded admission,

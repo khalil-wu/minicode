@@ -13,6 +13,35 @@ def seed(repo, count=1000):
         context_snapshot={"history": [{"role": item["role"], "content": item["content"]} for item in transcript]})
 
 
+def test_execution_context_reads_model_snapshot_without_copying_public_history(tmp_path, monkeypatch):
+    from backend.agent.context import ContextBuilder
+
+    repo = ConversationRepository(tmp_path)
+    original = seed(repo)
+    cached = repo._record_cache[original.id]
+    clone = repository_module.copy.deepcopy
+    def reject_history(value, memo=None):
+        assert value is not cached.transcript and value is not cached.context_snapshot
+        return clone(value, memo)
+    with monkeypatch.context() as scoped:
+        scoped.setattr(repository_module.copy, "deepcopy", reject_history)
+        execution = repo.get_execution_context(original.id)
+    assert execution.transcript == [] and execution.message_count == 1000
+    assert execution.context_snapshot is cached.context_snapshot
+    selected = repo.get_execution_context(original.id, transcript_ids=("m0", "missing"))
+    assert [item["id"] for item in selected.transcript] == ["m0"]
+    selected.transcript[0]["content"] = "caller-only text"
+    assert cached.transcript[0]["content"] == "history 0"
+    builder = ContextBuilder()
+    builder.load_snapshot(execution.context_snapshot)
+    builder._history[0].content = "run-owned change"
+    execution.model_selection["model"] = "run-only model"
+    assert repo.get_conversation(original.id).context_snapshot == original.context_snapshot
+    assert repo.get_conversation(original.id).model_selection == original.model_selection
+    repo.rename_conversation(original.id, "updated metadata")
+    assert repo.get_execution_context(original.id).title == "updated metadata"
+
+
 @pytest.mark.parametrize("checkpoint", [False, True])
 def test_internal_admission_owns_normalized_history_and_nested_metadata(tmp_path, monkeypatch, checkpoint):
     repo = ConversationRepository(tmp_path)
