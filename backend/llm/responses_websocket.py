@@ -77,6 +77,7 @@ def _request_properties(payload: dict[str, Any]) -> dict[str, Any]:
 class _Connection:
     socket: ClientConnection
     identity: tuple[Any, ...]
+    owner: Owner | None = None
     properties: dict[str, Any] = field(default_factory=dict)
     baseline: list[dict[str, Any]] = field(default_factory=list)
     response_id: str = ""
@@ -134,11 +135,13 @@ class ResponsesWebSocketRequest:
         self.pool.policy.acquire(url).check()
         if proxy_resolver is not None:
             proxy = proxy_resolver(url)
-        # The sticky turn token is response state, so it must not invalidate
-        # the connection identity or force a fresh socket on the next sample.
-        identity = (self.owner, url, proxy, tuple(sorted(
+        # Source keeps the completed websocket on the thread between turns.
+        # Turn metadata travels on response.create; routing/auth headers still
+        # invalidate the transport. The sticky token belongs to one turn only.
+        thread_owner = (self.owner[0], self.owner[1], self.owner[3]) if self.owner is not None else None
+        identity = (thread_owner, url, proxy, tuple(sorted(
             (key, value) for key, value in headers.items()
-            if key.lower() != TURN_STATE_HEADER
+            if key.lower() not in {TURN_STATE_HEADER, "x-codex-turn-metadata", "x-minicode-turn-metadata"}
         )))
         connection, self.pool.idle = self.pool.idle, None
         # No suspension occurs while taking the idle connection. A second
@@ -161,7 +164,10 @@ class ResponsesWebSocketRequest:
             if self.closed or self.pool.closed:
                 await socket.close()
                 raise RuntimeError("Responses WebSocket request was closed during connection setup")
-            connection = _Connection(socket, identity)
+            connection = _Connection(socket, identity, owner=self.owner)
+        if connection.owner != self.owner:
+            connection.owner = self.owner
+            connection.turn_state = ""
         # The token received from the previous handshake belongs on this
         # request. A token learned from the current handshake starts with the
         # next request, matching the upstream turn-state contract.

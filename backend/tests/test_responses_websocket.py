@@ -283,6 +283,67 @@ def test_concurrent_requests_have_separate_sockets_without_serializing():
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("change", ["append", "history", "instructions", "credentials", "route", "source", "session"])
+def test_next_turn_reuses_thread_connection_with_a_fresh_routing_token(change):
+    async def scenario():
+        async def respond(socket, request, index):
+            await socket.send(json.dumps({"type": "response.metadata", "headers": {
+                "x-codex-turn-state": f"route-{request['client_metadata']['turn_id']}"}}))
+            await socket.send(json.dumps(terminal(str(index), text="answer")))
+        async with endpoint(respond) as (adapter, requests, connections):
+            messages = [LLMMessage(role="system", content="instructions"), LLMMessage(role="user", content="private first turn")]
+            first = {"session_id": "session", "thread_id": "thread", "turn_id": "one",
+                "_source_responses_metadata": {"turn_id": "one", "kind": "regular"}}
+            events = [event async for event in adapter.stream_chat(messages, metadata=first)]
+            assert events[-1].type == StreamEventType.DONE
+            second = {**first, "turn_id": "two", "_source_responses_metadata": {"turn_id": "two", "kind": "regular"}}
+            following = [*messages, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="second turn")]
+            if change == "history": following[1] = LLMMessage(role="user", content="edited first turn")
+            if change == "instructions": following[0] = LLMMessage(role="system", content="new instructions")
+            if change == "credentials": adapter._settings = replace(adapter._settings, api_key="new-credential")
+            if change == "route": adapter._default_headers["X-Route"] = "new-route"
+            if change == "source": second["query_source"] = "independent-query"
+            if change == "session": second["session_id"] = "different-session"
+            events = [event async for event in adapter.stream_chat(following, metadata=second)]
+            assert events[-1].type == StreamEventType.DONE
+            assert len(connections) == (2 if change in {"credentials", "route", "source", "session"} else 1)
+            assert ("previous_response_id" in requests[1]) == (change == "append")
+            assert requests[1]["client_metadata"]["turn_id"] == "two"
+            assert "x-codex-turn-state" not in requests[1]["client_metadata"]
+            assert "route-one" not in json.dumps(requests[1])
+            third = [*following, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="same turn continuation")]
+            events = [event async for event in adapter.stream_chat(third, metadata=second)]
+            assert events[-1].type == StreamEventType.DONE
+            assert requests[2]["previous_response_id"] == "2"
+            assert requests[2]["client_metadata"]["x-codex-turn-state"] == "route-two"
+            assert requests[2]["input"] == [{"role": "user", "content": "same turn continuation"}]
+    asyncio.run(scenario())
+
+
+def test_concurrent_turns_in_one_thread_lease_separate_sockets():
+    async def scenario():
+        arrived = 0
+        ready = asyncio.Event()
+        async def respond(socket, request, index):
+            nonlocal arrived
+            arrived += 1
+            if arrived == 2:
+                ready.set()
+            await asyncio.wait_for(ready.wait(), 2)
+            await socket.send(json.dumps(terminal(str(index), text=request["input"][0]["content"])))
+        async with endpoint(respond) as (adapter, requests, connections):
+            async def turn(ident):
+                return [event async for event in adapter.stream_chat([LLMMessage(role="user", content=ident)],
+                    metadata={"thread_id": "same-thread", "turn_id": ident})]
+            a, b = await asyncio.gather(turn("one"), turn("two"))
+            assert len(connections) == 2
+            assert "".join(event.content for event in a if event.type == StreamEventType.TEXT_CHUNK) == "one"
+            assert "".join(event.content for event in b if event.type == StreamEventType.TEXT_CHUNK) == "two"
+            assert all("previous_response_id" not in request for request in requests)
+            assert not adapter._responses_websocket.active
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("cancel_task", [False, True])
 def test_partial_stream_close_and_cancellation_release_connection(cancel_task):
     async def scenario():
