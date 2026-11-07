@@ -152,6 +152,7 @@ class ConversationRuntime:
     def _load_prepared_snapshot(
         self, conversation_id: str, snapshot: dict[str, Any], snapshot_revision: int, *,
         notify: bool, on_hydration_complete: Callable[[str], Any] | None, defer_start: bool,
+        normalized_history: list[dict[str, Any]] | None = None,
     ) -> bool:
         nested_phase = self._hydration_task is not None and not self._hydration_task.done() and self._hydration_task is asyncio.current_task()
         if self._hydration_task and not self._hydration_task.done() and not nested_phase:
@@ -168,6 +169,7 @@ class ConversationRuntime:
         pending_history = self._context_builder.load_snapshot_partial(
             snapshot,
             recent_history_count=SNAPSHOT_PARTIAL_HISTORY_COUNT,
+            normalized_history=normalized_history,
         )
         if not pending_history:
             self._hydration_task = None
@@ -370,6 +372,8 @@ class ConversationRuntime:
             while True:
                 record = await asyncio.to_thread(self._conversation_repo.get_execution_context, conversation_id,
                     prepare_resume=True)
+                normalized_history = (await asyncio.to_thread(ContextBuilder._snapshot_history_with_admissions,
+                    record.context_snapshot) if record is not None else None)
                 async with self._projection_lock_for(conversation_id):
                     current_revision = await asyncio.to_thread(self._conversation_repo.get_context_snapshot_revision, conversation_id)
                     if generation != self._hydration_generation or conversation_id != self.active_conversation_id:
@@ -382,6 +386,7 @@ class ConversationRuntime:
                         pending = self._load_prepared_snapshot(
                             conversation_id, record.context_snapshot, record.revision, notify=True,
                             on_hydration_complete=callback, defer_start=True,
+                            normalized_history=normalized_history,
                         )
                     finally:
                         generation = self._hydration_generation

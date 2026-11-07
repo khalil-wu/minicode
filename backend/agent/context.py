@@ -4540,6 +4540,7 @@ class ContextBuilder:
         snapshot: dict[str, Any] | None,
         *,
         recent_history_count: int = 20,
+        normalized_history: list[dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         guardian_history_reset = bool(self._history or self.guardian_evidence.transcript)
         self.clear(reset_guardian=False)
@@ -4548,7 +4549,8 @@ class ContextBuilder:
             return []
 
         self._load_snapshot_metadata(snapshot, guardian_history_reset=guardian_history_reset)
-        raw_history = self._snapshot_history_with_admissions(snapshot)
+        raw_history = (self._snapshot_history_with_admissions(snapshot)
+            if normalized_history is None else normalized_history)
         if recent_history_count <= 0:
             recent_history: list[dict[str, Any]] = []
             pending_history = raw_history
@@ -4634,15 +4636,16 @@ class ContextBuilder:
         self._ensure_invoked_skill_messages()
         self._reconstruct_tool_result_budget_state()
 
-    def _snapshot_history_with_admissions(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    @staticmethod
+    def _snapshot_history_with_admissions(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
         # Older snapshots have no per-message provenance. A committed turn
         # admission identifies the final entry of its input span as the real
         # user message; do not guess from user-authored tags or role alone.
         admitted_indices = {
             int(boundary["history_end"]) - 1
-            for boundary in self._turn_admissions.values()
+            for boundary in snapshot.get("turn_admissions", {}).values()
         }
-        return self.sanitize_snapshot_history([
+        return ContextBuilder.sanitize_snapshot_history([
             {**raw, "is_user_input": True} if index in admitted_indices else raw
             for index, raw in enumerate(snapshot.get("history", []))
         ])

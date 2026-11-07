@@ -1,4 +1,6 @@
 from copy import deepcopy
+import asyncio
+import threading
 from unittest.mock import Mock
 
 import pytest
@@ -111,4 +113,58 @@ async def test_real_background_hydration_keeps_the_developer_at_the_recent_suffi
         assert [message.timestamp_ms for message in builder._history] == list(range(1, 25))
         assert builder._history_frozen_count == 24
     finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["unchanged", "replacement", "switch"])
+async def test_repository_normalization_yields_foreground_and_only_publishes_its_current_snapshot(tmp_path, monkeypatch, change):
+    repo = ConversationRepository(tmp_path)
+    source = history_snapshot()
+    source["history"].extend({"role": "assistant", "content": f"retained {index}"} for index in range(40))
+    record = repo.create_conversation(context_snapshot=source)
+    other = repo.create_conversation(context_snapshot={"history": [{"role": "user", "content": "Different conversation"}]})
+    builder = ContextBuilder()
+    runtime = ConversationRuntime(conversation_repo=repo, context_builder=builder, build_summary_from_transcript=lambda *_: "")
+    runtime.active_conversation_id = record.id
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    normalizer = ContextBuilder._snapshot_history_with_admissions
+    normalizations = []
+    def held(snapshot):
+        assert threading.get_ident() != foreground_thread
+        normalizations.append(snapshot)
+        if len(normalizations) == 1:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(5)
+        return normalizer(snapshot)
+    foreground_thread = threading.get_ident()
+    monkeypatch.setattr(ContextBuilder, "_snapshot_history_with_admissions", staticmethod(held))
+    try:
+        runtime.defer_repository_hydration(record.id, on_hydration_complete=None)
+        runtime.start_hydration(record.id)
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not runtime._projection_lock_for(record.id).locked()
+        tick = asyncio.Event()
+        loop.call_soon(tick.set)
+        await asyncio.wait_for(tick.wait(), .5)
+        if change == "replacement":
+            repo.save_context_snapshot(record.id, {"history": [{"role": "user", "content": "Replaced during restore"}]})
+        elif change == "switch":
+            runtime.active_conversation_id = other.id
+            runtime.defer_repository_hydration(other.id, on_hydration_complete=None)
+            runtime.start_hydration(other.id)
+        release.set()
+        await runtime.wait_for_hydration(runtime.active_conversation_id)
+        if change == "unchanged":
+            assert len(normalizations) == 1
+            monkeypatch.setattr(ContextBuilder, "_snapshot_history_with_admissions", staticmethod(normalizer))
+            expected = ContextBuilder()
+            expected.load_snapshot(source)
+            assert [message.to_openai_message() for message in builder._history] == [message.to_openai_message() for message in expected._history]
+            assert builder._history[0].is_user_input
+        else:
+            assert [message.content for message in builder._history] == ["Replaced during restore" if change == "replacement" else "Different conversation"]
+    finally:
+        release.set()
         await runtime.shutdown()
