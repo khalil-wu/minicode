@@ -38,7 +38,7 @@ from backend.llm.responses_websocket import (
     TURN_STATE_HEADER,
     responses_turn_state_from_headers,
 )
-from backend.llm.responses_input import admitted_response_items, prepare_content_item_kinds
+from backend.llm.responses_input import admitted_response_items, prepare_content_item_kinds, prepare_third_party_response_items
 from backend.llm.native_compaction import (
     NATIVE_COMPACTION_TYPE, native_compaction_windows,
     responses_context_origin, validate_compaction_window,
@@ -2867,6 +2867,10 @@ class OpenAIAdapter(LLMAdapter):
             dict(payload),
         )
         request_payload = dict(transformed_payload)
+        if self._settings.wire_api == "responses" and "input" in request_payload and (
+            self._settings.provider != "openai" or self._settings.aws is not None
+        ):
+            request_payload["input"] = prepare_third_party_response_items(request_payload["input"])
         if "extra_body" in request_payload:
             raise ValueError(
                 "MiniCode HTTP transport does not accept the OpenAI SDK extra_body wrapper"

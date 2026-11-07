@@ -72,3 +72,17 @@ def prepare_content_item_kinds(items: list[dict[str, Any]], *, enabled: bool) ->
                 item.pop("internal_chat_message_metadata_passthrough")
         prepared.append(item)
     return prepared
+
+
+def prepare_third_party_response_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply Source's non-OpenAI item boundary without changing saved evidence."""
+    prepared = []
+    for item in items:
+        item = dict(item)
+        item.pop("internal_chat_message_metadata_passthrough", None)
+        if item.get("type") not in {"reasoning", "compaction", "context_compaction"}:
+            item.pop("encrypted_content", None)
+        if item.get("type") == "function_call":
+            item.pop("encrypted_function_args", None)
+        prepared.append(item)
+    return prepared
