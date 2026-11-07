@@ -209,7 +209,7 @@ export function groupByWorkspace(conversations: (ConversationMeta & { sessionSta
   return groups;
 }
 
-export const ConversationsTab = ({
+export const ConversationsTab = memo(function ConversationsTab({
   conversationId,
   onNavigate,
   onSetConfirmDialog,
@@ -221,7 +221,7 @@ export const ConversationsTab = ({
   onSetConfirmDialog: (dialog: { title: string; message: string; confirmLabel: string; danger?: boolean; onConfirm: () => void }) => void;
   showRecent?: boolean;
   activityView?: boolean;
-}) => {
+}) {
   const { t: tr } = useI18n();
   const conversations = useAppStore((s) => s.conversations);
   const directory = useAppStore(s => s.conversationDirectory);
@@ -920,7 +920,7 @@ export const ConversationsTab = ({
       {workspaceMenu && <ProjectContextMenu path={workspaceMenu.path} position={workspaceMenu} anchor={workspaceMenu.anchor} onClose={() => setWorkspaceMenu(null)} />}
     </>
   );
-};
+});
 
 const taskSectionStyle: React.CSSProperties = {
   display: "grid",

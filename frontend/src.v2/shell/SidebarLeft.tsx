@@ -1,5 +1,5 @@
 import { useI18n } from "../i18n";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { KeyboardEvent, PointerEvent, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { BookOpenText, Check, ChevronDown, Clock3, Puzzle, Search, SquarePen } from "../lib/icons";
@@ -120,14 +120,14 @@ export const SidebarLeft = ({
     action();
     onNavigate?.();
   };
-  const leaveMarketplace = () => {
+  const leaveMarketplace = useCallback(() => {
     closeAutomations();
     useAppStore.setState({ skillsMarketplaceOpen: false, skillsMarketplaceReturnTarget: "app", projectsOpen: false });
-  };
-  const navigateToContent = () => {
+  }, []);
+  const navigateToContent = useCallback(() => {
     leaveMarketplace();
     onNavigate?.();
-  };
+  }, [leaveMarketplace, onNavigate]);
 
   const openAutomationsPanel = () => navigate(openAutomations);
 
@@ -154,7 +154,6 @@ export const SidebarLeft = ({
         minWidth: 0,
         background: "var(--surface-sidebar)",
         opacity: isOpen ? 1 : 0,
-        pointerEvents: isOpen ? "auto" : "none",
       }}
     >
       <div className="mc-sidebar-left-inner" style={{ width: embedded ? "100%" : navigationWidth }}>
@@ -188,7 +187,7 @@ export const SidebarLeft = ({
           <ConversationsTab
             conversationId={conversationId ?? ""}
             onNavigate={navigateToContent}
-            onSetConfirmDialog={(dialog) => setConfirmDialog(dialog)}
+            onSetConfirmDialog={setConfirmDialog}
             showRecent
           />
       </div>
