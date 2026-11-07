@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from backend.config_requirements import normalize_string_array
 from backend.permissions.patterns import normalize_tool_patterns as normalize_permission_deny_rules
+from backend.conversations.read_state import initial_read_state
 
 
 ConversationMemoryMode = Literal["enabled", "disabled", "polluted"]
@@ -176,6 +177,7 @@ class ConversationSummary:
     pinned: bool = False
     pinned_at: str = ""
     has_unread_turn: bool = False
+    read_state: dict[str, Any] = field(default_factory=dict)
     project_id: str | None = None
     resource_references: list[dict[str, Any]] = field(default_factory=list)
     workspace_root: str = ""
@@ -242,6 +244,7 @@ class ConversationSummary:
             pinned=bool(payload.get("pinned", False)),
             pinned_at=str(payload.get("pinned_at") or ""),
             has_unread_turn=bool(payload.get("has_unread_turn", False)),
+            read_state=deepcopy(payload.get("read_state") or initial_read_state(str(payload["id"]), bool(payload.get("has_unread_turn")))),
             project_id=payload.get("project_id"),
             resource_references=deepcopy(payload.get("resource_references", [])),
             workspace_root=str(payload.get("workspace_root") or ""),
@@ -302,6 +305,8 @@ class ConversationRecord:
     pinned: bool = False
     pinned_at: str = ""
     has_unread_turn: bool = False
+    read_state: dict[str, Any] = field(default_factory=dict)
+    last_published_turn: str = ""
     project_id: str | None = None
     workspace_root: str = ""
     execution_cwd: str = ""
@@ -349,6 +354,7 @@ class ConversationRecord:
             pinned=self.pinned,
             pinned_at=self.pinned_at,
             has_unread_turn=self.has_unread_turn,
+            read_state=deepcopy(self.read_state),
             project_id=self.project_id,
             resource_references=deepcopy(self.resource_references),
             workspace_root=self.workspace_root,
@@ -372,7 +378,7 @@ class ConversationRecord:
         payload = {
             item.name: deepcopy(getattr(self, item.name))
             for item in fields(self)
-            if item.name not in {"transcript", "context_snapshot"}
+            if item.name not in {"transcript", "context_snapshot", "read_state", "last_published_turn"}
         }
         payload["message_count"] = self.message_count or len(self.transcript)
         payload["encoding_version"] = "utf-8-v1"  # Mark all new writes as UTF-8
@@ -438,6 +444,8 @@ class ConversationRecord:
             pinned=bool(payload.get("pinned", False)),
             pinned_at=str(payload.get("pinned_at") or ""),
             has_unread_turn=bool(payload.get("has_unread_turn", False)),
+            read_state=deepcopy(payload.get("read_state") or initial_read_state(str(payload["id"]), bool(payload.get("has_unread_turn")))),
+            last_published_turn=payload.get("last_published_turn", ""),
             project_id=payload.get("project_id"),
             workspace_root=str(payload.get("workspace_root") or ""),
             execution_cwd=inherited_execution_cwd(payload),

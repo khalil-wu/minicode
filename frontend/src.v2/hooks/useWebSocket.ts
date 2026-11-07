@@ -232,6 +232,7 @@ const MAX_RECOVERY_BUFFERED_EVENTS = 1000;
 // match and every later durable event would be dropped as a replay hole.
 // scripts/check-protocol-sync.py keeps the two sets identical.
 const NON_REPLAYABLE_CURSOR_EVENT_TYPES = new Set<string>([
+  "thread/readState/changed",
   "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
   "thread/realtime/item/transcript/delta", "thread/realtime/transcript/delta",
   "thread/realtime/transcript/done", "thread/realtime/outputAudio/delta", "thread/realtime/sdp",
@@ -1394,6 +1395,7 @@ const CONTROL_PLANE_EVENT_TYPES = new Set<string>([
 const NOTICE_EVENT_TYPES = new Set<string>([
   "system_notice", "conversation.compaction.updated",
   "conversation.summary.updated",
+  "thread/readState/changed",
 ]);
 const DIFF_EVENT_TYPES = new Set<string>([
   "turn.diff.updated", "diff.git_working_tree", "diff.git_staged",

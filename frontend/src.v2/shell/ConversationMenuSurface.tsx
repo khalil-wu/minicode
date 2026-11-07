@@ -44,7 +44,7 @@ export const ConversationMenuSurface = ({
       ...(!archived ? [
         { label: tr("重命名"), icon: threadMenuIcon("rename"), shortcut: formatShortcut(shortcutBindings.renameThread), onClick: onRename },
         { label: tr(pinned ? "取消固定" : "固定"), icon: threadMenuIcon(pinned ? "unpin" : "pin"), shortcut: formatShortcut(shortcutBindings.toggleThreadPin), onClick: onPin },
-        { label: tr(hasUnreadTurn ? "标记为已读" : "标记为未读"), icon: threadMenuIcon("read"), onClick: onReadState },
+        ...(onReadState ? [{ label: tr(hasUnreadTurn ? "标记为已读" : "标记为未读"), icon: threadMenuIcon("read"), onClick: onReadState }] : []),
         ...(onNewSection ? [{ label: tr("分组"), icon: threadMenuIcon("section"), submenu: [
           ...sectionOptions.map(section => ({ label: section.name, checked: section.id === currentSection, checkType: "checkbox" as const,
             onClick: () => onSectionChange!(section.id === currentSection ? null : section.id) })),

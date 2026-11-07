@@ -14,6 +14,14 @@ SORT_COLUMNS = {"created_at": "created_at", "updated_at": "updated_at", "recency
     "section_position": "section_position", "sidebar_position": "sidebar_position"}
 
 
+def _decode_summary(payload):
+    from backend.conversations.read_state import initial_read_state
+
+    item = json.loads(payload)
+    item["read_state"] = item.get("read_state") or initial_read_state(item["id"], item.get("has_unread_turn", False))
+    return item
+
+
 class ConversationDirectory:
     def __init__(self, repository):
         self.repository = repository
@@ -238,7 +246,7 @@ class ConversationDirectory:
             if backwards:
                 rows.reverse()
             cursor_for = lambda row, back: self._cursor(state["instance_id"], sort_key, direction, row[column], row["id"], backwards=back)
-            return {"data": [json.loads(row["payload"]) for row in rows],
+            return {"data": [_decode_summary(row["payload"]) for row in rows],
                 "next_cursor": cursor_for(rows[-1], False) if rows and (has_more if not backwards else True) else None,
                 "backwards_cursor": cursor_for(rows[0], True) if rows else None,
                 "inventory_instance_id": state["instance_id"], "inventory_revision": state["revision"]}
@@ -268,7 +276,7 @@ class ConversationDirectory:
             page = self.sidebar_page(limit=25)
             selected = {item["id"]: item for item in page["data"]}
             for row in connection.execute("SELECT payload FROM threads WHERE pinned=1 AND archived=0 AND conversation_type='main'"):
-                item = json.loads(row[0])
+                item = _decode_summary(row[0])
                 selected[item["id"]] = item
             sections = self.repository.thread_sections.list()
             wanted = {active_id} if active_id else set()
@@ -279,7 +287,7 @@ class ConversationDirectory:
             connection.executemany("INSERT INTO known VALUES (?,?)", ((identifier, identifier not in known) for identifier in wanted))
             for row in connection.execute("SELECT payload FROM threads JOIN known USING(id) WHERE change_revision> ? OR id=? OR pinned=1 OR known.refresh=1",
                     (since_revision, active_id)):
-                item = json.loads(row[0])
+                item = _decode_summary(row[0])
                 selected[item["id"]] = item
             project_pages = {}
             for key in project_keys:

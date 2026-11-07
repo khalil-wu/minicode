@@ -101,6 +101,7 @@ export type {
   ConversationHydrationUpdatedEvent,
   ConversationCompactionUpdatedEvent,
   ConversationSummaryUpdatedEvent,
+  ThreadReadStateChangedEvent,
   ConversationTranscriptMessage,
   ConversationSummaryPayload,
   ConversationRecordPayload,
@@ -139,6 +140,7 @@ export type {
   SidebarProjectReorderCommand,
   SidebarThreadReorderCommand,
   ConversationReadStateSetCommand,
+  ThreadReadStateUpdateCommand,
   ConversationProjectSetCommand,
   ConversationMemoryModeSetCommand,
   ConversationAgentModeSetCommand,
@@ -451,6 +453,7 @@ export interface UntypedServerEvent {
     | "conversation.hydration.updated"
     | "conversation.compaction.updated"
     | "conversation.summary.updated"
+    | "thread/readState/changed"
     | "conversation.list"
     | "conversation.switched"
     | "llm.model.updated"
@@ -571,6 +574,7 @@ export interface UntypedClientCommand {
     | "sidebar.project.thread.reorder"
     | "sidebar.recent.reorder"
     | "conversation.read_state.set"
+    | "thread/readState/update"
     | "conversation.project.set"
     | "conversation.memory_mode.set"
     | "memory.reset"
@@ -655,6 +659,7 @@ import type {
   ConversationHydrationUpdatedEvent,
   ConversationCompactionUpdatedEvent,
   ConversationSummaryUpdatedEvent,
+  ThreadReadStateChangedEvent,
   ConversationListEvent,
   ConversationSwitchedEvent,
   LlmModelUpdatedEvent,
@@ -833,6 +838,7 @@ type ServerEventPayload =
   | ConversationHydrationUpdatedEvent
   | ConversationCompactionUpdatedEvent
   | ConversationSummaryUpdatedEvent
+  | ThreadReadStateChangedEvent
   | ConversationListEvent
   | ConversationSwitchedEvent
   | LlmModelUpdatedEvent
@@ -905,6 +911,7 @@ import type {
   SidebarProjectReorderCommand,
   SidebarThreadReorderCommand,
   ConversationReadStateSetCommand,
+  ThreadReadStateUpdateCommand,
   ConversationProjectSetCommand,
   ConversationMemoryModeSetCommand,
   ConversationAgentModeSetCommand,
@@ -1075,6 +1082,7 @@ type ClientCommandPayload =
   | SidebarProjectReorderCommand
   | SidebarThreadReorderCommand
   | ConversationReadStateSetCommand
+  | ThreadReadStateUpdateCommand
   | ConversationProjectSetCommand
   | ConversationMemoryModeSetCommand
   | ConversationAgentModeSetCommand
@@ -1157,6 +1165,7 @@ export const SERVER_EVENT_TYPES: ReadonlySet<ServerEventType> = new Set<ServerEv
   "conversation.hydration.updated",
   "conversation.compaction.updated",
   "conversation.summary.updated",
+  "thread/readState/changed",
   "goal.updated",
   "conversation.list",
   "conversation.switched",
@@ -1287,6 +1296,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "sidebar.project.thread.reorder",
   "sidebar.recent.reorder",
   "conversation.read_state.set",
+  "thread/readState/update",
   "conversation.project.set",
   "conversation.memory_mode.set",
   "memory.reset",

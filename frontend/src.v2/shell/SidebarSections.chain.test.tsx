@@ -30,6 +30,7 @@ const section = (keys = ["thread:direct", "project:c:/project"]): SidebarSection
   id: "source-section", name: "Source section", appearance: null, item_keys: keys,
 });
 const projectChats = Array.from({ length: 7 }, (_, index) => ({ id: `project-${index}`, title: `Project task ${index}`,
+  readState: { firstUnread: null, revision: `initial:project-${index}` },
   updatedAt: `2026-10-${String(20 - index).padStart(2, "0")}`, workspaceRoot: "C:/project" }));
 
 beforeEach(() => {
@@ -48,7 +49,7 @@ beforeEach(() => {
     throw new Error(`Unexpected metadata request ${url}`);
   });
   useAppStore.setState({ appMode: "cowork", conversationId: "project-0", pendingConversationSwitchId: null,
-    conversations: [{ id: "direct", title: "Direct source task", updatedAt: "2026-10-21" }, ...projectChats],
+    conversations: [{ id: "direct", title: "Direct source task", updatedAt: "2026-10-21", readState: { firstUnread: null, revision: "initial:direct" } }, ...projectChats],
     recentWorkspaces: [{ path: "C:/project", name: "Project", projectType: "node", lastOpened: 1, pinned: true, named: true }],
     conversationMessages: {}, conversationStreaming: {}, conversationHydration: {}, messages: [],
     draft: "Keep the active draft", attachments: [], selectedMentions: [], selectedSkills: [], quotedMessage: null,

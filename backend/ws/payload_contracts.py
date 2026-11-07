@@ -396,6 +396,7 @@ NON_REPLAYABLE_EVENT_TYPES = frozenset({
     "artifact_content",
     "conversation.list",
     "conversation.switched",
+    "thread/readState/changed",
     "llm.model.updated",
     "mcp_status",
     "pong",

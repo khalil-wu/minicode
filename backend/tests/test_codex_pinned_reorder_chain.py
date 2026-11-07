@@ -33,7 +33,7 @@ def test_source_reorder_preserves_hidden_slots_cold_metadata_and_all_original_re
     repository = ConversationRepository(tmp_path / "conversations")
     alpha, hidden, bravo, charlie = seed(repository, tmp_path)
     repository.set_archived(hidden, True)
-    repository.set_conversation_read_state(alpha, True)
+    repository.set_conversation_read_state(alpha, True, expected_revision=repository.get_conversation_summary(alpha).read_state["revision"])
     before = {identifier: repository.get_conversation(identifier).to_dict() for identifier in (alpha, hidden, bravo, charlie)}
     files = {path.name: path.read_bytes() for path in repository.storage_root.glob("*.g*")}
     revision = repository.list_conversations_with_revision()[1]
@@ -94,7 +94,7 @@ def test_reorder_and_read_metadata_writer_share_existing_store_without_losing_un
     writer = ConversationRepository(repository.storage_root)
     with ThreadPoolExecutor(max_workers=2) as pool:
         operations = [pool.submit(repository.reorder_pinned_conversations, bravo, alpha, [alpha, bravo]),
-                      pool.submit(writer.set_conversation_read_state, alpha, True)]
+                      pool.submit(writer.set_conversation_read_state, alpha, True, expected_revision=writer.get_conversation_summary(alpha).read_state["revision"])]
         for operation in operations:
             operation.result(timeout=5)
     assert order(repository) == [bravo, alpha]

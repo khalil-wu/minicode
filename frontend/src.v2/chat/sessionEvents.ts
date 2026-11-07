@@ -279,6 +279,8 @@ export const toConversationMeta = (conversation: ConversationSummary) => ({
   pinnedAt: conversation.pinned_at,
   resourceReferences: conversation.resource_references,
   hasUnreadTurn: conversation.has_unread_turn,
+  readState: conversation.read_state ?? { firstUnread: conversation.has_unread_turn ? { type: "threadStart" as const } : null,
+    revision: `initial:${conversation.id}` },
   projectId: conversation.project_id,
   memoryMode: maybeString(conversation.memory_mode),
   memoryPolluted: conversation.memory_polluted === true,

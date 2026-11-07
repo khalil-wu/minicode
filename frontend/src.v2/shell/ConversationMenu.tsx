@@ -23,7 +23,7 @@ export interface ConversationMenuProps {
   onSectionChange?: (sectionId: string | null) => void;
   onNewSection?: () => void;
   onPin: () => void;
-  onReadState: () => void;
+  onReadState?: () => void;
   onProjectChange: (projectId: string) => void;
   onRename: () => void;
   onCopy: () => void;

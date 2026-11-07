@@ -15,29 +15,67 @@ import { installDesktopVoiceControl } from "../desktop/voice-control";
 import { captureThreadActionOwner, executeThreadAction, THREAD_ACTION_EVENTS, THREAD_ACTION_IDS } from "../lib/thread-actions";
 import { isModalTarget, isTopLevelModalOpen } from "../lib/shortcut-context";
 import { browserOwnerId, projectBrowserWorkbenchEvent, readBrowserWorkbench, saveBrowserWorkbenchLayout } from "../stores/browser-workbench";
+import { automaticReadHolds, setThreadReadState } from "../chat/threadReadState";
+import { commandResultSucceeded } from "../protocol/ws-outbox";
 
-const markViewedConversationRead = (isWindowFocused: boolean, pendingReads: Set<string>) => {
+const markViewedConversationRead = (isWindowFocused: () => boolean, pendingReads: Set<string>) => {
   const state = useAppStore.getState();
   const conversationId = state.conversationId;
   const conversation = state.conversations.find(item => item.id === conversationId);
-  if (isWindowFocused && state.isConnected && conversationId
-    && conversation?.hasUnreadTurn
+  if (isWindowFocused() && state.isConnected && conversationId
+    && conversation?.hasUnreadTurn && conversation.readState
+    && !state.conversationHydration[conversationId]?.isHydrating
+    && !automaticReadHolds.has(conversationId)
     && desktopNotificationConversationVisible(conversationId, conversationId, state.settingsOpen, state.pendingConversationSwitchId)) {
-    // Completion, summary and native focus can all report the same unread
-    // revision before its receipt returns. A newer revision remains readable.
-    const key = JSON.stringify([conversationId, conversation.revision, conversation.updatedAt]);
-    if (pendingReads.has(key)) return;
-    pendingReads.add(key);
-    void sendClientCommandAwaitResult({ type: "conversation.read_state.set", conversation_id: conversationId,
-      has_unread_turn: false }, "conversation.read_state.set")
+    if (pendingReads.has(conversationId)) return;
+    pendingReads.add(conversationId);
+    const revision = conversation.readState.revision;
+    let reschedule = false;
+    // Store subscribers run before React paints. A receipt acknowledges the
+    // version rendered in this window, after the next paint boundary.
+    void new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
+      .then(async () => {
+        const current = useAppStore.getState();
+        if (!isWindowFocused() || !current.isConnected || current.conversationId !== conversationId
+          || automaticReadHolds.has(conversationId)
+          || !desktopNotificationConversationVisible(conversationId, current.conversationId, current.settingsOpen, current.pendingConversationSwitchId)) return;
+        const viewed = current.conversations.find(item => item.id === conversationId);
+        if (!viewed?.hasUnreadTurn || !viewed.readState) return;
+        if (current.conversationHydration[conversationId]?.isHydrating) return;
+        const reader = document.querySelector<HTMLElement>('.chat-pane [data-testid="message-list-scroll"]');
+        if (reader && reader.scrollHeight - reader.scrollTop - reader.clientHeight > 80) return;
+        if (viewed.readState.revision !== revision) { reschedule = true; return; }
+        const result = await setThreadReadState(conversationId, false, revision);
+        if (!commandResultSucceeded(result)) {
+          if ((result.data as { reason?: string } | undefined)?.reason !== "readStateConflict") pushToast(result.message, "error");
+          return;
+        }
+        reschedule = useAppStore.getState().conversations.find(item => item.id === conversationId)?.readState?.revision !== revision;
+      })
       .catch(error => pushToast(error instanceof Error ? error.message : String(error), "error"))
-      .finally(() => pendingReads.delete(key));
+      .finally(() => {
+        pendingReads.delete(conversationId);
+        if (reschedule) markViewedConversationRead(isWindowFocused, pendingReads);
+      });
   }
 };
 
 export const useDesktopEvents = () => {
   const pendingReads = useRef(new Set<string>());
+  const nativeFocused = useRef(false);
   useDesktopTerminalMirror();
+  useEffect(() => {
+    const resumeReading = (event: Event) => {
+      const id = useAppStore.getState().conversationId;
+      if (!id || !(event.target instanceof Element)
+          || !event.target.closest(".chat-pane, .composer-container")) return;
+      if (event.type === "scroll" && automaticReadHolds.has(id)) return;
+      automaticReadHolds.delete(id);
+      markViewedConversationRead(() => isDesktop() ? nativeFocused.current : document.hasFocus(), pendingReads.current);
+    };
+    for (const type of ["pointerdown", "keydown", "wheel", "scroll"]) document.addEventListener(type, resumeReading, { capture: true, passive: true });
+    return () => { for (const type of ["pointerdown", "keydown", "wheel", "scroll"]) document.removeEventListener(type, resumeReading, true); };
+  }, []);
   useEffect(() => {
     const restore = (state: ReturnType<typeof useAppStore.getState>) => {
       if (state.conversationId || !state.activeConversationDraftId) return;
@@ -67,18 +105,25 @@ export const useDesktopEvents = () => {
   useEffect(() => installDesktopVoiceControl(), []);
   useEffect(() => {
     if (isDesktop()) return;
-    const readViewedConversation = () => markViewedConversationRead(document.hasFocus(), pendingReads.current);
+    const readViewedConversation = () => markViewedConversationRead(() => document.hasFocus(), pendingReads.current);
+    const focusReader = () => {
+      const id = useAppStore.getState().conversationId;
+      if (id) automaticReadHolds.delete(id);
+      readViewedConversation();
+    };
     const unsubscribe = useAppStore.subscribe((state, previous) => {
+      if (state.conversationId !== previous.conversationId && state.conversationId) automaticReadHolds.delete(state.conversationId);
       if (state.conversations !== previous.conversations || state.conversationId !== previous.conversationId
         || state.settingsOpen !== previous.settingsOpen || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
+        || state.conversationHydration !== previous.conversationHydration
         || state.isConnected !== previous.isConnected) readViewedConversation();
       if (state.appMode !== previous.appMode || state.workbenchLayout !== previous.workbenchLayout || state.panelSlots !== previous.panelSlots) requestAnimationFrame(readViewedConversation);
     });
-    window.addEventListener("focus", readViewedConversation);
+    window.addEventListener("focus", focusReader);
     document.addEventListener("visibilitychange", readViewedConversation);
     readViewedConversation();
     return () => {
-      unsubscribe(); window.removeEventListener("focus", readViewedConversation);
+      unsubscribe(); window.removeEventListener("focus", focusReader);
       document.removeEventListener("visibilitychange", readViewedConversation);
     };
   }, []);
@@ -240,16 +285,23 @@ export const useDesktopEvents = () => {
       const conversationId = state.conversationId;
       if (conversationId && desktopNotificationConversationVisible(conversationId, conversationId, state.settingsOpen, state.pendingConversationSwitchId)) {
         void desktopRuntime?.hideNotifications({ conversationId, onlyIfFocused: true });
-        markViewedConversationRead(isNativeWindowFocused, pendingReads.current);
+        markViewedConversationRead(() => isNativeWindowFocused, pendingReads.current);
       }
     };
     const removeNotificationOwner = useAppStore.subscribe((state, previous) => {
+      if (state.conversationId !== previous.conversationId && state.conversationId) automaticReadHolds.delete(state.conversationId);
       if (state.conversationId !== previous.conversationId || state.settingsOpen !== previous.settingsOpen || state.pendingConversationSwitchId !== previous.pendingConversationSwitchId
-        || state.conversations !== previous.conversations || state.isConnected !== previous.isConnected) hideViewedNotifications();
+        || state.conversations !== previous.conversations || state.isConnected !== previous.isConnected
+        || state.conversationHydration !== previous.conversationHydration) hideViewedNotifications();
       if (state.appMode !== previous.appMode || state.workbenchLayout !== previous.workbenchLayout || state.panelSlots !== previous.panelSlots || state.skillsMarketplaceOpen !== previous.skillsMarketplaceOpen) requestAnimationFrame(hideViewedNotifications);
     });
     const updateNativeFocus = (state: { isFocused: boolean }) => {
+      if (state.isFocused && !isNativeWindowFocused) {
+        const id = useAppStore.getState().conversationId;
+        if (id) automaticReadHolds.delete(id);
+      }
       isNativeWindowFocused = state.isFocused;
+      nativeFocused.current = state.isFocused;
       if (state.isFocused) hideViewedNotifications();
     };
     const removeWindowFocus = desktopRuntime?.windowControls.onStateChanged(updateNativeFocus);

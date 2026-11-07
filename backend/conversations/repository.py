@@ -22,6 +22,10 @@ from backend.atomic_io import atomic_write_text, canonical_file_path_key, file_m
 from backend.conversations.context_delta import apply_context_snapshot_delta, compose_context_snapshot_deltas, context_snapshot_delta
 from backend.conversations.transcript_projection import TranscriptProjectionError, apply_transcript_projection, extend_transcript_projection, overlay_rows
 from backend.conversations.projection_log import append_projection, read_projection
+from backend.conversations.read_state import (
+    bind_read_receipt, mark_read_state, publish_turn_attention,
+    retire_removed_unread_turn, stored_read_receipt,
+)
 from backend.conversations.transcript_index import TranscriptIndexError, encode_transcript, read_page as read_transcript_page, read_message as read_indexed_message, find_match as find_indexed_match
 from backend.conversations.compression import (
     HistoryCompressionError, compressed_history_path, compress_history_file,
@@ -473,6 +477,9 @@ class ConversationRepository:
                         for key in delta.get("removed", []):
                             snapshot.pop(key, None)
                         current = {**metadata, **manifest.get("metadata", {}), "context_snapshot": snapshot}
+                        if manifest.get("read_receipt") is not None:
+                            current["read_state"] = manifest["read_receipt"]["readState"]
+                            current["has_unread_turn"] = current["read_state"]["firstUnread"] is not None
                         page = read_transcript_page(transcript_path, metadata["transcript_index"], limit=limit,
                                                     before_message_id=before_message_id, projection=projection)
                         # Indexed generations already contain normalized public messages.
@@ -592,6 +599,9 @@ class ConversationRepository:
             clone.title = (title or f"{source.title} · 副本").strip()[:120] or "New chat"
             clone.archived = False
             clone.archived_at = ""
+            clone.has_unread_turn = False
+            clone.read_state = {}
+            clone.last_published_turn = ""
             clone.parent_conversation_id = source.id
             clone.parent_message_index = len(source.transcript) - 1 if source.transcript else None
             clone.fork_id = f"fork_{uuid.uuid4().hex[:16]}"
@@ -1013,6 +1023,7 @@ class ConversationRepository:
         return_record: bool = True,
         source_user_message_ids: list[str] | None = None,
         source_run_id: str = "",
+        publish_attention: bool = True,
     ) -> ConversationRecord | ConversationSummary | None:
         """Atomically publish one terminal conversation projection.
 
@@ -1084,6 +1095,7 @@ class ConversationRepository:
                         current=current_revision,
                     )
             normalized_prefix = len(record.transcript)
+            receipt_update = None
             if assistant_message is not None:
                 next_message = projected_message or {}
                 message_id = str(next_message.get("id") or "").strip()
@@ -1107,8 +1119,9 @@ class ConversationRepository:
                     previous_notification = None
                     record.transcript.append(next_message)
                 notification = next_message.get("metadata", {}).get("completion_notification")
-                if not partial and notification is not None and previous_notification is None:
-                    record.has_unread_turn |= notification["should_mark_unread"]
+                if (publish_attention and not partial and notification is not None and previous_notification is None
+                        and publish_turn_attention(record, next_message)):
+                    receipt_update = stored_read_receipt(record)
             record.context_snapshot = (
                 apply_context_snapshot_delta(record.context_snapshot, copy.deepcopy(context_delta))
                 if context_delta is not None
@@ -1122,9 +1135,9 @@ class ConversationRepository:
                 record.transcript = record.transcript[:normalized_prefix] + _normalize_loaded_transcript(
                     record.transcript[normalized_prefix:], index_offset=normalized_prefix)
                 self._commit_metadata(record, transcript_from=normalized_prefix, context_delta=context_delta,
-                    content_changed=assistant_message is not None)
+                    content_changed=assistant_message is not None, read_receipt_update=receipt_update)
             else:
-                self._commit_record(record, normalized_prefix=normalized_prefix)
+                self._commit_record(record, normalized_prefix=normalized_prefix, read_receipt_update=receipt_update)
             self._cache_record(record, copy_record=return_record)
             return record if return_record else record.to_summary()
 
@@ -1239,6 +1252,10 @@ class ConversationRepository:
             normalized_prefix = len(record.transcript)
             if rewind_projection is not None:
                 normalized_prefix = 0
+                previous_read_revision = record.read_state.get("revision")
+                retire_removed_unread_turn(record, rewind_projection["transcript"],
+                    expected_revision=rewind_projection.get("expected_read_state_revision", ""))
+                rewind_receipt = stored_read_receipt(record) if record.read_state.get("revision") != previous_read_revision else None
                 record.transcript = project_public_transcript(rewind_projection["transcript"])
                 record.summary = rewind_projection["summary"]
                 record.memory_pollution_sources = list(rewind_projection["memory_pollution_sources"])
@@ -1295,7 +1312,8 @@ class ConversationRepository:
             if record.title == "New chat":
                 record.title = _derive_title(str(next_message.get("display_content", next_message.get("content", ""))))
             record.updated_at = utc_now_iso()
-            committed_projection = self._commit_record(record, normalized_prefix=None if rewind_projection is not None else normalized_prefix, admission=True)
+            committed_projection = self._commit_record(record, normalized_prefix=None if rewind_projection is not None else normalized_prefix, admission=True,
+                read_receipt_update=rewind_receipt if rewind_projection is not None else None)
             if not return_record:
                 # The projection log already deserialized its written delta.
                 # Reuse those owned values before publishing the internal cache;
@@ -1314,6 +1332,7 @@ class ConversationRepository:
         summary: str,
         memory_pollution_sources: list[str],
         expected_revision: int | None = None,
+        expected_read_state_revision: str = "",
     ) -> ConversationRecord | None:
         """Atomically publish a rewind across every conversation projection."""
 
@@ -1329,12 +1348,19 @@ class ConversationRepository:
             if record is None:
                 return None
             current_revision = max(0, int(getattr(record, "revision", 0) or 0))
-            if expected_revision is not None and current_revision != expected_revision:
+            manifest = self._read_manifest(conversation_id, log_errors=False) or {}
+            projection_revision = int(manifest.get("projection_revision") or manifest.get("current_generation") or current_revision)
+            history_changed = expected_revision is not None and (
+                current_revision < expected_revision or projection_revision > expected_revision)
+            if history_changed:
                 raise ConversationWriteConflict(
                     conversation_id,
                     expected=expected_revision,
                     current=current_revision,
                 )
+            previous_read_revision = record.read_state.get("revision")
+            retire_removed_unread_turn(record, transcript, expected_revision=expected_read_state_revision)
+            receipt_update = stored_read_receipt(record) if record.read_state.get("revision") != previous_read_revision else None
             record.transcript = project_public_transcript(transcript)
             record.context_snapshot = copy.deepcopy(dict(context_snapshot or {}))
             record.summary = str(summary or "")
@@ -1346,7 +1372,7 @@ class ConversationRepository:
                 record.memory_mode = "enabled"
             record.message_count = len(record.transcript)
             record.updated_at = utc_now_iso()
-            self._commit_record(record)
+            self._commit_record(record, read_receipt_update=receipt_update)
             self._cache_record(record)
             return record
 
@@ -1877,13 +1903,15 @@ class ConversationRepository:
                 state = {**state, "recent_thread_ids": [record.id, *[identifier for identifier in state["recent_thread_ids"] if identifier != record.id]]}
             self._write_sidebar_order(state, advance_inventory=False)
 
-    def set_conversation_read_state(self, conversation_id: str, has_unread_turn: bool) -> ConversationRecord | None:
-        def mutate(record: ConversationRecord) -> bool:
-            if record.has_unread_turn == has_unread_turn:
-                return False
-            record.has_unread_turn = has_unread_turn
-            return True
-        return self._mutate_meta(conversation_id, mutate, touch_updated_at=False)
+    def set_conversation_read_state(self, conversation_id: str, has_unread_turn: bool,
+                                    *, expected_revision: str) -> ConversationSummary | None:
+        def mutate(record: ConversationRecord) -> None:
+            mark_read_state(record, has_unread_turn, expected_revision=expected_revision)
+        return self._mutate_summary(conversation_id, mutate, touch_updated_at=False, receipt_only=True)
+
+    def publish_thread_attention(self, conversation_id: str, message: dict[str, Any]) -> ConversationSummary | None:
+        return self._mutate_summary(conversation_id, lambda record: publish_turn_attention(record, message),
+            touch_updated_at=False, receipt_only=True)
 
     def set_conversation_project(self, conversation_id: str, project_id: str) -> ConversationRecord | None:
         # Codex thread/metadata/update assigns a project independently of cwd.
@@ -1965,12 +1993,17 @@ class ConversationRepository:
 
     def _mutate_summary(
         self, conversation_id: str, mutate: Callable[[ConversationRecord], bool | None],
+        *, touch_updated_at: bool = True, receipt_only: bool = False,
     ) -> ConversationSummary | None:
         """Commit thread metadata without reading or copying its history."""
         with self._store_lock(conversation_id):
             manifest = self._read_manifest(conversation_id, log_errors=False)
             if manifest is None:
-                record = self._mutate_meta(conversation_id, mutate)
+                def migrate(record):
+                    bind_read_receipt(record, None)
+                    return mutate(record)
+                record = self._mutate_meta(conversation_id, migrate, touch_updated_at=touch_updated_at,
+                    read_receipt_mutation=receipt_only)
                 return record.to_summary() if record is not None else None
             if self._manifest_is_deleted(manifest):
                 return None
@@ -1978,14 +2011,28 @@ class ConversationRepository:
             if metadata is None:
                 metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
             record = ConversationRecord.from_dict(metadata)
+            bind_read_receipt(record, manifest.get("read_receipt"))
             record.revision = self._manifest_revision(manifest)
             if mutate(record) is False:
                 return record.to_summary()
             cached = self._record_cache.get(conversation_id)
             retain_history = (cached is not None and cached.revision == record.revision
                 and self._record_cache_stamps.get(conversation_id) == self._record_disk_stamp(conversation_id))
-            record.updated_at = utc_now_iso()
-            self._commit_metadata(record)
+            if touch_updated_at:
+                record.updated_at = utc_now_iso()
+            if receipt_only:
+                record.revision += 1
+                payload = {**manifest, "version": _STORAGE_MANIFEST_VERSION, "revision": record.revision,
+                    "read_receipt": stored_read_receipt(record),
+                    "metadata": {**metadata, "revision": record.revision, "has_unread_turn": record.has_unread_turn}}
+                with self._store_lock():
+                    self._advance_store_revision_unlocked()
+                    self._safe_write_text(self._manifest_path_for(record.id),
+                        json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+                    self.directory.committed(record.to_summary(), conversation_id=record.id,
+                        revision=self._read_store_revision_unlocked())
+            else:
+                self._commit_metadata(record)
             summary = record.to_summary()
             if retain_history:
                 # Publish a new metadata owner over the unchanged, repository-
@@ -2161,7 +2208,7 @@ class ConversationRepository:
         self,
         conversation_id: str,
         mutate: Callable[[ConversationRecord], bool | None],
-        *, touch_updated_at: bool = True,
+        *, touch_updated_at: bool = True, read_receipt_mutation: bool = False,
     ) -> ConversationRecord | None:
         with self._store_lock(conversation_id):
             record = self._load_record_for_mutation(conversation_id, copy_history=False)
@@ -2172,7 +2219,7 @@ class ConversationRepository:
             if touch_updated_at:
                 record.updated_at = utc_now_iso()
             record.message_count = len(record.transcript)
-            self._commit_metadata(record)
+            self._commit_metadata(record, read_receipt_update=stored_read_receipt(record) if read_receipt_mutation else None)
             self._cache_record(record)
             return record
 
@@ -2183,19 +2230,24 @@ class ConversationRepository:
         base_record: ConversationRecord | None = None,
         admission: bool = False,
         content_changed: bool = True,
+        read_receipt_update: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         """Publish metadata/deltas and return the log-owned cumulative projection."""
         manifest = self._read_manifest(record.id, log_errors=False)
         if manifest is None or record.revision != self._manifest_revision(manifest):
-            return self._commit_record(record)
+            return self._commit_record(record, read_receipt_update=read_receipt_update)
         pointer = manifest.get("projection_log")
         admissions = int(manifest.get("checkpoint_admissions", 0)) + int(admission)
         if context_delta is not None and (admissions >= self._MAX_PROJECTION_ADMISSIONS
                 or pointer and pointer["bytes"] >= self._MAX_PROJECTION_BYTES):
-            return self._commit_record(record)
+            return self._commit_record(record, read_receipt_update=read_receipt_update)
+        receipt = read_receipt_update if read_receipt_update is not None else manifest.get("read_receipt")
+        bind_read_receipt(record, receipt)
         revision = record.revision + 1
         metadata = {**record.to_meta_dict(), "revision": revision}
         payload = {**manifest, "version": _STORAGE_MANIFEST_VERSION, "revision": revision, "metadata": metadata}
+        if receipt is not None:
+            payload["read_receipt"] = receipt
         if context_delta is not None:
             base = base_record if base_record is not None else self._load_record_for_mutation(record.id, copy_history=False)
             if base is None:
@@ -2203,7 +2255,7 @@ class ConversationRepository:
             generation = manifest["current_generation"]
             checkpoint = self._read_generation_metadata(record.id, generation)
             if checkpoint.get("transcript_index_version") != 1:
-                return self._commit_record(record)
+                return self._commit_record(record, read_receipt_update=read_receipt_update)
             start = transcript_from if transcript_from is not None else len(record.transcript)
             if content_changed:
                 metadata["content_revision"] = revision
@@ -2230,7 +2282,7 @@ class ConversationRepository:
                 self._manifest_path_for(record.id),
                 json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             )
-            self.directory.committed(ConversationSummary.from_dict(metadata), conversation_id=record.id,
+            self.directory.committed(ConversationSummary.from_dict({**metadata, "read_state": record.read_state}), conversation_id=record.id,
                 revision=self._read_store_revision_unlocked())
         record.revision = revision
         record.content_revision = metadata["content_revision"]
@@ -2416,7 +2468,8 @@ class ConversationRepository:
                 f"Conversation manifest for '{conversation_id}' is corrupt: {exc}"
             ) from exc
 
-    def _commit_record(self, record: ConversationRecord, *, normalized_prefix: int | None = None, admission: bool = False) -> dict[str, Any] | None:
+    def _commit_record(self, record: ConversationRecord, *, normalized_prefix: int | None = None, admission: bool = False,
+                       read_receipt_update: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """Commit meta, transcript, and snapshot behind one atomic marker.
 
         Generation files are immutable once published.  The manifest rename
@@ -2506,6 +2559,7 @@ class ConversationRepository:
         if normalized_prefix is not None and manifest is not None and not current_generation_corrupt:
             return self._commit_metadata(record, transcript_from=prefix, base_record=readable_record, admission=admission,
                 content_changed=readable_record.transcript != record.transcript,
+                read_receipt_update=read_receipt_update,
                 context_delta=context_snapshot_delta(readable_record.context_snapshot, record.context_snapshot))
 
         previous_generation: int | None = (
@@ -2538,6 +2592,8 @@ class ConversationRepository:
             record.content_revision = previous_record.content_revision
             record.content_updated_at = previous_record.content_updated_at
         record.revision = next_generation
+        receipt = read_receipt_update if read_receipt_update is not None else (manifest or {}).get("read_receipt")
+        bind_read_receipt(record, receipt)
         # Advance before publishing the record. A crash can leave a harmless
         # gap in the global inventory sequence, but can never publish a record
         # whose authoritative list revision moved backwards. Inventory readers
@@ -2552,6 +2608,8 @@ class ConversationRepository:
             "checkpoint_admissions": 0,
             "metadata": record.to_meta_dict(),
         }
+        if receipt is not None:
+            manifest_payload["read_receipt"] = receipt
         if manifest is not None:
             previous_metadata = manifest.get(
                 "metadata" if previous_generation == current_generation else "previous_metadata"
@@ -2859,6 +2917,8 @@ class ConversationRepository:
                 if any(key in cached.context_snapshot for key in (PLAN_SLUG_KEY, PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY)):
                     cached = self.get_conversation_for_resume(conversation_id)
             record = ConversationRecord.from_dict(cached.to_meta_dict())
+            record.read_state = copy.deepcopy(cached.read_state)
+            record.last_published_turn = cached.last_published_turn
             record.context_snapshot = cached.context_snapshot
             if transcript_ids:
                 selected = set(transcript_ids)
@@ -2891,6 +2951,7 @@ class ConversationRepository:
                 projection = {**projection, "assistant_message": project_public_transcript_message(projection["assistant_message"])}
             record.transcript = apply_transcript_projection(record.transcript, projection)
             record.message_count = len(record.transcript)
+        bind_read_receipt(record, manifest.get("read_receipt"))
         return record
 
     def _load_committed_record(self, conversation_id: str) -> ConversationRecord | None:
@@ -3028,7 +3089,12 @@ class ConversationRepository:
             metadata = manifest.get("metadata")
             if metadata is None:
                 metadata = self._read_generation_metadata(conversation_id, manifest["current_generation"])
-            return ConversationSummary.from_dict(metadata)
+            summary = ConversationSummary.from_dict(metadata)
+            receipt = manifest.get("read_receipt")
+            if receipt is not None:
+                summary.read_state = copy.deepcopy(receipt["readState"])
+                summary.has_unread_turn = summary.read_state["firstUnread"] is not None
+            return summary
         meta_path = self._meta_path_for(conversation_id)
         has_metadata = disk_stamp[1] != (-1, -1) if disk_stamp is not None else meta_path.exists()
         if has_metadata:

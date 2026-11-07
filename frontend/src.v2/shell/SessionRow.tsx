@@ -36,7 +36,7 @@ export type SessionRowProps = {
   onHandoff: (id: string, target: "local" | "worktree") => void;
   onCopy: (path?: string) => void;
   onPin: (id: string, pinned: boolean) => void;
-  onReadState: (id: string, hasUnreadTurn: boolean) => void;
+  onReadState: (id: string, hasUnreadTurn: boolean, expectedRevision: string) => void;
   onProjectChange: (id: string, projectId: string) => void;
   currentProject: string;
   projectOptions: { id: string; name: string }[];
@@ -233,7 +233,7 @@ const SessionRowComponent = ({
           canHandoff={Boolean(c.gitBranch || c.gitIsolated || c.worktreePath)}
           pinned={c.pinned} hasUnreadTurn={c.hasUnreadTurn} currentProject={currentProject} projectOptions={projectOptions}
           onPin={() => onPin(c.id, !c.pinned)}
-          onReadState={() => onReadState(c.id, !c.hasUnreadTurn)}
+          onReadState={c.readState ? () => onReadState(c.id, !c.hasUnreadTurn, c.readState!.revision) : undefined}
           onProjectChange={projectId => onProjectChange(c.id, projectId)}
           sectionOptions={sectionOptions} currentSection={currentSection}
           onSectionChange={sectionId => onSectionChange?.(c.id, sectionId)} onNewSection={onNewSection ? () => onNewSection(c.id) : undefined}

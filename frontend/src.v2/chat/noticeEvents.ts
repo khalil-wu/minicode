@@ -11,6 +11,7 @@ import { isControlPlaneNotice } from "./controlPlaneNotices";
 import { addInspectorPayload } from "./inspectorEntries";
 import { stableTextHash } from "../lib/identity";
 import { incomingConversationMetaIsStale, normalizedConversationRevision } from "./activeConversation";
+import { applyThreadReadState } from "./threadReadState";
 
 const noticeText = (event: SystemNoticeEvent): string => {
   const title = String(event.title || "").trim();
@@ -117,6 +118,10 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
       });
       return true;
     }
+    case "thread/readState/changed": {
+      applyThreadReadState(e.threadId, e.readState, undefined, e.revision);
+      return true;
+    }
     case "conversation.summary.updated": {
       const ev = e as ConversationSummaryUpdatedEvent;
       const incomingRevision = normalizedConversationRevision(ev.revision);
@@ -131,6 +136,7 @@ export const handleNoticeEvent = (e: ServerEvent, conversationId?: string): bool
                 title: ev.title,
                 updatedAt: ev.updated_at,
                 ...(ev.has_unread_turn !== undefined ? { hasUnreadTurn: ev.has_unread_turn } : {}),
+                ...(ev.read_state !== undefined ? { readState: ev.read_state } : {}),
                 ...(ev.thread_source !== undefined ? { threadSource: ev.thread_source } : {}),
                 ...(incomingRevision !== undefined ? { revision: incomingRevision } : {}),
                 memoryMode: ev.memory_mode,

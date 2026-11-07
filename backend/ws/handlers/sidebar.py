@@ -11,6 +11,7 @@ from backend.ws.command_results import emit_command_error
 from backend.ws.handlers.conversation import _broadcast_conversation_lists
 from backend.ws.conversation_activity import live_sessions
 from backend.ws.lifecycle_scope import handoff_command_lifecycle_prefix
+from backend.conversations.read_state import ReadStateConflict
 
 
 async def _publish(session, command: str, record) -> bool:
@@ -34,29 +35,54 @@ async def handle_pin(session, data: dict[str, Any]) -> bool:
 
 
 async def handle_read_state(session, data: dict[str, Any]) -> bool:
+    return await _handle_read_state(session, data, command="conversation.read_state.set")
+
+
+async def handle_thread_read_state(session, data: dict[str, Any]) -> bool:
+    operation = data["operation"]["type"]
+    if operation not in {"read", "unread"}:
+        raise ValueError("operation.type must be read or unread")
+    thread = await to_thread_cancel_safe(session.conversation_repo.get_conversation_summary, data["threadId"])
+    if thread is None or thread.conversation_type != "main" or thread.thread_source != "user":
+        await emit_command_error(session, "thread/readState/update", "Thread read state unavailable")
+        return True
+    return await _handle_read_state(session, {"conversation_id": data["threadId"],
+        "has_unread_turn": operation == "unread", "expected_revision": data["expectedRevision"]},
+        command="thread/readState/update")
+
+
+async def _handle_read_state(session, data: dict[str, Any], *, command: str) -> bool:
     if not isinstance(data["has_unread_turn"], bool):
         raise ValueError("has_unread_turn must be a boolean")
-    record = await to_thread_cancel_safe(session.conversation_repo.set_conversation_read_state, data["conversation_id"], data["has_unread_turn"])
+    expected = data["expected_revision"]
+    if not isinstance(expected, str) or not expected:
+        raise ValueError("expected_revision must be a non-empty read-state revision")
+    try:
+        record = await to_thread_cancel_safe(session.conversation_repo.set_conversation_read_state,
+            data["conversation_id"], data["has_unread_turn"], expected_revision=expected)
+    except ReadStateConflict as error:
+        await session.emit_command_result(command, str(error), level="error", data={
+            "conversation_id": data["conversation_id"], "reason": "readStateConflict", "readState": error.read_state,
+            "revision": error.metadata_revision})
+        return True
     if record is None:
-        await emit_command_error(session, "conversation.read_state.set", "Conversation not found")
+        await emit_command_error(session, command, "Conversation not found")
         return True
     # The mutation is durable. A read receipt changes no navigation, ordering,
     # or transcript; do not hold the next send behind full list hydration.
     await handoff_command_lifecycle_prefix()
     payload = {
-        "type": "conversation.summary.updated", "conversation_id": record.id,
-        "revision": record.revision, "summary": record.summary, "title": record.title,
-        "updated_at": record.updated_at, "has_unread_turn": record.has_unread_turn,
-        "memory_mode": record.memory_mode, "memory_polluted": record.memory_polluted,
-        "memory_pollution_sources": list(record.memory_pollution_sources),
+        "type": "thread/readState/changed", "conversation_id": record.id,
+        "threadId": record.id, "readState": record.read_state, "revision": record.revision,
     }
     readers = [owner for owner in live_sessions(session) if owner.is_connected]
-    results = await asyncio.gather(*(owner.send_payload(payload, log_context="conversation.summary.updated",
+    results = await asyncio.gather(*(owner.send_payload(payload, log_context="thread/readState/changed",
         wait_for_delivery=False) for owner in readers), return_exceptions=True)
     errors = [owner.session_id for owner, result in zip(readers, results) if isinstance(result, BaseException) or not result]
-    await session.emit_command_result("conversation.read_state.set", "Sidebar metadata updated.",
+    await session.emit_command_result(command, "Read state updated.",
         level="warning" if errors else "success", data={"conversation_id": record.id,
-            "revision": record.revision, "has_unread_turn": record.has_unread_turn, "projection_errors": errors})
+            "readState": record.read_state, "revision": record.revision,
+            "has_unread_turn": record.has_unread_turn, "projection_errors": errors})
     return True
 
 
@@ -143,6 +169,7 @@ HANDLERS = {
     "conversation.pin.set": handle_pin,
     "conversation.pin.reorder": handle_pin_reorder,
     "conversation.read_state.set": handle_read_state,
+    "thread/readState/update": handle_thread_read_state,
     "conversation.project.set": handle_project,
     "sidebar.sort.set": handle_sort_mode,
     "sidebar.project.reorder": handle_project_reorder,

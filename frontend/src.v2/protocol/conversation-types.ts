@@ -29,6 +29,7 @@ export type ConversationServerEventType =
   | "conversation.hydration.updated"
   | "conversation.compaction.updated"
   | "conversation.summary.updated"
+  | "thread/readState/changed"
   | "goal.updated"
   | "conversation.list"
   | "conversation.switched"
@@ -74,6 +75,7 @@ export type ConversationClientCommandType =
   | "sidebar.project.thread.reorder"
   | "sidebar.recent.reorder"
   | "conversation.read_state.set"
+  | "thread/readState/update"
   | "conversation.project.set"
   | "conversation.memory_mode.set"
   | "memory.reset"
@@ -237,6 +239,7 @@ export interface ConversationSummaryUpdatedEvent {
   updated_at: string;
   revision?: number;
   has_unread_turn?: boolean;
+  read_state?: ThreadReadState;
   thread_source?: string;
   memory_mode: "enabled" | "disabled" | "polluted";
   memory_polluted: boolean;
@@ -284,6 +287,7 @@ export interface ConversationSummaryPayload {
   pinned?: boolean;
   pinned_at?: string;
   has_unread_turn?: boolean;
+  read_state?: ThreadReadState;
   project_id?: string | null;
   resource_references?: import("./thread-metadata").ThreadResourceReference[];
   archived_at?: string | null;
@@ -647,6 +651,27 @@ export interface ConversationReadStateSetCommand {
   type: "conversation.read_state.set";
   conversation_id: string;
   has_unread_turn: boolean;
+  expected_revision: string;
+}
+
+export interface ThreadReadState {
+  firstUnread: { type: "threadStart" } | { type: "turn"; turnId: string } | null;
+  revision: string;
+}
+
+export interface ThreadReadStateChangedEvent {
+  type: "thread/readState/changed";
+  conversation_id: string;
+  threadId: string;
+  readState: ThreadReadState;
+  revision?: number;
+}
+
+export interface ThreadReadStateUpdateCommand {
+  type: "thread/readState/update";
+  threadId: string;
+  operation: { type: "read" | "unread" };
+  expectedRevision: string;
 }
 
 export interface ConversationProjectSetCommand {

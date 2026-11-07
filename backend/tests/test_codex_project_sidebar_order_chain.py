@@ -64,7 +64,7 @@ def test_source_project_occurrence_reorder_keeps_hidden_slots_and_all_record_byt
     alpha, hidden, bravo, charlie = seed(repository, project, ["alpha", "hidden", "bravo", "charlie"])
     other = seed(repository, tmp_path / "Other", ["other"])[0]
     repository.set_conversation_pinned(other, True)
-    repository.set_conversation_read_state(alpha, True)
+    repository.set_conversation_read_state(alpha, True, expected_revision=repository.get_conversation_summary(alpha).read_state["revision"])
     repository.set_sidebar_sort_mode("manual", {str(project): [alpha, hidden, bravo, charlie]})
     repository.set_archived(hidden, True)
     before = {item.id: item.to_dict() for item in [repository.get_conversation(identifier) for identifier in [alpha, hidden, bravo, charlie, other]]}
@@ -178,7 +178,7 @@ def test_sort_write_and_read_metadata_writer_keep_both_changes(tmp_path):
     other = ConversationRepository(repository.storage_root)
     with ThreadPoolExecutor(max_workers=2) as pool:
         operations = [pool.submit(repository.reorder_sidebar_threads, str(project), bravo, alpha, [alpha, bravo]),
-                      pool.submit(other.set_conversation_read_state, alpha, True)]
+                      pool.submit(other.set_conversation_read_state, alpha, True, expected_revision=other.get_conversation_summary(alpha).read_state["revision"])]
         for operation in operations:
             operation.result(timeout=5)
     assert order(repository)["project_thread_orders"][project_key(str(project))] == [bravo, alpha]

@@ -1453,6 +1453,7 @@ export interface ConversationMeta {
   pinnedAt?: string;
   resourceReferences?: import("../protocol/thread-metadata").ThreadResourceReference[];
   hasUnreadTurn?: boolean;
+  readState?: import("../protocol/conversation-types").ThreadReadState;
   projectId?: string | null;
   memoryMode?: "enabled" | "disabled" | "polluted" | string;
   memoryPolluted?: boolean;

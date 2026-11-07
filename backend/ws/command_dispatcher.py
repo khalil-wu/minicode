@@ -106,7 +106,7 @@ def _normalize_command_owner(command: UserCommand) -> None:
     # in the explicit resource-owner field throughout admission and replay.
     if owner and not command.type.startswith("scheduler."):
         command.data["conversation_id"] = str(owner).strip()
-    if (command.type.startswith("thread/realtime/") or command.type == "thread/memory/read") and "conversation_id" not in command.data:
+    if (command.type.startswith("thread/realtime/") or command.type in {"thread/memory/read", "thread/readState/update"}) and "conversation_id" not in command.data:
         command.data["conversation_id"] = command.data.get("threadId", "")
 
 _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
@@ -122,6 +122,7 @@ _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
     "context.fork",
     "thread/realtime/start", "thread/realtime/stop",
     "thread/approveGuardianDeniedAction",
+    "thread/readState/update",
     "user_message.queue.cancel",
     "user_message.queue.steer",
     "user_message.queue.start",

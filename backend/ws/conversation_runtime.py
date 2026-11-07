@@ -483,6 +483,7 @@ class ConversationRuntime:
             ),
             "memory_pollution_sources": memory_pollution_sources,
             "expected_revision": int(getattr(conversation, "revision", 0) or 0),
+            "expected_read_state_revision": conversation.read_state.get("revision", f"initial:{conversation.id}"),
         }
 
     def rewind_to_user_turn(

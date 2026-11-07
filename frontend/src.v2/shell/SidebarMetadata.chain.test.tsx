@@ -69,17 +69,17 @@ it("projects real unread metadata and clears it when the user opens that row", a
   show();
   menuFor(screen.getByRole("region", { name: "工作区 A" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "标记为未读", exact: true }));
-  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: true }, "conversation.read_state.set", expect.anything()));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: true, expected_revision: "initial:task" }, "conversation.read_state.set"));
   publish({ revision: 2, has_unread_turn: true });
   const project = screen.getByRole("region", { name: "工作区 A" });
   expect(within(project).getByLabelText("未读")).toBeTruthy();
   menuFor(project);
   expect(screen.getByRole("menuitem", { name: "标记为已读", exact: true })).toBeTruthy();
   fireEvent.click(screen.getByRole("menuitem", { name: "标记为已读", exact: true }));
-  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: false }, "conversation.read_state.set", expect.anything()));
+  await waitFor(() => expect(send).toHaveBeenCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: false, expected_revision: "initial:task" }, "conversation.read_state.set"));
   publish({ revision: 3, has_unread_turn: true });
   fireEvent.click(within(project).getByRole("button", { name: "Actual task", exact: true }));
-  expect(send).toHaveBeenLastCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: false }, "conversation.read_state.set", expect.anything());
+  expect(send).toHaveBeenLastCalledWith({ type: "conversation.read_state.set", conversation_id: "task", has_unread_turn: false, expected_revision: "initial:task" }, "conversation.read_state.set");
 });
 
 it("moves the pinned task to a real project then removes membership while preserving execution and the reader", async () => {

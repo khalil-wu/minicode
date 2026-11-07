@@ -6623,6 +6623,7 @@ class SessionAgentRunnerMixin:
                                 "memory_polluted": memory_polluted,
                                 "memory_pollution_sources": memory_pollution_sources,
                                 "has_unread_turn": updated_conversation.has_unread_turn,
+                                "read_state": updated_conversation.read_state,
                                 "thread_source": updated_conversation.thread_source,
                             }
                 except Exception:
@@ -6650,9 +6651,12 @@ class SessionAgentRunnerMixin:
                 goal = run_context.goal_accounting.finish(status=terminal_status, content=assistant_content,
                     has_activity=bool(assistant_tool_calls), reason=query_terminal_reason)
                 if goal is not None:
-                    current_summary = self.conversation_repo.get_conversation_summary(conversation.id)
+                    current_summary = (await to_thread_cancel_safe(self.conversation_repo.publish_thread_attention,
+                        conversation.id, assistant_message) if assistant_message is not None
+                        else self.conversation_repo.get_conversation_summary(conversation.id))
                     if conversation_summary_payload is not None:
-                        conversation_summary_payload.update(revision=current_summary.revision, updated_at=current_summary.updated_at)
+                        conversation_summary_payload.update(revision=current_summary.revision, updated_at=current_summary.updated_at,
+                            read_state=current_summary.read_state, has_unread_turn=current_summary.has_unread_turn)
                     await self.send_payload(build_goal_updated_payload(conversation_id=conversation.id,
                         goal=goal, source="turn_completed", revision=run_context.goal_accounting.revision),
                         log_context="goal.updated")
@@ -6715,3 +6719,9 @@ class SessionAgentRunnerMixin:
                 for peer_session in live_sessions(self):
                     if peer_session is not self and peer_session.is_connected:
                         await peer_session.send_payload(conversation_summary_payload, log_context="conversation.summary.updated")
+                if conversation_summary_payload.get("read_state"):
+                    receipt_event = {"type": "thread/readState/changed", "conversation_id": conversation.id,
+                        "threadId": conversation.id, "readState": conversation_summary_payload["read_state"],
+                        "revision": conversation_summary_payload["revision"]}
+                    await asyncio.gather(*(peer.send_payload(receipt_event, log_context="thread/readState/changed")
+                        for peer in live_sessions(self) if peer.is_connected))

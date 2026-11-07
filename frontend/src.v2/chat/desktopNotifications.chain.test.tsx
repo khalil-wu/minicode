@@ -1,8 +1,10 @@
 /* @vitest-environment jsdom */
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAppStore } from "../stores";
 import { handleControlEvent } from "./controlEvents";
+import { automaticReadHolds } from "./threadReadState";
+import { applyThreadReadState } from "./threadReadState";
 import { useDesktopEvents } from "../hooks/useDesktopEvents";
 import type { ServerEvent } from "../protocol/events";
 
@@ -25,7 +27,7 @@ const request = (kind: "permission" | "question", conversationId = "conversation
 
 beforeEach(() => {
   mocks.notify.mockReset(); mocks.hide.mockClear(); mocks.removeFocus.mockClear(); mocks.focus = null;
-  mocks.send.mockClear();
+  mocks.send.mockClear(); automaticReadHolds.clear();
   readReceipts.result.mockReset().mockResolvedValue({ type: "command.result", command: "conversation.read_state.set", level: "success" });
   mocks.getState.mockReset().mockResolvedValue({ isMaximized: false, isFocused: false });
   window.__MINICODE_RUNTIME__ = { desktop: { notify: mocks.notify, hideNotifications: mocks.hide,
@@ -87,43 +89,79 @@ describe("real control facts to desktop notification identity and visibility", (
 
 describe("native window lifecycle instead of renderer DOM focus", () => {
   const Harness = () => { useDesktopEvents(); return <div className="chat-pane" />; };
+  it("waits for the painted reader and leaves a conflicting version unread until a new reader action", async () => {
+    let complete!: (value: unknown) => void;
+    readReceipts.result.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
+    useAppStore.setState({ isConnected: true, conversationHydration: {}, conversations: [{ id: "conversation-A", title: "Task", updatedAt: "old", revision: 10,
+      hasUnreadTurn: true, readState: { firstUnread: { type: "turn", turnId: "turn-1" }, revision: "receipt-1" } }] });
+    const view = render(<Harness />); await act(async () => {});
+    act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
+    expect(mocks.send).not.toHaveBeenCalled();
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    const current = { firstUnread: { type: "turn" as const, turnId: "turn-1" }, revision: "receipt-2" };
+    await act(async () => complete({ level: "error", data: { reason: "readStateConflict", readState: current, revision: 11 } }));
+    act(() => useAppStore.setState({ conversations: [...useAppStore.getState().conversations] }));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 50)));
+    expect(mocks.send).toHaveBeenCalledOnce();
+    expect(useAppStore.getState().conversations[0].hasUnreadTurn).toBe(true);
+    fireEvent.pointerDown(view.container.querySelector(".chat-pane")!);
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2));
+    expect(mocks.send.mock.calls[1][0]).toMatchObject({ expected_revision: "receipt-2" });
+    await act(async () => complete({ level: "success", data: { readState: { firstUnread: null, revision: "read-2" }, revision: 12 } }));
+  });
+
+  it("keeps a peer's explicit unread mark until this window actually reads again", async () => {
+    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Task", updatedAt: "old", revision: 10,
+      hasUnreadTurn: false, readState: { firstUnread: null, revision: "receipt-1" } }] });
+    const view = render(<Harness />); await act(async () => {});
+    act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
+    act(() => applyThreadReadState("conversation-A", { firstUnread: { type: "threadStart" }, revision: "peer-mark" }, undefined, 11));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 50)));
+    expect(mocks.send).not.toHaveBeenCalled();
+    fireEvent.scroll(view.container.querySelector(".chat-pane")!);
+    await act(async () => new Promise(resolve => setTimeout(resolve, 50)));
+    expect(mocks.send).not.toHaveBeenCalled();
+    fireEvent.pointerDown(view.container.querySelector(".chat-pane")!);
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    expect(mocks.send.mock.calls[0][0]).toMatchObject({ expected_revision: "peer-mark" });
+  });
   it("only the actually visible native focused reader clears a newly completed unread turn", async () => {
-    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Actual task", updatedAt: "2026-10-14", hasUnreadTurn: true }] });
+    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Actual task", updatedAt: "2026-10-14", hasUnreadTurn: true, readState: { firstUnread: { type: "turn", turnId: "turn-10" }, revision: "read-10" } }] });
     render(<Harness />); await act(async () => {});
     expect(mocks.send).not.toHaveBeenCalled();
     act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
-    expect(mocks.send).toHaveBeenCalledExactlyOnceWith({ type: "conversation.read_state.set", conversation_id: "conversation-A", has_unread_turn: false });
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledExactlyOnceWith({ type: "conversation.read_state.set", conversation_id: "conversation-A", has_unread_turn: false, expected_revision: "read-10" }));
     expect(useAppStore.getState().draft).toBe("Unsent source draft");
     await act(async () => {});
     mocks.send.mockClear();
     act(() => mocks.focus!({ isMaximized: false, isFocused: false }));
-    act(() => useAppStore.setState({ conversations: [{ id: "conversation-A", title: "Actual next turn", updatedAt: "2026-10-14", hasUnreadTurn: true }] }));
+    act(() => useAppStore.setState({ conversations: [{ id: "conversation-A", title: "Actual next turn", updatedAt: "2026-10-14", hasUnreadTurn: true, readState: { firstUnread: { type: "turn", turnId: "turn-10" }, revision: "read-10" } }] }));
     expect(mocks.send).not.toHaveBeenCalled();
     act(() => useAppStore.setState({ settingsOpen: true }));
     act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
     expect(mocks.send).not.toHaveBeenCalled();
     act(() => useAppStore.setState({ settingsOpen: false }));
-    expect(mocks.send).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
   });
 
   it("coalesces repeated completion/focus projections while admitting a newer unread revision", async () => {
     let complete!: (value: unknown) => void;
     readReceipts.result.mockImplementation(() => new Promise(resolve => { complete = resolve; }));
-    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Task", updatedAt: "2026-10-29", revision: 10, hasUnreadTurn: true }] });
+    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Task", updatedAt: "2026-10-29", revision: 10, hasUnreadTurn: true, readState: { firstUnread: { type: "turn", turnId: "turn-10" }, revision: "read-10" } }] });
     render(<Harness />); await act(async () => {});
     act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
     act(() => useAppStore.setState({ conversations: [...useAppStore.getState().conversations] }));
     act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
-    expect(mocks.send).toHaveBeenCalledOnce();
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
     expect(useAppStore.getState().conversations[0].hasUnreadTurn).toBe(true);
     await act(async () => { complete({}); });
-    act(() => useAppStore.setState({ conversations: [{ ...useAppStore.getState().conversations[0], revision: 11, hasUnreadTurn: true }] }));
-    expect(mocks.send).toHaveBeenCalledTimes(2);
+    act(() => useAppStore.setState({ conversations: [{ ...useAppStore.getState().conversations[0], revision: 11, hasUnreadTurn: true, readState: { firstUnread: { type: "turn", turnId: "turn-11" }, revision: "read-11" } }] }));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(2));
     await act(async () => { complete({}); });
   });
 
   it("a native focused window does not read a conversation hidden behind Code", async () => {
-    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Actual task", updatedAt: "2026-10-14", hasUnreadTurn: true }] });
+    useAppStore.setState({ isConnected: true, conversations: [{ id: "conversation-A", title: "Actual task", updatedAt: "2026-10-14", hasUnreadTurn: true, readState: { firstUnread: { type: "turn", turnId: "turn-10" }, revision: "read-10" } }] });
     render(<div hidden><Harness /></div>); await act(async () => {});
     act(() => mocks.focus!({ isMaximized: false, isFocused: true }));
     expect(mocks.send).not.toHaveBeenCalled();

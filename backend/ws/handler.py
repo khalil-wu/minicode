@@ -151,6 +151,7 @@ CONVERSATION_SCOPED_EVENT_TYPES = {
     "conversation.hydration.updated",
     "conversation.compaction.updated",
     "conversation.summary.updated",
+    "thread/readState/changed",
     "goal.updated",
     "turn.plan.updated",
     "turn.diff.updated",

@@ -7,6 +7,7 @@ import hashlib
 import re
 import json
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import fields, is_dataclass
 from typing import Any
 
@@ -1049,6 +1050,10 @@ def project_public_conversation(
     for key in ("memory_polluted", "archived", "git_isolated", "pinned", "has_unread_turn"):
         if isinstance(source.get(key), bool):
             projected[key] = bool(source.get(key))
+    from backend.conversations.read_state import initial_read_state
+    if source.get("id"):
+        projected["read_state"] = deepcopy(source.get("read_state") or initial_read_state(
+            source["id"], bool(source.get("has_unread_turn"))))
     pollution_sources = public_string_list(
         source.get("memory_pollution_sources"), maximum=256, item_max_chars=4_096
     )

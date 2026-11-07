@@ -10,6 +10,7 @@ import { useSidebarSections, type SidebarSection } from "../protocol/thread-meta
 import { threadMenuIcon } from "../shell/sidebarComponents";
 import { MenuSourceIcon } from "../lib/menu-source-icons";
 import { desktop, isDesktop } from "../desktop/runtime";
+import { setThreadReadState } from "../chat/threadReadState";
 
 export function ProjectContextMenu({ path, position, anchor, onClose, onEdit }: { path: string; position: { x: number; y: number }; anchor?: HTMLElement; onClose: () => void; onEdit?: () => void }) {
   const { t } = useI18n();
@@ -31,11 +32,11 @@ export function ProjectContextMenu({ path, position, anchor, onClose, onEdit }: 
   const project = state.recentWorkspaces.find(item => item.path === path)!;
   const sourceFolders = projectSourceFolders(project);
   const chats = state.conversations.filter(chat => !chat.archived && projectOwnsConversation(project, chat));
-  const unreadChats = chats.filter(chat => chat.hasUnreadTurn);
+  const unreadChats = chats.filter(chat => chat.hasUnreadTurn && chat.readState);
   const markRead = async () => {
     try {
       await Promise.all(unreadChats.map(async chat => {
-        const result = await sendClientCommandAwaitResult({ type: "conversation.read_state.set", conversation_id: chat.id, has_unread_turn: false }, "conversation.read_state.set");
+        const result = await setThreadReadState(chat.id, false, chat.readState!.revision);
         if (!commandResultSucceeded(result)) throw new Error(result.message);
       }));
     } catch (reason) { pushToast(String(reason), "error"); }

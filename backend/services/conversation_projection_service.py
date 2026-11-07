@@ -44,6 +44,7 @@ async def _replay_projection(repository: ConversationRepository, journal: Execut
                 expected_revision=expected_revision if expected_revision is not None else record.revision,
                 source_user_message_ids=source_user_ids,
                 source_run_id=owner["run_id"],
+                publish_attention=False,
                 **({"context_delta": payload["context_delta"], "partial": bool(payload.get("partial"))}
                    if "context_delta" in payload else {}),
             )

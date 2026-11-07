@@ -42,6 +42,8 @@ import { useSidebarSections, type SidebarSection } from "../protocol/thread-meta
 import { SidebarSections } from "./SidebarSections";
 import { handoffConversationWorktree } from "../lib/handoff-worktree";
 import { fetchConversationDirectory, publishDirectoryPage } from "../protocol/conversation-directory";
+import { setThreadReadState } from "../chat/threadReadState";
+import { toConversationMeta } from "../chat/sessionEvents";
 
 // The menu invocation owns its reply even after the reader changes chats.
 const runMenuCommand = async (command: ClientCommand): Promise<CommandResultEvent | undefined> => {
@@ -649,8 +651,10 @@ export const ConversationsTab = memo(function ConversationsTab({
   const setPinned = useCallback((id: string, pinned: boolean) => {
     void runMenuCommand({ type: "conversation.pin.set", conversation_id: id, pinned });
   }, []);
-  const setReadState = useCallback((id: string, hasUnreadTurn: boolean) => {
-    void runMenuCommand({ type: "conversation.read_state.set", conversation_id: id, has_unread_turn: hasUnreadTurn });
+  const setReadState = useCallback((id: string, hasUnreadTurn: boolean, expectedRevision: string) => {
+    void setThreadReadState(id, hasUnreadTurn, expectedRevision).then(result => {
+      if (!wsOutbox.commandResultSucceeded(result)) pushToast(result.message, "error");
+    }).catch(error => pushToast(error instanceof Error ? error.message : String(error), "error"));
   }, []);
   const setProject = useCallback((id: string, projectId: string) => {
     void runMenuCommand({ type: "conversation.project.set", conversation_id: id, project_id: projectId });
@@ -797,10 +801,11 @@ export const ConversationsTab = memo(function ConversationsTab({
       </div>}
     </section>
   );
-  const sectionThreadIds = async (section: SidebarSection) => {
+  const sectionThreads = async (section: SidebarSection) => {
     const identifiers = new Set(section.item_keys.flatMap(key => key.startsWith("thread:")
       ? filtered.some(item => item.id === key.slice(7)) ? [key.slice(7)] : []
       : allProjectGroups.get(workspaceGroupIdentity(key.slice(8)))?.items.map(item => item.id) ?? []));
+    const captured = new Map<string, ConversationMeta>(filtered.filter(item => identifiers.has(item.id)).map(item => [item.id, item]));
     if (directory) {
       const sessionId = getWebSocket()!.sessionId;
       for (const key of section.item_keys.filter(item => item.startsWith("project:"))) {
@@ -809,12 +814,12 @@ export const ConversationsTab = memo(function ConversationsTab({
           const page = await fetchConversationDirectory({ sidebar_scope: "project", sidebar_project: workspaceGroupIdentity(key.slice(8)),
             limit: 100, cursor }, sessionId);
           if (getWebSocket()?.sessionId !== sessionId) throw new Error(tr("后端连接尚未就绪，恢复连接后将重新读取。"));
-          for (const item of page.data) identifiers.add(item.id);
+          for (const item of page.data) captured.set(item.id, toConversationMeta(item));
           cursor = page.next_cursor;
         } while (cursor);
       }
     }
-    return [...identifiers];
+    return [...captured.values()];
   };
   const projectGroupsById = new Map(orderedProjectGroups.map(group => [group.projectKey, group]));
   const isEmpty = activityView ? filtered.length === 0
@@ -844,12 +849,14 @@ export const ConversationsTab = memo(function ConversationsTab({
         {!activityView && <SidebarSections sections={sections} collapsed={collapsedGroups} onToggle={toggleGroup}
           onNew={() => { void editSection(); }} onEdit={section => { void editSection(section); }}
           onRemove={id => { void sectionAction(`/sections/${id}`, undefined, "DELETE"); }}
-          onRead={section => { void sectionThreadIds(section).then(ids => { for (const id of ids) setReadState(id, false); })
+          onRead={section => { void sectionThreads(section).then(threads => {
+            for (const thread of threads) if (thread.readState) setReadState(thread.id, false, thread.readState.revision);
+          })
             .catch(error => pushToast(error instanceof Error ? error.message : String(error), "error")); }}
           onArchive={section => { void (async () => {
             if (!await showConfirm({ title: tr("归档分组中的聊天？"), message: section.name, confirmLabel: tr("归档") })) return;
-            for (const id of await sectionThreadIds(section)) {
-              const result = await setConversationArchived(id, true);
+            for (const thread of await sectionThreads(section)) {
+              const result = await setConversationArchived(thread.id, true);
               if (!wsOutbox.commandResultSucceeded(result)) throw new Error(result.message);
             }
           })().catch(error => pushToast(String(error), "error")); }}

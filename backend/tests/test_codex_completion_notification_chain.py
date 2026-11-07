@@ -82,7 +82,7 @@ def test_terminal_unread_is_atomic_durable_and_replay_does_not_undo_read(tmp_pat
     assert restored.has_unread_turn is True
     assert restored.transcript[-1]["metadata"]["completion_notification"]["body"] == "Original visible answer"
     assert project_public_conversation(restored)["thread_source"] == "user"
-    cold.set_conversation_read_state(owner.id, False)
+    cold.set_conversation_read_state(owner.id, False, expected_revision=cold.get_conversation_summary(owner.id).read_state["revision"])
     _terminal(cold, owner, "actual-message", notice)
     assert ConversationRepository(base_dir=tmp_path / "data").get_conversation(owner.id).has_unread_turn is False
 
@@ -92,7 +92,7 @@ def test_quiet_heartbeat_keeps_preexisting_manual_unread_and_does_not_mark_a_rea
     notice = completion_notification(status="completed", automation_kind="heartbeat", last_agent_message="DONT_NOTIFY")
     read = repository.create_conversation(title="Read task", workspace_root=str(tmp_path))
     unread = repository.create_conversation(title="Manual unread task", workspace_root=str(tmp_path))
-    repository.set_conversation_read_state(unread.id, True)
+    repository.set_conversation_read_state(unread.id, True, expected_revision=repository.get_conversation_summary(unread.id).read_state["revision"])
     assert _terminal(repository, read, "quiet-read", notice).has_unread_turn is False
     assert _terminal(repository, unread, "quiet-unread", notice).has_unread_turn is True
 

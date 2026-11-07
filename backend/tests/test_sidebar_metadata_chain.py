@@ -26,7 +26,7 @@ def test_sidebar_mutations_survive_cold_read_without_rewriting_transcript_contex
     assert project_public_conversation(ConversationRepository(repo.storage_root).get_conversation(original.id))["project_id"] is None
     checkpoint_files = {path.name: path.read_bytes() for path in repo.storage_root.glob("*.g*") if ".meta." not in path.name}
     pinned = repo.set_conversation_pinned("conv-sidebar", True)
-    unread = repo.set_conversation_read_state("conv-sidebar", True)
+    unread = repo.set_conversation_read_state("conv-sidebar", True, expected_revision=repo.get_conversation_summary("conv-sidebar").read_state["revision"])
     moved = repo.set_conversation_project("conv-sidebar", str(tmp_path / "B"))
     assert not moved.pinned
     assert moved.pinned_at == ""
@@ -52,15 +52,15 @@ def test_sidebar_mutations_survive_cold_read_without_rewriting_transcript_contex
     assert unread.has_unread_turn
 
 
-def test_repeated_read_state_is_idempotent_and_empty_project_is_explicit_removal(tmp_path):
+def test_repeated_read_mark_versions_the_receipt_and_empty_project_is_explicit_removal(tmp_path):
     repo = ConversationRepository(tmp_path / "conversations")
     conversation(repo, tmp_path / "A")
-    repo.set_conversation_read_state("conv-sidebar", True)
+    repo.set_conversation_read_state("conv-sidebar", True, expected_revision=repo.get_conversation_summary("conv-sidebar").read_state["revision"])
     before = repo.list_conversations_with_revision()[1]
     original = repo.get_conversation("conv-sidebar")
-    repeated = repo.set_conversation_read_state("conv-sidebar", True)
-    assert repeated.revision == original.revision
-    assert repo.list_conversations_with_revision()[1] == before
+    repeated = repo.set_conversation_read_state("conv-sidebar", True, expected_revision=repo.get_conversation_summary("conv-sidebar").read_state["revision"])
+    assert repeated.read_state["revision"] != original.read_state["revision"]
+    assert repo.list_conversations_with_revision()[1] > before
     cleared = repo.set_conversation_project("conv-sidebar", "")
     assert cleared.project_id == ""
     assert cleared.execution_cwd == str(tmp_path / "A")
@@ -74,7 +74,7 @@ def test_metadata_mutations_do_not_lose_a_frozen_turn_or_other_sidebar_writer(tm
     original = conversation(writer, tmp_path / "A")
     other = ConversationRepository(path)
     with ThreadPoolExecutor(max_workers=2) as pool:
-        list(pool.map(lambda action: action(), [lambda: writer.set_conversation_pinned("conv-sidebar", True), lambda: other.set_conversation_read_state("conv-sidebar", True)]))
+        list(pool.map(lambda action: action(), [lambda: writer.set_conversation_pinned("conv-sidebar", True), lambda: other.set_conversation_read_state("conv-sidebar", True, expected_revision=other.get_conversation_summary("conv-sidebar").read_state["revision"])]))
     final = writer.commit_turn_projection("conv-sidebar", assistant_message={"id": "final", "role": "assistant", "content": "Actual final answer"},
         context_snapshot=original.context_snapshot, expected_revision=original.revision)
     assert final.pinned
@@ -125,11 +125,11 @@ async def test_handlers_publish_canonical_metadata_to_peer_windows_without_activ
     manager = SimpleNamespace(iter_sessions=lambda: [session, peer])
     session.ws_manager = peer.ws_manager = manager
     await handle_pin(session, {"conversation_id": "conv-sidebar", "pinned": True})
-    await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True})
+    await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True, "expected_revision": repo.get_conversation_summary("conv-sidebar").read_state["revision"]})
     await handle_project(session, {"conversation_id": "conv-sidebar", "project_id": str(root_b)})
     assert len(session.events) == len(peer.events) == 3
-    assert peer.events[1]["type"] == "conversation.summary.updated"
-    assert peer.events[1]["has_unread_turn"] is True
+    assert peer.events[1]["type"] == "thread/readState/changed"
+    assert peer.events[1]["readState"]["firstUnread"] == {"type": "threadStart"}
     assert "transcript" not in peer.events[1]
     assert peer.events[-1][0]["project_id"] == str(root_b.resolve())
     assert peer.events[-1][0]["has_unread_turn"] is True
@@ -157,7 +157,7 @@ async def test_read_receipt_releases_send_lock_before_peer_projection(tmp_path):
     async with AsyncExitStack() as scope:
         await scope.enter_async_context(lock)
         with bind_command_lifecycle_prefix(scope):
-            await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True})
+            await handle_read_state(session, {"conversation_id": "conv-sidebar", "has_unread_turn": True, "expected_revision": repo.get_conversation_summary("conv-sidebar").read_state["revision"]})
     assert len(session.events) == 1
     assert session.results[-1]["level"] == "success"
 
