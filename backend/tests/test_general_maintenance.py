@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 import os
 import threading
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -287,6 +288,17 @@ def test_cold_selection_only_returns_existing_seven_day_history_files(tmp_path):
     assert all(file.name.startswith(cold.id + ".") for file in files)
     assert not any(file.name.endswith((".meta.json", ".manifest.json")) for file in files)
     assert repository.get_conversation(recent.id) is not None
+
+
+def test_legacy_only_directory_does_not_probe_each_conversation_for_nonexistent_history_files(tmp_path, monkeypatch):
+    repository = ConversationRepository(tmp_path / "conversations")
+    for index in range(256):
+        identifier = f"conv_legacy_{index:04}"
+        (repository.storage_root / (identifier + ".json")).write_text(json.dumps({"id": identifier,
+            "title": "Legacy", "updated_at": OLD.isoformat(), "transcript": []}), encoding="utf-8")
+    summaries = repository.list_conversations()
+    monkeypatch.setattr(repository, "history_paths", lambda *_: pytest.fail("Legacy-only rows have no separate history file to compress"))
+    assert maintenance.cold_history_files(repository, summaries, protected_ids=set(), now=NOW) == []
 
 
 def test_cold_selection_finishes_file_stats_before_a_checkpoint_reclaims_its_previous_generation(tmp_path, monkeypatch):

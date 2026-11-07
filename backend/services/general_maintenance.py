@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from backend.agent.conversation_query_guard import conversation_query_guards
 from backend.conversations.repository import ConversationRepository
+from backend.conversations.compression import is_history_path
 from backend.ws.conversation_activity import conversation_activity_blockers
 
 
@@ -50,9 +52,21 @@ def archive_candidates(summaries, *, inactive_days: int, protected_ids: set[str]
 
 def cold_history_files(repository, summaries, *, protected_ids: set[str], now: datetime) -> list[Path]:
     cutoff = now - timedelta(days=7)
+    candidates = set()
+    with os.scandir(repository.storage_root) as entries:
+        for entry in entries:
+            if entry.name.endswith(".zst") or not is_history_path(Path(entry.name)) or not entry.is_file(follow_symlinks=False):
+                continue
+            try:
+                modified = entry.stat(follow_symlinks=False).st_mtime
+            except FileNotFoundError:
+                # A checkpoint can reclaim its predecessor during discovery.
+                continue
+            if datetime.fromtimestamp(modified, UTC) <= cutoff:
+                candidates.add(entry.name.partition(".")[0])
     files = []
     for chat in summaries:
-        if chat.id in protected_ids:
+        if chat.id in protected_ids or chat.id not in candidates:
             continue
         # Checkpoints reclaim old generations under this same owner lock.
         # Keep their paths and timestamps in one read; encoding stays outside.
