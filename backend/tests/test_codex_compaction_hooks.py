@@ -125,7 +125,7 @@ async def test_automatic_stop_preserves_before_or_committed_window_and_emits_act
     else:
         context = _BudgetCtx(token_usage=900, after_compact_usage=500); context.hook_manager = Hooks()
         from backend.config import TokenBudget
-        events = [event async for event in manage_context_budget(context, state, TokenBudget(total=1000), [])]
+        events = [event async for event in manage_context_budget(context, state, TokenBudget(total=1000, response_reserve=150), [])]
         compacted = context.compact_calls
     assert compacted == (0 if stage == "before" else 1)
     assert state.stopped_reason == "interrupted" and state.terminal_status == "cancelled"

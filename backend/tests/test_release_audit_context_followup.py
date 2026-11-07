@@ -80,7 +80,7 @@ def test_compaction_noop_does_not_poison_across_turn_failure_counter():
         consecutive_autocompact_failures = 0
         hook_manager = None
         calls = 0
-        def needs_compaction(self, *args, **kwargs): return True
+        def get_budget_snapshot(self, *args, **kwargs): return {"used": 950, "total": 1000, "breakdown": {}}
         def context_ledger(self): return {"estimated_tokens": 900, "entries": []}
         async def compact(self, **kwargs):
             self.calls += 1
