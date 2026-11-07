@@ -107,6 +107,7 @@ class ConversationThreadRuntime:
     node_repl_companions: Any | None = None
     mcp_connections: Any | None = None
     cua_repl_companions: Any | None = None
+    exec_policy_owner: Any | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
 

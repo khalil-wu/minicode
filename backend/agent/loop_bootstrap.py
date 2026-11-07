@@ -602,15 +602,18 @@ async def bootstrap_agent_loop(
     tool_context.permission_grants.begin_turn(tool_context.turn_id)
     from backend.permissions.exec_policy import ExecPolicyOwner, config_folders
     from backend.async_cleanup import to_thread_cancel_safe
-    owner = context._exec_policy_owner
+    thread_runtime = run_context.environment_thread_runtime
+    owner = thread_runtime.exec_policy_owner if thread_runtime is not None else context._exec_policy_owner
     if (owner is None or owner.folders != config_folders(turn_config_stack)
             or owner._requirements_rules != turn_config_stack.requirements.value_for("rules")):
         home = Path(next(layer.source.file for layer in reversed(turn_config_stack.get_layers()) if layer.source.kind == "user")).parent
         owner = await to_thread_cancel_safe(ExecPolicyOwner, home=home, stack=turn_config_stack)
-        context._exec_policy_owner = owner
         if owner.load_warning is not None and emit_event is not None:
             await emit_event("system_notice", {"conversation_id": conversation_id,
                 "message": owner.load_warning.message, "level": "warning"})
+    context._exec_policy_owner = owner
+    if thread_runtime is not None:
+        thread_runtime.exec_policy_owner = owner
     run_context.exec_policy_owner = owner
     if run_context.turn_environments is not None:
         from backend.network.runtime import prepare_environment_network_step

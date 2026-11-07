@@ -434,3 +434,47 @@ async def test_production_loop_uses_captured_trusted_layers_actual_native_argv_a
         assert any("<permissions instructions>" in str(message.content) for message in adapter.requests[0])
     finally:
         runtime.close(release_lease=True)
+
+
+@pytest.mark.asyncio
+async def test_thread_reuses_exec_policy_across_fresh_turn_builders_and_rebinds_changed_layers(tmp_path):
+    from backend.agent.loop import run_agent_loop
+    from backend.ws.execution_context import ConversationThreadRuntime
+
+    class AnswerModel(LLMAdapter):
+        async def simple_chat(self, messages, *, max_tokens=None):
+            return "ready"
+
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            yield StreamEvent(type=StreamEventType.TEXT_CHUNK, content="ready", phase="final_answer")
+            yield StreamEvent(type=StreamEventType.DONE, finish_reason="stop")
+
+    host = setup(tmp_path)
+    adapter = AnswerModel()
+    snapshot = replace(host.snapshot, llm=adapter)
+    runtime = AgentRuntime(metrics_file=tmp_path / "runtime/metrics.jsonl", swarm_store_dir=tmp_path / "runtime/swarm", enable_lease_heartbeat=False)
+    thread = ConversationThreadRuntime("fixture-store", "thread-policy")
+    permission = replace(host.context.permission, mode="bypass", sandbox_mode="danger-full-access")
+
+    async def turn(model):
+        run = RunContext(model_execution=model, agent_runtime=runtime, environment_thread_runtime=thread)
+        builder = ContextBuilder(llm=adapter)
+        events = [event async for event in run_agent_loop("answer", adapter, host.registry,
+            host.context.artifact_store, host.checker, context_builder=builder, permission_context=permission,
+            run_context=run, session_id="thread-policy", metadata={"conversation_id": "thread-policy",
+                "workspace_root": str(host.workspace)})]
+        assert next(event for event in reversed(events) if event.type == "done").data["status"] == "completed"
+        assert builder._exec_policy_owner is run.exec_policy_owner is thread.exec_policy_owner
+        return run.exec_policy_owner
+
+    try:
+        original = await turn(snapshot)
+        assert await turn(snapshot) is original
+        other_home = tmp_path / "other-home"
+        other_home.mkdir()
+        stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(other_home / "config.toml")), {}),))
+        changed = await turn(replace(snapshot, config=replace(snapshot.config, config_layer_stack=stack)))
+        assert changed is not original and changed.home == other_home
+    finally:
+        await thread.close_environments()
+        runtime.close(release_lease=True)
