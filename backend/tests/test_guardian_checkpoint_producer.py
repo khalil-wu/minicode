@@ -23,6 +23,21 @@ from backend.services.llm_adapter_factory import build_provider_adapter
 from backend.tests.test_native_compaction import Endpoint
 
 
+def test_restored_guardian_backup_does_not_rebuild_unused_parent_transcript(monkeypatch):
+    from backend.agent.guardian import host
+
+    builder = ContextBuilder()
+    builder.load_snapshot({"history": [{"role": "user", "content": "retained"}]})
+    builder.guardian_evidence.has_transcript_backup = True
+    def unexpected(_builder):
+        raise AssertionError("An existing Guardian backup rebuilt its parent transcript")
+    monkeypatch.setattr(host, "parent_window_transcript", unexpected)
+    model = ModelExecutionSnapshot(config=AppConfig(llm=LLMSettings(api_key="", model="fixture")), llm=SimpleNamespace(),
+        provider="custom", model="fixture", model_info=None)
+    builder.bind_guardian_model(model, restored=True)
+    assert builder.guardian_evidence.has_transcript_backup
+
+
 @pytest.mark.parametrize("source", ["settings", "models_json", "extension"])
 def test_admitted_model_hash_reaches_the_actual_selected_compactor(tmp_path, monkeypatch, source):
     monkeypatch.setenv("MINICODE_STATE_ROOT", str(tmp_path / "state"))

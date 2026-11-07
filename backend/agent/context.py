@@ -950,10 +950,11 @@ class ContextBuilder:
             from backend.agent.guardian.host import parent_window_transcript, restore_parent_compaction_from_window, restore_requires_parent_context
 
             restore_parent_compaction_from_window(self.guardian_evidence, self)
+            current_parent_transcript = None if self.guardian_evidence.has_transcript_backup else parent_window_transcript(self)
             self.guardian_evidence.restore_review_context(
                 reviewer_compaction_hash=self._guardian_reviewer_compaction_hash,
-                requires_parent_context=restore_requires_parent_context(self.guardian_evidence, self),
-                current_parent_transcript=parent_window_transcript(self))
+                requires_parent_context=restore_requires_parent_context(self.guardian_evidence, self, current_parent_transcript=current_parent_transcript),
+                current_parent_transcript=current_parent_transcript)
 
     def record_turn_admission(self, message_id: str, boundary: dict[str, Any]) -> None:
         self._turn_admissions[message_id] = dict(boundary)

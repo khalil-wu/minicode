@@ -182,13 +182,13 @@ def parent_window_transcript(builder: ContextBuilder) -> tuple[GuardianTranscrip
     return tuple(entries)
 
 
-def restore_requires_parent_context(owner: GuardianEvidenceOwner, builder: ContextBuilder) -> bool:
+def restore_requires_parent_context(owner: GuardianEvidenceOwner, builder: ContextBuilder, *, current_parent_transcript=None) -> bool:
     """Source retained facts need the parent window only without a backup."""
     if owner.has_transcript_backup:
         return False
     if not owner.retained.verified_answers_complete() or owner.retained.verified_answers:
         return True
-    current = parent_window_transcript(builder)
+    current = parent_window_transcript(builder) if current_parent_transcript is None else current_parent_transcript
     for role, records in (("user", owner.retained.user_messages), ("assistant", owner.retained.assistant_messages)):
         for record in records:
             message = record.value
