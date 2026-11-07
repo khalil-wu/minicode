@@ -1,6 +1,6 @@
 """Responses WebSocket connections leased to individual provider requests.
 
-One idle connection is retained per adapter. Concurrent requests own separate
+One idle connection is retained per loaded thread. Concurrent requests own separate
 connections; only the request parser can publish a successful replay baseline.
 """
 from __future__ import annotations
@@ -25,6 +25,10 @@ TURN_STATE_HEADER = "x-codex-turn-state"
 RESPONSES_WEBSOCKET_MAX_MESSAGE_BYTES = 64 << 20
 RESPONSES_WEBSOCKET_MAX_FRAME_BYTES = 16 << 20
 Owner = tuple[str, str, str, str]
+
+
+def thread_owner(owner):
+    return (owner[0], owner[1], owner[3]) if owner is not None else None
 
 
 def responses_turn_state_from_headers(headers: Any) -> str:
@@ -70,7 +74,7 @@ def _replay_item(item: Any) -> Any:
 def _request_properties(payload: dict[str, Any]) -> dict[str, Any]:
     # These metadata fields describe the current request, not model context.
     return {key: value for key, value in payload.items()
-            if key not in {"input", "client_metadata", "metadata"}}
+            if key not in {"input", "client_metadata", "metadata", "generate"}}
 
 
 @dataclass
@@ -88,7 +92,7 @@ class ResponsesWebSocketPool:
     def __init__(self, *, policy=None) -> None:
         from backend.application_network import application_network_policy
         self.policy = policy if policy is not None else application_network_policy()
-        self.idle: _Connection | None = None
+        self.idle: dict[tuple[str, ...], _Connection] = {}
         self.active: set[ResponsesWebSocketRequest] = set()
         self.closed = False
         self.unavailable_status: int | None = None
@@ -107,11 +111,19 @@ class ResponsesWebSocketPool:
 
     async def aclose(self) -> None:
         self.closed = True
-        idle, self.idle = self.idle, None
+        idle, self.idle = self.idle, {}
         await asyncio.gather(
             *(request.aclose() for request in tuple(self.active)),
-            *([idle.socket.close()] if idle is not None else []),
+            *(connection.socket.close() for connection in idle.values()),
         )
+
+    async def close_thread(self, thread_id):
+        idle = [self.idle.pop(key) for key in tuple(self.idle) if key[1] == thread_id]
+        active = [request for request in self.active if request.owner is not None and request.owner[1] == thread_id]
+        for request in active:
+            request.accepted = False
+        await asyncio.gather(*(connection.socket.close() for connection in idle),
+            *(request.aclose() for request in active))
 
 
 class ResponsesWebSocketRequest:
@@ -125,12 +137,7 @@ class ResponsesWebSocketRequest:
         self.response: dict[str, Any] | None = None
         self.info: dict[str, Any] = {"mode": "websocket", "incremental": False, "connection_reused": False}
 
-    async def events(
-        self, payload: dict[str, Any], *, url: str, headers: dict[str, str],
-        proxy: str | None, wire_payload_sink: dict[str, Any] | None,
-        on_handshake: Any,
-        proxy_resolver=None,
-    ) -> AsyncIterator[dict[str, Any]]:
+    async def connect(self, *, url, headers, proxy, on_handshake, proxy_resolver=None):
         from backend.application_network import application_websocket_connect
         self.pool.policy.acquire(url).check()
         if proxy_resolver is not None:
@@ -138,12 +145,12 @@ class ResponsesWebSocketRequest:
         # Source keeps the completed websocket on the thread between turns.
         # Turn metadata travels on response.create; routing/auth headers still
         # invalidate the transport. The sticky token belongs to one turn only.
-        thread_owner = (self.owner[0], self.owner[1], self.owner[3]) if self.owner is not None else None
-        identity = (thread_owner, url, proxy, tuple(sorted(
+        owner_key = thread_owner(self.owner)
+        identity = (owner_key, url, proxy, tuple(sorted(
             (key, value) for key, value in headers.items()
             if key.lower() not in {TURN_STATE_HEADER, "x-codex-turn-metadata", "x-minicode-turn-metadata"}
         )))
-        connection, self.pool.idle = self.pool.idle, None
+        connection = self.pool.idle.pop(owner_key, None)
         # No suspension occurs while taking the idle connection. A second
         # request therefore opens its own socket instead of sharing recv().
         if connection is not None and (
@@ -184,6 +191,32 @@ class ResponsesWebSocketRequest:
             connection.turn_state = turn_state
             self.info["turn_state_present"] = True
         await on_handshake(connection.socket.response.status_code, handshake_headers)
+        return connection, request_turn_state
+
+    async def preconnect(self, **options):
+        connection, _ = await self.connect(**options)
+        self.connection = None
+        self.closed = True
+        self.pool.active.discard(self)
+        key = thread_owner(self.owner)
+        if self.pool.closed or key in self.pool.idle:
+            await connection.socket.close()
+        else:
+            # A viewed thread without a real request has no loaded core to
+            # retire it. Keep only its latest speculative empty connection.
+            retired = [self.pool.idle.pop(other) for other in tuple(self.pool.idle)
+                if not self.pool.idle[other].response_id]
+            self.pool.idle[key] = connection
+            await asyncio.gather(*(item.socket.close() for item in retired))
+
+    async def events(
+        self, payload: dict[str, Any], *, url: str, headers: dict[str, str],
+        proxy: str | None, wire_payload_sink: dict[str, Any] | None,
+        on_handshake: Any,
+        proxy_resolver=None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        connection, request_turn_state = await self.connect(url=url, headers=headers, proxy=proxy,
+            on_handshake=on_handshake, proxy_resolver=proxy_resolver)
         self.payload = payload
         inputs = payload.get("input", [])
         comparable = [_replay_item(item) for item in inputs]
@@ -261,7 +294,9 @@ class ResponsesWebSocketRequest:
             connection.baseline = [_replay_item(item) for item in
                                    [*self.payload.get("input", []), *self.response.get("output", [])]]
             connection.response_id = self.response["id"]
-            previous, self.pool.idle = self.pool.idle, connection
+            key = thread_owner(self.owner)
+            previous = self.pool.idle.get(key)
+            self.pool.idle[key] = connection
             if previous is not None:
                 await previous.socket.close()
         else:

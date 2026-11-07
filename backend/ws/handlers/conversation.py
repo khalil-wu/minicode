@@ -1185,6 +1185,9 @@ async def _publish_conversation_switch(
                                         "session": runtime_snapshot,
                                         "snapshot_at": datetime.now(UTC).isoformat().replace("+00:00", "Z")},
                                        log_context="conversation.switched", wait_for_delivery=False)
+        from backend.ws.model_prewarm import schedule_model_prewarm
+
+        schedule_model_prewarm(session, owner)
         if (not data.get("defer_runtime_capabilities") and owner == session.active_conversation_id
                 and session.session_lifecycle.foreground_navigation_is_current()):
             session.session_lifecycle.schedule_runtime_capabilities(source="workspace.activate.conversation.switch")

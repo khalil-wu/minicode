@@ -1567,6 +1567,9 @@ class SessionLifecycle:
         await session.run_manager.unwatch_conversation_notifications(conversation_id)
         await session.cancel_pending_approvals(reason=reason, conversation_id=conversation_id)
         await session.cancel_agent_runs(conversation_id=conversation_id, reason=reason)
+        from backend.ws.model_prewarm import close_thread_model_sessions
+
+        await close_thread_model_sessions(session, conversation_id)
         from backend.agent.runtime import default_runtime_if_initialized
         from backend.preview.launcher import stop_preview_launches_for_conversation
 

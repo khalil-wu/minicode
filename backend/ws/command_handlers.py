@@ -202,7 +202,7 @@ class SessionCommandHandlersMixin:
                     llm=replace(current.config.llm, model=selected_model, reasoning_effort=selected_effort)),
                     model_runtime=runtime, provider=provider, model=selected_model)
                 adapter = _get_or_create_session_llm(self, config=config, provider=provider,
-                    model=selected_model, model_runtime=runtime)
+                    model=selected_model, model_runtime=runtime, conversation_id=conversation_id)
                 effective = _apply_thinking_level(adapter, definition, selected_effort)
                 config = replace(config, llm=replace(config.llm, reasoning_effort=effective))
                 destination = ModelExecutionSnapshot(config=config, llm=adapter, provider=provider, model=selected_model,

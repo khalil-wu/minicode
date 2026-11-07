@@ -470,6 +470,7 @@ _LLM_ADAPTER_IDENTITY_FIELDS = (
     "responses_reasoning_summary",
     "max_tokens",
     "wire_api",
+    "responses_websocket",
     "proxy_mode",
     "prompt_cache_retention",
     "reasoning_effort_levels",
@@ -667,11 +668,14 @@ def _apply_thinking_level(adapter: Any, model: Any, requested: Any) -> str:
     return apply_model_thinking_level(adapter, model, effective)
 
 
-def _clear_session_llm_cache(session: Any) -> None:
+def _clear_session_llm_cache(session: Any, *, conversation_id: str | None = None) -> None:
     cache = getattr(session, "_llm_adapter_cache", None)
     if isinstance(cache, dict):
-        adapters = list({id(adapter): adapter for adapter in cache.values()}.values())
-        cache.clear()
+        keys = list(cache) if conversation_id is None else [key for key in cache
+            if (key[:2] == ("conversation", conversation_id) if conversation_id
+                else not (len(key) == 3 and key[0] == "conversation"))]
+        removed = [cache.pop(key) for key in keys]
+        adapters = list({id(adapter): adapter for adapter in removed}.values())
         leases = getattr(session, "_llm_adapter_leases", None)
         retired = getattr(session, "_retired_llm_adapters", None)
         if not isinstance(retired, dict):
@@ -693,6 +697,7 @@ def _get_or_create_session_llm(
     provider: str,
     model: str,
     model_runtime: Any | None = None,
+    conversation_id: str = "",
 ) -> Any:
     cache = getattr(session, "_llm_adapter_cache", None)
     if not isinstance(cache, dict):
@@ -706,6 +711,8 @@ def _get_or_create_session_llm(
         model=model,
         model_runtime=model_runtime,
     )
+    if conversation_id:
+        key = ("conversation", conversation_id, key)
     if key in cache:
         adapter = cache[key]
         _lease_session_llm_for_current_task(session, adapter)
@@ -719,7 +726,7 @@ def _get_or_create_session_llm(
         provider_override=provider or None,
         model_runtime=model_runtime,
     )
-    _clear_session_llm_cache(session)
+    _clear_session_llm_cache(session, conversation_id=conversation_id)
     cache[key] = adapter
     _lease_session_llm_for_current_task(session, adapter)
     return adapter
@@ -1946,7 +1953,7 @@ class SessionAgentRunnerMixin:
             or bool(state.get("shutting_down"))
         ):
             return
-        _clear_session_llm_cache(self)
+        _clear_session_llm_cache(self, conversation_id=clean_id)
         existing = state.get("model_refresh_task")
         if isinstance(existing, asyncio.Task) and not existing.done():
             return
@@ -3222,7 +3229,7 @@ class SessionAgentRunnerMixin:
                 model_runtime=selected_catalog, provider=provider, model=model,
             )
             adapter = _get_or_create_session_llm(self, config=config, provider=provider,
-                model=model, model_runtime=selected_catalog)
+                model=model, model_runtime=selected_catalog, conversation_id=conversation_id)
             selected_model = (previous.model_info if (provider, model) == (previous.provider, previous.model)
                 else selected_catalog.get_model(provider, model) if selected_catalog is not None else None)
             effective = _apply_thinking_level(adapter, selected_model, level)
@@ -3709,6 +3716,10 @@ class SessionAgentRunnerMixin:
         # context. Candidate generations are already bound before publication;
         # actual slash dispatch below still captures the latest conversation.
         if not bind_command_context:
+            from backend.ws.model_prewarm import schedule_model_prewarm
+
+            if clean_id == self.active_conversation_id:
+                schedule_model_prewarm(self, clean_id)
             return runner
         tool_registry = (
             self._extension_runtime_state(clean_id).get("registry") or tool_registry
@@ -4574,6 +4585,7 @@ class SessionAgentRunnerMixin:
                 provider=run_provider,
                 model=run_model,
                 model_runtime=run_model_runtime,
+                conversation_id=conversation.id,
             )
             run_context.active_final_output_json_schema = run_config.model_request_policy.final_output_json_schema if run_config.model_request_policy is not None else None
             run_runtime_model = (

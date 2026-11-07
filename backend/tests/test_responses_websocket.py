@@ -82,7 +82,7 @@ def test_codex_metadata_websocket_replays_first_route_in_body_and_headers():
 
             # Reconnect within the same turn must keep the token in both
             # transport representations, without a stale replay baseline.
-            await adapter._responses_websocket.idle.socket.close()
+            await next(iter(adapter._responses_websocket.idle.values())).socket.close()
             await collect(adapter, third)
             assert handshakes[1]["x-codex-turn-state"] == "first-route"
             assert requests[3]["client_metadata"]["x-codex-turn-state"] == "first-route"
@@ -164,7 +164,7 @@ def test_exhausted_websocket_retries_switch_to_http_with_a_new_attempt(tmp_path,
             return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(http_reply)) as client:
-            async with endpoint(disconnected, http_client=client) as (adapter, requests, connections):
+            async with endpoint(disconnected, http_client=client, handle_warmup=True) as (adapter, requests, connections):
                 state, _, events = await run_case(tmp_path, adapter, [], stream_max_attempts=2)
                 assert state.terminal_status == "completed"
                 assert state.reply == "Recovered through HTTPS."
@@ -188,12 +188,15 @@ def test_exhausted_websocket_retries_switch_to_http_with_a_new_attempt(tmp_path,
 
 
 @asynccontextmanager
-async def endpoint(responder, *, http_client=None, process_request=None, compression="deflate"):
+async def endpoint(responder, *, http_client=None, process_request=None, compression="deflate", handle_warmup=False):
     requests, connections = [], []
     async def handler(socket):
         connections.append(socket)
         async for raw in socket:
             request = json.loads(raw)
+            if handle_warmup and request.get("generate") is False:
+                await socket.send(json.dumps(terminal("prewarm", output=[])))
+                continue
             requests.append(request)
             await responder(socket, request, len(requests))
     async with serve(handler, "127.0.0.1", 0, max_size=None, close_timeout=1, process_request=process_request, compression=compression) as server:
@@ -213,7 +216,7 @@ def test_query_engine_reuses_connection_and_sends_only_tool_result(tmp_path, mon
         async def respond(socket, request, index):
             output = [custom_item() if native else function_call()] if index == 1 else None
             await socket.send(json.dumps(terminal(f"response-{index}", output=output)))
-        async with endpoint(respond) as (adapter, requests, connections):
+        async with endpoint(respond, handle_warmup=True) as (adapter, requests, connections):
             adapter._settings = replace(adapter._settings, supports_custom_tools=native)
             tool = ApplyPatchTool() if native else WorkTool("inspect")
             state, _, events = await run_case(tmp_path, adapter, [tool])
@@ -228,7 +231,7 @@ def test_query_engine_reuses_connection_and_sends_only_tool_result(tmp_path, mon
             else:
                 assert tool.executions == 1
             assert not adapter._responses_websocket.active
-            assert adapter._responses_websocket.idle is not None
+            assert bool(adapter._responses_websocket.idle)
             traces = [event.data.get("provider_raw", {}) for event in events if isinstance(event.data, dict)]
             assert any(trace.get("request_summary", {}).get("transport", {}).get("incremental") for trace in traces)
     asyncio.run(scenario())
@@ -279,7 +282,7 @@ def test_concurrent_requests_have_separate_sockets_without_serializing():
             assert "".join(event.content for event in b if event.type == StreamEventType.TEXT_CHUNK) == "b"
             assert len(connections) == 2
             assert not adapter._responses_websocket.active
-            assert adapter._responses_websocket.idle is not None
+            assert bool(adapter._responses_websocket.idle)
     asyncio.run(scenario())
 
 
@@ -369,7 +372,7 @@ def test_partial_stream_close_and_cancellation_release_connection(cancel_task):
                 assert first.content == "partial"
                 await stream.aclose()
             await asyncio.wait_for(closed.wait(), 2)
-            assert not adapter._responses_websocket.active and adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.active and not adapter._responses_websocket.idle
             await collect(adapter, messages)
             assert len(connections) == 2 and "previous_response_id" not in requests[1]
     asyncio.run(scenario())
@@ -404,7 +407,7 @@ def test_existing_harness_recovery_uses_full_context_and_never_repeats_tools(tmp
                     assert any(item.get("type") == "function_call" and item.get("call_id") == "call-1" for item in request["input"])
                     assert any(item.get("type") == "function_call_output" and item.get("call_id") == "call-1" for item in request["input"])
                 await socket.send(json.dumps(terminal("recovered", text="Correct final answer.")))
-        async with endpoint(respond) as (adapter, requests, connections):
+        async with endpoint(respond, handle_warmup=True) as (adapter, requests, connections):
             tool = WorkTool("inspect")
             state, _, _ = await run_case(tmp_path, adapter, [tool])
             assert state.terminal_status == "completed", state.stopped_reason
@@ -444,7 +447,7 @@ def test_codex_missing_previous_response_recovers_native_patch_once(tmp_path, mo
                 assert any(item.get("type") == "custom_tool_call_output" for item in request["input"])
                 await socket.send(json.dumps(terminal("rebuilt", text="Recovered after patch.")))
 
-        async with endpoint(respond) as (adapter, requests, connections):
+        async with endpoint(respond, handle_warmup=True) as (adapter, requests, connections):
             adapter._settings = replace(adapter._settings, supports_custom_tools=True)
             state, _, _ = await run_case(tmp_path, adapter, [tool])
             assert state.terminal_status == "completed", state.stopped_reason
@@ -479,7 +482,7 @@ def test_missing_continuation_discards_lease_without_leaking_owner(continuation_
             events = await collect(adapter, [*messages, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="continue-a")], owner="owner-a")
             error = next(event for event in events if event.type == StreamEventType.ERROR)
             assert error.raw["provider_error_type"] == "network"
-            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.idle
             assert not adapter._responses_websocket.active
             await collect(adapter, [LLMMessage(role="user", content="public-b")], owner="owner-b")
             assert len(connections) == 2
@@ -557,7 +560,7 @@ def test_protocol_rejection_cannot_publish_a_replay_baseline():
             messages = [LLMMessage(role="user", content="work")]
             events = await collect(adapter, messages)
             assert any(event.type == StreamEventType.ERROR for event in events)
-            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.idle
             await collect(adapter, messages)
             assert len(connections) == 2 and "previous_response_id" not in requests[1]
     asyncio.run(scenario())
@@ -590,7 +593,7 @@ def test_source_frame_limit_rejects_oversized_message_and_discards_the_connectio
             messages = [LLMMessage(role="user", content="work")]
             events = await collect(adapter, messages)
             assert any(event.type == StreamEventType.ERROR for event in events)
-            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.idle
             events = await collect(adapter, messages)
             assert any(event.type == StreamEventType.DONE for event in events)
             assert len(connections) == 2 and "previous_response_id" not in requests[1]
@@ -608,7 +611,7 @@ def test_fragmented_message_limit_applies_across_frames(monkeypatch):
         async with endpoint(respond, compression=None) as (adapter, _requests, _connections):
             events = await collect(adapter, [LLMMessage(role="user", content="work")])
             assert any(event.type == StreamEventType.ERROR for event in events)
-            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.idle
     asyncio.run(scenario())
 
 
@@ -651,7 +654,7 @@ def test_streamed_text_missing_from_terminal_items_forces_full_replay():
             assert events[-1].type == StreamEventType.DONE
             assert "".join(event.content for event in events if event.type == StreamEventType.TEXT_CHUNK) == "answer"
             assert events[-1].raw["request_summary"]["transport"]["response_items_complete"] is False
-            assert adapter._responses_websocket.idle is None
+            assert not adapter._responses_websocket.idle
             await collect(adapter, [*messages, LLMMessage(role="assistant", content="answer"), LLMMessage(role="user", content="continue")])
             assert "previous_response_id" not in requests[1]
             assert len(requests[1]["input"]) == 3

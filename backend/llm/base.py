@@ -989,6 +989,22 @@ class LLMAdapter(ABC):
         """Switch a replayable request to another supported transport, if any."""
         return False
 
+    @property
+    def supports_session_prewarm(self) -> bool:
+        return False
+
+    def schedule_session_preconnect(self, metadata: dict[str, Any]) -> asyncio.Task | None:
+        return None
+
+    def session_prewarm_needed(self, metadata) -> bool:
+        return False
+
+    def schedule_session_prewarm(self, messages, tools, metadata) -> asyncio.Task | None:
+        return None
+
+    async def close_thread_session(self, thread_id: str) -> None:
+        return None
+
     async def transcribe_audio(self, content: bytes, *, filename: str, model: str, language: str = "", prompt: str = "") -> str:
         raise NotImplementedError("当前服务商不支持语音转文字，请选择兼容 audio/transcriptions 的服务。")
 

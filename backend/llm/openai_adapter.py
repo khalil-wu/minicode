@@ -2508,6 +2508,8 @@ class OpenAIAdapter(LLMAdapter):
         self._responses_websocket = ResponsesWebSocketPool(policy=self._application_network)
         self._responses_side_pools: set[ResponsesWebSocketPool] = set()
         self._responses_turn_states: dict[tuple[str, ...], str] = {}
+        self._session_warmups: dict[tuple[str, ...], tuple[asyncio.Task, float, str]] = {}
+        self._session_warmup_tasks: dict[asyncio.Task, tuple[str, ...]] = {}
         self._http_client: httpx.AsyncClient | None = http_client
         # Optional chat fields this gateway answered 400 for. Remembered so the
         # rejection is paid once per adapter, not on every turn.
@@ -2537,6 +2539,137 @@ class OpenAIAdapter(LLMAdapter):
         self._responses_websocket.fallback_to_http = True
         return True
 
+    @property
+    def supports_session_prewarm(self) -> bool:
+        return self._settings.wire_api == "responses" and self._settings.responses_websocket and not self._responses_websocket.http_only
+
+    @staticmethod
+    def _warmup_key(owner):
+        return (owner[0], owner[1], owner[3]) if owner is not None else None
+
+    def session_prewarm_needed(self, metadata):
+        if self._closed or not self.supports_session_prewarm:
+            return False
+        from websockets.protocol import State
+
+        key = self._warmup_key(self._responses_turn_owner(metadata))
+        idle = self._responses_websocket.idle.get(key)
+        pending = self._session_warmups.get(key)
+        return key is not None and not (pending is not None and pending[2] == "prompt" and not pending[0].done()) and not (
+            idle is not None and self._warmup_key(idle.owner) == key and idle.response_id and idle.socket.state == State.OPEN)
+
+    def _schedule_session_warmup(self, metadata, kind, operation):
+        if self._closed or not self.supports_session_prewarm:
+            return None
+        owner = self._responses_turn_owner(metadata)
+        key = self._warmup_key(owner)
+        if key is None or not owner[1]:
+            return None
+        previous = self._session_warmups.get(key)
+        if previous is not None and previous[2] == kind and not previous[0].done():
+            return previous[0]
+        idle = self._responses_websocket.idle.get(key)
+        if idle is not None and self._warmup_key(idle.owner) == key and (kind == "connect" or idle.response_id):
+            from websockets.protocol import State
+
+            if idle.socket.state == State.OPEN:
+                return None
+
+        async def prepare():
+            if previous is not None:
+                await previous[0]
+            try:
+                async with asyncio.timeout(10):
+                    await operation(owner)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                # Prewarm is optional setup; the real request retains the
+                # normal retry/error path. Do not log credential-bearing URLs.
+                logger.info("Model session %s prewarm unavailable (%s)", kind, type(error).__name__)
+
+        task = asyncio.create_task(prepare(), name=f"model-session-{kind}:{owner[1]}")
+        self._session_warmups[key] = (task, previous[1] if previous is not None and not previous[0].done() else time.monotonic(), kind)
+        self._session_warmup_tasks[task] = key
+        def settled(done):
+            self._session_warmup_tasks.pop(done, None)
+            current = self._session_warmups.get(key)
+            if current is not None and current[0] is done:
+                self._session_warmups.pop(key)
+            if not done.cancelled():
+                done.exception()
+        task.add_done_callback(settled)
+        return task
+
+    async def _consume_session_warmup(self, owner):
+        pending = self._session_warmups.pop(self._warmup_key(owner), None)
+        if pending is None:
+            return
+        task, started, _ = pending
+        try:
+            if task.done():
+                task.result()
+            else:
+                await asyncio.wait_for(asyncio.shield(task), max(0, 10 - (time.monotonic() - started)))
+        except TimeoutError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        except asyncio.CancelledError:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+    async def close_thread_session(self, thread_id):
+        warmups = [task for task, key in self._session_warmup_tasks.items() if key[1] == thread_id]
+        for key in tuple(self._session_warmups):
+            if key[1] == thread_id:
+                self._session_warmups.pop(key)
+        for task in warmups:
+            task.cancel()
+        await asyncio.gather(*warmups, return_exceptions=True)
+        await self._responses_websocket.close_thread(thread_id)
+
+    def schedule_session_preconnect(self, metadata):
+        metadata = dict(metadata)
+        async def connect_session(owner):
+            base = {**self._responses_headers(), "OpenAI-Beta": WEBSOCKET_BETA,
+                **_responses_identity_headers(_responses_client_metadata(metadata))}
+            headers = await emit_provider_lifecycle_headers(metadata, base)
+            url = urlparse(self._responses_url())
+            ws_url = url._replace(scheme="wss" if url.scheme == "https" else "ws").geturl()
+            request = self._responses_websocket.request(owner)
+            async def handshake(status, response_headers):
+                self._remember_responses_turn_state(metadata, response_headers)
+            try:
+                await request.preconnect(url=ws_url, headers=headers, proxy=None, on_handshake=handshake,
+                    proxy_resolver=lambda destination: _proxy_url_for_base_url(
+                        destination.replace("wss://", "https://", 1).replace("ws://", "http://", 1), self._settings.proxy_mode) or None)
+            finally:
+                await request.aclose()
+        return self._schedule_session_warmup(metadata, "connect", connect_session)
+
+    def schedule_session_prewarm(self, messages, tools, metadata):
+        if not self.session_prewarm_needed(metadata):
+            return None
+        # The canonical request builder detaches provider input and tools now,
+        # before the foreground appends its next admitted user input.
+        metadata = dict(metadata)
+        metadata["_source_responses_metadata"] = {**metadata.get("_source_responses_metadata", {}), "request_kind": "prewarm"}
+        payload, _, _ = self._responses_request_payload(messages, tools, metadata)
+        async def warm_session(owner):
+            request = self._responses_websocket.request(owner)
+            stream = self._emit_responses_websocket_events(payload, request=request,
+                metadata=metadata, wire_payload_sink=None, warmup=True)
+            try:
+                async for _ in stream:
+                    pass
+                request.accepted = bool(request.response and request.response.get("status") == "completed"
+                    and isinstance(request.response.get("output"), list))
+            finally:
+                await _close_async_iterator(stream)
+                await request.aclose()
+        return self._schedule_session_warmup(metadata, "prompt", warm_session)
+
     async def transcribe_audio(self, content: bytes, *, filename: str, model: str, language: str = "", prompt: str = "") -> str:
         headers = {key: value for key, value in self._images_headers().items() if key.lower() != "content-type"}
         data = {"model": model, "response_format": "json"}
@@ -2560,6 +2693,11 @@ class OpenAIAdapter(LLMAdapter):
         if self._closed:
             return
         self._closed = True
+        warmups, self._session_warmup_tasks = self._session_warmup_tasks, {}
+        self._session_warmups.clear()
+        for task in warmups:
+            task.cancel()
+        await asyncio.gather(*warmups, return_exceptions=True)
         self._responses_turn_states.clear()
         await asyncio.gather(
             self._responses_websocket.aclose(),
@@ -3373,6 +3511,7 @@ class OpenAIAdapter(LLMAdapter):
     async def _emit_responses_websocket_events(
         self, payload: dict[str, Any], *, request: ResponsesWebSocketRequest,
         metadata: dict[str, Any] | None, wire_payload_sink: dict[str, Any] | None,
+        warmup: bool = False,
     ) -> AsyncIterator[Any]:
         base_headers = self._responses_headers()
         if not request.pool.http_only:
@@ -3380,6 +3519,8 @@ class OpenAIAdapter(LLMAdapter):
         sent_payload, headers = await self._prepare_http_request(
             payload, metadata=metadata, base_headers=base_headers,
         )
+        if warmup:
+            sent_payload["generate"] = False
         url = urlparse(self._responses_url())
         ws_url = url._replace(scheme="wss" if url.scheme == "https" else "ws").geturl()
         async def handshake(status: int, response_headers: dict[str, str]) -> None:
@@ -3414,6 +3555,8 @@ class OpenAIAdapter(LLMAdapter):
                 request.pool.unavailable_status = status
             finally:
                 await _close_async_iterator(events)
+        if warmup:
+            return
         if headers.get("OpenAI-Beta") == WEBSOCKET_BETA:
             headers = {key: value for key, value in headers.items() if key != "OpenAI-Beta"}
         request.info.update({
@@ -3448,6 +3591,7 @@ class OpenAIAdapter(LLMAdapter):
             owner = (str(routing.get("session_id") or ""), thread_id,
                      str(routing.get("run_id") or routing.get("turn_id") or ""),
                      str(routing.get("query_source") or "user")) if thread_id else None
+            await self._consume_session_warmup(owner)
             request = self._responses_websocket.request(owner)
         stream = self._stream_responses_events(messages, tools, metadata=metadata, websocket_request=request)
         try:
@@ -3476,21 +3620,7 @@ class OpenAIAdapter(LLMAdapter):
                 if request is not None:
                     await request.aclose()
 
-    async def _stream_responses_events(
-        self,
-        messages: list[LLMMessage],
-        tools: list[dict[str, Any]] | None = None,
-        metadata: dict[str, Any] | None = None,
-        websocket_request: ResponsesWebSocketRequest | None = None,
-    ) -> AsyncIterator[StreamEvent]:
-        """
-        使用 Responses API 流式调用。
-
-        Responses API 格式：
-          input: list[dict] — 消息列表
-          tools: list[dict] — 工具定义
-          stream: bool — 流式
-        """
+    def _responses_request_payload(self, messages, tools, metadata):
         # 构建 instructions + input（Responses API 消息格式）
         instructions, input_messages = _split_responses_instructions(messages)
         api_input = self._build_responses_input(input_messages)
@@ -3600,6 +3730,24 @@ class OpenAIAdapter(LLMAdapter):
                 and "reasoning" in kwargs and "summary" in kwargs["reasoning"]):
             kwargs["stream_options"] = {"reasoning_summary_delivery": "sequential_cutoff"}
 
+        return kwargs, custom_fields, uses_sequential_cutoff_summaries
+
+    async def _stream_responses_events(
+        self,
+        messages: list[LLMMessage],
+        tools: list[dict[str, Any]] | None = None,
+        metadata: dict[str, Any] | None = None,
+        websocket_request: ResponsesWebSocketRequest | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """
+        使用 Responses API 流式调用。
+
+        Responses API 格式：
+          input: list[dict] — 消息列表
+          tools: list[dict] — 工具定义
+          stream: bool — 流式
+        """
+        kwargs, custom_fields, uses_sequential_cutoff_summaries = self._responses_request_payload(messages, tools, metadata)
         # Keep routing metadata through the concrete transport even when no
         # lifecycle hook is installed. It owns turn-scoped sticky state as
         # well as extension callbacks.

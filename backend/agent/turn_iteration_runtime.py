@@ -376,6 +376,21 @@ class TurnIterationRuntime:
             state=self.state, session_id=self.tool_context.run_context.responses_session_id,
             agent_name=AgentPath.parse(self.turn_kernel.run_record.agent_path).logical_name,
         )
+        if initial_turn_pending and self.llm.supports_session_prewarm:
+            from backend.async_cleanup import retain_cleanup_task
+            from backend.agent.provider_protocol import build_llm_request_metadata, build_provider_attempt_metadata
+
+            request_metadata = build_llm_request_metadata(metadata=self.metadata,
+                session_id=self.tool_context.session_id, task_id=self.tool_context.task_id,
+                workspace_root=self.workspace_root, run_id=self.run_record.run_id,
+                conversation_id=self.run_record.conversation_id, provider_lifecycle_runtime=run_context.lifecycle_runtime)
+            request_metadata = build_provider_attempt_metadata(request_metadata, context_builder=self.context,
+                run_context=run_context, run_record=self.run_record)
+            if self.llm.session_prewarm_needed(request_metadata):
+                prompt = self.context._render_prompt_messages(self.state, self.workspace_root)
+                warmup = self.llm.schedule_session_prewarm(prompt, tool_schemas, request_metadata)
+                if warmup is not None:
+                    retain_cleanup_task(warmup, run_context.lifecycle_cleanup_tasks)
         boundary_input = await self.turn_kernel.take_boundary_input(
             initial_turn_pending=initial_turn_pending,
         )

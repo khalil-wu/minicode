@@ -18,6 +18,10 @@ def _session(repo: ConversationRepository, active_id: str) -> SimpleNamespace:
     session = SimpleNamespace(
         active_conversation_id=active_id,
         connection_generation=1,
+        _model_prewarm_tasks={},
+        _model_prewarm_view_owner=None,
+        run_manager=SimpleNamespace(run_tasks={}),
+        provider="custom", selected_model="", config=SimpleNamespace(llm=SimpleNamespace(reasoning_effort="")),
         conversation_repo=repo,
         _conversation_projection_lock=lambda _owner: projection_lock,
         ws_manager=None,
