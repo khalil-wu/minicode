@@ -236,6 +236,30 @@ def test_old_native_snapshot_reconstructs_raw_parent_state_without_capture_or_gu
     assert restored.export_snapshot()["history"] == persisted["history"]
 
 
+@pytest.mark.parametrize("reuse", [True, False])
+def test_uncompacted_restore_only_builds_a_backup_for_independent_review(tmp_path, monkeypatch, reuse):
+    ctx, _ = guardian_context(tmp_path)
+    execution = replace(ctx.model_execution, config=replace(ctx.model_execution.config,
+        feature_flags=FeatureFlags({"guardian_approval": True, "guardian_reuse_parent_compaction": reuse})))
+    builder = ContextBuilder()
+    builder.load_snapshot({"history": [{"role": "user", "content": f"Original instruction {index}"} for index in range(10000)]})
+    seen = []
+    def observe(owner):
+        seen.append(owner)
+        return parent_window_transcript(owner)
+    monkeypatch.setattr("backend.agent.guardian.host.parent_window_transcript", observe)
+    builder.bind_guardian_model(execution, restored=True)
+    assert len(seen) == (0 if reuse else 1)
+    assert builder.guardian_evidence.context_mode == ("thread_owned" if reuse else "independent")
+    assert builder.guardian_evidence.has_transcript_backup is not reuse
+    host = GuardianHostState("parent")
+    host.bind(builder)
+    reviewed = host.snapshot()
+    assert len(reviewed.parent_window_transcript) == 10000
+    assert reviewed.parent_window_transcript[0].text == "Original instruction 0"
+    assert reviewed.parent_window_transcript[-1].text == "Original instruction 9999"
+
+
 def test_loaded_checkpoint_transcript_uses_current_window_and_retains_authorization(tmp_path):
     _, action = guardian_context(tmp_path)
     builder = ContextBuilder()

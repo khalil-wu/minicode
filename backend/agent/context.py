@@ -967,8 +967,16 @@ class ContextBuilder:
         self._guardian_reviewer_compaction_hash = review_model_for_execution(snapshot).compaction_hash
         if restored:
             from backend.agent.guardian.host import parent_window_transcript, restore_parent_compaction_from_window, restore_requires_parent_context
+            from backend.agent.guardian.context import GuardianContextMode
 
             restore_parent_compaction_from_window(self.guardian_evidence, self)
+            mode = (GuardianContextMode.INDEPENDENT if self.guardian_evidence.context_mode == GuardianContextMode.INDEPENDENT.value
+                else GuardianContextMode.for_checkpoint(self.guardian_evidence.parent_compaction, self._guardian_reviewer_compaction_hash))
+            # ThreadOwned uses the model window at the actual review. An
+            # eager transcript here is discarded by restore_review_context.
+            if mode is GuardianContextMode.THREAD_OWNED:
+                self.guardian_evidence.restore_review_context(reviewer_compaction_hash=self._guardian_reviewer_compaction_hash)
+                return
             current_parent_transcript = None if self.guardian_evidence.has_transcript_backup else parent_window_transcript(self)
             self.guardian_evidence.restore_review_context(
                 reviewer_compaction_hash=self._guardian_reviewer_compaction_hash,
