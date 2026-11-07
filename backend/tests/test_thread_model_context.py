@@ -8,6 +8,10 @@ from backend.agent.context import ContextBuilder
 from backend.agent.run_context import RunContext
 from backend.tests.test_user_input_presentation_chain import session_for
 from backend.ws.execution_context import ConversationThreadRuntime
+from backend.ws.manager import WebSocketManager
+from backend.ws.model_prewarm import prepare_thread_model_context, release_prepared_model_context, schedule_model_prewarm
+from pathlib import Path
+import threading
 
 
 @pytest.mark.asyncio
@@ -87,3 +91,109 @@ async def test_real_ws_turns_reuse_context_and_external_replacement_forces_reloa
     finally:
         await thread.close_environments()
         await session.session_lifecycle.shutdown(reason="thread-model-context")
+
+
+@pytest.mark.asyncio
+async def test_idle_context_is_taken_by_the_first_real_turn_without_loading_it_again(tmp_path, monkeypatch):
+    session, record, adapter = session_for(tmp_path, monkeypatch)
+    manager = WebSocketManager()
+    session.ws_manager = manager
+    session.conversation_repo.save_context_snapshot(record.id, {"history": [{"role": "user", "content": "Restored original input"}]})
+    loads = []
+    load = ContextBuilder.load_snapshot
+    def observe(builder, snapshot):
+        if builder._conversation_id == record.id:
+            loads.append(builder)
+        return load(builder, snapshot)
+    monkeypatch.setattr(ContextBuilder, "load_snapshot", observe)
+    workspace = Path(record.execution_cwd)
+    try:
+        await prepare_thread_model_context(session, record.id, workspace, session.config)
+        thread = manager.execution_contexts.thread_runtime_for(session.conversation_repo.store_instance_id(), record.id)
+        prepared = thread.model_context[0]
+        assert loads == [prepared] and prepared is not session.context_builder
+        session.context_builder.append_user("Reader-only mutation must not enter model context")
+        await asyncio.create_task(session._run_agent("First real input", conversation_id=record.id,
+            run_context=RunContext(environment_thread_runtime=thread),
+            metadata={"user_message_id": "first-user", "assistant_message_id": "first-answer"}))
+        await asyncio.gather(*tuple(session.run_manager.lifecycle_cleanup_tasks_for(record.id)))
+        assert loads == [prepared]
+        assert thread.model_context[0] is prepared
+        assert any(message.content == "Restored original input" for message in adapter.requests[0])
+        assert not any("Reader-only mutation" in str(message.content) for message in adapter.requests[0])
+        release_prepared_model_context(session)
+    finally:
+        session.ws_manager = None
+        await session.session_lifecycle.shutdown(reason="idle-context-first-turn")
+        for thread in manager.execution_contexts.thread_runtimes():
+            await thread.close_environments()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["history", "workspace", "admission", "navigation", "shutdown"])
+async def test_idle_preparation_cannot_publish_across_an_owner_transition(tmp_path, monkeypatch, change):
+    session, record, _ = session_for(tmp_path, monkeypatch)
+    manager = WebSocketManager()
+    session.ws_manager = manager
+    workspace = Path(record.execution_cwd)
+    entered, release = threading.Event(), threading.Event()
+    load = ContextBuilder.load_snapshot
+    def delayed(builder, snapshot):
+        if builder._conversation_id == record.id:
+            entered.set()
+            assert release.wait(5)
+        return load(builder, snapshot)
+    monkeypatch.setattr(ContextBuilder, "load_snapshot", delayed)
+    task = asyncio.create_task(prepare_thread_model_context(session, record.id, workspace, session.config))
+    assert await asyncio.to_thread(entered.wait, 3)
+    try:
+        if change == "history":
+            session.conversation_repo.save_context_snapshot(record.id, {"history": [{"role": "user", "content": "newer history"}]})
+        elif change == "workspace":
+            workspace = tmp_path / "another-workspace"
+        elif change == "admission":
+            session.run_manager.run_tasks[record.id] = asyncio.current_task()
+        elif change == "navigation":
+            session.active_conversation_id = "another-thread"
+        else:
+            session.session_lifecycle.is_shutting_down = True
+        release.set()
+        await task
+        thread = manager.execution_contexts.thread_runtime_for(session.conversation_repo.store_instance_id(), record.id)
+        if change in {"history", "workspace"}:
+            current = session.conversation_repo.get_execution_context(record.id)
+            assert thread.take_model_context(current.context_snapshot, workspace) is None
+        else:
+            assert thread is None
+        release_prepared_model_context(session)
+    finally:
+        release.set()
+        session.run_manager.run_tasks.pop(record.id, None)
+        session.ws_manager = None
+        await session.session_lifecycle.shutdown(reason="idle-context-transition")
+
+
+@pytest.mark.asyncio
+async def test_prewarm_shutdown_drains_the_history_worker_and_does_not_retain_a_speculative_thread(tmp_path, monkeypatch):
+    session, record, _ = session_for(tmp_path, monkeypatch)
+    manager = WebSocketManager()
+    session.ws_manager = manager
+    session.provider, session.selected_model = "custom", session.config.llm.model
+    monkeypatch.setattr("backend.config.load_config", lambda **_: session.config)
+    entered, release = threading.Event(), threading.Event()
+    load = ContextBuilder.load_snapshot
+    def delayed(builder, snapshot):
+        if builder._conversation_id == record.id:
+            entered.set()
+            assert release.wait(5)
+        return load(builder, snapshot)
+    monkeypatch.setattr(ContextBuilder, "load_snapshot", delayed)
+    schedule_model_prewarm(session, record.id)
+    assert await asyncio.to_thread(entered.wait, 3)
+    shutdown = asyncio.create_task(session.session_lifecycle.shutdown(reason="prewarm-worker-drain"))
+    await asyncio.sleep(.03)
+    assert not shutdown.done()
+    release.set()
+    await shutdown
+    assert session._model_context_prewarm is None
+    assert not manager.execution_contexts.thread_runtimes()

@@ -1602,6 +1602,8 @@ class SessionLifecycle:
             )
             if receipt.pending:
                 raise RuntimeError(f"Session {self._session.session_id} still owns {receipt.pending} command task(s)")
+        from backend.ws.model_prewarm import release_prepared_model_context
+        release_prepared_model_context(self._session)
         # Retirement stops execution, not admitted user work. Follow-ups,
         # inflight dispatches and unacknowledged steers are already durable;
         # cancellation cleanup restores the latter and closing the owner lease

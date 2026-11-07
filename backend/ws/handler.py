@@ -362,6 +362,7 @@ class WebSocketSession(
         self._llm_adapter_cache: dict[tuple[Any, ...], LLMAdapter] = {}
         self._model_prewarm_tasks: dict[str, tuple[tuple[Any, ...], asyncio.Task]] = {}
         self._model_prewarm_view_owner: str | None = None
+        self._model_context_prewarm = None
         self._llm_close_tasks: set[asyncio.Task[Any]] = set()
         self._llm_adapter_leases: dict[int, set[asyncio.Task[Any]]] = {}
         self._retired_llm_adapters: dict[int, LLMAdapter] = {}

@@ -11,11 +11,58 @@ from backend.llm.base import LLMAdapter
 logger = logging.getLogger(__name__)
 
 
+def release_prepared_model_context(session, conversation_id=None):
+    prepared = session._model_context_prewarm
+    if prepared is None or conversation_id is not None and prepared[0].conversation_id != conversation_id:
+        return
+    session._model_context_prewarm = None
+    thread, retained = prepared
+    if thread.model_context is retained:
+        thread.model_context = None
+        registry = session.ws_manager.execution_contexts
+        if registry.context_for(thread.conversation_id) is None and thread.thread_environments is None and not thread.pending_tasks():
+            registry.release_thread_runtime(thread)
+
+
+async def prepare_thread_model_context(session, conversation_id, workspace, config):
+    """Load the idle thread's owned context before input admission needs it."""
+    if session.ws_manager is None:
+        return
+    registry = session.ws_manager.execution_contexts
+    store_id = await asyncio.to_thread(session.conversation_repo.store_instance_id)
+    thread = registry.thread_runtime_for(store_id, conversation_id)
+    if thread is not None and (thread.model_context is not None or thread.pending_tasks()):
+        return
+
+    def load():
+        from backend.agent.context import ContextBuilder
+
+        record = session.conversation_repo.get_execution_context(conversation_id, prepare_resume=True)
+        if record is None or record.archived:
+            return None
+        builder = ContextBuilder(token_budget=config.token_budget, agent_settings=config.agent,
+            conversation_id=conversation_id, workspace_root=workspace)
+        builder.load_snapshot(record.context_snapshot)
+        return builder, record.context_snapshot
+
+    prepared = await to_thread_cancel_safe(load)
+    if (prepared is None or session.active_conversation_id != conversation_id or session.session_lifecycle.is_shutting_down
+            or conversation_id in session.run_manager.run_tasks):
+        return
+    thread = registry.thread_runtime(store_id, conversation_id)
+    if thread.model_context is not None or thread.pending_tasks():
+        return
+    builder, snapshot = prepared
+    thread.retain_model_context(builder, snapshot, workspace)
+    session._model_context_prewarm = (thread, thread.model_context)
+
+
 async def close_thread_model_sessions(session, conversation_id):
     pending = session.__dict__.get("_model_prewarm_tasks", {}).pop(conversation_id, None)
     if pending is not None:
         pending[1].cancel()
         await asyncio.gather(pending[1], return_exceptions=True)
+    release_prepared_model_context(session, conversation_id)
     adapters = {id(adapter): adapter for collection in ("_llm_adapter_cache", "_retired_llm_adapters")
         for adapter in session.__dict__.get(collection, {}).values()}
     await asyncio.gather(*(adapter.close_thread_session(conversation_id) for adapter in adapters.values() if isinstance(adapter, LLMAdapter)))
@@ -55,17 +102,24 @@ def schedule_model_prewarm(session, conversation_id):
             # Speculative views have no loaded core to unload. The normal
             # adapter lease still protects a foreground run admitted now.
             _clear_session_llm_cache(session, conversation_id=previous_view)
+            release_prepared_model_context(session, previous_view)
 
     async def prepare():
         from backend.config import load_config
-        from backend.ws.agent_runner import _apply_thinking_level, _config_with_runtime_model_budget, _get_or_create_session_llm
-        from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
 
         record = await asyncio.to_thread(session.conversation_repo.get_conversation_summary, conversation_id)
         if record is None or record.archived:
             return
         workspace = session.session_lifecycle.workspace_root_for_conversation(record)
         config = await to_thread_cancel_safe(load_config, cwd=workspace)
+        async with asyncio.TaskGroup() as preparation:
+            preparation.create_task(prepare_thread_model_context(session, conversation_id, workspace, config))
+            preparation.create_task(prepare_transport(config))
+
+    async def prepare_transport(config):
+        from backend.ws.agent_runner import _apply_thinking_level, _config_with_runtime_model_budget, _get_or_create_session_llm
+        from backend.agent.provider_lifecycle import LIFECYCLE_RUNTIME_METADATA_KEY
+
         runtime = session._model_runtime_for_conversation(conversation_id)
         provider, model, effort = selection
         if runtime is not None:
