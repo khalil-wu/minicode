@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import stat
 import yaml
 from dataclasses import dataclass, field
 from collections import deque
@@ -365,8 +366,9 @@ class SkillLoader:
     @staticmethod
     def skill_files_for_root(base_dir: Path, *, direct_children: bool) -> list[Path]:
         if direct_children:
-            return sorted(child / "SKILL.md" for child in base_dir.iterdir()
-                if child.is_dir() and (child / "SKILL.md").is_file())
+            with os.scandir(base_dir) as entries:
+                return sorted(Path(child.path) / "SKILL.md" for child in entries
+                    if child.is_dir() and (Path(child.path) / "SKILL.md").is_file())
         return SkillLoader._discover_skill_files(base_dir)
 
     @staticmethod
@@ -378,17 +380,18 @@ class SkillLoader:
         nested container layouts). Resolve
         directory identities so linked directory trees cannot create cycles.
         """
-        pending = deque([base_dir])
+        pending = deque([(base_dir, None)])
         seen_dirs: set[str] = set()
         found: list[Path] = []
         excluded = {".git", ".hg", ".svn", "node_modules", "__pycache__"}
 
         while pending:
-            current = pending.popleft()
-            try:
-                identity = os.path.normcase(str(current.resolve()))
-            except OSError:
-                identity = os.path.normcase(str(current.absolute()))
+            current, identity = pending.popleft()
+            if identity is None:
+                try:
+                    identity = os.path.normcase(str(current.resolve()))
+                except OSError:
+                    identity = os.path.normcase(str(current.absolute()))
             if identity in seen_dirs:
                 continue
             seen_dirs.add(identity)
@@ -399,14 +402,18 @@ class SkillLoader:
                 continue
 
             try:
-                children = sorted(
-                    (
-                        child
-                        for child in current.iterdir()
-                        if child.name not in excluded and child.is_dir()
-                    ),
-                    key=lambda path: path.name.casefold(),
-                )
+                with os.scandir(current) as entries:
+                    children = []
+                    for child in entries:
+                        if child.name in excluded or not child.is_dir():
+                            continue
+                        # An ordinary child's identity follows its resolved
+                        # parent. Only links/junctions require another resolve.
+                        linked = child.is_symlink() or (os.name == "nt" and
+                            child.stat(follow_symlinks=False).st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+                        child_identity = None if linked else os.path.normcase(os.path.join(identity, child.name))
+                        children.append((Path(child.path), child_identity))
+                    children.sort(key=lambda item: item[0].name.casefold())
             except OSError:
                 continue
             pending.extend(children)

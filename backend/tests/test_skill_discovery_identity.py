@@ -97,3 +97,31 @@ def test_same_target_alias_deduplicates_but_retarget_is_observed_on_next_scan(tm
         assert original[0].description == "First target"
     finally:
         unlink()
+
+
+def test_nested_discovery_resolves_only_root_and_linked_directories(tmp_path, monkeypatch):
+    root = tmp_path / "skills"
+    paths = [skill(root / "container" / f"owned-{index}", f"owned-{index}") for index in range(32)]
+    cycle = root / "container" / "cycle"
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(str(root), str(cycle))
+    else:
+        cycle.symlink_to(root, target_is_directory=True)
+    resolved = []
+    resolve = Path.resolve
+
+    def observe(path, *args, **kwargs):
+        resolved.append(path)
+        return resolve(path, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as scoped:
+            scoped.setattr(Path, "resolve", observe)
+            found = SkillLoader._discover_skill_files(root)
+        assert set(found) == set(paths)
+        assert resolved == [root, cycle]
+        paths[0].unlink()
+        assert set(SkillLoader._discover_skill_files(root)) == set(paths[1:])
+    finally:
+        cycle.rmdir() if os.name == "nt" else cycle.unlink()
