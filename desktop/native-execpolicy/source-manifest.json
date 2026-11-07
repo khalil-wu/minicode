@@ -1,6 +1,6 @@
 {
   "source": "https://github.com/openai/codex",
-  "commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
   "license": "Apache-2.0",
   "starlark": "0.14.2",
   "rust_toolchain": "1.95.0",
@@ -108,7 +108,7 @@
     {
       "upstream": "codex-rs/utils/absolute-path/src/lib.rs",
       "vendored": "vendor/absolute-path/src/lib.rs",
-      "sha256": "b0a5c11456cdb6978c739898ec3174a65413c94676d4bfa19324f42a52e20991"
+      "sha256": "4cfda82592d78a39d2bbfeeea3bf343037126da8d2a11c16f7a29ced87a46a6e"
     },
     {
       "upstream": "codex-rs/utils/absolute-path/src/system_aliases.rs",
@@ -123,7 +123,7 @@
     {
       "upstream": "codex-rs/shell-command/src/bash.rs",
       "vendored": "vendor/source-shell/src/bash.rs",
-      "sha256": "f6761e7b2faf0e6de7148336cc3277525cfd7aab0fee10e40e279c30c99c5322"
+      "sha256": "c3596adbff47b2c98af1eb7d6cf0dec9f7ade0e8d29c5b31a2bf4f01a337af29"
     },
     {
       "upstream": "codex-rs/shell-command/src/powershell.rs",
@@ -133,12 +133,12 @@
     {
       "upstream": "codex-rs/shell-command/src/shell_detect.rs",
       "vendored": "vendor/source-shell/src/shell_detect.rs",
-      "sha256": "b46ffe661d5c7fc292b5bb1767b8c3e16b71bb6d67b1ac4769438346ee435ce8"
+      "sha256": "b2e97e5e449e8381b4643ecd2ba3cee2457066b2b9479872aad2785c3f3d3ccd"
     },
     {
       "upstream": "codex-rs/shell-command/src/command_safety/is_dangerous_command.rs",
       "vendored": "vendor/source-shell/src/command_safety/is_dangerous_command.rs",
-      "sha256": "51b3920ca68914b3bc800ff5428828120480f68588689c2994ec69c9406c70fd"
+      "sha256": "062a357c5c3e2353bc071dd2f1afba0e3605da7617ba300395ff62941e29d31c"
     },
     {
       "upstream": "codex-rs/shell-command/src/command_safety/mod.rs",
@@ -168,7 +168,7 @@
     {
       "upstream": "codex-rs/shell-command/src/command_safety/windows_dangerous_commands.rs",
       "vendored": "vendor/source-shell/src/command_safety/windows_dangerous_commands.rs",
-      "sha256": "56a06ee2d97a0be4b490475abbafea6f32e948ae532cbf6cee79877ba919d995"
+      "sha256": "d1d91da2a0812270c9293d022b337da03a351bbcc9e817632edbe019298b891f"
     },
     {
       "upstream": "codex-rs/shell-command/src/command_safety/fixtures/powershell_lowering.json",

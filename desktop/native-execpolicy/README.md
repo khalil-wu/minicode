@@ -2,7 +2,7 @@
 
 This standalone workspace vendors `execpolicy`, `utils/absolute-path`, and the
 selected shell parser / command safety modules from
-OpenAI Codex commit `822e58cc3d666166c7446c5b1ea2e52f5d09594c`. Their source files
+OpenAI Codex commit `970111f6cb62cc02fe36a82ea7d71b37a2889c97`. Their source files
 are unchanged. `source-manifest.json` records each original path and SHA256;
 the original Apache-2.0 license and NOTICE accompany the code. The bridge also
 retains the Source amendment algorithms and banned suggestion list, adapting
@@ -10,7 +10,7 @@ only the protocol value type and function visibility.
 
 The parser is the actual Source `PolicyParser`, with Starlark 0.14.2's
 `AstModule` / `Evaluator`. `Cargo.lock` fixes the native dependency graph and
-Rust 1.95.0 matches the pinned Source toolchain. The executable needs no Codex
+Rust 1.95.0 is the validated compiler for this standalone bridge. The executable needs no Codex
 checkout or Rust installation at runtime.
 
 The JSON stdin API supports identity, policy inspection, native matching of

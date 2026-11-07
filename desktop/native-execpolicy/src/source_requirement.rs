@@ -98,7 +98,7 @@ pub struct CommandRequirementInput {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-enum ExecPolicyCommandOrigin { Generic, PowerShell }
+enum ExecPolicyCommandOrigin { Generic, PowerShell, PowerShellLiteral }
 
 #[derive(Clone, Copy)]
 struct UnmatchedCommandContext<'a> {
@@ -131,10 +131,13 @@ pub(crate) fn command_requirement(policy: &Policy, input: CommandRequirementInpu
     } else {
         let mut parsed = if command_platform == DangerousCommandPlatform::Windows {
             match extract_powershell_command(&input.command) {
-                Some((_, script)) => ExecPolicyCommands {
-                    commands: parse_powershell_script_into_plain_commands(script)
-                        .unwrap_or_else(|| vec![input.command.clone()]),
-                    command_origin: ExecPolicyCommandOrigin::PowerShell,
+                Some((_, script)) => {
+                    let commands = parse_powershell_script_into_plain_commands(script)
+                        .unwrap_or_else(|| vec![input.command.clone()]);
+                    ExecPolicyCommands {
+                        command_origin: powershell_command_origin(script, &commands),
+                        commands,
+                    }
                 },
                 None => commands_for_exec_policy_for_platform(&input.command, command_platform),
             }
@@ -246,6 +249,9 @@ fn dangerous_command_match_for_origin(
                 command,
                 command_platform,
             )
+        }
+        ExecPolicyCommandOrigin::PowerShellLiteral => {
+            codex_shell_command::is_dangerous_command::dangerous_powershell_literal_words_match(command)
         }
     }
 }
@@ -381,19 +387,29 @@ fn commands_for_exec_policy_for_platform(
     }
 
     if command_platform == DangerousCommandPlatform::Windows
+        && let Some((_, script)) =
+            codex_shell_command::powershell::extract_powershell_command(command)
         && let Some(commands) =
-            codex_shell_command::powershell::parse_powershell_command_into_plain_commands(command)
+            codex_shell_command::powershell::parse_powershell_script_into_plain_commands(script)
         && !commands.is_empty()
     {
         return ExecPolicyCommands {
+            command_origin: powershell_command_origin(script, &commands),
             commands,
-            command_origin: ExecPolicyCommandOrigin::PowerShell,
         };
     }
 
     ExecPolicyCommands {
         commands: vec![command.to_vec()],
         command_origin: ExecPolicyCommandOrigin::Generic,
+    }
+}
+
+fn powershell_command_origin(script: &str, commands: &[Vec<String>]) -> ExecPolicyCommandOrigin {
+    if codex_shell_command::is_dangerous_command::powershell_commands_are_independent(script, commands) {
+        ExecPolicyCommandOrigin::PowerShellLiteral
+    } else {
+        ExecPolicyCommandOrigin::PowerShell
     }
 }
 

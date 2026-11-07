@@ -197,10 +197,32 @@ fn configured_powershell_lowers_real_literal_commands_and_keeps_dynamic_script_o
     policy(&mut value, "prefix_rule(pattern=[\"git\", [\"status\", \"diff\"]], decision=\"allow\")");
     let literal = run(value.clone());
     assert_eq!(literal["commands"], json!([["git", "status"], ["git", "diff"]]));
-    assert_eq!(literal["command_origin"], "PowerShell");
+    assert_eq!(literal["command_origin"], "PowerShellLiteral");
     assert_eq!(literal["requirement"]["bypass_sandbox"], true);
     value["command"] = json!(["powershell.exe", "-Command", "& $program status"]);
     let dynamic = run(value);
     assert_eq!(dynamic["commands"], json!([["powershell.exe", "-Command", "& $program status"]]));
     assert_eq!(dynamic["requirement"]["kind"], "needs_approval");
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_literal_parameters_do_not_borrow_launch_semantics() {
+    for script in [
+        "Write-Output start https://example.test",
+        "Write-Output 'start'; Write-Output https://example.test",
+    ] {
+        let value = run(request(&["powershell.exe", "-NoProfile", "-Command", script], "powershell.exe"));
+        assert_eq!(value["command_origin"], "PowerShellLiteral", "{script}");
+        assert_eq!(value["requirement"]["kind"], "skip", "{script}");
+    }
+    for script in [
+        "Start-Process https://example.test",
+        "Write-Output start https://example.test | Out-Null",
+        "Set-Alias launch Start-Process; Write-Output start https://example.test",
+        "cmd /c start https://example.test",
+    ] {
+        let value = run(request(&["powershell.exe", "-NoProfile", "-Command", script], "powershell.exe"));
+        assert_eq!(value["requirement"]["kind"], "needs_approval", "{script}");
+    }
 }

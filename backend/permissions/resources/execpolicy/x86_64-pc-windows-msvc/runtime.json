@@ -2,18 +2,18 @@
   "identity": "minicode-execpolicy",
   "ok": true,
   "protocol": 1,
-  "source_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "source_commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
   "starlark": "0.14.2",
   "target": "x86_64-pc-windows-msvc",
   "source": "https://github.com/openai/codex",
   "rust_toolchain": "1.95.0",
-  "input_sha256": "651d323123d4464401da6d3ea0749dc2afd0e54435a580a6963e76de9e20ac2e",
+  "input_sha256": "1c7e644a64ef8d54031ccc972832688f45cbdce162fec9c7d3484d217cd9f9ad",
   "cargo_lock_sha256": "eb6077c03261137ef7e9cb627ac447e23e3a8ffff5a905e412b7128e9bb668ce",
   "files": {
     "LICENSE.openai-codex": "aa5e89edcbbd01fc3fb188a527d8bdc0da5812305cab220c84348c14ea427288",
-    "minicode-execpolicy.exe": "82448962cf8c535b126defa5c20791a9ae0ca92af0dffe492096b47754c21ecc",
+    "minicode-execpolicy.exe": "e0d41b7f02cfd5188d834754fb71830a6a957c9085359792814e980d0e5f0cc8",
     "NOTICE.openai-codex": "3c505dc54be731583470ef3584e5cb96d60df7add3e7e36294cf4dea8316a5cb",
-    "source-manifest.json": "87ca37dd4af51bfc337d8ab8b17817774afb71eb68dde9e92e7344939e3f4a00",
+    "source-manifest.json": "b6b5e20cb28d6a5618a9019564cdb0d1ef11d7126cb25e4dc5d78e4f93eef0ba",
     "THIRD_PARTY_NOTICES.txt": "c237e5acf0c741b2257a0ca4707998b425b41537587c7979bed166ed51e137bc"
   }
 }

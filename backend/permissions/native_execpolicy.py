@@ -9,7 +9,7 @@ import sys
 from typing import Any
 
 
-SOURCE_COMMIT = "822e58cc3d666166c7446c5b1ea2e52f5d09594c"
+SOURCE_COMMIT = "970111f6cb62cc02fe36a82ea7d71b37a2889c97"
 
 
 def packaged_execpolicy_directory() -> Path:

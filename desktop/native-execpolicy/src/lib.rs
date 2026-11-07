@@ -154,7 +154,7 @@ fn snapshot(policy: &Policy) -> Value {
 pub fn execute(request: Request) -> Result<Value, Error> {
     match request {
         Request::Identity => Ok(json!({"ok": true, "identity": "minicode-execpolicy",
-            "source_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c", "starlark": "0.14.2",
+            "source_commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97", "starlark": "0.14.2",
             "protocol": 1})),
         Request::Inspect {policy, ignore_allow_prefix_rules} => {
             let policy = current_for_prefix_rules(&load_policy(policy)?, ignore_allow_prefix_rules);
