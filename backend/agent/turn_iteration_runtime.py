@@ -423,7 +423,7 @@ class TurnIterationRuntime:
 
         if boundary_input.has_new_input:
             history_start = self.context.history_length
-            admission_snapshot = self.context.export_snapshot()
+            admission_snapshot = (run_context.capture_context_snapshot or self.context.export_snapshot)()
             admission_history_revision = self.context._history_store.revision
 
             def capture_admitted_snapshot() -> dict[str, Any]:

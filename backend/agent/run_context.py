@@ -88,6 +88,7 @@ class RunContext:
     initial_turn_environments: TurnEnvironmentSnapshot | None = None
     turn_environments: TurnEnvironmentSnapshot | None = None
     context_builder: ContextBuilder | None = None
+    capture_context_snapshot: Callable[[], dict[str, Any]] | None = None
     realtime_history_fragments: list[tuple[str, str]] = field(default_factory=list)
     extension_actions: ExtensionExecutionActions | None = None
     enqueue_extension_followup: Callable[[UserCommand], Any] | None = None

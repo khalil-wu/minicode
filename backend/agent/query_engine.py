@@ -411,6 +411,7 @@ class QueryEngine:
             turn_kernel=turn_ctx.turn_kernel,
             conversation_id=conversation_id,
         )
+        turn_ctx.run_context.capture_context_snapshot = journal.capture_context_snapshot
         host_emit_event = turn_ctx.emit_event
         async def emit_runtime_event(event_type, data):
             # Direct tool callbacks do not travel through the yielded query

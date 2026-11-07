@@ -49,6 +49,7 @@ class QueryJournalRecorder:
         default_factory=dict
     )
     projection_base_snapshot: dict[str, Any] = field(default_factory=dict)
+    projection_history_revision: int | None = None
     _progress_queue: deque[dict[str, Any]] = field(default_factory=deque)
     _progress_task: asyncio.Task[None] | None = None
 
@@ -83,6 +84,7 @@ class QueryJournalRecorder:
 
     def record_turn_started(self) -> None:
         self.projection_base_snapshot = self.context_builder.export_snapshot()
+        self.projection_history_revision = self.context_builder._history_store.revision
         self.lifecycle(
             "turn_started",
             {
@@ -97,6 +99,14 @@ class QueryJournalRecorder:
             {"conversation_id": self.conversation_id},
         )
 
+    def capture_context_snapshot(self) -> dict[str, Any]:
+        """Reuse this turn's recovery base and serialize only changed history."""
+        from backend.conversations.context_delta import apply_context_snapshot_delta
+
+        changes, _ = self.context_builder.export_snapshot_delta(
+            self.projection_base_snapshot, since_revision=self.projection_history_revision)
+        return apply_context_snapshot_delta(self.projection_base_snapshot, changes)
+
     def record_terminal_intent(self, event: AgentEvent) -> None:
         """Persist recovery input without claiming a committed runtime terminal."""
 
@@ -109,7 +119,7 @@ class QueryJournalRecorder:
             return
         message_id = str(self.metadata.get("assistant_message_id") or "")
         from backend.conversations.context_delta import context_snapshot_delta
-        snapshot = self.context_builder.export_snapshot()
+        snapshot = self.capture_context_snapshot()
         self.terminal_intent_event = self.lifecycle(
             "terminal_intent",
             {
@@ -215,7 +225,7 @@ class QueryJournalRecorder:
                 "compaction_committed",
                 {
                     **data,
-                    "context_snapshot": self.context_builder.export_snapshot(),
+                    "context_snapshot": self.capture_context_snapshot(),
                 },
             )
             return
@@ -340,7 +350,7 @@ class QueryJournalRecorder:
             assistant_content = str(
                 self.state.prompt_context.get("last_completed_assistant_text", "")
             )
-        terminal_context_snapshot = self.context_builder.export_snapshot()
+        terminal_context_snapshot = self.capture_context_snapshot()
         from backend.conversations.context_delta import context_snapshot_delta
         projection_owner = conversation_projection_owner_fields(self.metadata, terminal_context_snapshot)
         completed_item = self.agent_messages.get(self.last_completed_answer_item_id)
