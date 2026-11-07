@@ -95,3 +95,25 @@ def test_execution_resume_recovers_plan_before_model_snapshot_is_returned(tmp_pa
     assert execution.context_snapshot["plan_recovery_status"] == "recovered"
     assert execution.context_snapshot["history"] == conversation.context_snapshot["history"]
     assert execution.transcript == []
+
+
+@pytest.mark.asyncio
+async def test_background_model_restore_does_not_copy_public_transcript(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from backend.conversations.repository import ConversationRepository
+    from backend.ws.conversation_runtime import ConversationRuntime
+
+    repository = ConversationRepository(tmp_path / "conversations")
+    history = [{"role": "user", "content": f"durable model {index}"} for index in range(100)]
+    record = repository.create_conversation(context_snapshot={"history": history},
+        transcript=[{"id": f"ui-{index}", "role": "user", "content": "rendered public history"} for index in range(1000)])
+    builder = ContextBuilder()
+    runtime = ConversationRuntime(conversation_repo=repository, context_builder=builder, build_summary_from_transcript=lambda *_: "")
+    runtime.active_conversation_id = record.id
+    monkeypatch.setattr(repository, "get_conversation", Mock(side_effect=AssertionError("Model hydration copied UI history")))
+    try:
+        runtime.defer_repository_hydration(record.id, on_hydration_complete=None)
+        await runtime.wait_for_hydration(record.id)
+        assert [message.content for message in builder._history] == [item["content"] for item in history]
+    finally:
+        await runtime.shutdown()

@@ -252,13 +252,13 @@ def test_hydration_reloads_only_changed_context_and_keeps_full_work_off_loop(tmp
     loop_thread = threading.get_ident()
     full_reads, decoded = [], []
     entered, release = threading.Event(), threading.Event()
-    read = repo.get_conversation
+    read = repo.get_execution_context
     deserialize = ContextBuilder._deserialize_normalized_history
 
-    def read_full(owner):
-        assert threading.get_ident() != loop_thread, "full record copied on the event loop"
+    def read_full(owner, **kwargs):
+        assert threading.get_ident() != loop_thread, "model context read on the event loop"
         full_reads.append(owner)
-        return read(owner)
+        return read(owner, **kwargs)
 
     def decode(raw_history, **options):
         decoded.append((len(raw_history), threading.get_ident()))
@@ -270,7 +270,7 @@ def test_hydration_reloads_only_changed_context_and_keeps_full_work_off_loop(tmp
     def full_load_is_not_a_reload(*_args, **_kwargs):
         raise AssertionError("changed context must use the asynchronous partial hydration path")
 
-    monkeypatch.setattr(repo, "get_conversation", read_full)
+    monkeypatch.setattr(repo, "get_execution_context", read_full)
     monkeypatch.setattr(ContextBuilder, "_deserialize_normalized_history", staticmethod(decode))
     monkeypatch.setattr(builder, "load_snapshot", full_load_is_not_a_reload)
 
@@ -317,11 +317,11 @@ def test_snapshot_and_its_source_revision_stay_paired_until_publication(tmp_path
     runtime, builder = _runtime_with_builder(repo)
     runtime.active_conversation_id = conversation.id
     read_ready, release = threading.Event(), threading.Event()
-    read = repo.get_conversation_for_resume
+    read = repo.get_execution_context
     reads = []
 
-    def hold_detached_record(owner):
-        record = read(owner)
+    def hold_detached_record(owner, **kwargs):
+        record = read(owner, **kwargs)
         reads.append(record.revision)
         if len(reads) == 1:
             read_ready.set()
@@ -329,7 +329,7 @@ def test_snapshot_and_its_source_revision_stay_paired_until_publication(tmp_path
         return record
 
     if entrypoint == "repository":
-        monkeypatch.setattr(repo, "get_conversation_for_resume", hold_detached_record)
+        monkeypatch.setattr(repo, "get_execution_context", hold_detached_record)
 
     async def exercise():
         completed = []

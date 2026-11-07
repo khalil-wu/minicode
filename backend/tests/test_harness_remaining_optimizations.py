@@ -140,16 +140,16 @@ def test_repository_hydration_waits_for_full_context_without_cancelling_on_waite
         repo = ConversationRepository(tmp_path)
         record = repo.create_conversation(transcript=history(120), context_snapshot={"history": history(120)})
         entered, release = threading.Event(), threading.Event()
-        original = repo.get_conversation
+        original = repo.get_execution_context
         calls = 0
-        def load(owner):
+        def load(owner, **kwargs):
             nonlocal calls
             calls += 1
             if calls == 1:
                 entered.set()
                 assert release.wait(5)
-            return original(owner)
-        monkeypatch.setattr(repo, "get_conversation", load)
+            return original(owner, **kwargs)
+        monkeypatch.setattr(repo, "get_execution_context", load)
         builder = ContextBuilder(workspace_root=tmp_path)
         runtime = ConversationRuntime(conversation_repo=repo, context_builder=builder, build_summary_from_transcript=lambda *_: "")
         runtime.active_conversation_id = record.id
@@ -189,21 +189,21 @@ def test_conversation_switch_publishes_page_before_private_context_load(tmp_path
         repo._record_cache.clear()
         entered, release = threading.Event(), threading.Event()
         preview = asyncio.Event()
-        original_get = repo.get_conversation
+        original_get = repo.get_execution_context
         original_send = connection["websocket"].send_json
         async def send(payload):
             await original_send(payload)
             if payload.get("context_pending"):
                 assert not entered.is_set()
                 preview.set()
-        def load(owner):
+        def load(owner, **kwargs):
             if owner == record.id and not release.is_set():
                 entered.set()
                 assert release.wait(5)
                 if fail_read: raise RuntimeError("private checkpoint unreadable")
-            return original_get(owner)
+            return original_get(owner, **kwargs)
         monkeypatch.setattr(connection["websocket"], "send_json", send)
-        monkeypatch.setattr(repo, "get_conversation", load)
+        monkeypatch.setattr(repo, "get_execution_context", load)
         switching = asyncio.create_task(handle_conversation_switch(session, {"conversation_id": record.id}))
         try:
             await asyncio.wait_for(preview.wait(), timeout=3)

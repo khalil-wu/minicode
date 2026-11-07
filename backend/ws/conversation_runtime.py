@@ -368,7 +368,8 @@ class ConversationRuntime:
     async def _hydrate_repository(self, conversation_id: str, generation: int, callback: Callable[[str], Any] | None) -> None:
         try:
             while True:
-                record = await asyncio.to_thread(self._conversation_repo.get_conversation_for_resume, conversation_id)
+                record = await asyncio.to_thread(self._conversation_repo.get_execution_context, conversation_id,
+                    prepare_resume=True)
                 async with self._projection_lock_for(conversation_id):
                     current_revision = await asyncio.to_thread(self._conversation_repo.get_context_snapshot_revision, conversation_id)
                     if generation != self._hydration_generation or conversation_id != self.active_conversation_id:
