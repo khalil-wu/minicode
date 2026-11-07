@@ -5,9 +5,9 @@ import type { ResolvedTheme } from "../../stores/types";
 import { codeBlockStyle } from "./code-block-presentation";
 import { CodeBlockContent } from "./CodeBlockContent";
 
-interface Props { children: string; hasLanguage: boolean; language: string; resolvedTheme: ResolvedTheme; isStreaming?: boolean }
+interface Props { children: string; language: string; resolvedTheme: ResolvedTheme; isStreaming?: boolean }
 
-export default function CodeThemeHighlighter({ children, hasLanguage, language, resolvedTheme, isStreaming = false }: Props) {
+export default function CodeThemeHighlighter({ children, language, resolvedTheme, isStreaming = false }: Props) {
   const id = useAppStore(state => state.appearanceThemes[resolvedTheme]?.codeThemeId ?? "codex");
   const [result, setResult] = useState<{ code: string; language: string; variant: string; lines: string[] }>();
   useEffect(() => {
@@ -24,7 +24,7 @@ export default function CodeThemeHighlighter({ children, hasLanguage, language, 
   // Clearing it first rebuilt every line twice and flashed plain text.
   const lines = !isStreaming && result?.code === children && result.language === language && result.variant === resolvedTheme
     ? result.lines : undefined;
-  return <pre className="overflow-x-auto" style={codeBlockStyle(hasLanguage)} data-markdown-copy="code-block" data-markdown-copy-text={children}>
+  return <pre className="overflow-x-auto" style={codeBlockStyle} data-markdown-copy="code-block" data-markdown-copy-text={children}>
     <code><CodeBlockContent text={children} highlightedLines={lines} /></code>
   </pre>;
 }

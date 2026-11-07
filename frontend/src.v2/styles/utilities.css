@@ -135,8 +135,8 @@
   overscroll-behavior: contain;
   padding: 12px;
   background: var(--surface-soft);
-  border: 1px solid var(--border-subtle);
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  border: 0;
+  border-radius: 0;
   scrollbar-width: thin;
   scrollbar-color: var(--text-muted) var(--surface-soft);
 }

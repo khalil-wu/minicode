@@ -2621,6 +2621,16 @@ button.diff-cell-file-path:hover {
   margin-block: 0.8em;
 }
 
+.code-block-wrapper {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm, 6px);
+  overflow: hidden;
+}
+
+.code-block-header {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
 .code-theme-line-number {
   display: inline-block;
   min-width: 2.25em;

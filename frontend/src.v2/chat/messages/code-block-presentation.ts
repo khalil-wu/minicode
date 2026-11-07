@@ -1,10 +1,9 @@
 import type { CSSProperties } from "react";
 
-export const codeBlockStyle = (hasLanguage: boolean): CSSProperties => ({
+export const codeBlockStyle: CSSProperties = {
   margin: 0, padding: "12px 14px", background: "var(--surface-soft)",
-  border: "1px solid var(--border-subtle)",
-  borderRadius: hasLanguage ? "0 0 var(--radius-sm, 6px) var(--radius-sm, 6px)" : "var(--radius-sm, 6px)",
+  border: 0, borderRadius: 0,
   fontFamily: "var(--editor-font-family)", fontSize: "var(--editor-font-size)",
   lineHeight: "var(--editor-line-height)", color: "var(--editor-foreground)",
   whiteSpace: "pre-wrap", overflowWrap: "anywhere",
-});
+};

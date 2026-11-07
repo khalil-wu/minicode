@@ -47,7 +47,7 @@ it("updates an already rendered fence with actual TextMate colors in the same mo
   const themes = { ...emptyAppearanceThemes(), dark: { codeThemeId: "github" as const, ...defaultThemePreferences("dark") } };
   useAppStore.setState({ appearanceThemes: themes });
   const code = '// 注释\nconst answer = "<Hello>";';
-  const view = render(<CodeThemeHighlighter hasLanguage language="javascript" resolvedTheme="dark">{code}</CodeThemeHighlighter>);
+  const view = render(<CodeThemeHighlighter language="javascript" resolvedTheme="dark">{code}</CodeThemeHighlighter>);
   const token = () => Array.from(view.container.querySelectorAll('code span[style]')).find(span => span.textContent?.trim() === "const") as HTMLElement;
   await waitFor(() => expect(token()?.style.color).toBe("rgb(255, 123, 114)"));
   act(() => useAppStore.setState({ appearanceThemes: { ...themes, dark: { ...themes.dark, codeThemeId: "dracula" } } }));

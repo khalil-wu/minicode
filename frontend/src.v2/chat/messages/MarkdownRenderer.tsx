@@ -507,10 +507,10 @@ const InsertButton = ({ text }: { text: string }) => {
   );
 };
 
-const PlainCodeBlock = ({ hasLanguage, text }: { hasLanguage: boolean; text: string }) => {
+const PlainCodeBlock = ({ text }: { text: string }) => {
   return (
     <pre
-      style={codeBlockStyle(hasLanguage)}
+      style={codeBlockStyle}
       className="overflow-x-auto"
       data-markdown-copy="code-block"
       data-markdown-copy-text={text}
@@ -527,7 +527,7 @@ const MeasuredMarkdownBlock = ({ className, ...props }: React.HTMLAttributes<HTM
 
 const CodeBlockFrame = ({ text, language, children }: { text: string; language?: string; children: React.ReactNode }) => (
   <MeasuredMarkdownBlock className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
-    {language && <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
+    {language && <div className="code-block-header flex justify-between items-center px-3 py-1 bg-[var(--surface-active)]">
       <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">{language}</span>
     </div>}
     <InsertButton text={text} />
@@ -595,13 +595,13 @@ const MermaidBlock = ({ chart, resolvedTheme }: { chart: string; resolvedTheme: 
         <div className="text-[var(--text-xs)] text-[var(--state-warning)] px-3 py-2 bg-[var(--surface-soft)] border border-[var(--border-subtle)] rounded-[var(--radius-sm,6px)]">
           {t("Mermaid 呈现失败，已显示源代码。")}
         </div>
-        <PlainCodeBlock hasLanguage text={chart} />
+        <PlainCodeBlock text={chart} />
       </div>
     );
   }
 
   if (!svg) {
-    return <PlainCodeBlock hasLanguage text={chart} />;
+    return <PlainCodeBlock text={chart} />;
   }
 
   return (
@@ -1289,13 +1289,13 @@ const mdComponents = (
     if (language === "mermaid") {
       return (
         <div className="code-block-wrapper relative" data-markdown-copy="code-block" data-markdown-copy-text={text}>
-          <div className="flex justify-between items-center px-3 py-1 bg-[var(--surface-active)] rounded-t-[var(--radius-sm,6px)] border border-[var(--border-subtle)] border-b-0">
+          <div className="code-block-header flex justify-between items-center px-3 py-1 bg-[var(--surface-active)]">
             <span className="text-[var(--text-xs)] text-[var(--text-muted)] font-[var(--font-mono)]">
               mermaid
             </span>
           </div>
           <CopyButton text={text} />
-          {streamingTail ? <PlainCodeBlock hasLanguage text={text} /> : <MermaidBlock chart={text} resolvedTheme={resolvedTheme} />}
+          {streamingTail ? <PlainCodeBlock text={text} /> : <MermaidBlock chart={text} resolvedTheme={resolvedTheme} />}
         </div>
       );
     }
@@ -1303,7 +1303,6 @@ const mdComponents = (
       return (
         <CodeBlockFrame text={text} language={match?.[1]}>
           <CodeThemeHighlighter
-            hasLanguage={Boolean(match)}
             language={match?.[1] ?? "text"}
             resolvedTheme={resolvedTheme}
             isStreaming={streamingTail}
@@ -1683,7 +1682,7 @@ const MarkdownPiece = memo(({ part, scopeId, resources, resolved, plugins, openF
   headingId.reset();
   if (fence) {
     return <CodeBlockFrame text={fence.text} language={fence.language}>
-      <CodeThemeHighlighter hasLanguage={Boolean(fence.language)} language={fence.language ?? "text"}
+      <CodeThemeHighlighter language={fence.language ?? "text"}
         resolvedTheme={resolved} isStreaming={streamingTail || openFence === 0}>{fence.text}</CodeThemeHighlighter>
     </CodeBlockFrame>;
   }
