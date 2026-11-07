@@ -8,6 +8,7 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from backend.agent.execution_journal import ExecutionJournal, JournalEvent, conversation_projection_owner_fields
 from backend.agent.message import AgentEvent
@@ -85,23 +86,24 @@ class QueryJournalRecorder:
     def record_turn_started(self) -> None:
         self.projection_base_snapshot = self.context_builder.export_snapshot()
         self.projection_history_revision = self.context_builder._history_store.revision
-        started = self.lifecycle(
-            "turn_started",
-            {
+        if self.journal is None:
+            return
+        started, _ = self.journal.append_once_many([
+            ("system", {
+                "lifecycle": "turn_started",
                 "conversation_id": self.conversation_id,
                 "run_id": str(self.metadata.get("run_id") or ""),
                 "turn_id": str(self.metadata.get("turn_id") or self.metadata.get("run_id") or ""),
                 "context_snapshot": self.projection_base_snapshot,
-            },
-        )
-        if started is not None:
-            # The journal owns the serialized recovery base. Reuse its exact
-            # immutable history branches in later admission/terminal deltas.
-            self.projection_base_snapshot = started.payload["context_snapshot"]
-        self.lifecycle(
-            "provider_claimed",
-            {"conversation_id": self.conversation_id},
-        )
+            }, uuid4().hex),
+            ("system", {
+                "lifecycle": "provider_claimed",
+                "conversation_id": self.conversation_id,
+            }, uuid4().hex),
+        ])
+        # Both startup facts are durable before provider execution. Reuse the
+        # journal-owned recovery base for later admission/terminal deltas.
+        self.projection_base_snapshot = started.payload["context_snapshot"]
 
     def capture_context_snapshot(self) -> dict[str, Any]:
         """Reuse this turn's recovery base and serialize only changed history."""

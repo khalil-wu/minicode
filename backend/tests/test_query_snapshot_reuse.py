@@ -19,6 +19,80 @@ def recorder(tmp_path):
         builder, None, "conversation")
 
 
+def test_query_start_persists_ordered_facts_with_one_sync_per_attempt(tmp_path, monkeypatch):
+    from backend.agent import execution_journal
+
+    owner = recorder(tmp_path)
+    sync = execution_journal.os.fsync
+    synced = []
+
+    def observe(fd):
+        synced.append(fd)
+        sync(fd)
+
+    monkeypatch.setattr(execution_journal.os, "fsync", observe)
+    owner.record_turn_started()
+    events = owner.journal.read_events()
+    assert len(synced) == 1
+    assert [event.payload["lifecycle"] for event in events] == ["turn_started", "provider_claimed"]
+    assert events[0].payload == {
+        "lifecycle": "turn_started", "conversation_id": "conversation",
+        "run_id": "run", "turn_id": "turn", "context_snapshot": owner.context_builder.export_snapshot(),
+    }
+    assert owner.projection_base_snapshot is events[0].payload["context_snapshot"]
+    # A resumed execution of the same turn is a new provider attempt.
+    owner.context_builder.append_assistant("retained before resuming")
+    owner.record_turn_started()
+    recovered = ExecutionJournal("snapshot-reuse", base_dir=tmp_path).read_events()
+    assert len(synced) == 2
+    assert [event.seq for event in recovered] == [1, 2, 3, 4]
+    assert len({event.event_id for event in recovered}) == 4
+    assert recovered[2].payload["context_snapshot"] == owner.context_builder.export_snapshot()
+
+
+@pytest.mark.parametrize("failure", ["second_fact", "sync"])
+def test_failed_query_start_preserves_previous_recovery_and_retries(tmp_path, monkeypatch, failure):
+    from backend.agent import execution_journal
+
+    owner = recorder(tmp_path)
+    owner.record_turn_started()
+    previous = owner.journal.path.read_bytes()
+    original = deepcopy(owner.projection_base_snapshot)
+    owner.context_builder.append_assistant("new attempt")
+    append = owner.journal._append_unlocked
+    sync = execution_journal.os.fsync
+    syncs = 0
+
+    def append_fact(kind, payload, **kwargs):
+        if payload.get("lifecycle") == "provider_claimed":
+            raise OSError("startup write failed")
+        return append(kind, payload, **kwargs)
+
+    def sync_fact(fd):
+        nonlocal syncs
+        syncs += 1
+        if syncs == 1:
+            raise OSError("startup sync failed")
+        sync(fd)
+
+    with monkeypatch.context() as scoped:
+        if failure == "second_fact":
+            scoped.setattr(owner.journal, "_append_unlocked", append_fact)
+        else:
+            scoped.setattr(execution_journal.os, "fsync", sync_fact)
+        with pytest.raises(OSError, match="startup"):
+            owner.record_turn_started()
+    assert owner.journal.path.read_bytes() == previous
+    recovered = ExecutionJournal("snapshot-reuse", base_dir=tmp_path).read_events()
+    assert recovered[0].payload["context_snapshot"] == original
+    assert len(recovered) == 2
+    owner.record_turn_started()
+    recovered = ExecutionJournal("snapshot-reuse", base_dir=tmp_path).read_events()
+    assert [event.seq for event in recovered] == [1, 2, 3, 4]
+    assert recovered[2].payload["context_snapshot"] == owner.context_builder.export_snapshot()
+    assert recovered[3].payload["lifecycle"] == "provider_claimed"
+
+
 def test_query_captures_share_only_owned_unchanged_journal_history(tmp_path, monkeypatch):
     from backend.conversations import projection_log
 
