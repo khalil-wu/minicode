@@ -17,6 +17,7 @@ import tempfile
 import time
 from uuid import uuid4
 
+from backend.async_cleanup import to_thread_cancel_safe
 from backend.environments.errors import ExecutorClosed, ExecutorProtocolError
 from backend.environments.events import ProcessEventLog
 from backend.environments.process import ProcessOutputChunk, ProcessRead
@@ -431,6 +432,9 @@ class LocalExecutionEnvironmentBackend:
         self.close_task: asyncio.Task | None = None
 
     async def info(self) -> dict:
+        return await to_thread_cancel_safe(self._info)
+
+    def _info(self) -> dict:
         if self.process.closed:
             raise ExecutorClosed("local execution environment is closed")
         shell = default_user_shell(native_process=True)

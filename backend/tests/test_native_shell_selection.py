@@ -36,6 +36,54 @@ def test_direct_powershell_remains_the_preferred_native_shell(tmp_path, monkeypa
     assert powershell_executable(native_process=True) == str(direct)
 
 
+@pytest.mark.parametrize("native_process", [False, True])
+def test_selected_powershell_skips_backup_search_and_observes_the_next_path(tmp_path, monkeypatch, native_process):
+    shells = [tmp_path / "first.exe", tmp_path / "second.exe"]
+    for shell in shells:
+        shell.write_bytes(b"executable")
+    selected = shells[0]
+    searched = []
+
+    def which(name):
+        searched.append(name)
+        assert name == "pwsh", "A selected pwsh must not scan the backup PowerShell PATH"
+        return str(selected)
+
+    monkeypatch.setattr("backend.runtime_env.shutil.which", which)
+    assert powershell_executable(native_process=native_process) == str(shells[0])
+    selected = shells[1]
+    assert powershell_executable(native_process=native_process) == str(shells[1])
+    assert searched == ["pwsh", "pwsh"]
+
+
+@pytest.mark.asyncio
+async def test_slow_local_shell_discovery_allows_other_commands_to_run(tmp_path, monkeypatch):
+    import threading
+    from backend.workspace.executor_local import LocalExecutionEnvironmentBackend
+
+    entered, release = threading.Event(), threading.Event()
+    selected = {"name": "powershell", "path": str(tmp_path / "pwsh.exe")}
+
+    def discover(*, native_process):
+        assert native_process
+        entered.set()
+        assert release.wait(3), "Shell lookup blocked the event loop"
+        return selected
+
+    monkeypatch.setattr("backend.workspace.executor_local.default_user_shell", discover)
+    backend = LocalExecutionEnvironmentBackend()
+    task = asyncio.create_task(backend.info())
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert not task.done()
+        release.set()
+        assert (await task)["shell"] == selected
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await backend.close()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows original Job process owner")
 @pytest.mark.asyncio
 async def test_native_cancellation_reaps_the_actual_selected_shell_child(tmp_path):

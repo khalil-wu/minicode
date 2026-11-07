@@ -38,13 +38,15 @@ def is_git_tool_env(name: str) -> bool:
 
 def powershell_executable(*, native_process: bool = False) -> str | None:
     """Select the first PowerShell the captured Windows process can own."""
-    candidates = [shutil.which("pwsh"), shutil.which("powershell")]
-    if os.name == "nt":
-        candidates[1:1] = [str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell/7/pwsh.exe")]
-        candidates.append(str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"))
-    else:
-        candidates[1:1] = ["/usr/local/bin/pwsh"]
-    for candidate in candidates:
+    def candidates():
+        yield shutil.which("pwsh")
+        yield (str(Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell/7/pwsh.exe")
+            if os.name == "nt" else "/usr/local/bin/pwsh")
+        yield shutil.which("powershell")
+        if os.name == "nt":
+            yield str(Path(os.environ.get("SYSTEMROOT", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe")
+
+    for candidate in candidates():
         if not candidate or not Path(candidate).is_file():
             continue
         if native_process and os.name == "nt":
