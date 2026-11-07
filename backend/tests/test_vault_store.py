@@ -53,6 +53,23 @@ def credential_store(monkeypatch):
     return values
 
 
+def test_absent_index_needs_no_mutation_lock_and_observes_later_publication(tmp_path, credential_store, monkeypatch):
+    from unittest.mock import Mock
+
+    path = tmp_path / "vault.json"
+    reader = EnvVault(path)
+    with monkeypatch.context() as scoped:
+        lock = Mock(side_effect=AssertionError("An absent index has no published credentials"))
+        scoped.setattr("backend.vault.store.file_mutation_locks", lock)
+        assert reader.get("SECRET") is None
+        lock.assert_not_called()
+    writer = EnvVault(path)
+    writer.set("SECRET", "published")
+    assert reader.get("SECRET") == "published"
+    writer.delete("SECRET")
+    assert reader.get("SECRET") is None
+
+
 def test_missing_os_credential_is_metadata_and_does_not_block_unrelated_injection(tmp_path, credential_store):
     from backend.services.env_vault_service import list_env_entries
 

@@ -147,6 +147,10 @@ class EnvVault:
                 raise
 
     def get(self, name: str) -> str | None:
+        # The index publishes credential ownership. An absent index has no
+        # readable entries; recheck on each call so a new publication is seen.
+        if not self._path.exists():
+            return None
         with file_mutation_locks([self._path]):
             self._load_unlocked()
             entry = self._entries.get(name)

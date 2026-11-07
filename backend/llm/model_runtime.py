@@ -3188,7 +3188,7 @@ class ModelRuntime:
                 {"Authorization": f"Bearer {api_key}"},
             )
         environment = _resolved_config_environment([raw_key])
-        status = self.get_provider_auth_status(clean_id)
+        source, _ = self._provider_auth_status_source(clean_id, raw_key)
         auth: dict[str, Any] = {"api_key": api_key}
         if headers:
             auth["headers"] = headers
@@ -3197,7 +3197,7 @@ class ModelRuntime:
             **({"env": environment} if environment else {}),
             "source": (
                 "stored credential"
-                if status.get("source") == "stored"
+                if source == "stored"
                 else "configured API key"
             ),
         }

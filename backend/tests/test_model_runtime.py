@@ -326,6 +326,22 @@ def _isolated_model_runtime() -> ModelRuntime:
     return runtime
 
 
+def test_configured_auth_reads_credentials_once_per_resolution(monkeypatch):
+    from unittest.mock import Mock
+
+    runtime = _isolated_model_runtime()
+    runtime.register_provider("one-read", {"api": "openai-completions", "api_key": "configured",
+        "models": [{"id": "model", "base_url": "https://example.invalid/v1"}]})
+    read = Mock(return_value=None)
+    monkeypatch.setattr(runtime, "_stored_credential", read)
+    assert runtime._resolve_known_provider_auth("one-read")["source"] == "configured API key"
+    read.assert_called_once_with("one-read")
+    read.return_value = {"type": "api_key", "key": "new stored value"}
+    resolved = runtime._resolve_known_provider_auth("one-read")
+    assert resolved["auth"]["api_key"] == "new stored value"
+    assert resolved["source"] == "stored credential"
+
+
 def test_registered_model_exposes_its_tool_mode() -> None:
     runtime = _isolated_model_runtime()
     runtime.register_provider("tool-mode-provider", {
