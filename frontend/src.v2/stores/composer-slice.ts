@@ -229,13 +229,21 @@ export const createComposerSlice: StateCreator<AppStore, [], [], ComposerSlice> 
     if (commandId && state.latestAgentModeCommandIds[owner] && state.latestAgentModeCommandIds[owner] !== commandId) return state;
     const meta = state.conversations.find(conversation => conversation.id === owner);
     if (revision !== undefined && meta?.revision !== undefined && revision < meta.revision) return state;
-    const workbench = owner === state.conversationId ? liveConversationWorkbenchState(state)
-      : state.conversationWorkbenchStates[owner] ?? emptyConversationWorkbenchState();
+    const active = owner === state.conversationId;
+    const activeChanged = active && state.agentMode !== m;
+    const cachedWorkbench = state.conversationWorkbenchStates[owner];
+    // Unopened rows already have their authoritative mode in the directory.
+    // Update a real cached workbench, or retain an owner not in this page yet.
+    const workbenchChanged = activeChanged || (cachedWorkbench ? cachedWorkbench.agentMode !== m : !meta);
+    const metadataChanged = meta && (meta.agentMode !== m || revision !== undefined && meta.revision !== revision);
+    if (!activeChanged && !workbenchChanged && !metadataChanged) return state;
     return {
-      ...(owner === state.conversationId ? { agentMode: m } : {}),
-      conversationWorkbenchStates: { ...state.conversationWorkbenchStates, [owner]: { ...workbench, agentMode: m } },
-      conversations: state.conversations.map(conversation => conversation.id === owner ? { ...conversation, agentMode: m,
-        ...(revision !== undefined ? { revision } : {}) } : conversation),
+      ...(activeChanged ? { agentMode: m } : {}),
+      ...(workbenchChanged ? { conversationWorkbenchStates: { ...state.conversationWorkbenchStates,
+        [owner]: { ...(active ? liveConversationWorkbenchState(state) : cachedWorkbench ?? emptyConversationWorkbenchState()), agentMode: m },
+      } } : {}),
+      ...(metadataChanged ? { conversations: state.conversations.map(conversation => conversation.id === owner
+        ? { ...conversation, agentMode: m, ...(revision !== undefined ? { revision } : {}) } : conversation) } : {}),
     };
   }),
   setEffortLevel: (e) => {

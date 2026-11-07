@@ -180,3 +180,39 @@ it("uses an explicitly supplied turn mode for its owner without borrowing the fo
   expect(wire.messages[0]).toMatchObject({ conversation_id: "other", agent_mode: "review" });
   expect(useAppStore.getState().agentMode).toBe("plan");
 });
+
+it("keeps unchanged mode projections stable while advancing revisions and retaining live and hidden drafts", () => {
+  useAppStore.setState({ agentMode: "build", conversationWorkbenchStates: {
+    other: { ...emptyConversationWorkbenchState(), agentMode: "build", draft: "Hidden authored text" },
+  } });
+  useAppStore.getState().syncConversationAgentMode("build", "owner", undefined, 1);
+  useAppStore.setState({ draft: "New authored text" });
+  const before = useAppStore.getState();
+  before.syncConversationAgentMode("build", "owner", undefined, 1);
+  expect(useAppStore.getState()).toBe(before);
+  before.syncConversationAgentMode("build", "owner", undefined, 2);
+  const advanced = useAppStore.getState();
+  expect(advanced.conversationWorkbenchStates).toBe(before.conversationWorkbenchStates);
+  expect(advanced.conversations.find(item => item.id === "owner")).toMatchObject({ agentMode: "build", revision: 2 });
+  advanced.syncConversationAgentMode("plan", "owner", undefined, 1);
+  expect(useAppStore.getState()).toBe(advanced);
+  advanced.syncConversationAgentMode("plan", "owner", undefined, 3);
+  expect(useAppStore.getState()).toMatchObject({ agentMode: "plan", draft: "New authored text", attachments: [{ id: "attachment" }] });
+  expect(useAppStore.getState().conversationWorkbenchStates.owner).toMatchObject({ agentMode: "plan", draft: "New authored text" });
+  expect(useAppStore.getState().conversationWorkbenchStates.other).toBe(before.conversationWorkbenchStates.other);
+});
+
+it("uses directory modes for unopened chats without creating empty workbenches and retains uncatalogued owners", () => {
+  useAppStore.setState({ agentMode: "build" });
+  const before = useAppStore.getState();
+  before.syncConversationAgentMode("build", "other", undefined, 1);
+  expect(useAppStore.getState()).toBe(before);
+  before.syncConversationAgentMode("plan", "other", undefined, 2);
+  expect(useAppStore.getState().conversationWorkbenchStates.other).toBeUndefined();
+  switchTo("other", "plan", 2);
+  expect(useAppStore.getState().agentMode).toBe("plan");
+  switchTo("owner", "build", 1);
+  expect(useAppStore.getState()).toMatchObject({ agentMode: "build", draft: "Retained text", quotedMessage: { id: "quote" } });
+  useAppStore.getState().syncConversationAgentMode("plan", "not-in-current-page", undefined, 8);
+  expect(useAppStore.getState().conversationWorkbenchStates["not-in-current-page"].agentMode).toBe("plan");
+});

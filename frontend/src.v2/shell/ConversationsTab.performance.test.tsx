@@ -3,6 +3,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Profiler, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { applyRuntimeSessionSnapshot } from "../chat/sessionEvents";
 
 const { sessionRowRenderMock } = vi.hoisted(() => ({
   sessionRowRenderMock: vi.fn(),
@@ -114,6 +115,21 @@ describe("ConversationsTab row rendering performance", () => {
     expect(sessionRowRenderMock.mock.calls.map(([id]) => id)).toEqual(["conv-b"]);
     expect(screen.getByTestId("mock-session-row-conv-b").getAttribute("data-status")).toBe("waiting");
     expect(screen.getByTestId("mock-session-row-conv-a").getAttribute("data-status")).toBe("idle");
+  });
+
+  it("keeps sidebar rows out of repeated runtime mode acknowledgements", () => {
+    useAppStore.setState({ conversationId: "conv-a", agentMode: "build" });
+    useAppStore.getState().syncConversationAgentMode("build", "conv-a", undefined, 1);
+    const committed = vi.fn();
+    render(<Profiler id="sidebar" onRender={committed}><ConversationsTab conversationId="conv-a" onSetConfirmDialog={vi.fn()} /></Profiler>);
+    committed.mockClear(); sessionRowRenderMock.mockClear();
+    for (const phase of ["plan", "execute", "execute", "finalize"]) {
+      act(() => applyRuntimeSessionSnapshot({ active_conversation_id: "conv-a", agent_mode: "build", agent_mode_revision: 1,
+        task_summary: { phase }, pending_approvals: [], pending_approval_count: 0 }, "conv-a"));
+    }
+    expect(committed).not.toHaveBeenCalled();
+    expect(sessionRowRenderMock).not.toHaveBeenCalled();
+    expect(useAppStore.getState().runtimeSession?.task_summary?.phase).toBe("finalize");
   });
 
   it("does not reparse activity summaries when opening an unrelated row menu", () => {
