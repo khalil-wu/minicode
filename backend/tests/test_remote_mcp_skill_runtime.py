@@ -320,6 +320,10 @@ async def test_required_skill_failed_or_starting_attachment_blocks_real_query_en
             assert 'Required skill "exact" from environment "remote" is unavailable' in caplog.text
         finally:
             await session.aclose()
+            # Failed admission may still own the native policy preparation
+            # worker. Keep this fixture's event loop alive through its drain.
+            if session._command_shutdown_task is not None:
+                await asyncio.wait_for(asyncio.shield(session._command_shutdown_task), 10)
             artifacts.shutdown()
             runtime.close(release_lease=True)
             await manager.close()
