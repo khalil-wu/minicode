@@ -1027,7 +1027,9 @@ class QueryEngine:
             if isinstance(skill_manager, SkillManager):
                 captured_request = run_context.start_request
                 already_captured = captured_request is not None and skill_manager is captured_request.skill_manager
+                execution = run_context.model_execution
                 ctx.bind_skill_manager(skill_manager, sc.workspace_root, refresh=True,
+                    config_stack=execution.config.config_layer_stack if execution is not None else None,
                     force_reload=not already_captured, turn_id=str(metadata["turn_id"]))
                 skill_manager = ctx.skill_manager
 

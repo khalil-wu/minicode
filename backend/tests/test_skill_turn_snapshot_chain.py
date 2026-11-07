@@ -150,6 +150,14 @@ async def test_query_and_bootstrap_share_one_scan_and_next_real_turn_sees_files(
     _skill(tmp_path, "owned", "Initial description")
     stack = ConfigLayerStack((ConfigLayer(ConfigLayerSource("user", file=str(tmp_path / "settings.json")), {}),))
     host, scans = _host(tmp_path, monkeypatch, stack)
+    snapshots = []
+    snapshot = SkillManager.snapshot
+
+    def capture(manager, *args, **kwargs):
+        snapshots.append(manager)
+        return snapshot(manager, *args, **kwargs)
+
+    monkeypatch.setattr(SkillManager, "snapshot", capture)
     observed = []
     builder = ContextBuilder(workspace_root=tmp_path)
 
@@ -185,6 +193,7 @@ async def test_query_and_bootstrap_share_one_scan_and_next_real_turn_sees_files(
                     metadata={"conversation_id": "skill-turn-owner"}))) ]
             assert any(event.type == "done" and event.data.get("status") == "completed" for event in events)
             assert len(scans) == index + 1
+            assert len(snapshots) == (index + 1) * (2 if entry == "captured_request" else 1)
             if index == 0:
                 _skill(tmp_path, "owned", "Edited description")
                 _skill(tmp_path, "installed", "New skill")
