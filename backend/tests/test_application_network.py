@@ -323,7 +323,7 @@ async def test_responses_pool_does_not_reuse_the_revoked_original_idle_socket(mo
     async def handshake(_status, _headers):
         return None
     async def turn():
-        request = pool.request(("original-owner",))
+        request = pool.request(("original-owner", "original-thread", "turn", "foreground"))
         async for _event in request.events({"input": []}, url="wss://allowed.test", headers={}, proxy=None,
                 wire_payload_sink=None, on_handshake=handshake):
             pass
@@ -332,7 +332,7 @@ async def test_responses_pool_does_not_reuse_the_revoked_original_idle_socket(mo
         return request
     try:
         await turn()
-        assert pool.idle is not None
+        assert ("original-owner", "original-thread", "foreground") in pool.idle
         controller.publish(0, DestinationPolicy(frozenset()))
         await asyncio.wait_for(sockets[0].closed.wait(), 1)
         controller.publish(0, DestinationPolicy(frozenset({"allowed.test"})))
