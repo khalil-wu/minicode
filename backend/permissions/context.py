@@ -193,6 +193,8 @@ class ToolExecutionContext:
     exec_policy_decision: Any | None = field(default=None, repr=False)
     final_tool_request: Any | None = field(default=None, repr=False)
     turn_environment: TurnEnvironment | None = field(default=None, repr=False)
+    named_turn_environments: dict[str, TurnEnvironment] = field(default_factory=dict, repr=False)
+    environment_hook_manager: Any | None = field(default=None, repr=False)
     environment_bindings: ToolEnvironmentBindings | None = field(default=None, repr=False)
 
     def source_for_call(self, call_id: str) -> ToolCallSource:

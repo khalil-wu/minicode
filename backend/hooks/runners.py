@@ -68,6 +68,11 @@ async def execute_hook(
     parse_verdict: Callable[[str], tuple[bool, str] | None],
 ) -> HookExecutionResult:
     if entry.hook_type == "command":
+        if getattr(entry, "execution_environment", None) is not None:
+            from backend.hooks.environment import execute_environment_hook
+
+            return await execute_environment_hook(entry, event=event, json_input=json_input,
+                event_name=event_name, runtime=runtime)
         return await _execute_command(
             entry,
             event=event,

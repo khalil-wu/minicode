@@ -106,6 +106,10 @@ def build_tool_registry(
     registry.register(ApplyPatchTool())
     registry.register(ListFilesTool())
     registry.register(NotebookEditTool())
+    if config_snapshot.feature_flags.enabled("multi_env_copy_file"):
+        from backend.tools.multi_env_copy_file import MultiEnvCopyFileTool
+
+        registry.register(MultiEnvCopyFileTool())
 
     registry.register(GrepFilesTool())
     registry.register(GlobFilesTool())

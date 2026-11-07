@@ -598,6 +598,7 @@ class BaseTool(ABC):
     # Executor-backed tools select from the captured turn attachments. MCP
     # tools retain their own per-server authority instead of inheriting this.
     requires_execution_environment: bool = False
+    execution_environment_fields: tuple[str, ...] = ()
     allow_workspace_root_path: bool = False
     allow_tool_result_path: bool = False
     # UI/event projection hints. These are non-model-facing and let each tool own
@@ -667,7 +668,7 @@ class BaseTool(ABC):
 
     def model_schema_for_policy(self, policy) -> ToolSchema:
         schema = self.model_schema()
-        if self.requires_execution_environment and policy.environment_count is not None and policy.environment_count > 1:
+        if self.requires_execution_environment and not self.execution_environment_fields and policy.environment_count is not None and policy.environment_count > 1:
             return replace(schema, parameters={**schema.parameters, "properties": {
                 **schema.parameters.get("properties", {}), "environment_id": {"type": "string",
                     "description": "Environment id from <environment_context>. Omit to use the primary environment."}}})
@@ -934,7 +935,7 @@ def validate_tool_input(tool: BaseTool, args: Any) -> str:
 
     try:
         schema = tool.get_execution_schema().parameters
-        if tool.requires_execution_environment:
+        if tool.requires_execution_environment and not tool.execution_environment_fields:
             schema = {**schema, "properties": {**schema.get("properties", {}), "environment_id": {"type": "string"}}}
         validator_class = validator_for(schema)
         validator_class.check_schema(schema)

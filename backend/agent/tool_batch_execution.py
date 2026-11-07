@@ -1870,10 +1870,12 @@ async def execute_serial(
             tool_ctx = execution_context_for_call(tc, tool_ctx, _tool_for_call(tc, tool_registry))
             approval_request = _bound_final_tool_request(tc)
             if approval_request is None:
+                from backend.agent.tool_environments import execution_environment_identity
+
                 captured_tool = _tool_for_call(tc, tool_registry)
                 approval_request = FinalExecutableToolRequest.freeze(tc,
                     policy_identity=captured_tool.policy_identity if captured_tool is not None else tc.name,
-                    environment_identity=(tool_ctx.permission.environment_scope.identity()
+                    environment_identity=(execution_environment_identity(tool_ctx)
                         if captured_tool is not None and captured_tool.requires_execution_environment
                         and tool_ctx.permission.environment_scope is not None else None))
                 _bind_final_tool_request(tc, approval_request)

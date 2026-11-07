@@ -28,7 +28,8 @@ def path(value):
 
 
 def info():
-    return {"shell": {"name": "test", "path": sys.executable}, "executorVersion": "0.0.0",
+    return {"shell": {"name": os.environ.get("MINICODE_TEST_SHELL_NAME", "test"),
+                      "path": os.environ.get("MINICODE_TEST_SHELL_PATH", sys.executable)}, "executorVersion": "0.0.0",
             "providerId": "owned-stdio-test-peer", "cwd": Path.cwd().as_uri(),
             "capabilities": {"fileWriteStreaming": True, "sandboxedFileStreaming": True}}
 

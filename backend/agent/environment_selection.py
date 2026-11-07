@@ -84,10 +84,11 @@ class EnvironmentConfig:
     mcp_policy: Mapping[str, Any] | None = None
     network_policy: Mapping[str, Any] | None = None
     selected_capability_roots: tuple[dict[str, Any], ...] = ()
+    environment_hooks: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "shell_environment_policy", deepcopy(self.shell_environment_policy))
-        for name in ("exec_policy", "mcp_policy", "network_policy", "selected_capability_roots"):
+        for name in ("exec_policy", "mcp_policy", "network_policy", "selected_capability_roots", "environment_hooks"):
             object.__setattr__(self, name, deepcopy(getattr(self, name)))
 
 

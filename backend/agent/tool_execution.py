@@ -150,6 +150,8 @@ def _tool_turn_id(tool_ctx: ToolExecutionContext) -> str:
 
 
 def _tool_hook_manager(tool_ctx: ToolExecutionContext) -> Any | None:
+    if tool_ctx.environment_hook_manager is not None:
+        return tool_ctx.environment_hook_manager
     run_context = tool_ctx.run_context
     return run_context.hook_manager if run_context is not None else None
 
@@ -1425,6 +1427,18 @@ async def _apply_pre_tool_hook(
     tc: ToolCallEvent,
     tool_ctx: ToolExecutionContext,
 ) -> ToolResult | None:
+    tool = _tool_for_call(tc, tool_ctx.tool_registry) if tool_ctx.tool_registry is not None else None
+    if tool is not None and tool.execution_environment_fields:
+        from backend.agent.tool_environments import execution_context_for_call
+        from backend.environments.errors import ExecutorError
+
+        invalid = validate_tool_input(tool, tc.arguments)
+        if invalid:
+            return ToolResult(invalid, is_error=True)
+        try:
+            tool_ctx = execution_context_for_call(tc, tool_ctx, tool)
+        except (ValueError, ExecutorError) as error:
+            return ToolResult(str(error), is_error=True)
     # Without callbacks this path only normalizes arguments and marks admission.
     # Keep it inline so a no-op cannot consume the tool's execution time slice.
     if (
@@ -1483,6 +1497,11 @@ async def _apply_pre_tool_hook_owned(
                     content=f"Tool blocked by hook: {pre.message}", is_error=True
                 )
             if isinstance(pre.updated_input, dict):
+                for field, environment in tool_ctx.named_turn_environments.items():
+                    expected = environment.selection.environment_id
+                    if field in pre.updated_input and pre.updated_input[field] != expected:
+                        return ToolResult(f"PreToolUse hook cannot change the tool environment ({field})", is_error=True)
+                    pre.updated_input[field] = expected
                 if tc.name == "run_command":
                     if "command" in pre.updated_input:
                         tc.arguments = {**tc.arguments, "command": pre.updated_input["command"]}

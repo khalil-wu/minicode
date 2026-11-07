@@ -578,6 +578,7 @@ class _HookEntry:
     source: str = "unknown"
     display_order: int = 0
     env: dict[str, str] = field(default_factory=dict)
+    execution_environment: Any | None = field(default=None, repr=False)
 
 
 @dataclass
