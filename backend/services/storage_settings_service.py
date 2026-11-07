@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -80,8 +81,9 @@ def app_disk_usage() -> dict[str, Any]:
     from backend.conversations.repository import ConversationRepository
     from backend.services.worktree_settings_service import list_managed_worktrees
     repository = ConversationRepository()
-    return disk_usage(repository=repository, records=storage_records(),
-                      worktree_paths=[record["path"] for record in list_managed_worktrees(repository=repository)])
+    with storage_records() as records:
+        return disk_usage(repository=repository, records=records,
+                          worktree_paths=[record["path"] for record in list_managed_worktrees(repository=repository)])
 
 
 def _disk_bytes(path: Path) -> int:
@@ -158,10 +160,10 @@ def _tree_storage_bytes(repo, tree: dict[str, Any], store: FileSwarmStore) -> in
 
 def review_storage(repo, *, days: int, archived_only: bool, store: FileSwarmStore | None = None, now: datetime | None = None) -> dict[str, Any]:
     cutoff = (now or datetime.now(UTC)) - timedelta(days=days)
-    records = store if store is not None else storage_records()
-    trees = _tree_activity(repo, records)
-    inventory = [{**{key: value for key, value in tree.items() if key not in {"agent_ids", "running"}},
-                  "bytes": _tree_storage_bytes(repo, tree, records)} for tree in trees.values() if not tree["running"]]
+    with nullcontext(store) if store is not None else storage_records() as records:
+        trees = _tree_activity(repo, records)
+        inventory = [{**{key: value for key, value in tree.items() if key not in {"agent_ids", "running"}},
+                      "bytes": _tree_storage_bytes(repo, tree, records)} for tree in trees.values() if not tree["running"]]
     inventory.sort(key=lambda tree: (tree["updated_at"], tree["id"]))
     candidates = [tree for tree in inventory if (not archived_only or tree["archived"])
                   and datetime.fromisoformat(tree["updated_at"]) < cutoff]
@@ -169,5 +171,6 @@ def review_storage(repo, *, days: int, archived_only: bool, store: FileSwarmStor
 
 
 def storage_review_changed(repo, conversation_id: str, snapshot: dict[str, Any], *, store: FileSwarmStore | None = None) -> bool:
-    tree = _tree_activity(repo, store if store is not None else storage_records()).get(conversation_id)
+    with nullcontext(store) if store is not None else storage_records() as records:
+        tree = _tree_activity(repo, records).get(conversation_id)
     return tree is None or tree["running"] or tree["snapshot"] != snapshot

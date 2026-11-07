@@ -110,8 +110,9 @@ async def recover_persisted_conversation_projections(repository: ConversationRep
         return
     if runtime is not None:
         journal = await to_thread_cancel_safe(runtime.execution_journal, owner)
+        await replay_pending_conversation_projections(repository, journal, conversation_id=conversation_id)
     else:
-        store = FileSwarmStore(SWARM_DIR)
-        journal = await to_thread_cancel_safe(ExecutionJournal, owner, base_dir=journal_root,
-                                             terminal_record_reader=store.get_agent_run)
-    await replay_pending_conversation_projections(repository, journal, conversation_id=conversation_id)
+        with FileSwarmStore(SWARM_DIR) as store:
+            journal = await to_thread_cancel_safe(ExecutionJournal, owner, base_dir=journal_root,
+                                                 terminal_record_reader=store.get_agent_run)
+            await replay_pending_conversation_projections(repository, journal, conversation_id=conversation_id)

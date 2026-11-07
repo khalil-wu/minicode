@@ -619,11 +619,13 @@ class AgentRuntime:
         self._lease_stop_event = None
         self._lease_thread = None
         if not release_lease or self._lease_lost:
+            self._swarm_store.close()
             return False
         released = self._swarm_store.release_runtime_lease(
             runtime_instance_id=self._runtime_instance_id,
             owner_token=self._runtime_owner_token,
         )
+        self._swarm_store.close()
         if released:
             self._lease_lost = True
         return released
@@ -4395,17 +4397,17 @@ def purge_persisted_conversation_runtime(conversation_id: str) -> dict[str, Any]
             "the live process runtime must own in-memory conversation cleanup"
         )
 
-    store = FileSwarmStore(SWARM_DIR)
-    removed = store.purge_conversation(
-        owner,
-        allowed_active_owner_tokens=set(),
-        before_delete=lambda durable: _purge_conversation_files(
-            set(durable["run_ids"]) | set(durable["subagent_ids"]),
-            conversation_id=owner, journal_root=SWARM_DIR.parent / "sidechains",
-            outbox_root=SWARM_DIR.parent / "parent_notifications",
-            subagent_records=durable["subagent_records"],
-        ),
-    )
+    with FileSwarmStore(SWARM_DIR) as store:
+        removed = store.purge_conversation(
+            owner,
+            allowed_active_owner_tokens=set(),
+            before_delete=lambda durable: _purge_conversation_files(
+                set(durable["run_ids"]) | set(durable["subagent_ids"]),
+                conversation_id=owner, journal_root=SWARM_DIR.parent / "sidechains",
+                outbox_root=SWARM_DIR.parent / "parent_notifications",
+                subagent_records=durable["subagent_records"],
+            ),
+        )
     if not removed.get("cleanup_pending"):
         # The message board is its own local database. The live purge deletes
         # the conversation's tree after the swarm records; the cold purge owns

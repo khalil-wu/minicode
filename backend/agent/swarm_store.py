@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
+import weakref
 from contextlib import closing, contextmanager
 from hashlib import sha256
 from pathlib import Path
@@ -221,8 +223,8 @@ class FileSwarmStore:
     """SQLite/WAL task, message, and team store.
 
     The historical class name remains the public API so callers do not need a
-    migration layer. Each operation uses a short connection and writes acquire
-    SQLite's transaction lock with ``BEGIN IMMEDIATE``.
+    migration layer. One writer belongs to this store; readers use short
+    connections. Writes acquire SQLite's transaction lock with ``BEGIN IMMEDIATE``.
     """
 
     def __init__(self, root: Path) -> None:
@@ -233,10 +235,17 @@ class FileSwarmStore:
         self._busy_retries: int = 0
         self._write_count: int = 0
         self._migration_duration_ms: float = 0.0
-        self._initialize()
+        self._writer_lock = threading.Lock()
+        self._writer = self._connect(check_same_thread=False)
+        self._close_writer = weakref.finalize(self, self._writer.close)
+        try:
+            self._initialize()
+        except BaseException:
+            self.close()
+            raise
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5.0)
+    def _connect(self, *, check_same_thread: bool = True) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=5.0, check_same_thread=check_same_thread)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 5000")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -245,31 +254,42 @@ class FileSwarmStore:
         connection.execute("PRAGMA synchronous = FULL")
         return connection
 
+    def close(self) -> None:
+        with self._writer_lock:
+            self._close_writer()
+
+    def __enter__(self) -> FileSwarmStore:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
     @contextmanager
     def _write(self) -> Iterator[sqlite3.Connection]:
-        connection = self._connect()
-        self._write_count += 1
-        max_retries = 3
-        try:
-            for attempt in range(max_retries + 1):
-                try:
-                    connection.execute("BEGIN IMMEDIATE")
-                    break
-                except sqlite3.OperationalError as exc:
-                    if attempt < max_retries and "locked" in str(exc).lower():
-                        self._busy_retries += 1
-                        logger.debug("SQLite busy retry %d: %s", attempt + 1, exc)
-                        time.sleep(0.05 * (attempt + 1))
-                        continue
-                    connection.rollback()
-                    raise
-            yield connection
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+        # A connection is never borrowed by concurrent transactions. Keeping
+        # the writer alive also keeps WAL alive between short read operations,
+        # avoiding a checkpoint and WAL recreation for every runtime fact.
+        with self._writer_lock:
+            connection = self._writer
+            self._write_count += 1
+            max_retries = 3
+            try:
+                for attempt in range(max_retries + 1):
+                    try:
+                        connection.execute("BEGIN IMMEDIATE")
+                        break
+                    except sqlite3.OperationalError as exc:
+                        if attempt < max_retries and "locked" in str(exc).lower():
+                            self._busy_retries += 1
+                            logger.debug("SQLite busy retry %d: %s", attempt + 1, exc)
+                            time.sleep(0.05 * (attempt + 1))
+                            continue
+                        raise
+                yield connection
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
 
     def _initialize(self) -> None:
         connection = self._connect()
