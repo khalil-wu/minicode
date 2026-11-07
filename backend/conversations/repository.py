@@ -2830,11 +2830,12 @@ class ConversationRepository:
                 self._cache_record(cached, copy_record=False)
             return cached.revision, cached.context_snapshot
 
-    def get_execution_context(self, conversation_id: str, *, transcript_ids: tuple[str, ...] = ()) -> ConversationRecord | None:
+    def get_execution_context(self, conversation_id: str, *, transcript_ids: tuple[str, ...] = (), prepare_resume: bool = False) -> ConversationRecord | None:
         """Capture run metadata and an immutable model snapshot without UI history.
 
         The run deserializer owns its resulting messages. It reads this
         repository-owned snapshot and must never mutate its nested values.
+        Explicit resume preparation also restores the retained Plan file.
         """
         with self._store_lock(conversation_id):
             cached = self._record_cache.get(conversation_id)
@@ -2843,6 +2844,11 @@ class ConversationRepository:
                 if cached is None:
                     return None
                 self._cache_record(cached, copy_record=False)
+            if prepare_resume:
+                from backend.agent.plans import PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY, PLAN_SLUG_KEY
+
+                if any(key in cached.context_snapshot for key in (PLAN_SLUG_KEY, PLAN_FILE_REFERENCE_KEY, PLAN_RECOVERY_STATUS_KEY)):
+                    cached = self.get_conversation_for_resume(conversation_id)
             record = ConversationRecord.from_dict(cached.to_meta_dict())
             record.context_snapshot = cached.context_snapshot
             if transcript_ids:

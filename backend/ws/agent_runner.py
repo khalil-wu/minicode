@@ -4254,15 +4254,6 @@ class SessionAgentRunnerMixin:
             run_context.skill_snapshot_task = skill_snapshot_task
             retain_cleanup_task(skill_snapshot_task, run_context.lifecycle_cleanup_tasks)
 
-        # A restored conversation may have only its newest entries loaded
-        # synchronously.  Do not construct or send a provider request until
-        # the durable older prefix has been hydrated.
-        conversation_runtime = getattr(self, "conversation_runtime", None)
-        wait_for_hydration = getattr(conversation_runtime, "wait_for_hydration", None)
-        if callable(wait_for_hydration):
-            await wait_for_hydration(conversation.id)
-            pre_trace.mark("run.hydrated")
-
         def _owns_query_claim() -> bool:
             return query_claim is None or conversation_query_guards().owns(query_claim)
 
@@ -4333,9 +4324,12 @@ class SessionAgentRunnerMixin:
             pre_trace.mark("run.projections_replayed")
             flushed_ui_state = await self._flush_ui_agent_state_now_unlocked(conversation.id)
             pre_trace.mark("run.ui_state_flushed")
+            # Execution reads the complete durable model window. The UI's
+            # independent recent-page hydration is not a provider dependency.
             latest_for_turn = await asyncio.to_thread(
                 self.conversation_repo.get_execution_context,
                 conversation.id,
+                prepare_resume=True,
             )
             pre_trace.mark("run.record_loaded")
             if latest_for_turn is None:
@@ -4374,6 +4368,17 @@ class SessionAgentRunnerMixin:
                 run_context_snapshot = dict(conversation.context_snapshot)
 
         pre_trace.mark("run.snapshot_ready")
+        run_context_builder = ContextBuilder(
+            token_budget=request_snapshot.config.token_budget,
+            agent_settings=request_snapshot.config.agent,
+            skill_executor=request_snapshot.skill_executor,
+            conversation_id=conversation.id,
+            workspace_root=run_workspace_root,
+        )
+        history_task = asyncio.create_task(to_thread_cancel_safe(
+            run_context_builder.load_snapshot, run_context_snapshot))
+        retain_cleanup_task(history_task, run_context.lifecycle_cleanup_tasks)
+        pre_trace.mark("run.history.start")
         # Discovery is independent of journal recovery and the persisted model
         # snapshot. Join it at the first consumer instead of serializing both.
         if run_context.skill_snapshot_task is not None:
@@ -4745,15 +4750,14 @@ class SessionAgentRunnerMixin:
             run_memory_manager = MemoryManager(FileMemory.for_workspace(run_workspace_root))
         run_tool_registry = memory_tools_for_run(run_tool_registry, run_memory_manager.file_memory if run_memory_manager is not None else None)
 
-        run_context_builder = ContextBuilder(
-            token_budget=run_config.token_budget,
-            agent_settings=run_config.agent,
-            skill_executor=request_snapshot.skill_executor,
-            memory_manager=run_memory_manager,
-            llm=run_llm,
-            conversation_id=conversation.id,
-            workspace_root=run_workspace_root,
-        )
+        # Decode durable history while the transport and extension runtime are
+        # prepared. Bind the final selected runtime only after that work joins.
+        await asyncio.shield(history_task)
+        pre_trace.mark("run.load_snapshot")
+        run_context_builder.bind_budget(run_config.token_budget)
+        run_context_builder._agent_settings = run_config.agent
+        run_context_builder._memory_manager = run_memory_manager
+        run_context_builder.bind_llm(run_llm)
         run_agent_session = AgentSession(
             llm=run_llm,
             tool_registry=run_tool_registry,
@@ -4780,15 +4784,10 @@ class SessionAgentRunnerMixin:
         run_context.retain_model = lambda adapter, task: _lease_session_llm_for_task(self, adapter, task)
         run_context.refresh_model_auth = lambda snapshot, force, task: _refresh_session_model_auth(self, snapshot, force, task)
 
-        # Rebuilding the full history and its token cache is CPU-bound and
-        # grows with the conversation; keep it off the event loop so other
-        # sessions' deltas and this socket's acknowledgements keep flowing.
         from backend.agent.turn_trace import turn_trace_shared
 
         run_trace = turn_trace_shared(f"turn[{conversation.id}]")
         run_trace.mark("run.start")
-        await asyncio.to_thread(run_context_builder.load_snapshot, run_context_snapshot)
-        run_trace.mark("run.load_snapshot")
         normalized_attachments = list(attachments or [])
         # These values are host capabilities or concrete runtime owners, never
         # transport metadata. A local adapter/checkpoint resume may supply

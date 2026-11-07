@@ -2080,7 +2080,7 @@ def test_runner_terminal_projections_use_the_committed_reason_not_the_phase_summ
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_run_discovers_captured_workspace_skills_off_loop_while_history_hydrates(tmp_path, monkeypatch, cancel):
+def test_run_discovers_captured_workspace_skills_off_loop_while_runtime_prepares(tmp_path, monkeypatch, cancel):
     from backend.skills.loader import SkillLoader
     from backend.skills.manager import SkillManager
 
@@ -2130,15 +2130,9 @@ def test_run_discovers_captured_workspace_skills_off_loop_while_history_hydrates
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", lambda config, model_override=None, **_kwargs: _NoopLLM())
 
     async def scenario():
-        hydration_entered, hydration_release = asyncio.Event(), asyncio.Event()
-        async def wait_for_hydration(_owner):
-            hydration_entered.set()
-            await hydration_release.wait()
-        monkeypatch.setattr(session.conversation_runtime, "wait_for_hydration", wait_for_hydration)
         task = asyncio.create_task(session._run_agent_locked("run captured scope", conversation_id="conv_runnerdone",
             metadata={"assistant_message_id": "skills-answer", "user_message_id": "skills-user"}))
         try:
-            await asyncio.wait_for(hydration_entered.wait(), 3)
             assert await asyncio.wait_for(asyncio.to_thread(entered.wait, 3), 4)
             assert worker_threads[0] != threading.get_ident()
             runtime_roots.roots = (extra_new,)
@@ -2151,14 +2145,12 @@ def test_run_discovers_captured_workspace_skills_off_loop_while_history_hydrates
                 assert not names
             else:
                 release.set()
-                hydration_release.set()
                 await asyncio.wait_for(task, 10)
                 assert len(names) == 1 and {"original-only", "original-extra"} <= names[0]
                 assert not {"other-only", "later-extra"} & names[0]
                 assert any(event.get("type") == "done" for event in events)
         finally:
             release.set()
-            hydration_release.set()
             await asyncio.gather(task, return_exceptions=True)
             pending = tuple(session.run_manager.lifecycle_cleanup_tasks_for("conv_runnerdone"))
             await asyncio.gather(*pending, return_exceptions=True)
