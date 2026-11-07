@@ -74,12 +74,20 @@ async def _replay_projection(repository: ConversationRepository, journal: Execut
 
 async def replay_pending_conversation_projections(repository: ConversationRepository, journal: ExecutionJournal, *, conversation_id: str) -> None:
     """Recover applicable facts; settle superseded facts without changing history."""
-    for pending in await to_thread_cancel_safe(journal.pending_conversation_projections):
+    # These scans share a journal generation. Run them in one worker handoff;
+    # after actual recovery, rescan the terminal receipts against the new head.
+    pending_items, terminal_items = await to_thread_cancel_safe(
+        lambda: (journal.pending_conversation_projections(), journal.unprojected_terminal_projections()))
+    recovered = False
+    for pending in pending_items:
         payload = dict(pending.payload)
         if str(payload.get("conversation_id") or "") == conversation_id:
             await _replay_projection(repository, journal, conversation_id=conversation_id,
                                      payload=payload, source_event_id=pending.event_id)
-    for projection in await to_thread_cancel_safe(journal.unprojected_terminal_projections):
+            recovered = True
+    if recovered:
+        terminal_items = await to_thread_cancel_safe(journal.unprojected_terminal_projections)
+    for projection in terminal_items:
         if str(projection.get("conversation_id") or "") == conversation_id:
             await _replay_projection(repository, journal, conversation_id=conversation_id,
                                      payload=projection, source_event_id=projection["source_event_id"], minimal=True)
