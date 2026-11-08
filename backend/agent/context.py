@@ -157,6 +157,7 @@ def clone_context_builder(builder: "ContextBuilder", *, copy_history: bool = Tru
             setattr(cloned, name, deepcopy(getattr(builder, name)))
     # Prompt previews only read history/evidence; branch clones still own them.
     cloned._history_store = builder._history_store.clone() if copy_history else builder._history_store
+    cloned._recovery_snapshot = None
     cloned.guardian_evidence = deepcopy(builder.guardian_evidence) if copy_history else builder.guardian_evidence
     cloned._withheld_media_timestamps = set()
     cloned._tool_execution_context = None
@@ -637,6 +638,7 @@ class ContextBuilder:
         # Ordered transcript lives in ConversationHistory; the builder reaches
         # it through the _history/_history_* property delegates below.
         self._history_store = ConversationHistory(estimator=estimate_llm_message_tokens)
+        self._recovery_snapshot: tuple[dict[str, Any], int] | None = None
         from backend.agent.guardian.retained import GuardianEvidenceOwner
         self.guardian_evidence = GuardianEvidenceOwner()
         self._guardian_reviewer_compaction_hash: str | None = None
@@ -995,6 +997,10 @@ class ContextBuilder:
             "model_item_id": model_item_id,
             "text_start": len(projected) - len(text) if single_text else 0,
             "text_length": len(text) if single_text else len(projected), "single_text": single_text}
+        index = next((index for index in range(len(self._history) - 1, -1, -1)
+                      if self._history[index] is message), None)
+        if index is not None:
+            self._history_store._changed(index)
         self.guardian_evidence.record_accepted_message("user", text, turn_id=turn_id, message_id=message_id,
             acceptance_order=acceptance_order, origin=message.input_origin, complete=single_text, single_text=single_text,
             model_item_id=model_item_id)
@@ -4287,6 +4293,7 @@ class ContextBuilder:
 
     def clear(self, *, reset_guardian: bool = True) -> None:
         clear_system_prompt_sections()
+        self._recovery_snapshot = None
         self._history_store.clear()
         if reset_guardian:
             self.guardian_evidence.reset_history()
@@ -4519,6 +4526,24 @@ class ContextBuilder:
             **({"inactive_context_windows": deepcopy(self._inactive_context_windows)} if self._inactive_context_windows else {}),
             **({"history_notes_hint": deepcopy(self._history_notes_hint)} if self._history_notes_hint else {}),
         }
+
+    def prepare_recovery_snapshot(self) -> None:
+        """Prepare the idle thread's canonical, detached history projection."""
+        self._recovery_snapshot = (deepcopy(self.export_snapshot()), self._history_store.revision)
+
+    def capture_recovery_snapshot(self) -> tuple[dict[str, Any], int]:
+        """Project current metadata and changed history over the owned base."""
+        if self._recovery_snapshot is None:
+            return self.export_snapshot(), self._history_store.revision
+        from backend.conversations.context_delta import apply_context_snapshot_delta
+
+        before, revision = self._recovery_snapshot
+        changes, current = self.export_snapshot_delta(before, since_revision=revision)
+        return apply_context_snapshot_delta(before, changes), current
+
+    def retain_recovery_snapshot(self, snapshot: dict[str, Any], history_revision: int) -> None:
+        """Retain a journal-owned immutable snapshot after its durable write."""
+        self._recovery_snapshot = (snapshot, history_revision)
 
     def export_snapshot_delta(
         self, before: dict[str, Any], *, since_revision: int | None,

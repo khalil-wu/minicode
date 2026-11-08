@@ -189,3 +189,107 @@ async def test_real_query_uses_journal_base_for_admission_and_terminal_snapshots
         assert any(requested for requested, _ in calls), "Terminal persistence must use the same owner"
     finally:
         await session.session_lifecycle.shutdown(reason="query-snapshot-reuse")
+
+
+def test_next_turn_starts_from_durable_canonical_history_and_only_serializes_new_rows(tmp_path, monkeypatch):
+    from backend.agent import context as context_module
+
+    first = recorder(tmp_path)
+    first.record_turn_started()
+    first.context_builder.append_assistant("first final answer")
+    first.record_terminal_intent(AgentEvent.done(status="completed"))
+    retained = deepcopy(first.terminal_intent_event.payload["context_snapshot"])
+    first.context_builder.append_user("next user input")
+    first.context_builder._history_frozen_count = 1001
+    first.context_builder.extension_state["latest"] = "current metadata"
+    second = QueryJournalRecorder(first.journal, {"run_id": "next", "turn_id": "next"},
+        AgentState(user_message="next user input"), first.context_builder, None, "conversation")
+    calls = []
+    sanitize = context_module._sanitize_provider_items
+
+    def observed(items):
+        calls.append(items)
+        return sanitize(items)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(context_module, "_sanitize_provider_items", observed)
+        second.record_turn_started()
+    assert len(calls) == 1
+    expected = second.context_builder.export_snapshot()
+    assert second.projection_base_snapshot == expected
+    assert first.terminal_intent_event.payload["context_snapshot"] == retained
+    cold = ExecutionJournal("snapshot-reuse", base_dir=tmp_path).read_events()
+    assert cold[-2].payload["context_snapshot"] == expected
+    assert cold[-1].payload["lifecycle"] == "provider_claimed"
+
+
+def test_idle_snapshot_is_normalized_detached_and_invalidated_by_restore_or_branch(tmp_path, monkeypatch):
+    from backend.agent import context as context_module
+    from backend.agent.context import clone_context_builder
+    raw = {"history": [{"role": "system", "content": "import prefix"},
+        {"role": "user", "content": "Same literal prompt"}, {"role": "user", "content": "Same literal prompt"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "read", "name": "read_file", "arguments": {"file_path": "owned"}}]}]}
+    builder = ContextBuilder()
+    builder.load_snapshot(raw)
+    builder.prepare_recovery_snapshot()
+    before = deepcopy(builder._recovery_snapshot[0])
+    raw["history"][1]["content"] = "external caller mutation"
+    builder._history[-1].tool_calls[0].arguments["file_path"] = "updated"
+    builder._history_store.refresh_message_estimate(builder._history[-1])
+    actual, _ = builder.capture_recovery_snapshot()
+    assert actual == builder.export_snapshot()
+    assert builder._recovery_snapshot[0] == before
+    child = clone_context_builder(builder)
+    assert child._recovery_snapshot is None
+    child._history[0].content = "child edit"
+    assert child.capture_recovery_snapshot()[0] == child.export_snapshot()
+    assert builder._history[0].content == "Same literal prompt"
+    builder.load_snapshot({"history": [{"role": "user", "content": "different conversation"}]})
+    assert builder._recovery_snapshot is None
+    assert builder.capture_recovery_snapshot()[0] == builder.export_snapshot()
+
+
+def test_failed_start_does_not_promote_uncommitted_recovery_base(tmp_path, monkeypatch):
+    owner = recorder(tmp_path)
+    owner.record_turn_started()
+    retained = owner.context_builder._recovery_snapshot
+    owner.context_builder.append_user("pending new input")
+    write = owner.journal.append_once_many
+    monkeypatch.setattr(owner.journal, "append_once_many", lambda entries: (_ for _ in ()).throw(OSError("disk unavailable")))
+    with pytest.raises(OSError):
+        owner.record_turn_started()
+    assert owner.context_builder._recovery_snapshot is retained
+    monkeypatch.setattr(owner.journal, "append_once_many", write)
+    owner.record_turn_started()
+    assert owner.context_builder._recovery_snapshot[0] == owner.context_builder.export_snapshot()
+
+
+def test_idle_preparation_serializes_once_and_subsequent_journal_start_skips_history(tmp_path, monkeypatch):
+    from backend.agent import context as context_module
+
+    owner = recorder(tmp_path)
+    owner.context_builder.prepare_recovery_snapshot()
+    calls = []
+    sanitize = context_module._sanitize_provider_items
+
+    def observed(items):
+        calls.append(items)
+        return sanitize(items)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(context_module, "_sanitize_provider_items", observed)
+        owner.record_turn_started()
+    assert calls == []
+    assert owner.projection_base_snapshot == owner.context_builder.export_snapshot()
+
+
+def test_new_acceptance_provenance_updates_prepared_history():
+    builder = ContextBuilder()
+    builder.append_user("Accepted source input")
+    message = builder._history[-1]
+    builder.prepare_recovery_snapshot()
+    builder.record_admitted_user_input(message, text="Accepted source input", turn_id="new-turn",
+        message_id="input", acceptance_order=3)
+    captured, _ = builder.capture_recovery_snapshot()
+    assert captured == builder.export_snapshot()
+    assert captured["history"][-1]["accepted_input"]["turn_id"] == "new-turn"

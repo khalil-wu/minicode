@@ -44,6 +44,7 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
         builder = ContextBuilder(token_budget=config.token_budget, agent_settings=config.agent,
             conversation_id=conversation_id, workspace_root=workspace)
         builder.load_snapshot(record.context_snapshot)
+        builder.prepare_recovery_snapshot()
         shell = thread.user_shell if thread is not None and thread.user_shell is not None else default_user_shell()
         return builder, record.context_snapshot, shell
 

@@ -84,8 +84,7 @@ class QueryJournalRecorder:
         return self.journal.append_lifecycle(name, payload)
 
     def record_turn_started(self) -> None:
-        self.projection_base_snapshot = self.context_builder.export_snapshot()
-        self.projection_history_revision = self.context_builder._history_store.revision
+        self.projection_base_snapshot, self.projection_history_revision = self.context_builder.capture_recovery_snapshot()
         if self.journal is None:
             return
         started, _ = self.journal.append_once_many([
@@ -104,6 +103,7 @@ class QueryJournalRecorder:
         # Both startup facts are durable before provider execution. Reuse the
         # journal-owned recovery base for later admission/terminal deltas.
         self.projection_base_snapshot = started.payload["context_snapshot"]
+        self.context_builder.retain_recovery_snapshot(self.projection_base_snapshot, self.projection_history_revision)
 
     def capture_context_snapshot(self) -> dict[str, Any]:
         """Reuse this turn's recovery base and serialize only changed history."""
@@ -126,6 +126,7 @@ class QueryJournalRecorder:
         message_id = str(self.metadata.get("assistant_message_id") or "")
         from backend.conversations.context_delta import context_snapshot_delta
         snapshot = self.capture_context_snapshot()
+        history_revision = self.context_builder._history_store.revision
         self.terminal_intent_event = self.lifecycle(
             "terminal_intent",
             {
@@ -151,6 +152,7 @@ class QueryJournalRecorder:
                 ),
             },
         )
+        self.context_builder.retain_recovery_snapshot(self.terminal_intent_event.payload["context_snapshot"], history_revision)
         self.terminal_intent_key = next_key
 
     def record_event(self, event: AgentEvent) -> None:
