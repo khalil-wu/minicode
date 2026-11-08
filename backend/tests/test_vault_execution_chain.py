@@ -5,6 +5,7 @@ import json
 import os
 from unittest.mock import AsyncMock
 
+import keyring
 import pytest
 
 from backend.mcp.client import MCPClient
@@ -20,9 +21,9 @@ def execution_vault(tmp_path, monkeypatch):
 
     secrets = {}
     monkeypatch.setattr(store, "VAULT_FILE", tmp_path / "vault.json")
-    monkeypatch.setattr(store.keyring, "get_password", lambda service, name: secrets.get((service, name)))
-    monkeypatch.setattr(store.keyring, "set_password", lambda service, name, value: secrets.__setitem__((service, name), value))
-    monkeypatch.setattr(store.keyring, "delete_password", lambda service, name: secrets.pop((service, name), None))
+    monkeypatch.setattr(keyring, "get_password", lambda service, name: secrets.get((service, name)))
+    monkeypatch.setattr(keyring, "set_password", lambda service, name, value: secrets.__setitem__((service, name), value))
+    monkeypatch.setattr(keyring, "delete_password", lambda service, name: secrets.pop((service, name), None))
     vault = EnvVault()
     vault.set("VAULT_GLOBAL", "global")
     vault.set("VAULT_SHARED", "saved")
@@ -52,10 +53,9 @@ def test_shell_launch_reads_scoped_vault_values_without_changing_host_env(execut
 
 
 def test_missing_global_credential_does_not_block_shell_or_scoped_mcp_startup(execution_vault, tmp_path, monkeypatch):
-    import backend.vault.store as store
 
-    read_credential = store.keyring.get_password
-    monkeypatch.setattr(store.keyring, "get_password", lambda service, name: None if name == "VAULT_GLOBAL" else read_credential(service, name))
+    read_credential = keyring.get_password
+    monkeypatch.setattr(keyring, "get_password", lambda service, name: None if name == "VAULT_GLOBAL" else read_credential(service, name))
     monkeypatch.delenv("VAULT_GLOBAL", raising=False)
     runner = SandboxRunner(SandboxPolicy(workspace_root=tmp_path))
     environment = runner._build_env()

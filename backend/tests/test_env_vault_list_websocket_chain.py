@@ -12,9 +12,9 @@ from tests.test_conversations import _install_noop_llm, _receive_until_event
 def test_settings_inventory_returns_metadata_and_injection_uses_each_scope(tmp_path, monkeypatch):
     _install_noop_llm(monkeypatch)
     credentials = {}
-    monkeypatch.setattr("backend.vault.store.keyring.get_password", lambda service, name: credentials.get((service, name)))
-    monkeypatch.setattr("backend.vault.store.keyring.set_password", lambda service, name, value: credentials.__setitem__((service, name), value))
-    monkeypatch.setattr("backend.vault.store.keyring.delete_password", lambda service, name: credentials.pop((service, name), None))
+    monkeypatch.setattr("keyring.get_password", lambda service, name: credentials.get((service, name)))
+    monkeypatch.setattr("keyring.set_password", lambda service, name, value: credentials.__setitem__((service, name), value))
+    monkeypatch.setattr("keyring.delete_password", lambda service, name: credentials.pop((service, name), None))
     vault = EnvVault(tmp_path / "vault.json")
     vault.set("GLOBAL_EXAMPLE", "global-value-example", scope="global")
     vault.set("COMMAND_EXAMPLE", "command-value-example", scope="run_command")

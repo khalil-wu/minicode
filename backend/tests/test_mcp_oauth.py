@@ -133,9 +133,9 @@ def test_oauth_credentials_stay_with_their_endpoint_and_client(tmp_path, monkeyp
     from backend.mcp.oauth import create_sdk_oauth_provider
 
     credentials = {}
-    monkeypatch.setattr("backend.mcp.oauth.keyring.get_password", lambda service, key: credentials.get((service, key)))
-    monkeypatch.setattr("backend.mcp.oauth.keyring.set_password", lambda service, key, value: credentials.__setitem__((service, key), value))
-    monkeypatch.setattr("backend.mcp.oauth.keyring.delete_password", lambda service, key: credentials.pop((service, key), None))
+    monkeypatch.setattr("keyring.get_password", lambda service, key: credentials.get((service, key)))
+    monkeypatch.setattr("keyring.set_password", lambda service, key, value: credentials.__setitem__((service, key), value))
+    monkeypatch.setattr("keyring.delete_password", lambda service, key: credentials.pop((service, key), None))
 
     async def scenario():
         config_path = tmp_path / "config.json"
@@ -191,8 +191,8 @@ def test_name_only_legacy_tokens_are_not_rebound_to_the_current_url(tmp_path, mo
     from backend.mcp.oauth import create_sdk_oauth_provider
 
     credentials = {}
-    monkeypatch.setattr("backend.mcp.oauth.keyring.get_password", lambda service, key: credentials.get((service, key)))
-    monkeypatch.setattr("backend.mcp.oauth.keyring.set_password", lambda service, key, value: credentials.__setitem__((service, key), value))
+    monkeypatch.setattr("keyring.get_password", lambda service, key: credentials.get((service, key)))
+    monkeypatch.setattr("keyring.set_password", lambda service, key, value: credentials.__setitem__((service, key), value))
 
     async def scenario():
         store = TokenStore(tmp_path / "tokens.json")

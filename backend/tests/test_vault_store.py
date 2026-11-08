@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import keyring
 import pytest
 
 from backend.vault.store import EnvVault, VaultReadError
@@ -27,13 +28,12 @@ def test_corrupt_index_refuses_mutations_instead_of_wiping(tmp_path: Path) -> No
 
 
 def test_healthy_round_trip(tmp_path: Path, monkeypatch) -> None:
-    import backend.vault.store as store
 
     vault_path = tmp_path / "vault.json"
     vault = EnvVault(vault_path)
-    monkeypatch.setattr(store.keyring, "set_password", lambda *_a, **_k: None)
-    monkeypatch.setattr(store.keyring, "get_password", lambda *_a, **_k: "value")
-    monkeypatch.setattr(store.keyring, "delete_password", lambda *_a, **_k: None)
+    monkeypatch.setattr(keyring, "set_password", lambda *_a, **_k: None)
+    monkeypatch.setattr(keyring, "get_password", lambda *_a, **_k: "value")
+    monkeypatch.setattr(keyring, "delete_password", lambda *_a, **_k: None)
 
     vault.set("secret-name", "value", description="d")
     payload = json.loads(vault_path.read_text(encoding="utf-8"))
@@ -44,12 +44,11 @@ def test_healthy_round_trip(tmp_path: Path, monkeypatch) -> None:
 
 @pytest.fixture
 def credential_store(monkeypatch):
-    import backend.vault.store as store
 
     values = {}
-    monkeypatch.setattr(store.keyring, "get_password", lambda service, name: values.get((service, name)))
-    monkeypatch.setattr(store.keyring, "set_password", lambda service, name, value: values.__setitem__((service, name), value))
-    monkeypatch.setattr(store.keyring, "delete_password", lambda service, name: values.pop((service, name), None))
+    monkeypatch.setattr(keyring, "get_password", lambda service, name: values.get((service, name)))
+    monkeypatch.setattr(keyring, "set_password", lambda service, name, value: values.__setitem__((service, name), value))
+    monkeypatch.setattr(keyring, "delete_password", lambda service, name: values.pop((service, name), None))
     return values
 
 
@@ -106,7 +105,6 @@ def test_missing_credential_can_be_resaved_with_its_scope_or_removed(tmp_path, c
 
 
 def test_os_read_failure_remains_an_error_for_reads_metadata_and_injection(tmp_path, credential_store, monkeypatch):
-    import backend.vault.store as store
     from keyring.errors import KeyringError
 
     vault = EnvVault(tmp_path / "vault.json")
@@ -114,7 +112,7 @@ def test_os_read_failure_remains_an_error_for_reads_metadata_and_injection(tmp_p
     original_index = vault._path.read_bytes()
     def unreadable(_service, _name):
         raise KeyringError("credential store unavailable")
-    monkeypatch.setattr(store.keyring, "get_password", unreadable)
+    monkeypatch.setattr(keyring, "get_password", unreadable)
     for read in (lambda: vault.get("SECRET"), vault.list_names, vault.inject_into_env):
         with pytest.raises(VaultReadError, match="could not read vault entry SECRET"):
             read()
@@ -168,7 +166,6 @@ def test_vault_handle_defers_reads_until_operation_and_sees_other_instance_updat
 
 @pytest.mark.parametrize("version", [1, 2])
 def test_prefix_listing_reloads_index_checks_matching_credentials_and_skips_unrelated_values(tmp_path, monkeypatch, version):
-    import backend.vault.store as store
     from keyring.errors import KeyringError
 
     vault_path = tmp_path / "vault.json"
@@ -184,8 +181,8 @@ def test_prefix_listing_reloads_index_checks_matching_credentials_and_skips_unre
     def unreadable(*args):
         raise KeyringError("synthetic credential reader unavailable")
 
-    monkeypatch.setattr(store.keyring, "get_password", missing)
-    monkeypatch.setattr(store.keyring, "set_password", lambda *args: pytest.fail("name lookup migrated a credential"))
+    monkeypatch.setattr(keyring, "get_password", missing)
+    monkeypatch.setattr(keyring, "set_password", lambda *args: pytest.fail("name lookup migrated a credential"))
     vault = EnvVault(vault_path)
     assert vault.list_names(prefix="CUSTOM_API_KEY_") == []
     assert reads == []
@@ -195,12 +192,12 @@ def test_prefix_listing_reloads_index_checks_matching_credentials_and_skips_unre
     assert vault.list_names(prefix="CUSTOM_API_KEY_") == [{"name": "CUSTOM_API_KEY_SCOPED", "description": "", "scope": "global", "credential_status": "missing"}]
     assert reads == ["CUSTOM_API_KEY_SCOPED"]
     assert vault_path.read_bytes() == original_index
-    monkeypatch.setattr(store.keyring, "get_password", unreadable)
+    monkeypatch.setattr(keyring, "get_password", unreadable)
     with pytest.raises(VaultReadError):
         vault.get("CUSTOM_API_KEY_SCOPED")
     with pytest.raises(VaultReadError):
         vault.list_names(prefix="CUSTOM_API_KEY_")
-    monkeypatch.setattr(store.keyring, "get_password", missing)
+    monkeypatch.setattr(keyring, "get_password", missing)
     del entries["CUSTOM_API_KEY_SCOPED"]
     vault_path.write_text(json.dumps({"version": version, "entries": entries}), encoding="utf-8")
     assert vault.list_names(prefix="CUSTOM_API_KEY_") == []
@@ -212,7 +209,6 @@ def test_prefix_listing_reloads_index_checks_matching_credentials_and_skips_unre
 @pytest.mark.parametrize("stale_scoped_marker", [False, True])
 def test_global_legacy_fallback_respects_indexed_scope_marker_with_missing_keyring_value(tmp_path, credential_store, monkeypatch, stale_scoped_marker):
     import backend.config_helpers as helpers
-    import backend.vault.store as store
 
     vault_path = tmp_path / "vault.json"
     entries = {"CUSTOM_API_KEY": {}, "UNRELATED": {}}
@@ -228,7 +224,7 @@ def test_global_legacy_fallback_respects_indexed_scope_marker_with_missing_keyri
         reads.append(name)
         return credential_store.get((service, name))
 
-    monkeypatch.setattr(store.keyring, "get_password", read)
+    monkeypatch.setattr(keyring, "get_password", read)
     monkeypatch.setattr("backend.vault.EnvVault", lambda: vault)
     monkeypatch.setattr(helpers, "_RUNTIME_API_KEY_SCOPES", {})
     monkeypatch.delenv("CUSTOM_BASE_URL", raising=False)
@@ -238,7 +234,6 @@ def test_global_legacy_fallback_respects_indexed_scope_marker_with_missing_keyri
 
 
 def test_execution_injection_reads_one_index_and_only_current_scope_values(tmp_path, credential_store, monkeypatch):
-    import backend.vault.store as store
 
     vault_path = tmp_path / "vault.json"
     vault = EnvVault(vault_path)
@@ -261,7 +256,7 @@ def test_execution_injection_reads_one_index_and_only_current_scope_values(tmp_p
         return credential_store.get((service, name))
 
     monkeypatch.setattr(Path, "read_text", read)
-    monkeypatch.setattr(store.keyring, "get_password", credential)
+    monkeypatch.setattr(keyring, "get_password", credential)
     assert vault.inject_into_env("run_command") == {"GLOBAL": "global", "SHELL": "shell"}
     assert reads == [vault_path]
     assert names == ["GLOBAL", "SHELL", "MISSING"]

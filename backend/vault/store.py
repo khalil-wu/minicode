@@ -10,17 +10,9 @@ from pathlib import Path
 from typing import Any
 from collections.abc import Callable, Mapping
 
-import keyring
-from keyring.errors import KeyringError, PasswordDeleteError
-
 from backend.config import STATE_ROOT
 from backend.atomic_io import atomic_write_text, file_mutation_locks
-
-_CREDENTIAL_ERRORS = (KeyringError,)
-if os.name == "nt":
-    import pywintypes
-
-    _CREDENTIAL_ERRORS += (pywintypes.error,)
+from backend.security.credential_backend import load_credential_backend
 
 VAULT_FILE = STATE_ROOT / ".minicode" / "vault.json"
 _KDF_ITERATIONS = 100_000  # legacy v1 migration only
@@ -96,12 +88,13 @@ class EnvVault:
         publish: Callable[[], Any] | None = None,
     ) -> Any:
         """Commit one credential family; None removes a member of the family."""
+        keyring, credential_errors, PasswordDeleteError = load_credential_backend()
         with file_mutation_locks([self._path]):
             self._load_unlocked()
             original_index = self._path.read_bytes() if self._path.exists() else None
             try:
                 previous = {name: keyring.get_password(self._service, name) for name in changes}
-            except _CREDENTIAL_ERRORS as exc:
+            except credential_errors as exc:
                 raise RuntimeError("OS credential store could not read the previous credential family") from exc
             try:
                 for name, (value, description, scope) in changes.items():
@@ -127,7 +120,7 @@ class EnvVault:
                                 pass
                         else:
                             keyring.set_password(self._service, name, value)
-                    except _CREDENTIAL_ERRORS as exc:
+                    except credential_errors as exc:
                         rollback_errors.append(exc)
                 try:
                     if original_index is None:
@@ -142,7 +135,7 @@ class EnvVault:
                     rollback_errors.append(exc)
                 if rollback_errors:
                     raise ExceptionGroup("Credential family publication and rollback failed", [failure, *rollback_errors]) from failure
-                if isinstance(failure, _CREDENTIAL_ERRORS):
+                if isinstance(failure, credential_errors):
                     raise RuntimeError("OS credential store rejected the credential family") from failure
                 raise
 
@@ -159,6 +152,7 @@ class EnvVault:
             return self._get_unlocked(name, entry)
 
     def _get_unlocked(self, name: str, entry: _VaultEntry) -> str | None:
+        keyring, credential_errors, _ = load_credential_backend()
         try:
             value = keyring.get_password(self._service, name)
             if value is not None:
@@ -177,7 +171,7 @@ class EnvVault:
             entry.salt = ""
             self._save_unlocked()
             return value
-        except (*_CREDENTIAL_ERRORS, ValueError, UnicodeDecodeError) as exc:
+        except (*credential_errors, ValueError, UnicodeDecodeError) as exc:
             raise VaultReadError(f"OS credential store could not read vault entry {name}") from exc
 
     def delete(self, name: str) -> bool:

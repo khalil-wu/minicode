@@ -28,18 +28,11 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
-import keyring
-from keyring.errors import KeyringError, PasswordDeleteError
 from filelock import AsyncFileLock, FileLock
 from mcp.client.auth import OAuthClientProvider as SDKOAuthClientProvider
 
 from backend.atomic_io import atomic_write_text, file_mutation_locks
-
-_CREDENTIAL_ERRORS = (KeyringError,)
-if os.name == "nt":
-    import pywintypes
-
-    _CREDENTIAL_ERRORS += (pywintypes.error,)
+from backend.security.credential_backend import load_credential_backend
 
 
 class MCPTokenStoreError(RuntimeError):
@@ -143,10 +136,11 @@ class TokenStore:
             pass
 
     def get(self, server: str) -> OAuthTokens | None:
+        keyring, credential_errors, _ = load_credential_backend()
         with file_mutation_locks([self._path]):
             try:
                 secret = keyring.get_password(self._service, f"{server}:legacy")
-            except _CREDENTIAL_ERRORS as exc:
+            except credential_errors as exc:
                 raise MCPTokenStoreError("MCP credential store cannot read legacy credentials") from exc
             legacy_data = self._load_unlocked() if secret is None else {}
             try:
@@ -171,12 +165,13 @@ class TokenStore:
             return tokens
 
     def _commit_credentials(self, server: str, changes: dict[str, str | None]) -> None:
+        keyring, credential_errors, PasswordDeleteError = load_credential_backend()
         with file_mutation_locks([self._path]):
             legacy_data = self._load_unlocked()
             original_file = self._path.read_bytes() if self._path.exists() else None
             try:
                 previous = {suffix: keyring.get_password(self._service, f"{server}:{suffix}") for suffix in changes}
-            except _CREDENTIAL_ERRORS as exc:
+            except credential_errors as exc:
                 raise MCPTokenStoreError("MCP credential store cannot read the previous credential family") from exc
             try:
                 for suffix, value in changes.items():
@@ -201,7 +196,7 @@ class TokenStore:
                                 pass
                         else:
                             keyring.set_password(self._service, f"{server}:{suffix}", value)
-                    except _CREDENTIAL_ERRORS as exc:
+                    except credential_errors as exc:
                         rollback_errors.append(exc)
                 try:
                     current_file = self._path.read_bytes() if self._path.exists() else None
@@ -214,7 +209,7 @@ class TokenStore:
                     rollback_errors.append(exc)
                 if rollback_errors:
                     raise ExceptionGroup("MCP credential publication and rollback failed", [failure, *rollback_errors]) from failure
-                if isinstance(failure, _CREDENTIAL_ERRORS):
+                if isinstance(failure, credential_errors):
                     raise MCPTokenStoreError("MCP credential store rejected the credential family") from failure
                 raise
 
@@ -236,9 +231,10 @@ class TokenStore:
         return SDKTokenStorage(self._service, server, self._path)
 
     def has_sdk_tokens(self, server: str) -> bool:
+        keyring, credential_errors, _ = load_credential_backend()
         try:
             raw = keyring.get_password(self._service, f"{server}:tokens")
-        except _CREDENTIAL_ERRORS as exc:
+        except credential_errors as exc:
             raise MCPTokenStoreError("MCP credential store cannot read SDK tokens") from exc
         if raw is None:
             return False
@@ -248,10 +244,11 @@ class TokenStore:
     def startup_identity(self, server: str) -> tuple[str, bool]:
         """Fingerprint protected discovery credentials without publishing their values."""
         legacy = self.get(server)
+        keyring, credential_errors, _ = load_credential_backend()
         try:
             tokens = keyring.get_password(self._service, f"{server}:tokens")
             client = keyring.get_password(self._service, f"{server}:client")
-        except _CREDENTIAL_ERRORS as exc:
+        except credential_errors as exc:
             raise MCPTokenStoreError("MCP credential store cannot read startup credentials") from exc
         if tokens is not None:
             SDKTokenStorage._parse_tokens(tokens)
@@ -274,20 +271,21 @@ class SDKTokenStorage:
         self.context: Any = None
 
     async def _get(self, suffix: str) -> str | None:
-        try:
-            return await asyncio.to_thread(
-                keyring.get_password, self._service, f"{self._server}:{suffix}",
-            )
-        except _CREDENTIAL_ERRORS as exc:
-            raise MCPTokenStoreError("MCP credential store cannot read SDK credentials") from exc
+        def read():
+            keyring, credential_errors, _ = load_credential_backend()
+            try:
+                return keyring.get_password(self._service, f"{self._server}:{suffix}")
+            except credential_errors as exc:
+                raise MCPTokenStoreError("MCP credential store cannot read SDK credentials") from exc
+
+        return await asyncio.to_thread(read)
 
     async def _set(self, suffix: str, value: str) -> None:
-        write = asyncio.create_task(to_thread_cancel_safe(
-            keyring.set_password,
-            self._service,
-            f"{self._server}:{suffix}",
-            value,
-        ))
+        def publish():
+            keyring, _, _ = load_credential_backend()
+            keyring.set_password(self._service, f"{self._server}:{suffix}", value)
+
+        write = asyncio.create_task(to_thread_cancel_safe(publish))
         cancelled = False
         # Native credential writes cannot be cancelled. Finish this one write
         # before releasing its refresh lock, including on repeated cancellation.
