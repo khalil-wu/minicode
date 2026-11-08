@@ -1286,7 +1286,7 @@ def _reconcile_ui_agent_state_with_runtime(
 
     state = _coerce_ui_agent_state(current)
     changed = False
-    inventory = runtime.list_runs(conversation_id=conversation_id, include_subagents=True)
+    inventory = runtime.list_runs(conversation_id=conversation_id, include_subagents=True, include_swarm=False)
     owned_ids = {
         str(record["subagent_id"])
         for record in inventory.get("subagents", [])
@@ -1744,6 +1744,7 @@ class SessionAgentRunnerMixin:
         owner = str(conversation_id or "").strip()
         if not owner:
             return None
+        runtime = await to_thread_cancel_safe(default_runtime)
         async with self._conversation_projection_lock(owner):
             state_store = self.ui_agent_state_store
             pending = state_store.pending
@@ -1788,7 +1789,7 @@ class SessionAgentRunnerMixin:
                 persisted_revision = int(pending_revision)
             reconciled_state, changed = _reconcile_ui_agent_state_with_runtime(
                 current_state,
-                runtime=default_runtime(),
+                runtime=runtime,
                 conversation_id=owner,
             )
             if not changed and pending_item is None:

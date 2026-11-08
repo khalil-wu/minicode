@@ -332,6 +332,7 @@ async def _admit_query_submission(submission) -> None:
 class _Session(SessionAgentRunnerMixin, SessionApprovalRuntimeMixin):
     def __init__(self, tmp_path: Path, events: list[dict], runner_events: list[AgentEvent] | None = None):
         self.session_id = "session_runner_done"
+        self.is_connected = True
         # Match the desktop composition root: host stores and their queue lease
         # files belong to the isolated runtime state, outside user workspace.
         tmp_path.mkdir(parents=True, exist_ok=True)
@@ -934,7 +935,7 @@ def test_ui_agent_reconcile_recovers_children_omitted_by_old_twenty_row_snapshot
                 "teammate_name": f"Agent {index}", "objective": f"Task {index}"} for index in range(35)]
 
     class Runtime:
-        def list_runs(self, *, conversation_id, include_subagents):
+        def list_runs(self, *, conversation_id, include_subagents, include_swarm=True):
             assert conversation_id == "conversation-owner"
             assert include_subagents is True
             return {"subagents": records}
@@ -981,7 +982,7 @@ def test_ui_agent_snapshot_does_not_regress_terminal_subagent_to_running() -> No
 def test_ui_agent_snapshot_reconciles_stale_running_child_from_durable_runtime() -> None:
     class _Runtime:
         @staticmethod
-        def list_runs(*, conversation_id, include_subagents):
+        def list_runs(*, conversation_id, include_subagents, include_swarm=True):
             assert conversation_id == "conv-weather"
             assert include_subagents is True
             return {"subagents": [{"subagent_id": "sa-stale"}]}
@@ -1078,7 +1079,7 @@ def test_persisted_ui_agent_snapshot_is_repaired_before_restore(tmp_path, monkey
 
     class _Runtime:
         @staticmethod
-        def list_runs(*, conversation_id, include_subagents):
+        def list_runs(*, conversation_id, include_subagents, include_swarm=True):
             return {"subagents": [{"subagent_id": "sa-restored"}]}
 
         @staticmethod
@@ -1157,7 +1158,7 @@ def test_persisted_ui_agent_reconcile_keeps_projection_ownership_through_patch(
 
     class _Runtime:
         @staticmethod
-        def list_runs(*, conversation_id, include_subagents):
+        def list_runs(*, conversation_id, include_subagents, include_swarm=True):
             return {"subagents": [{"subagent_id": "sa-owned"}]}
 
         @staticmethod

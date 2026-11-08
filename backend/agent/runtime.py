@@ -4383,11 +4383,10 @@ def default_runtime_if_initialized() -> AgentRuntime | None:
     work must continue to use :func:`default_runtime`.
     """
 
-    with _DEFAULT_RUNTIME_LOCK:
-        runtime = _DEFAULT_RUNTIME
-        if runtime is None or runtime._lease_lost:
-            return None
-        return runtime
+    # Construction publishes this reference only after durable recovery is
+    # complete. A read-only probe must not wait on that constructor's lock.
+    runtime = _DEFAULT_RUNTIME
+    return runtime if runtime is not None and not runtime._lease_lost else None
 
 
 def purge_persisted_conversation_runtime(conversation_id: str) -> dict[str, Any]:
