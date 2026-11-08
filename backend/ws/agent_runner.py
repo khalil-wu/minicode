@@ -4407,7 +4407,7 @@ class SessionAgentRunnerMixin:
 
         pre_trace.mark("run.snapshot_ready")
         thread_runtime = run_context.environment_thread_runtime
-        run_context_builder = (thread_runtime.take_model_context(run_context_snapshot, run_workspace_root)
+        run_context_builder = (await thread_runtime.acquire_model_context(run_context_snapshot, run_workspace_root)
             if thread_runtime is not None and retry_projection is None else None)
         history_task = None
         if run_context_builder is None:

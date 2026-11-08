@@ -112,6 +112,7 @@ class ConversationThreadRuntime:
     memory_version: MemoryVersion | None = None
     user_shell: dict[str, str] | None = None
     model_context: tuple[Any, dict[str, Any], int, str] | None = None
+    model_context_preparation: asyncio.Task[Any] | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
 
@@ -133,6 +134,17 @@ class ConversationThreadRuntime:
             return None
         builder.release_turn_bindings()
         return builder
+
+    async def acquire_model_context(self, snapshot: dict[str, Any], workspace_root: Any):
+        preparation, self.model_context_preparation = self.model_context_preparation, None
+        if preparation is not None:
+            prepared = await asyncio.shield(preparation)
+            if prepared is not None:
+                builder, saved, shell, prepared_workspace = prepared
+                if self.user_shell is None:
+                    self.user_shell = shell
+                self.retain_model_context(builder, saved, prepared_workspace)
+        return self.take_model_context(snapshot, workspace_root)
 
     def retain_model_context(self, builder, snapshot: dict[str, Any], workspace_root: Any) -> None:
         # Snapshot branches belong to the committed repository generation.

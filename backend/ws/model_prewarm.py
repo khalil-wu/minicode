@@ -11,17 +11,26 @@ from backend.llm.base import LLMAdapter
 logger = logging.getLogger(__name__)
 
 
+def _release_unused_thread(registry, thread):
+    if (registry.context_for(thread.conversation_id) is None and thread.thread_environments is None
+            and thread.model_context is None and thread.model_context_preparation is None and not thread.pending_tasks()):
+        registry.release_thread_runtime(thread)
+
+
 def release_prepared_model_context(session, conversation_id=None):
     prepared = session._model_context_prewarm
     if prepared is None or conversation_id is not None and prepared[0].conversation_id != conversation_id:
         return
     session._model_context_prewarm = None
     thread, retained = prepared
+    registry = session.ws_manager.execution_contexts
+    if thread.model_context_preparation is retained:
+        thread.model_context_preparation = None
+        retained.cancel()
+        retained.add_done_callback(lambda _: _release_unused_thread(registry, thread))
     if thread.model_context is retained:
         thread.model_context = None
-        registry = session.ws_manager.execution_contexts
-        if registry.context_for(thread.conversation_id) is None and thread.thread_environments is None and not thread.pending_tasks():
-            registry.release_thread_runtime(thread)
+        _release_unused_thread(registry, thread)
 
 
 async def prepare_thread_model_context(session, conversation_id, workspace, config):
@@ -30,8 +39,8 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
         return
     registry = session.ws_manager.execution_contexts
     store_id = await asyncio.to_thread(session.conversation_repo.store_instance_id)
-    thread = registry.thread_runtime_for(store_id, conversation_id)
-    if thread is not None and (thread.model_context is not None or thread.pending_tasks()):
+    thread = registry.thread_runtime(store_id, conversation_id)
+    if thread.model_context is not None or thread.model_context_preparation is not None or thread.pending_tasks():
         return
 
     def load():
@@ -46,17 +55,34 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
         builder.load_snapshot(record.context_snapshot)
         builder.prepare_recovery_snapshot()
         shell = thread.user_shell if thread is not None and thread.user_shell is not None else default_user_shell()
-        return builder, record.context_snapshot, shell
+        return builder, record.context_snapshot, shell, workspace
 
-    prepared = await to_thread_cancel_safe(load)
+    work = asyncio.create_task(to_thread_cancel_safe(load), name=f"thread-history-prepare:{conversation_id}")
+    thread.model_context_preparation = work
+    thread.retain_turn(work, set())
+    session._model_context_prewarm = (thread, work)
+    try:
+        prepared = await asyncio.shield(work)
+    except asyncio.CancelledError:
+        if thread.model_context_preparation is work:
+            work.cancel()
+            await asyncio.gather(work, return_exceptions=True)
+            release_prepared_model_context(session, conversation_id)
+        raise
+    except Exception:
+        release_prepared_model_context(session, conversation_id)
+        raise
+    if thread.model_context_preparation is not work:
+        return  # A real turn now owns the same preparation and its validation.
     if (prepared is None or session.active_conversation_id != conversation_id or session.session_lifecycle.is_shutting_down
-            or conversation_id in session.run_manager.run_tasks):
+            or thread.pending_tasks()):
+        release_prepared_model_context(session, conversation_id)
         return
-    thread = registry.thread_runtime(store_id, conversation_id)
+    if conversation_id in session.run_manager.run_tasks:
+        return  # Admission will take the ready candidate at its history boundary.
+    thread.model_context_preparation = None
     thread.capture_memory_settings(config.memories)
-    if thread.model_context is not None or thread.pending_tasks():
-        return
-    builder, snapshot, shell = prepared
+    builder, snapshot, shell, _ = prepared
     if thread.user_shell is None:
         thread.user_shell = shell
     thread.retain_model_context(builder, snapshot, workspace)

@@ -163,6 +163,10 @@ async def test_idle_preparation_cannot_publish_across_an_owner_transition(tmp_pa
         if change in {"history", "workspace"}:
             current = session.conversation_repo.get_execution_context(record.id)
             assert thread.take_model_context(current.context_snapshot, workspace) is None
+        elif change == "admission":
+            assert thread.model_context is None and thread.model_context_preparation.done()
+            current = session.conversation_repo.get_execution_context(record.id)
+            assert await thread.acquire_model_context(current.context_snapshot, workspace) is not None
         else:
             assert thread is None
         release_prepared_model_context(session)
@@ -197,3 +201,67 @@ async def test_prewarm_shutdown_drains_the_history_worker_and_does_not_retain_a_
     await shutdown
     assert session._model_context_prewarm is None
     assert not manager.execution_contexts.thread_runtimes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["none", "history", "navigation", "cancel"])
+async def test_first_turn_takes_the_inflight_history_preparation_instead_of_decoding_twice(tmp_path, monkeypatch, change):
+    session, record, adapter = session_for(tmp_path, monkeypatch)
+    manager = WebSocketManager()
+    session.ws_manager = manager
+    workspace = Path(record.execution_cwd)
+    session.conversation_repo.save_context_snapshot(record.id, {"history": [{"role": "user", "content": "Original retained input"}]})
+    entered, release = threading.Event(), threading.Event()
+    acquired = asyncio.Event()
+    load, acquire = ContextBuilder.load_snapshot, ConversationThreadRuntime.acquire_model_context
+    loads = []
+    def held(builder, snapshot):
+        if builder._conversation_id == record.id:
+            loads.append(builder)
+            if len(loads) == 1:
+                entered.set()
+                assert release.wait(6)
+        return load(builder, snapshot)
+    async def observed(thread, snapshot, cwd):
+        acquired.set()
+        return await acquire(thread, snapshot, cwd)
+    monkeypatch.setattr(ContextBuilder, "load_snapshot", held)
+    monkeypatch.setattr(ConversationThreadRuntime, "acquire_model_context", observed)
+    idle = asyncio.create_task(prepare_thread_model_context(session, record.id, workspace, session.config))
+    assert await asyncio.to_thread(entered.wait, 3)
+    thread = manager.execution_contexts.thread_runtime_for(session.conversation_repo.store_instance_id(), record.id)
+    if change == "history":
+        session.conversation_repo.save_context_snapshot(record.id, {"history": [{"role": "user", "content": "New durable history"}]})
+    turn = asyncio.create_task(session._run_agent("Actual input", conversation_id=record.id,
+        run_context=RunContext(environment_thread_runtime=thread),
+        metadata={"user_message_id": "real-user", "assistant_message_id": "real-answer"}))
+    try:
+        await asyncio.wait_for(acquired.wait(), 3)
+        assert thread.model_context_preparation is None
+        assert len(loads) == 1 and not adapter.requests
+        if change == "navigation":
+            session.active_conversation_id = "new-reader"
+            release_prepared_model_context(session)
+            idle.cancel()
+            await asyncio.gather(idle, return_exceptions=True)
+        elif change == "cancel":
+            turn.cancel()
+            await asyncio.gather(turn, return_exceptions=True)
+            assert thread.pending_tasks()
+        release.set()
+        await asyncio.gather(turn, idle, return_exceptions=True)
+        await asyncio.gather(*tuple(session.run_manager.lifecycle_cleanup_tasks_for(record.id)))
+        if change == "cancel":
+            assert not adapter.requests
+        else:
+            assert turn.exception() is None
+            assert len(loads) == (2 if change == "history" else 1)
+            expected = "New durable history" if change == "history" else "Original retained input"
+            assert any(message.content == expected for message in adapter.requests[0])
+    finally:
+        release.set()
+        await asyncio.gather(turn, idle, return_exceptions=True)
+        release_prepared_model_context(session)
+        await thread.close_environments()
+        session.ws_manager = None
+        await session.session_lifecycle.shutdown(reason="inflight-model-context")
