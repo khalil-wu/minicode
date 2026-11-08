@@ -91,7 +91,7 @@ def test_restored_session_projects_the_saved_policy_without_rebinding(configured
     session = SimpleNamespace(config=config, provider="custom", llm=selected_client, selected_model=source["model"],
         available_models=[source["model"]], models_source="settings", active_conversation_id="restored-ultra",
         session_lifecycle=SimpleNamespace(workspace_root_for_conversation=lambda: None),
-        _model_runtime_for_conversation=lambda _: None, default_model_selection=lambda _: (config, None),
+        _model_runtime_for_conversation=lambda _: None, default_model_selection=lambda _, **kwargs: (config, None),
         conversation_repo=SimpleNamespace(get_conversation_summary=lambda _: SimpleNamespace(model_selection={"selection_mode": "model"})),
         _model_override_active=True)
     session._llm_selection_payload = lambda: WebSocketSession._llm_selection_payload(session)

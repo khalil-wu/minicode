@@ -383,7 +383,7 @@ class SessionCommandHandlersMixin:
             config_override=scoped_config,
         )
 
-    def default_model_selection(self, conversation_id: str | None = None) -> tuple[Any, dict[str, str] | None]:
+    def default_model_selection(self, conversation_id: str | None = None, *, config_snapshot=None) -> tuple[Any, dict[str, str] | None]:
         """Resolve the project's configured model and effort as one selection."""
         from backend.config import load_config
         from backend.llm.capabilities import capabilities_from_settings
@@ -392,7 +392,7 @@ class SessionCommandHandlersMixin:
         owner_id = conversation_id or self.active_conversation_id
         conversation = self.conversation_repo.get_conversation_summary(owner_id) if owner_id else None
         workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
-        config = load_config(cwd=workspace_root, resolve_credentials=False)
+        config = config_snapshot if config_snapshot is not None else load_config(cwd=workspace_root, resolve_credentials=False)
         provider, model = config.llm.provider, config.llm.model
         if not model:
             return config, None
@@ -444,7 +444,7 @@ class SessionCommandHandlersMixin:
         if sent:
             await self._report_model_catalog_error(model_runtime)
 
-    def _llm_selection_payload(self) -> dict[str, Any]:
+    def _llm_selection_payload(self, *, config_snapshot=None) -> dict[str, Any]:
         """Project the selected catalog/config contract without binding a client."""
         from backend.services.llm_config_service import llm_model_updated_payload
 
@@ -480,7 +480,7 @@ class SessionCommandHandlersMixin:
                 payload["available_model_options"].append({"model": definition.id,
                     "reasoning_effort_levels": list(levels),
                     "default_reasoning_effort": default_model_thinking_level(definition, levels) or "off"})
-        _, payload["default_model_selection"] = self.default_model_selection(self.active_conversation_id)
+        _, payload["default_model_selection"] = self.default_model_selection(self.active_conversation_id, config_snapshot=config_snapshot)
         conversation = self.conversation_repo.get_conversation_summary(self.active_conversation_id) if self.active_conversation_id else None
         payload["model_selection_mode"] = (conversation.model_selection.get("selection_mode", "model")
             if conversation is not None and conversation.model_selection else "model" if self._model_override_active else "default")

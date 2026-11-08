@@ -847,11 +847,11 @@ class WebSocketSession(
         from backend.commands.catalog import get_enabled_composer_command_catalog
         from backend.config import load_config
 
-        self.refresh_tool_registry_if_mcp_changed()
         if config_snapshot is None:
             config_snapshot = load_config(
                 cwd=self.session_lifecycle.workspace_root_for_conversation(), resolve_credentials=False)
-        model_selection = self._llm_selection_payload()
+        self.refresh_tool_registry_if_mcp_changed(config_snapshot=config_snapshot)
+        model_selection = self._llm_selection_payload(config_snapshot=config_snapshot)
         registry = self.tool_registry
         try:
             registry_for_conversation = getattr(
@@ -860,7 +860,7 @@ class WebSocketSession(
                 None,
             )
             if callable(registry_for_conversation) and self.active_conversation_id:
-                registry = registry_for_conversation(self.active_conversation_id)
+                registry = registry_for_conversation(self.active_conversation_id, config=config_snapshot)
             snapshot = registry.build_snapshot(
                 permission_checker=self.permission_checker,
                 permission_context=self.permission_context,
@@ -1578,6 +1578,7 @@ class WebSocketSession(
     def refresh_tool_registry_if_mcp_changed(
         self, *, allow_when_busy: bool = True,
         workspace_root: Path | None | object = _MCP_REFRESH_SCOPE_UNSET,
+        config_snapshot: AppConfig | None = None,
     ) -> bool:
         """Rebuild this session's tool registry when the MCP registry changed.
 
@@ -1620,7 +1621,7 @@ class WebSocketSession(
             self.tool_registry = bootstrap.create_tool_registry(
                 self.artifact_store,
                 workspace_root=workspace_root,
-                config=load_config(cwd=workspace_root, resolve_credentials=False),
+                config=config_snapshot if config_snapshot is not None else load_config(cwd=workspace_root, resolve_credentials=False),
                 mcp_manager=manager,
             )
         except Exception as exc:  # pragma: no cover - never break a run/inspect

@@ -139,7 +139,7 @@ async def test_model_capability_projection_skips_skill_discovery_and_sandbox_pro
         refresh_tool_registry_if_mcp_changed=Mock(), tool_registry=ToolRegistry(),
         permission_checker=None, permission_context=None, _mcp_registry_version_snapshot=0,
         runtime_toolset_policy=lambda _, **_kwargs: None,
-        _llm_selection_payload=lambda: {"model": "chosen-model", "configured_reasoning_effort": "high"},
+        _llm_selection_payload=lambda **_: {"model": "chosen-model", "configured_reasoning_effort": "high"},
         _provider_capabilities_payload=lambda _selection=None: {"model": "chosen-model", "configured_reasoning_effort": "high"},
         send_payload=AsyncMock(),
     )

@@ -298,7 +298,7 @@ async def test_runtime_inspect_and_workspace_switch_publish_the_same_fresh_scope
         _model_runtime_for_conversation=lambda _: None, skill_manager=None,
         _provider_capabilities_payload=lambda _: {}, _runtime_permission_payload=lambda: {},
         command_registry=SimpleNamespace(list_extension_slash_commands=lambda **_: []))
-    session._llm_selection_payload = lambda: llm_model_updated_payload(
+    session._llm_selection_payload = lambda **_: llm_model_updated_payload(
         provider=session.provider, selected_model=session.selected_model,
         available_models=[session.selected_model], workspace_root=session.root,
         settings_data=scopes[session.root].config_layer_stack.effective_config(),

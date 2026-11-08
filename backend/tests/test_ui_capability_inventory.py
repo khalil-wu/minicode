@@ -84,7 +84,7 @@ def test_session_capabilities_send_names_not_large_argument_schemas(tmp_path):
         refresh_tool_registry_if_mcp_changed=Mock(), tool_registry=registry,
         permission_checker=None, permission_context=None, _mcp_registry_version_snapshot=0,
         runtime_toolset_policy=lambda _, **_kwargs: ToolsetPolicy(),
-        _llm_selection_payload=lambda: {}, _provider_capabilities_payload=lambda _: {},
+        _llm_selection_payload=lambda **_: {}, _provider_capabilities_payload=lambda _: {},
     )
     registry.get_schemas = Mock(wraps=registry.get_schemas)
     snapshot = WebSocketSession.runtime_capability_snapshot(owner, include_catalogs=False)
