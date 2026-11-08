@@ -347,6 +347,8 @@ class AgentRuntime:
         self._lease_stop_event: threading.Event | None = None
         self._lease_thread: threading.Thread | None = None
         self._lease_finalizer: weakref.finalize | None = None
+        self._close_lock = threading.Lock()
+        self._close_done = False
         store_dir = swarm_store_dir or ((metrics_file.parent / "swarm") if metrics_file is not None else SWARM_DIR)
         self._swarm_store = FileSwarmStore(store_dir)
         self._runtime_state_root = runtime_state_root_for_store(
@@ -616,27 +618,29 @@ class AgentRuntime:
                     return asyncio.run(self.aclose(release_lease=True))
                 self._session_shutdown_task = loop.create_task(self.aclose(release_lease=True), name="agent-runtime-session-shutdown")
             return False
-        if release_lease:
-            self._subagent_mailbox_shutdown = True
-            for task, _ in tuple(self._subagent_mailbox_turns.values()):
-                task.get_loop().call_soon_threadsafe(task.cancel)
-        self.message_boards.close()
-        if self._lease_finalizer is not None:
-            self._lease_finalizer()
-            self._lease_finalizer = None
-        self._lease_stop_event = None
-        self._lease_thread = None
-        if not release_lease or self._lease_lost:
+        with self._close_lock:
+            if self._close_done:
+                return False
+            if release_lease:
+                self._subagent_mailbox_shutdown = True
+                for task, _ in tuple(self._subagent_mailbox_turns.values()):
+                    task.get_loop().call_soon_threadsafe(task.cancel)
+            self.message_boards.close()
+            if self._lease_finalizer is not None:
+                self._lease_finalizer()
+                self._lease_finalizer = None
+            self._lease_stop_event = None
+            self._lease_thread = None
+            released = release_lease and not self._lease_lost and self._swarm_store.release_runtime_lease(
+                runtime_instance_id=self._runtime_instance_id,
+                owner_token=self._runtime_owner_token,
+            )
             self._swarm_store.close()
-            return False
-        released = self._swarm_store.release_runtime_lease(
-            runtime_instance_id=self._runtime_instance_id,
-            owner_token=self._runtime_owner_token,
-        )
-        self._swarm_store.close()
-        if released:
+            self._close_done = True
+            # This observer can no longer write even when another observer
+            # still holds the shared process lease.
             self._lease_lost = True
-        return released
+            return released
 
     async def aclose(self, *, release_lease: bool = True) -> bool:
         self._subagent_mailbox_shutdown = True

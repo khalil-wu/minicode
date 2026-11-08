@@ -114,6 +114,39 @@ def test_runtime_shutdown_releases_writer_after_lease_and_allows_new_owner(tmp_p
         restored.close(release_lease=True)
 
 
+def test_observer_close_cannot_release_a_peers_lease_on_later_teardown(tmp_path):
+    observer = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    peer = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    try:
+        assert observer._runtime_owner_token == peer._runtime_owner_token
+        assert not observer.close()
+        assert not observer.close(release_lease=True)
+        assert peer._refresh_runtime_lease()
+        assert peer.start_run(conversation_id="still-owned").status == "running"
+        with pytest.raises(RuntimeError, match="lease was lost"):
+            observer.start_run(conversation_id="closed-observer")
+    finally:
+        peer.close(release_lease=True)
+        observer.close(release_lease=True)
+
+
+def test_lease_already_released_by_peer_still_closes_observer_once(tmp_path):
+    observer = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    peer = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    assert peer.close(release_lease=True)
+    assert not observer.close(release_lease=True)
+    assert not observer.close(release_lease=True)
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        observer._swarm_store._writer.execute("SELECT 1")
+
+
+def test_concurrent_close_waits_for_one_lease_release_and_writer_shutdown(tmp_path):
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    with ThreadPoolExecutor(max_workers=4) as workers:
+        results = list(workers.map(lambda _: runtime.close(release_lease=True), range(8)))
+    assert results.count(True) == 1 and results.count(False) == 7
+
+
 def test_runtime_close_waits_for_heartbeat_before_releasing_its_connection(tmp_path, monkeypatch):
     import backend.agent.runtime as module
 
