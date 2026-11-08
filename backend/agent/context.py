@@ -4567,7 +4567,7 @@ class ContextBuilder:
             delta["history"] = after["history"]
         return delta, revision
 
-    def load_snapshot(self, snapshot: dict[str, Any] | None) -> None:
+    def load_snapshot(self, snapshot: dict[str, Any] | None, *, prepared_history: ConversationHistory | None = None) -> None:
         guardian_history_reset = bool(self._history or self.guardian_evidence.transcript)
         self.clear(reset_guardian=False)
         if not snapshot:
@@ -4575,9 +4575,12 @@ class ContextBuilder:
             return
 
         self._load_snapshot_metadata(snapshot, guardian_history_reset=guardian_history_reset)
-        self._history = self._deserialize_normalized_history(
-            self._snapshot_history_with_admissions(snapshot)
-        )
+        if prepared_history is None:
+            self._history = self._deserialize_normalized_history(
+                self._snapshot_history_with_admissions(snapshot)
+            )
+        else:
+            self._history_store = prepared_history
         if not self._history_frozen_metadata_present and self._history:
             self._history_frozen_count = len(self._history)
         self._history_frozen_count = min(

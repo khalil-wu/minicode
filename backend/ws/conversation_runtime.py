@@ -42,6 +42,8 @@ class ConversationRuntime:
         self._hydration_task: asyncio.Task[None] | None = None
         self._retired_hydration_tasks: set[asyncio.Task[None]] = set()
         self._hydration_generation = 0
+        self._hydration_source_snapshot: dict[str, Any] | None = None
+        self._prepared_model_history = None
         self.hydration_error: Exception | None = None
         self._pending_hydration: tuple[
             str,
@@ -166,6 +168,8 @@ class ConversationRuntime:
         self.hydration_error = None
         generation = self._hydration_generation
         self._pending_hydration = None
+        self._prepared_model_history = None
+        self._hydration_source_snapshot = snapshot
         pending_history = self._context_builder.load_snapshot_partial(
             snapshot,
             recent_history_count=SNAPSHOT_PARTIAL_HISTORY_COUNT,
@@ -173,6 +177,7 @@ class ConversationRuntime:
         )
         if not pending_history:
             self._hydration_task = None
+            self._retain_prepared_history(conversation_id)
             return False
 
         if defer_start:
@@ -211,6 +216,8 @@ class ConversationRuntime:
             previous.add_done_callback(self._retired_hydration_tasks.discard)
         self._hydration_generation += 1
         self.hydration_error = None
+        self._prepared_model_history = None
+        self._hydration_source_snapshot = None
         self._context_builder.clear()
         self._hydration_task = None
         self._pending_hydration = (conversation_id, self._hydration_generation, 0, None, True, on_hydration_complete)
@@ -308,6 +315,29 @@ class ConversationRuntime:
             self._hydration_task = None
         return not still_pending
 
+    def _retain_prepared_history(self, conversation_id: str) -> None:
+        history = self._context_builder._history_store
+        self._prepared_model_history = (conversation_id, self._hydration_source_snapshot, history, history.revision)
+
+    def copy_prepared_history(self, conversation_id: str, snapshot: dict[str, Any]):
+        """Reuse completed parsing/accounting while keeping run mutations private.
+
+        The worker may overlap navigation or a reader update. Only a matching,
+        unchanged prepared history can seed the independently owned run.
+        """
+        prepared = self._prepared_model_history
+        if prepared is None:
+            return None
+        owner, source, history, revision = prepared
+        from backend.ws.execution_context import ConversationThreadRuntime
+        if (owner != conversation_id or history.revision != revision
+                or ConversationThreadRuntime._model_snapshot(source) != ConversationThreadRuntime._model_snapshot(snapshot)):
+            return None
+        copied = history.clone()
+        if history.revision != revision:
+            return None
+        return copied
+
     async def _hydrate_snapshot(
         self,
         *,
@@ -361,6 +391,7 @@ class ConversationRuntime:
             changed = current_revision > expected_snapshot_revision
             if not changed:
                 self._context_builder.prepend_prepared_history(prepared_history)
+                self._retain_prepared_history(conversation_id)
         if changed:
             await self._hydrate_repository(conversation_id, generation,
                 on_hydration_complete if notify else None)

@@ -409,7 +409,27 @@ class ConversationHistory:
         never deep-copied, so cloning never drags the owning builder along.
         """
         cloned = ConversationHistory(estimator=self._estimator)
-        cloned.messages = deepcopy(self.messages)
+        # Message envelopes contain many immutable scalar fields. Copy those
+        # directly while deepcopy owns mutable provider/tool/media payloads.
+        # Keep one memo across the graph, including subclasses and aliases.
+        memo = {id(self.messages): cloned.messages}
+        atomic = (str, int, float, bool, type(None))
+        for message in self.messages:
+            if type(message) is LLMMessage and id(message) not in memo:
+                copied = object.__new__(LLMMessage)
+                memo[id(message)] = copied
+                copied.__dict__ = vars(message).copy()
+                memo[id(vars(message))] = vars(copied)
+                for key, value in vars(message).items():
+                    if type(value) in atomic:
+                        continue
+                    if type(value) in (list, dict) and not value:
+                        copied.__dict__[key] = memo.setdefault(id(value), value.copy())
+                    else:
+                        copied.__dict__[key] = deepcopy(value, memo)
+            else:
+                copied = deepcopy(message, memo)
+            cloned.messages.append(copied)
         cloned.frozen_count = self.frozen_count
         cloned.frozen_metadata_present = self.frozen_metadata_present
         cloned.pending_hydration_frozen_prefix_count = self.pending_hydration_frozen_prefix_count
