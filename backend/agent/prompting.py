@@ -713,6 +713,7 @@ class PromptBuilderV2:
         personality: str | None = None,
         captured_model_messages: Any = None,
         has_captured_model: bool = False,
+        include_host_context: bool = True,
     ) -> PromptParts:
         return PromptParts.from_sections(
             self.build_sections(
@@ -728,6 +729,7 @@ class PromptBuilderV2:
                 personality=personality,
                 captured_model_messages=captured_model_messages,
                 has_captured_model=has_captured_model,
+                include_host_context=include_host_context,
             )
         )
 
@@ -746,6 +748,7 @@ class PromptBuilderV2:
         personality: str | None = None,
         captured_model_messages: Any = None,
         has_captured_model: bool = False,
+        include_host_context: bool = True,
     ) -> list[PromptSection]:
         """Assemble the ordered, named prompt sections.
 
@@ -775,15 +778,19 @@ class PromptBuilderV2:
             ),
         ]
 
-        workspace_summary = ""
-        if getattr(state, "workspace_context", None):
-            workspace_summary = state.workspace_context.get_project_summary() or ""
-        context_candidates: list[tuple[str, str]] = [
-            ("host_environment", build_static_environment_info(workspace_root)),
-            ("workspace_summary", workspace_summary),
+        context_candidates: list[tuple[str, str]] = []
+        if include_host_context:
+            workspace_summary = ""
+            if getattr(state, "workspace_context", None):
+                workspace_summary = state.workspace_context.get_project_summary() or ""
+            context_candidates.extend((
+                ("host_environment", build_static_environment_info(workspace_root)),
+                ("workspace_summary", workspace_summary),
+            ))
+        context_candidates.extend((
             ("skill_context", skill_context.strip() if skill_context else ""),
             ("project_guidelines", project_guidelines.strip() if project_guidelines else ""),
-        ]
+        ))
         if is_subagent and not source_agent_role:
             context_candidates.append(("subagent_reporting", _SUBAGENT_REPORTING_PROMPT))
         # Bounded workers still follow project instructions. Parent memory and

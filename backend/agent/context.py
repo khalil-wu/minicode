@@ -2026,9 +2026,8 @@ class ContextBuilder:
             personality=self._role_personality,
             captured_model_messages=model_messages,
             has_captured_model=has_model,
+            include_host_context=environment_snapshot is None,
         )
-        if environment_snapshot is not None:
-            sections = [section for section in sections if section.name not in {"host_environment", "workspace_summary"}]
         if self._tool_execution_context is not None and self._tool_execution_context.run_context.exec_policy_owner is not None:
             from backend.permissions.prompt import permission_instructions
             from backend.agent.prompting import system_prompt_section

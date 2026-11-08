@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import aclosing
 from dataclasses import replace
+from types import SimpleNamespace
 import os
 
 import pytest
@@ -34,7 +35,7 @@ class CaptureModel(LLMAdapter):
 
 
 @pytest.mark.asyncio
-async def test_context_builder_reads_selected_project_docs_and_git_without_controller_workspace(executor_host, tmp_path):
+async def test_context_builder_reads_selected_project_docs_and_git_without_controller_workspace(executor_host, tmp_path, monkeypatch):
     host = executor_host
     target = tmp_path / "selected-target"
     target.mkdir()
@@ -53,6 +54,10 @@ async def test_context_builder_reads_selected_project_docs_and_git_without_contr
         await builder._ensure_environment_project_instructions()
         await builder._ensure_git_status_context(host.workspace)
         state = AgentState(user_message="Use the selected executor", workspace_root=host.workspace)
+        def forbidden_host_read(*args):
+            pytest.fail("A captured executor must not discover controller shell or project details")
+        monkeypatch.setattr("backend.agent.prompting.build_static_environment_info", forbidden_host_read)
+        state.workspace_context = SimpleNamespace(get_project_summary=forbidden_host_read)
         prompt = "\n".join(message.content for message in builder._render_prompt_messages(state, host.workspace))
         assert "TARGET_OVERRIDE_ONLY" in prompt
         assert "CONTROLLER_PROJECT_MUST_NOT_LEAK" not in prompt
@@ -67,7 +72,7 @@ async def test_context_builder_reads_selected_project_docs_and_git_without_contr
 
 
 @pytest.mark.asyncio
-async def test_empty_captured_environment_prompt_never_uses_host_paths_or_shell(executor_host):
+async def test_empty_captured_environment_prompt_never_uses_host_paths_or_shell(executor_host, monkeypatch):
     host = executor_host
     host.context.run_context.turn_environments = TurnEnvironmentSnapshot()
     builder = ContextBuilder(workspace_root=host.workspace)
@@ -75,10 +80,23 @@ async def test_empty_captured_environment_prompt_never_uses_host_paths_or_shell(
     state = AgentState(user_message="Observe no executor", workspace_root=host.workspace)
     await builder._ensure_environment_project_instructions()
     await builder._ensure_git_status_context(host.workspace)
+    monkeypatch.setattr("backend.agent.prompting.build_static_environment_info",
+        lambda *args: pytest.fail("An empty captured environment must not discover a host shell"))
+    prompt = builder._build_prompt_parts(state, host.workspace)
+    assert "Host Environment" not in prompt.render_system()
     xml = builder._build_environment_context_xml(state)
     assert "<environment " not in xml and "<environments>" not in xml
     assert "<cwd>" not in xml and "<shell>" not in xml and "<filesystem>" not in xml
     assert builder._git_status_context == ""
+
+
+def test_prompt_without_executor_snapshot_retains_host_context(tmp_path, monkeypatch):
+    monkeypatch.setattr("backend.agent.prompting.build_static_environment_info", lambda *_: "HOST_ENVIRONMENT")
+    state = AgentState(user_message="local input", workspace_root=tmp_path)
+    state.workspace_context = SimpleNamespace(get_project_summary=lambda: "HOST_PROJECT")
+    builder = ContextBuilder(workspace_root=tmp_path)
+    prompt = builder._build_prompt_parts(state, tmp_path).render_system()
+    assert "HOST_ENVIRONMENT" in prompt and "HOST_PROJECT" in prompt
 
 
 @pytest.mark.asyncio
