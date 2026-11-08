@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import subprocess
@@ -111,3 +112,93 @@ def test_runtime_shutdown_releases_writer_after_lease_and_allows_new_owner(tmp_p
         assert restored.start_run(conversation_id="conversation").status == "running"
     finally:
         restored.close(release_lease=True)
+
+
+def test_runtime_close_waits_for_heartbeat_before_releasing_its_connection(tmp_path, monkeypatch):
+    import backend.agent.runtime as module
+
+    monkeypatch.setattr(module, "RUNTIME_HEARTBEAT_INTERVAL_MS", 10)
+    entered, release, closed = threading.Event(), threading.Event(), threading.Event()
+    heartbeat = AgentRuntime._refresh_runtime_lease
+
+    def delayed(runtime):
+        entered.set()
+        assert release.wait(5)
+        return heartbeat(runtime)
+
+    monkeypatch.setattr(AgentRuntime, "_refresh_runtime_lease", delayed)
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=True)
+    thread = runtime._lease_thread
+
+    def close():
+        try:
+            return runtime.close(release_lease=True)
+        finally:
+            closed.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        assert entered.wait(3)
+        pending = pool.submit(close)
+        try:
+            assert not closed.wait(2.15), "The former two-second join timeout abandoned the writer"
+            assert runtime._swarm_store._writer.execute("SELECT 1").fetchone()[0] == 1
+        finally:
+            release.set()
+        assert pending.result(timeout=5)
+    assert not thread.is_alive()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_async_runtime_shutdown_does_not_block_other_loop_work(tmp_path, monkeypatch, cancel):
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=False)
+    entered, release = threading.Event(), threading.Event()
+    close = runtime.close
+
+    def held_close(**kwargs):
+        entered.set()
+        assert release.wait(4)
+        return close(**kwargs)
+
+    monkeypatch.setattr(runtime, "close", held_close)
+    task = asyncio.create_task(runtime.aclose())
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert not task.done()
+        if cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+    finally:
+        release.set()
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            runtime._swarm_store._writer.execute("SELECT 1")
+    else:
+        assert await task
+
+
+def test_interpreter_shutdown_stops_the_daemon_heartbeat_before_sqlite_finalization(tmp_path):
+    marker = tmp_path / "closed.json"
+    code = r'''import json,sqlite3,sys
+from pathlib import Path
+import backend.agent.runtime as module
+runtime=None
+marker=Path(sys.argv[1])
+class Observed(sqlite3.Connection):
+    def close(self):
+        if runtime is not None:
+            marker.write_text(json.dumps({'heartbeat_alive': runtime._lease_thread.is_alive()}))
+        super().close()
+connect=sqlite3.connect
+def observed(*args,**kwargs):
+    return connect(*args,**kwargs,factory=Observed)
+sqlite3.connect=observed
+runtime=module.AgentRuntime(metrics_file=marker.parent/'metrics.jsonl',enable_lease_heartbeat=True)
+'''
+    result = subprocess.run([sys.executable, "-c", code, str(marker)], capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "Cannot operate on a closed database" not in result.stderr
+    assert json.loads(marker.read_text()) == {"heartbeat_alive": False}

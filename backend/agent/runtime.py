@@ -27,6 +27,7 @@ from uuid import uuid4
 from backend.async_cleanup import (
     CANCELLATION_DRAIN_TIMEOUT_SECONDS,
     cancel_and_drain,
+    to_thread_cancel_safe,
 )
 from backend.atomic_io import await_task_despite_cancellation
 from backend.config import DATA_ROOT, TokenBudget
@@ -212,6 +213,12 @@ MAX_CONCURRENT_SUBAGENTS = 4
 # their file mutations do not leak into the primary workspace until merged.
 WRITE_SCOPE_STRATEGIES: frozenset[str] = frozenset({"none", "workspace", "worktree", "readonly"})
 
+
+def _stop_runtime_heartbeat(stop: threading.Event, thread: threading.Thread) -> None:
+    stop.set()
+    if thread is not threading.current_thread():
+        thread.join()
+
 METRICS_DIR = DATA_ROOT / "metrics"
 METRICS_FILE = METRICS_DIR / "agent_metrics.jsonl"
 SWARM_DIR = DATA_ROOT / "swarm"
@@ -339,6 +346,7 @@ class AgentRuntime:
         self._lease_lost = False
         self._lease_stop_event: threading.Event | None = None
         self._lease_thread: threading.Thread | None = None
+        self._lease_finalizer: weakref.finalize | None = None
         store_dir = swarm_store_dir or ((metrics_file.parent / "swarm") if metrics_file is not None else SWARM_DIR)
         self._swarm_store = FileSwarmStore(store_dir)
         self._runtime_state_root = runtime_state_root_for_store(
@@ -587,6 +595,9 @@ class AgentRuntime:
             daemon=True,
         )
         self._lease_thread.start()
+        # Registered after the store's finalizer: interpreter shutdown stops
+        # its writer before releasing the connection it still owns.
+        self._lease_finalizer = weakref.finalize(self, _stop_runtime_heartbeat, stop_event, self._lease_thread)
 
     def close(self, *, release_lease: bool = False) -> bool:
         """Stop background lease maintenance and optionally relinquish ownership.
@@ -610,12 +621,9 @@ class AgentRuntime:
             for task, _ in tuple(self._subagent_mailbox_turns.values()):
                 task.get_loop().call_soon_threadsafe(task.cancel)
         self.message_boards.close()
-        stop_event = self._lease_stop_event
-        thread = self._lease_thread
-        if stop_event is not None:
-            stop_event.set()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
+        if self._lease_finalizer is not None:
+            self._lease_finalizer()
+            self._lease_finalizer = None
         self._lease_stop_event = None
         self._lease_thread = None
         if not release_lease or self._lease_lost:
@@ -637,7 +645,7 @@ class AgentRuntime:
             completed = await self.close_subagent_session(agent_id, reason="runtime_shutdown") and completed
         if not completed:
             return False
-        return self.close(release_lease=True) if release_lease else True
+        return await to_thread_cancel_safe(self.close, release_lease=release_lease)
 
     def _owns_record(self, record: AgentRunRecord | SubagentRunRecord) -> bool:
         return bool(
