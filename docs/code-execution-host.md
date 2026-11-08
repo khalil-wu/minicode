@@ -15,6 +15,12 @@ An optional prewarm failure is recorded in backend logs, and actual execution
 can start a new host. Conversation unload and application shutdown drain startup
 and close the owned session through the normal code-store lifecycle.
 
+Code-cell `ALL_TOOLS` entries and nested `tool_search` results include a tool's
+namespace guidance before its own description. Set
+`features.code_mode_tool_description_first` to `true` to put the tool description
+first. The setting defaults to `false` and is captured for the issuing model
+step. Ordinary provider function descriptions keep their existing format.
+
 The host evaluates JavaScript and returns tool requests. MiniCode's existing
 tool runner still owns permissions, approvals, execution ordering, workspace
 access, tool hooks, media provenance and durable tool receipts. The JavaScript

@@ -19,6 +19,17 @@ def code_mode_tool_name(schema: dict[str, Any]) -> str:
         for index, character in enumerate(raw)) or "_"
 
 
+def code_mode_tool_description(schema: dict[str, Any], *, tool_description_first: bool) -> str:
+    """Keep namespace guidance on both code-cell and nested-search definitions."""
+    description = schema["function"]["description"]
+    namespace = schema.get("_minicode_namespace")
+    namespace_description = namespace["description"].strip() if namespace is not None else ""
+    if not namespace_description:
+        return description
+    return (f"{description}\n\n{namespace_description}" if tool_description_first
+        else f"{namespace_description}\n\n{description}")
+
+
 def code_mode_parameters(parameters: dict[str, Any] | bool) -> str:
     """Render the object actually accepted by tools.name(args), including unions.
 

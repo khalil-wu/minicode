@@ -24,7 +24,7 @@ from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import ToolCallSource, ToolExecutionContext
 from backend.tools.base import ToolResult, artifact_owner_workspace_root
 from backend.tools.registry import ToolRegistry
-from backend.tools.schema import code_mode_tool_name
+from backend.tools.schema import code_mode_tool_description, code_mode_tool_name
 from backend.tools.toolsets import ACTIVE_TOOLSET_POLICY_METADATA_KEY, ToolsetPolicy
 
 CODE_TOOLS = frozenset({"tool_exec", "tool_wait"})
@@ -97,7 +97,10 @@ class CodeExecutionRuntime:
             policy = self._policy(registry, base_policy)
             schemas = registry.get_schemas(permission_checker=self.permission_checker, permission_context=self.tool_context.permission,
                 toolset_policy=replace(policy, include_deferred_directly=True))
-            catalog = [{"name": schema["function"]["name"], "description": schema["function"]["description"],
+            model = parent.model_execution
+            description_first = model is not None and model.config.feature_flags.enabled("code_mode_tool_description_first")
+            catalog = [{"name": schema["function"]["name"],
+                        "description": code_mode_tool_description(schema, tool_description_first=description_first),
                         "parameters": schema["function"]["parameters"],
                         "public_name": code_mode_tool_name(schema),
                         **({"output_schema": schema["_minicode_output_schema"]}
