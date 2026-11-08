@@ -26,6 +26,7 @@ class ConversationDirectory:
     def __init__(self, repository):
         self.repository = repository
         self.path = repository.storage_root / ".conversation-directory.sqlite3"
+        self._indexed_source = None
 
     @contextmanager
     def connect(self):
@@ -108,13 +109,21 @@ class ConversationDirectory:
             with repository._process_lock:
                 repository._ensure_summary_index_loaded()
                 summaries = dict(repository._summary_index)
+                source = (instance, revision, dict(repository._summary_index_stamps))
             project_keys = {}
-            prepared = [self._values(summary, revision, project_keys) for summary in summaries.values()]
+            prepared = (None if source == self._indexed_source else
+                [self._values(summary, revision, project_keys) for summary in summaries.values()])
             with repository._store_lock(), self.connect() as connection:
                 if revision != repository._read_store_revision_unlocked() or instance != repository._read_or_create_store_instance_id_unlocked():
                     continue
+                state = connection.execute("SELECT instance_id,revision FROM directory_state WHERE singleton=1").fetchone()
+                # Discovery still observes external file edits. An unchanged
+                # source and published index need no JSON encoding or upserts.
+                if prepared is None and state is not None and (state[0], state[1]) == (instance, revision):
+                    return
+                if prepared is None:
+                    prepared = [self._values(summary, revision, project_keys) for summary in summaries.values()]
                 previous = {row[0] for row in connection.execute("SELECT id FROM threads")}
-                state = connection.execute("SELECT instance_id FROM directory_state WHERE singleton=1").fetchone()
                 if state is not None and state[0] != instance:
                     connection.execute("DELETE FROM threads")
                     previous = set()
@@ -122,7 +131,8 @@ class ConversationDirectory:
                 for identifier in previous - summaries.keys():
                     connection.execute("DELETE FROM threads WHERE id=?", (identifier,))
                 connection.execute("INSERT OR REPLACE INTO directory_state VALUES (1,?,?)", (instance, revision))
-                return
+            self._indexed_source = source
+            return
 
     @staticmethod
     def _cursor(instance, sort_key, direction, value, identifier, *, backwards=False):

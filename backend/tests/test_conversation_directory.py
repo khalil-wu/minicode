@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import threading
 import json
 
@@ -117,8 +118,62 @@ def test_failed_derived_publication_is_repaired_from_the_committed_manifest(dire
     assert ids(page) == [records[0].id]
 
 
-def test_cold_directory_scan_releases_publication_lock_and_retries_concurrent_commit(directory_case, monkeypatch):
+def test_unchanged_directory_reads_preserve_index_without_reencoding_summaries(directory_case, monkeypatch):
     repo, records = directory_case
+    first = repo.directory.page({"limit": 7})
+    connect = repo.directory.connect
+    writes = []
+
+    @contextmanager
+    def observe_writes():
+        with connect() as connection:
+            before = connection.total_changes
+            yield connection
+            writes.append(connection.total_changes - before)
+
+    monkeypatch.setattr(repo.directory, "connect", observe_writes)
+    monkeypatch.setattr(repo.directory, "_values", lambda *_: pytest.fail("Unchanged summaries must not be reencoded"))
+    assert repo.directory.page({"limit": 7}) == first
+    second = repo.directory.page({"limit": 7, "cursor": first["next_cursor"]})
+    assert ids(first) + ids(second) == [record.id for record in reversed(records[-14:])]
+    assert [item.id for item in repo.list_conversations()] == [record.id for record in reversed(records)]
+    assert writes and not any(writes)
+
+
+def test_reused_directory_observes_external_files_even_after_a_direct_summary_read(tmp_path):
+    repo = ConversationRepository(tmp_path / "external")
+    path = repo.storage_root / "conv_external.json"
+    payload = {"id": "conv_external", "title": "Initial", "transcript": []}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert repo.directory.page()["data"][0]["title"] == "Initial"
+    path.write_text(json.dumps({**payload, "title": "Externally replaced title"}), encoding="utf-8")
+    assert repo.get_conversation_summary(payload["id"]).title == "Externally replaced title"
+    assert repo.directory.page()["data"][0]["title"] == "Externally replaced title"
+    added = repo.storage_root / "conv_added_item.json"
+    added.write_text(json.dumps({**payload, "id": "conv_added_item"}), encoding="utf-8")
+    assert set(ids(repo.directory.page())) == {"conv_external", "conv_added_item"}
+    path.write_text("{broken", encoding="utf-8")
+    assert ids(repo.directory.page()) == ["conv_added_item"]
+    added.unlink()
+    assert repo.directory.page()["data"] == []
+
+
+def test_reused_directory_rebuilds_when_derived_publication_is_missing(directory_case):
+    repo, records = directory_case
+    first = repo.directory.page({"limit": 100})
+    with repo.directory.connect() as connection:
+        connection.execute("DELETE FROM directory_state")
+        connection.execute("DELETE FROM threads")
+    rebuilt = repo.directory.page({"limit": 100})
+    assert rebuilt == first
+    assert len(rebuilt["data"]) == len(records)
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_directory_scan_releases_publication_lock_and_retries_concurrent_commit(directory_case, monkeypatch, warm):
+    repo, records = directory_case
+    if warm:
+        repo.directory.page()
     writer = ConversationRepository(repo.storage_root)
     entered, release = threading.Event(), threading.Event()
     scan = repo._ensure_summary_index_loaded
