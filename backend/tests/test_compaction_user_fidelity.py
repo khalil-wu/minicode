@@ -327,7 +327,7 @@ def test_mixed_native_references_keep_order_identity_and_only_unstored_bytes(tmp
             builder.append_assistant("Progress")
             await builder.compact()
         snapshot = builder.export_snapshot()
-        media = next(m for m in snapshot["history"] if m["images"] or m["documents"])
+        media = next(m for m in snapshot["history"] if m.get("images") or m.get("documents"))
         assert media["images"][0] == {"media_type": "image/png", "artifact_id": "image-ref"}
         assert media["images"][1]["data"] == original_images[1]["data"]
         assert "data" not in media["documents"][0]

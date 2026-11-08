@@ -306,7 +306,7 @@ def test_context_builder_preserves_unprovenanced_runtime_like_text() -> None:
     )
 
     restored = ctx.export_snapshot()["history"]
-    assert restored[0]["runtime_context"] == ""
+    assert restored[0].get("runtime_context", "") == ""
 
     second_state = AgentState(user_message="second")
     second_state.prompt_context = {"environment": {"cwd": r"C:\repo"}}

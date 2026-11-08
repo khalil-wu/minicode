@@ -4378,7 +4378,6 @@ class ContextBuilder:
             groups = list(reversed(selected_reversed))
 
         def serialize_message(message: LLMMessage) -> dict[str, Any]:
-            attachment_refs = deepcopy(_sanitize_attachment_refs(message.attachment_refs))
             serialized = {
                 "role": message.role,
                 # ``export_snapshot()`` is the authoritative resume/replay
@@ -4389,34 +4388,37 @@ class ContextBuilder:
                 # ``max_messages``/``max_chars`` below, but that path never
                 # mutates an individual protocol item.
                 "content": message.content,
-                "name": message.name,
-                "tool_call_id": message.tool_call_id,
-                "is_error": bool(message.is_error),
-                "phase": message.phase,
-                "input_origin": message.input_origin,
-                "answer_source": message.answer_source,
-                **({"content_kind": message.content_kind} if message.content_kind else {}),
-                "provider_items": _sanitize_provider_items(message.provider_items),
-                **({"mcp_output": deepcopy(message.mcp_output)} if message.mcp_output is not None else {}),
-                **({"code_mode_output": deepcopy(message.code_mode_output)} if message.code_mode_output is not None else {}),
-                **({"tool_search_output": deepcopy(message.tool_search_output)} if message.tool_search_output is not None else {}),
-                **({"history_notes_output": deepcopy(message.history_notes_output)} if message.history_notes_output is not None else {}),
-                **({"native_tool_output": deepcopy(message.native_tool_output)} if message.native_tool_output is not None else {}),
-                **({"private_model_only": True} if message.private_model_only else {}),
-                "attachment_refs": attachment_refs,
-                # Provenance is part of the durable projection used to decide
-                # whether an unsent user wrapper can be refreshed.  Truncating
-                # it only in the snapshot would make resume classify the same
-                # provider-visible message differently.
-                "runtime_context": str(message.runtime_context or ""),
-                **({"is_user_input": True} if message.is_user_input else {}),
-                **({"accepted_input": deepcopy(message.accepted_input)} if message.accepted_input is not None else {}),
                 "timestamp_ms": (
                     int(message.timestamp_ms)
                     if message.timestamp_ms is not None
                     else None
                 ),
-                "tool_calls": [
+            }
+            # Import already supplies these absent-field defaults. Ordinary
+            # text history should not allocate, encode and decode empty tool,
+            # provenance and media fields on every durable boundary.
+            for key in ("name", "tool_call_id"):
+                value = getattr(message, key)
+                if value is not None:
+                    serialized[key] = value
+            for key in ("phase", "input_origin", "answer_source", "content_kind", "runtime_context"):
+                value = getattr(message, key)
+                if value:
+                    serialized[key] = value
+            for key in ("is_error", "private_model_only", "is_user_input"):
+                if getattr(message, key):
+                    serialized[key] = True
+            # Empty native outputs are actual provider results, distinct from
+            # an absent result. Preserve them and opaque nested fields exactly.
+            for key in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output", "native_tool_output", "accepted_input"):
+                value = getattr(message, key)
+                if value is not None:
+                    serialized[key] = deepcopy(value)
+            provider_items = _sanitize_provider_items(message.provider_items)
+            if provider_items:
+                serialized["provider_items"] = provider_items
+            if message.tool_calls:
+                serialized["tool_calls"] = [
                     {
                         "id": tool_call.id,
                         "name": tool_call.name,
@@ -4427,15 +4429,15 @@ class ContextBuilder:
                         **({"encrypted_function_args": list(tool_call.encrypted_function_args)}
                             if tool_call.encrypted_function_args is not None else {}),
                     }
-                    for tool_call in (message.tool_calls or [])
-                ],
-            }
-            # Keep media keys present even when scoped references replace the
-            # inline bytes.  Stable object shape matters to provider replay;
-            # the bytes themselves remain omitted when an attachment ref is
-            # authoritative.
+                    for tool_call in message.tool_calls
+                ]
+            attachment_refs = deepcopy(_sanitize_attachment_refs(message.attachment_refs)) if message.attachment_refs else []
+            if attachment_refs:
+                serialized["attachment_refs"] = attachment_refs
             ref_ids = {ref["artifact_id"] for ref in attachment_refs}
             for key, items in (("images", message.images), ("documents", message.documents)):
+                if not items:
+                    continue
                 native = _sanitize_media_items(items, document=key == "documents")
                 # Keep ordered identity markers for stored pixels and inline
                 # bytes for every unreferenced item. Ref presence alone never
