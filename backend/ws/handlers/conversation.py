@@ -1138,7 +1138,18 @@ async def _publish_conversation_switch(
     session: "WebSocketSession", target: Any, view: dict[str, Any], data: dict[str, Any],
 ) -> None:
     from datetime import UTC, datetime
+    from backend.config import load_config
     from backend.services.conversation_payload_service import restore_tool_artifact_sources
+
+    async def refresh_selection(owner: str) -> bool:
+        previous_config = session.config
+        workspace = session.session_lifecycle.workspace_root_for_conversation()
+        config = await to_thread_cancel_safe(load_config, cwd=workspace, resolve_credentials=False)
+        if owner != session.active_conversation_id or not session.session_lifecycle.foreground_navigation_is_current():
+            return False
+        if session.config is previous_config:
+            session.refresh_llm_selection(config_snapshot=config)
+        return True
 
     if not session.session_lifecycle.foreground_navigation_is_current():
         await session.emit_command_result("conversation.switch", "A newer selection replaced this request.", level="warning",
@@ -1146,7 +1157,8 @@ async def _publish_conversation_switch(
         return
     session.active_conversation_id = target.id
     session.permission_context = session.permission_context_for_conversation(target, source="conversation.switch")
-    session.refresh_llm_selection()
+    if not await refresh_selection(target.id):
+        return
     initial_view_delivered = False
     initial_connection_generation = session.connection_generation
 
@@ -1162,7 +1174,8 @@ async def _publish_conversation_switch(
         generation = session.conversation_runtime._hydration_generation
         if data.get("_reconcile_agent_state", True):
             await session.reconcile_persisted_ui_agent_state(owner)
-        session.refresh_llm_selection()
+        if not await refresh_selection(owner):
+            return
         boundary = session.ws_manager.conversation_stream_lock(owner) if session.ws_manager is not None else nullcontext()
         async with boundary:
             current_view = await asyncio.to_thread(session.conversation_repo.get_conversation_view, owner)

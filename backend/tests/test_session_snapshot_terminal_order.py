@@ -29,7 +29,7 @@ async def test_own_snapshot_cannot_replace_a_terminal_answer_with_a_pre_terminal
         # Workspace preparation/model selection is independent of the actual
         # repository hydration callback and WebSocket ordering exercised here.
         monkeypatch.setattr(owner, "switch_workspace_for_conversation", AsyncMock(return_value=True))
-        monkeypatch.setattr(owner, "refresh_llm_selection", lambda: None)
+        monkeypatch.setattr(owner, "refresh_llm_selection", lambda **_kwargs: None)
         monkeypatch.setattr(owner.session_lifecycle, "schedule_runtime_capabilities", lambda **_kwargs: None)
         reconcile = owner.reconcile_persisted_ui_agent_state
 

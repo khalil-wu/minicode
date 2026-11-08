@@ -19,14 +19,14 @@ class SessionCommandHandlersMixin:
             self.session_lifecycle.workspace_root_for_conversation(), resolve_active_workspace=False)
         register_domain_handlers(self)
 
-    def refresh_llm_selection(self, *, prefer_config: bool = False) -> None:
+    def refresh_llm_selection(self, *, prefer_config: bool = False, config_snapshot=None) -> None:
         """Restore the visible selection without changing a running query's client."""
         from backend.services.llm_config_service import refresh_llm_selection_state
         from backend.config import load_config
         from backend.ws.agent_runner import _resolver_accepts_positional_arguments
 
         workspace_root = self.session_lifecycle.workspace_root_for_conversation()
-        scoped_config = load_config(cwd=workspace_root, resolve_credentials=False)
+        scoped_config = config_snapshot if config_snapshot is not None else load_config(cwd=workspace_root, resolve_credentials=False)
         scoped_settings = (
             scoped_config.config_layer_stack.effective_config()
             if scoped_config.config_layer_stack is not None
