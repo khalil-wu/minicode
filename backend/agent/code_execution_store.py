@@ -35,12 +35,19 @@ class CodeExecutionStore:
         self._host_session = None
         self.elicitations = ElicitationService()
 
-    def create_vm(self):
+    def _session(self):
         from backend.agent.code_host import CodeHostSession
 
         if self._host_session is None:
             self._host_session = CodeHostSession()
-        return self._host_session.cell()
+        return self._host_session
+
+    async def prewarm(self) -> None:
+        """Prepare the owned host session without creating or executing a cell."""
+        await self._session().binding()
+
+    def create_vm(self):
+        return self._session().cell()
 
     def pending_tasks(self, llm: Any = None) -> set[asyncio.Task]:
         tasks = {cell.task for cell in self.cells.values()

@@ -9,6 +9,7 @@ from typing import Any, Mapping, MutableMapping
 
 
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
+    "code_mode_prewarm": False,
     "memories": False,
     "multi_agent": True,
     "goals": True,

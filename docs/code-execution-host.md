@@ -1,11 +1,19 @@
 # Code execution host
 
-`tool_exec` runs JavaScript in a separate Python process containing V8. Ordinary
-conversation requests do not start that process or load V8 into the backend.
+`tool_exec` runs JavaScript in a separate Python process containing V8. By default,
+ordinary conversation requests do not start that process or load V8 into the backend.
 Code sessions on the backend's event loop share a lazy host; each cell has its
 own isolate. Desktop conversations, agent threads and SDK sessions retain their
 host session across turns. Closing the final owner closes the pipes and waits
 for the host process to exit.
+
+Set `features.code_mode_prewarm` to `true` to open the selected idle desktop
+conversation's host session during startup preparation. The setting defaults to
+`false`. Prewarming opens the process and session without creating a cell,
+running JavaScript or calling tools; the next `tool_exec` uses that same session.
+An optional prewarm failure is recorded in backend logs, and actual execution
+can start a new host. Conversation unload and application shutdown drain startup
+and close the owned session through the normal code-store lifecycle.
 
 The host evaluates JavaScript and returns tool requests. MiniCode's existing
 tool runner still owns permissions, approvals, execution ordering, workspace

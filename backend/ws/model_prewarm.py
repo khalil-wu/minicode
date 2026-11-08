@@ -150,6 +150,19 @@ def schedule_model_prewarm(session, conversation_id):
         async with asyncio.TaskGroup() as preparation:
             preparation.create_task(prepare_thread_model_context(session, conversation_id, workspace, config))
             preparation.create_task(prepare_transport(config))
+            if config.feature_flags.enabled("code_mode_prewarm"):
+                preparation.create_task(prepare_code())
+
+    async def prepare_code():
+        if (session.active_conversation_id != conversation_id or session.session_lifecycle.is_shutting_down
+                or conversation_id in session.run_manager.run_tasks):
+            return
+        # Source startup_prewarm owns an optional host session independently
+        # from model transport; the actual tool retains startup errors.
+        try:
+            await session.conversation_runtime.code_store_for(conversation_id).prewarm()
+        except Exception:
+            logger.warning("Code host startup prewarm failed", exc_info=True)
 
     async def prepare_transport(config):
         from backend.ws.agent_runner import _apply_thinking_level, _config_with_runtime_model_budget, _get_or_create_session_llm
