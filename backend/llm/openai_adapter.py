@@ -2512,6 +2512,8 @@ class OpenAIAdapter(LLMAdapter):
         self._responses_websocket = ResponsesWebSocketPool(policy=self._application_network)
         self._responses_side_pools: set[ResponsesWebSocketPool] = set()
         self._responses_turn_states: dict[tuple[str, ...], str] = {}
+        self._remote_compaction_support: str | None = None
+        self._compaction_image_budget = True
         self._session_warmups: dict[tuple[str, ...], tuple[asyncio.Task, float, str]] = {}
         self._session_warmup_tasks: dict[asyncio.Task, tuple[str, ...]] = {}
         self._http_client: httpx.AsyncClient | None = http_client
@@ -2728,6 +2730,8 @@ class OpenAIAdapter(LLMAdapter):
             self._settings,
             provider=self._settings.provider,
         )
+        if self._remote_compaction_support is not None:
+            capabilities = replace(capabilities, native_compaction=self.remote_compaction_v2)
         policy = getattr(self, "_reasoning_policy", None)
         if isinstance(policy, ReasoningPolicy):
             return replace(capabilities, reasoning_effort_levels=policy.levels or capabilities.reasoning_effort_levels,
@@ -2746,6 +2750,27 @@ class OpenAIAdapter(LLMAdapter):
     @property
     def native_context_origin(self) -> str:
         return responses_context_origin(_normalized_openai_base_url(self._settings.base_url)) if self._settings.wire_api == "responses" else ""
+
+    def configure_remote_compaction(self, support: str, *, charge_images: bool = True) -> None:
+        if support not in {"unsupported", "v2"}:
+            raise ValueError("Provider capabilities.remote_compaction must be unsupported or v2")
+        if support == "v2" and self._settings.wire_api != "responses":
+            raise ValueError("Remote compaction V2 requires the Responses API")
+        self._remote_compaction_support = support
+        self._compaction_image_budget = charge_images
+
+    @property
+    def remote_compaction_v2(self) -> bool:
+        return (self._remote_compaction_support == "v2" and self._settings.native_compaction is not False
+            and not is_gpt_image_model(self._settings.model))
+
+    async def compact_context_v2(self, messages, *, tools=None, metadata=None, turn_context=None, background=False):
+        if not self.remote_compaction_v2:
+            raise ValueError("Remote compaction V2 is not enabled for this provider")
+        from backend.llm.compaction_v2 import compact
+
+        return await compact(self, messages, tools=tools, metadata=metadata,
+            turn_context=turn_context, background=background)
 
     async def compact_context(
         self, messages: list[LLMMessage], *, turn_context: LLMTurnContext | None = None,
@@ -3386,6 +3411,8 @@ class OpenAIAdapter(LLMAdapter):
         metadata: dict[str, Any] | None = None,
         wire_payload_sink: dict[str, Any] | None = None,
         prepared: tuple[dict[str, Any], dict[str, Any]] | None = None,
+        update_turn_state: bool = True,
+        request_url: str | None = None,
     ) -> AsyncIterator[Any]:
         if self._http_client is None:
             raise RuntimeError("Responses HTTP client is not initialized")
@@ -3401,11 +3428,12 @@ class OpenAIAdapter(LLMAdapter):
         async with _openai_http_stream(
             self._http_client,
             "POST",
-            self._responses_url(),
+            request_url if request_url is not None else self._responses_url(),
             headers=headers,
             json_payload=sent_payload,
         ) as response:
-            self._remember_responses_turn_state(metadata, getattr(response, "headers", None))
+            if update_turn_state:
+                self._remember_responses_turn_state(metadata, getattr(response, "headers", None))
             await emit_provider_lifecycle_response(
                 metadata,
                 response.status_code,
@@ -3432,7 +3460,7 @@ class OpenAIAdapter(LLMAdapter):
                     yield _RESPONSES_TRANSPORT_ACTIVITY
                     continue
                 malformed_budget.accept()
-                if getattr(event, "type", "") == "response.metadata":
+                if update_turn_state and getattr(event, "type", "") == "response.metadata":
                     self._remember_responses_turn_state(metadata, getattr(event, "headers", None))
                 yield event
 

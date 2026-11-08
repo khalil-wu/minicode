@@ -1182,6 +1182,10 @@ class LLMAdapter(ABC):
         raise NotImplementedError("This adapter does not support native compaction")
 
     @property
+    def remote_compaction_v2(self) -> bool:
+        return False
+
+    @property
     def native_context_origin(self) -> str:
         """Provider endpoint whose encrypted continuation this adapter accepts."""
         return ""

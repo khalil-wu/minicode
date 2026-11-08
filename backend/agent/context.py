@@ -1404,7 +1404,7 @@ class ContextBuilder:
             return
         rendered = f"User-configured hook feedback:\n{text}"
         self._history_store.append(
-            LLMMessage(role="user", content=rendered),
+            LLMMessage(role="user", content=rendered, input_origin="hook"),
             raw_content=rendered,
         )
 
@@ -3923,6 +3923,8 @@ class ContextBuilder:
         *, replacement_budget: TokenBudget | None = None,
         replacement_llm: LLMAdapter | None = None,
         manual: bool = False,
+        tool_schemas: list[dict[str, Any]] | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> str:
         """Compact the explicit model window or the automatic older prefix."""
         await self._ensure_environment_project_instructions()
@@ -3951,6 +3953,8 @@ class ContextBuilder:
             return await self._compact_native_context(
                 focus, restore_state, replacement_budget=replacement_budget,
                 replacement_llm=replacement_llm,
+                tool_schemas=tool_schemas,
+                request_metadata=request_metadata,
             )
         # A local summary can compact newer readable history, but may not
         # rewrite or discard an already-installed encrypted provider window.
@@ -4097,6 +4101,8 @@ class ContextBuilder:
         self, focus: str, restore_state: AgentState | None, *,
         replacement_budget: TokenBudget | None = None,
         replacement_llm: LLMAdapter | None = None,
+        tool_schemas: list[dict[str, Any]] | None = None,
+        request_metadata: dict[str, Any] | None = None,
     ) -> str:
         state = restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root)
         recent_start = self._compaction_inflight_start()
@@ -4112,7 +4118,16 @@ class ContextBuilder:
         messages = compact_builder._render_prompt_messages(state, self._workspace_root_for_state(state))
         if focus:
             messages.insert(0, LLMMessage(role="system", content=f"Compaction focus requested by the user: {focus}"))
-        replacement = await self._llm.compact_context(messages, turn_context=self._llm_turn_context)
+        if isinstance(self._llm, LLMAdapter) and self._llm.remote_compaction_v2:
+            execution = self._tool_execution_context
+            registry = execution.tool_registry if execution is not None else None
+            tools = tool_schemas if tool_schemas is not None else registry.get_schemas(permission_checker=execution.permission_checker,
+                permission_context=execution.permission, toolset_policy=execution.run_context.toolset_policy) if registry is not None else []
+            replacement = await self._llm.compact_context_v2(messages, tools=tools,
+                metadata=request_metadata if request_metadata is not None else execution.metadata if execution is not None else None,
+                turn_context=self._llm_turn_context)
+        else:
+            replacement = await self._llm.compact_context(messages, turn_context=self._llm_turn_context)
         if replacement_llm is not None:
             replacement_llm.validate_context([replacement])
         # References preserve access to originals without duplicating the

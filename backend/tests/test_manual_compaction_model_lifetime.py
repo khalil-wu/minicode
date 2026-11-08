@@ -20,6 +20,7 @@ from backend.permissions.context import PermissionContext
 from backend.ws.agent_runner import _clear_session_llm_cache, _get_or_create_session_llm
 from backend.ws.handlers.conversation import handle_context_compact
 from backend.agent.conversation_query_guard import conversation_query_guards
+from backend.tools.registry import ToolRegistry
 
 
 def compaction_states(session):
@@ -116,7 +117,7 @@ async def prepare(monkeypatch, tmp_path, endpoint, *, active=True, native=True):
     monkeypatch.setattr("backend.config.load_config", lambda **_kwargs: config)
     monkeypatch.setattr("backend.llm.model_registry.create_session_llm", factory)
     monkeypatch.setattr("backend.ws.handlers.conversation._conversation_has_active_run", lambda *_args: False)
-    registry = SimpleNamespace(get_schemas=lambda **_kwargs: [])
+    registry = ToolRegistry()
     repo = ConversationRepository(tmp_path / "conversations")
     target = "conv_compact_owner"
     session = SimpleNamespace(session_id="manual-compact-session", config=config, cleanup_tasks=set(), _llm_close_tasks=set(), _llm_adapter_cache={},

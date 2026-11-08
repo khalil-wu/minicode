@@ -3990,6 +3990,7 @@ def _capture_manual_compaction_model(session: "WebSocketSession", current: Any, 
     from backend.llm.model_selection import config_with_model_budget
     from backend.permissions.checker import PermissionChecker
     from backend.tools.toolsets import ToolsetPolicy
+    from backend.agent.tool_schema_derivation import effective_toolset_policy, requested_tool_mode
 
     workspace_root = session.session_lifecycle.workspace_root_for_conversation(current)
     config = load_config(cwd=workspace_root)
@@ -4000,16 +4001,25 @@ def _capture_manual_compaction_model(session: "WebSocketSession", current: Any, 
         reasoning_effort=selection.get("reasoning_effort", config.llm.reasoning_effort)))
     model_runtime = session._model_runtime_for_conversation(conversation_id)
     config = config_with_model_budget(config, model_runtime=model_runtime, provider=provider, model=model)
-    registry = session._conversation_tool_registry(conversation_id)
+    registry = session._conversation_tool_registry(conversation_id).fork()
     policy = ToolsetPolicy.default()
     active_tools = session._extension_runtime_states.get(conversation_id, {}).get("active_tool_names")
     if active_tools is not None:
         policy = policy.with_active_tool_selection(active_tools)
+    prepared = ModelExecutionSnapshot(config=config, llm=None, provider=provider, model=model,
+        model_runtime=model_runtime, model_info=model_runtime.get_model(provider, model) if model_runtime is not None else None)
+    permission = session.permission_context_for_conversation(current, source="context.compact")
+    policy = effective_toolset_policy(base_policy=policy, tool_registry=registry, disabled_tools=set(),
+        requires_explicit_workspace=False, workspace_root=workspace_root, permission_mode=permission.mode,
+        tool_mode="code_mode" if active_tools is not None else requested_tool_mode(
+            default_code_mode_only=config.agent.code_mode_only, model_execution=prepared, llm=None),
+        model_execution=prepared,
+        supports_search_tool=prepared.model_info.supports_search_tool if prepared.model_info is not None else config.llm.supports_search_tool)
     schemas = registry.get_schemas(permission_checker=PermissionChecker(config.permissions),
-        permission_context=session.permission_context_for_conversation(current, source="context.compact"),
+        permission_context=permission,
         toolset_policy=policy)
     adapter = create_session_llm(config, provider_override=provider, model_override=model, model_runtime=model_runtime)
-    return ModelExecutionSnapshot(config=config, llm=adapter, provider=provider, model=model), workspace_root, schemas
+    return replace(prepared, llm=adapter), workspace_root, schemas
 
 
 async def handle_context_compact(session: "WebSocketSession", data: dict[str, Any]) -> bool:
@@ -4183,6 +4193,9 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
             try:
                 committed = await compact_conversation(
                     session, conversation_id=conversation_id, context_builder=ctx, focus=focus,
+                    tool_schemas=target_schemas,
+                    request_metadata={**hook_context.metadata, "session_id": session.session_id,
+                        "thread_id": conversation_id, "query_source": "compact"},
                     restore_state=state, live_context_builder=live_context if shared_context else None,
                     on_started=publish_started,
                     on_completed=publish_completed, on_hook_event=publish_hook_event,

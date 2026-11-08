@@ -119,6 +119,8 @@ async def compact_conversation(
     on_hook_event: Callable[[AgentEvent], Awaitable[None]] | None = None,
     compaction_item: dict[str, Any] | None = None,
     operation_turn_id: str = "",
+    tool_schemas: list[dict[str, Any]] | None = None,
+    request_metadata: dict[str, Any] | None = None,
 ) -> CompactionCommit:
     """Compact and CAS-publish one conversation snapshot."""
 
@@ -179,6 +181,8 @@ async def compact_conversation(
                 focus=str(focus or "").strip() or None,
                 restore_state=restore_state,
                 manual=True,
+                tool_schemas=tool_schemas,
+                request_metadata=request_metadata,
             )
             summary_text = str(summary or "").strip()
             saved_snapshot = transaction_builder.export_snapshot()

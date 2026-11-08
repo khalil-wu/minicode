@@ -148,7 +148,7 @@ async def _run_normal_compaction(
         stop_context_compaction(state)
         return
     try:
-        summary = await ctx.compact(focus=state.user_message, restore_state=state)
+        summary = await ctx.compact(focus=state.user_message, restore_state=state, tool_schemas=tool_schemas)
     except CompactionNoopError as exc:
         # No eligible history was removed and no summarizer request failed.
         logger.info("Automatic compaction made no change: %s", exc)

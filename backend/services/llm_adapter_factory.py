@@ -433,6 +433,18 @@ def _bind_config_model_request_policy(adapter: LLMAdapter, config: "AppConfig", 
     if isinstance(adapter, OpenAIAdapter):
         adapter.configure_content_item_kinds(config.feature_flags.enabled("content_item_kinds"))
     effective = config.config_layer_stack.effective_config() if config.config_layer_stack is not None else {}
+    if isinstance(adapter, OpenAIAdapter):
+        settings = adapter._settings
+        provider = effective.get("model_providers", {}).get(settings.provider, {})
+        support = provider.get("capabilities", {}).get("remote_compaction")
+        if support is None and settings.wire_api == "responses" and settings.native_compaction is None:
+            azure = settings.provider.lower() == "azure" or any(marker in settings.base_url.lower()
+                for marker in ("openai.azure.", "cognitiveservices.azure.", "aoai.azure.", "azure-api.", "azurefd.", "windows.net/openai"))
+            if settings.provider in {"openai", "gcp"} or settings.aws is not None or azure:
+                support = "v2"
+        if support is not None:
+            adapter.configure_remote_compaction(support,
+                charge_images=config.feature_flags.enabled("compaction_image_budget"))
     definition = adapter.provider_adapter_spec.model if adapter.provider_adapter_spec is not None else None
     policy = config.model_request_policy or resolve_model_request_policy(config, model=model, definition=definition,
         root_service_tier=effective.get("service_tier"))
