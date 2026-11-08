@@ -334,6 +334,8 @@ async def bootstrap_agent_loop(
     from backend.async_cleanup import retain_cleanup_task, to_thread_cancel_safe
 
     thread_runtime = run_context.environment_thread_runtime
+    if thread_runtime is not None or agent_session is not None:
+        context._async_compaction = (thread_runtime or agent_session).async_compaction
     owner = thread_runtime.exec_policy_owner if thread_runtime is not None else context._exec_policy_owner
     policy_task = None
     if (owner is None or owner.folders != config_folders(turn_config_stack)

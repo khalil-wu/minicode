@@ -310,6 +310,11 @@ class TurnIterationAdmission:
 
 
         self.context.begin_provider_request(prepared_context.messages, tool_schemas)
+        if self.context._async_compaction is not None:
+            self.context._async_compaction.maybe_start(self.context, self.state,
+                execution=self.tool_context.model_execution, tools=tool_schemas,
+                metadata=self.llm_request_metadata, run_context=self.tool_context.run_context,
+                rollout_budget=self.budget_runtime.rollout_budget, phase="pre_turn", messages=prepared_context.messages)
         self.state.iterations += 1
         current_iteration_id = iteration_id(self.state)
         model_phase = "execute"

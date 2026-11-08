@@ -190,6 +190,7 @@ class ConversationHistory:
         # handed to a provider. Once a message is in this prefix, runtime
         # refresh/cleanup must never rewrite it.
         self.frozen_count = 0
+        self.generation = 0
         # Older snapshots have no sent-boundary marker. Treat their durable
         # transcript as already sent and carry that conservative assumption
         # through partial hydration.
@@ -303,6 +304,7 @@ class ConversationHistory:
             # for a later unrelated append or skill restore.
             self.pending_hydration_frozen_prefix_count = 0
             return
+        self.generation += 1
         self.messages = prefix.messages + self.messages
         self.frozen_count = min(
             len(self.messages),
@@ -324,10 +326,12 @@ class ConversationHistory:
         self._changed(0)
 
     def replace_all(self, messages: list[LLMMessage]) -> None:
+        self.generation += 1
         self.messages = messages
         self.rebuild_token_cache()
 
     def clear(self) -> None:
+        self.generation += 1
         self.messages.clear()
         self._changed(0)
         self.frozen_count = 0
@@ -394,6 +398,7 @@ class ConversationHistory:
         """
         repaired, inserted, dropped = repair_tool_messages(self.messages)
         if inserted or dropped:
+            self.generation += 1
             self.messages = repaired
             self.frozen_count = 0
             self.rebuild_token_cache()
@@ -431,6 +436,7 @@ class ConversationHistory:
                 copied = deepcopy(message, memo)
             cloned.messages.append(copied)
         cloned.frozen_count = self.frozen_count
+        cloned.generation = self.generation
         cloned.frozen_metadata_present = self.frozen_metadata_present
         cloned.pending_hydration_frozen_prefix_count = self.pending_hydration_frozen_prefix_count
         cloned.last_message_timestamp_ms = self.last_message_timestamp_ms

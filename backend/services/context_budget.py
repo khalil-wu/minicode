@@ -56,7 +56,9 @@ async def manage_context_budget(
                 yield event
         return
     snapshot = ctx.get_budget_snapshot(state, tool_schemas=tool_schemas, **request_args)
-    if int(snapshot.get("used", 0)) <= max(0, budget.total - budget.reserved_response_tokens):
+    prepared = (isinstance(ctx, ContextBuilder) and ctx._async_compaction is not None
+        and ctx._async_compaction.ready(ctx, ctx._async_compaction_execution))
+    if not prepared and int(snapshot.get("used", 0)) <= max(0, budget.total - budget.reserved_response_tokens):
         warning = _pre_compaction_warning(ctx, state, budget, tool_schemas, snapshot=snapshot, **request_args)
         if warning is not None:
             yield warning

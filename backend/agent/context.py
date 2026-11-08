@@ -161,6 +161,8 @@ def clone_context_builder(builder: "ContextBuilder", *, copy_history: bool = Tru
     cloned.guardian_evidence = deepcopy(builder.guardian_evidence) if copy_history else builder.guardian_evidence
     cloned._withheld_media_timestamps = set()
     cloned._tool_execution_context = None
+    cloned._async_compaction = None
+    cloned._async_compaction_execution = None
     cloned._git_status_authority = None
     cloned._prepared_environment_snapshot = None
     cloned._environment_project_guidelines = ""
@@ -665,6 +667,8 @@ class ContextBuilder:
         self._memory_manager = memory_manager
         self._llm = llm
         self._llm_turn_context: Any | None = None
+        self._async_compaction = None
+        self._async_compaction_execution = None
         self._hook_manager: Any | None = None
         # Persisted tool-result references are durable data, so their owner is
         # part of the context builder rather than inferred from process-global
@@ -3925,6 +3929,7 @@ class ContextBuilder:
         manual: bool = False,
         tool_schemas: list[dict[str, Any]] | None = None,
         request_metadata: dict[str, Any] | None = None,
+        wait_for_background: bool = True,
     ) -> str:
         """Compact the explicit model window or the automatic older prefix."""
         await self._ensure_environment_project_instructions()
@@ -3955,6 +3960,7 @@ class ContextBuilder:
                 replacement_llm=replacement_llm,
                 tool_schemas=tool_schemas,
                 request_metadata=request_metadata,
+                wait_for_background=wait_for_background,
             )
         # A local summary can compact newer readable history, but may not
         # rewrite or discard an already-installed encrypted provider window.
@@ -4103,8 +4109,20 @@ class ContextBuilder:
         replacement_llm: LLMAdapter | None = None,
         tool_schemas: list[dict[str, Any]] | None = None,
         request_metadata: dict[str, Any] | None = None,
+        wait_for_background: bool = True,
     ) -> str:
         state = restore_state or AgentState(user_message="", conversation_id=self._conversation_id, workspace_root=self._workspace_root)
+        if self._async_compaction is not None and replacement_llm is None:
+            candidate = await self._async_compaction.take(self, self._async_compaction_execution, wait=wait_for_background)
+            if candidate is not None:
+                # Revalidate immediately before replacing the prefix; no await
+                # may separate this check from preserving the current suffix.
+                execution = (self._tool_execution_context.run_context.model_execution
+                    if self._tool_execution_context is not None else self._async_compaction_execution)
+                if candidate.matches(self, execution):
+                    await self._install_native_replacement(candidate.replacement, len(candidate.prefix), restore_state)
+                    if not self.needs_compaction(state, tool_schemas=tool_schemas):
+                        return "Provider-native context compaction completed."
         recent_start = self._compaction_inflight_start()
         if recent_start == 0:
             raise CompactionNoopError()
@@ -4130,6 +4148,11 @@ class ContextBuilder:
             replacement = await self._llm.compact_context(messages, turn_context=self._llm_turn_context)
         if replacement_llm is not None:
             replacement_llm.validate_context([replacement])
+        await self._install_native_replacement(replacement, recent_start, restore_state,
+            replacement_budget=replacement_budget)
+        return "Provider-native context compaction completed."
+
+    async def _install_native_replacement(self, replacement, recent_start, restore_state, *, replacement_budget=None):
         # References preserve access to originals without duplicating the
         # provider's returned media or trying to interpret encrypted content.
         refs = {ref["artifact_id"]: ref for message in self._history[:recent_start] for ref in message.attachment_refs}
@@ -4139,7 +4162,6 @@ class ContextBuilder:
         recent = self._history[recent_start:]
         self._install_compacted_history([replacement, *recent], removed_prefix=recent_start, recent_count=len(recent), restore_state=restore_state)
         await self._restore_executor_files_after_compaction(restore_state)
-        return "Provider-native context compaction completed."
 
     def _install_compacted_history(
         self, history: list[LLMMessage], *, removed_prefix: int, recent_count: int, restore_state: AgentState | None,

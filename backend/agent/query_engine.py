@@ -47,6 +47,7 @@ from backend.agent.lifecycle_observer import (
     resolve_lifecycle_runtime,
 )
 from backend.llm.base import LLMAdapter, LLMTurnContext
+from backend.agent.async_compaction import AsyncCompaction
 from backend.permissions.checker import PermissionChecker
 from backend.permissions.context import PermissionContext
 from backend.permissions.grants import PermissionGrantStore
@@ -100,6 +101,7 @@ class AgentSession:
     close_thread_resources: Callable[[], Awaitable[Any]] | None = None
     close_model: Callable[[], Awaitable[None]] | None = None
     model_retirement_tasks: set[asyncio.Task] = field(default_factory=set)
+    async_compaction: AsyncCompaction = field(default_factory=AsyncCompaction)
     user_shell: dict[str, str] | None = None
     closed: bool = field(default=False, init=False)
 
@@ -111,6 +113,7 @@ class AgentSession:
     async def aclose(self) -> None:
         """Release owned resources after their real borrowers have settled."""
         self.closed = True
+        await self.async_compaction.aclose()
         await self.code_store.aclose(release_host=self.owns_code_store)
         if self.model_retirement_tasks:
             await asyncio.gather(*self.model_retirement_tasks)
@@ -847,6 +850,9 @@ class QueryEngine:
         if run_context.retain_model is not None:
             run_context.retain_model(session.llm, asyncio.current_task())
         run_context.code_store = session.code_store
+        ctx_owner = run_context.environment_thread_runtime or session
+        if session.context_builder is not None:
+            session.context_builder._async_compaction = ctx_owner.async_compaction
         runtime_value = run_context.agent_runtime
         if runtime_value is None:
             runtime_value = default_runtime()

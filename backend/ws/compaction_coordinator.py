@@ -164,6 +164,8 @@ async def compact_conversation(
             if callable(load_snapshot):
                 transaction_builder = clone_context_builder(context_builder)
                 transaction_builder.load_snapshot(previous_snapshot)
+                transaction_builder._async_compaction = context_builder._async_compaction
+                transaction_builder._async_compaction_execution = context_builder._async_compaction_execution
             else:
                 transaction_builder = context_builder
             outcome = await run_context_compaction_hook(transaction_builder, HookEvent.PRE_COMPACT, trigger="manual")

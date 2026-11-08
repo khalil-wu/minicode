@@ -2764,13 +2764,22 @@ class OpenAIAdapter(LLMAdapter):
         return (self._remote_compaction_support == "v2" and self._settings.native_compaction is not False
             and not is_gpt_image_model(self._settings.model))
 
-    async def compact_context_v2(self, messages, *, tools=None, metadata=None, turn_context=None, background=False):
+    def compaction_identity(self) -> tuple:
+        settings = self._settings
+        auth = self._provider_request_auth
+        return (settings.provider, self.native_context_origin, settings.model, settings.comp_hash,
+            settings.api_key, tuple(settings.default_headers), id(auth))
+
+    def has_compaction_route(self, metadata) -> bool:
+        return self._responses_turn_owner(metadata) in self._responses_turn_states
+
+    async def compact_context_v2(self, messages, *, tools=None, metadata=None, turn_context=None, background=False, prepared=None):
         if not self.remote_compaction_v2:
             raise ValueError("Remote compaction V2 is not enabled for this provider")
         from backend.llm.compaction_v2 import compact
 
         return await compact(self, messages, tools=tools, metadata=metadata,
-            turn_context=turn_context, background=background)
+            turn_context=turn_context, background=background, prepared=prepared)
 
     async def compact_context(
         self, messages: list[LLMMessage], *, turn_context: LLMTurnContext | None = None,

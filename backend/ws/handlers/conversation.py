@@ -4107,6 +4107,11 @@ async def handle_context_compact(session: "WebSocketSession", data: dict[str, An
         target_adapter = execution.llm
         ctx = ContextBuilder(token_budget=execution.config.token_budget, agent_settings=execution.config.agent,
             llm=execution.llm, conversation_id=conversation_id, workspace_root=workspace_root)
+        if session.__dict__.get("ws_manager") is not None:
+            thread_runtime = session.ws_manager.execution_contexts.thread_runtime(
+                session.conversation_repo.store_instance_id(), conversation_id)
+            ctx._async_compaction = thread_runtime.async_compaction
+            ctx._async_compaction_execution = execution
         from backend.llm.base import LLMTurnContext
 
         manual_llm_turn_context = LLMTurnContext(cost_session_id=conversation_id)

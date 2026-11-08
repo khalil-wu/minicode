@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from contextlib import aclosing
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import json
+from typing import TYPE_CHECKING
 
 from backend.llm.base import LLMMessage, SideQueryOptions
 from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE, native_compaction_windows, validate_compaction_window
 from backend.mcp.result_projection import _truncate_text
+
+if TYPE_CHECKING:
+    from backend.config import LLMSettings
 
 
 def _tokens(text: str) -> int:
@@ -143,9 +147,17 @@ def retained_input(adapter, messages: list[LLMMessage], *, max_tokens: int = 64_
     return retained
 
 
-async def compact(adapter, messages, *, tools, metadata, turn_context, background=False):
-    from backend.llm.openai_adapter import _responses_detach_provider_json, _get_attr_or_item, ResponsesStreamError
+@dataclass(frozen=True)
+class PreparedCompaction:
+    settings: LLMSettings = field(repr=False)
+    payload: dict = field(repr=False)
+    retained: list = field(repr=False)
+    origin: str
+    request_url: str
+    headers: dict = field(repr=False)
 
+
+def prepare_request(adapter, messages, *, tools, metadata) -> PreparedCompaction:
     adapter.validate_context(messages)
     settings = adapter._settings
     payload, _, _ = adapter._responses_request_payload(messages, tools, metadata)
@@ -155,10 +167,16 @@ async def compact(adapter, messages, *, tools, metadata, turn_context, backgroun
         payload["text"] = {key: value for key, value in payload["text"].items() if key != "format"}
         if not payload["text"]:
             payload.pop("text")
-    retained = retained_input(adapter, messages, charge_images=adapter._compaction_image_budget)
-    origin = adapter.native_context_origin
-    request_url = adapter._responses_url()
-    request_headers = adapter._responses_headers()
+    return PreparedCompaction(settings, payload,
+        retained_input(adapter, messages, charge_images=adapter._compaction_image_budget),
+        adapter.native_context_origin, adapter._responses_url(), adapter._responses_headers())
+
+
+async def compact(adapter, messages, *, tools, metadata, turn_context, background=False, prepared=None):
+    from backend.llm.openai_adapter import _responses_detach_provider_json, _get_attr_or_item, ResponsesStreamError
+
+    request = prepared if prepared is not None else prepare_request(adapter, messages, tools=tools, metadata=metadata)
+    settings, payload = request.settings, request.payload
     options = SideQueryOptions(operation="compact", enable_prompt_cache=False,
         max_retries=0 if background else 2, query_source="compact")
 
@@ -167,10 +185,10 @@ async def compact(adapter, messages, *, tools, metadata, turn_context, backgroun
         request_metadata = {**(metadata or {}), **context.request_metadata()}
         outputs = []
         completed = None
-        prepared = await adapter._prepare_http_request(payload, metadata=request_metadata,
-            base_headers=request_headers)
+        wire = await adapter._prepare_http_request(payload, metadata=request_metadata,
+            base_headers=request.headers)
         stream = adapter._emit_responses_http_stream_events(payload, metadata=request_metadata,
-            prepared=prepared, update_turn_state=not background, request_url=request_url)
+            prepared=wire, update_turn_state=not background, request_url=request.request_url)
         async with aclosing(stream):
             async for event in stream:
                 kind = _get_attr_or_item(event, "type", "")
@@ -194,9 +212,9 @@ async def compact(adapter, messages, *, tools, metadata, turn_context, backgroun
             raise RuntimeError("Remote compaction V2 stream closed before response.completed")
         if len(outputs) != 1:
             raise ValueError(f"Remote compaction V2 expected exactly one compaction output item, got {len(outputs)}")
-        window = validate_compaction_window({"type": NATIVE_COMPACTION_TYPE, "origin": origin,
+        window = validate_compaction_window({"type": NATIVE_COMPACTION_TYPE, "origin": request.origin,
             "model": settings.model, "response_id": _get_attr_or_item(completed, "id", ""),
-            "output": [*retained, outputs[0]], "compaction_model_hash": settings.comp_hash})
+            "output": [*request.retained, outputs[0]], "compaction_model_hash": settings.comp_hash})
         context.record["compaction_output_items"] = len(window["output"])
         return LLMMessage(role="assistant", provider_items=[window])
 

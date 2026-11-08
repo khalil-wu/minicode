@@ -437,7 +437,8 @@ def _bind_config_model_request_policy(adapter: LLMAdapter, config: "AppConfig", 
         settings = adapter._settings
         provider = effective.get("model_providers", {}).get(settings.provider, {})
         support = provider.get("capabilities", {}).get("remote_compaction")
-        if support is None and settings.wire_api == "responses" and settings.native_compaction is None:
+        if support is None and settings.wire_api == "responses" and (
+                settings.native_compaction is None or settings.provider == "gcp" or settings.aws is not None):
             azure = settings.provider.lower() == "azure" or any(marker in settings.base_url.lower()
                 for marker in ("openai.azure.", "cognitiveservices.azure.", "aoai.azure.", "azure-api.", "azurefd.", "windows.net/openai"))
             if settings.provider in {"openai", "gcp"} or settings.aws is not None or azure:

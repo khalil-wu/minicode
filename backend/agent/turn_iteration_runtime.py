@@ -383,6 +383,7 @@ class TurnIterationRuntime:
         trace.mark("populate_prompt_context")
 
         tool_schemas = schema_state.tool_schemas
+        self.context._async_compaction_execution = snapshot
         self.state.prompt_context["model_catalog"] = (
             schema_state.model_catalog.fragment() if schema_state.model_catalog is not None else None)
         self.state.prompt_context["model_catalog_namespace"] = (

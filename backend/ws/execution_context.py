@@ -11,6 +11,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from backend.agent.async_compaction import AsyncCompaction
+
 if TYPE_CHECKING:
     from backend.memory.settings import MemorySettings, MemoryVersion
     from backend.agent.environment_selection import ThreadEnvironments
@@ -115,6 +117,7 @@ class ConversationThreadRuntime:
     model_context_preparation: asyncio.Task[Any] | None = None
     model_config: Any | None = None
     realtime_runtime: Any | None = None
+    async_compaction: AsyncCompaction = field(default_factory=AsyncCompaction)
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
 
     def capture_memory_settings(self, settings: MemorySettings) -> MemorySettings:
@@ -174,6 +177,7 @@ class ConversationThreadRuntime:
         return frozenset(pending)
 
     async def close_environments(self) -> None:
+        await self.async_compaction.aclose()
         if self.realtime_runtime is not None:
             await self.realtime_runtime.aclose()
         while pending := self.pending_tasks():

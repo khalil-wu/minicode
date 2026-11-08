@@ -1589,6 +1589,7 @@ class SessionLifecycle:
         await session.run_manager.unwatch_conversation_notifications(conversation_id)
         await session.cancel_pending_approvals(reason=reason, conversation_id=conversation_id)
         await session.cancel_agent_runs(conversation_id=conversation_id, reason=reason)
+        await session.run_manager.close_background_models(conversation_id)
         from backend.ws.model_prewarm import close_thread_model_sessions
 
         await close_thread_model_sessions(session, conversation_id)
@@ -1633,6 +1634,7 @@ class SessionLifecycle:
         self._workspace_generation += 1
         self._sandbox_capability_generation += 1
         await self._session.cancel_agent_runs(reason=reason)
+        await self._session.run_manager.close_background_models()
         from backend.agent.runtime import default_runtime_if_initialized
 
         runtime = default_runtime_if_initialized()

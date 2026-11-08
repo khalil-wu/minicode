@@ -104,6 +104,7 @@ class RunContext:
     extension_tool_selection_setter: Callable[[list[str]], None] | None = None
     cancel_event: asyncio.Event | None = None
     retain_model: Callable[[Any, asyncio.Task], None] | None = None
+    retain_background_model: Callable[[asyncio.Task], None] | None = None
     lifecycle_cleanup_tasks: set[asyncio.Task] = field(default_factory=set)
     lifecycle_cleanup_receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     refresh_model_auth: Callable[[ModelExecutionSnapshot, bool, asyncio.Task], Awaitable[ModelExecutionSnapshot]] | None = None

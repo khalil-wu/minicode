@@ -14,6 +14,7 @@ DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     "code_mode_only_strict_3p_tools": False,
     "model_catalog_in_context": False,
     "compaction_image_budget": True,
+    "async_compaction": False,
     "memories": False,
     "multi_agent": True,
     "goals": True,
@@ -145,6 +146,10 @@ def load_feature_flags(
         if not name:
             continue
         value = raw_value.get("enabled") if isinstance(raw_value, Mapping) else raw_value
+        if name == "async_compaction" and isinstance(raw_value, Mapping):
+            threshold = raw_value.get("model_async_compact_threshold_percent", 65)
+            if type(threshold) is not int or not 1 <= threshold <= 100:
+                raise ValueError("features.async_compaction.model_async_compact_threshold_percent must be between 1 and 100")
         flags[name] = coerce_feature_bool(value, flags.get(name, False))
 
     for env_name, raw_value in os.environ.items():

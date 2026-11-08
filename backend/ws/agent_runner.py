@@ -4861,6 +4861,7 @@ class SessionAgentRunnerMixin:
             return snapshot.llm if snapshot is not None else run_agent_session.llm
 
         run_context.retain_model = lambda adapter, task: _lease_session_llm_for_task(self, adapter, task)
+        run_context.retain_background_model = lambda task: self.run_manager.retain_background_model_task(conversation.id, task)
         run_context.refresh_model_auth = lambda snapshot, force, task: _refresh_session_model_auth(self, snapshot, force, task)
 
         from backend.agent.turn_trace import turn_trace_shared

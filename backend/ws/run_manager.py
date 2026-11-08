@@ -57,6 +57,7 @@ class SessionRunManager:
         self._run_tasks: dict[str, asyncio.Task[Any]] = {}
         self._run_contexts: dict[str, RunContext] = {}
         self._lifecycle_cleanup_tasks: dict[str, set[asyncio.Task[Any]]] = {}
+        self._background_model_tasks: dict[str, set[asyncio.Task[Any]]] = {}
         self._lifecycle_release_tasks: set[asyncio.Task[Any]] = set()
         self._run_task_ids: dict[str, str] = {}
         self._cancel_events: dict[str, asyncio.Event] = {}
@@ -995,14 +996,31 @@ class SessionRunManager:
 
         return self._lifecycle_cleanup_tasks.setdefault(conversation_id, set())
 
+    def retain_background_model_task(self, conversation_id, task):
+        tasks = self._background_model_tasks.setdefault(conversation_id, set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
+    async def close_background_models(self, conversation_id=None):
+        groups = (self._background_model_tasks.get(conversation_id, set()),) if conversation_id is not None else tuple(self._background_model_tasks.values())
+        pending = {task for tasks in groups for task in tasks if not task.done()}
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     def lifecycle_release_fence(
         self,
         conversation_id: str,
         *,
         after: asyncio.Task[Any] | None = None,
     ) -> asyncio.Task[None] | None:
-        owner = self.lifecycle_cleanup_tasks_for(conversation_id)
-        if (after is None or after.done()) and not any(not task.done() for task in owner):
+        cleanup = self.lifecycle_cleanup_tasks_for(conversation_id)
+        background = self._background_model_tasks.setdefault(conversation_id, set())
+        def borrowers():
+            return {task for task in cleanup | background if not task.done()}
+
+        if (after is None or after.done()) and not borrowers():
             return None
 
         async def wait_for_release() -> None:
@@ -1016,7 +1034,7 @@ class SessionRunManager:
                 except asyncio.CancelledError:
                     continue
                 pending = {task for task in pending if not task.done()}
-            while pending := {task for task in owner if not task.done()}:
+            while pending := borrowers():
                 try:
                     await asyncio.wait(pending)
                 except asyncio.CancelledError:

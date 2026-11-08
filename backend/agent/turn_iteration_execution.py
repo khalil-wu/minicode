@@ -78,6 +78,15 @@ class TurnIterationExecutor:
     iteration and returns only the state needed by the next iteration.
     """
 
+    async def settle_context(self, *, needs_follow_up, tool_schemas):
+        async for event in settle_context_window(self.context_builder, self.agent_state, needs_follow_up=needs_follow_up):
+            yield event
+        owner = self.context_builder._async_compaction
+        if owner is not None:
+            owner.maybe_start(self.context_builder, self.agent_state, execution=self.tool_context.model_execution,
+                tools=tool_schemas, metadata=self.llm_request_metadata, run_context=self.tool_context.run_context,
+                rollout_budget=self.budget_runtime.rollout_budget, phase="post_turn")
+
     def __init__(
         self,
         *,
@@ -291,7 +300,7 @@ class TurnIterationExecutor:
             for event in retain_provider_follow_up(state=self.agent_state, stream_state=stream_state,
                 stream_text=stream_text, context_builder=self.context_builder):
                 yield event
-            async for event in settle_context_window(self.context_builder, self.agent_state, needs_follow_up=True):
+            async for event in self.settle_context(needs_follow_up=True, tool_schemas=tool_schemas):
                 yield event
             yield IterationExecutionResult(action="retry", state=execution_state, stream_text=stream_text)
             return
@@ -365,8 +374,8 @@ class TurnIterationExecutor:
                     "final-answer orchestrator returned without an outcome"
                 )
             execution_state.degraded_reason = final_answer_outcome.degraded_reason
-            async for event in settle_context_window(
-                self.context_builder, self.agent_state,
+            async for event in self.settle_context(
+                tool_schemas=tool_schemas,
                 needs_follow_up=final_answer_outcome.action == "retry",
             ):
                 yield event
@@ -413,7 +422,7 @@ class TurnIterationExecutor:
             raise RuntimeError("tool turn runtime returned without a result")
         execution_state.tool_batch_count = tool_turn_result.tool_batch_count
         if tool_turn_result.action != "terminate":
-            async for event in settle_context_window(self.context_builder, self.agent_state, needs_follow_up=True):
+            async for event in self.settle_context(needs_follow_up=True, tool_schemas=tool_schemas):
                 yield event
         yield IterationExecutionResult(
             action=("terminate" if tool_turn_result.action == "terminate" else "retry"),

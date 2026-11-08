@@ -2595,7 +2595,8 @@ class TaskTool(BaseTool):
             retirement.session = child_agent_session
             previous_close = child_agent_session.close_model
             if previous_close is not None and child_agent_session.llm is not llm:
-                pending = child_agent_session.code_store.pending_tasks(llm=child_agent_session.llm)
+                pending = (child_agent_session.code_store.pending_tasks(llm=child_agent_session.llm)
+                    | child_agent_session.async_compaction.pending_tasks(llm=child_agent_session.llm))
                 if pending:
                     async def retire_model(tasks=tuple(pending), close=previous_close):
                         await asyncio.gather(*tasks, return_exceptions=True)
@@ -3536,6 +3537,7 @@ class TaskTool(BaseTool):
                     is_subagent=True,
                     isolated=agent_worktree is not None,
                     retain_model=parent_run_context.retain_model,
+                    retain_background_model=parent_run_context.retain_background_model,
                     refresh_model_auth=parent_run_context.refresh_model_auth,
                     execution_journal=journal,
                     window_binding_token=context.window_binding_token,
