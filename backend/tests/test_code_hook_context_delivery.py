@@ -30,6 +30,7 @@ async def test_nested_hook_context_reaches_model_once_independent_of_selected_ou
         permission=PermissionContext(), conversation_id="owner", workspace_root=tmp_path,
         artifact_store=ArtifactStore(storage_dir=tmp_path / "artifacts"),
     )
+    runtime.tool_context = context
     builder = ContextBuilder(token_budget=TokenBudget(total=200000, response_reserve=1000))
     try:
         result = await _present_result(await runtime.wait("cell", yield_time_ms=0), context, 64, "tool_exec")

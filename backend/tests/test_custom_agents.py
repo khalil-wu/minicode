@@ -33,7 +33,7 @@ def test_discover_parses_frontmatter_and_body(monkeypatch, tmp_path):
         "You are a senior code reviewer. Find bugs and risky changes. "
         "Return CONCISE findings with file:line.\n",
     )
-    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None: [project_agents])
+    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None, *, config_stack=None: [project_agents])
 
     agents = agents_loader.discover_agents()
     assert "reviewer" in agents
@@ -44,7 +44,7 @@ def test_discover_parses_frontmatter_and_body(monkeypatch, tmp_path):
 
 
 def test_get_custom_agent_returns_none_for_unknown(monkeypatch, tmp_path):
-    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None: [tmp_path / "agents"])
+    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None, *, config_stack=None: [tmp_path / "agents"])
     assert agents_loader.get_custom_agent("does-not-exist") is None
 
 
@@ -54,7 +54,7 @@ def test_project_agent_overrides_user_global(monkeypatch, tmp_path):
     _write_agent(project, "lint.md", "---\nname: lint\ndescription: project version\n---\nproject body\n")
     _write_agent(user, "lint.md", "---\nname: lint\ndescription: user version\n---\nuser body\n")
     # Project dir listed first → wins.
-    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None: [project, user])
+    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None, *, config_stack=None: [project, user])
 
     agents = agents_loader.discover_agents()
     assert agents["lint"].description == "project version"
@@ -63,7 +63,7 @@ def test_project_agent_overrides_user_global(monkeypatch, tmp_path):
 def test_empty_file_is_skipped(monkeypatch, tmp_path):
     d = tmp_path / "agents"
     _write_agent(d, "blank.md", "")
-    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None: [d])
+    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda root=None, *, config_stack=None: [d])
     assert agents_loader.discover_agents() == {}
 
 
@@ -80,7 +80,7 @@ def test_discover_recurses_through_nested_agent_directories(
     monkeypatch.setattr(
         agents_loader,
         "_agent_search_dirs",
-        lambda root=None: [agents_dir],
+        lambda root=None, *, config_stack=None: [agents_dir],
     )
 
     discovered = agents_loader.discover_agents()
@@ -112,7 +112,7 @@ def test_discover_deduplicates_hard_linked_agent_files(
     monkeypatch.setattr(
         agents_loader,
         "_agent_search_dirs",
-        lambda root=None: [first_dir, second_dir],
+        lambda root=None, *, config_stack=None: [first_dir, second_dir],
     )
 
     definitions = agents_loader.discover_agent_definitions()

@@ -222,7 +222,7 @@ def test_agent_frontmatter_requires_string_tool_arrays_and_skips_invalid_files(
         "disallowed_tools: [write_file, false]\n"
         "---\nSkip this agent.\n",
     )
-    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda _root=None: [agents_dir])
+    monkeypatch.setattr(agents_loader, "_agent_search_dirs", lambda _root=None, *, config_stack=None: [agents_dir])
 
     discovered = agents_loader.discover_agents(tmp_path)
 

@@ -304,7 +304,7 @@ async def test_command_obeys_network_owner_before_spawn_and_on_revocation(tmp_pa
 async def test_native_default_gcloud_command_uses_captured_session_directory(tmp_path, monkeypatch):
     token_command(tmp_path)
     if os.name == "nt":
-        (tmp_path / "gcloud.cmd").write_text(f'@"{sys.executable}" "{tmp_path / "token.py"}"\n')
+        (tmp_path / "gcloud.cmd").write_text(f'@"{sys.executable}" "%~dp0token.py"\n')
     else:
         script = tmp_path / "gcloud"
         script.write_text(f'#!{sys.executable}\nexec(open({str(tmp_path / "token.py")!r}).read())\n')

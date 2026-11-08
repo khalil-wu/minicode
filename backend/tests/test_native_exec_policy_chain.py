@@ -90,7 +90,7 @@ def output_command(text):
 
 def test_actual_packaged_engine_identity_and_source_parser():
     native = NativeExecPolicyRuntime()
-    assert "backend" in native.directory.parts and ".tmp" not in native.directory.parts
+    assert native.directory.parent == Path(__file__).resolve().parents[1] / "permissions/resources/execpolicy"
     assert native.identity()["source_commit"] == SOURCE_COMMIT
     result = native.invoke({"operation": "inspect", "sources": [{"path": "actual.rules", "contents":
         'def add(verb):\n    prefix_rule(pattern=["git", verb])\nfor verb in ["status", "diff"]:\n    add(verb)\n'}], "ignore_allow_prefix_rules": False})

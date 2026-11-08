@@ -141,6 +141,7 @@ async def _admit_fake_turn(kwargs) -> None:
         boundary_input=SimpleNamespace(consumed_steer=None),
         history_start=history_start,
         history_end=context.history_length,
+        capture_snapshot=context.export_snapshot,
     )
     await kwargs["metadata"]["report_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
     await kwargs["metadata"]["publish_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
@@ -620,7 +621,7 @@ def test_websocket_control_protocol_forwards_structured_approval_diff(monkeypatc
 
 def test_generate_diff_returns_structured_payload_for_write_file(tmp_path) -> None:
     file_path = tmp_path / "demo.txt"
-    file_path.write_text("before\n", encoding="utf-8")
+    file_path.write_bytes(b"before\n")
 
     diff = _generate_diff(
         "write_file",

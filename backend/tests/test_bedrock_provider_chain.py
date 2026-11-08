@@ -143,8 +143,9 @@ async def test_api_key_and_explicit_header_precedence_use_no_sigv4(monkeypatch):
             (BedrockRequestAuth({"region": "us-east-1"}, explicit_authorization=True), {"authorization": "Bearer explicit-header"}, "Bearer explicit-header")]:
             async with httpx.AsyncClient(auth=auth) as client:
                 await client.post(url + "/responses", headers=headers, json={"model": "explicit", "input": "body"})
-            assert requests[-1][1]["authorization"] == expected
-            assert "X-Amz-Date" not in requests[-1][1]
+            received_headers = httpx.Headers(requests[-1][1])
+            assert received_headers["authorization"] == expected
+            assert "x-amz-date" not in received_headers
 
 
 def test_source_endpoints_catalog_govcloud_and_discovery_do_not_resolve_credentials(tmp_path, monkeypatch):

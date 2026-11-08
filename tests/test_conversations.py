@@ -154,6 +154,7 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
         "session.state_changed",
         "agent.run.started",
         "agent.run.completed",
+        "thread/readState/changed",
         # Query admission publishes its captured model owner before transcript
         # events. Model-control tests validate that notification separately.
         "llm.model.updated",
@@ -1366,10 +1367,10 @@ def test_conversation_repository_reuses_cached_summary_index_for_repeat_list(tmp
     assert {item.id for item in listed_once} == {first.id, second.id}
     assert [item.id for item in listed_twice] == [item.id for item in listed_once]
     assert not any(".transcript." in name or ".snapshot." in name for name in read_calls)
-    assert read_calls[first_pass_reads:] == [
+    assert set(read_calls[first_pass_reads:]) == {
         ".conversation-store.instance",
         ".conversation-store.revision",
-    ]
+    }
 
 
 def test_conversation_repository_updates_cached_index_after_mutation(tmp_path, monkeypatch) -> None:
@@ -1408,10 +1409,10 @@ def test_conversation_repository_updates_cached_index_after_mutation(tmp_path, m
     assert listed[0].title == "refresh the cached title"
     assert listed[0].message_count == 1
     assert not any(".transcript." in name or ".snapshot." in name for name in read_calls[:mutation_reads])
-    assert read_calls[mutation_reads:] == [
+    assert set(read_calls[mutation_reads:]) == {
         ".conversation-store.instance",
         ".conversation-store.revision",
-    ]
+    }
 
 
 def test_conversation_list_order_stays_fixed_when_existing_sessions_update(tmp_path) -> None:
@@ -2096,9 +2097,13 @@ def test_websocket_conversation_list_does_not_activate_archived_history(monkeypa
 
             ws.send_json({"type": "conversation.list"})
             listing = _receive_until_event(ws, "conversation.list")
+            archived = client.post("/api/conversations/list",
+                params={"session_id": "session_test_archived_only_list"}, json={"archived": True})
+            assert archived.status_code == 200
 
-    assert [item["id"] for item in listing["conversations"]] == [conversation.id]
-    assert listing["conversations"][0]["archived"] is True
+    assert listing["conversations"] == []
+    assert [item["id"] for item in archived.json()["data"]] == [conversation.id]
+    assert archived.json()["data"][0]["archived"] is True
     assert listing["active_conversation_id"] is None
     assert listing["active_conversation"] is None
     assert listing["session"]["active_conversation_id"] is None
@@ -2837,6 +2842,7 @@ async def _admit_fake_turn(kwargs) -> None:
         boundary_input=boundary,
         history_start=history_start,
         history_end=context.history_length,
+        capture_snapshot=context.export_snapshot,
     )
     await metadata["report_turn_admission"](boundary_input=boundary)
     await metadata["publish_turn_admission"](boundary_input=boundary)

@@ -335,6 +335,7 @@ def test_unchanged_extension_generation_does_not_reload_history_but_replacement_
     clear_extension_cache()
     _isolate_user_extension_roots(monkeypatch, tmp_path)
     monkeypatch.setattr("backend.ws.agent_runner.is_workspace_trusted", lambda root: True)
+    _write_project_extension(tmp_path, lifecycle_marker=tmp_path / "lifecycle.log")
     host = _Session(tmp_path, [])
     registry = ToolRegistry()
     replacement_registry = ToolRegistry()

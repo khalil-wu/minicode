@@ -21,15 +21,17 @@ async def test_refresh_keeps_retry_ownership_and_user_input_reaches_disk_while_r
     dispatcher = session.command_dispatcher
     session._conversation_lifecycle_lock = asyncio.Lock()
     queue = session.run_manager.durable_client_commands
-    persist = queue.persist_client_command
+    admit = queue.admit_client_command
     persisted = []
     entered, release, input_seen = asyncio.Event(), asyncio.Event(), asyncio.Event()
     owners = []
 
-    def persisted_command(command):
+    def persisted_command(command, **kwargs):
         assert command.type not in READ_ONLY_REFRESH_COMMAND_TYPES
+        receipt = admit(command, **kwargs)
+        assert queue.has_client_command(command.data["client_command_id"])
         persisted.append(command.type)
-        return persist(command)
+        return receipt
 
     async def handle(command):
         if command.type == command_type:
@@ -40,7 +42,7 @@ async def test_refresh_keeps_retry_ownership_and_user_input_reaches_disk_while_r
         else:
             input_seen.set()
 
-    monkeypatch.setattr(queue, "persist_client_command", persisted_command)
+    monkeypatch.setattr(queue, "admit_client_command", persisted_command)
     monkeypatch.setattr(dispatcher, "_handle_command_inner", handle)
     reader = asyncio.create_task(dispatcher.run(session.connection_generation))
     try:

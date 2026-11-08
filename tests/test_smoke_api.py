@@ -28,6 +28,7 @@ def _receive_next_non_task_update(ws, *, max_attempts: int = 20) -> dict[str, ob
         "session.state_changed",
         "agent.run.started",
         "agent.run.completed",
+        "thread/readState/changed",
     }
     for _ in range(max_attempts):
         payload = ws.receive_json()
@@ -82,7 +83,10 @@ async def _admit_fake_turn(kwargs) -> None:
         boundary_input=SimpleNamespace(consumed_steer=None),
         history_start=history_start,
         history_end=context.history_length,
+        capture_snapshot=context.export_snapshot,
     )
+    await kwargs["metadata"]["report_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
+    await kwargs["metadata"]["publish_turn_admission"](boundary_input=SimpleNamespace(consumed_steer=None))
 
 
 def test_health_endpoint_returns_ok() -> None:
