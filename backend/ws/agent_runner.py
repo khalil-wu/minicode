@@ -4390,7 +4390,11 @@ class SessionAgentRunnerMixin:
                 run_context_snapshot = _reset_ui_agent_state_snapshot(
                     conversation.context_snapshot
                 )
-                if run_context_snapshot != conversation.context_snapshot:
+                # An absent projection already displays the empty initial UI.
+                # Only a real UI update needs to materialize durable state.
+                if (UI_AGENT_STATE_SNAPSHOT_KEY in conversation.context_snapshot
+                        and run_context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]
+                        != conversation.context_snapshot[UI_AGENT_STATE_SNAPSHOT_KEY]):
                     await to_thread_cancel_safe(
                         self.conversation_repo.commit_turn_projection,
                         conversation.id,

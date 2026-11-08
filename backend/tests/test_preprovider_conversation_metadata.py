@@ -84,14 +84,17 @@ async def test_dispatch_reads_only_candidate_input_evidence(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("dirty_ui", [False, True])
-async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_and_receipt(tmp_path, monkeypatch, dirty_ui):
+@pytest.mark.parametrize("ui_state", ["missing", "empty", "populated"])
+async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_and_receipt(tmp_path, monkeypatch, ui_state):
     session, conversation, adapter = session_for(tmp_path, monkeypatch)
     repo = session.conversation_repo
     children = [{"id": "retained-child", "role": "explore", "status": "done", "resultContent": "Existing child evidence"}]
     snapshot = {"history": [{"role": "user", "content": "Previous accepted request"}],
         "ui_agent_state": {"plan": None, "todos": [], "subagents": deepcopy(children), "agentProgress": []}}
-    if dirty_ui:
+    if ui_state == "missing":
+        snapshot.pop("ui_agent_state")
+        children = []
+    elif ui_state == "populated":
         snapshot["ui_agent_state"]["todos"] = [{"id": "old", "content": "Completed prior work", "status": "completed"}]
     repo.commit_turn_admission(conversation.id,
         user_message={"id": "previous-user", "role": "user", "content": "Previous accepted request"},
@@ -125,14 +128,20 @@ async def test_real_query_only_skips_unchanged_ui_write_and_keeps_user_journal_a
         await session.event_outbox.drain_persistence()
         assert len(adapter.requests) == 1
         assert context_reads.call_count >= 2
-        assert len(reset_saves) == int(dirty_ui)
+        assert len(reset_saves) == int(ui_state == "populated")
         admission.assert_called_once()
         accepted_snapshot = admission.call_args.kwargs["context_snapshot"]
-        assert accepted_snapshot["ui_agent_state"] == {"plan": None, "todos": [], "subagents": children, "agentProgress": []}
+        if ui_state == "missing":
+            assert "ui_agent_state" not in accepted_snapshot
+        else:
+            assert accepted_snapshot["ui_agent_state"] == {"plan": None, "todos": [], "subagents": children, "agentProgress": []}
         saved = ConversationRepository(repo._base_dir).get_conversation(conversation.id)
         assert [item["id"] for item in saved.transcript] == ["previous-user", "current-owned-user", "current-owned-assistant"]
         assert saved.transcript[0]["content"] == "Previous accepted request"
-        assert saved.context_snapshot["ui_agent_state"]["subagents"] == children
+        if ui_state == "missing":
+            assert "ui_agent_state" not in saved.context_snapshot
+        else:
+            assert saved.context_snapshot["ui_agent_state"]["subagents"] == children
         assert saved.compaction_summary == "Retain the earlier compaction evidence"
         assert "Earlier: Retain the earlier compaction evidence" in saved.summary
         receipt = next(event for event in session.ws.messages if event.get("type") == "command.result"
