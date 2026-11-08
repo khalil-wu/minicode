@@ -367,6 +367,8 @@ def _sanitize_media_items(raw_items: Any, *, document: bool = False) -> list[dic
             item["artifact_id"] = artifact_id
         if document:
             item["file_name"] = str(raw.get("file_name") or "attachment")
+        elif "detail" in raw:
+            item["detail"] = raw["detail"]
         items.append(item)
     return items
 
