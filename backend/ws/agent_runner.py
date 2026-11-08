@@ -1766,8 +1766,10 @@ class SessionAgentRunnerMixin:
             pending_item = pending.get(owner)
             loaded_owner = str(getattr(conversation, "id", "") or "").strip()
             if conversation is None or loaded_owner != owner or must_reload_after_flush:
+                # Reconciliation reads metadata and UI state. The reader has
+                # already hydrated history; do not copy it again for status.
                 conversation = await asyncio.to_thread(
-                    self.conversation_repo.get_conversation,
+                    self.conversation_repo.get_execution_context,
                     owner,
                 )
             if conversation is None:
