@@ -123,6 +123,7 @@ def canonicalize_tool_schemas(
     schemas: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
     *,
     tool_registry: "ToolRegistry | None" = None,
+    tool_specs: dict[str, ToolSpec] | None = None,
 ) -> list[dict[str, Any]]:
     """Return the stable tool wire order used by mature agent runtimes.
 
@@ -161,6 +162,8 @@ def canonicalize_tool_schemas(
     def is_mcp(name: str) -> bool:
         if name.startswith("mcp__"):
             return True
+        if tool_specs is not None:
+            return tool_specs[name].toolset == "mcp"
         if tool_registry is not None:
             return tool_spec_for(name, tool_registry).toolset == "mcp"
         return False

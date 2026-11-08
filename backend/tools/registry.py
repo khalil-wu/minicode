@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from backend.permissions.checker import PermissionChecker
     from backend.permissions.context import PermissionContext
     from backend.tools.toolsets import ToolsetPolicy
+    from backend.tools.contracts import ToolSpec
 
 from backend.permissions.context import ToolExecutionContext
 from backend.atomic_io import await_task_despite_cancellation
@@ -147,7 +148,7 @@ class CapabilityRegistry:
             self.mcp_tool_registry.fork(clone)
         return clone
 
-    def _resolve_toolset_policy(self, toolset_policy: 'ToolsetPolicy | None') -> Any:
+    def _resolve_toolset_policy(self, toolset_policy: 'ToolsetPolicy | None', *, tool_specs: 'dict[str, ToolSpec] | None' = None) -> Any:
         """Return the active policy after checking it against this registry.
 
         The registry owns the universe of tool and toolset names, so it is the
@@ -167,7 +168,7 @@ class CapabilityRegistry:
         cache_key = (policy.cache_key(), self._version)
         if cache_key in self._validated_policies:
             return policy
-        policy.validate_against(self.get_tool_spec(name) for name in self._tools)
+        policy.validate_against(tool_specs.values() if tool_specs is not None else (self.get_tool_spec(name) for name in self._tools))
         self._validated_policies.add(cache_key)
         return policy
 
@@ -280,10 +281,11 @@ class CapabilityRegistry:
         permission_context: 'PermissionContext | None' = None,
         materialize_schema: bool = True,
         permission_decisions: dict[str, Any] | None = None,
+        tool_specs: 'dict[str, ToolSpec] | None' = None,
     ) -> Any:
         from backend.tools.contracts import ToolSchemaView
 
-        spec = active_policy.project_tool_spec(self.get_tool_spec(name))
+        spec = active_policy.project_tool_spec(tool_specs[name] if tool_specs is not None else self.get_tool_spec(name))
         policy_available = active_policy.is_available(spec)
         if tool.requires_execution_environment and not tool.execution_environment_fields and not active_policy.advertise_environment_tools:
             policy_available = False
@@ -321,16 +323,7 @@ class CapabilityRegistry:
         direct = direct and not denied
         schema_available = exposure != "hidden"
         code_mode_available = schema_available and active_policy.is_code_mode_available(spec)
-        description_for_policy = getattr(
-            tool,
-            "model_description_for_policy",
-            None,
-        )
-        model_description = str(
-            description_for_policy(active_policy)
-            if callable(description_for_policy)
-            else tool.model_description() or ""
-        ).strip()
+        model_description = self._model_description_for_tool(tool, active_policy, tool_specs=tool_specs)
         schema = None
         if materialize_schema and direct and schema_available:
             schema_for_policy = getattr(tool, "model_schema_for_policy", None)
@@ -505,18 +498,29 @@ class CapabilityRegistry:
         parts.extend(str(arg) for arg in required_args)
         return " ".join(str(part) for part in parts if str(part).strip())
 
+    def _model_description_for_tool(self, tool, policy, *, tool_specs=None) -> str:
+        from backend.tools.tool_search import ToolSearchTool
+
+        if isinstance(tool, ToolSearchTool):
+            return tool.model_description_for_policy(policy, registry=self, tool_specs=tool_specs)
+        describe = getattr(tool, "model_description_for_policy", None)
+        return str(describe(policy) if callable(describe) else tool.model_description() or "").strip()
+
     def _direct_schema_fingerprint(
         self,
         active_policy: Any,
         *,
+        tool_specs: 'dict[str, ToolSpec]',
         permission_checker: 'PermissionChecker | None' = None,
         permission_context: 'PermissionContext | None' = None,
         permission_decisions: dict[str, Any] | None = None,
     ) -> str:
         """Fingerprint only tools that can affect this turn's direct schema list."""
+        from backend.tools.tool_search import ToolSearchTool
+
         direct_items: list[tuple[Any, ...]] = []
         for name, tool in self._tools.items():
-            spec = self.get_tool_spec(name)
+            spec = tool_specs[name]
             direct = active_policy.is_directly_visible(spec)
             if tool.requires_execution_environment and not tool.execution_environment_fields and not active_policy.advertise_environment_tools:
                 direct = False
@@ -556,6 +560,8 @@ class CapabilityRegistry:
                     getattr(spec, "toolset", ""),
                     getattr(spec, "exposure", ""),
                     bool(getattr(spec, "always_load", False)),
+                    self._model_description_for_tool(tool, active_policy, tool_specs=tool_specs)
+                    if isinstance(tool, ToolSearchTool) else "",
                 )
             )
         direct_items.sort()
@@ -598,16 +604,7 @@ class CapabilityRegistry:
             if callable(schema_for_policy)
             else tool.model_schema() or tool.get_schema()
         )
-        description_for_policy = getattr(
-            tool,
-            "model_description_for_policy",
-            None,
-        )
-        model_description = str(
-            description_for_policy(toolset_policy or ToolsetPolicy.default())
-            if callable(description_for_policy)
-            else tool.model_description() or ""
-        ).strip()
+        model_description = self._model_description_for_tool(tool, toolset_policy or ToolsetPolicy.default())
         if model_description and model_description != str(tool_schema.description or "").strip():
             tool_schema = tool_schema.with_description(model_description)
         tool_schema = (toolset_policy or ToolsetPolicy.default()).project_tool_schema(name, tool_schema)
@@ -621,30 +618,46 @@ class CapabilityRegistry:
         mcp_registry_version: int = 0,
         permission_decisions: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
+        # One synchronous construction owns these current definitions. Reuse
+        # them across outer/nested visibility, fingerprints and wire ordering;
+        # the next call captures live tool metadata again.
+        return self._schemas_from_specs(
+            {name: self.get_tool_spec(name) for name in self._tools},
+            permission_checker=permission_checker, permission_context=permission_context,
+            toolset_policy=toolset_policy, permission_decisions=permission_decisions,
+        )
+
+    def _schemas_from_specs(
+        self,
+        tool_specs: 'dict[str, ToolSpec]',
+        *,
+        permission_checker: 'PermissionChecker | None',
+        permission_context: 'PermissionContext | None',
+        toolset_policy: 'ToolsetPolicy | None',
+        permission_decisions: dict[str, Any] | None,
+        eager_only: bool = False,
+    ) -> list[dict[str, Any]]:
         if permission_decisions is None:
             permission_decisions = {}
-        active_policy = self._resolve_toolset_policy(toolset_policy)
+        active_policy = self._resolve_toolset_policy(toolset_policy, tool_specs=tool_specs)
         # mcp_registry_version is intentionally ignored for the default direct
         # schema payload: deferred/MCP catalog churn must not perturb the model's
         # tools array. Direct visibility changes still affect the fingerprint.
         direct_fingerprint = self._direct_schema_fingerprint(
             active_policy,
+            tool_specs=tool_specs,
             permission_checker=permission_checker,
             permission_context=permission_context,
             permission_decisions=permission_decisions,
         )
         if active_policy.code_mode_only and not active_policy.nested_surface:
             nested_prompt_policy = replace(active_policy, nested_surface=True)
-            if active_policy.strict_third_party:
-                # Deferred third-party schemas are discovered inside exec.
-                # Do not materialize them while building its initial prompt.
-                nested_prompt_policy = nested_prompt_policy.with_disabled_tools(
-                    name for name in self._tools if self.get_tool_spec(name).third_party)
             # exec's description contains the nested directory. Its cache must
             # change when an internal tool is registered, replaced or denied,
             # even though the outer tools array still has the same three names.
             direct_fingerprint += self._direct_schema_fingerprint(
                 nested_prompt_policy,
+                tool_specs=tool_specs,
                 permission_checker=permission_checker,
                 permission_context=permission_context,
                 permission_decisions=permission_decisions,
@@ -660,6 +673,7 @@ class CapabilityRegistry:
                 f"_{overrides_hash}"
                 f"_{active_policy.cache_key()}_{direct_fingerprint}"
             )
+        cache_key += f"_eager_only={eager_only}"
 
         cached = self._schema_cache.get(cache_key)
         if cached is not None:
@@ -679,12 +693,14 @@ class CapabilityRegistry:
         views = [
             self._build_schema_view_for_tool(
                 name, tool, active_policy=active_policy,
+                tool_specs=tool_specs,
                 permission_checker=permission_checker,
                 permission_context=permission_context,
                 permission_decisions=permission_decisions,
             )
             for name, tool in self._tools.items()
-            if active_policy.is_directly_visible(self.get_tool_spec(name))
+            if active_policy.is_directly_visible(tool_specs[name])
+            and not (eager_only and tool_specs[name].third_party)
         ]
         direct_views = sorted(
             (v for v in views if v.direct and v.schema is not None),
@@ -703,11 +719,13 @@ class CapabilityRegistry:
         if active_policy.code_mode_only and not active_policy.nested_surface and "tool_exec" in visible_names:
             from backend.tools.schema import code_mode_parameters
 
-            nested_schemas = self.get_schemas(
+            nested_schemas = self._schemas_from_specs(
+                tool_specs,
                 permission_checker=permission_checker,
                 permission_context=permission_context,
                 toolset_policy=nested_prompt_policy,
                 permission_decisions=permission_decisions,
+                eager_only=active_policy.strict_third_party,
             )
             catalog = []
             for nested in nested_schemas:
@@ -730,7 +748,7 @@ class CapabilityRegistry:
                     if freeform := schema.get("_minicode_freeform"):
                         freeform["description"] += directory
                     break
-        schemas = canonicalize_tool_schemas(schemas, tool_registry=self)
+        schemas = canonicalize_tool_schemas(schemas, tool_specs=tool_specs)
 
         self._schema_cache[cache_key] = schemas
         self._schema_templates[cache_key] = json.dumps(schemas, ensure_ascii=False, separators=(",", ":"))

@@ -148,11 +148,12 @@ class ToolSearchTool(BaseTool):
     def model_description(self) -> str:
         return self._description({})
 
-    def model_description_for_policy(self, policy: Any) -> str:
+    def model_description_for_policy(self, policy: Any, *, registry=None, tool_specs=None) -> str:
         sources: dict[str, str | None] = {}
-        if self._registry is not None:
-            for runtime in self._registry.get_tools():
-                spec = self._registry.get_tool_spec(runtime.name)
+        registry = registry if registry is not None else self._registry
+        if registry is not None:
+            for runtime in registry.get_tools():
+                spec = policy.project_tool_spec(tool_specs[runtime.name] if tool_specs is not None else registry.get_tool_spec(runtime.name))
                 if spec.exposure not in {"deferred", "deferred_model_only"} or not policy.is_available(spec):
                     continue
                 source = getattr(runtime, "server_name", None)

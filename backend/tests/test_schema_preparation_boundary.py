@@ -19,6 +19,7 @@ from backend.permissions.context import PermissionContext
 from backend.services.tool_registry_factory import build_tool_registry
 from backend.tools.base import BaseTool, ToolSchema
 from backend.tools.code_execution import ToolExecTool
+from backend.tools.contracts import ToolSpec
 from backend.tools.registry import ToolRegistry
 from backend.tools.toolsets import ToolsetPolicy
 
@@ -137,6 +138,75 @@ def test_new_preparation_observes_owner_policy_and_replacement_generation(tmp_pa
     replacement = prepare_schemas(registry, checker, permission, policy, previous=denied)
     assert "owned_read({ replacement: string" in description(replacement)
     assert "owned_read({ original: string" in description(first)
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_one_schema_construction_captures_tool_definitions_and_the_next_observes_changes(monkeypatch, strict):
+    class ClientTool(BaseTool):
+        name = "client_echo"
+        description = "Read client data"
+        exposure = "direct_model_only"
+        read_only = True
+        third_party = True
+
+        def get_spec(self):
+            return ToolSpec(self.name, exposure=self.exposure)
+
+        def get_schema(self):
+            return ToolSchema(self.name, self.description, {"type": "object", "properties": {}})
+
+        async def execute(self, args, context=None):
+            raise AssertionError("Schema preparation does not execute tools")
+
+    registry = ToolRegistry()
+    client = ClientTool()
+    registry.register(ToolExecTool())
+    registry.register(client)
+    spec = Mock(wraps=registry.get_tool_spec)
+    monkeypatch.setattr(registry, "get_tool_spec", spec)
+    policy = ToolsetPolicy(code_mode_only=True, strict_third_party=strict,
+        enabled_tools=frozenset({client.name}), supports_search_tool=True)
+    first = registry.get_schemas(toolset_policy=policy)
+    assert (client.name in {item["function"]["name"] for item in first}) is (not strict)
+    assert Counter(call.args[0] for call in spec.call_args_list) == {"tool_exec": 1, client.name: 1}
+    client.exposure = "hidden"
+    spec.reset_mock()
+    hidden = registry.get_schemas(toolset_policy=policy)
+    assert client.name not in str(hidden)
+    assert Counter(call.args[0] for call in spec.call_args_list) == {"tool_exec": 1, client.name: 1}
+    client.exposure = "core"
+    restored = registry.get_schemas(toolset_policy=replace(policy, nested_surface=True))
+    assert {item["function"]["name"] for item in restored} == {client.name}
+
+
+def test_search_description_uses_the_receiving_registry_and_invalidates_only_when_sources_change(monkeypatch):
+    from backend.mcp.client import MCPToolDef
+    from backend.mcp.registry import MCPToolProxy
+    from backend.tools.tool_search import ToolSearchTool
+
+    root = ToolRegistry()
+    root.register(ToolExecTool())
+    root.register(ToolSearchTool(root))
+    receiving = root.fork()
+    receiving.register(MCPToolProxy("first", MCPToolDef("echo", "First echo"), None))
+    spec = Mock(wraps=receiving.get_tool_spec)
+    monkeypatch.setattr(receiving, "get_tool_spec", spec)
+    policy = ToolsetPolicy(code_mode_only=True, strict_third_party=True, supports_search_tool=True)
+
+    def prompt():
+        schemas = receiving.get_schemas(toolset_policy=policy)
+        return next(item["function"]["description"] for item in schemas if item["function"]["name"] == "tool_exec")
+
+    first = prompt()
+    assert "- first\n" in first and "First echo" not in first
+    assert set(Counter(call.args[0] for call in spec.call_args_list).values()) == {1}
+    receiving.register(MCPToolProxy("second", MCPToolDef("echo", "Second echo"), None))
+    second = prompt()
+    assert "- first\n" in second and "- second\n" in second
+    receiving.unregister("mcp__first__echo")
+    third = prompt()
+    assert "- first\n" not in third and "- second\n" in third
+    assert "- second\n" not in root.get_schemas(toolset_policy=policy)[0]["function"]["description"]
 
 
 @pytest.mark.asyncio
