@@ -5,24 +5,45 @@ import asyncio
 import json
 import time
 from pathlib import Path
+from functools import cache
 
-from py_mini_racer import MiniRacer
+from backend.async_cleanup import to_thread_cancel_safe
 
-_BOOTSTRAP = Path(__file__).with_suffix(".js").read_text(encoding="utf-8")
+
+@cache
+def _bootstrap() -> str:
+    return Path(__file__).with_suffix(".js").read_text(encoding="utf-8")
+
+
+@cache
+def _runtime():
+    from py_mini_racer import MiniRacer, init_mini_racer
+
+    init_mini_racer(ignore_duplicate_init=True)
+    _bootstrap()
+    return MiniRacer
 
 
 class CodeVM:
     def __init__(self):
-        self.context = MiniRacer()
-        self.context.set_hard_memory_limit(128 * 1024 * 1024)
+        self.context = None
         self.control = None
         self.execution_seconds = 0.0
+        self._closed = False
 
     async def step(self, operation: str = "", payload=None) -> dict:
+        if self._closed:
+            raise RuntimeError("Code cell has closed")
+        if self.context is None:
+            runtime = await to_thread_cancel_safe(_runtime)
+            # MiniRacer captures this loop for its native callbacks. Only the
+            # library/file loading crosses the worker boundary.
+            self.context = runtime()
+            self.context.set_hard_memory_limit(128 * 1024 * 1024)
         started = time.monotonic()
         async with asyncio.timeout(max(.001, 10 - self.execution_seconds)):
             if self.control is None:
-                self.control = (await self.context.eval_cancelable(_BOOTSTRAP)).cancelable()
+                self.control = (await self.context.eval_cancelable(_bootstrap())).cancelable()
             if operation:
                 await self.control(operation, json.dumps(payload, ensure_ascii=False))
             packet = json.loads(await self.control("drain", ""))
@@ -33,5 +54,8 @@ class CodeVM:
         return packet
 
     def close(self):
+        self._closed = True
         self.control = None
-        self.context.close()
+        if self.context is not None:
+            self.context.close()
+            self.context = None
