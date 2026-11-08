@@ -231,7 +231,7 @@ class TurnIterationRuntime:
         run_context.shell_version = await shell_version_for_environment(run_context.turn_environments,
             enabled=snapshot is not None and snapshot.config.feature_flags.enabled("powershell_shell_version"))
         if run_context.plugin_capabilities_changed:
-            run_context.plugin_install_candidates = None
+            run_context.plugin_install_tools = None
             run_context.plugin_capabilities_changed = False
         mcp_version, mcp_instructions = self.mcp_catalog(self.base_tool_registry)
         self.tool_registry = self.base_tool_registry.fork()

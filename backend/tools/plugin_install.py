@@ -1,8 +1,9 @@
 """Plugin requests use the existing owned elicitation and actual installer."""
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 import json
+from pathlib import Path
 
 from backend.async_cleanup import to_thread_cancel_safe
 from backend.plugins.install_suggestions import disable_install_suggestion, installed_plugin
@@ -91,7 +92,6 @@ class RequestPluginInstallTool(BaseTool):
             await to_thread_cancel_safe(disable_install_suggestion, candidate.id)
             from backend.config import load_config_layer_stack
             context.run_context.plugin_capability_config = await to_thread_cancel_safe(load_config_layer_stack, cwd=context.workspace_root)
-            context.run_context.plugin_install_candidates = None
             context.run_context.plugin_install_tools = None
         if confirmed:
             stack, completed = await to_thread_cancel_safe(installed_plugin, candidate, context.workspace_root)
@@ -102,24 +102,38 @@ class RequestPluginInstallTool(BaseTool):
             "action_type": "install", "tool_id": candidate.id, "tool_name": candidate.name, "suggest_reason": reason}, ensure_ascii=False))
 
 
-async def bind_plugin_install_tools(registry, context):
+@dataclass(frozen=True)
+class PluginInstallTools:
+    config_fingerprint: str
+    workspace_root: Path | None
+    tools: tuple[BaseTool, ...]
+
+
+async def prepare_plugin_install_tools(owner, snapshot, workspace_root, *, approval_handler):
     from backend.plugins.install_suggestions import discover_install_candidates
 
-    snapshot = context.model_execution
-    if context.approval_handler is None:
-        return
-    if snapshot is None or not all(snapshot.config.feature_flags.enabled(name, True) for name in ("apps", "plugins", "tool_suggest")):
-        return
-    if context.run_context.is_subagent:
-        return
-    stack = context.run_context.plugin_capability_config or snapshot.config.config_layer_stack
+    if (approval_handler is None or owner.is_subagent or snapshot is None
+            or not all(snapshot.config.feature_flags.enabled(name, True) for name in ("apps", "plugins", "tool_suggest"))):
+        owner.plugin_install_tools = None
+        return ()
+    stack = owner.plugin_capability_config or snapshot.config.config_layer_stack
     if stack is None:
-        return
-    owner = context.run_context
-    if owner.plugin_install_candidates is None:
-        owner.plugin_install_candidates = await asyncio.to_thread(discover_install_candidates, stack, context.workspace_root)
-        owner.plugin_install_tools = (ListAvailablePluginsToInstallTool(owner.plugin_install_candidates),
-            RequestPluginInstallTool(owner.plugin_install_candidates))
-    if owner.plugin_install_candidates:
-        for tool in owner.plugin_install_tools:
-            registry.register(tool, owner="plugin-install-suggestions")
+        owner.plugin_install_tools = None
+        return ()
+    fingerprint = stack.fingerprint
+    prepared = owner.plugin_install_tools
+    if prepared is None or (prepared.config_fingerprint, prepared.workspace_root) != (fingerprint, workspace_root):
+        # Join the read before cancellation returns; never publish a completed
+        # catalog into a later turn after its preparation was abandoned.
+        candidates = await to_thread_cancel_safe(discover_install_candidates, stack, workspace_root)
+        tools = (ListAvailablePluginsToInstallTool(candidates), RequestPluginInstallTool(candidates)) if candidates else ()
+        prepared = PluginInstallTools(fingerprint, workspace_root, tools)
+        owner.plugin_install_tools = prepared
+    return prepared.tools
+
+
+async def bind_plugin_install_tools(registry, context):
+    tools = await prepare_plugin_install_tools(context.run_context, context.model_execution, context.workspace_root,
+        approval_handler=context.approval_handler)
+    for tool in tools:
+        registry.register(tool, owner="plugin-install-suggestions")

@@ -66,7 +66,6 @@ class RunContext:
     environment_prepared_turn_id: str = ""
     plugin_capability_config: Any | None = None
     plugin_capabilities_changed: bool = False
-    plugin_install_candidates: Any | None = None
     plugin_install_tools: Any | None = None
     environment_retirement_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
     cua_repl_turn: Any | None = None

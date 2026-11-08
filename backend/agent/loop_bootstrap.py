@@ -435,13 +435,28 @@ async def bootstrap_agent_loop(
             if run_context.environment_host_skill_manager is None:
                 run_context.environment_host_skill_manager = skill_manager
             run_context.environment_host_captured = True
-        prepared_capabilities = await refresh_run_environment_capabilities(run_context,
-            agent_session=agent_session, permission_context=effective_permission_context,
-            config_stack=turn_config_stack, feature_flags=model_snapshot.config.feature_flags,
-            registry=request.tool_registry, artifact_store=request.artifact_store,
-            workspace_root=workspace_root, conversation_id=conversation_id,
-            turn_id=str(turn_kernel.metadata["turn_id"]),
-            mcp_optional_startup_grace_ms=model_snapshot.config.mcp_optional_startup_grace_ms)
+        from backend.tools.plugin_install import prepare_plugin_install_tools
+
+        # Source step preparation joins MCP and plugin recommendations. Both
+        # use this receiving turn's configuration before schemas are exposed.
+        try:
+            async with asyncio.TaskGroup() as preparation:
+                capabilities_task = preparation.create_task(refresh_run_environment_capabilities(run_context,
+                    agent_session=agent_session, permission_context=effective_permission_context,
+                    config_stack=turn_config_stack, feature_flags=model_snapshot.config.feature_flags,
+                    registry=request.tool_registry, artifact_store=request.artifact_store,
+                    workspace_root=workspace_root, conversation_id=conversation_id,
+                    turn_id=str(turn_kernel.metadata["turn_id"]),
+                    mcp_optional_startup_grace_ms=model_snapshot.config.mcp_optional_startup_grace_ms))
+                preparation.create_task(prepare_plugin_install_tools(run_context, model_snapshot, workspace_root,
+                    approval_handler=request.approval_handler))
+        except ExceptionGroup as failure:
+            # Preserve the original typed startup error at the query boundary.
+            # TaskGroup has already joined the cancelled sibling preparation.
+            if len(failure.exceptions) == 1:
+                raise failure.exceptions[0] from failure
+            raise
+        prepared_capabilities = capabilities_task.result()
         skill_manager = prepared_capabilities.skill_manager
         context.bind_skill_manager(skill_manager, workspace_root, config_stack=turn_config_stack)
         trace.mark("bootstrap.capabilities.done")

@@ -920,7 +920,6 @@ class QueryEngine:
         run_context.context_builder = ctx
         run_context.plugin_capability_config = None
         run_context.plugin_capabilities_changed = False
-        run_context.plugin_install_candidates = None
         run_context.plugin_install_tools = None
         if session.guardian_host is None:
             session.guardian_host = GuardianHostState(str(metadata.get("conversation_id") or session_id), root_source=run_context.guardian_evidence_source)

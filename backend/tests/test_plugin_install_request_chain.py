@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -17,7 +18,7 @@ from backend.feature_flags import FeatureFlags
 from backend.permissions.context import PermissionContext, ToolExecutionContext
 from backend.plugins.install_suggestions import discover_install_candidates, installed_plugin
 from backend.plugins.manager import PluginManager
-from backend.tools.plugin_install import ListAvailablePluginsToInstallTool, RequestPluginInstallTool, bind_plugin_install_tools
+from backend.tools.plugin_install import ListAvailablePluginsToInstallTool, RequestPluginInstallTool, bind_plugin_install_tools, prepare_plugin_install_tools
 from backend.tools.registry import ToolRegistry
 from backend.tests.test_plugin_catalog_scope_chain import catalog_home, write_marketplace
 
@@ -171,6 +172,132 @@ async def test_only_root_steps_with_all_source_gates_capture_the_catalog(install
         next_registry = ToolRegistry()
         await bind_plugin_install_tools(next_registry, context)
         assert registry.get_tool("request_plugin_install") is next_registry.get_tool("request_plugin_install")
+
+
+@pytest.mark.asyncio
+async def test_prepared_install_tools_follow_the_receiving_config_and_workspace(install_scope, monkeypatch):
+    from backend.config_layers import ConfigLayer, ConfigLayerSource, ConfigLayerStack
+
+    env = install_scope
+    context, _ = tool_context(env)
+    context.model_execution = SimpleNamespace(config=SimpleNamespace(config_layer_stack=env.stack, feature_flags=FeatureFlags()))
+    observed = []
+    discover = discover_install_candidates
+
+    def captured(stack, workspace):
+        observed.append((stack.fingerprint, workspace))
+        return discover(stack, workspace)
+
+    monkeypatch.setattr("backend.plugins.install_suggestions.discover_install_candidates", captured)
+    first = await prepare_plugin_install_tools(context.run_context, context.model_execution, context.workspace_root,
+        approval_handler=context.approval_handler)
+    registry = ToolRegistry()
+    await bind_plugin_install_tools(registry, context)
+    assert registry.get_tool("request_plugin_install") is first[1]
+    assert len(observed) == 1
+    updated = ConfigLayerStack((*env.stack.layers, ConfigLayer(ConfigLayerSource("session_flags"),
+        {"tool_suggest": {"disabled_tools": [{"type": "plugin", "id": env.candidate.id}]}})))
+    context.model_execution = SimpleNamespace(config=SimpleNamespace(config_layer_stack=updated, feature_flags=FeatureFlags()))
+    next_registry = ToolRegistry()
+    await bind_plugin_install_tools(next_registry, context)
+    tool = next_registry.get_tool("request_plugin_install")
+    assert tool is None or env.candidate.id not in {candidate.id for candidate in tool.candidates}
+    assert len(observed) == 2
+    context.workspace_root = env.root
+    await bind_plugin_install_tools(ToolRegistry(), context)
+    assert observed[-1][1] == env.root and len(observed) == 3
+    context.model_execution.config.feature_flags = FeatureFlags({"tool_suggest": False})
+    gated = ToolRegistry()
+    await bind_plugin_install_tools(gated, context)
+    assert gated.list_tools() == [] and context.run_context.plugin_install_tools is None
+    assert len(observed) == 3
+
+
+@pytest.mark.asyncio
+async def test_cancelled_discovery_joins_its_worker_without_publishing_late_tools(install_scope, monkeypatch):
+    env = install_scope
+    context, _ = tool_context(env)
+    snapshot = SimpleNamespace(config=SimpleNamespace(config_layer_stack=env.stack, feature_flags=FeatureFlags()))
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def held(*_args):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        return (env.candidate,)
+
+    monkeypatch.setattr("backend.plugins.install_suggestions.discover_install_candidates", held)
+    task = asyncio.create_task(prepare_plugin_install_tools(context.run_context, snapshot, env.workspace,
+        approval_handler=context.approval_handler))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done() and context.run_context.plugin_install_tools is None
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert context.run_context.plugin_install_tools is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, "discovery", "environment"])
+async def test_real_query_prepares_install_discovery_alongside_receiving_environment(install_scope, monkeypatch, caplog, failure):
+    from backend.sdk import create_session
+    from backend.agent import environment_runtime
+    from backend.tests.test_user_input_presentation_chain import Answer
+
+    env = install_scope
+    cfg = config.load_config(cwd=env.workspace)
+    env_started, discovered = threading.Event(), asyncio.Event()
+    loop = asyncio.get_running_loop()
+    prepare = environment_runtime.refresh_run_environment_capabilities
+    observations = []
+
+    async def receiving_environment(*args, **kwargs):
+        env_started.set()
+        await asyncio.wait_for(discovered.wait(), 3)
+        if failure == "environment":
+            raise ValueError("Actual environment preparation failed")
+        return await prepare(*args, **kwargs)
+
+    def discover(stack, workspace):
+        assert env_started.wait(3)
+        observations.append((stack.fingerprint, workspace))
+        loop.call_soon_threadsafe(discovered.set)
+        if failure == "discovery":
+            raise ValueError("Actual plugin discovery failed")
+        return discover_install_candidates(stack, workspace)
+
+    monkeypatch.setattr(environment_runtime, "refresh_run_environment_capabilities", receiving_environment)
+    monkeypatch.setattr("backend.plugins.install_suggestions.discover_install_candidates", discover)
+
+    class Model(Answer):
+        async def stream_chat(self, messages, tools=None, metadata=None):
+            assert failure is None
+            assert "request_plugin_install" in {item["function"]["name"] for item in tools}
+            assert len(observations) == 1
+            async for event in super().stream_chat(messages, tools, metadata):
+                yield event
+
+    model = Model()
+    session = create_session(session_id="parallel-plugin-preparation", workspace_root=env.workspace, config=cfg,
+        llm=model, tool_registry=ToolRegistry(), permission_context=PermissionContext(mode="bypass"),
+        approval_handler=AsyncMock(return_value={"action": "decline"}))
+    try:
+        events = [event async for event in session.query("Continue the actual local task")]
+        errors = [event.data for event in events if event.type == "error"]
+        assert any(event.type == "done" and event.data.get("status") == ("failed" if failure else "completed")
+            for event in events), errors
+        if failure:
+            expected = "Actual plugin discovery failed" if failure == "discovery" else "Actual environment preparation failed"
+            assert errors[0]["error_type"] == "runtime" and not model.requests
+            assert any(record.exc_info and isinstance(record.exc_info[1], ValueError)
+                and str(record.exc_info[1]) == expected for record in caplog.records)
+        assert len(observations) == 1 and observations[0][1] == env.workspace
+    finally:
+        await session.aclose()
 
 
 @pytest.mark.asyncio
