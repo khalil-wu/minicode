@@ -930,6 +930,7 @@ class SandboxRunner:
         preserve_full_output: bool = False,
         argv: list[str] | None = None,
         tty: bool = False,
+        elicitations=None,
     ) -> SandboxResult:
         try:
             wrapped_command, capability = self.prepare_command(
@@ -1159,7 +1160,12 @@ class SandboxRunner:
                 # command. Drain before waiting for the namespace handshake:
                 # an early launcher exit otherwise loses its stderr entirely.
                 await self._await_sandbox_ready(proc)
-                if self._policy.timeout is not None and self._policy.timeout > 0:
+                if elicitations is not None:
+                    done, _ = await elicitations.wait_any({completion_task}, self._policy.timeout or None)
+                    if not done:
+                        raise TimeoutError
+                    _, stdout_total, stderr_total, _ = completion_task.result()
+                elif self._policy.timeout is not None and self._policy.timeout > 0:
                     _, stdout_total, stderr_total, _ = await asyncio.wait_for(
                         asyncio.shield(completion_task),
                         timeout=self._policy.timeout,

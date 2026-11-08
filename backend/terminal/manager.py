@@ -114,6 +114,7 @@ class BackgroundCommand:
     executor_session_id: str = ""
     network_audit: list[dict] = field(default_factory=list, repr=False)
     startup_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    elicitations: Any = field(default=None, repr=False)
 
     def append_live_output(self, piece: str) -> None:
         """Persist one streamed chunk and keep only a bounded in-memory tail."""
@@ -262,6 +263,7 @@ class BackgroundCommandManager:
         terminal_authority: TerminalLaunchAuthority | None = None,
         original_tool_call_id: str = "",
         original_tool_args: dict[str, Any] | None = None,
+        elicitations=None,
     ) -> BackgroundCommand:
         """在后台执行命令，立即返回 BackgroundCommand。"""
         owner = str(conversation_id or "").strip()
@@ -337,6 +339,7 @@ class BackgroundCommandManager:
             terminal_authority=terminal_authority,
             original_tool_call_id=original_tool_call_id,
             original_tool_args=deepcopy(original_tool_args or {"command": display_command}),
+            elicitations=elicitations,
             sandbox_policy=sandbox_policy,
             environment_id=sandbox_policy.scope.environment_id if isinstance(sandbox_policy, EnvironmentCommandPolicy) else "local",
             executor_remote=isinstance(sandbox_policy, EnvironmentCommandPolicy) and sandbox_policy.attachment.is_remote,
@@ -580,6 +583,7 @@ class BackgroundCommandManager:
                     host_command=host_command,
                     argv=bg_cmd.argv or None,
                     tty=bg_cmd.tty,
+                    elicitations=bg_cmd.elicitations,
                     process_started_callback=_process_started,
                     process_ready_callback=_process_ready,
                     keep_stdin_open=True,
@@ -878,6 +882,7 @@ class BackgroundCommandManager:
     async def wait(
         self, command_id: str, *, conversation_id: str, wait_ms: int,
         cursor: int | None = None, cancel_event: asyncio.Event | None = None,
+        elicitations=None,
     ) -> BackgroundCommand:
         """Wait on owned output/completion without cancelling the process on timeout."""
         command = self.get_status(command_id, conversation_id=conversation_id)
@@ -887,25 +892,33 @@ class BackgroundCommandManager:
         async with lock:
             if self.get_status(command_id, conversation_id=conversation_id) is not command:
                 raise StdinAuthorityError("the terminal instance changed while this interaction was pending; submit it again")
-            return await self._wait_for_output(command, wait_ms=wait_ms, cursor=cursor, cancel_event=cancel_event)
+            return await self._wait_for_output(command, wait_ms=wait_ms, cursor=cursor,
+                cancel_event=cancel_event, elicitations=elicitations)
 
     async def _wait_for_output(self, command: BackgroundCommand, *, wait_ms: int,
-                               cursor: int | None, cancel_event: asyncio.Event | None) -> BackgroundCommand:
-        deadline = asyncio.get_running_loop().time() + wait_ms / 1000
-        while command.status == "running":
+                               cursor: int | None, cancel_event: asyncio.Event | None,
+                               elicitations=None) -> BackgroundCommand:
+        clock = elicitations.active_time if elicitations is not None else asyncio.get_running_loop().time
+        deadline = clock() + wait_ms / 1000
+        while True:
+            if elicitations is not None:
+                await elicitations.wait_until_clear(cancel_event)
+            if command.status != "running":
+                break
             command.output_changed.clear()
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError
             if cursor is not None and command.output_bytes > cursor:
                 break
-            remaining = deadline - asyncio.get_running_loop().time()
+            remaining = deadline - clock()
             if remaining <= 0:
                 break
             changed = asyncio.create_task(command.output_changed.wait())
             cancelled = asyncio.create_task(cancel_event.wait()) if cancel_event is not None else None
             waiters = {changed, *([cancelled] if cancelled is not None else [])}
             try:
-                done, _ = await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED)
+                done, _ = (await elicitations.wait_any(waiters, remaining) if elicitations is not None else
+                    await asyncio.wait(waiters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED))
                 if cancelled is not None and cancelled in done:
                     raise asyncio.CancelledError
                 if not done:
@@ -1081,7 +1094,8 @@ class BackgroundCommandManager:
                     f"Background command {command_id} closed stdin before the write completed."
                 ) from exc
             await self._wait_for_output(command, wait_ms=wait_ms, cursor=cursor,
-                                        cancel_event=context.cancel_event if context is not None else None)
+                cancel_event=context.cancel_event if context is not None else None,
+                elicitations=context.run_context.elicitations if context is not None and context.run_context is not None else None)
         return len(payload)
 
     def _verify_interaction_instance(self, command_id, command, process, conversation_id, *, interrupt=False):

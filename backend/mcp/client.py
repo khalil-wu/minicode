@@ -18,7 +18,7 @@ import sys
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
@@ -1386,7 +1386,9 @@ class MCPClient:
             _mcp_request_id=str(context.request_id),
         )
         try:
-            result = await self._elicitation_handler(payload)
+            elicitations = owner.get("elicitation_service")
+            with elicitations.register() if elicitations is not None else nullcontext():
+                result = await self._elicitation_handler(payload)
             action = str(result.get("action") or "cancel")
             if action == "submit":
                 result = {"action": "accept", "content": result.get("response") or {}}

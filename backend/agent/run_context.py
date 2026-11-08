@@ -174,6 +174,10 @@ class RunContext:
     user_stop_acceptance: asyncio.Future[None] | None = None
     exec_policy_owner: Any | None = None
 
+    @property
+    def elicitations(self):
+        return self.code_store.elicitations if self.code_store is not None else None
+
     def capture_user_shell(self) -> dict[str, str]:
         if self.user_shell is None:
             self.user_shell = default_user_shell()

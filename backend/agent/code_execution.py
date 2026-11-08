@@ -132,6 +132,7 @@ class CodeExecutionRuntime:
                         for record in self.state.tool_calls if record.call_source.get("cell_id") == cell_id]
             report = {"cell_id": cell_id, "status": "unavailable", "completed_tools": previous,
                 "error": "The live JavaScript cell is unavailable after this runtime ended or restarted. Do not blindly rerun writes; inspect recorded outcomes and current workspace state."}
+            await self.store.elicitations.wait_until_clear(self.tool_context.cancel_event)
             return ToolResult(json.dumps(report, ensure_ascii=False), is_error=True, status="failed", error_kind="code_cell_unavailable",
                               runtime_metadata={"code_cell": report})
         if terminate and cell.status == "running":
@@ -146,6 +147,7 @@ class CodeExecutionRuntime:
             finally:
                 waiter.cancel()
                 await asyncio.gather(waiter, return_exceptions=True)
+        await self.store.elicitations.wait_until_clear(self.tool_context.cancel_event)
         if live_cell is not None:
             live_cell.changed.clear()
         # Completed receipts share these buffers with the originating cell;

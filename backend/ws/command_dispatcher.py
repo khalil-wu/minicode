@@ -44,6 +44,8 @@ READ_ONLY_REFRESH_COMMAND_TYPES = frozenset({
     "thread/memory/read", "memory/status",
 })
 
+LIVE_ELICITATION_COMMAND_TYPES = frozenset({"thread/increment_elicitation", "thread/decrement_elicitation"})
+
 
 def _admitted_input_origin(admission: dict[str, Any], projection: dict[str, Any] | None, runtime: Any) -> str:
     origin = str(admission.get("client_queue_key") or "")
@@ -86,6 +88,7 @@ COMMAND_BACKLOG_BYPASS_TYPES = {
     "interrupt",
     "mcp.inventory.cancel",
     "thread/realtime/appendAudio", "thread/realtime/stop",
+    *LIVE_ELICITATION_COMMAND_TYPES,
 }
 
 _FORWARDED_CONVERSATION_COMMAND_TYPES = frozenset({
@@ -514,6 +517,11 @@ class SessionCommandDispatcher:
                 # A cold replay must never restart a microphone or replay audio.
                 self._schedule_transient_client_command(command, connection_generation)
                 continue
+            if command.type in LIVE_ELICITATION_COMMAND_TYPES:
+                # These counters belong to the loaded process. Replaying an
+                # old increment after restart would pause an unrelated turn.
+                self._schedule_transient_client_command(command, connection_generation)
+                continue
 
             if command.type == "user_message":
                 for field in ("_client_queue_key", "_legacy_user_message_identity", "_queue_entry_id", "_queued_user_message_dispatch", "_submitted_content", "_guardian_acceptance_order",
@@ -684,7 +692,7 @@ class SessionCommandDispatcher:
             return
         async def _guarded_handle() -> None:
             handled = await self._dispatch_client_command(command, connection_generation)
-            if command.type in READ_ONLY_REFRESH_COMMAND_TYPES and handled:
+            if command.type in READ_ONLY_REFRESH_COMMAND_TYPES | LIVE_ELICITATION_COMMAND_TYPES and handled:
                 # Keep the browser's retry ownership until the read's result
                 # was produced; a pending read is never durably acknowledged.
                 with self._session.event_outbox.bind_connection_generation(connection_generation):

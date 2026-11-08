@@ -176,9 +176,11 @@ class MonitorTool(BaseTool):
                 conversation_id=conversation_id,
             )
         if command_id:
-            if wait_ms:
+            elicitations = context.run_context.elicitations if context.run_context is not None else None
+            if wait_ms or elicitations is not None and elicitations.paused:
                 try:
-                    await manager.wait(command_id, conversation_id=conversation_id, wait_ms=wait_ms, cursor=cursor, cancel_event=getattr(context, "cancel_event", None))
+                    await manager.wait(command_id, conversation_id=conversation_id, wait_ms=wait_ms, cursor=cursor,
+                        cancel_event=getattr(context, "cancel_event", None), elicitations=elicitations)
                 except KeyError:
                     return self._error_result(f"Background command '{command_id}' was not found.")
             return self._command_snapshot(manager, command_id, args, conversation_id=conversation_id)

@@ -54,6 +54,11 @@ class ApproveGuardianDeniedActionCommand(TypedDict):
     event: dict[str, Any]
 
 
+class ThreadElicitationCommand(TypedDict):
+    type: Literal["thread/increment_elicitation", "thread/decrement_elicitation"]
+    threadId: str
+
+
 ServerEventType = Literal[
     "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
     "thread/realtime/item/transcript/delta", "thread/realtime/item/completed", "thread/realtime/transcript/delta",
@@ -260,6 +265,7 @@ ClientCommandType = Literal[
     "sidebar.recent.reorder",
     "conversation.read_state.set",
     "thread/readState/update",
+    "thread/increment_elicitation", "thread/decrement_elicitation",
     "conversation.project.set",
     "conversation.memory_mode.set",
     "memory.reset",

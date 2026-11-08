@@ -346,6 +346,8 @@ import type { CommonClientCommandType } from "./common-types";
 import type { CodeReviewCommand } from "./code-review-types";
 
 export type ClientCommandType =
+  | "thread/increment_elicitation"
+  | "thread/decrement_elicitation"
   | RealtimeCommand["type"]
   | ApproveGuardianDeniedActionCommand["type"]
   | CodeReviewCommand["type"]
@@ -575,6 +577,8 @@ export interface UntypedClientCommand {
     | "sidebar.recent.reorder"
     | "conversation.read_state.set"
     | "thread/readState/update"
+    | "thread/increment_elicitation"
+    | "thread/decrement_elicitation"
     | "conversation.project.set"
     | "conversation.memory_mode.set"
     | "memory.reset"
@@ -999,6 +1003,7 @@ export interface ClientCommandEnvelope {
 }
 
 type ClientCommandPayload =
+  | { type: "thread/increment_elicitation" | "thread/decrement_elicitation"; threadId: string }
   | ApproveGuardianDeniedActionCommand
   | CodeReviewCommand
   | UserMessageCommand
@@ -1297,6 +1302,7 @@ export const CLIENT_COMMAND_TYPES: ReadonlySet<ClientCommandType> = new Set<Clie
   "sidebar.recent.reorder",
   "conversation.read_state.set",
   "thread/readState/update",
+  "thread/increment_elicitation", "thread/decrement_elicitation",
   "conversation.project.set",
   "conversation.memory_mode.set",
   "memory.reset",

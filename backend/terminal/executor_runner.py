@@ -174,7 +174,7 @@ class ExecutorCommandRunner:
     async def run(self, command, *, cwd, argv, tty=False, keep_stdin_open=False,
             cancel_event=None, stream_callback=None, process_started_callback=None,
             process_ready_callback=None, executor_started_callback=None,
-            preserve_full_output=False, host_command=None, process_id=None):
+            preserve_full_output=False, host_command=None, process_id=None, elicitations=None):
         decoders = {name: codecs.getincrementaldecoder("utf-8")(errors="replace") for name in ("stdout", "stderr")}
         output = {"stdout": "", "stderr": ""}
         totals = {"stdout": 0, "stderr": 0}
@@ -313,8 +313,8 @@ class ExecutorCommandRunner:
             if cancel_event is not None:
                 cancel_waiter = asyncio.create_task(cancel_event.wait())
             waiting = {self.pump, *({cancel_waiter} if cancel_waiter is not None else set())}
-            done, _ = await asyncio.wait(waiting, timeout=self.policy.timeout or None,
-                return_when=asyncio.FIRST_COMPLETED)
+            done, _ = (await elicitations.wait_any(waiting, self.policy.timeout or None) if elicitations is not None else
+                await asyncio.wait(waiting, timeout=self.policy.timeout or None, return_when=asyncio.FIRST_COMPLETED))
             if self.pump not in done:
                 cancelled = cancel_waiter is not None and cancel_waiter in done
                 timed_out = not cancelled

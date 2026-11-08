@@ -728,6 +728,13 @@ class QueryEngine:
         submission: QuerySubmission,
     ) -> AsyncGenerator[AgentEvent, None]:
         session = turn_ctx.session
+        approval_handler = session.approval_handler
+        if approval_handler is not None:
+            original_approval = approval_handler
+            async def observed_approval(*args, **kwargs):
+                with session.code_store.elicitations.register():
+                    return await original_approval(*args, **kwargs)
+            approval_handler = observed_approval
         runner = self._resolve_runner()(
             user_message=turn_ctx.user_message,
             llm=session.llm,
@@ -738,7 +745,7 @@ class QueryEngine:
             token_budget=session.token_budget,
             context_builder=turn_ctx.context_builder,
             state=turn_ctx.state,
-            approval_handler=session.approval_handler,
+            approval_handler=approval_handler,
             skill_manager=turn_ctx.skill_manager,
             permission_context=turn_ctx.permission_context,
             session_id=turn_ctx.session_id,

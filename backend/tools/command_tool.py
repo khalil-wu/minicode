@@ -617,6 +617,7 @@ class RunCommandTool(BaseTool):
                     ),
                     original_tool_call_id=context.tool_call_id,
                     original_tool_args=deepcopy(original_tool_args or {}),
+                    elicitations=context.run_context.elicitations if context.run_context is not None else None,
                 )
             conversation_id = context.command_scope_id if context is not None else ""
             if conversation_id:
@@ -650,6 +651,7 @@ class RunCommandTool(BaseTool):
                 # have the same cleanup interrupted by the registry.
                 await background_manager.wait(
                     bg_cmd.command_id, conversation_id=conversation_id, wait_ms=wait_ms,
+                    elicitations=context.run_context.elicitations if context.run_context is not None else None,
                 )
                 await background_manager.detach(bg_cmd.command_id, conversation_id=conversation_id)
             except asyncio.CancelledError:
@@ -789,6 +791,7 @@ class RunCommandTool(BaseTool):
                 argv=argv,
                 tty=tty,
                 preserve_full_output=True,
+                elicitations=context.run_context.elicitations if context is not None and context.run_context is not None else None,
             )
         except Exception as exc:
             if getattr(exc, "cleanup_pending", False):
@@ -800,6 +803,8 @@ class RunCommandTool(BaseTool):
             await self._retain_cleanup(runner, command, cwd, context, result.cleanup_reason)
             if result.cleanup_pending else {}
         )
+        if context is not None and context.run_context is not None and context.run_context.elicitations is not None:
+            await context.run_context.elicitations.wait_until_clear(cancel_event)
 
         return await to_thread_cancel_safe(
             self._foreground_result, result, command, timeout, context, policy,

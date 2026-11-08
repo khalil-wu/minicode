@@ -7,6 +7,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from backend.agent.elicitation import ElicitationService
+
 if TYPE_CHECKING:
     from backend.agent.code_execution import CodeCell, CodeExecutionRuntime
 
@@ -31,6 +33,7 @@ class CodeExecutionStore:
         self.runtimes: set[CodeExecutionRuntime] = set()
         self.retirements: dict[CodeExecutionRuntime, asyncio.Task] = {}
         self._host_session = None
+        self.elicitations = ElicitationService()
 
     def create_vm(self):
         from backend.agent.code_host import CodeHostSession
@@ -103,6 +106,8 @@ class CodeExecutionStore:
             raise RuntimeError(f"Code cells still own {len(pending)} pending tool cleanup task(s)")
         await asyncio.gather(*tuple(self.retirements.values()))
         self.runtimes.clear()
+        if release_host:
+            self.elicitations.reset_external()
         if release_host and self._host_session is not None:
             await self._host_session.aclose()
             self._host_session = None

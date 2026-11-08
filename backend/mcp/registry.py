@@ -521,6 +521,7 @@ class MCPToolProxy(BaseTool):
                     # and elicitation stop with the originating turn instead of
                     # outliving a cancelled tool call in the shared MCP client.
                     "cancel_event": getattr(context, "cancel_event", None),
+                    "elicitation_service": run_context.elicitations if run_context is not None else None,
                     "permission_context_provider": (
                         run_context.permission_context_provider
                         if run_context is not None and run_context.permission_context_provider is not None

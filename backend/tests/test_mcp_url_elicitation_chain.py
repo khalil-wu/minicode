@@ -7,6 +7,7 @@ import pytest
 from mcp import types
 
 from backend.agent.message import UserCommand
+from backend.agent.elicitation import ElicitationService
 from backend.bootstrap.app import AppBootstrap
 from backend.mcp.client import MCPClient
 from backend.tests.test_mcp_client_owner_routing import _OAuthControlSession
@@ -26,6 +27,8 @@ async def test_url_sdk_producer_owned_replay_and_response_roundtrip(monkeypatch,
     monkeypatch.setattr("backend.mcp.client.feature_enabled", lambda name: name == "mcp_elicitation")
     session = MCPControlSession()
     owner = {"session_id": "session-a", "conversation_id": "conv_oauth_a", "message_id": "message-mcp", "turn_id": "turn-mcp", "task_id": "child-worker"}
+    service = ElicitationService()
+    owner["elicitation_service"] = service
     bootstrap = object.__new__(AppBootstrap)
     bootstrap._resolve_mcp_request_session = lambda params: (session, params["_minicode_owner"])
     client = MCPClient("source-server", elicitation_handler=bootstrap._handle_mcp_elicitation)
@@ -37,6 +40,7 @@ async def test_url_sdk_producer_owned_replay_and_response_roundtrip(monkeypatch,
             break
         await asyncio.sleep(0)
     public_id = next(iter(session.turn_wait_state.pending_elicitations))
+    assert service.paused
     payload = session.turn_wait_state.pending_approval_payloads[public_id]
     assert payload["request"] == {
         "subtype": "elicitation", "tool_use_id": public_id,
@@ -62,6 +66,7 @@ async def test_url_sdk_producer_owned_replay_and_response_roundtrip(monkeypatch,
         "response": {"subtype": "success", "response": {"action": action, "content": {"not_url_input": "discard"}, "_meta": {"reply": "kept"}}},
     }))
     result = await asyncio.wait_for(task, 1)
+    assert not service.paused
     assert isinstance(result, types.ElicitResult)
     assert result.action == action
     assert result.content is None

@@ -451,7 +451,9 @@ class EventOutbox:
     @staticmethod
     def _is_replayable(payload: dict[str, Any]) -> bool:
         event_type = str(payload.get("type") or "").strip()
-        if event_type == "command.result" and str(payload.get("command") or "").startswith("thread/realtime/"):
+        command = str(payload.get("command") or "")
+        if event_type == "command.result" and (command.startswith("thread/realtime/")
+                or command in {"thread/increment_elicitation", "thread/decrement_elicitation"}):
             return False
         if is_non_replayable_event_type(event_type):
             return False
