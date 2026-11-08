@@ -39,7 +39,10 @@ _PUBLIC_USAGE_COUNT_FIELDS = (
 
 
 def public_text(value: Any, *, max_chars: int = 50_000, single_line: bool = False) -> str:
-    rendered = redact_secrets(str(value or ""))
+    rendered = str(value or "")
+    if not rendered:
+        return ""
+    rendered = redact_secrets(rendered)
     if single_line:
         rendered = " ".join(rendered.split())
     if len(rendered) <= max_chars:
@@ -57,7 +60,9 @@ def project_public_usage(value: Any) -> dict[str, Any]:
     cannot piggyback on a subagent completion event.
     """
 
-    source = value if isinstance(value, Mapping) else {}
+    if not isinstance(value, Mapping):
+        return {}
+    source = value
     projected: dict[str, Any] = {}
     for key in _PUBLIC_USAGE_COUNT_FIELDS:
         if key not in source:

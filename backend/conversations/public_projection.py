@@ -784,7 +784,9 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
         ("summary", 262_144),
         ("fromId", 1_024),
     ):
-        text = public_text(source.get(key), max_chars=maximum, single_line=maximum <= 1_024)
+        if key not in source:
+            continue
+        text = public_text(source[key], max_chars=maximum, single_line=maximum <= 1_024)
         if text:
             projected[key] = text
     for source_key, target_key in (
@@ -796,7 +798,9 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
         ("exitCode", "exitCode"),
         ("tokensBefore", "tokensBefore"),
     ):
-        number = _finite_number(source.get(source_key))
+        if source_key not in source:
+            continue
+        number = _finite_number(source[source_key])
         if number is not None:
             projected[target_key] = number
     for source_key, target_key in (
@@ -858,7 +862,9 @@ def project_public_transcript_message(value: Any, *, defer_turn_diff: bool = Fal
         ("tool_result_details", "tool_result_details", False),
         ("details", "details", False),
     ):
-        raw = source.get(source_key)
+        if source_key not in source:
+            continue
+        raw = source[source_key]
         if isinstance(raw, (list, tuple, Mapping)):
             projected[target_key] = _public_json(
                 raw,

@@ -4,6 +4,9 @@ from backend.conversations import public_projection
 from backend.conversations.repository import _normalize_loaded_transcript
 from backend.services.conversation_payload_service import restore_tool_artifact_sources
 from types import SimpleNamespace
+from copy import deepcopy
+
+import pytest
 
 
 def test_message_projection_preserves_owned_turn_diff_without_exposing_arbitrary_metadata():
@@ -155,3 +158,28 @@ def test_old_image_sources_are_read_from_owned_artifact_metadata_without_rewriti
     assert all("toolCallId" not in artifact for artifact in artifacts)
     assert calls == [(artifact_id, "owner", "C:/project") for artifact_id in sources]
     assert all("source" not in artifact for artifact in payload["transcript"][0]["artifacts"])
+
+
+@pytest.mark.parametrize("explicit_defaults", [False, True])
+def test_optional_message_fields_keep_redaction_aliases_zeroes_and_false_values(explicit_defaults):
+    secret = "sk-" + "x" * 24
+    message = {"id": "answer", "role": "assistant", "content": "Observed " + secret,
+        "command": "echo " + secret, "output": "Actual " + secret,
+        "details": {"access_token": "private", "observed": secret, "exit_code": 0},
+        "contextRefs": [{"kind": "file", "name": "selected", "path": "src/a.py"}],
+        "durationMs": 0, "exitCode": 0, "cancelled": False, "is_error": False,
+        "usage": {"input_tokens": 0, "model": "must not enter usage", "speed": "fast"}}
+    if explicit_defaults:
+        message.update(thinking=None, api="", wire_api=False, model=0, artifacts=None, citations=None,
+            completed_at=None, queue_position=None, tool_page=None, metadata=None)
+    original = deepcopy(message)
+    actual = public_projection.project_public_transcript_message(message)
+    assert actual == {"id": "answer", "role": "assistant", "content": "Observed [REDACTED_SECRET]",
+        "command": "echo [REDACTED_SECRET]", "output": "Actual [REDACTED_SECRET]",
+        "details": {"observed": "[REDACTED_SECRET]", "exit_code": 0},
+        "context_refs": [{"kind": "file", "name": "selected", "path": "src/a.py"}],
+        "duration_ms": 0.0, "exitCode": 0.0, "cancelled": False, "is_error": False,
+        "usage": {"input_tokens": 0, "speed": "fast"}}
+    assert message == original
+    actual["details"]["observed"] = "caller changed"
+    assert message == original
