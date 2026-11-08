@@ -15,7 +15,7 @@ from backend.agent.message import UserCommand
 @pytest.mark.asyncio
 async def test_catalog_read_reuses_published_context_but_dispatch_rebinds_current_owner(tmp_path, monkeypatch):
     session, conversation, _ = session_for(tmp_path, monkeypatch)
-    runner = SimpleNamespace(active=True)
+    runner = SimpleNamespace(active=True, extensions=[object()])
     monkeypatch.setattr(session, "_ensure_lifecycle_runtime", AsyncMock(return_value=runner))
     monkeypatch.setattr(session, "_conversation_tool_registry", lambda *args, **kwargs: session.tool_registry)
     bind = AsyncMock()

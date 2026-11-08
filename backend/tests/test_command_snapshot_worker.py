@@ -72,6 +72,9 @@ async def test_unpublished_command_snapshot_is_drained_and_discarded(tmp_path, m
     monkeypatch.setenv("MINICODE_CONFIG_DIR", str(tmp_path / "home"))
     monkeypatch.setattr("backend.ws.agent_runner.is_workspace_trusted", lambda root: True)
     host = _Session(tmp_path, [])
+    extension = tmp_path / ".minicode" / "extensions" / "owned.py"
+    extension.parent.mkdir(parents=True)
+    extension.write_text("def extension(api):\n    api.on('session_start', lambda event, ctx: None)\n", encoding="utf-8")
     registry = ToolRegistry()
     entered, release = threading.Event(), threading.Event()
     load = ContextBuilder.load_snapshot

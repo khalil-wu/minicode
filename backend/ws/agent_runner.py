@@ -2263,12 +2263,6 @@ class SessionAgentRunnerMixin:
                     and runtime_fingerprint == generation_fingerprint
                 ):
                     return runtime
-            # Only a replacement generation binds an executable context.
-            # Its snapshot includes history; the unchanged-generation path
-            # above needs only the owner's existence and metadata.
-            conversation = await to_thread_cancel_safe(conversation_repo.get_conversation, owner_id)
-            if conversation is None:
-                raise RuntimeError(f"Conversation {owner_id!r} disappeared while loading extensions")
             # The source owns discovery, trust-scoped path expansion, loader
             # cache partitioning and provider capability construction. The WS
             # owner only receives an unpublished candidate.
@@ -2342,20 +2336,22 @@ class SessionAgentRunnerMixin:
 
             try:
                 next_runtime.bind_tool_registry(tool_registry)
-                # MiniCode binds the complete AgentSession runtime before its command
-                # surface becomes invokable.  Give the off-to-the-side
-                # candidate a conversation-owned command snapshot before the
-                # scoped command projection is atomically replaced; otherwise
-                # a concurrent slash dispatch can reach a half-bound runner.
-                await self._bind_lifecycle_runtime_command_snapshot(
-                    next_runtime,
-                    conversation=conversation,
-                    tool_registry=tool_registry,
-                    model_runtime=candidate_model_runtime,
-                    model_registry=candidate_model_registry,
-                    skill_manager=skill_manager,
-                    config=config,
-                )
+                if result.extensions:
+                    # Executable extensions receive their complete context
+                    # before callbacks or commands can run. A model/catalog
+                    # generation with no extensions has no history consumer.
+                    conversation = await to_thread_cancel_safe(conversation_repo.get_conversation, owner_id)
+                    if conversation is None:
+                        raise RuntimeError(f"Conversation {owner_id!r} disappeared while loading extensions")
+                    await self._bind_lifecycle_runtime_command_snapshot(
+                        next_runtime,
+                        conversation=conversation,
+                        tool_registry=tool_registry,
+                        model_runtime=candidate_model_runtime,
+                        model_registry=candidate_model_registry,
+                        skill_manager=skill_manager,
+                        config=config,
+                    )
                 if bool(getattr(self, "_extension_runtimes_shutting_down", False)) or state.get("shutting_down"):
                     capability.discard("Extension generation was discarded during command snapshot preparation")
                     return None
@@ -2411,7 +2407,7 @@ class SessionAgentRunnerMixin:
                 workspace_key=workspace_key,
                 fingerprint=generation_fingerprint,
                 result=result,
-                host_actions_bound=True,
+                host_actions_bound=bool(result.extensions),
                 model_runtime=candidate_model_runtime,
                 model_registry=candidate_model_registry,
             )
@@ -3716,10 +3712,15 @@ class SessionAgentRunnerMixin:
         clean_id = str(conversation_id or "").strip()
         if not clean_id:
             return None
-        read = self.conversation_repo.get_conversation if bind_command_context else self.conversation_repo.get_conversation_summary
-        conversation = await to_thread_cancel_safe(read, clean_id)
+        conversation = await to_thread_cancel_safe(self.conversation_repo.get_conversation_summary, clean_id)
         if conversation is None:
             return None
+        if bind_command_context and not conversation.execution_cwd:
+            # Legacy dispatch may recover cwd from the full saved context.
+            # Catalog-only readers keep their existing metadata-only scope.
+            conversation = await to_thread_cancel_safe(self.conversation_repo.get_conversation, clean_id)
+            if conversation is None:
+                return None
         workspace_root = self.session_lifecycle.workspace_root_for_conversation(conversation)
         config = await to_thread_cancel_safe(load_config, cwd=workspace_root)
         refresh = getattr(self, "refresh_tool_registry_if_mcp_changed", None)
@@ -3738,10 +3739,9 @@ class SessionAgentRunnerMixin:
         )
         if runner is None:
             return None
-        # Catalog readers need the published generation, not a new executable
-        # context. Candidate generations are already bound before publication;
-        # actual slash dispatch below still captures the latest conversation.
-        if not bind_command_context:
+        # Catalog readers use the published generation. Executable candidates
+        # were bound before publication; slash dispatch captures current history.
+        if not bind_command_context or not runner.extensions:
             from backend.ws.model_prewarm import schedule_model_prewarm
 
             if clean_id == self.active_conversation_id:
@@ -3767,7 +3767,7 @@ class SessionAgentRunnerMixin:
 
         await self._bind_lifecycle_runtime_command_snapshot(
             runner,
-            conversation=conversation,
+            conversation=await to_thread_cancel_safe(self.conversation_repo.get_conversation, clean_id),
             tool_registry=tool_registry,
             config=config,
         )
