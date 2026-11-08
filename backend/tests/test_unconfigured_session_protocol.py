@@ -90,15 +90,15 @@ async def test_archive_publishes_fallback_without_waiting_for_provider_history(
                 return await publish_inventory(**options)
 
             monkeypatch.setattr(session, "send_conversation_list", publish_while_history_is_blocked)
-            read_inventory = session.conversation_repo.list_conversations_with_revision
+            read_inventory = session.conversation_repo.directory.inventory
             inventory_reads = []
 
-            def counted_inventory():
-                inventory = read_inventory()
+            def counted_inventory(**options):
+                inventory = read_inventory(**options)
                 inventory_reads.append(inventory)
                 return inventory
 
-            monkeypatch.setattr(session.conversation_repo, "list_conversations_with_revision", counted_inventory)
+            monkeypatch.setattr(session.conversation_repo.directory, "inventory", counted_inventory)
             await socket.command("conversation.archive", conversation_id=archived.id)
             result = await socket.until("command.result", command="conversation.archive")
             assert result["level"] == "success"
@@ -172,14 +172,28 @@ async def test_protocol_start_restore_catalogs_and_files_do_not_bind_a_model(
                     "source": "provider", "supports_hosted_web_search": True,
                     "parallel_tool_calls": False, "input": ["text", "image"], "native_compaction": False,
                 }}}}}), encoding="utf-8")
-    adapter_calls = []
+    adapter_calls, prepared, sampling_calls = [], [], []
 
-    def model_forbidden(*args, **kwargs):
+    from backend.llm.base import LLMAdapter
+    class PreparedOnly(LLMAdapter):
+        async def stream_chat(self, *args, **kwargs):
+            sampling_calls.append("stream")
+            raise AssertionError("Viewing history must not sample a model")
+            yield
+
+        async def simple_chat(self, *args, **kwargs):
+            sampling_calls.append("simple")
+            raise AssertionError("Viewing history must not sample a model")
+
+    def prepare_only(config, **kwargs):
         adapter_calls.append(kwargs)
-        raise AssertionError("This operation does not sample or bind a model")
+        adapter = PreparedOnly()
+        adapter._settings = config.llm
+        prepared.append(adapter)
+        return adapter
 
-    monkeypatch.setattr(main, "_create_session_llm", model_forbidden)
-    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", model_forbidden)
+    monkeypatch.setattr(main, "_create_session_llm", prepare_only)
+    monkeypatch.setattr("backend.llm.model_registry.create_session_llm", prepare_only)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "README.md").write_text("Preserved file content", encoding="utf-8")
@@ -245,13 +259,15 @@ async def test_protocol_start_restore_catalogs_and_files_do_not_bind_a_model(
                 assert file.status_code == 200 and file.json()["content"] == "Preserved file content"
             await socket.command("ping")
             await socket.until("pong")
-            assert session.llm is None and session._llm_adapter_cache == {}
+            assert session.llm is None
+            assert all(adapter in prepared for adapter in session._llm_adapter_cache.values())
             if selected_model:
                 capabilities = session._provider_capabilities_payload()
                 assert capabilities["model"] == selected_model and capabilities["effective_reasoning_effort"] == "medium"
                 assert capabilities["reasoning_effort_supported"] is True
                 assert capabilities["vision"] is True and capabilities["parallel_tool_calls"] is False
-            assert adapter_calls == []
+            assert sampling_calls == []
+            assert all(call["model_override"] == selected_model for call in adapter_calls)
             assert not any(event["type"] == "error" for event in socket.sent)
         finally:
             await socket.finish(task)
@@ -261,7 +277,8 @@ async def test_protocol_start_restore_catalogs_and_files_do_not_bind_a_model(
             await reconnect.until("llm.model.updated")
             assert main._state.ws_manager.get_session(reconnect.query_params["session_id"]) is session
             assert session.connection_generation == 2 and session.llm is None
-            assert adapter_calls == []
+            assert sampling_calls == []
+            assert all(call["model_override"] == selected_model for call in adapter_calls)
         finally:
             await reconnect.finish(task)
 
@@ -474,8 +491,11 @@ async def test_real_queries_and_warm_history_switches_bind_only_at_execution_bou
     def build(config, *, model_override=None, provider_override=None, model_runtime=None):
         from backend.services.llm_adapter_factory import build_provider_adapter
         adapter = build_provider_adapter(provider_override, model_override, model_runtime=model_runtime)
-        adapter._http_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-        adapters.append(adapter)
+        async def actual_request(request):
+            if adapter not in adapters:
+                adapters.append(adapter)
+            return await respond(request)
+        adapter._http_client = httpx.AsyncClient(transport=httpx.MockTransport(actual_request))
         return adapter
 
     monkeypatch.setattr(main, "_create_session_llm", build)
