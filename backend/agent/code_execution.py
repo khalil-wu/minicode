@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any
 from uuid import uuid4
 
-from backend.agent.code_execution_vm import CodeVM
 from backend.agent.code_execution_output import native_content_items, normalize_runtime_item, selected_media
 from backend.agent.code_execution_store import CodeCellReceipt
 from backend.agent.context import ContextBuilder
@@ -243,6 +242,7 @@ class CodeExecutionRuntime:
 
     async def _run(self, cell: CodeCell) -> None:
         vm = None
+        host_failure = None
         jobs: set[asyncio.Task] = set()
         timers: dict[str, asyncio.Task] = {}
         terminal_status = "failed"
@@ -250,8 +250,9 @@ class CodeExecutionRuntime:
             await asyncio.sleep(request["delay"] / 1000)
             await cell.replies.put({"id": request["id"], "timer": True})
         try:
-            vm = CodeVM()
+            vm = self.store.create_vm()
             packet = await vm.step("start", {"code": cell.code, "tools": cell.catalog, "storage": dict(self.store.values)})
+            host_failure = asyncio.create_task(vm.wait_failure(), name=f"code-host-failure:{cell.id}")
             while True:
                 # image() can forward a leaf artifact, but script-created IDs
                 # are not provenance. Retain only this cell's original bytes.
@@ -304,7 +305,9 @@ class CodeExecutionRuntime:
                         raise RuntimeError("Script has an unresolved promise with no pending tool, timer or microtask.")
                     waiting = asyncio.create_task(cell.replies.get())
                     try:
-                        done, _ = await asyncio.wait(active | {waiting}, return_when=asyncio.FIRST_COMPLETED)
+                        done, _ = await asyncio.wait(active | {waiting, host_failure}, return_when=asyncio.FIRST_COMPLETED)
+                        if host_failure in done:
+                            host_failure.result()
                         if waiting in done:
                             replies = [waiting.result()]
                         else:
@@ -328,6 +331,9 @@ class CodeExecutionRuntime:
             cell.error = f"{type(error).__name__}: {error}"
         finally:
             cell.cancel.set()
+            if host_failure is not None:
+                host_failure.cancel()
+                await asyncio.gather(host_failure, return_exceptions=True)
             try:
                 receipt = await cancel_and_drain_receipt(list(jobs | set(timers.values())), timeout=CANCELLATION_DRAIN_TIMEOUT_SECONDS,
                     label="code cell tools and timers", owner=self.tool_context.pending_cleanup_tasks)
@@ -336,7 +342,11 @@ class CodeExecutionRuntime:
                     cell.error = "Nested tool cleanup remains pending; inspect execution evidence before retrying."
             finally:
                 if vm is not None:
-                    vm.close()
+                    try:
+                        await vm.aclose()
+                    except Exception as error:
+                        terminal_status = "failed"
+                        cell.error = f"{cell.error}\nCode host cleanup: {error}".strip()
                 cell.image_artifacts.clear()
                 cell.status = terminal_status
                 self.store.receipts[cell.id] = CodeCellReceipt(cell.id, cell.status, cell.error, cell.output, cell.hook_context, cell.discarded_calls)

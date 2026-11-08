@@ -10,6 +10,7 @@ from dataclasses import replace
 import pytest
 
 from backend.agent.code_execution_vm import CodeVM
+from backend.agent.code_host import HostedCodeVM
 from backend.agent.context import ContextBuilder
 from backend.agent.execution_journal import ExecutionJournal
 from backend.agent.loop_session import AgentLoopSessionContext
@@ -346,14 +347,14 @@ def test_busy_javascript_is_cancelled_without_blocking_the_event_loop(tmp_path, 
 
     async def scenario():
         step_entered = asyncio.Event()
-        original_step = CodeVM.step
+        original_step = HostedCodeVM.step
 
         async def observe_busy_step(vm, operation="", payload=None):
             if operation == "start":
                 step_entered.set()
             return await original_step(vm, operation, payload)
 
-        monkeypatch.setattr(CodeVM, "step", observe_busy_step)
+        monkeypatch.setattr(HostedCodeVM, "step", observe_busy_step)
         cancellation_started = None
         cancellation_finished = None
 

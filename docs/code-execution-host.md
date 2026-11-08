@@ -1,0 +1,35 @@
+# Code execution host
+
+`tool_exec` runs JavaScript in a separate Python process containing V8. Ordinary
+conversation requests do not start that process or load V8 into the backend.
+Code sessions on the backend's event loop share a lazy host; each cell has its
+own isolate. Desktop conversations, agent threads and SDK sessions retain their
+host session across turns. Closing the final owner closes the pipes and waits
+for the host process to exit.
+
+The host evaluates JavaScript and returns tool requests. MiniCode's existing
+tool runner still owns permissions, approvals, execution ordering, workspace
+access, tool hooks, media provenance and durable tool receipts. The JavaScript
+environment has no `process`, `require`, `fetch` or filesystem bindings.
+The host uses Python isolated mode and the existing subprocess environment
+policy. Process isolation does not replace the sandbox applied to individual
+tools.
+
+`tool_wait` retains its existing yield and cancellation behavior. Cancelled
+cells drain their nested tools and close the actual V8 isolate. A host failure
+fails its live cells, including cells waiting on a tool, and preserves completed
+tool outcomes. New cells can start a new host. A cell from the failed host is
+never replayed on the new process, so callers must inspect completed writes
+before deciding whether to retry. Session JSON values stay with the controller;
+successful `store` updates already received by it remain available.
+
+The host transport is a private, versioned stdio protocol with little-endian
+length-prefixed JSON frames, a 64 MiB frame limit, request cancellation and
+explicit session shutdown. A host permits 128 active isolates and 256 concurrent
+requests; the existing four active cells per code store still applies. Each
+isolate retains its 128 MiB memory limit and ten-second JavaScript execution
+budget. Tool waiting time is outside that execution budget.
+
+Startup and process exit are recorded in backend logs as `Code host started`
+and `Code host stopped`. This local transport does not expose a network endpoint
+or implement Codex's remote gRPC host protocol.

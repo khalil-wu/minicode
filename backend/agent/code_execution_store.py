@@ -30,6 +30,14 @@ class CodeExecutionStore:
         self.cells: dict[str, CodeCell] = {}
         self.runtimes: set[CodeExecutionRuntime] = set()
         self.retirements: dict[CodeExecutionRuntime, asyncio.Task] = {}
+        self._host_session = None
+
+    def create_vm(self):
+        from backend.agent.code_host import CodeHostSession
+
+        if self._host_session is None:
+            self._host_session = CodeHostSession()
+        return self._host_session.cell()
 
     def pending_tasks(self, llm: Any = None) -> set[asyncio.Task]:
         tasks = {cell.task for cell in self.cells.values()
@@ -88,13 +96,16 @@ class CodeExecutionStore:
 
         task.add_done_callback(settled)
 
-    async def aclose(self) -> None:
+    async def aclose(self, *, release_host: bool = True) -> None:
         await asyncio.gather(*(runtime.aclose() for runtime in tuple(self.runtimes)))
         pending = {task for runtime in self.runtimes for task in runtime.pending_tasks()}
         if pending:
             raise RuntimeError(f"Code cells still own {len(pending)} pending tool cleanup task(s)")
         await asyncio.gather(*tuple(self.retirements.values()))
         self.runtimes.clear()
+        if release_host and self._host_session is not None:
+            await self._host_session.aclose()
+            self._host_session = None
 
     def put(self, key: str, value: Any) -> None:
         size = len(json.dumps({key: value}, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))

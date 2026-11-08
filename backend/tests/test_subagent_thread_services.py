@@ -222,6 +222,7 @@ class _ChildCellModel(LLMAdapter):
         self.calls = 0
         self.code = code
         self.new_turn, self.finish_turn = asyncio.Event(), asyncio.Event()
+        self.before_final = None
 
     async def stream_chat(self, messages, tools=None, metadata=None):
         self.calls += 1
@@ -233,6 +234,8 @@ class _ChildCellModel(LLMAdapter):
         if self.calls > 2:
             self.new_turn.set()
             await self.finish_turn.wait()
+        elif self.before_final is not None:
+            await self.before_final.wait()
         yield StreamEvent(StreamEventType.TEXT_CHUNK, content="The child turn finished.", phase="final_answer")
         yield StreamEvent(StreamEventType.DONE, finish_reason="stop")
 
@@ -244,12 +247,23 @@ class _ChildCellModel(LLMAdapter):
 
 
 @pytest.mark.asyncio
-async def test_old_cell_evidence_keeps_its_turn_and_does_not_change_the_resumed_worker(lifetime_case):
+@pytest.mark.parametrize("late_start", [False, True])
+async def test_old_cell_evidence_keeps_its_turn_and_does_not_change_the_resumed_worker(lifetime_case, monkeypatch, late_start):
     from backend.tests.test_code_cell_thread_lifetime import ProcessTool
+    from backend.agent.code_host import _Connection
 
     case = lifetime_case
     process_tool = ProcessTool()
     model = _ChildCellModel("const result=await tools.held_process({}); text(result.content);")
+    release = asyncio.Event()
+    if late_start:
+        original_start = _Connection.start
+        async def held_start():
+            await release.wait()
+            return await original_start()
+        monkeypatch.setattr(_Connection, "start", held_start)
+    else:
+        model.before_final = process_tool.started
     case.tool._llm_provider = model
     case.context.tool_registry.register(process_tool)
     case.context.tool_registry.register(ToolExecTool())
@@ -259,16 +273,32 @@ async def test_old_cell_evidence_keeps_its_turn_and_does_not_change_the_resumed_
     try:
         child_id, first = await _launch(case, "foreground")
         assert first.status == "completed", first.content
-        await asyncio.wait_for(process_tool.started.wait(), 5)
         session = case.runtime.subagent_session(child_id)
         cell, = session.code_store.cells.values()
+        release.set()
+        started = asyncio.create_task(process_tool.started.wait())
+        try:
+            await asyncio.wait({started, cell.task}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
+            assert process_tool.started.is_set(), (cell.status, cell.error, cell.output)
+        finally:
+            started.cancel()
+            await asyncio.gather(started, return_exceptions=True)
+        from backend.agent.tool_execution import stale_subagent_context_guard_reason
+        call_id, = cell.pending_tools
+        from backend.permissions.context import ToolCallSource
+        nested = replace(cell.parent, tool_call_id=call_id,
+            call_sources={call_id: ToolCallSource("code_mode", cell.parent.tool_call_id, cell.id, "request")})
+        assert stale_subagent_context_guard_reason(nested) == ""
+        assert stale_subagent_context_guard_reason(replace(nested, call_sources={}))
+        assert stale_subagent_context_guard_reason(replace(nested,
+            call_sources={call_id: ToolCallSource("code_mode", "different-parent", cell.id, "request")}))
         old = case.runtime.get_subagent(child_id)
         old_turn = cell.parent.turn_id
         facts = [event.to_dict() for event in case.runtime.execution_journal(child_id).read_events()]
         assert not any(event["event_type"] == "tool_result"
             and event["payload"]["tool_call_id"] in cell.pending_tools for event in facts)
         terminal = next(event["payload"] for event in reversed(facts) if event["event_type"] == "terminal")
-        assert any(use["tool_call_id"] in cell.pending_tools for use in terminal["unresolved_tool_uses"])
+        assert any(use["tool_call_id"] in cell.pending_tools for use in terminal["unresolved_tool_uses"]) is (not late_start)
         assert terminal["uncertain_tool_uses"] == [] and not terminal["manual_recovery_required"]
         followup = await FollowupTaskTool().execute(
             {"target": child_id, "message": "Continue this same child thread."}, case.context)
@@ -309,6 +339,7 @@ async def test_old_cell_evidence_keeps_its_turn_and_does_not_change_the_resumed_
         assert current.status == "running" and current.mailbox_epoch == old.mailbox_epoch + 2
         assert (current.current_tool, current.waiting_on, current.last_progress_at, current.model) == before
     finally:
+        release.set()
         model.finish_turn.set()
         await asyncio.gather(*case.workers, return_exceptions=True)
 

@@ -80,6 +80,7 @@ class AgentSession:
     lifecycle_cleanup_tasks: set[asyncio.Task] = field(default_factory=set)
     active_tool_names: tuple[str, ...] | None = None
     code_store: CodeExecutionStore = field(default_factory=CodeExecutionStore)
+    owns_code_store: bool = True
     permission_grants: PermissionGrantStore = field(default_factory=PermissionGrantStore)
     guardian_host: GuardianHostState | None = None
     mcp_tool_approvals: MCPApprovalStore = field(default_factory=MCPApprovalStore)
@@ -110,7 +111,7 @@ class AgentSession:
     async def aclose(self) -> None:
         """Release owned resources after their real borrowers have settled."""
         self.closed = True
-        await self.code_store.aclose()
+        await self.code_store.aclose(release_host=self.owns_code_store)
         if self.model_retirement_tasks:
             await asyncio.gather(*self.model_retirement_tasks)
             self.model_retirement_tasks.clear()

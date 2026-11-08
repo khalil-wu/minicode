@@ -822,6 +822,17 @@ def stale_subagent_context_guard_reason(tool_ctx: ToolExecutionContext | None) -
     from backend.agent.agent_identity import coordination_agent_id
 
     subagent_id = coordination_agent_id(metadata) or str(getattr(tool_ctx, "task_id", "") or "").strip()
+    source = tool_ctx.source_for_call(tool_ctx.tool_call_id)
+    if source.kind == "code_mode" and run_context.code_store is not None:
+        cell = run_context.code_store.live_tool_calls().get(tool_ctx.tool_call_id)
+        if (cell is not None and cell.parent.run_context is run_context
+                and cell.id == source.cell_id and cell.parent.tool_call_id == source.parent_call_id
+                and not cell.cancel.is_set()):
+            session = runtime.subagent_session(subagent_id)
+            if session is not None and not session.closed and session.code_store is run_context.code_store:
+                # The resident cell owns its original advertised step after
+                # yielding, including calls first emitted after that turn ends.
+                return ""
     try:
         mailbox_epoch = int(metadata.get("mailbox_epoch"))
     except (TypeError, ValueError):

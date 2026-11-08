@@ -176,6 +176,7 @@ class SDKSession:
             if not task.done()
         }:
             await asyncio.wait(pending)
+        await asyncio.gather(*(store.aclose() for store in self._code_stores.values()))
         await self._commands.shutdown()
         if self.node_repl_companions is not None:
             await self.node_repl_companions.aclose()
@@ -628,6 +629,7 @@ async def _query_unclaimed(
             token_budget=token_budget,
             context_builder=context_builder,
             code_store=code_store or CodeExecutionStore(),
+            owns_code_store=code_store is None,
             lifecycle_cleanup_tasks=run_context.lifecycle_cleanup_tasks,
         ),
         state=state,
