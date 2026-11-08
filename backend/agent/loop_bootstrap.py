@@ -806,7 +806,7 @@ async def bootstrap_agent_loop(
         resolved_metadata["hook_initial_user_message"] = initial_user_message
     if watch_paths:
         resolved_metadata["hook_watch_paths"] = list(watch_paths)
-    if not run_context.is_subagent:
+    if not run_context.is_subagent and run_context.response_capture is None:
         register_hook_manager_for_session(
             hook_scope_id,
             hook_manager,

@@ -272,6 +272,8 @@ class NodeReplCompanions:
 
 async def register_node_companion(run_context, registry, agent_session, *, execution) -> None:
     """Register only after the canonical step has captured its network policy."""
+    if run_context.mcp_servers_disabled:
+        return
     snapshot = run_context.turn_environments
     prepared = run_context.environment_capabilities
     if snapshot is None or prepared is None:

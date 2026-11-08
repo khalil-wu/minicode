@@ -45,6 +45,7 @@ READ_ONLY_REFRESH_COMMAND_TYPES = frozenset({
 })
 
 LIVE_ELICITATION_COMMAND_TYPES = frozenset({"thread/increment_elicitation", "thread/decrement_elicitation"})
+LIVE_SAMPLE_COMMAND_TYPES = frozenset({"thread/sample", "thread/sample/cancel"})
 
 
 def _admitted_input_origin(admission: dict[str, Any], projection: dict[str, Any] | None, runtime: Any) -> str:
@@ -89,6 +90,7 @@ COMMAND_BACKLOG_BYPASS_TYPES = {
     "mcp.inventory.cancel",
     "thread/realtime/appendAudio", "thread/realtime/stop",
     *LIVE_ELICITATION_COMMAND_TYPES,
+    *LIVE_SAMPLE_COMMAND_TYPES,
 }
 
 _FORWARDED_CONVERSATION_COMMAND_TYPES = frozenset({
@@ -109,7 +111,7 @@ def _normalize_command_owner(command: UserCommand) -> None:
     # in the explicit resource-owner field throughout admission and replay.
     if owner and not command.type.startswith("scheduler."):
         command.data["conversation_id"] = str(owner).strip()
-    if (command.type.startswith("thread/realtime/") or command.type in {"thread/memory/read", "thread/readState/update"}) and "conversation_id" not in command.data:
+    if (command.type.startswith("thread/realtime/") or command.type in {"thread/memory/read", "thread/readState/update", "thread/sample"}) and "conversation_id" not in command.data:
         command.data["conversation_id"] = command.data.get("threadId", "")
 
 _CONVERSATION_LIFECYCLE_COMMAND_TYPES = {
@@ -259,6 +261,8 @@ class SessionCommandDispatcher:
         root_dir: Path,
     ) -> None:
         self._session = session
+        from backend.ws.thread_sample import ThreadSampleRequests
+        self.thread_samples = ThreadSampleRequests(session)
         self._client_command_store = ClientCommandDedupStore(
             session_id=session.session_id,
             root_dir=root_dir,
@@ -517,9 +521,9 @@ class SessionCommandDispatcher:
                 # A cold replay must never restart a microphone or replay audio.
                 self._schedule_transient_client_command(command, connection_generation)
                 continue
-            if command.type in LIVE_ELICITATION_COMMAND_TYPES:
-                # These counters belong to the loaded process. Replaying an
-                # old increment after restart would pause an unrelated turn.
+            if command.type in LIVE_ELICITATION_COMMAND_TYPES | LIVE_SAMPLE_COMMAND_TYPES:
+                # Counters and samples belong to the current live owner;
+                # neither may be restarted from a durable command replay.
                 self._schedule_transient_client_command(command, connection_generation)
                 continue
 
@@ -692,7 +696,7 @@ class SessionCommandDispatcher:
             return
         async def _guarded_handle() -> None:
             handled = await self._dispatch_client_command(command, connection_generation)
-            if command.type in READ_ONLY_REFRESH_COMMAND_TYPES | LIVE_ELICITATION_COMMAND_TYPES and handled:
+            if command.type in READ_ONLY_REFRESH_COMMAND_TYPES | LIVE_ELICITATION_COMMAND_TYPES | LIVE_SAMPLE_COMMAND_TYPES and handled:
                 # Keep the browser's retry ownership until the read's result
                 # was produced; a pending read is never durably acknowledged.
                 with self._session.event_outbox.bind_connection_generation(connection_generation):

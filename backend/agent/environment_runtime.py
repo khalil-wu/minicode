@@ -202,7 +202,10 @@ async def refresh_run_environment_capabilities(run_context, *, permission_contex
         is_subagent=run_context.is_subagent, local_cwd=Path(workspace_root or Path.cwd()).as_uri(),
         selected_capability_roots=snapshot.selected_capability_roots, previous=previous,
         restriction_product="codex", connection_pool=connection_owner.mcp_connections,
-        optional_startup_grace_ms=mcp_optional_startup_grace_ms)
+        optional_startup_grace_ms=mcp_optional_startup_grace_ms,
+        mcp_disabled=run_context.mcp_servers_disabled,
+        client_interaction_handler=(run_context.response_capture.reject_interaction
+            if run_context.response_capture is not None else None))
     try:
         prepared.validate_required_skills()
         prepared.bind_registry(registry, artifact_store)

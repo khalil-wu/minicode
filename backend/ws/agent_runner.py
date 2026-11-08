@@ -1441,7 +1441,8 @@ class SessionAgentRunnerMixin:
     services.
     """
 
-    def capture_agent_run_request(self, conversation_id: str, *, turn_settings: PreparedTurnSettings | None = None) -> AgentRunRequest:
+    def capture_agent_run_request(self, conversation_id: str, *, turn_settings: PreparedTurnSettings | None = None,
+            config: AppConfig | None = None) -> AgentRunRequest:
         """Resolve window-dependent inputs before handing startup to the registered run."""
         conversation = self.conversation_repo.get_conversation_summary(conversation_id)
         if conversation is None:
@@ -1458,7 +1459,7 @@ class SessionAgentRunnerMixin:
                 legacy_scope_cwd=cwd if not conversation.workspace_root and not conversation.projectless_output_dir else "")
         conversation = turn_settings.preview(conversation)
         root = self.session_lifecycle.workspace_root_for_conversation(conversation)
-        config = capture_model_config(load_config(cwd=root))
+        config = capture_model_config(config if config is not None else load_config(cwd=root))
         if conversation.permission_mode == "plan":
             from backend.agent.plans import (
                 PLAN_SLUG_KEY, generate_plan_slug, get_plan_file_path, get_plans_directory, plan_slug_from_snapshot,
@@ -6604,6 +6605,8 @@ class SessionAgentRunnerMixin:
                             if (thread_runtime is not None and terminal_status == "completed" and committed_context is not None
                                     and thread_runtime._model_snapshot(committed_context[1]) == thread_runtime._model_snapshot(saved_snapshot)):
                                 thread_runtime.retain_model_context(run_context_builder, committed_context[1], run_workspace_root)
+                            if thread_runtime is not None:
+                                thread_runtime.model_config = run_context.model_execution.config
                             if (
                                 conversation.id == self.active_conversation_id
                                 and hydration_generation == self.conversation_runtime._hydration_generation

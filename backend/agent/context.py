@@ -646,6 +646,7 @@ class ContextBuilder:
         self._persistent_notes: list[dict[str, str]] = []
         self.prompted_mcp_dependencies: set[str] = set()
         self._compaction_count = 0
+        self.auto_compaction_disabled = False
         self._skill_executor = skill_executor
         self._skill_manager = skill_manager
         self._developer_instructions = developer_instructions
@@ -1423,7 +1424,7 @@ class ContextBuilder:
 
         messages: list[LLMMessage] = []
         self._history_store.ensure_timestamps()
-        if allow_time_based_microcompact:
+        if allow_time_based_microcompact and not self.auto_compaction_disabled:
             self.maybe_time_based_microcompact(active_state)
         self._enforce_per_message_tool_budget()
 
@@ -3501,6 +3502,8 @@ class ContextBuilder:
         tool_schemas: list[dict[str, Any]] | None = None,
         messages: list[LLMMessage] | None = None,
     ) -> bool:
+        if self.auto_compaction_disabled:
+            return False
         if self.token_budget_enabled:
             return self.new_context_window_requested or self.context_window_status()["token_limit_reached"]
         # The compaction boundary is the request that can actually be sent:

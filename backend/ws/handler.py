@@ -481,9 +481,11 @@ class WebSocketSession(
         return self.event_outbox.connected
 
     def mark_disconnected(self) -> None:
+        self.command_dispatcher.thread_samples.disconnect(self.connection_generation)
         self.event_outbox.mark_disconnected()
 
     def attach_websocket(self, websocket: WebSocket, *, window_instance_id: str = "", window_owner_id: str = "", window_binding_token: str = "") -> tuple[WebSocket, int]:
+        self.command_dispatcher.thread_samples.disconnect(self.connection_generation)
         previous, generation = self.event_outbox.attach_websocket(websocket)
         self.window_instance_id = window_instance_id
         self.window_owner_id = window_owner_id

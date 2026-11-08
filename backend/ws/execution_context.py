@@ -113,6 +113,7 @@ class ConversationThreadRuntime:
     user_shell: dict[str, str] | None = None
     model_context: tuple[Any, dict[str, Any], int, str] | None = None
     model_context_preparation: asyncio.Task[Any] | None = None
+    model_config: Any | None = None
     realtime_runtime: Any | None = None
     _turn_borrowers: dict[asyncio.Task[Any], set[asyncio.Task[Any]]] = field(default_factory=dict, repr=False)
 
@@ -336,6 +337,9 @@ class ConversationExecutionRegistry:
             current.unloading.sync(has_subscribers=has_subscribers, is_active=is_active, now=now)
             return current
         runtime = self.thread_runtime(session.conversation_repo.store_instance_id(), conversation_id)
+        if runtime.model_config is None:
+            from backend.agent.model_execution import capture_model_config
+            runtime.model_config = capture_model_config(session.config)
         context = ConversationExecutionContext(conversation_id, self.retain_host(session), ThreadUnloadingState.create(
             has_subscribers=has_subscribers, is_active=is_active, now=now, delay=unload_delay), runtime)
         self._conversations[conversation_id] = context

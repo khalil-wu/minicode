@@ -216,7 +216,7 @@ class TurnIterationRuntime:
             self.tool_context.environment_id = primary.selection.environment_id if primary is not None else ""
             self.context.configure_project_instructions(snapshot.config.config_layer_stack.project_instruction_config())
         model_events: list[AgentEvent] = []
-        if snapshot is not None and self.context._llm is not snapshot.llm:
+        if snapshot is not None and self.context._llm is not snapshot.llm and not self.context.auto_compaction_disabled:
             target_budget = snapshot.config.token_budget
             if (target_budget.total < self.context._budget.total
                 and self.context.token_usage > target_budget.total - target_budget.reserved_response_tokens):

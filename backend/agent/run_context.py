@@ -83,6 +83,10 @@ class RunContext:
     network_approval_service: Any | None = None
     session_source: str = "sdk"
     isolated: bool = False
+    # Private response capture runs the canonical turn up to provider I/O.
+    # Its owner drains the turn before publishing the captured response.
+    response_capture: Any | None = None
+    mcp_servers_disabled: bool = False
     is_subagent: bool = False
     thread_environments: ThreadEnvironments | None = None
     retain_thread_environments: bool = False

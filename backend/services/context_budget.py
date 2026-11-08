@@ -46,6 +46,8 @@ async def manage_context_budget(
     Without this guard a context that cannot be reduced below the threshold
     will loop indefinitely, burning API calls.
     """
+    if isinstance(ctx, ContextBuilder) and ctx.auto_compaction_disabled:
+        return
     request_args = {"messages": messages} if messages is not None else {}
     if isinstance(ctx, ContextBuilder) and ctx.token_budget_enabled:
         if ctx.needs_compaction(state, tool_schemas=tool_schemas, **request_args):

@@ -453,7 +453,7 @@ class EventOutbox:
         event_type = str(payload.get("type") or "").strip()
         command = str(payload.get("command") or "")
         if event_type == "command.result" and (command.startswith("thread/realtime/")
-                or command in {"thread/increment_elicitation", "thread/decrement_elicitation"}):
+                or command in {"thread/increment_elicitation", "thread/decrement_elicitation", "thread/sample", "thread/sample/cancel"}):
             return False
         if is_non_replayable_event_type(event_type):
             return False

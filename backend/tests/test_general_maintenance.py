@@ -218,6 +218,8 @@ def test_auto_archive_unloads_the_real_idle_core_and_notification_listener_witho
 
     async def scenario():
         session = FixtureSession()
+        from backend.config import AppConfig, LLMSettings
+        session.config = AppConfig(llm=LLMSettings(api_key="fixture"))
         session.session_id = "fixture-maintenance-core"
         session.window_instance_id = "fixture-window"
         session.window_owner_id = "fixture-owner"

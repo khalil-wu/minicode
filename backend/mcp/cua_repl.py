@@ -305,6 +305,8 @@ class CuaTurn:
 
 
 async def register_cua_companion(run_context, agent_session, *, execution):
+    if run_context.mcp_servers_disabled:
+        return
     prepared = run_context.environment_capabilities
     if prepared is None or prepared.runtime is None:
         return

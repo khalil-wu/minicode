@@ -179,6 +179,12 @@ async def stream_provider_response(
                 metadata=request_metadata,
             ).__aiter__()
             stream_read_context = copy_context()
+            if tool_context.run_context.response_capture is not None:
+                # Capture upstream before event dispatch or streaming tool
+                # execution. The capture holds until its owner cancels us;
+                # EOF recovery and normal completion must never run here.
+                await asyncio.create_task(tool_context.run_context.response_capture.intercept(stream_iter),
+                    context=stream_read_context)
             first_event = True
             stream_first_event_seen = False
             while True:

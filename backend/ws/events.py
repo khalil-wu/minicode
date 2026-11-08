@@ -59,6 +59,24 @@ class ThreadElicitationCommand(TypedDict):
     threadId: str
 
 
+class ThreadSampleCommand(TypedDict):
+    type: Literal["thread/sample"]
+    requestId: str | int
+    threadId: str
+    expectedTurnId: str
+    prompt: str
+    effort: NotRequired[str | None]
+    threadSource: NotRequired[str | None]
+    turnTrigger: NotRequired[str | None]
+    responsesapiClientMetadata: NotRequired[dict[str, str] | None]
+    disableMcp: NotRequired[bool]
+
+
+class ThreadSampleCancelCommand(TypedDict):
+    type: Literal["thread/sample/cancel"]
+    requestId: str | int
+
+
 ServerEventType = Literal[
     "thread/realtime/started", "thread/realtime/itemAdded", "thread/realtime/item/started",
     "thread/realtime/item/transcript/delta", "thread/realtime/item/completed", "thread/realtime/transcript/delta",
@@ -266,6 +284,7 @@ ClientCommandType = Literal[
     "conversation.read_state.set",
     "thread/readState/update",
     "thread/increment_elicitation", "thread/decrement_elicitation",
+    "thread/sample", "thread/sample/cancel",
     "conversation.project.set",
     "conversation.memory_mode.set",
     "memory.reset",

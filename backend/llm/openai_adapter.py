@@ -59,6 +59,7 @@ from backend.llm.errors import (
     _safe_provider_diagnostic_text,
 )
 from backend.llm.base import (
+    capture_response_items,
     emit_provider_lifecycle_request,
     LLMAdapter,
     LLMSideCallContext,
@@ -3843,6 +3844,7 @@ class OpenAIAdapter(LLMAdapter):
         terminal_tool_calls: list[ToolCallEvent] = []
         completed_response_message_phase = ""
         completed_response_end_turn: bool | None = None
+        response_id = ""
         saw_terminal_response_event = False
         response_text_by_item: dict[str, str] = {}
         response_reasoning_by_part: dict[str, str] = {}
@@ -4459,6 +4461,32 @@ class OpenAIAdapter(LLMAdapter):
                     yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY)
                     continue
                 event_type = str(_get_attr_or_item(event, "type", "") or "")
+                if capture_response_items.get():
+                    # Sample at the native response boundary. Executable
+                    # items remain data even when the normal tool decoder
+                    # cannot execute that particular native item type.
+                    item = _get_attr_or_item(event, "item", None)
+                    if event_type == "response.output_item.done" or (
+                            event_type == "response.output_item.added" and _get_attr_or_item(item, "type", "")
+                            in {"function_call", "custom_tool_call", "local_shell_call", "tool_search_call"}):
+                        yield StreamEvent(type=StreamEventType.TRANSPORT_ACTIVITY,
+                            provider_items=[_responses_detach_provider_json(item)])
+                    elif event_type == "response.completed":
+                        response_obj = _get_attr_or_item(event, "response", None)
+                        if response_obj is None:
+                            raise ValueError("sample completion has no response")
+                        reported = _get_attr_or_item(response_obj, "usage", None)
+                        yield StreamEvent(type=StreamEventType.DONE,
+                            response_id=str(_get_attr_or_item(response_obj, "id", "")),
+                            usage=usage_info_from_openai(reported) if reported is not None else None)
+                        return
+                    elif event_type in {"error", "response.failed", "response.incomplete"}:
+                        error = _get_attr_or_item(event, "error", None) or _get_attr_or_item(
+                            _get_attr_or_item(event, "response", None), "error", None)
+                        message, raw = _responses_error_event_raw(event_type, error, fallback=event_type)
+                        yield StreamEvent(type=StreamEventType.ERROR, content=message, raw=raw)
+                        return
+                    continue
                 response_usage = _get_attr_or_item(_get_attr_or_item(event, "response", None), "usage", None)
                 if response_usage is not None:
                     usage = usage_info_from_openai(response_usage)
@@ -5556,6 +5584,7 @@ class OpenAIAdapter(LLMAdapter):
             provider_items=completed_response_provider_items,
             phase=completed_response_message_phase,
             end_turn=completed_response_end_turn,
+            response_id=response_id,
         )
 
     async def _simple_responses_api(
@@ -6073,6 +6102,7 @@ class OpenAIAdapter(LLMAdapter):
         content_sanitizer = ThinkingStreamSanitizer(hide_memory_citations=False)
         chat_reasoning_parts: list[str] = []
         chat_reasoning_field = ""
+        response_id = ""
         stream_started_at = time.monotonic()
         first_sse_at: float | None = None
         previous_sse_at: float | None = None
@@ -6150,6 +6180,8 @@ class OpenAIAdapter(LLMAdapter):
                 if not isinstance(chunk, dict):
                     raise ValueError("provider_error_type=protocol: Chat stream event must be an object")
                 malformed_budget.accept()
+
+                response_id = str(chunk.get("id") or response_id)
 
                 usage_obj = chunk.get("usage")
                 raw_text_delta = _raw_text_delta_metadata(
@@ -6415,6 +6447,7 @@ class OpenAIAdapter(LLMAdapter):
             finish_reason=finish_reason,
             raw=raw_done,
             provider_items=provider_items,
+            response_id=response_id,
         )
 
     async def _stream_chat_completions_http(

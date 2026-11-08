@@ -67,6 +67,7 @@ _MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 _HEADERS_HELPER_ENV = ("MINICODE_MCP_SERVER_NAME", "MINICODE_MCP_SERVER_URL")
 
 _request_owner: ContextVar[dict[str, Any] | None] = ContextVar("mcp_request_owner", default=None)
+sample_interaction_handler: ContextVar[Any] = ContextVar("mcp_sample_interaction_handler", default=None)
 _NativeCallToolResult = RootModel[dict[str, Any]]
 _callback_owner: ContextVar[tuple[bool, dict[str, Any] | None] | None] = ContextVar("mcp_callback_owner", default=None)
 
@@ -1371,6 +1372,12 @@ class MCPClient:
         return types.ListRootsResult(roots=[types.Root.model_validate(root) for root in self._client_roots()])
 
     async def _sdk_elicitation_callback(self, context: Any, params: Any) -> Any:
+        # A private sample must fail even when a peer requests interaction
+        # during initialize, before any tool-call owner can exist. The
+        # connection task inherits this callback from its sample owner.
+        sample_handler = sample_interaction_handler.get()
+        if sample_handler is not None:
+            await sample_handler()
         if not self._feature_enabled("mcp_elicitation") or self._elicitation_handler is None:
             return types.ErrorData(code=types.INVALID_REQUEST, message="elicitation not supported")
         correlated = _callback_owner.get()

@@ -1479,6 +1479,7 @@ class AnthropicAdapter(LLMAdapter):
             type=StreamEventType.DONE,
             usage=usage if usage_reported else None,
             finish_reason=stop_reason,
+            response_id=current_message_id,
             raw=done_raw,
             provider_items=_anthropic_provider_message_item(
                 provider_content_blocks

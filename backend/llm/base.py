@@ -20,6 +20,7 @@ import time
 from copy import deepcopy
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, AsyncIterator, TypeVar, cast
@@ -42,6 +43,8 @@ from backend.llm.native_compaction import NATIVE_COMPACTION_TYPE
 
 logger = logging.getLogger(__name__)
 _SideResult = TypeVar("_SideResult")
+# Set only by an owned generation interceptor, never by request metadata.
+capture_response_items: ContextVar[bool] = ContextVar("capture_response_items", default=False)
 
 
 _REQUEST_METADATA_KEY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
@@ -662,6 +665,8 @@ class StreamEvent:
     # True only at a provider's semantic item-completion boundary, never when
     # a JSON prefix merely happens to parse. These calls may execute in flight.
     tool_calls_committed: bool = False
+    # Opaque provider response identity, kept separate from public diagnostics.
+    response_id: str = ""
 
 
 @dataclass

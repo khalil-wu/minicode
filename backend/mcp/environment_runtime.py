@@ -268,7 +268,8 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
     previous: PreparedEnvironmentCapabilities | None = None, disabled_plugin_ids: tuple[str, ...] = (),
     disabled_skill_paths=None, restriction_product: str | None = "codex",
     selected_capability_roots: tuple[dict, ...] = (), connection_pool=None,
-    optional_startup_grace_ms: int = 1000) -> PreparedEnvironmentCapabilities:
+    optional_startup_grace_ms: int = 1000, mcp_disabled: bool = False,
+    client_interaction_handler=None) -> PreparedEnvironmentCapabilities:
     from backend.mcp.environment_discovery import discover_environment_http, selected_plugin_configs
     from backend.mcp.manager import MCPServerManager
     from backend.mcp.node_repl import SOURCE_PREFIX as NODE_COMPANION_SOURCE
@@ -333,8 +334,9 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
         source = host_mcp_manager
         manager = MCPServerManager(config_path=source._config_path if source is not None else None,
             workspace_root=source.workspace_root if source is not None else None,
-            elicitation_handler=source._elicitation_handler if source is not None else None,
-            on_status_change=source._on_status_change if source is not None else None,
+            elicitation_handler=(client_interaction_handler if client_interaction_handler is not None
+                else source._elicitation_handler if source is not None else None),
+            on_status_change=source._on_status_change if source is not None and client_interaction_handler is None else None,
             managed_settings_dir=source._managed_settings_dir if source is not None else None,
             requirements_path=source._requirements_path if source is not None else None,
             environment_runtime=runtime, runtime_configs=(),
@@ -363,7 +365,7 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             if current is None or current.source.startswith("plugin:"):
                 configs[config.name] = config
         registered = set()
-        if not isolated:
+        if not isolated and not mcp_disabled:
             for environment in ready:
                 for config in await discover_environment_http(manager, environment, warnings):
                     current = configs.get(config.name)
@@ -378,6 +380,8 @@ async def prepare_environment_capabilities(*, turn_environments, host_skill_mana
             # receiving catalog. The next step captures its own fresh stack.
             policy = load_mcp_policy(managed_settings_dir=source._managed_settings_dir, config_stack=source_stack)
             configs = {config.name: config for config in manager._apply_mcp_policies(list(configs.values()), policy=policy)}
+        if mcp_disabled:
+            configs.clear()
         manager._runtime_configs = tuple(configs.values())
         if connection_pool is not None:
             connection_pool.reconcile({config.name for config in configs.values() if config.enabled})

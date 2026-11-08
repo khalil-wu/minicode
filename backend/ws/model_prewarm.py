@@ -40,6 +40,9 @@ async def prepare_thread_model_context(session, conversation_id, workspace, conf
     registry = session.ws_manager.execution_contexts
     store_id = await asyncio.to_thread(session.conversation_repo.store_instance_id)
     thread = registry.thread_runtime(store_id, conversation_id)
+    if thread.model_config is None:
+        from backend.agent.model_execution import capture_model_config
+        thread.model_config = capture_model_config(config)
     if thread.model_context is not None or thread.model_context_preparation is not None or thread.pending_tasks():
         return
 

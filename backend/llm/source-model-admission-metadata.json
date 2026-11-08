@@ -1,5 +1,5 @@
 {
-  "reference_commit": "822e58cc3d666166c7446c5b1ea2e52f5d09594c",
+  "reference_commit": "970111f6cb62cc02fe36a82ea7d71b37a2889c97",
   "source_file": "codex-rs/models-manager/models.json",
   "models": {
     "gpt-6-astra": {
@@ -9,7 +9,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v2",
-      "multi_agent_reasoning_effort": "xhigh"
+      "multi_agent_reasoning_effort": "xhigh",
+      "supports_reasoning_effort_updates": true,
+      "use_responses_lite": true
     },
     "gpt-6.1-sol": {
       "model_specialty": null,
@@ -18,7 +20,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v2",
-      "multi_agent_reasoning_effort": "xhigh"
+      "multi_agent_reasoning_effort": "xhigh",
+      "supports_reasoning_effort_updates": true,
+      "use_responses_lite": true
     },
     "gpt-6-sol": {
       "model_specialty": null,
@@ -27,7 +31,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v2",
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-6-luna": {
       "model_specialty": null,
@@ -36,7 +42,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v2",
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-5.6-sol": {
       "model_specialty": null,
@@ -45,7 +53,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v2",
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-5.6-terra": {
       "model_specialty": null,
@@ -54,7 +64,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v2",
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-5.6-luna": {
       "model_specialty": null,
@@ -63,7 +75,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v1",
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-daybreak-blue-latest": {
       "model_specialty": "cyber",
@@ -71,7 +85,9 @@
       "node_repl_disabled": false,
       "guardian": null,
       "auto_review_model_override": null,
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-daybreak-red-latest": {
       "model_specialty": "cyber",
@@ -79,7 +95,9 @@
       "node_repl_disabled": false,
       "guardian": null,
       "auto_review_model_override": null,
-      "multi_agent_version": "v2"
+      "multi_agent_version": "v2",
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     },
     "gpt-5.5": {
       "model_specialty": null,
@@ -88,7 +106,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": null,
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": false
     },
     "codex-auto-review": {
       "model_specialty": null,
@@ -97,7 +117,9 @@
       "guardian": null,
       "auto_review_model_override": null,
       "multi_agent_version": "v1",
-      "multi_agent_reasoning_effort": null
+      "multi_agent_reasoning_effort": null,
+      "supports_reasoning_effort_updates": false,
+      "use_responses_lite": true
     }
   }
 }
