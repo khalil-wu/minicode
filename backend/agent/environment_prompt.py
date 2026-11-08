@@ -76,7 +76,7 @@ def _filesystem(environment) -> str:
         + f'<permission_profile type={quoteattr(kind)}>{body}</permission_profile></filesystem>')
 
 
-def render_environment_context(snapshot, *, current_date: str, timezone: str) -> str:
+def render_environment_context(snapshot, *, current_date: str, timezone: str, shell_version: str | None = None) -> str:
     primary = snapshot.primary()
     entries = sorted(snapshot.environments, key=lambda item: item.selection.environment_id)
     lines = ["<environment_context>"]
@@ -107,6 +107,8 @@ def render_environment_context(snapshot, *, current_date: str, timezone: str) ->
             lines.append("    </environment>")
     if not legacy and entries:
         lines.append("  </environments>")
+    if shell_version is not None:
+        lines.append(f"  <shell_version>{escape(shell_version)}</shell_version>")
     lines.extend((f"  <current_date>{escape(current_date)}</current_date>", f"  <timezone>{escape(timezone)}</timezone>"))
     if primary is not None:
         lines.append(_filesystem(primary))

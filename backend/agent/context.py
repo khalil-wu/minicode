@@ -2378,7 +2378,8 @@ class ContextBuilder:
 
             return render_environment_context(snapshot,
                 current_date=datetime.now().astimezone().strftime("%Y-%m-%d"),
-                timezone=self._session_timezone or "local")
+                timezone=self._session_timezone or "local",
+                shell_version=self._tool_execution_context.run_context.shell_version)
         environment = prompt_context.get("environment")
         if not isinstance(environment, dict):
             environment = {}

@@ -17,6 +17,7 @@ DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     "send_message_to_user_async": False,
     "realtime_conversation": True,
     "stable_environment_tools": False,
+    "powershell_shell_version": False,
     "content_item_kinds": True,
     "skill_mcp_dependency_install": True,
     "default_mode_request_user_input": False,

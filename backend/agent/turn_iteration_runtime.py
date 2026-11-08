@@ -227,6 +227,9 @@ class TurnIterationRuntime:
                 )
                 model_events.append(build_context_compacted_event(summary, before, context_ledger_snapshot(self.context)))
         self.sync_active_session_model(snapshot)
+        from backend.agent.shell_version import shell_version_for_environment
+        run_context.shell_version = await shell_version_for_environment(run_context.turn_environments,
+            enabled=snapshot is not None and snapshot.config.feature_flags.enabled("powershell_shell_version"))
         if run_context.plugin_capabilities_changed:
             run_context.plugin_install_candidates = None
             run_context.plugin_capabilities_changed = False

@@ -91,6 +91,7 @@ class RunContext:
     thread_environments: ThreadEnvironments | None = None
     retain_thread_environments: bool = False
     user_shell: dict[str, str] | None = None
+    shell_version: str | None = None
     environment_thread_runtime: ConversationThreadRuntime | None = None
     node_repl_owner: Any | None = None
     initial_turn_environments: TurnEnvironmentSnapshot | None = None
