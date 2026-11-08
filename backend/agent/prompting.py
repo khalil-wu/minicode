@@ -428,12 +428,12 @@ def build_static_environment_info(workspace_root: Path | None = None) -> str:
     # active model name/provider is NOT static (it can change per session/turn)
     # and would break prompt-cache reuse if inlined here. It belongs in the
     # per-turn runtime context, not this stable block.
-    try:
+    if is_windows:
+        os_version = "Windows " + ".".join(map(str, sys.getwindowsversion().platform_version))
+    else:
         os_version = " ".join(
             part for part in (platform.system(), platform.release(), platform.version()) if part
         ).strip()
-    except Exception:
-        os_version = os_name
     lines = [
         "## Environment",
         f"- OS: {os_version or os_name} (platform {sys.platform})",

@@ -6,6 +6,7 @@ import platform
 from pathlib import Path
 import subprocess
 import sys
+import sysconfig
 from typing import Any
 
 
@@ -13,6 +14,9 @@ SOURCE_COMMIT = "970111f6cb62cc02fe36a82ea7d71b37a2889c97"
 
 
 def packaged_execpolicy_directory() -> Path:
+    # Select the binary for this interpreter without a Windows management query.
+    machine = (sysconfig.get_platform().removeprefix("win-")
+        if sys.platform == "win32" else platform.machine().lower())
     target = {
         ("win32", "amd64"): "x86_64-pc-windows-msvc",
         ("win32", "x86_64"): "x86_64-pc-windows-msvc",
@@ -20,7 +24,7 @@ def packaged_execpolicy_directory() -> Path:
         ("linux", "aarch64"): "aarch64-unknown-linux-gnu",
         ("darwin", "arm64"): "aarch64-apple-darwin",
         ("darwin", "x86_64"): "x86_64-apple-darwin",
-    }[(sys.platform, platform.machine().lower())]
+    }[(sys.platform, machine)]
     return Path(__file__).with_name("resources") / "execpolicy" / target
 
 

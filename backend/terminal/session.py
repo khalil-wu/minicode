@@ -5,9 +5,6 @@ import codecs
 import logging
 import os
 from pathlib import Path
-import platform
-import signal
-import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -87,7 +84,7 @@ class TerminalSession:
         self._stdout_reader_task: asyncio.Task[None] | None = None
         self._stderr_reader_task: asyncio.Task[None] | None = None
         self._waiter_task: asyncio.Task[None] | None = None
-        self._is_windows = platform.system() == "Windows"
+        self._is_windows = os.name == "nt"
         self._exit_notified = False
         self._exit_notification_error: dict[str, str] = {}
         self._external_pid: int | None = None

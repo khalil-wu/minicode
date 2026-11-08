@@ -289,12 +289,16 @@ def test_run_command_model_schema_exposes_execution_policy_controls() -> None:
 
 
 def test_windows_environment_prompt_matches_run_command_shell(monkeypatch) -> None:
+    from types import SimpleNamespace
     from backend.agent import prompting
 
     monkeypatch.setattr(prompting.sys, "platform", "win32")
+    monkeypatch.setattr(prompting.sys, "getwindowsversion",
+        lambda: SimpleNamespace(platform_version=(10, 0, 26100)), raising=False)
 
     environment = build_static_environment_info()
 
+    assert "Windows 10.0.26100 (platform win32)" in environment
     assert "command syntax is PowerShell" in environment
     assert "sandbox changes permissions/network" in environment
     assert "run_command uses host" in environment

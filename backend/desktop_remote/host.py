@@ -9,19 +9,11 @@ from pathlib import Path
 import platform
 import secrets
 import signal
-import socket
 
 from .relay import Relay
 
 
 PROTOCOL_VERSION = 1
-
-
-def _listener() -> socket.socket:
-    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    listener.bind(("127.0.0.1", 0))
-    listener.setblocking(False)
-    return listener
 
 
 class DesktopHost:
@@ -89,8 +81,6 @@ class DesktopHost:
 
         bridge = await asyncio.start_server(self._bridge, "127.0.0.1", 0)
         bridge_port = bridge.sockets[0].getsockname()[1]
-        backend_socket = _listener()
-        backend_port = backend_socket.getsockname()[1]
         bridge_endpoint = f"http://127.0.0.1:{bridge_port}"
         os.environ["MINICODE_STATE_ROOT"] = str(self.state_root)
         os.environ["MINICODE_RUNTIME_TOKEN"] = self.runtime_token
@@ -103,15 +93,10 @@ class DesktopHost:
 
         self.native = RemoteNative(self.emit_native, bridge_endpoint, self.bridge_token)
         app.include_router(self.native.router)
-        self.runtime = {
-            "protocol": PROTOCOL_VERSION, "version": __version__, "generation": self.generation,
-            "backend_port": backend_port, "runtime_token": self.runtime_token,
-            "bridge_endpoint": bridge_endpoint, "bridge_token": self.bridge_token,
-            "platform": platform.system().lower(), "home": str(Path.home()), "state_root": str(self.state_root),
-        }
-        self.server = uvicorn.Server(uvicorn.Config(app, access_log=False, log_level="warning", ws_max_size=1024 * 1024,
+        self.server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0,
+                                                  access_log=False, log_level="warning", ws_max_size=1024 * 1024,
                                                   ws_ping_interval=None))
-        backend_task = asyncio.create_task(self.server.serve(sockets=[backend_socket]), name="remote-minicode-harness")
+        backend_task = asyncio.create_task(self.server.serve(), name="remote-minicode-harness")
         control = None
         state_file = self.daemon_dir / "daemon.json"
         try:
@@ -121,6 +106,13 @@ class DesktopHost:
                         await backend_task
                         raise RuntimeError("remote MiniCode backend exited before readiness")
                     await asyncio.sleep(0.02)
+            self.runtime = {
+                "protocol": PROTOCOL_VERSION, "version": __version__, "generation": self.generation,
+                "backend_port": self.server.servers[0].sockets[0].getsockname()[1], "runtime_token": self.runtime_token,
+                "bridge_endpoint": bridge_endpoint, "bridge_token": self.bridge_token,
+                "platform": "windows" if os.name == "nt" else platform.system().lower(),
+                "home": str(Path.home()), "state_root": str(self.state_root),
+            }
             control = await asyncio.start_server(self._control, "127.0.0.1", 0, limit=4096)
             state = {"pid": os.getpid(), "generation": self.generation,
                      "port": control.sockets[0].getsockname()[1], "token": self.control_token}
@@ -147,7 +139,6 @@ class DesktopHost:
                 await self.native.close()
             self.server.should_exit = True
             await backend_task
-            backend_socket.close()
             if state_file.exists() and json.loads(state_file.read_text(encoding="utf-8"))["generation"] == self.generation:
                 state_file.unlink()
 
