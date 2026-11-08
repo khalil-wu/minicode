@@ -30,6 +30,27 @@ def ids(page):
     return [item["id"] for item in page["data"]]
 
 
+def test_warm_directory_republishes_recovered_summary_without_a_manifest_change(tmp_path):
+    repo = ConversationRepository(tmp_path / "conversations")
+    first = repo.create_conversation(title="Readable generation", transcript=[{"id": "first", "role": "user", "content": "Original"}])
+    repo._MAX_PROJECTION_ADMISSIONS = 0
+    second = repo.append_transcript_message(first.id, {"id": "second", "role": "assistant", "content": "Later"})
+    reader = ConversationRepository(repo.storage_root)
+    assert reader.directory.page()["data"][0]["message_count"] == 2
+    before = reader.directory._indexed_source
+    repo.transcript_path(first.id).write_text("truncated", encoding="utf-8")
+    recovered = reader.get_conversation_view(first.id)
+    assert recovered["revision"] == first.revision < second.revision
+    page = reader.directory.page()
+    assert page["data"][0]["revision"] == first.revision
+    assert page["data"][0]["message_count"] == 1
+    assert reader.directory._indexed_source != before
+    assert reader.directory.page({"use_state_db_only": True})["data"] == page["data"]
+    repaired = reader.append_transcript_message(first.id, {"id": "repair", "role": "user", "content": "Continue recovered history"})
+    assert repaired.revision > second.revision
+    assert ConversationRepository(repo.storage_root).directory.page()["data"][0]["revision"] == repaired.revision
+
+
 def test_forward_backward_exclusions_and_stable_cursor_after_deletion(directory_case):
     repo, records = directory_case
     expected = [item.id for item in reversed(records)]

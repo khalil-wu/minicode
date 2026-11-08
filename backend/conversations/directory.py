@@ -109,7 +109,11 @@ class ConversationDirectory:
             with repository._process_lock:
                 repository._ensure_summary_index_loaded()
                 summaries = dict(repository._summary_index)
-                source = (instance, revision, dict(repository._summary_index_stamps))
+                # History recovery can replace a cached summary with an older
+                # readable generation while the manifest's file stamp stays
+                # unchanged. The directory must publish that observed revision.
+                source = (instance, revision, {identifier: (repository._summary_index_stamps[identifier], summary.revision)
+                    for identifier, summary in summaries.items()})
             project_keys = {}
             prepared = (None if source == self._indexed_source else
                 [self._values(summary, revision, project_keys) for summary in summaries.values()])
