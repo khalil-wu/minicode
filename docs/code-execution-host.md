@@ -29,6 +29,9 @@ explicit session shutdown. A host permits 128 active isolates and 256 concurrent
 requests; the existing four active cells per code store still applies. Each
 isolate retains its 128 MiB memory limit and ten-second JavaScript execution
 budget. Tool waiting time is outside that execution budget.
+The controller negotiates startup within thirty seconds. A host operation that
+does not answer within sixty seconds terminates that host and fails its live
+cells; an unresponsive process cannot retain the session's cleanup indefinitely.
 
 Startup and process exit are recorded in backend logs as `Code host started`
 and `Code host stopped`. This local transport does not expose a network endpoint

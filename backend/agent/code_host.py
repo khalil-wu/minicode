@@ -14,6 +14,7 @@ from backend.runtime_env import sanitized_subprocess_env
 from backend.subprocesses import spawn_exec, terminate_process_tree
 
 logger = logging.getLogger(__name__)
+HOST_REQUEST_TIMEOUT_SECONDS = 60
 
 
 class CodeHostError(RuntimeError):
@@ -113,11 +114,19 @@ class _Connection:
         self._pending[request_id] = future
         sent = False
         try:
-            async with self._write_lock:
-                self.process.stdin.write(frame)
-                sent = True
-                await self.process.stdin.drain()
-            return await asyncio.shield(future)
+            async with asyncio.timeout(HOST_REQUEST_TIMEOUT_SECONDS):
+                async with self._write_lock:
+                    self.process.stdin.write(frame)
+                    sent = True
+                    await self.process.stdin.drain()
+                return await asyncio.shield(future)
+        except TimeoutError:
+            future.add_done_callback(lambda done: done.exception())
+            self.process.stdin.close()
+            if not await terminate_process_tree(self.process):
+                raise CodeHostError(f"Unresponsive code host cleanup remains pending (pid {self.process.pid})")
+            await asyncio.shield(self._reader)
+            raise CodeHostDisconnected("Code host request timed out; the process was terminated. Inspect completed tool outcomes before retrying writes.")
         except asyncio.CancelledError:
             # Keep the reply owned after the caller stops observing it. The
             # subsequent cell close waits for V8 cancellation to complete.

@@ -99,6 +99,29 @@ async def test_host_crash_fails_all_bound_cells_and_only_new_cells_can_reconnect
 
 
 @pytest.mark.asyncio
+async def test_unresponsive_host_timeout_reaps_process_and_fails_other_live_cells(monkeypatch):
+    import backend.agent.code_host as module
+
+    session = CodeHostSession()
+    left, right = session.cell(), session.cell()
+    try:
+        await asyncio.gather(start(left, "await new Promise(()=>{});"), start(right, "await new Promise(()=>{});"))
+        connection = session.host._connection
+        lost = asyncio.create_task(right.wait_failure())
+        process = psutil.Process(connection.process.pid)
+        process.suspend()
+        monkeypatch.setattr(module, "HOST_REQUEST_TIMEOUT_SECONDS", .1)
+        with pytest.raises(CodeHostDisconnected, match="timed out"):
+            await asyncio.wait_for(left.step("deliver", []), 8)
+        with pytest.raises(CodeHostDisconnected):
+            await lost
+        assert connection.process.returncode is not None
+        assert not process.is_running()
+    finally:
+        await session.aclose()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_start_and_close_wait_for_the_actual_spawn_owner(monkeypatch):
     import backend.agent.code_host as module
 
