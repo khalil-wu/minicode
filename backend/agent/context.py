@@ -4688,7 +4688,10 @@ class ContextBuilder:
 
     def prepend_history_messages(self, messages: list[LLMMessage]) -> None:
         """Prepend hydrated prefix messages via ConversationHistory."""
-        self._history_store.prepend(messages)
+        self.prepend_prepared_history(self._history_store.prepare_prefix(messages))
+
+    def prepend_prepared_history(self, prefix: ConversationHistory) -> None:
+        self._history_store.prepend_prepared(prefix)
         self._ensure_invoked_skill_messages()
         self._reconstruct_tool_result_budget_state()
 

@@ -321,10 +321,11 @@ class ConversationRuntime:
         try:
             # load_snapshot_partial normalized and detached the whole history
             # before splitting it. Preserve that boundary during prefix decode.
-            parsed_history = await asyncio.to_thread(
-                ContextBuilder._deserialize_normalized_history,
-                pending_history,
-            )
+            history_store = self._context_builder._history_store
+            def prepare():
+                messages = ContextBuilder._deserialize_normalized_history(pending_history)
+                return history_store.prepare_prefix(messages)
+            prepared_history = await asyncio.to_thread(prepare)
         except asyncio.CancelledError:
             return
         except Exception as exc:
@@ -359,7 +360,7 @@ class ConversationRuntime:
                 return
             changed = current_revision > expected_snapshot_revision
             if not changed:
-                self._context_builder.prepend_history_messages(parsed_history)
+                self._context_builder.prepend_prepared_history(prepared_history)
         if changed:
             await self._hydrate_repository(conversation_id, generation,
                 on_hydration_complete if notify else None)

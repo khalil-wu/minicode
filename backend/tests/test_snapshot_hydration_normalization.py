@@ -85,9 +85,9 @@ def test_hydration_accounts_each_installed_history_once_and_recounts_inserted_sk
         builder.prepend_history_messages(ContextBuilder._deserialize_normalized_history(pending))
     else:
         builder.load_snapshot(source)
-    # Initial recent/full installation, optional complete prefix installation,
-    # and only a real inserted skill require token accounting.
-    assert estimator.call_count == (9 if partial else 6) + (7 if restore_skill else 0)
+    # Prefix preparation reuses the installed suffix's accounting. Only a
+    # real inserted skill requires rebuilding the affected history.
+    assert estimator.call_count == 6 + (7 if restore_skill else 0)
     expected = ContextBuilder()
     expected.load_snapshot(builder.export_snapshot())
     assert builder.context_ledger() == expected.context_ledger()
@@ -165,6 +165,71 @@ async def test_repository_normalization_yields_foreground_and_only_publishes_its
             assert builder._history[0].is_user_input
         else:
             assert [message.content for message in builder._history] == ["Replaced during restore" if change == "replacement" else "Different conversation"]
+    finally:
+        release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["none", "append", "replacement", "switch", "shutdown"])
+async def test_prefix_accounting_runs_off_loop_and_keeps_live_suffix_ownership(tmp_path, monkeypatch, change):
+    from backend.llm.base import LLMMessage
+
+    source = history_snapshot()
+    source["history"].extend({"role": "assistant", "content": f"retained-{index}"} for index in range(1000))
+    repo = ConversationRepository(tmp_path)
+    record = repo.create_conversation(context_snapshot=source)
+    other = repo.create_conversation(context_snapshot={"history": [{"role": "user", "content": "Other owner"}]})
+    builder = ContextBuilder()
+    runtime = ConversationRuntime(conversation_repo=repo, context_builder=builder, build_summary_from_transcript=lambda *_: "")
+    runtime.active_conversation_id = record.id
+    foreground = threading.get_ident()
+    entered, release = threading.Event(), threading.Event()
+    estimates = []
+    held_once = False
+    def estimate(message, raw):
+        nonlocal held_once
+        worker = threading.get_ident() != foreground
+        if worker and not held_once:
+            held_once = True
+            entered.set()
+            assert release.wait(5)
+        estimates.append((message.content, worker))
+        return estimate_llm_message_tokens(message, raw)
+    builder._history_store._estimator = estimate
+    try:
+        runtime.load_active_conversation_snapshot(record.id, record.context_snapshot, snapshot_revision=record.revision)
+        assert await asyncio.to_thread(entered.wait, 3)
+        assert len(builder._history) == 20
+        tail = tuple(builder._history)
+        before = builder._history_store.revision
+        if change == "append":
+            builder._history_store.append(LLMMessage("user", "Arrived during hydration", timestamp_ms=2000))
+        elif change == "replacement":
+            repo.save_context_snapshot(record.id, {"history": [{"role": "user", "content": "Replaced owner"}]})
+        elif change == "switch":
+            runtime.active_conversation_id = other.id
+            runtime.defer_repository_hydration(other.id, on_hydration_complete=None)
+            runtime.start_hydration(other.id)
+        elif change == "shutdown":
+            await runtime.shutdown()
+        release.set()
+        await runtime.wait_for_hydration(runtime.active_conversation_id)
+        if change in {"none", "append"}:
+            assert sum(not worker for _, worker in estimates) == 20 + int(change == "append")
+            assert len(estimates) == 1006 + int(change == "append")
+            assert builder._history_store.changed_since(before) == 0
+            start = -21 if change == "append" else -20
+            assert all(builder._history[start + index] is message for index, message in enumerate(tail))
+            expected = ContextBuilder()
+            expected.load_snapshot(builder.export_snapshot())
+            assert builder.context_ledger() == expected.context_ledger()
+            assert builder._history_tokens_total == expected._history_tokens_total
+            assert builder._history_store.token_estimates == expected._history_store.token_estimates
+        elif change == "shutdown":
+            assert tuple(builder._history) == tail
+        else:
+            assert [message.content for message in builder._history] == ["Replaced owner" if change == "replacement" else "Other owner"]
     finally:
         release.set()
         await runtime.shutdown()

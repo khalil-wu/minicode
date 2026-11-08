@@ -285,21 +285,43 @@ class ConversationHistory:
 
     def prepend(self, messages: list[LLMMessage]) -> None:
         """Prepend hydrated prefix messages, adjusting the frozen boundary."""
-        if not messages:
+        self.prepend_prepared(self.prepare_prefix(messages))
+
+    def prepare_prefix(self, messages: list[LLMMessage]) -> ConversationHistory:
+        """Prepare detached restored messages without touching the live suffix."""
+        prepared = ConversationHistory(self._estimator)
+        prepared.messages = messages
+        prepared.ensure_timestamps()
+        prepared.rebuild_token_cache()
+        return prepared
+
+    def prepend_prepared(self, prefix: ConversationHistory) -> None:
+        """Install a prepared prefix and merge its accounting on the owner loop."""
+        if not prefix.messages:
             # A completed/empty hydration callback means no older prefix will
             # be prepended. Do not leave an absolute pending boundary around
             # for a later unrelated append or skill restore.
             self.pending_hydration_frozen_prefix_count = 0
             return
-        self.messages = messages + self.messages
+        self.messages = prefix.messages + self.messages
         self.frozen_count = min(
             len(self.messages),
             max(0, int(self.pending_hydration_frozen_prefix_count))
             + max(0, int(self.frozen_count)),
         )
         self.pending_hydration_frozen_prefix_count = 0
-        self.ensure_timestamps()
-        self.rebuild_token_cache()
+        self.last_message_timestamp_ms = max(self.last_message_timestamp_ms, prefix.last_message_timestamp_ms)
+        self._token_estimates = prefix._token_estimates + self._token_estimates
+        self._tokens_total += prefix._tokens_total
+        self._accounting = prefix._accounting + self._accounting
+        for category, row in self._ledger.items():
+            earlier = prefix._ledger[category]
+            sources = earlier["sources"].copy()
+            sources.update(row["sources"])
+            row["sources"] = sources
+            row["tokens"] += earlier["tokens"]
+            row["items"] += earlier["items"]
+        self._changed(0)
 
     def replace_all(self, messages: list[LLMMessage]) -> None:
         self.messages = messages
