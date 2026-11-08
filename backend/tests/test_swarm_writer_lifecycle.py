@@ -202,3 +202,17 @@ runtime=module.AgentRuntime(metrics_file=marker.parent/'metrics.jsonl',enable_le
     assert result.returncode == 0, result.stderr
     assert "Cannot operate on a closed database" not in result.stderr
     assert json.loads(marker.read_text()) == {"heartbeat_alive": False}
+
+
+@pytest.mark.asyncio
+async def test_child_drain_keeps_process_lease_and_writer_until_application_services_close(tmp_path):
+    runtime = AgentRuntime(metrics_file=tmp_path / "metrics.jsonl", enable_lease_heartbeat=True)
+    heartbeat = runtime._lease_thread
+    try:
+        assert await runtime.aclose(release_lease=False)
+        assert heartbeat.is_alive() and not runtime._lease_lost
+        assert runtime._swarm_store._writer.execute("SELECT 1").fetchone()[0] == 1
+        assert await runtime.aclose(release_lease=True)
+        assert not heartbeat.is_alive()
+    finally:
+        runtime.close(release_lease=True)

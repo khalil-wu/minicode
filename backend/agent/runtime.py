@@ -645,7 +645,7 @@ class AgentRuntime:
             completed = await self.close_subagent_session(agent_id, reason="runtime_shutdown") and completed
         if not completed:
             return False
-        return await to_thread_cancel_safe(self.close, release_lease=release_lease)
+        return await to_thread_cancel_safe(self.close, release_lease=True) if release_lease else True
 
     def _owns_record(self, record: AgentRunRecord | SubagentRunRecord) -> bool:
         return bool(
