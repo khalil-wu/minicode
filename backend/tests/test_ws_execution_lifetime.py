@@ -252,7 +252,7 @@ async def test_home_durable_ack_retains_actual_task_before_any_conversation_exis
             entered.set()
             await release.wait()
             conversation = owner.conversation_repo.create_conversation(conversation_id="conv_home_lifetime")
-            owner.command_dispatcher._bind_user_message_owner(command, conversation.id)
+            await owner.command_dispatcher._bind_user_message_owner(command, conversation.id)
             return True
 
         monkeypatch.setattr(owner.command_dispatcher, "_dispatch_client_command", preparing)

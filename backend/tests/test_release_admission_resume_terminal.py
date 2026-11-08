@@ -61,7 +61,7 @@ async def test_first_input_owner_survives_admission_without_command_completion(t
         claimed.data["_client_queue_key"] = queue.path.stem
         async with first.conversation_lifecycle_lock():
             first.active_conversation_id = repository.create_conversation(conversation_id=owner, workspace_root=str(tmp_path)).id
-            dispatcher._bind_user_message_owner(claimed, first.active_conversation_id)
+            await dispatcher._bind_user_message_owner(claimed, first.active_conversation_id)
         assert claimed.data["conversation_id"] == owner == first.active_conversation_id
         assert sent[0]["type"] == "client.command.ack"
         repository.commit_turn_admission(owner,
@@ -116,7 +116,7 @@ async def test_first_input_owner_waits_for_prior_selection_without_blocking_inte
         elif command.type == "interrupt":
             interrupted.set()
         elif command.type == "user_message":
-            dispatcher._bind_user_message_owner(command, session.active_conversation_id)
+            await dispatcher._bind_user_message_owner(command, session.active_conversation_id)
             admitted.append(command.data["conversation_id"])
 
     dispatcher._handle_command_inner = handle

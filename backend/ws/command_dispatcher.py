@@ -1546,9 +1546,9 @@ class SessionCommandDispatcher:
             return
         await self._session.send_event(AgentEvent.command_result(command.type, "", level="success"))
 
-    def _bind_user_message_owner(self, command: UserCommand, conversation_id: str) -> None:
+    async def _bind_user_message_owner(self, command: UserCommand, conversation_id: str) -> None:
         command_id = self._client_command_id(command)
-        if command_id:
+        def bind():
             durable_queue = self._session.run_manager.durable_client_commands
             if (durable_queue is not None and command.data.get("_client_queue_key") == durable_queue.path.stem
                     and durable_queue.has_client_command(command_id)):
@@ -1557,6 +1557,8 @@ class SessionCommandDispatcher:
                             "_permission_mode_selection_revision", "_workspace_binding_selection_revision",
                         ) if key in command.data}):
                     raise RuntimeError("The current dispatcher does not own this durable input")
+        if command_id:
+            await to_thread_cancel_safe(bind)
         command.data["conversation_id"] = conversation_id
         manager = self._session.ws_manager
         if manager is not None and conversation_id:
@@ -1597,7 +1599,7 @@ class SessionCommandDispatcher:
         completion = "refused" if negative is not None else "completed" if results else "unknown"
         outcome = negative if negative is not None else results[-1] if results else None
         conversation_id = str(command.data.get("conversation_id") or self._session.active_conversation_id or "")
-        self._bind_user_message_owner(command, conversation_id)
+        await self._bind_user_message_owner(command, conversation_id)
         await self._session.send_event(AgentEvent(type="command.result", data={
             "command": "user_message", "client_command_id": command_id,
             "conversation_id": conversation_id,
@@ -1783,7 +1785,7 @@ class SessionCommandDispatcher:
                         str(AttachmentUnavailableError(unavailable)), reason="attachments_rejected")
                     return
                 command.data["attachments"] = attachments
-                self._bind_user_message_owner(command, target_conversation_id)
+                await self._bind_user_message_owner(command, target_conversation_id)
                 if await self._forward_conversation_command(command, target_conversation_id):
                     return
 
@@ -1855,9 +1857,9 @@ class SessionCommandDispatcher:
             if not user_message_id and legacy_suffix:
                 candidates.append(f"user_{legacy_suffix}")
             current_for_admission = (
-                (self._session.conversation_repo.get_conversation(target_conversation_id)
+                (await to_thread_cancel_safe(self._session.conversation_repo.get_conversation, target_conversation_id)
                  if command.data.get("_legacy_user_message_identity")
-                 else self._session.conversation_repo.get_execution_context(target_conversation_id,
+                 else await to_thread_cancel_safe(self._session.conversation_repo.get_execution_context, target_conversation_id,
                      transcript_ids=tuple(candidates)))
                 if (client_command_id or requested_agent_mode is not None or requested_permission_mode is not None
                     or requested_workspace_root) and target_conversation_id else None
@@ -1882,11 +1884,13 @@ class SessionCommandDispatcher:
             if client_command_id:
                 message_metadata["client_command_id"] = client_command_id
                 from backend.agent.runtime import default_runtime
-                runtime = default_runtime()
-                store_id = self._session.conversation_repo.store_instance_id()
-                journal = runtime.execution_journal(execution_journal_owner(
-                    "conversation", store_id, target_conversation_id,
-                )) if target_conversation_id else None
+                def journal_owner():
+                    runtime = default_runtime()
+                    store_id = self._session.conversation_repo.store_instance_id()
+                    journal = runtime.execution_journal(execution_journal_owner(
+                        "conversation", store_id, target_conversation_id)) if target_conversation_id else None
+                    return runtime, store_id, journal
+                runtime, store_id, journal = await to_thread_cancel_safe(journal_owner)
                 snapshot = current_for_admission.context_snapshot if current_for_admission is not None else {}
                 users = {str(item.get("id") or ""): item for item in (
                     current_for_admission.transcript if current_for_admission is not None else []
@@ -1898,12 +1902,17 @@ class SessionCommandDispatcher:
                     candidates.extend(str(message_id) for message_id, boundary in (snapshot.get("turn_admissions") or {}).items()
                         if boundary.get("client_command_id") == client_command_id)
                     if journal is not None:
-                        candidates.extend(str(event.payload["user_message_id"]) for event in journal.read_events()
+                        candidates.extend(str(event.payload["user_message_id"]) for event in await to_thread_cancel_safe(journal.read_events)
                             if event.event_type == "user_prompt" and event.payload.get("client_command_id") == client_command_id)
                 candidates = list(dict.fromkeys(candidates))
+                receipt_ids = [identity for candidate in candidates for identity in (
+                    turn_user_prompt_id(store_id, target_conversation_id, candidate),
+                    turn_input_rejection_id(candidate, client_command_id),
+                    turn_input_consumption_id(candidate, client_command_id))]
+                receipts = await to_thread_cancel_safe(journal.get_events, receipt_ids) if journal is not None else {}
                 for candidate in candidates:
                     candidate_user = users.get(candidate)
-                    candidate_prompt = journal.get_event(turn_user_prompt_id(store_id, target_conversation_id, candidate)) if journal is not None else None
+                    candidate_prompt = receipts.get(turn_user_prompt_id(store_id, target_conversation_id, candidate))
                     candidate_admission = dict((snapshot.get("turn_admissions") or {}).get(candidate) or {})
                     if not candidate_admission and candidate_prompt is not None:
                         candidate_admission = dict((candidate_prompt.payload.get("context_snapshot", {}).get("turn_admissions") or {}).get(candidate) or {})
@@ -1933,11 +1942,11 @@ class SessionCommandDispatcher:
             message_metadata.update(user_message_id=user_message_id, assistant_message_id=assistant_message_id)
             command.data.update(user_message_id=user_message_id, assistant_message_id=assistant_message_id)
             if journal is not None:
-                rejection = journal.get_event(turn_input_rejection_id(user_message_id, client_command_id))
+                rejection = receipts.get(turn_input_rejection_id(user_message_id, client_command_id))
                 if rejection is not None:
                     await self._session.send_event(AgentEvent(type="command.result", data=rejection.payload["result"]))
                     return
-                consumption = journal.get_event(turn_input_consumption_id(user_message_id, client_command_id))
+                consumption = receipts.get(turn_input_consumption_id(user_message_id, client_command_id))
                 if consumption is not None and (existing_user is not None or prompt is not None):
                     await self._session.send_event(AgentEvent(type="command.result", data={
                         "command": "user_message", "level": "success", "message": "",
@@ -2080,7 +2089,7 @@ class SessionCommandDispatcher:
                     message_metadata["_workspace_binding_selection_revision"] = created.workspace_binding_revision
                     command.data["_permission_mode_selection_revision"] = created.permission_mode_revision
                     command.data["_workspace_binding_selection_revision"] = created.workspace_binding_revision
-                self._bind_user_message_owner(command, target_conversation_id)
+                await self._bind_user_message_owner(command, target_conversation_id)
                 queued_dispatch = bool(command.data.pop("_queued_user_message_dispatch", False))
                 message_metadata["_queued_user_message_dispatch"] = queued_dispatch
                 if retry_from_message_id:
@@ -2162,7 +2171,7 @@ class SessionCommandDispatcher:
                     or self._session.run_manager.is_queue_dispatching(target_conversation_id)
                     or self._session.run_manager.has_pending_lifecycle_cleanup(target_conversation_id)
                 ) and not queued_dispatch:
-                    accepted_conversation = self._session.conversation_repo.get_conversation(target_conversation_id)
+                    accepted_conversation = await to_thread_cancel_safe(self._session.conversation_repo.get_execution_context, target_conversation_id)
                     guardian_order = self._session.guardian_host_for_conversation(target_conversation_id,
                         evidence_checkpoint=accepted_conversation.context_snapshot.get("guardian_evidence")).evidence.reserve_order()
                     from dataclasses import replace

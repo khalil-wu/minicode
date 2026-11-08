@@ -1005,9 +1005,13 @@ class ExecutionJournal:
                 ) from exc
 
     def get_event(self, event_id: str) -> JournalEvent | None:
+        return self.get_events((event_id,)).get(event_id)
+
+    def get_events(self, event_ids: Iterable[str]) -> dict[str, JournalEvent]:
+        """Read related receipt facts at one validated journal boundary."""
         with self._locked():
             self._validated_events_unlocked()
-            return self._events_by_id.get(event_id)
+            return {event_id: self._events_by_id[event_id] for event_id in event_ids if event_id in self._events_by_id}
 
     def read_events_since(self, seq: int) -> list[JournalEvent]:
         with self._locked():
