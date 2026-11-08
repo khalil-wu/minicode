@@ -1283,6 +1283,7 @@ class ContextBuilder:
         """Render and store one model-visible user turn."""
         user_message = str(user_message or "")
         self._sync_realtime_world_state()
+        self._sync_model_catalog(state)
         agent_inputs = state.prompt_context.get("agent_input_messages")
         if agent_inputs:
             workspace_root = self._workspace_root_for_state(state)
@@ -1450,10 +1451,30 @@ class ContextBuilder:
         self._refresh_active_user_runtime_context(active_state)
         self._sync_realtime_world_state()
 
+        self._sync_model_catalog(active_state)
         messages = self._render_prompt_messages(active_state, workspace_root, prompt_parts)
         # Freeze the transcript used by this request; subsequent runtime updates append.
         self._history_frozen_count = max(self._history_frozen_count, len(self._history))
         return messages
+
+    def _sync_model_catalog(self, state: AgentState) -> None:
+        from backend.agents.model_catalog import INVALIDATED_CATALOG, MODEL_CATALOG_KIND
+
+        if "model_catalog" not in state.prompt_context:
+            return  # Preview-only builders have not captured a receiving tool surface.
+        catalog = state.prompt_context["model_catalog"]
+        previous = next((message for message in reversed(self._history)
+            if message.role == "developer" and (message.content_kind == MODEL_CATALOG_KIND
+                or message.content.startswith("<model_catalog>") and message.content.endswith("</model_catalog>"))), None)
+        if catalog is None and previous is None:
+            return
+        content = catalog if catalog is not None else INVALIDATED_CATALOG
+        namespace = state.prompt_context.get("model_catalog_namespace")
+        metadata = {"provenance": {"type": "tool", **({"namespace": namespace} if namespace is not None else {})}}
+        if previous is not None and previous.content == content and previous.content_metadata == metadata:
+            return
+        self._history_store.append(LLMMessage(role="developer", content=content,
+            content_kind=MODEL_CATALOG_KIND, content_metadata=metadata, private_model_only=True), raw_content=content)
 
     def _sync_realtime_world_state(self) -> None:
         context = self._tool_execution_context
@@ -3071,6 +3092,7 @@ class ContextBuilder:
                 phase=message.phase,
                 answer_source=message.answer_source,
                 content_kind=message.content_kind,
+                content_metadata=deepcopy(message.content_metadata),
                 provider_items=list(message.provider_items),
                 attachment_refs=list(message.attachment_refs),
                 runtime_context=message.runtime_context,
@@ -3418,6 +3440,7 @@ class ContextBuilder:
                 phase=message.phase,
                 answer_source=message.answer_source,
                 content_kind=message.content_kind,
+                content_metadata=deepcopy(message.content_metadata),
                 provider_items=list(message.provider_items),
                 images=list(message.images),
                 documents=list(message.documents),
@@ -4408,6 +4431,8 @@ class ContextBuilder:
             for key in ("is_error", "private_model_only", "is_user_input"):
                 if getattr(message, key):
                     serialized[key] = True
+            if message.content_metadata:
+                serialized["content_metadata"] = deepcopy(message.content_metadata)
             # Empty native outputs are actual provider results, distinct from
             # an absent result. Preserve them and opaque nested fields exactly.
             for key in ("mcp_output", "code_mode_output", "tool_search_output", "history_notes_output", "native_tool_output", "accepted_input"):
@@ -4727,7 +4752,7 @@ class ContextBuilder:
                 continue
             role = _normalize_message_role(raw.get("role", "user"))
             content = _message_content_text(raw.get("content", ""))
-            if role == "system" or (role == "developer" and not history_started):
+            if role == "system" or (role == "developer" and not history_started and not raw.get("content_kind")):
                 continue
             history_started = True
             raw = {**raw, "role": role, "content": content}
@@ -4828,6 +4853,7 @@ class ContextBuilder:
                     input_origin=raw["input_origin"],
                     answer_source=raw["answer_source"],
                     content_kind=str(raw.get("content_kind") or ""),
+                    content_metadata=deepcopy(raw.get("content_metadata", {})),
                     provider_items=raw["provider_items"],
                     mcp_output=deepcopy(raw.get("mcp_output")),
                     code_mode_output=deepcopy(raw.get("code_mode_output")),

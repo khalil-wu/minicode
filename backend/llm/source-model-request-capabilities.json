@@ -16,7 +16,9 @@
       "experimental_supported_tools": [
         "send_user_message_async",
         "clock"
-      ]
+      ],
+      "description": "Frontier intelligence for the most demanding work.",
+      "visibility": "list"
     },
     "gpt-6.1-sol": {
       "support_verbosity": true,
@@ -33,7 +35,9 @@
       "experimental_supported_tools": [
         "send_user_message_async",
         "clock"
-      ]
+      ],
+      "description": "Latest workhorse model for coding and everyday work.",
+      "visibility": "list"
     },
     "gpt-6-sol": {
       "support_verbosity": true,
@@ -50,7 +54,9 @@
       "experimental_supported_tools": [
         "send_user_message_async",
         "clock"
-      ]
+      ],
+      "description": "Previous generation workhorse model.",
+      "visibility": "list"
     },
     "gpt-6-luna": {
       "support_verbosity": true,
@@ -67,7 +73,9 @@
       "experimental_supported_tools": [
         "send_user_message_async",
         "clock"
-      ]
+      ],
+      "description": "Fast and affordable model for easier tasks.",
+      "visibility": "list"
     },
     "gpt-5.6-sol": {
       "support_verbosity": true,
@@ -81,7 +89,9 @@
         }
       ],
       "multi_agent_version": "v2",
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Older generation workhorse model.",
+      "visibility": "list"
     },
     "gpt-5.6-terra": {
       "support_verbosity": true,
@@ -95,7 +105,9 @@
         }
       ],
       "multi_agent_version": "v2",
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Older balanced model for straightforward work.",
+      "visibility": "list"
     },
     "gpt-5.6-luna": {
       "support_verbosity": true,
@@ -109,7 +121,9 @@
         }
       ],
       "multi_agent_version": "v1",
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Older fast and efficient model.",
+      "visibility": "list"
     },
     "gpt-daybreak-blue-latest": {
       "support_verbosity": true,
@@ -117,7 +131,9 @@
       "supports_reasoning_summary_parameter": true,
       "service_tiers": [],
       "multi_agent_version": "v2",
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Latest frontier agentic coding model for broad defensive cybersecurity work.",
+      "visibility": "hide"
     },
     "gpt-daybreak-red-latest": {
       "support_verbosity": true,
@@ -125,7 +141,9 @@
       "supports_reasoning_summary_parameter": true,
       "service_tiers": [],
       "multi_agent_version": "v2",
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Cyber-permissive variant of our latest frontier agentic coding model for advanced, authorized cybersecurity research.",
+      "visibility": "hide"
     },
     "gpt-5.5": {
       "support_verbosity": true,
@@ -139,7 +157,9 @@
         }
       ],
       "multi_agent_version": null,
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Legacy coding model.",
+      "visibility": "list"
     },
     "codex-auto-review": {
       "support_verbosity": true,
@@ -153,7 +173,9 @@
         }
       ],
       "multi_agent_version": "v1",
-      "experimental_supported_tools": []
+      "experimental_supported_tools": [],
+      "description": "Automatic approval review model for Codex.",
+      "visibility": "hide"
     }
   }
 }

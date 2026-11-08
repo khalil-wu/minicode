@@ -118,6 +118,7 @@ def effective_toolset_policy(
 
     denied = set(disabled_tools)
     coordination_options = None
+    spawn_model_catalog = None
     config = model_execution.config if model_execution is not None else config_snapshot
     model_name = model_execution.model if model_execution is not None else model_name
     model_info = model_execution.model_info if model_execution is not None else model_info
@@ -135,6 +136,10 @@ def effective_toolset_policy(
         from backend.tools.collaboration_tools import SpawnAgentTool, ListAgentsTool, WaitAgentTool, InterruptAgentTool
         from backend.tools.swarm_tools import FollowupTaskTool, SourceSendMessageTool
         coordination = source_agent_options(config, model=model_name, definition=model_info, version=multi_agent_version)
+        from backend.agents.model_catalog import capture_spawn_model_catalog
+
+        if tool_registry.get_tool("task") is not None or tool_registry.get_tool("spawn_agent") is not None:
+            spawn_model_catalog = capture_spawn_model_catalog(model_execution, coordination)
         v2_names = {"spawn_agent", "list_agents", "wait_agent", "interrupt_agent"}
         legacy_names = {"task", "task_status", "task_stop", "send_message", "followup_task", "message_list",
             "task_create", "task_list", "task_get", "task_update", "task_output", "team_create", "team_list", "team_delete"}
@@ -222,6 +227,7 @@ def effective_toolset_policy(
         code_mode_enabled=mode != "direct" and policy.is_available(tool_registry.get_tool_spec("tool_exec")),
         supports_search_tool=supports_search_tool,
         coordination_options=coordination_options,
+        spawn_model_catalog=spawn_model_catalog,
         strict_third_party=mode == "code_mode_only" and config is not None and config.feature_flags.enabled("code_mode_only_strict_3p_tools"),
         direct_only_tool_namespaces=namespaces["direct_only_tool_namespaces"],
         excluded_tool_namespaces=namespaces["excluded_tool_namespaces"],
@@ -249,6 +255,7 @@ class TurnToolSchemaDerivation:
     runtime_guidance: str
     deferred_tools_prompt_block: str = ""
     derivation_key: tuple[Any, ...] = ()
+    model_catalog: Any | None = None
 
 
 def derive_turn_tool_schema_state(
@@ -264,6 +271,7 @@ def derive_turn_tool_schema_state(
     permission_decisions: dict[str, Any] | None = None,
 ) -> TurnToolSchemaDerivation:
     permission_key = permission_context_cache_key(permission_context)
+    catalog = toolset_policy.spawn_model_catalog if toolset_policy is not None else None
     derivation_key = (
         tool_registry.schema_source if tool_registry is not None else None,
         tool_registry.version if tool_registry is not None else None,
@@ -272,6 +280,7 @@ def derive_turn_tool_schema_state(
         id(permission_checker),
         json.dumps(permission_checker.policy_snapshot(), sort_keys=True) if permission_checker is not None else "",
         tuple(sorted(mcp_instructions.items())),
+        catalog,
     )
     if (previous is not None and previous.permission_key == permission_key
             and previous.derivation_key == derivation_key
@@ -286,6 +295,15 @@ def derive_turn_tool_schema_state(
         for schema in canonical_base_schemas
     )
     names = sorted(tool_schema_names(canonical_base_schemas))
+    if catalog is not None and catalog.in_context and catalog.expose_overrides and tool_registry is not None:
+        view = tool_registry.get_schema_view(catalog.tool_name, toolset_policy=toolset_policy,
+            permission_checker=permission_checker, permission_context=permission_context,
+            materialize_schema=False, permission_decisions=permission_decisions)
+        if view is None or not (view.direct or view.code_mode_available
+                or "tool_search" in names and view.exposure in {"deferred", "deferred_model_only"}):
+            catalog = None
+    else:
+        catalog = None
     reachable_mcp_tools = set()
     reachable_mcp_servers = None
     if tool_registry is not None:
@@ -318,4 +336,5 @@ def derive_turn_tool_schema_state(
             reachable_mcp_tools=reachable_mcp_tools, reachable_mcp_servers=reachable_mcp_servers),
         deferred_tools_prompt_block="",
         derivation_key=derivation_key,
+        model_catalog=catalog,
     )

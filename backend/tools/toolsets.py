@@ -141,6 +141,8 @@ class ToolsetPolicy:
     environment_login_parameter: bool | None = None
     model_messages: Mapping[str, Any] | None = field(default=None, repr=False)
     coordination_options: Mapping[str, Any] | None = field(default=None, repr=False)
+    # Receiving-step choices; only schema guidance belongs in the schema cache.
+    spawn_model_catalog: Any | None = field(default=None, repr=False)
     # Live host capability. It never enters durable policy mappings or model metadata.
     realtime_service: Any | None = field(default=None, repr=False, compare=False)
 
@@ -381,6 +383,7 @@ class ToolsetPolicy:
                 f"environments={self.environment_count}:{self.advertise_environment_tools}:{self.windows_shell_guidance}:{self.environment_login_parameter}",
                 "model_messages=" + json.dumps(self.model_messages, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
                 "coordination=" + json.dumps(self.coordination_options, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
+                "spawn_catalog=" + (self.spawn_model_catalog.schema_guidance() if self.spawn_model_catalog is not None else ""),
                 f"realtime={bool(self.realtime_service is not None and self.realtime_service.active and self.realtime_service.started and not self.realtime_service.closing)}",
                 "realtime_desktop=" + ",".join(name for name in ("capture_screen_context", "transfer_voice_call")
                     if self.realtime_service is not None and self.realtime_service.desktop_client is not None
@@ -518,6 +521,8 @@ class ToolsetPolicy:
         """Project captured V2 presentation without mutating the shared executor."""
         options = self.coordination_options
         if options is None or name not in SOURCE_V2_COORDINATION_TOOLS | SOURCE_MESSAGE_BOARD_TOOLS:
+            if self.spawn_model_catalog is not None and self.spawn_model_catalog.expose_overrides and name == self.spawn_model_catalog.tool_name:
+                schema = replace(schema, description=schema.description + "\n\n" + self.spawn_model_catalog.schema_guidance())
             return schema
         namespace = options["tool_namespace"]
         schema = replace(schema, namespace=namespace or "", namespace_tool_name=name,
@@ -562,6 +567,8 @@ class ToolsetPolicy:
             schema = replace(schema, parameters={**schema.parameters, "properties": {
                 **properties, "message": {**properties["message"], "encrypted": True},
             }})
+        if name == "spawn_agent" and self.spawn_model_catalog is not None and self.spawn_model_catalog.expose_overrides:
+            schema = replace(schema, description=schema.description + "\n\n" + self.spawn_model_catalog.schema_guidance())
         if name == "spawn_agent" and options["usage_hint_text"] is not None:
             schema = replace(schema, description=schema.description + "\n\n" + options["usage_hint_text"])
         return schema

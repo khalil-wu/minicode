@@ -65,7 +65,7 @@ def prepare_content_item_kinds(items: list[dict[str, Any]], *, enabled: bool) ->
         metadata = item.get("internal_chat_message_metadata_passthrough")
         if metadata is not None and "content_item_kinds" in metadata:
             item = dict(item)
-            metadata = {key: value for key, value in metadata.items() if key != "content_item_kinds"}
+            metadata = {key: value for key, value in metadata.items() if key not in {"content_item_kinds", "content_item_metadata"}}
             if metadata:
                 item["internal_chat_message_metadata_passthrough"] = metadata
             else:

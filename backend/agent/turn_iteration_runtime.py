@@ -371,6 +371,7 @@ class TurnIterationRuntime:
                 tool_names=[],
                 runtime_guidance="",
                 deferred_tools_prompt_block="",
+                model_catalog=None,
             )
         self.populate_prompt_context(
             state=self.state,
@@ -382,6 +383,10 @@ class TurnIterationRuntime:
         trace.mark("populate_prompt_context")
 
         tool_schemas = schema_state.tool_schemas
+        self.state.prompt_context["model_catalog"] = (
+            schema_state.model_catalog.fragment() if schema_state.model_catalog is not None else None)
+        self.state.prompt_context["model_catalog_namespace"] = (
+            active_policy.spawn_model_catalog.namespace if active_policy.spawn_model_catalog is not None else None)
         if self.tool_context.run_context.extension_actions is not None:
             self.tool_context.run_context.extension_actions.tool_schemas = tool_schemas
         self.state.prompt_context["tool_names"] = schema_state.tool_names

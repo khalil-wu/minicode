@@ -621,9 +621,9 @@ async def _resolve_subagent_llm(
     # A configured role's model is resolved separately above, after that check.
     if model_was_selected and spawn_version == "v2" and not (_apply_source_role and "model" in source_overrides):
         if source_model_request_capabilities(target_model, runtime_model).get("multi_agent_version") == "disabled":
-            available = [model.id for model in model_runtime.get_models(target_provider)
-                if source_model_request_capabilities(model.id, model).get("multi_agent_version") != "disabled"
-                and model.extra.get("show_in_picker", True)] if model_runtime is not None else []
+            from backend.agents.model_catalog import eligible_spawn_models
+
+            available = [model.id for model in eligible_spawn_models(model_runtime.get_models(target_provider), spawn_version)] if model_runtime is not None else []
             raise ValueError(f"Unknown model '{target_model}' for spawn_agent. Available models: {', '.join(available[:5])}")
 
     model_changed = target_provider != parent_provider or target_model != parent_model
@@ -1287,5 +1287,4 @@ class _SubagentLifecycleOwner:
         if decision is not None:
             return decision
         return _SubagentLifecycleDecision("idle", "teammate_idle")
-
 

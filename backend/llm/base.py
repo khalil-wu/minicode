@@ -754,6 +754,7 @@ class LLMMessage:
     native_tool_output: str | list[dict[str, Any]] | None = field(default=None, repr=False)
     # Source ContextualUserFragment identity, independent of provider phase.
     content_kind: str = ""
+    content_metadata: dict[str, Any] = field(default_factory=dict)
 
     def user_text_parts(self) -> list[str]:
         """Keep admitted runtime context and the user's text in separate wire blocks.

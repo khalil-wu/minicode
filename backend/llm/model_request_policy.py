@@ -48,7 +48,8 @@ def source_model_request_capabilities(model: str, definition: Any = None) -> dic
         **_SOURCE_MODELS.get(model, {})}
     if definition is not None:
         capabilities.update({key: value for key, value in definition.extra.items() if key in {
-            "support_verbosity", "default_verbosity", "supports_reasoning_summary_parameter", "service_tiers", "multi_agent_version", "experimental_supported_tools"}})
+            "support_verbosity", "default_verbosity", "supports_reasoning_summary_parameter", "service_tiers", "multi_agent_version", "experimental_supported_tools",
+            "description", "show_in_picker", "visibility"}})
     return capabilities
 
 

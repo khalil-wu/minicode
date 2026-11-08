@@ -5879,7 +5879,15 @@ class OpenAIAdapter(LLMAdapter):
             if role == "system":
                 continue
             elif role == "developer":
-                result.append({"role": "developer", "content": _message_content_text(msg.content)})
+                item = {"role": "developer", "content": _message_content_text(msg.content)}
+                if msg.content_metadata:
+                    item = {"type": "message", "role": "developer",
+                        "content": [{"type": "input_text", "text": _message_content_text(msg.content)}],
+                        "internal_chat_message_metadata_passthrough": {
+                            "content_item_kinds": [msg.content_kind],
+                            "content_item_metadata": [deepcopy(msg.content_metadata)],
+                        }}
+                result.append(item)
             elif role == "user":
                 if msg.input_origin == "agent" and msg.provider_items:
                     result.extend(deepcopy(msg.provider_items))
