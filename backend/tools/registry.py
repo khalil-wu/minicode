@@ -320,11 +320,7 @@ class CapabilityRegistry:
             exposure = "hidden"
         direct = direct and not denied
         schema_available = exposure != "hidden"
-        code_mode_available = (
-            schema_available and active_policy.code_mode_enabled
-            and exposure not in {"direct_model_only", "deferred_model_only"}
-            and name not in {"tool_exec", "tool_wait"}
-        )
+        code_mode_available = schema_available and active_policy.is_code_mode_available(spec)
         description_for_policy = getattr(
             tool,
             "model_description_for_policy",
@@ -638,11 +634,17 @@ class CapabilityRegistry:
             permission_decisions=permission_decisions,
         )
         if active_policy.code_mode_only and not active_policy.nested_surface:
+            nested_prompt_policy = replace(active_policy, nested_surface=True)
+            if active_policy.strict_third_party:
+                # Deferred third-party schemas are discovered inside exec.
+                # Do not materialize them while building its initial prompt.
+                nested_prompt_policy = nested_prompt_policy.with_disabled_tools(
+                    name for name in self._tools if self.get_tool_spec(name).third_party)
             # exec's description contains the nested directory. Its cache must
             # change when an internal tool is registered, replaced or denied,
             # even though the outer tools array still has the same three names.
             direct_fingerprint += self._direct_schema_fingerprint(
-                replace(active_policy, code_mode_only=False, nested_surface=True),
+                nested_prompt_policy,
                 permission_checker=permission_checker,
                 permission_context=permission_context,
                 permission_decisions=permission_decisions,
@@ -699,20 +701,19 @@ class CapabilityRegistry:
             for v in direct_views
         ]
         if active_policy.code_mode_only and not active_policy.nested_surface and "tool_exec" in visible_names:
-            from backend.tools.toolsets import CODE_MODE_DIRECT_TOOLS
             from backend.tools.schema import code_mode_parameters
 
             nested_schemas = self.get_schemas(
                 permission_checker=permission_checker,
                 permission_context=permission_context,
-                toolset_policy=replace(active_policy, code_mode_only=False, nested_surface=True),
+                toolset_policy=nested_prompt_policy,
                 permission_decisions=permission_decisions,
             )
             catalog = []
             for nested in nested_schemas:
                 function = nested.get("function") or {}
                 name = function.get("name")
-                if not name or name in CODE_MODE_DIRECT_TOOLS:
+                if not name or name in {"tool_exec", "tool_wait"} or name == "tool_search" and name in visible_names:
                     continue
                 parameters = function.get("parameters") or {}
                 args = code_mode_parameters(parameters)

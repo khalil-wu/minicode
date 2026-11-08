@@ -11,6 +11,7 @@ from typing import Any, Mapping, MutableMapping
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     "code_mode_prewarm": False,
     "code_mode_tool_description_first": False,
+    "code_mode_only_strict_3p_tools": False,
     "memories": False,
     "multi_agent": True,
     "goals": True,

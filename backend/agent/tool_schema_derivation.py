@@ -207,17 +207,29 @@ def effective_toolset_policy(
         (base_policy or ToolsetPolicy.default()).with_disabled_tools(denied),
         realtime_service=realtime_service if not is_subagent else None,
     )
-    if supports_search_tool and not any((spec := tool_registry.get_tool_spec(tool.name)).exposure in {"deferred", "deferred_model_only"}
-            and policy.is_available(spec) for tool in tool_registry.get_tools()):
-        policy = policy.with_disabled_tools({"tool_search"})
     mode = tool_mode if tool_registry.get_tool("tool_exec") is not None else "direct"
-    return replace(
+    code_mode_config = (config.config_layer_stack.effective_config().get("code_mode", {})
+        if config is not None and config.config_layer_stack is not None else {})
+    namespaces = {}
+    for field in ("direct_only_tool_namespaces", "excluded_tool_namespaces"):
+        values = code_mode_config.get(field, [])
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError(f"code_mode.{field} must be an array of strings")
+        namespaces[field] = frozenset(values)
+    policy = replace(
         policy,
         code_mode_only=mode == "code_mode_only",
-        code_mode_enabled=mode != "direct",
+        code_mode_enabled=mode != "direct" and policy.is_available(tool_registry.get_tool_spec("tool_exec")),
         supports_search_tool=supports_search_tool,
         coordination_options=coordination_options,
+        strict_third_party=mode == "code_mode_only" and config is not None and config.feature_flags.enabled("code_mode_only_strict_3p_tools"),
+        direct_only_tool_namespaces=namespaces["direct_only_tool_namespaces"],
+        excluded_tool_namespaces=namespaces["excluded_tool_namespaces"],
     )
+    if supports_search_tool and not any((spec := policy.project_tool_spec(tool_registry.get_tool_spec(tool.name))).exposure in {"deferred", "deferred_model_only"}
+            and policy.is_available(spec) for tool in tool_registry.get_tools()):
+        policy = policy.with_disabled_tools({"tool_search"})
+    return policy
 
 
 def tool_schema_names(schemas: list[dict[str, Any]]) -> set[str]:

@@ -129,6 +129,9 @@ class ToolsetPolicy:
     code_mode_enabled: bool = True
     nested_surface: bool = False
     supports_search_tool: bool = False
+    strict_third_party: bool = False
+    direct_only_tool_namespaces: frozenset[str] = frozenset()
+    excluded_tool_namespaces: frozenset[str] = frozenset()
     availability_filters: tuple[ToolAvailabilityFilter, ...] = ()
     # Ephemeral receiving-step facts. They are rebuilt from the actual
     # attachment snapshot and never restored from persisted model metadata.
@@ -372,6 +375,9 @@ class ToolsetPolicy:
                 "code_mode_enabled=1" if self.code_mode_enabled else "code_mode_enabled=0",
                 "nested_surface=1" if self.nested_surface else "nested_surface=0",
                 "search=1" if self.supports_search_tool else "search=0",
+                f"strict_3p={self.strict_third_party}",
+                "direct_namespaces=" + ",".join(sorted(self.direct_only_tool_namespaces)),
+                "excluded_namespaces=" + ",".join(sorted(self.excluded_tool_namespaces)),
                 f"environments={self.environment_count}:{self.advertise_environment_tools}:{self.windows_shell_guidance}:{self.environment_login_parameter}",
                 "model_messages=" + json.dumps(self.model_messages, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
                 "coordination=" + json.dumps(self.coordination_options, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
@@ -446,9 +452,12 @@ class ToolsetPolicy:
         if not self.is_available(spec):
             return False
         if self.nested_surface:
-            if spec.exposure in {"direct_model_only", "deferred_model_only"}:
+            if not self.is_code_mode_available(spec):
                 return False
         else:
+            if self.strict_third_party and (spec.third_party or (
+                    spec.name == "tool_search" and spec.exposure != "direct_model_only")):
+                return False
             if spec.exposure == "code_mode_only":
                 return False
             if not self.code_mode_enabled and spec.name in {"tool_exec", "tool_wait"}:
@@ -472,8 +481,38 @@ class ToolsetPolicy:
     def project_tool_spec(self, spec: ToolSpec) -> ToolSpec:
         options = self.coordination_options
         if options is not None and spec.name in SOURCE_V2_COORDINATION_TOOLS:
-            return replace(spec, exposure="direct_model_only" if options["non_code_mode_only"] else spec.exposure)
+            spec = replace(spec, exposure="direct_model_only" if options["non_code_mode_only"] else spec.exposure,
+                namespace=options["tool_namespace"] or "functions")
+        if spec.exposure == "hidden":
+            return spec
+        # Caller exposure preferences cannot remove the exec route in strict
+        # mode. Eligibility/permission checks still run on the projected spec.
+        if self.strict_third_party and spec.third_party:
+            return replace(spec, exposure="deferred", always_load=False)
+        if spec.mcp_omit_tools_from:
+            surfaces = {"direct", "deferred", "code_mode"} - spec.mcp_omit_tools_from
+            if spec.namespace in self.direct_only_tool_namespaces:
+                surfaces.difference_update({"deferred", "code_mode"})
+            if self.supports_search_tool and "deferred" in surfaces and (not self.code_mode_only or "code_mode" in surfaces):
+                surfaces.discard("direct")
+            else:
+                surfaces.discard("deferred")
+            exposure = {
+                frozenset(): "hidden", frozenset({"code_mode"}): "code_mode_only",
+                frozenset({"direct"}): "direct_model_only", frozenset({"direct", "code_mode"}): "core",
+                frozenset({"deferred"}): "deferred_model_only", frozenset({"deferred", "code_mode"}): "deferred",
+            }[frozenset(surfaces)]
+            spec = replace(spec, exposure=exposure, always_load=False)
+        if spec.namespace in self.direct_only_tool_namespaces and spec.exposure in {"core", "deferred", "code_mode_only"}:
+            spec = replace(spec, exposure="direct_model_only")
         return spec
+
+    def is_code_mode_available(self, spec: ToolSpec) -> bool:
+        spec = self.project_tool_spec(spec)
+        return (self.code_mode_enabled and self.is_available(spec)
+            and spec.name not in {"tool_exec", "tool_wait"}
+            and spec.exposure not in {"direct_model_only", "deferred_model_only", "hidden"}
+            and (spec.namespace not in self.excluded_tool_namespaces or self.strict_third_party and spec.third_party))
 
     def project_tool_schema(self, name: str, schema):
         """Project captured V2 presentation without mutating the shared executor."""

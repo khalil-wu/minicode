@@ -43,6 +43,8 @@ ToolCallable = Callable[..., Any]
 class FunctionTool(BaseTool):
     """SDK adapter that exposes a Python callable as a MiniCode tool."""
 
+    third_party = True
+
     def __init__(
         self,
         *,

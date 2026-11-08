@@ -40,6 +40,8 @@ def tool_spec_from_instance(tool: Any, *, name: str) -> ToolSpec:
     get_spec = getattr(tool, "get_spec", None)
     spec = get_spec() if callable(get_spec) else None
     if isinstance(spec, ToolSpec):
+        if getattr(tool, "third_party", False) and not spec.third_party:
+            spec = replace(spec, third_party=True)
         if spec.name != tool_name:
             raise ValueError(
                 f"Tool spec name mismatch: registry={tool_name}, spec={spec.name}"
@@ -85,6 +87,8 @@ def tool_spec_from_instance(tool: Any, *, name: str) -> ToolSpec:
         policy_aliases=tool.policy_aliases,
         policy_identity=tool.policy_identity,
         policy_deny_aliases=tool.policy_deny_aliases,
+        third_party=bool(getattr(tool, "third_party", False)),
+        namespace=getattr(schema, "namespace", "") or "functions",
     )
 
 

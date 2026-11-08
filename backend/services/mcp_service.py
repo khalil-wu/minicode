@@ -645,6 +645,7 @@ def _manual_config_from_payload(data: dict[str, Any]) -> MCPServerConfig:
         supports_parallel_tool_calls=supports_parallel_tool_calls,
         enabled_tools=enabled_tools,
         disabled_tools=disabled_tools,
+        omit_tools_from=data.get("omit_tools_from"),
         default_tools_approval_mode=default_tools_approval_mode,
         tool_approval_modes=tool_approval_modes,
     )
@@ -705,6 +706,8 @@ def _server_entry_from_config(config: MCPServerConfig) -> dict[str, Any]:
         server_entry["enabled_tools"] = list(config.enabled_tools)
     if config.disabled_tools:
         server_entry["disabled_tools"] = list(config.disabled_tools)
+    if config.omit_tools_from is not None:
+        server_entry["omit_tools_from"] = list(config.omit_tools_from)
     if config.default_tools_approval_mode is not None:
         server_entry["default_tools_approval_mode"] = config.default_tools_approval_mode
     if config.tool_approval_modes:
@@ -762,6 +765,7 @@ def _server_entry_from_payload(
         "supports_parallel_tool_calls",
         "enabled_tools",
         "disabled_tools",
+        "omit_tools_from",
         "default_tools_approval_mode",
         "tools",
         "environment_id",

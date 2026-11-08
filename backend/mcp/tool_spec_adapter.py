@@ -6,6 +6,12 @@ from typing import Any
 from backend.tools.contracts import ToolSpec
 
 
+def validate_omit_tools_from(value: Any) -> None:
+    if value is not None and (not isinstance(value, list) or any(
+            not isinstance(surface, str) or surface not in {"direct", "deferred", "code_mode"} for surface in value)):
+        raise ValueError("omit_tools_from must be an array of direct, deferred, or code_mode surfaces")
+
+
 @dataclass(frozen=True)
 class MCPToolSpecAdapter:
     """Expose an MCP server's declared schema without semantic inference.

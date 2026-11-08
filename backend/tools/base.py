@@ -560,6 +560,7 @@ class BaseTool(ABC):
 
     name: str
     description: str
+    third_party: bool = False
     # Grant-safe aliases are separate from historical restriction aliases.
     policy_aliases: tuple[str, ...] = ()
     policy_deny_aliases: tuple[str, ...] = ()

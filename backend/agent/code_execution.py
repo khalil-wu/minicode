@@ -83,7 +83,7 @@ class CodeExecutionRuntime:
         loaded = {registry.get_tool_spec(name).policy_identity or name
                   for name in requested if name in self.state.loaded_deferred_tools and registry.get_tool(name) is not None
                   and base.is_available(registry.get_tool_spec(name))}
-        return replace(base, enabled_tools=base.enabled_tools | loaded, code_mode_only=False, code_mode_enabled=True, nested_surface=True).with_disabled_tools(self.state.disabled_tools | CODE_TOOLS)
+        return replace(base, enabled_tools=base.enabled_tools | loaded, code_mode_enabled=True, nested_surface=True).with_disabled_tools(self.state.disabled_tools | CODE_TOOLS)
 
     async def execute(self, code: str, parent: ToolExecutionContext, *, yield_time_ms: int) -> ToolResult:
         if self._closed:

@@ -110,6 +110,8 @@ class MCPToolProxy(BaseTool):
     proxy to the exact live client and catalog reviewed for that invocation.
     """
 
+    third_party = True
+
     def __init__(
         self,
         server_name: str,
@@ -182,6 +184,7 @@ class MCPToolProxy(BaseTool):
             if manager is not None and hasattr(manager, "get_server_config")
             else None
         )
+        self._omit_tools_from = frozenset(server_config.omit_tools_from or ()) if server_config is not None else frozenset()
         self._supports_parallel_tool_calls = bool(
             getattr(server_config, "supports_parallel_tool_calls", False)
         )
@@ -363,6 +366,7 @@ class MCPToolProxy(BaseTool):
             spec,
             policy_identity=self.policy_identity,
             policy_deny_aliases=self.policy_deny_aliases,
+            third_party=True, namespace=self.model_namespace, mcp_omit_tools_from=self._omit_tools_from,
         )
 
     def _catalog_is_current(self, context=None) -> bool:
@@ -421,6 +425,8 @@ class MCPToolProxy(BaseTool):
             and (current_approval_mode == self._approval_mode or own_persistent_approval)
             and current.title == self._tool_def.title
             and current.output_schema == self._tool_def.output_schema
+            and (frozenset(current_server_config.omit_tools_from or ()) if current_server_config is not None else frozenset())
+            == self._omit_tools_from
             and (current_server_config.tool_output_token_limits.get(self._tool_def.name) if current_server_config is not None else None)
             == self._output_token_limit
         )

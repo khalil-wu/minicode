@@ -56,6 +56,9 @@ class ToolSpec:
     policy_aliases: tuple[str, ...] = ()
     policy_identity: str = ""
     policy_deny_aliases: tuple[str, ...] = ()
+    third_party: bool = False
+    namespace: str = "functions"
+    mcp_omit_tools_from: frozenset[str] = frozenset()
 
     @property
     def policy_names(self) -> tuple[str, ...]:

@@ -21,7 +21,7 @@ _SERVER_FIELDS = frozenset({
     "transport", "command", "args", "env", "env_vars", "cwd", "url",
     "headers", "headers_helper", "oauth", "auto_start", "startup_timeout_sec",
     "tool_timeout_sec", "required", "startup_readiness", "supports_parallel_tool_calls",
-    "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools",
+    "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools", "omit_tools_from",
     "requires_user_action", "setup_hint", "docs_url",
     "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
 })
@@ -323,6 +323,8 @@ def _validate_server(name: str, server: dict[str, Any]) -> dict[str, Any]:
                 f"MCP server '{name}' {field} must be an array of non-empty strings."
             )
         normalized[field] = list(dict.fromkeys(value.strip() for value in values))
+    from backend.mcp.tool_spec_adapter import validate_omit_tools_from
+    validate_omit_tools_from(normalized.get("omit_tools_from"))
     approval_modes = {"auto", "prompt", "writes", "approve"}
     default_approval = normalized.get("default_tools_approval_mode")
     if default_approval is not None and (

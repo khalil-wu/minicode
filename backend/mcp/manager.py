@@ -58,7 +58,7 @@ _MCP_SERVER_FIELDS = frozenset({
     "transport", "command", "args", "env", "env_vars", "cwd", "url",
     "headers", "headers_helper", "oauth", "auto_start", "startup_timeout_sec",
     "tool_timeout_sec", "required", "startup_readiness", "supports_parallel_tool_calls",
-    "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools",
+    "enabled_tools", "disabled_tools", "default_tools_approval_mode", "tools", "omit_tools_from",
     "requires_user_action", "setup_hint", "docs_url",
     "environment_id", "enabled", "bearer_token_env_var", "env_http_headers", "http_headers", "http_headers_helper",
 })
@@ -188,6 +188,7 @@ class MCPServerConfig:
     supports_parallel_tool_calls: bool = False
     enabled_tools: list[str] | None = None
     disabled_tools: list[str] = field(default_factory=list)
+    omit_tools_from: list[str] | None = None
     default_tools_approval_mode: str | None = None
     tool_approval_modes: dict[str, str] = field(default_factory=dict)
     tool_output_token_limits: dict[str, int] = field(default_factory=dict)
@@ -260,6 +261,8 @@ def validate_mcp_server_config(config: MCPServerConfig) -> None:
         raise ValueError("startup_readiness must be connection or catalog")
     if not isinstance(config.supports_parallel_tool_calls, bool):
         raise ValueError("supports_parallel_tool_calls must be a boolean")
+    from backend.mcp.tool_spec_adapter import validate_omit_tools_from
+    validate_omit_tools_from(config.omit_tools_from)
     for field_name, values in (
         ("enabled_tools", config.enabled_tools),
         ("disabled_tools", config.disabled_tools),
@@ -428,6 +431,7 @@ class MCPServerState:
             "supports_parallel_tool_calls": self.config.supports_parallel_tool_calls,
             "enabled_tools": self.config.enabled_tools,
             "disabled_tools": list(self.config.disabled_tools),
+            "omit_tools_from": self.config.omit_tools_from,
             "default_tools_approval_mode": self.config.default_tools_approval_mode,
             "enabled": self.config.enabled,
             "disabled_reason": self.config.disabled_reason,
@@ -905,7 +909,7 @@ class MCPServerManager:
                                     raw_config["transport"] = "stdio"
                                 elif "url" in raw_config:
                                     raw_config["transport"] = "http"
-                        for field_name in ("enabled", "enabled_tools", "disabled_tools", "default_tools_approval_mode"):
+                        for field_name in ("enabled", "enabled_tools", "disabled_tools", "default_tools_approval_mode", "omit_tools_from"):
                             if field_name in policy_override:
                                 raw_config[field_name] = policy_override[field_name]
                         for tool_name, tool_policy in policy_override.get("tools", {}).items():
@@ -1302,6 +1306,7 @@ class MCPServerManager:
             supports_parallel_tool_calls=supports_parallel_tool_calls,
             enabled_tools=enabled_tools,
             disabled_tools=disabled_tools,
+            omit_tools_from=conf.get("omit_tools_from"),
             enabled=conf.get("enabled", True),
             default_tools_approval_mode=default_tools_approval_mode,
             tool_approval_modes=tool_approval_modes,
@@ -2877,6 +2882,7 @@ def _same_runtime_config(left: MCPServerConfig, right: MCPServerConfig) -> bool:
         and left.supports_parallel_tool_calls == right.supports_parallel_tool_calls
         and left.enabled_tools == right.enabled_tools
         and left.disabled_tools == right.disabled_tools
+        and left.omit_tools_from == right.omit_tools_from
         and left.default_tools_approval_mode == right.default_tools_approval_mode
         and left.tool_approval_modes == right.tool_approval_modes
         and left.tool_output_token_limits == right.tool_output_token_limits
@@ -2901,6 +2907,7 @@ def _same_connection_config(left: MCPServerConfig, right: MCPServerConfig) -> bo
         left,
         enabled_tools=right.enabled_tools,
         disabled_tools=right.disabled_tools,
+        omit_tools_from=right.omit_tools_from,
         default_tools_approval_mode=right.default_tools_approval_mode,
         tool_approval_modes=right.tool_approval_modes,
         tool_output_token_limits=right.tool_output_token_limits,
