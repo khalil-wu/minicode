@@ -11,6 +11,7 @@ from fastapi import HTTPException
 
 from backend.diff.git_integration import is_not_git_repository
 from backend.runtime_env import sanitized_git_env
+from backend.async_cleanup import to_thread_cancel_safe
 
 
 @asynccontextmanager
@@ -35,23 +36,26 @@ async def capture_workspace_execution(session, conversation_id: str, *, environm
     if conversation is None or conversation.archived:
         raise HTTPException(404, "The target conversation is not available.")
     permission = session.permission_context_for_conversation(conversation, source="workspace.request")
+    config_stack = session.config.config_layer_stack
+    permission_checker = session.permission_checker
     directory = conversation.execution_cwd or conversation.worktree_path or conversation.workspace_root
     if not directory:
         raise HTTPException(409, "The conversation has no fixed execution owner.")
     cwd_uri = (ExecutorPath.parse(directory).uri if directory.startswith("file:") else Path(directory).expanduser().resolve().as_uri())
     from backend.workspace.project_sources import local_project_source_selection
-    project_id, folders = (None, ()) if directory.startswith("file:") else local_project_source_selection(directory)
+    project_id, folders = ((None, ()) if directory.startswith("file:")
+        else await to_thread_cancel_safe(local_project_source_selection, directory))
     roots = (cwd_uri,) if directory.startswith("file:") else tuple(root.as_uri() for root in folders)
     snapshot = await capture_conversation_environments(environment_manager=session.environment_manager,
         execution_registry=session.ws_manager.execution_contexts, conversation_repository=session.conversation_repo,
-        conversation_id=conversation_id, permission_context=permission, config_stack=session.config.config_layer_stack,
+        conversation_id=conversation_id, permission_context=permission, config_stack=config_stack,
         cwd_uri=cwd_uri, workspace_root_uris=roots, require_existing_attachment=directory.startswith("file:"),
         project_source_cwd=cwd_uri if project_id is not None else None)
     try:
         attachment = select_turn_environment(snapshot, environment_id)
         context = ToolExecutionContext(permission=permission, session_id=session.session_id, conversation_id=conversation_id,
             run_context=RunContext(turn_environments=snapshot, environment_manager=session.environment_manager),
-            permission_checker=session.permission_checker, background_manager=session.background_manager)
+            permission_checker=permission_checker, background_manager=session.background_manager)
         captured = bind_tool_execution_environment(context, attachment)
         try:
             yield captured

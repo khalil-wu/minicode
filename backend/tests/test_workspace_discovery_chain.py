@@ -185,7 +185,7 @@ def test_invalid_recent_record_shape_is_reported_without_rewriting_it(tmp_path, 
     path.write_text(json.dumps(records), encoding="utf-8")
     original = path.read_bytes()
     with pytest.raises(RecentProjectPersistenceError):
-        RecentProjectStore(path)
+        RecentProjectStore(path).list()
     assert path.read_bytes() == original
 
 

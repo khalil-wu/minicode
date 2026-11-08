@@ -13,9 +13,13 @@ def local_project_source_selection(workspace_root: Path | str) -> tuple[str | No
     # Registration comes from explicit desktop folder choices. Revoked or
     # unavailable folders cannot silently remain executor grants.
     accepted = [primary]
+    accepted_keys = {canonical_file_path_key(primary)}
     for folder in folders:
         path = Path(folder).expanduser().resolve()
-        if canonical_file_path_key(path) != canonical_file_path_key(primary) and is_workspace_trusted(path): accepted.append(path)
+        key = canonical_file_path_key(path)
+        if key not in accepted_keys and is_workspace_trusted(path):
+            accepted.append(path)
+            accepted_keys.add(key)
     return project.path, tuple(accepted)
 
 

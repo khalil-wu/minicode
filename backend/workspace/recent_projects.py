@@ -85,7 +85,6 @@ class RecentProjectStore:
     def __init__(self, store_path: Path | None = None) -> None:
         self._store_path = store_path or DEFAULT_STORE_PATH
         self._projects: list[RecentProject] = []
-        self._load()
 
     def _load(self) -> None:
         """从文件加载。"""
@@ -180,6 +179,12 @@ class RecentProjectStore:
 
     def list(self, limit: int | None = None, clean: bool = False) -> list[RecentProject]:
         """读取已保存项目；只有显式清理才移除不可用目录。"""
+        if not clean:
+            # Writers atomically replace the complete JSON snapshot. An
+            # ordinary reader needs neither a mutation lock nor a second
+            # constructor-time read of the same file.
+            self._load()
+            return self._projects[:limit]
         with file_mutation_locks([self._store_path]):
             self._load()
             if clean:

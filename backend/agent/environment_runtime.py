@@ -12,6 +12,7 @@ from backend.agent.environment_selection import (
 )
 from backend.permissions.environment_scope import capture_environment_permission_profile
 from backend.runtime_env import ShellEnvironmentPolicy
+from backend.async_cleanup import to_thread_cancel_safe
 
 
 def thread_environment_defaults(permission, config_stack) -> ThreadEnvironmentDefaults:
@@ -123,7 +124,7 @@ async def prepare_run_environments(run_context, *, agent_session, permission_con
     project_source_cwd = None
     if not run_context.execution_cwd_uri and workspace_root is not None:
         from backend.workspace.project_sources import local_project_source_selection
-        project_id, folders = local_project_source_selection(workspace_root)
+        project_id, folders = await to_thread_cancel_safe(local_project_source_selection, workspace_root)
         roots = tuple(root.as_uri() for root in folders)
         project_source_cwd = cwd_uri if project_id is not None else None
     defaults = thread_environment_defaults(permission_context, config_stack)

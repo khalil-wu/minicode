@@ -5,6 +5,8 @@ from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
+import asyncio
+import threading
 
 from backend.conversations.repository import ConversationRepository
 from backend.ws.command_scope import resolve_command_scope, resolve_resource_command_scope
@@ -86,6 +88,7 @@ async def test_workspace_capture_uses_metadata_except_for_plan_constraints(tmp_p
     session.environment_manager = object()
     session.ws_manager = SimpleNamespace(execution_contexts=object())
     session.config = SimpleNamespace(config_layer_stack=None)
+    session.permission_checker = object()
     captured = []
     session.permission_context_for_conversation = lambda conversation, **kwargs: captured.append(conversation) or object()
     monkeypatch.setattr("backend.agent.environment_runtime.capture_conversation_environments",
@@ -97,6 +100,48 @@ async def test_workspace_capture_uses_metadata_except_for_plan_constraints(tmp_p
     assert captured[0].execution_cwd == str(root)
     if plan:
         assert captured[0].context_snapshot == record.context_snapshot
+
+
+@pytest.mark.asyncio
+async def test_workspace_project_discovery_yields_without_retargeting_to_new_selection(tmp_path, monkeypatch):
+    session, record, root = owner(tmp_path)
+    session.environment_manager = object()
+    session.ws_manager = SimpleNamespace(execution_contexts=object())
+    config_stack = object()
+    session.config = SimpleNamespace(config_layer_stack=config_stack)
+    session.permission_checker = object()
+    session.permission_context_for_conversation = lambda conversation, **kwargs: object()
+    entered, release = threading.Event(), threading.Event()
+    loop_thread = threading.get_ident()
+
+    def held(workspace):
+        assert threading.get_ident() != loop_thread
+        assert workspace == str(root)
+        entered.set()
+        assert release.wait(4)
+        return None, (root,)
+
+    monkeypatch.setattr("backend.workspace.project_sources.local_project_source_selection", held)
+    capture = AsyncMock(side_effect=RuntimeError("captured original workspace"))
+    monkeypatch.setattr("backend.agent.environment_runtime.capture_conversation_environments", capture)
+
+    async def operation():
+        async with capture_workspace_execution(session, record.id):
+            pass
+
+    task = asyncio.create_task(operation())
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        session.active_conversation_id = "new-reader"
+        session.config = SimpleNamespace(config_layer_stack=object())
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(RuntimeError, match="captured original workspace"):
+        await task
+    assert capture.call_args.kwargs["conversation_id"] == record.id
+    assert capture.call_args.kwargs["cwd_uri"] == root.as_uri()
+    assert capture.call_args.kwargs["config_stack"] is config_stack
 
 
 @pytest.mark.parametrize("mode", ["normal", "plan", "enter_plan", "legacy_cwd"])
